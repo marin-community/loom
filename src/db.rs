@@ -71,11 +71,6 @@ pub fn default_db_path() -> PathBuf {
     weaver_home().join("weaver.db")
 }
 
-/// Directory holding a workspace's git worktree.
-pub fn tree_dir(id: &str) -> PathBuf {
-    weaver_home().join("trees").join(id)
-}
-
 /// Directory holding a workspace's runtime files (e.g. the goal file).
 pub fn run_dir(id: &str) -> PathBuf {
     weaver_home().join("run").join(id)

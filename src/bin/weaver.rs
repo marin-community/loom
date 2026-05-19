@@ -42,6 +42,8 @@ enum Cmd {
     Status { id: Option<String> },
     /// Attach your terminal to a workspace's tmux session.
     Attach { id: String },
+    /// Print a workspace's worktree directory (e.g. `cd "$(weaver path <id>)"`).
+    Path { id: String },
     /// Send a line of text to a workspace's agent.
     Send { id: String, text: Vec<String> },
     /// Force a fresh summary of a workspace now.
@@ -111,6 +113,7 @@ async fn run() -> Result<()> {
         Cmd::Ls => cmd_ls().await,
         Cmd::Status { id } => cmd_status(id).await,
         Cmd::Attach { id } => cmd_attach(id).await,
+        Cmd::Path { id } => cmd_path(id).await,
         Cmd::Send { id, text } => cmd_send(id, text.join(" ")).await,
         Cmd::Summary { id } => cmd_summary(id).await,
         Cmd::Merge { id } => cmd_merge(id).await,
@@ -243,6 +246,13 @@ async fn cmd_attach(id: String) -> Result<()> {
         .args(["attach-session", "-t", session])
         .exec();
     Err(anyhow!("failed to exec tmux: {err}"))
+}
+
+async fn cmd_path(id: String) -> Result<()> {
+    let client = Client::new();
+    let ws = client.get(&format!("/api/workspaces/{id}")).await?;
+    println!("{}", str_field(&ws, "work_dir"));
+    Ok(())
 }
 
 async fn cmd_send(id: String, text: String) -> Result<()> {

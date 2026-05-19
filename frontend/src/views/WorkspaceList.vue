@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, watch, onMounted, onUnmounted } from 'vue';
 import { get, post } from '../api';
 import type { Workspace } from '../types';
 import StatusBadge from '../components/StatusBadge.vue';
@@ -8,9 +8,24 @@ const workspaces = ref<Workspace[]>([]);
 const error = ref('');
 const showForm = ref(false);
 const goal = ref('');
+const name = ref('');
+const nameEdited = ref(false);
 const repo = ref('');
 const creating = ref(false);
 let timer: number | undefined;
+
+function slugify(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+}
+
+// Keep the name in sync with the goal until the user edits it directly.
+watch(goal, (g) => {
+  if (!nameEdited.value) name.value = slugify(g);
+});
 
 async function load() {
   try {
@@ -25,8 +40,14 @@ async function create() {
   if (!goal.value.trim() || !repo.value.trim()) return;
   creating.value = true;
   try {
-    await post('/workspaces', { goal: goal.value, cwd: repo.value });
+    await post('/workspaces', {
+      goal: goal.value,
+      cwd: repo.value,
+      name: name.value || undefined,
+    });
     goal.value = '';
+    name.value = '';
+    nameEdited.value = false;
     showForm.value = false;
     await load();
   } catch (e) {
@@ -74,6 +95,17 @@ onUnmounted(() => clearInterval(timer));
           v-model="goal"
           placeholder="Add a /health endpoint"
           class="w-full rounded bg-neutral-800 px-2 py-1.5 text-sm outline-none focus:ring-1 ring-emerald-600"
+        />
+      </div>
+      <div>
+        <label class="block text-xs text-neutral-400 mb-1">
+          Name — the worktree (<code>.worktrees/&lt;name&gt;</code>) and branch
+        </label>
+        <input
+          v-model="name"
+          @input="nameEdited = true"
+          placeholder="add-a-health-endpoint"
+          class="w-full rounded bg-neutral-800 px-2 py-1.5 text-sm outline-none focus:ring-1 ring-emerald-600 font-mono"
         />
       </div>
       <button

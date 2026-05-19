@@ -183,26 +183,39 @@ async fn create_workspace(
         return Err(AppError::bad_request("goal is required"));
     }
 
-    let name = req
-        .name
-        .filter(|n| !n.trim().is_empty())
-        .unwrap_or_else(|| workspace::slugify(&goal));
+    // The slug: an explicit name wins, otherwise it is derived from the goal.
+    // It is always slugified so it is safe as both a branch and directory name.
+    let explicit = req.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+    let base_slug = workspace::slugify(explicit.unwrap_or(goal.as_str()));
+    let mut slug = base_slug.clone();
+    let mut suffix = 2;
+    loop {
+        let branch = format!("weaver/{slug}");
+        let dir = repo_root.join(".worktrees").join(&slug);
+        if !git::branch_exists(&repo_root, &branch).await && !dir.exists() {
+            break;
+        }
+        if explicit.is_some() {
+            return Err(AppError::conflict(format!(
+                "a workspace named '{slug}' already exists — choose a different name"
+            )));
+        }
+        slug = format!("{base_slug}-{suffix}");
+        suffix += 1;
+    }
+    let branch = format!("weaver/{slug}");
     let base = match req.base {
         Some(b) => b,
         None => git::current_branch(&repo_root).await?,
     };
-    let mut branch = format!("weaver/{name}");
-    if git::branch_exists(&repo_root, &branch).await {
-        branch = format!("weaver/{name}-{id}");
-    }
 
-    // Lay out filesystem: worktree + runtime dir + goal file.
-    let work_dir = db::tree_dir(&id);
+    // Lay out filesystem: the worktree lives inside the repo at
+    // `.worktrees/<slug>`; the runtime dir (goal file) stays under ~/.weaver.
+    let work_dir = repo_root.join(".worktrees").join(&slug);
     let run_dir = db::run_dir(&id);
-    if let Some(parent) = work_dir.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
+    tokio::fs::create_dir_all(repo_root.join(".worktrees")).await?;
     tokio::fs::create_dir_all(&run_dir).await?;
+    git::ensure_excluded(&repo_root, ".worktrees/").await.ok();
     git::worktree_add(&repo_root, &work_dir, &branch, &base)
         .await
         .map_err(|e| AppError::bad_request(e.to_string()))?;
@@ -238,7 +251,7 @@ async fn create_workspace(
         &st.db,
         &NewWorkspace {
             id: id.clone(),
-            name,
+            name: slug,
             goal,
             description,
             status: status.to_string(),

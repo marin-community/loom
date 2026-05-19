@@ -151,10 +151,11 @@ onUnmounted(() => source?.close());
       <h1 class="text-xl font-semibold">{{ ws.name }}</h1>
       <StatusBadge :status="ws.status" />
     </div>
-    <div class="text-xs text-neutral-600 font-mono mb-4">
+    <div class="text-xs text-neutral-600 font-mono mb-1">
       {{ ws.id }} · {{ ws.branch }} (base {{ ws.base_branch }}) · {{ ws.agent_kind }} · {{ ws.tmux_session }}
       <span v-if="ws.github_issue"> · {{ ws.github_repo }}#{{ ws.github_issue }}</span>
     </div>
+    <div class="text-xs text-neutral-600 font-mono mb-4">worktree: {{ ws.work_dir }}</div>
 
     <p v-if="error" class="mb-3 text-sm text-red-400">{{ error }}</p>
     <p v-if="notice" class="mb-3 text-sm text-emerald-400">{{ notice }}</p>

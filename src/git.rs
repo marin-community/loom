@@ -1,6 +1,6 @@
 //! Thin async wrapper over the `git` binary.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
@@ -30,12 +30,45 @@ async fn git(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
 
-/// Absolute path to the top of the git working tree containing `dir`.
+/// Absolute path to the **main** working tree of the repository containing
+/// `dir`. When `dir` is inside a linked worktree this still resolves back to
+/// the primary checkout, so weaver's worktrees never nest inside each other.
 pub async fn repo_root(dir: &Path) -> Result<PathBuf> {
-    let s = git(dir, &["rev-parse", "--show-toplevel"])
+    let out = git(dir, &["worktree", "list", "--porcelain"])
         .await
         .with_context(|| format!("{} is not inside a git repository", dir.display()))?;
-    Ok(PathBuf::from(s))
+    // `git worktree list` always reports the main working tree first.
+    let first = out
+        .lines()
+        .find_map(|l| l.strip_prefix("worktree "))
+        .ok_or_else(|| anyhow!("could not determine the main worktree"))?;
+    Ok(PathBuf::from(first))
+}
+
+/// Ensure `pattern` is present in the repository's `.git/info/exclude`, so
+/// that (for example) the in-repo `.worktrees/` directory is not reported as
+/// untracked content. This is local-only and never touches a tracked file.
+pub async fn ensure_excluded(repo_root: &Path, pattern: &str) -> Result<()> {
+    let common = git(
+        repo_root,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .await?;
+    let info = PathBuf::from(common).join("info");
+    tokio::fs::create_dir_all(&info).await.ok();
+    let exclude = info.join("exclude");
+    let current = tokio::fs::read_to_string(&exclude).await.unwrap_or_default();
+    if current.lines().any(|l| l.trim() == pattern) {
+        return Ok(());
+    }
+    let mut next = current;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str(pattern);
+    next.push('\n');
+    tokio::fs::write(&exclude, next).await?;
+    Ok(())
 }
 
 pub async fn current_branch(dir: &Path) -> Result<String> {

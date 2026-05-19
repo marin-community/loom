@@ -70,11 +70,16 @@ async fn workspace_lifecycle() {
         .unwrap();
     let id = ws["id"].as_str().unwrap().to_string();
     let session = ws["tmux_session"].as_str().unwrap().to_string();
+    let work_dir = ws["work_dir"].as_str().unwrap().to_string();
 
     // Worktree, branch and tmux session all exist.
     assert!(
-        db::tree_dir(&id).join(".git").exists(),
+        std::path::Path::new(&work_dir).join(".git").exists(),
         "worktree was not created"
+    );
+    assert!(
+        work_dir.ends_with("/.worktrees/integration-test-goal"),
+        "worktree should live inside the repo at .worktrees/<slug>, got {work_dir}"
     );
     assert_eq!(ws["branch"], "weaver/integration-test-goal");
     assert!(tmux::has_session(&session).await, "tmux session missing");
