@@ -1,15 +1,27 @@
 <script setup lang="ts">
-import type { IssueStatus } from '../types'
-import { statusClasses } from '../utils'
+import { computed } from 'vue';
 
-defineProps<{
-  status: IssueStatus
-}>()
+const props = defineProps<{ status: string }>();
+
+const palette: Record<string, string> = {
+  created: 'bg-neutral-700 text-neutral-200',
+  launching: 'bg-sky-800 text-sky-100',
+  working: 'bg-emerald-800 text-emerald-100',
+  waiting: 'bg-amber-700 text-amber-100',
+  idle: 'bg-neutral-700 text-neutral-200',
+  done: 'bg-indigo-800 text-indigo-100',
+  error: 'bg-red-800 text-red-100',
+};
+
+const cls = computed(() => palette[props.status] ?? 'bg-neutral-700 text-neutral-200');
 </script>
 
 <template>
-  <span :class="['inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold uppercase tracking-wide', statusClasses(status)]">
-    <span v-if="status === 'running'" class="w-1.5 h-1.5 rounded-full bg-current animate-pulse-dot" />
-    {{ status.replace('_', ' ') }}
+  <span
+    :class="cls"
+    data-testid="status-badge"
+    class="inline-block rounded px-2 py-0.5 text-xs font-medium uppercase tracking-wide"
+  >
+    {{ status }}
   </span>
 </template>

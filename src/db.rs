@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{Context, Result};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::path::{Path, PathBuf};
@@ -7,156 +7,125 @@ use std::str::FromStr;
 pub type Db = SqlitePool;
 
 const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS issues (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    body TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'pending',
-
-    prompt TEXT,
-    context TEXT NOT NULL DEFAULT '{}',
-
-    dependencies TEXT NOT NULL DEFAULT '[]',
-
-    num_tries INTEGER NOT NULL DEFAULT 0,
-    max_tries INTEGER NOT NULL DEFAULT 3,
-    parent_issue_id TEXT,
-
-    tags TEXT NOT NULL DEFAULT '[]',
-    priority INTEGER NOT NULL DEFAULT 0,
-
-    channel_kind TEXT,
-    origin_ref TEXT,
-    user_id TEXT,
-
-    result TEXT,
-    error TEXT,
-
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    completed_at TEXT
+CREATE TABLE IF NOT EXISTS workspaces (
+    id                 TEXT PRIMARY KEY,
+    name               TEXT NOT NULL,
+    goal               TEXT NOT NULL DEFAULT '',
+    description        TEXT NOT NULL DEFAULT '',
+    status             TEXT NOT NULL DEFAULT 'created',
+    repo_root          TEXT NOT NULL,
+    work_dir           TEXT NOT NULL,
+    branch             TEXT NOT NULL,
+    base_branch        TEXT NOT NULL DEFAULT 'main',
+    tmux_session       TEXT NOT NULL,
+    agent_kind         TEXT NOT NULL DEFAULT 'claude',
+    github_repo        TEXT,
+    github_issue       INTEGER,
+    created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    last_activity_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    summary_updated_at TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_workspaces_status ON workspaces(status);
 
-CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
-CREATE INDEX IF NOT EXISTS idx_issues_parent ON issues(parent_issue_id);
-CREATE INDEX IF NOT EXISTS idx_issues_created ON issues(created_at);
-
-CREATE TABLE IF NOT EXISTS issue_comments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    issue_id TEXT NOT NULL REFERENCES issues(id),
-    author TEXT NOT NULL DEFAULT 'system',
-    body TEXT NOT NULL,
-    tag TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+CREATE TABLE IF NOT EXISTS events (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    data         TEXT NOT NULL DEFAULT '{}',
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
+CREATE INDEX IF NOT EXISTS idx_events_ws ON events(workspace_id, id);
 
-CREATE INDEX IF NOT EXISTS idx_issue_comments_issue ON issue_comments(issue_id);
+CREATE TABLE IF NOT EXISTS summaries (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id  TEXT NOT NULL,
+    description   TEXT NOT NULL,
+    files_changed INTEGER NOT NULL DEFAULT 0,
+    insertions    INTEGER NOT NULL DEFAULT 0,
+    deletions     INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_summaries_ws ON summaries(workspace_id, id);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 "#;
 
-/// Default database path: searches for `.weaver/db.sqlite` walking up from the current directory.
-/// If an existing database is found in a parent directory, that path is returned.
-/// Otherwise, falls back to `.weaver/db.sqlite` in the current directory.
-pub fn default_db_path() -> PathBuf {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut dir = cwd.as_path();
-    loop {
-        let candidate = dir.join(".weaver/db.sqlite");
-        if candidate.exists() {
-            return candidate;
-        }
-        match dir.parent() {
-            Some(parent) => dir = parent,
-            None => break,
-        }
+/// Root directory for all weaver state on this machine.
+pub fn weaver_home() -> PathBuf {
+    if let Ok(p) = std::env::var("WEAVER_HOME") {
+        return PathBuf::from(p);
     }
-    cwd.join(".weaver/db.sqlite")
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".weaver")
 }
 
-pub async fn connect(path: &Path) -> anyhow::Result<Db> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!("failed to create database directory \"{}\"", parent.display())
-        })?;
+/// Path to the single per-VM SQLite database.
+pub fn default_db_path() -> PathBuf {
+    if let Ok(p) = std::env::var("WEAVER_DB") {
+        return PathBuf::from(p);
     }
+    weaver_home().join("weaver.db")
+}
 
+/// Directory holding a workspace's git worktree.
+pub fn tree_dir(id: &str) -> PathBuf {
+    weaver_home().join("trees").join(id)
+}
+
+/// Directory holding a workspace's runtime files (e.g. the goal file).
+pub fn run_dir(id: &str) -> PathBuf {
+    weaver_home().join("run").join(id)
+}
+
+/// Current UTC time as an ISO-8601 string, matching the SQLite default format.
+pub fn now_iso() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
+
+pub async fn connect(path: &Path) -> Result<Db> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating db directory {}", parent.display()))?;
+    }
     let options = SqliteConnectOptions::from_str(&format!("sqlite:{}", path.display()))
-        .with_context(|| format!("invalid database path \"{}\"", path.display()))?
+        .with_context(|| format!("invalid database path {}", path.display()))?
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal);
-
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
         .connect_with(options)
         .await
-        .with_context(|| format!("failed to connect to database \"{}\"", path.display()))?;
-
-    run_migrations(&pool).await?;
+        .with_context(|| format!("opening database {}", path.display()))?;
+    migrate(&pool).await?;
     Ok(pool)
 }
 
-pub async fn connect_in_memory() -> anyhow::Result<Db> {
+pub async fn connect_in_memory() -> Result<Db> {
     let options = SqliteConnectOptions::new()
         .in_memory(true)
         .journal_mode(SqliteJournalMode::Wal);
-
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(options)
         .await?;
-
-    run_migrations(&pool).await?;
+    migrate(&pool).await?;
     Ok(pool)
 }
 
-const MIGRATIONS: &str = r#"
-CREATE TABLE IF NOT EXISTS issue_usage (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    issue_id TEXT NOT NULL REFERENCES issues(id),
-    input_tokens INTEGER NOT NULL DEFAULT 0,
-    output_tokens INTEGER NOT NULL DEFAULT 0,
-    model TEXT,
-    cost_usd REAL,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_issue_usage_issue ON issue_usage(issue_id);
-
-CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-
-ALTER TABLE issue_comments ADD COLUMN tag TEXT;
-
-CREATE TABLE IF NOT EXISTS issue_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    issue_id TEXT NOT NULL REFERENCES issues(id),
-    seq INTEGER NOT NULL,
-    kind TEXT NOT NULL,
-    data TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_issue_events_issue_seq ON issue_events(issue_id, seq);
-
-ALTER TABLE issues ADD COLUMN claude_session_id TEXT;
-"#;
-
-async fn run_migrations(pool: &Db) -> anyhow::Result<()> {
+async fn migrate(pool: &Db) -> Result<()> {
     for statement in SCHEMA.split(';') {
         let trimmed = statement.trim();
         if trimmed.is_empty() {
             continue;
         }
-        sqlx::query(trimmed).execute(pool).await.ok();
-    }
-    for statement in MIGRATIONS.split(';') {
-        let trimmed = statement.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        sqlx::query(trimmed).execute(pool).await.ok();
+        sqlx::query(trimmed)
+            .execute(pool)
+            .await
+            .with_context(|| format!("running migration: {trimmed}"))?;
     }
     Ok(())
 }
@@ -166,37 +135,16 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn connect_in_memory_runs_migrations() {
+    async fn in_memory_schema_works() {
         let db = connect_in_memory().await.unwrap();
-        // Should be able to insert an issue
-        sqlx::query("INSERT INTO issues (id, title) VALUES ('test', 'Test issue')")
+        sqlx::query("INSERT INTO workspaces (id,name,repo_root,work_dir,branch,tmux_session) VALUES ('t','t','/r','/w','b','s')")
             .execute(&db)
             .await
             .unwrap();
-
-        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM issues")
+        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM workspaces")
             .fetch_one(&db)
             .await
             .unwrap();
-        assert_eq!(count, 1);
-    }
-
-    #[tokio::test]
-    async fn comments_table_exists() {
-        let db = connect_in_memory().await.unwrap();
-        sqlx::query("INSERT INTO issues (id, title) VALUES ('i1', 'Issue 1')")
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO issue_comments (issue_id, author, body) VALUES ('i1', 'test', 'A comment')")
-            .execute(&db)
-            .await
-            .unwrap();
-
-        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM issue_comments")
-            .fetch_one(&db)
-            .await
-            .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(n, 1);
     }
 }

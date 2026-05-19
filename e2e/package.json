@@ -1,11 +1,14 @@
 {
+  "name": "weaver-e2e",
   "private": true,
+  "version": "0.0.0",
+  "description": "Playwright end-to-end tests for the weaver workspace manager",
   "scripts": {
-    "test": "playwright test",
-    "test:headed": "playwright test --headed"
+    "test": "playwright test"
   },
   "devDependencies": {
-    "@playwright/test": "^1.48",
-    "typescript": "^5.9"
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.9.3"
   }
 }

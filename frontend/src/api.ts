@@ -1,33 +1,26 @@
-export async function api<T>(path: string): Promise<T> {
-  const resp = await fetch(path)
-  if (!resp.ok) throw new Error(`API ${resp.status}: ${path}`)
-  return resp.json()
-}
-
-export async function apiPost<T>(path: string, body?: unknown): Promise<T | null> {
-  const opts: RequestInit = { method: 'POST' }
-  if (body !== undefined) {
-    opts.headers = { 'Content-Type': 'application/json' }
-    opts.body = JSON.stringify(body)
+async function request(path: string, opts: RequestInit = {}): Promise<unknown> {
+  const res = await fetch('/api' + path, {
+    headers: { 'content-type': 'application/json' },
+    ...opts,
+  });
+  if (!res.ok) {
+    let message = res.statusText;
+    try {
+      const body = await res.json();
+      if (body && typeof body.error === 'string') message = body.error;
+    } catch {
+      /* keep statusText */
+    }
+    throw new Error(message);
   }
-  const resp = await fetch(path, opts)
-  if (!resp.ok) throw new Error(`API ${resp.status}: ${path}`)
-  const text = await resp.text()
-  return text ? JSON.parse(text) : null
+  if (res.status === 204) return null;
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
 }
 
-export async function apiPut<T>(path: string, body: unknown): Promise<T | null> {
-  const resp = await fetch(path, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  if (!resp.ok) throw new Error(`API ${resp.status}: ${path}`)
-  const text = await resp.text()
-  return text ? JSON.parse(text) : null
-}
-
-export async function apiDelete(path: string): Promise<void> {
-  const resp = await fetch(path, { method: 'DELETE' })
-  if (!resp.ok && resp.status !== 404) throw new Error(`API ${resp.status}: ${path}`)
-}
+export const get = (path: string) => request(path);
+export const post = (path: string, body?: unknown) =>
+  request(path, { method: 'POST', body: JSON.stringify(body ?? {}) });
+export const patch = (path: string, body: unknown) =>
+  request(path, { method: 'PATCH', body: JSON.stringify(body) });
+export const del = (path: string) => request(path, { method: 'DELETE' });

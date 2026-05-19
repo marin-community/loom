@@ -1,20 +1,16 @@
-import { createApp } from 'vue'
-import { createRouter, createWebHashHistory } from 'vue-router'
-import App from './App.vue'
-import './styles.css'
-
-import IssuesList from './views/IssuesList.vue'
-import IssueDetail from './views/IssueDetail.vue'
-import Settings from './views/Settings.vue'
+import { createApp } from 'vue';
+import { createRouter, createWebHashHistory } from 'vue-router';
+import App from './App.vue';
+import WorkspaceList from './views/WorkspaceList.vue';
+import WorkspaceDetail from './views/WorkspaceDetail.vue';
+import './styles.css';
 
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
-    { path: '/', component: IssuesList },
-    { path: '/issues', component: IssuesList },
-    { path: '/issues/:id', component: IssueDetail },
-    { path: '/settings', component: Settings },
+    { path: '/', component: WorkspaceList },
+    { path: '/w/:id', component: WorkspaceDetail, props: true },
   ],
-})
+});
 
-createApp(App).use(router).mount('#app')
+createApp(App).use(router).mount('#app');
