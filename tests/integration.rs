@@ -115,6 +115,17 @@ async fn workspace_lifecycle() {
     }
     assert!(found, "sent text never appeared in the pane");
 
+    // Interrupting the agent sends an Esc keypress and leaves the session up.
+    let res = client
+        .post(&format!("/api/workspaces/{id}/interrupt"), json!({}))
+        .await
+        .unwrap();
+    assert_eq!(res["interrupted"], true);
+    assert!(
+        tmux::has_session(&session).await,
+        "interrupt should not kill the tmux session"
+    );
+
     // A hook flips the workspace status.
     client
         .post("/api/hook", json!({ "workspace": id, "event": "working" }))
