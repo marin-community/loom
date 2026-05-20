@@ -177,8 +177,8 @@ export const test = base.extend<{ weaver: WeaverFixture }>({
 
     // UI-created workspaces should use a plain shell, never the real claude CLI.
     await fetchJson(`${baseUrl}/api/settings`, {
-      method: 'POST',
-      body: JSON.stringify({ key: 'agent.default', value: 'shell' }),
+      method: 'PATCH',
+      body: JSON.stringify({ 'agent.default': 'shell' }),
     });
 
     const fixture: WeaverFixture = {

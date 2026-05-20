@@ -51,8 +51,9 @@ CREATE TABLE IF NOT EXISTS summaries (
 CREATE INDEX IF NOT EXISTS idx_summaries_ws ON summaries(workspace_id, id);
 
 CREATE TABLE IF NOT EXISTS settings (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
 -- Repositories the user has started a workspace in. Unlike `workspaces`, a
@@ -143,6 +144,10 @@ async fn migrate(pool: &Db) -> Result<()> {
     const ALTERS: &[&str] = &[
         "ALTER TABLE workspaces ADD COLUMN title TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE workspaces ADD COLUMN pending_prompt TEXT NOT NULL DEFAULT ''",
+        // SQLite rejects a non-constant DEFAULT in ALTER TABLE ADD COLUMN, so
+        // older databases get an empty-string default; `config::set` stamps a
+        // real timestamp on the next write.
+        "ALTER TABLE settings ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
     ];
     for stmt in ALTERS {
         if let Err(e) = sqlx::query(stmt).execute(pool).await {

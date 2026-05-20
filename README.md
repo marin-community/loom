@@ -102,6 +102,35 @@ the address it actually bound in `~/.weaver/server.json`, so clients find it
 with no configuration in the common case. An explicit `weaver serve --addr
 <host:port>` overrides `WEAVER_API`.
 
+## Configuration
+
+Settings live in the `settings` table of the SQLite database, shared by the
+server and every CLI client. Each known setting is declared in a registry
+(`src/config.rs`) that gives it a label, help text, type, and default — so a
+setting that has never been written simply uses its default.
+
+Edit them in the **Settings** pane of the web UI (the link in the header), or
+from the CLI:
+
+```sh
+weaver config list                                  # show stored settings
+weaver config get agent.summary_command
+weaver config set agent.claude_args "--model claude-opus-4-7"
+weaver config unset agent.claude_args                # revert to the default
+```
+
+Notable settings:
+
+- `agent.default` — agent launched for a new workspace (`claude`, `shell`, or a
+  custom command) when `weaver new` is given no `--agent`.
+- `agent.claude_args` — extra arguments spliced into the Claude TUI launch,
+  e.g. `--model claude-opus-4-7` to pin a model class.
+- `agent.summary_command` — command used for the headless diff summaries;
+  add flags to pick a cheaper model, e.g. `claude --model claude-haiku-4-5`.
+- `summary.interval_secs` — how often the background summarizer revisits an
+  active workspace.
+- `server.auto_adopt` — adopt every recoverable workspace on server startup.
+
 ## Building
 
 ```sh

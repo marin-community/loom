@@ -40,6 +40,9 @@ pub struct AppState {
 pub struct AppError {
     status: StatusCode,
     message: String,
+    /// Optional machine-readable detail, e.g. a `{ key: reason }` map of
+    /// per-field validation failures. Serialized under `"details"`.
+    details: Option<Value>,
 }
 
 impl AppError {
@@ -47,6 +50,7 @@ impl AppError {
         Self {
             status,
             message: message.into(),
+            details: None,
         }
     }
     fn bad_request(message: impl Into<String>) -> Self {
@@ -57,6 +61,11 @@ impl AppError {
     }
     fn not_found() -> Self {
         Self::new(StatusCode::NOT_FOUND, "workspace not found")
+    }
+    /// Attach a machine-readable detail payload (see [`AppError::details`]).
+    fn with_details(mut self, details: Value) -> Self {
+        self.details = Some(details);
+        self
     }
     /// The human-readable error message (for logging by non-HTTP callers).
     pub fn message(&self) -> &str {
@@ -71,7 +80,11 @@ impl IntoResponse for AppError {
         } else {
             tracing::warn!(status = %self.status.as_u16(), message = %self.message, "request rejected");
         }
-        (self.status, Json(json!({ "error": self.message }))).into_response()
+        let mut body = json!({ "error": self.message });
+        if let Some(details) = self.details {
+            body["details"] = details;
+        }
+        (self.status, Json(body)).into_response()
     }
 }
 
@@ -123,7 +136,7 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{id}/events", get(events_sse))
         .route("/repos/recent", get(recent_repos))
         .route("/hook", post(hook))
-        .route("/settings", get(list_settings).post(set_setting))
+        .route("/settings", get(get_settings).patch(patch_settings))
         .with_state(state);
 
     let index = static_dir().join("index.html");
@@ -266,6 +279,7 @@ async fn create_workspace(
     // Launch the agent in a detached tmux session via the shared launch path
     // (installs Claude Code hooks, sets env, starts tmux).
     let session = format!("weaver-{id}");
+    let claude_args = config::get_or(&st.db, "agent.claude_args", "").await;
     agent::launch(
         &agent::LaunchSpec {
             workspace_id: &id,
@@ -274,6 +288,7 @@ async fn create_workspace(
             tmux_session: &session,
             goal_file: goal_file.as_deref(),
             server_addr: &st.addr,
+            claude_args: &claude_args,
         },
         agent::LaunchMode::Fresh,
     )
@@ -536,6 +551,7 @@ pub async fn adopt(st: &AppState, ws: &Workspace) -> Result<(), AppError> {
             None
         }
     };
+    let claude_args = config::get_or(&st.db, "agent.claude_args", "").await;
     agent::launch(
         &agent::LaunchSpec {
             workspace_id: &ws.id,
@@ -544,6 +560,7 @@ pub async fn adopt(st: &AppState, ws: &Workspace) -> Result<(), AppError> {
             tmux_session: &ws.tmux_session,
             goal_file: goal_file.as_deref(),
             server_addr: &st.addr,
+            claude_args: &claude_args,
         },
         agent::LaunchMode::Adopt,
     )
@@ -685,26 +702,72 @@ async fn hook(State(st): State<AppState>, Json(req): Json<HookReq>) -> ApiResult
     Ok(Json(json!({ "ok": true, "status": status })))
 }
 
-async fn list_settings(State(st): State<AppState>) -> ApiResult<Json<Value>> {
-    let map: serde_json::Map<String, Value> = config::list(&st.db)
-        .await?
-        .into_iter()
-        .map(|(k, v)| (k, Value::String(v)))
-        .collect();
-    Ok(Json(Value::Object(map)))
+/// The canonical settings representation: every registered setting with its
+/// label, help text, type, default, and current effective value, wrapped in an
+/// envelope so the response can grow new fields without breaking clients.
+async fn settings_envelope(db: &Db) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({ "settings": config::describe(db).await? })))
 }
 
-#[derive(Debug, Deserialize)]
-struct SettingReq {
-    key: String,
-    value: String,
+/// `GET /api/settings` — the full settings list. Both the web pane and the CLI
+/// (`weaver config`) read this single shape.
+async fn get_settings(State(st): State<AppState>) -> ApiResult<Json<Value>> {
+    settings_envelope(&st.db).await
 }
 
-async fn set_setting(
+/// `PATCH /api/settings` — apply a partial map of changes.
+///
+/// The body is a JSON object of `{ "<key>": <value> }`: a string/number/bool
+/// writes that key, `null` resets it to its default. Every key must be a
+/// registered setting and every value must fit its type; the whole batch is
+/// validated before anything is written, and applied atomically. On success
+/// the response is the same envelope as [`get_settings`], reflecting the new
+/// state — so a client never needs a follow-up request.
+async fn patch_settings(
     State(st): State<AppState>,
-    Json(req): Json<SettingReq>,
+    Json(body): Json<serde_json::Map<String, Value>>,
 ) -> ApiResult<Json<Value>> {
-    config::set(&st.db, &req.key, &req.value).await?;
-    tracing::debug!(key = %req.key, "setting updated");
-    Ok(Json(json!({ "ok": true })))
+    let mut changes: Vec<config::Change> = Vec::with_capacity(body.len());
+    let mut errors = serde_json::Map::new();
+
+    for (key, raw) in body {
+        if config::spec(&key).is_none() {
+            errors.insert(key, json!("unknown setting"));
+            continue;
+        }
+        // Coerce the JSON value to the stored string form; `null` means reset.
+        let value = match raw {
+            Value::Null => None,
+            Value::String(s) => Some(s),
+            Value::Bool(b) => Some(b.to_string()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => {
+                errors.insert(key, json!("value must be a string, number, boolean, or null"));
+                continue;
+            }
+        };
+        if let Some(value) = &value {
+            if let Err(why) = config::validate(&key, value) {
+                errors.insert(key, json!(why));
+                continue;
+            }
+        }
+        changes.push((key, value));
+    }
+
+    if !errors.is_empty() {
+        // With a single bad key, surface its reason as the top-level message so
+        // one-shot clients (the CLI) show something precise without having to
+        // parse `details`.
+        let message = if errors.len() == 1 {
+            let (key, why) = errors.iter().next().unwrap();
+            format!("{key}: {}", why.as_str().unwrap_or("invalid"))
+        } else {
+            "one or more settings are invalid".to_string()
+        };
+        return Err(AppError::bad_request(message).with_details(Value::Object(errors)));
+    }
+    config::apply(&st.db, &changes).await?;
+    tracing::debug!(count = changes.len(), "settings updated");
+    settings_envelope(&st.db).await
 }

@@ -1,15 +1,184 @@
 //! Key/value settings stored in the `settings` table.
+//!
+//! The table itself is a plain key/value store, but every setting weaver knows
+//! about is also declared in [`REGISTRY`] — a single source of truth that gives
+//! each key a label, help text, type, default, and group. The registry drives
+//! validation ([`validate`]) and the settings pane in the web UI
+//! ([`describe`]); the raw [`get`]/[`set`] helpers still accept arbitrary keys
+//! so nothing breaks if a setting is read before it is registered.
 
 use anyhow::Result;
+use serde::Serialize;
 use sqlx::Row;
 
-use crate::db::Db;
+use crate::db::{now_iso, Db};
 
 pub const DEFAULT_AGENT: &str = "claude";
+/// Command used for headless diff summaries. `-p <prompt>` is appended and the
+/// diff is piped to stdin; extra flags here pick a model class.
+pub const DEFAULT_SUMMARY_COMMAND: &str = "claude";
 pub const DEFAULT_SUMMARY_INTERVAL_SECS: i64 = 600;
 /// Whether the server adopts orphaned workspaces on startup. Off by default:
 /// the operator opts in via `weaver config set server.auto_adopt true`.
 pub const DEFAULT_AUTO_ADOPT: bool = false;
+
+// ---------------------------------------------------------------------------
+// Setting registry
+// ---------------------------------------------------------------------------
+
+/// The value type of a registered setting. Drives both validation and the
+/// input control rendered in the settings pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SettingKind {
+    /// Free-form text (commands, names, …).
+    String,
+    /// A signed integer.
+    Int,
+    /// A boolean — stored as `true`/`false`.
+    Bool,
+}
+
+/// A statically declared setting: everything the UI and validator need to know
+/// about one configuration key.
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingSpec {
+    /// Dotted key, e.g. `agent.default`.
+    pub key: &'static str,
+    /// Short human-readable name shown in the settings pane.
+    pub label: &'static str,
+    /// One- or two-sentence explanation of what the setting does.
+    pub description: &'static str,
+    /// Value type — determines validation and the input control.
+    pub kind: SettingKind,
+    /// Value used when the key is absent from the `settings` table.
+    pub default: &'static str,
+    /// Heading the setting is grouped under in the UI.
+    pub group: &'static str,
+}
+
+/// Every setting weaver knows about. Adding a row here is all it takes to make
+/// a new option appear in the settings pane.
+pub const REGISTRY: &[SettingSpec] = &[
+    SettingSpec {
+        key: "agent.default",
+        label: "Default agent",
+        description: "Agent launched in each new workspace's tmux session when \
+            `weaver new` is given no `--agent`. Use `claude` for the Claude Code \
+            TUI, `shell` for a plain shell, or any other command (it receives \
+            the goal file's path as its argument).",
+        kind: SettingKind::String,
+        default: DEFAULT_AGENT,
+        group: "Agents",
+    },
+    SettingSpec {
+        key: "agent.claude_args",
+        label: "Claude agent arguments",
+        description: "Extra arguments inserted into the Claude Code launch \
+            command, e.g. `--model claude-opus-4-7` to pin a model class. \
+            Applies only to claude-backed workspaces; ignored by `shell` and \
+            custom agents.",
+        kind: SettingKind::String,
+        default: "",
+        group: "Agents",
+    },
+    SettingSpec {
+        key: "agent.summary_command",
+        label: "Summary agent command",
+        description: "Command run for the headless diff summaries shown on the \
+            dashboard. The workspace diff is piped to its stdin and `-p \
+            <prompt>` is appended. Add flags to choose a cheaper model, e.g. \
+            `claude --model claude-haiku-4-5`.",
+        kind: SettingKind::String,
+        default: DEFAULT_SUMMARY_COMMAND,
+        group: "Agents",
+    },
+    SettingSpec {
+        key: "summary.interval_secs",
+        label: "Summary interval (seconds)",
+        description: "How long the background summarizer waits before \
+            revisiting a workspace that has had activity since its last \
+            summary.",
+        kind: SettingKind::Int,
+        default: "600",
+        group: "Summaries",
+    },
+    SettingSpec {
+        key: "server.auto_adopt",
+        label: "Auto-adopt on startup",
+        description: "When enabled, the server recreates the tmux session for \
+            every recoverable workspace on startup, rather than leaving them \
+            `orphaned` for manual adoption.",
+        kind: SettingKind::Bool,
+        default: "false",
+        group: "Server",
+    },
+];
+
+/// Look up the [`SettingSpec`] for a key, if it is a registered setting.
+pub fn spec(key: &str) -> Option<&'static SettingSpec> {
+    REGISTRY.iter().find(|s| s.key == key)
+}
+
+/// Check that `value` is acceptable for `key`. Unregistered keys accept any
+/// value; registered keys are checked against their [`SettingKind`]. The error
+/// is a key-free reason (e.g. `expects an integer, got 'soon'`) so callers can
+/// prefix it with whatever context — a bare key, a field path — they like.
+pub fn validate(key: &str, value: &str) -> std::result::Result<(), String> {
+    let Some(spec) = spec(key) else {
+        return Ok(());
+    };
+    match spec.kind {
+        SettingKind::String => Ok(()),
+        SettingKind::Int => value
+            .trim()
+            .parse::<i64>()
+            .map(|_| ())
+            .map_err(|_| format!("expects an integer, got '{value}'")),
+        SettingKind::Bool => match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" | "false" | "0" | "no" | "off" => Ok(()),
+            _ => Err(format!("expects true or false, got '{value}'")),
+        },
+    }
+}
+
+/// A registered setting paired with its current effective value — what the
+/// settings pane renders. `value` is the stored value, or the default when the
+/// key is absent; `is_default` says which.
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingView {
+    #[serde(flatten)]
+    pub spec: &'static SettingSpec,
+    /// Effective value: the stored value, or `spec.default` when unset.
+    pub value: String,
+    /// True when no value is stored and `value` is the default.
+    pub is_default: bool,
+}
+
+/// The full registry with each setting's current effective value, ordered as
+/// declared in [`REGISTRY`].
+pub async fn describe(db: &Db) -> Result<Vec<SettingView>> {
+    let stored: std::collections::HashMap<String, String> = list(db).await?.into_iter().collect();
+    Ok(REGISTRY
+        .iter()
+        .map(|spec| match stored.get(spec.key) {
+            Some(value) => SettingView {
+                spec,
+                value: value.clone(),
+                is_default: false,
+            },
+            None => SettingView {
+                spec,
+                value: spec.default.to_string(),
+                is_default: true,
+            },
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Raw key/value access
+// ---------------------------------------------------------------------------
 
 pub async fn get(db: &Db, key: &str) -> Option<String> {
     let value = sqlx::query("SELECT value FROM settings WHERE key = ?")
@@ -48,22 +217,41 @@ pub async fn get_bool(db: &Db, key: &str, default: bool) -> bool {
     }
 }
 
-pub async fn set(db: &Db, key: &str, value: &str) -> Result<()> {
-    tracing::debug!(key, value, "config set");
-    sqlx::query("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-        .bind(key)
-        .bind(value)
-        .execute(db)
-        .await?;
-    Ok(())
-}
+/// One requested change: `Some(value)` writes a key, `None` clears it (so the
+/// key falls back to its registered default).
+pub type Change = (String, Option<String>);
 
-pub async fn delete(db: &Db, key: &str) -> Result<()> {
-    tracing::debug!(key, "config delete");
-    sqlx::query("DELETE FROM settings WHERE key = ?")
-        .bind(key)
-        .execute(db)
-        .await?;
+/// Apply a batch of [`Change`]s atomically — either all writes land or none do.
+/// Callers are expected to [`validate`] each value first; `apply` itself only
+/// touches the database.
+pub async fn apply(db: &Db, changes: &[Change]) -> Result<()> {
+    let mut tx = db.begin().await?;
+    let now = now_iso();
+    for (key, value) in changes {
+        match value {
+            Some(value) => {
+                tracing::debug!(key, value, "config set");
+                sqlx::query(
+                    "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+                     ON CONFLICT(key) DO UPDATE
+                       SET value = excluded.value, updated_at = excluded.updated_at",
+                )
+                .bind(key)
+                .bind(value)
+                .bind(&now)
+                .execute(&mut *tx)
+                .await?;
+            }
+            None => {
+                tracing::debug!(key, "config reset to default");
+                sqlx::query("DELETE FROM settings WHERE key = ?")
+                    .bind(key)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+    }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -75,4 +263,70 @@ pub async fn list(db: &Db) -> Result<Vec<(String, String)>> {
         .into_iter()
         .map(|r| (r.get::<String, _>("key"), r.get::<String, _>("value")))
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_keys_are_unique() {
+        let mut keys: Vec<&str> = REGISTRY.iter().map(|s| s.key).collect();
+        keys.sort_unstable();
+        let count = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), count, "duplicate key in REGISTRY");
+    }
+
+    #[test]
+    fn registered_defaults_pass_their_own_validation() {
+        for s in REGISTRY {
+            assert!(
+                validate(s.key, s.default).is_ok(),
+                "default for '{}' fails validation",
+                s.key
+            );
+        }
+    }
+
+    #[test]
+    fn validate_checks_kinds_and_ignores_unknown_keys() {
+        assert!(validate("summary.interval_secs", "300").is_ok());
+        assert!(validate("summary.interval_secs", "soon").is_err());
+        assert!(validate("server.auto_adopt", "yes").is_ok());
+        assert!(validate("server.auto_adopt", "maybe").is_err());
+        // Unregistered keys are free-form.
+        assert!(validate("some.future.key", "anything").is_ok());
+    }
+
+    #[tokio::test]
+    async fn describe_reports_defaults_then_stored_values() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let before = describe(&db).await.unwrap();
+        let auto_adopt = before.iter().find(|v| v.spec.key == "server.auto_adopt").unwrap();
+        assert!(auto_adopt.is_default);
+        assert_eq!(auto_adopt.value, "false");
+
+        apply(&db, &[("server.auto_adopt".into(), Some("true".into()))])
+            .await
+            .unwrap();
+        let after = describe(&db).await.unwrap();
+        let auto_adopt = after.iter().find(|v| v.spec.key == "server.auto_adopt").unwrap();
+        assert!(!auto_adopt.is_default);
+        assert_eq!(auto_adopt.value, "true");
+    }
+
+    #[tokio::test]
+    async fn apply_is_atomic_and_a_none_change_resets_to_default() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        apply(&db, &[("agent.claude_args".into(), Some("--model x".into()))])
+            .await
+            .unwrap();
+        assert_eq!(get(&db, "agent.claude_args").await.as_deref(), Some("--model x"));
+        // A `None` change clears the row so the default applies again.
+        apply(&db, &[("agent.claude_args".into(), None)])
+            .await
+            .unwrap();
+        assert_eq!(get(&db, "agent.claude_args").await, None);
+    }
 }

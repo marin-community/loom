@@ -77,13 +77,20 @@ pub async fn summarize_workspace(state: &AppState, ws: &Workspace) -> Result<Str
         return Ok(ws.description.clone());
     }
     let stat = git::diff_stat(&work_dir, &base).await?;
+    let command = config::get_or(
+        &state.db,
+        "agent.summary_command",
+        config::DEFAULT_SUMMARY_COMMAND,
+    )
+    .await;
     tracing::debug!(
         id = %ws.id,
         patch_len = patch.len(),
         files_changed = stat.files_changed,
+        %command,
         "summarizing workspace diff"
     );
-    let description = agent::summarize(&work_dir, &patch).await?;
+    let description = agent::summarize(&work_dir, &command, &patch).await?;
 
     sqlx::query(
         "INSERT INTO summaries (workspace_id, description, files_changed, insertions, deletions)

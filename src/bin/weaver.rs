@@ -96,6 +96,8 @@ enum Cmd {
 enum ConfigCmd {
     Get { key: String },
     Set { key: String, value: String },
+    /// Remove a setting, reverting it to its built-in default.
+    Unset { key: String },
     List,
 }
 
@@ -467,32 +469,55 @@ async fn cmd_hook(workspace: String, event: String) -> Result<()> {
 // Config
 // ---------------------------------------------------------------------------
 
+/// Fetch the settings list from the canonical `{ "settings": [...] }` envelope.
+async fn fetch_settings(client: &Client) -> Result<Vec<Value>> {
+    let res = client.get("/api/settings").await?;
+    Ok(res
+        .get("settings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// PATCH a single change. `value` is `Some` to set a key, `None` to reset it.
+async fn patch_setting(client: &Client, key: &str, value: Option<&str>) -> Result<()> {
+    let mut body = serde_json::Map::new();
+    body.insert(
+        key.to_string(),
+        value.map_or(Value::Null, |v| Value::String(v.to_string())),
+    );
+    client.patch("/api/settings", Value::Object(body)).await?;
+    Ok(())
+}
+
 async fn cmd_config(cmd: ConfigCmd) -> Result<()> {
     let client = Client::new();
     match cmd {
         ConfigCmd::List => {
-            let settings = client.get("/api/settings").await?;
-            if let Some(map) = settings.as_object() {
-                if map.is_empty() {
-                    println!("no settings");
-                }
-                for (k, v) in map {
-                    println!("{k} = {}", v.as_str().unwrap_or(""));
-                }
+            let settings = fetch_settings(&client).await?;
+            for s in &settings {
+                let suffix = if s.get("is_default").and_then(Value::as_bool) == Some(true) {
+                    "  (default)"
+                } else {
+                    ""
+                };
+                println!("{} = {}{suffix}", str_field(s, "key"), str_field(s, "value"));
             }
         }
         ConfigCmd::Get { key } => {
-            let settings = client.get("/api/settings").await?;
-            match settings.get(&key).and_then(Value::as_str) {
-                Some(v) => println!("{v}"),
-                None => bail!("no setting '{key}'"),
+            let settings = fetch_settings(&client).await?;
+            match settings.iter().find(|s| str_field(s, "key") == key) {
+                Some(s) => println!("{}", str_field(s, "value")),
+                None => bail!("no setting '{key}' — see `weaver config list`"),
             }
         }
         ConfigCmd::Set { key, value } => {
-            client
-                .post("/api/settings", json!({ "key": key, "value": value }))
-                .await?;
+            patch_setting(&client, &key, Some(&value)).await?;
             println!("set {key}");
+        }
+        ConfigCmd::Unset { key } => {
+            patch_setting(&client, &key, None).await?;
+            println!("unset {key}");
         }
     }
     Ok(())

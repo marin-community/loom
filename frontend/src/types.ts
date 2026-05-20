@@ -39,3 +39,17 @@ export interface DiffStat {
   insertions: number;
   deletions: number;
 }
+
+export type SettingKind = 'string' | 'int' | 'bool';
+
+/// One configurable setting: its registry metadata plus its current value.
+export interface SettingView {
+  key: string;
+  label: string;
+  description: string;
+  kind: SettingKind;
+  default: string;
+  group: string;
+  value: string;
+  is_default: boolean;
+}
