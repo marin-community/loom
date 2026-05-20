@@ -68,6 +68,17 @@ pub async fn send_text(name: &str, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Send named keys (e.g. `Escape`, `C-c`) to the session's active pane.
+///
+/// Unlike [`send_text`], the arguments are interpreted by tmux as key names
+/// rather than literal text, and no trailing Enter is appended.
+pub async fn send_keys(name: &str, keys: &[&str]) -> Result<()> {
+    let mut args = vec!["send-keys", "-t", name];
+    args.extend_from_slice(keys);
+    run(&args).await?;
+    Ok(())
+}
+
 /// Capture the session's pane. `history` extra scrollback lines (0 = visible screen only).
 pub async fn capture(name: &str, history: usize) -> Result<String> {
     let start;

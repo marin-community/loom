@@ -36,6 +36,7 @@ weaver ls                             # list workspaces
 weaver status <id>                    # workspace detail
 weaver attach <id>                    # attach to the agent's tmux session
 weaver send <id> "use port 8081"      # send a line to an idle agent
+weaver interrupt <id>                 # interrupt the agent (sends Esc)
 weaver summary <id>                   # force a state summary now
 weaver merge <id>                     # merge the branch into its base
 weaver adopt <id>                     # recreate the tmux session for an orphaned workspace

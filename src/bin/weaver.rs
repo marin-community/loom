@@ -50,6 +50,8 @@ enum Cmd {
     Path { id: String },
     /// Send a line of text to a workspace's agent.
     Send { id: String, text: Vec<String> },
+    /// Interrupt a workspace's agent (sends Esc, like pressing it in the TUI).
+    Interrupt { id: String },
     /// Force a fresh summary of a workspace now.
     Summary { id: String },
     /// Merge a workspace's branch into its base branch.
@@ -142,6 +144,7 @@ async fn run() -> Result<()> {
         Cmd::Attach { id } => cmd_attach(id).await,
         Cmd::Path { id } => cmd_path(id).await,
         Cmd::Send { id, text } => cmd_send(id, text.join(" ")).await,
+        Cmd::Interrupt { id } => cmd_interrupt(id).await,
         Cmd::Summary { id } => cmd_summary(id).await,
         Cmd::Merge { id } => cmd_merge(id).await,
         Cmd::Adopt { id } => cmd_adopt(id).await,
@@ -313,6 +316,15 @@ async fn cmd_send(id: String, text: String) -> Result<()> {
         .post(&format!("/api/workspaces/{id}/send"), json!({ "text": text }))
         .await?;
     println!("sent");
+    Ok(())
+}
+
+async fn cmd_interrupt(id: String) -> Result<()> {
+    let client = Client::new();
+    client
+        .post(&format!("/api/workspaces/{id}/interrupt"), json!({}))
+        .await?;
+    println!("interrupt sent");
     Ok(())
 }
 

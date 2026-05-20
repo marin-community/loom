@@ -126,6 +126,7 @@ pub fn router(state: AppState) -> Router {
                 .delete(delete_workspace),
         )
         .route("/workspaces/{id}/send", post(send_workspace))
+        .route("/workspaces/{id}/interrupt", post(interrupt_workspace))
         .route("/workspaces/{id}/note", post(note_workspace))
         .route("/workspaces/{id}/summarize", post(summarize_workspace))
         .route("/workspaces/{id}/merge", post(merge_workspace))
@@ -455,6 +456,31 @@ async fn send_workspace(
     .await
     .ok();
     Ok(Json(json!({ "sent": true })))
+}
+
+/// Interrupt the agent by sending an Escape keypress to its tmux pane — the
+/// same key a user would press in the TUI to stop the agent mid-task. It does
+/// not kill the session; the agent stays alive and ready for the next prompt.
+async fn interrupt_workspace(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let ws = require(&st.db, &key).await?;
+    tmux::send_keys(&ws.tmux_session, &["Escape"])
+        .await
+        .map_err(|e| AppError::bad_request(e.to_string()))?;
+    tracing::debug!(workspace = %ws.id, "interrupt sent to agent");
+    workspace::touch(&st.db, &ws.id).await.ok();
+    events::record(
+        &st.db,
+        &st.bus,
+        &ws.id,
+        "note",
+        json!({ "text": "interrupted agent (Esc)" }),
+    )
+    .await
+    .ok();
+    Ok(Json(json!({ "interrupted": true })))
 }
 
 #[derive(Debug, Deserialize)]

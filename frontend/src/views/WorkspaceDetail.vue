@@ -107,6 +107,12 @@ const send = () =>
     sendText.value = '';
   });
 
+const stop = () =>
+  act('stop', async () => {
+    await post(`/workspaces/${props.id}/interrupt`);
+    notice.value = 'Interrupt sent to the agent.';
+  });
+
 const summarize = () =>
   act('summary', async () => {
     const res = (await post(`/workspaces/${props.id}/summarize`)) as { description: string };
@@ -298,6 +304,15 @@ onUnmounted(() => source?.close());
               :disabled="busy === 'send'"
             >
               Send
+            </button>
+            <button
+              type="button"
+              class="rounded bg-rose-700 hover:bg-rose-600 px-3 py-1.5 text-sm"
+              :disabled="busy === 'stop'"
+              title="Send Esc to the agent — interrupts whatever it is doing"
+              @click="stop"
+            >
+              {{ busy === 'stop' ? 'Stopping…' : 'Stop' }}
             </button>
           </form>
         </section>
