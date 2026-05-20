@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { get, post } from '../api';
-import type { Workspace } from '../types';
+import type { Workspace, RecentRepo } from '../types';
 import StatusBadge from '../components/StatusBadge.vue';
 
 const workspaces = ref<Workspace[]>([]);
+const recentRepos = ref<RecentRepo[]>([]);
 const error = ref('');
 const showForm = ref(false);
 const repo = ref('');
+const repoFocused = ref(false);
 const title = ref('');
 const goal = ref('');
 const name = ref('');
@@ -23,6 +25,22 @@ function slugify(s: string): string {
     .slice(0, 40);
 }
 
+// Final path segment of a repo root, used as its short label in the dropdown.
+function repoName(path: string): string {
+  return path.replace(/\/+$/, '').split('/').pop() || path;
+}
+
+// Recently-used repos, narrowed to those matching what the user has typed.
+const repoMatches = computed(() => {
+  const q = repo.value.trim().toLowerCase();
+  return recentRepos.value.filter((r) => r.repo_root.toLowerCase().includes(q));
+});
+
+function pickRepo(path: string) {
+  repo.value = path;
+  repoFocused.value = false;
+}
+
 // Keep the name in sync with the title (or goal) until the user edits it.
 watch([title, goal], ([t, g]) => {
   if (!nameEdited.value) name.value = slugify(t || g);
@@ -34,6 +52,14 @@ async function load() {
     error.value = '';
   } catch (e) {
     error.value = (e as Error).message;
+  }
+}
+
+async function loadRecentRepos() {
+  try {
+    recentRepos.value = (await get('/repos/recent')) as RecentRepo[];
+  } catch {
+    // The recent-repos dropdown is a convenience; ignore failures here.
   }
 }
 
@@ -55,6 +81,7 @@ async function create() {
     nameEdited.value = false;
     showForm.value = false;
     await load();
+    await loadRecentRepos();
   } catch (e) {
     error.value = (e as Error).message;
   } finally {
@@ -64,6 +91,7 @@ async function create() {
 
 onMounted(() => {
   load();
+  loadRecentRepos();
   timer = window.setInterval(load, 3000);
 });
 onUnmounted(() => clearInterval(timer));
@@ -86,13 +114,47 @@ onUnmounted(() => clearInterval(timer));
       class="mb-5 rounded border border-neutral-800 bg-neutral-900 p-4 space-y-3"
       @submit.prevent="create"
     >
-      <div>
-        <label class="block text-xs text-neutral-400 mb-1">Repository path (on the server)</label>
+      <div class="relative">
+        <label class="block text-xs text-neutral-400 mb-1">
+          Repository path (on the server)
+          <span v-if="recentRepos.length" class="text-neutral-600">— or pick a recent one</span>
+        </label>
         <input
           v-model="repo"
+          @focus="repoFocused = true"
+          @input="repoFocused = true"
+          @blur="repoFocused = false"
           placeholder="/home/you/code/project"
+          autocomplete="off"
+          spellcheck="false"
           class="w-full rounded bg-neutral-800 px-2 py-1.5 text-sm outline-none focus:ring-1 ring-emerald-600"
         />
+        <ul
+          v-if="repoFocused && repoMatches.length"
+          data-testid="recent-repos"
+          class="absolute left-0 right-0 z-10 mt-1 max-h-56 overflow-auto rounded border border-neutral-700 bg-neutral-800 shadow-lg"
+        >
+          <li v-for="r in repoMatches" :key="r.repo_root">
+            <button
+              type="button"
+              data-testid="recent-repo"
+              @mousedown.prevent="pickRepo(r.repo_root)"
+              class="flex w-full items-center justify-between gap-3 px-2 py-1.5 text-left hover:bg-neutral-700"
+            >
+              <span class="min-w-0">
+                <span class="block truncate text-sm">{{ repoName(r.repo_root) }}</span>
+                <span class="block truncate text-xs text-neutral-500 font-mono">{{ r.repo_root }}</span>
+              </span>
+              <span
+                v-if="r.active_workspaces"
+                :title="`${r.active_workspaces} active workspace(s)`"
+                class="shrink-0 rounded bg-neutral-700 px-1.5 py-0.5 text-xs text-neutral-300"
+              >
+                {{ r.active_workspaces }}
+              </span>
+            </button>
+          </li>
+        </ul>
       </div>
       <div>
         <label class="block text-xs text-neutral-400 mb-1">Title</label>

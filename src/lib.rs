@@ -12,6 +12,7 @@ pub mod events;
 pub mod git;
 pub mod github;
 pub mod monitor;
+pub mod repo;
 pub mod server;
 pub mod summary;
 pub mod tmux;

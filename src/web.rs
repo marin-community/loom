@@ -23,7 +23,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::db::Db;
 use crate::events::{Event, EventBus};
 use crate::workspace::{NewWorkspace, Workspace};
-use crate::{agent, config, db, events, git, github, tmux, workspace};
+use crate::{agent, config, db, events, git, github, repo, tmux, workspace};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -121,6 +121,7 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{id}/pane", get(pane_workspace))
         .route("/workspaces/{id}/log", get(log_workspace))
         .route("/workspaces/{id}/events", get(events_sse))
+        .route("/repos/recent", get(recent_repos))
         .route("/hook", post(hook))
         .route("/settings", get(list_settings).post(set_setting))
         .with_state(state);
@@ -304,6 +305,10 @@ async fn create_workspace(
         },
     )
     .await?;
+    // Remember this repo so the dashboard can offer it for the next workspace.
+    if let Err(e) = repo::record_use(&st.db, &ws.repo_root).await {
+        tracing::warn!(workspace = %ws.id, error = %e, "failed to record recent repo");
+    }
     events::record(
         &st.db,
         &st.bus,
@@ -618,6 +623,24 @@ async fn events_sse(
             .unwrap_or_default()))
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+// ---------------------------------------------------------------------------
+// Recent repositories
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct RecentReposQuery {
+    /// How many repos to return. Defaults to 10; clamped to [1, 50].
+    limit: Option<i64>,
+}
+
+async fn recent_repos(
+    State(st): State<AppState>,
+    Query(q): Query<RecentReposQuery>,
+) -> ApiResult<Json<Vec<repo::RecentRepo>>> {
+    let limit = q.limit.unwrap_or(10).clamp(1, 50);
+    Ok(Json(repo::recent(&st.db, limit).await?))
 }
 
 // ---------------------------------------------------------------------------

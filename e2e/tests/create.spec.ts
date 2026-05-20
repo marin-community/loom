@@ -31,6 +31,28 @@ test.describe('creating a workspace via the UI form', () => {
     expect(all[0].agent_kind).toBe('shell');
   });
 
+  test('the repository field offers recently-used repos', async ({ page, weaver }) => {
+    // Seed a workspace so its repo is recorded as recently used.
+    const ws = await weaver.seedWorkspace({ goal: 'seed', name: 'seed-ws' });
+
+    await page.goto(weaver.baseUrl);
+    await page.getByRole('button', { name: 'New workspace' }).click();
+
+    const repoInput = page.getByPlaceholder('/home/you/code/project');
+    // The dropdown stays hidden until the repository field is focused.
+    await expect(page.getByTestId('recent-repo')).toBeHidden();
+    await repoInput.focus();
+
+    const recent = page.getByTestId('recent-repo');
+    await expect(recent).toHaveCount(1);
+    await expect(recent.first()).toContainText(ws.repo_root);
+
+    // Picking a recent repo fills the field and closes the dropdown.
+    await recent.first().click();
+    await expect(repoInput).toHaveValue(ws.repo_root);
+    await expect(page.getByTestId('recent-repo')).toBeHidden();
+  });
+
   test('Cancel hides the form again', async ({ page, weaver }) => {
     await page.goto(weaver.baseUrl);
     await page.getByRole('button', { name: 'New workspace' }).click();

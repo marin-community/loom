@@ -54,6 +54,14 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Repositories the user has started a workspace in. Unlike `workspaces`, a
+-- row here outlives the removal of all of a repo's workspaces, so the web UI
+-- can keep offering recently-used repos when starting a new session.
+CREATE TABLE IF NOT EXISTS recent_repos (
+    repo_root    TEXT PRIMARY KEY,
+    last_used_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
 "#;
 
 /// Root directory for all weaver state on this machine.
@@ -143,6 +151,16 @@ async fn migrate(pool: &Db) -> Result<()> {
             tracing::debug!(error = %e, statement = %stmt, "idempotent alter skipped");
         }
     }
+    // Backfill `recent_repos` from any pre-existing workspaces so the feature
+    // works on databases created before the table existed. `INSERT OR IGNORE`
+    // makes this idempotent: it never overwrites a repo's recorded recency.
+    sqlx::query(
+        "INSERT OR IGNORE INTO recent_repos (repo_root, last_used_at)
+         SELECT repo_root, MAX(created_at) FROM workspaces GROUP BY repo_root",
+    )
+    .execute(pool)
+    .await
+    .context("seeding recent_repos from existing workspaces")?;
     Ok(())
 }
 

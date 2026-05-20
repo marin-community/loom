@@ -71,6 +71,7 @@ async fn workspace_lifecycle() {
     let id = ws["id"].as_str().unwrap().to_string();
     let session = ws["tmux_session"].as_str().unwrap().to_string();
     let work_dir = ws["work_dir"].as_str().unwrap().to_string();
+    let repo_root = ws["repo_root"].as_str().unwrap().to_string();
 
     // Worktree, branch and tmux session all exist.
     assert!(
@@ -88,6 +89,13 @@ async fn workspace_lifecycle() {
     // It shows up in the listing.
     let list = client.get("/api/workspaces").await.unwrap();
     assert_eq!(list.as_array().unwrap().len(), 1);
+
+    // Creating the workspace recorded its repo as recently used.
+    let recent = client.get("/api/repos/recent").await.unwrap();
+    let recent = recent.as_array().unwrap();
+    assert_eq!(recent.len(), 1, "repo should be recorded after first workspace");
+    assert_eq!(recent[0]["repo_root"], repo_root);
+    assert_eq!(recent[0]["active_workspaces"], 1);
 
     // Text sent to the workspace reaches the pane.
     client
@@ -186,4 +194,12 @@ async fn workspace_lifecycle() {
     );
     let list = client.get("/api/workspaces").await.unwrap();
     assert_eq!(list.as_array().unwrap().len(), 0);
+
+    // The repo is still remembered after every workspace in it is gone — that
+    // is what lets the dashboard offer it for the next session.
+    let recent = client.get("/api/repos/recent").await.unwrap();
+    let recent = recent.as_array().unwrap();
+    assert_eq!(recent.len(), 1, "recent repo should outlive its workspaces");
+    assert_eq!(recent[0]["repo_root"], repo_root);
+    assert_eq!(recent[0]["active_workspaces"], 0);
 }

@@ -20,6 +20,12 @@ export interface Workspace {
   pending_prompt: string;
 }
 
+export interface RecentRepo {
+  repo_root: string;
+  last_used_at: string;
+  active_workspaces: number;
+}
+
 export interface WeaverEvent {
   id: number;
   workspace_id: string;
