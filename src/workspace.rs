@@ -172,6 +172,14 @@ pub async fn get(db: &Db, id: &str) -> Result<Option<Workspace>> {
     Ok(row)
 }
 
+pub async fn find_by_name(db: &Db, name: &str) -> Result<Option<Workspace>> {
+    let row = sqlx::query_as::<_, Workspace>("SELECT * FROM workspaces WHERE name = ?")
+        .bind(name)
+        .fetch_optional(db)
+        .await?;
+    Ok(row)
+}
+
 /// Resolve a workspace by exact id, exact name, or unambiguous id prefix.
 pub async fn resolve(db: &Db, key: &str) -> Result<Option<Workspace>> {
     if let Some(w) = get(db, key).await? {

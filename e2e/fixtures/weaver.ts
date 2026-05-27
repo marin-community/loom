@@ -119,7 +119,7 @@ export const test = base.extend<{ weaver: WeaverFixture }>({
     makeRepo(repoPath);
 
     // Bind to a random free port (0) and parse the actual port from stdout.
-    const server: ChildProcess = spawn(BINARY, ['serve', '--addr', '127.0.0.1:0'], {
+    const server: ChildProcess = spawn(BINARY, ['server', 'run', '--addr', '127.0.0.1:0'], {
       env: {
         ...process.env,
         WEAVER_HOME: weaverHome,

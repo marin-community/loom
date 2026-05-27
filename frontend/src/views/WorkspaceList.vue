@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { get, post } from '../api';
-import type { Workspace, RecentRepo } from '../types';
+import type { Workspace, RecentRepo, Branch } from '../types';
 import StatusBadge from '../components/StatusBadge.vue';
 
 const workspaces = ref<Workspace[]>([]);
@@ -15,6 +15,14 @@ const goal = ref('');
 const name = ref('');
 const nameEdited = ref(false);
 const creating = ref(false);
+
+type BranchMode = 'new' | 'existing';
+const branchMode = ref<BranchMode>('new');
+const existingBranch = ref('');
+const branchFocused = ref(false);
+const branches = ref<Branch[]>([]);
+const branchesError = ref('');
+let branchesReqId = 0;
 let timer: number | undefined;
 
 function slugify(s: string): string {
@@ -36,14 +44,45 @@ const repoMatches = computed(() => {
   return recentRepos.value.filter((r) => r.repo_root.toLowerCase().includes(q));
 });
 
+const branchMatches = computed(() => {
+  const q = existingBranch.value.trim().toLowerCase();
+  if (!q) return branches.value;
+  return branches.value.filter((b) => b.name.toLowerCase().includes(q));
+});
+
 function pickRepo(path: string) {
   repo.value = path;
   repoFocused.value = false;
 }
 
+function pickBranch(b: Branch) {
+  existingBranch.value = b.name;
+  branchFocused.value = false;
+}
+
 // Keep the name in sync with the title (or goal) until the user edits it.
 watch([title, goal], ([t, g]) => {
   if (!nameEdited.value) name.value = slugify(t || g);
+});
+
+async function loadBranches() {
+  const path = repo.value.trim();
+  branches.value = [];
+  branchesError.value = '';
+  if (!path) return;
+  const reqId = ++branchesReqId;
+  try {
+    const res = (await get(`/repos/branches?cwd=${encodeURIComponent(path)}`)) as Branch[];
+    if (reqId === branchesReqId) branches.value = res;
+  } catch (e) {
+    if (reqId === branchesReqId) branchesError.value = (e as Error).message;
+  }
+}
+
+// Fetch branches when the user switches into "existing branch" mode or
+// changes the repo path while in that mode.
+watch([repo, branchMode], ([, mode]) => {
+  if (mode === 'existing') loadBranches();
 });
 
 async function load() {
@@ -67,18 +106,26 @@ async function create() {
   // A workspace needs a repo and at least a title or a goal; the goal alone
   // is optional (an empty goal just starts the agent unprompted).
   if (!repo.value.trim() || !(title.value.trim() || goal.value.trim())) return;
+  if (branchMode.value === 'existing' && !existingBranch.value.trim()) return;
   creating.value = true;
   try {
-    await post('/workspaces', {
+    const body: Record<string, unknown> = {
       cwd: repo.value,
       title: title.value || undefined,
       goal: goal.value,
-      name: name.value || undefined,
-    });
+    };
+    if (branchMode.value === 'existing') {
+      body.existing_branch = existingBranch.value.trim();
+    } else {
+      body.name = name.value || undefined;
+    }
+    await post('/workspaces', body);
     title.value = '';
     goal.value = '';
     name.value = '';
+    existingBranch.value = '';
     nameEdited.value = false;
+    branchMode.value = 'new';
     showForm.value = false;
     await load();
     await loadRecentRepos();
@@ -175,15 +222,81 @@ onUnmounted(() => clearInterval(timer));
         />
       </div>
       <div>
-        <label class="block text-xs text-neutral-400 mb-1">
-          Name — the worktree (<code>.worktrees/&lt;name&gt;</code>) and branch
-        </label>
-        <input
-          v-model="name"
-          @input="nameEdited = true"
-          placeholder="health-endpoint"
-          class="w-full rounded bg-neutral-800 px-2 py-1.5 text-sm outline-none focus:ring-1 ring-emerald-600 font-mono"
-        />
+        <div class="inline-flex rounded border border-neutral-700 text-xs overflow-hidden mb-2">
+          <button
+            type="button"
+            :class="[
+              'px-3 py-1',
+              branchMode === 'new' ? 'bg-emerald-700 text-white' : 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700',
+            ]"
+            @click="branchMode = 'new'"
+          >
+            New branch
+          </button>
+          <button
+            type="button"
+            :class="[
+              'px-3 py-1 border-l border-neutral-700',
+              branchMode === 'existing' ? 'bg-emerald-700 text-white' : 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700',
+            ]"
+            @click="branchMode = 'existing'"
+          >
+            Existing branch
+          </button>
+        </div>
+        <div v-if="branchMode === 'new'">
+          <label class="block text-xs text-neutral-400 mb-1">
+            Name — the worktree (<code>.worktrees/&lt;name&gt;</code>) and branch
+            (<code>weaver/&lt;name&gt;</code>)
+          </label>
+          <input
+            v-model="name"
+            @input="nameEdited = true"
+            placeholder="health-endpoint"
+            class="w-full rounded bg-neutral-800 px-2 py-1.5 text-sm outline-none focus:ring-1 ring-emerald-600 font-mono"
+          />
+        </div>
+        <div v-else class="relative">
+          <label class="block text-xs text-neutral-400 mb-1">
+            Existing branch — weaver reuses its worktree if one is checked out
+          </label>
+          <input
+            v-model="existingBranch"
+            @focus="branchFocused = true"
+            @input="branchFocused = true"
+            @blur="branchFocused = false"
+            placeholder="feature/foo"
+            autocomplete="off"
+            spellcheck="false"
+            class="w-full rounded bg-neutral-800 px-2 py-1.5 text-sm outline-none focus:ring-1 ring-emerald-600 font-mono"
+          />
+          <p v-if="branchesError" class="mt-1 text-xs text-red-400">{{ branchesError }}</p>
+          <ul
+            v-if="branchFocused && branchMatches.length"
+            data-testid="branch-options"
+            class="absolute left-0 right-0 z-10 mt-1 max-h-56 overflow-auto rounded border border-neutral-700 bg-neutral-800 shadow-lg"
+          >
+            <li v-for="b in branchMatches" :key="b.name">
+              <button
+                type="button"
+                data-testid="branch-option"
+                @mousedown.prevent="pickBranch(b)"
+                class="flex w-full items-center justify-between gap-3 px-2 py-1.5 text-left hover:bg-neutral-700"
+              >
+                <span class="min-w-0">
+                  <span class="block truncate text-sm font-mono">
+                    {{ b.name }}
+                    <span v-if="b.current" class="ml-1 text-xs text-emerald-400">(current)</span>
+                  </span>
+                  <span
+                    v-if="b.worktree"
+                    class="block truncate text-xs text-neutral-500 font-mono"
+                  >→ {{ b.worktree }}</span>
+                </span>
+              </button>
+            </li>
+          </ul>
+        </div>
       </div>
       <button
         type="submit"

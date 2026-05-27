@@ -26,6 +26,12 @@ export interface RecentRepo {
   active_workspaces: number;
 }
 
+export interface Branch {
+  name: string;
+  worktree: string | null;
+  current: boolean;
+}
+
 export interface WeaverEvent {
   id: number;
   workspace_id: string;

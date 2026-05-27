@@ -114,6 +114,50 @@ pub async fn worktree_add(repo_root: &Path, path: &Path, branch: &str, base: &st
     Ok(())
 }
 
+/// Check out an existing `branch` into a new worktree at `path` (no `-b`).
+pub async fn worktree_add_existing(repo_root: &Path, path: &Path, branch: &str) -> Result<()> {
+    let path = path.to_string_lossy();
+    git(repo_root, &["worktree", "add", &path, branch]).await?;
+    tracing::info!(%branch, path = %path, "worktree created for existing branch");
+    Ok(())
+}
+
+/// List local branch names (`refs/heads/*`).
+pub async fn list_branches(repo_root: &Path) -> Result<Vec<String>> {
+    let out = git(
+        repo_root,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    )
+    .await?;
+    Ok(out
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+/// Path of the worktree that currently has `branch` checked out, if any.
+/// Parses `git worktree list --porcelain`: each record is a `worktree <path>`
+/// line optionally followed by `HEAD <sha>` and either `branch refs/heads/<n>`
+/// or `detached`. Records are separated by blank lines.
+pub async fn worktree_for_branch(repo_root: &Path, branch: &str) -> Result<Option<PathBuf>> {
+    let out = git(repo_root, &["worktree", "list", "--porcelain"]).await?;
+    let target = format!("refs/heads/{branch}");
+    let mut current: Option<PathBuf> = None;
+    for line in out.lines() {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            current = Some(PathBuf::from(rest));
+        } else if let Some(rest) = line.strip_prefix("branch ") {
+            if rest == target {
+                return Ok(current);
+            }
+        } else if line.is_empty() {
+            current = None;
+        }
+    }
+    Ok(None)
+}
+
 pub async fn worktree_remove(repo_root: &Path, path: &Path) -> Result<()> {
     let path = path.to_string_lossy();
     git(repo_root, &["worktree", "remove", "--force", &path]).await?;

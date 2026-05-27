@@ -13,7 +13,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
@@ -136,6 +136,7 @@ pub fn router(state: AppState) -> Router {
         .route("/workspaces/{id}/log", get(log_workspace))
         .route("/workspaces/{id}/events", get(events_sse))
         .route("/repos/recent", get(recent_repos))
+        .route("/repos/branches", get(repo_branches))
         .route("/hook", post(hook))
         .route("/settings", get(get_settings).patch(patch_settings))
         .with_state(state);
@@ -177,6 +178,12 @@ struct CreateReq {
     agent: Option<String>,
     name: Option<String>,
     issue: Option<i64>,
+    /// Attach to a branch that already exists locally instead of creating
+    /// `weaver/<slug>`. If a worktree already checks out the branch, weaver
+    /// reuses that path; otherwise it adds one under `.worktrees/<slug>`.
+    /// Mutually exclusive with `name`.
+    #[serde(default)]
+    existing_branch: Option<String>,
 }
 
 async fn create_workspace(
@@ -231,42 +238,87 @@ async fn create_workspace(
         }
     });
 
-    // The slug: an explicit name wins, otherwise it is derived from the title.
-    // It is always slugified so it is safe as both a branch and directory name.
-    let explicit = req.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
-    let base_slug = workspace::slugify(explicit.unwrap_or(title.as_str()));
-    let mut slug = base_slug.clone();
-    let mut suffix = 2;
-    loop {
-        let branch = format!("weaver/{slug}");
-        let dir = repo_root.join(".worktrees").join(&slug);
-        if !git::branch_exists(&repo_root, &branch).await && !dir.exists() {
-            break;
-        }
-        if explicit.is_some() {
-            return Err(AppError::conflict(format!(
-                "a workspace named '{slug}' already exists — choose a different name"
-            )));
-        }
-        slug = format!("{base_slug}-{suffix}");
-        suffix += 1;
+    let existing = req
+        .existing_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty());
+    if existing.is_some() && req.name.as_deref().map(str::trim).is_some_and(|n| !n.is_empty()) {
+        return Err(AppError::bad_request(
+            "`name` and `existing_branch` are mutually exclusive",
+        ));
     }
-    let branch = format!("weaver/{slug}");
-    let base = match req.base {
+
+    let base = match req.base.clone() {
         Some(b) => b,
         None => git::current_branch(&repo_root).await?,
     };
 
-    // Lay out filesystem: the worktree lives inside the repo at
-    // `.worktrees/<slug>`; the runtime dir (goal file) stays under ~/.weaver.
-    let work_dir = repo_root.join(".worktrees").join(&slug);
+    let (slug, branch, work_dir) = if let Some(existing_branch) = existing {
+        // Attach to an existing branch: reuse its worktree if one is checked
+        // out, otherwise add one under `.worktrees/<slug>`. The branch name
+        // is preserved verbatim — no `weaver/` prefix.
+        if !git::branch_exists(&repo_root, existing_branch).await {
+            return Err(AppError::bad_request(format!(
+                "branch '{existing_branch}' does not exist in this repo"
+            )));
+        }
+        let base_slug = workspace::slugify(existing_branch);
+        let mut slug = base_slug.clone();
+        let mut suffix = 2;
+        while workspace::find_by_name(&st.db, &slug).await?.is_some() {
+            slug = format!("{base_slug}-{suffix}");
+            suffix += 1;
+        }
+        let work_dir = match git::worktree_for_branch(&repo_root, existing_branch)
+            .await
+            .map_err(|e| AppError::bad_request(e.to_string()))?
+        {
+            Some(p) => p,
+            None => {
+                let dir = repo_root.join(".worktrees").join(&slug);
+                tokio::fs::create_dir_all(repo_root.join(".worktrees")).await?;
+                git::ensure_excluded(&repo_root, ".worktrees/").await.ok();
+                git::worktree_add_existing(&repo_root, &dir, existing_branch)
+                    .await
+                    .map_err(|e| AppError::bad_request(e.to_string()))?;
+                dir
+            }
+        };
+        (slug, existing_branch.to_string(), work_dir)
+    } else {
+        // The slug: an explicit name wins, otherwise it is derived from the title.
+        // It is always slugified so it is safe as both a branch and directory name.
+        let explicit = req.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+        let base_slug = workspace::slugify(explicit.unwrap_or(title.as_str()));
+        let mut slug = base_slug.clone();
+        let mut suffix = 2;
+        loop {
+            let branch = format!("weaver/{slug}");
+            let dir = repo_root.join(".worktrees").join(&slug);
+            if !git::branch_exists(&repo_root, &branch).await && !dir.exists() {
+                break;
+            }
+            if explicit.is_some() {
+                return Err(AppError::conflict(format!(
+                    "a workspace named '{slug}' already exists — choose a different name"
+                )));
+            }
+            slug = format!("{base_slug}-{suffix}");
+            suffix += 1;
+        }
+        let branch = format!("weaver/{slug}");
+        let work_dir = repo_root.join(".worktrees").join(&slug);
+        tokio::fs::create_dir_all(repo_root.join(".worktrees")).await?;
+        git::ensure_excluded(&repo_root, ".worktrees/").await.ok();
+        git::worktree_add(&repo_root, &work_dir, &branch, &base)
+            .await
+            .map_err(|e| AppError::bad_request(e.to_string()))?;
+        (slug, branch, work_dir)
+    };
+
     let run_dir = db::run_dir(&id);
-    tokio::fs::create_dir_all(repo_root.join(".worktrees")).await?;
     tokio::fs::create_dir_all(&run_dir).await?;
-    git::ensure_excluded(&repo_root, ".worktrees/").await.ok();
-    git::worktree_add(&repo_root, &work_dir, &branch, &base)
-        .await
-        .map_err(|e| AppError::bad_request(e.to_string()))?;
     // The goal file seeds the agent's first prompt; with no goal there is no
     // file and the agent launches unprompted.
     let goal_file = if goal.is_empty() {
@@ -684,6 +736,63 @@ async fn recent_repos(
 ) -> ApiResult<Json<Vec<repo::RecentRepo>>> {
     let limit = q.limit.unwrap_or(10).clamp(1, 50);
     Ok(Json(repo::recent(&st.db, limit).await?))
+}
+
+#[derive(Debug, Deserialize)]
+struct BranchesQuery {
+    /// Directory used to resolve the repo root (same as `cwd` on create).
+    cwd: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BranchInfo {
+    name: String,
+    /// Existing worktree path for this branch, if any is checked out.
+    worktree: Option<String>,
+    /// True for the repo's currently checked-out branch.
+    current: bool,
+}
+
+async fn repo_branches(
+    Query(q): Query<BranchesQuery>,
+) -> ApiResult<Json<Vec<BranchInfo>>> {
+    let cwd = PathBuf::from(&q.cwd);
+    let repo_root = git::repo_root(&cwd)
+        .await
+        .map_err(|e| AppError::bad_request(e.to_string()))?;
+    let current = git::current_branch(&repo_root).await.ok();
+    let names = git::list_branches(&repo_root).await?;
+    let mut out: Vec<BranchInfo> = Vec::with_capacity(names.len());
+    for name in names {
+        let worktree = git::worktree_for_branch(&repo_root, &name)
+            .await
+            .ok()
+            .flatten()
+            .map(|p| p.display().to_string());
+        let is_current = current.as_deref() == Some(name.as_str());
+        out.push(BranchInfo {
+            name,
+            worktree,
+            current: is_current,
+        });
+    }
+    // Sort: current branch first, then branches with existing worktrees, then
+    // the rest alphabetical.
+    out.sort_by(|a, b| {
+        let rank = |b: &BranchInfo| {
+            if b.current {
+                0
+            } else if b.worktree.is_some() {
+                1
+            } else {
+                2
+            }
+        };
+        rank(a)
+            .cmp(&rank(b))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(Json(out))
 }
 
 // ---------------------------------------------------------------------------

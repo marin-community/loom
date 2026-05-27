@@ -1,4 +1,4 @@
-//! Thin HTTP client used by every CLI subcommand except `serve`.
+//! Thin HTTP client used by every CLI subcommand except `server run`.
 
 use anyhow::{anyhow, bail, Result};
 use reqwest::Method;
@@ -37,7 +37,7 @@ impl Client {
         let resp = req.send().await.map_err(|e| {
             if e.is_connect() {
                 anyhow!(
-                    "cannot reach the weaver server at {} — start it with `weaver serve`",
+                    "cannot reach the weaver server at {} — start it with `weaver server start`",
                     self.base
                 )
             } else {

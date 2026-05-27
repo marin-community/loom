@@ -1,4 +1,4 @@
-//! weaver CLI — a thin client over the local weaver server, plus `serve`.
+//! weaver CLI — a thin client over the local weaver server, plus `server run`.
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -14,12 +14,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run the weaver server.
-    Serve {
-        /// Address to bind. Defaults to $WEAVER_API, then 127.0.0.1:7878.
-        #[arg(long)]
-        addr: Option<String>,
-    },
     /// Create a new workspace: worktree + tmux session + agent.
     New {
         /// What the agent should do. Optional — omit to start it unprompted.
@@ -36,6 +30,11 @@ enum Cmd {
         /// Explicit name / branch slug (derived from the title when omitted).
         #[arg(long)]
         name: Option<String>,
+        /// Attach to an existing local branch instead of creating
+        /// `weaver/<slug>`. Reuses an already-checked-out worktree if one
+        /// exists, otherwise adds one under `.worktrees/`.
+        #[arg(long, conflicts_with = "name")]
+        branch: Option<String>,
         /// GitHub issue number to link and seed the workspace from.
         #[arg(long)]
         issue: Option<i64>,
@@ -105,6 +104,12 @@ enum ConfigCmd {
 
 #[derive(Subcommand)]
 enum ServerCmd {
+    /// Run the weaver server in the foreground.
+    Run {
+        /// Address to bind. Defaults to $WEAVER_API, then 127.0.0.1:7878.
+        #[arg(long)]
+        addr: Option<String>,
+    },
     /// Report whether the server is running.
     Status,
     /// Start the server in the background if it is not already running.
@@ -126,19 +131,15 @@ async fn main() {
 async fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Serve { addr } => {
-            init_tracing();
-            let addr = weaver::endpoint::bind_addr(addr.as_deref());
-            weaver::server::run(&addr).await
-        }
         Cmd::New {
             goal,
             title,
             base,
             agent,
             name,
+            branch,
             issue,
-        } => cmd_new(goal.join(" "), title, base, agent, name, issue).await,
+        } => cmd_new(goal.join(" "), title, base, agent, name, branch, issue).await,
         Cmd::Ls => cmd_ls().await,
         Cmd::Status { id } => cmd_status(id).await,
         Cmd::Attach { id } => cmd_attach(id).await,
@@ -195,6 +196,7 @@ async fn cmd_new(
     base: Option<String>,
     agent: Option<String>,
     name: Option<String>,
+    branch: Option<String>,
     issue: Option<i64>,
 ) -> Result<()> {
     let client = Client::new();
@@ -209,6 +211,7 @@ async fn cmd_new(
                 "base": base,
                 "agent": agent,
                 "name": name,
+                "existing_branch": branch,
                 "issue": issue,
             }),
         )
@@ -594,6 +597,11 @@ async fn wait_for_health(base: &str, want: bool, timeout: std::time::Duration) -
 
 async fn cmd_server(cmd: ServerCmd) -> Result<()> {
     match cmd {
+        ServerCmd::Run { addr } => {
+            init_tracing();
+            let addr = weaver::endpoint::bind_addr(addr.as_deref());
+            weaver::server::run(&addr).await
+        }
         ServerCmd::Status => server_status().await,
         ServerCmd::Start => server_start().await,
         ServerCmd::Stop => server_stop().await,
@@ -629,8 +637,8 @@ async fn server_start() -> Result<()> {
     spawn_server().await
 }
 
-/// Spawn `weaver serve` detached, logging to `<weaver_home>/server.log`, and
-/// wait for it to come up.
+/// Spawn `weaver server run` detached, logging to `<weaver_home>/server.log`,
+/// and wait for it to come up.
 async fn spawn_server() -> Result<()> {
     use std::os::unix::process::CommandExt;
 
@@ -652,14 +660,14 @@ async fn spawn_server() -> Result<()> {
     // Detach into its own process group so it outlives this CLI process.
     let mut command = std::process::Command::new(&exe);
     command
-        .arg("serve")
+        .args(["server", "run"])
         .arg("--addr")
         .arg(&addr)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log))
         .stderr(std::process::Stdio::from(log_err))
         .process_group(0);
-    let child = command.spawn().context("spawning `weaver serve`")?;
+    let child = command.spawn().context("spawning `weaver server run`")?;
     // Deliberately do not wait on the child — it is now independent.
     drop(child);
 

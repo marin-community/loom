@@ -149,6 +149,107 @@ async fn workspace_lifecycle() {
         .unwrap();
     assert!(diff["patch"].is_string());
 
+    // ---- Attach to an existing branch -----------------------------------
+    // /repos/branches lists the repo's local branches and flags the current one.
+    // The temp-dir path is plain ASCII (alphanumerics, '-', '/') so it needs
+    // no percent-encoding to ride along as a query parameter.
+    let branches = client
+        .get(&format!(
+            "/api/repos/branches?cwd={}",
+            repo.path().to_string_lossy()
+        ))
+        .await
+        .unwrap();
+    let arr = branches.as_array().unwrap();
+    assert!(
+        arr.iter().any(|b| b["name"] == "main" && b["current"] == true),
+        "main should be listed as current, got {arr:?}"
+    );
+
+    // Pre-create a branch on disk and ask weaver to attach to it.
+    sh(repo.path(), "git", &["branch", "feature/x", "main"]);
+    let attached = client
+        .post(
+            "/api/workspaces",
+            json!({
+                "cwd": repo.path().to_string_lossy(),
+                "goal": "attach to feature/x",
+                "agent": "shell",
+                "existing_branch": "feature/x",
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(attached["branch"], "feature/x");
+    let attached_id = attached["id"].as_str().unwrap().to_string();
+    let attached_dir = attached["work_dir"].as_str().unwrap().to_string();
+    assert!(
+        attached_dir.ends_with("/.worktrees/feature-x"),
+        "attached worktree should live at .worktrees/feature-x, got {attached_dir}"
+    );
+    assert!(std::path::Path::new(&attached_dir).join(".git").exists());
+
+    // Attaching when a worktree is already checked out for the branch reuses it.
+    sh(repo.path(), "git", &["branch", "feature/y", "main"]);
+    let preexisting = repo.path().join("custom-worktree-y");
+    sh(
+        repo.path(),
+        "git",
+        &[
+            "worktree",
+            "add",
+            preexisting.to_str().unwrap(),
+            "feature/y",
+        ],
+    );
+    let attached_y = client
+        .post(
+            "/api/workspaces",
+            json!({
+                "cwd": repo.path().to_string_lossy(),
+                "goal": "attach to feature/y",
+                "agent": "shell",
+                "existing_branch": "feature/y",
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(attached_y["branch"], "feature/y");
+    let dir_y = attached_y["work_dir"].as_str().unwrap().to_string();
+    assert_eq!(
+        std::fs::canonicalize(&dir_y).unwrap(),
+        std::fs::canonicalize(&preexisting).unwrap(),
+        "weaver should reuse the pre-existing worktree path"
+    );
+
+    // Attaching to a branch that does not exist is a 400.
+    let missing = client
+        .post(
+            "/api/workspaces",
+            json!({
+                "cwd": repo.path().to_string_lossy(),
+                "goal": "missing branch",
+                "agent": "shell",
+                "existing_branch": "no/such/branch",
+            }),
+        )
+        .await;
+    assert!(missing.is_err(), "missing branch should be rejected");
+
+    // Clean up the attached workspaces so the rest of the lifecycle test
+    // continues to see exactly one workspace.
+    client
+        .delete(&format!("/api/workspaces/{attached_id}"))
+        .await
+        .unwrap();
+    client
+        .delete(&format!(
+            "/api/workspaces/{}",
+            attached_y["id"].as_str().unwrap()
+        ))
+        .await
+        .unwrap();
+
     // Adoption: kill the tmux session out from under weaver (as a reboot
     // would), then adopt the workspace and confirm the session is recreated.
     tmux::kill_session(&session).await.unwrap();

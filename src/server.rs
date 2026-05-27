@@ -16,7 +16,7 @@ use crate::{config, db, monitor, summary, tmux, web, workspace};
 /// is bound. CLI subcommands read it to find the server's pid and address.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerState {
-    /// Process id of the `weaver serve` process.
+    /// Process id of the `weaver server run` process.
     pub pid: u32,
     /// host:port the server bound to.
     pub addr: String,

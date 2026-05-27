@@ -24,13 +24,13 @@ Claude Code hooks ──HTTP──▶ server   (working / waiting / idle status)
 Vue SPA ──REST + SSE──▶ server
 ```
 
-The CLI is a thin HTTP client; `weaver serve` owns the database, tmux, and git.
+The CLI is a thin HTTP client; `weaver server run` owns the database, tmux, and git.
 `weaver attach` is the only command that runs locally — it `exec`s `tmux attach`.
 
 ## Usage
 
 ```sh
-weaver serve                          # run the server (also serves the web UI)
+weaver server run                     # run the server (also serves the web UI)
 weaver new "add a /health endpoint"   # create a workspace in the current repo
 weaver ls                             # list workspaces
 weaver status <id>                    # workspace detail
@@ -96,11 +96,11 @@ weaver config set server.auto_adopt true
 
 ## Server address
 
-`weaver serve` binds `127.0.0.1:7878` by default. Set `WEAVER_API` (e.g.
+`weaver server run` binds `127.0.0.1:7878` by default. Set `WEAVER_API` (e.g.
 `WEAVER_API=http://127.0.0.1:9000`) to point the server *and* every CLI client
 at a different address — it configures both sides. The running server records
 the address it actually bound in `~/.weaver/server.json`, so clients find it
-with no configuration in the common case. An explicit `weaver serve --addr
+with no configuration in the common case. An explicit `weaver server run --addr
 <host:port>` overrides `WEAVER_API`.
 
 ## Configuration

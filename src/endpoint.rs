@@ -1,6 +1,6 @@
 //! Resolving the weaver server's address — the single source of truth shared by
-//! `weaver serve` (which binds it) and every other subcommand (which connects
-//! to it).
+//! `weaver server run` (which binds it) and every other subcommand (which
+//! connects to it).
 //!
 //! `$WEAVER_API` configures both sides at once: set it and the server binds
 //! there and clients look there. With nothing set, the server records the
@@ -33,8 +33,8 @@ fn env_addr() -> Option<String> {
 /// The `host:port` the server should bind: an explicit `--addr` wins, then
 /// `$WEAVER_API`, then the default.
 ///
-/// The running server's `server.json` is deliberately ignored here — `serve`
-/// *creates* the endpoint, it does not discover an existing one.
+/// The running server's `server.json` is deliberately ignored here — the
+/// server *creates* the endpoint, it does not discover an existing one.
 pub fn bind_addr(override_addr: Option<&str>) -> String {
     let explicit = override_addr
         .map(|s| s.trim())
