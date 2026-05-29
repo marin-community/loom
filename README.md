@@ -44,9 +44,7 @@ loom serve                            # run the daemon (REST + UI + tmux + monit
 loom launch "add-health-endpoint"     # new worktree + tmux + agent
 loom ps                               # list active sessions
 loom show <branch>                    # session detail
-loom attach <branch>                  # exec tmux attach
-loom send <branch> "use port 8081"
-loom interrupt <branch>               # send Esc to the agent
+loom attach <branch>                  # exec tmux attach (or use the browser terminal)
 loom summary <branch>                 # force a fresh summary now
 loom merge <branch>                   # merge the branch into its base
 loom adopt <branch>                   # recreate tmux for an orphaned session
@@ -110,8 +108,9 @@ Loom serves a JSON API under `/api`; the Vue SPA is the primary consumer.
 
 - `GET /api/health`
 - `GET POST /api/sessions`, `GET PATCH DELETE /api/sessions/{id}`,
-  `POST /api/sessions/{id}/{send,interrupt,note,summarize,merge,adopt}`,
-  `GET /api/sessions/{id}/{diff,pane,log,events}`
+  `POST /api/sessions/{id}/{note,summarize,merge,adopt}`,
+  `GET /api/sessions/{id}/{diff,log,events}`,
+  `GET /api/sessions/{id}/terminal` (WebSocket: xterm.js ⇄ PTY ⇄ tmux)
 - `GET /api/branches`, `GET PATCH /api/branches/{id}`,
   `GET POST /api/branches/{id}/issues`,
   `GET PATCH DELETE /api/issues/{id}`

@@ -63,8 +63,6 @@ export interface WeaverFixture {
   listSessions(): Promise<Session[]>;
   /** Flip a session's status by writing a hook event row via `weaver hook`. */
   hook(session: Session, event: 'working' | 'waiting' | 'idle'): Promise<void>;
-  /** Poll /api/sessions/{id}/pane until `marker` appears (or throw). */
-  waitForPane(id: string, marker: string, timeoutMs?: number): Promise<string>;
 }
 
 /** Ensure the loom binary and the Vue frontend bundle both exist. */
@@ -231,26 +229,6 @@ export const test = base.extend<{ weaver: WeaverFixture }>({
           env: { ...childEnv, WEAVER_BRANCH: session.branch.id },
           stdio: 'pipe',
         });
-      },
-
-      async waitForPane(id, marker, timeoutMs = 15_000) {
-        const start = Date.now();
-        let content = '';
-        while (Date.now() - start < timeoutMs) {
-          try {
-            const pane = (await fetchJson(`${baseUrl}/api/sessions/${id}/pane`)) as {
-              content: string;
-            };
-            content = pane.content ?? '';
-            if (content.includes(marker)) return content;
-          } catch {
-            /* retry */
-          }
-          await new Promise((r) => setTimeout(r, 250));
-        }
-        throw new Error(
-          `marker "${marker}" not seen in pane of ${id} within ${timeoutMs}ms. Last pane:\n${content}`,
-        );
       },
     };
 

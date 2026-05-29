@@ -15,10 +15,12 @@ path = "src/bin/loom.rs"
 [dependencies]
 weaver-core = { path = "../weaver-core" }
 anyhow = "1"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
+futures-util = "0.3"
+portable-pty = "0.9"
 rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 serde = { version = "1", features = ["derive"] }
@@ -33,3 +35,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile = "3"
+# WebSocket client for the terminal round-trip integration test. 0.29 matches
+# axum 0.8's own tokio-tungstenite, so the two speak the same protocol stack.
+tokio-tungstenite = "0.29"
+futures-util = "0.3"

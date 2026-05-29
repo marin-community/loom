@@ -54,7 +54,8 @@ needing the daemon to be reachable.
 | `crates/loom/src/summary.rs` | background summarizer |
 | `crates/loom/src/agent.rs` | launching agents into tmux + installing `.claude/settings.local.json` hooks |
 | `crates/loom/src/session.rs` | `Session` row + sqlx queries |
-| `crates/loom/src/tmux.rs` | `tmux new-session / send-keys / capture-pane / kill-session` |
+| `crates/loom/src/tmux.rs` | `tmux new-session / capture-pane / kill-session / attach` (exact-match `=name:` targets) |
+| `crates/loom/src/terminal.rs` | WebSocket ⇄ PTY bridge: xterm.js ⇄ `tmux attach` (the live terminal) |
 | `crates/loom/src/github.rs` | `gh` CLI shell-out for issue seeding |
 | `crates/loom/src/client.rs` | HTTP client used by the `loom` CLI to talk to its own daemon |
 | `crates/loom/src/bin/loom.rs` | the orchestrator CLI (`serve`, `launch`, `ps`, `attach`, …) |
@@ -102,8 +103,9 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `GET /api/health` | liveness probe |
 | `GET /api/sessions` / `POST /api/sessions` | list / create sessions |
 | `GET PATCH DELETE /api/sessions/{id}` | session CRUD (status, title, goal, description) |
-| `POST /api/sessions/{id}/{send,interrupt,note,summarize,merge,adopt}` | actions |
-| `GET /api/sessions/{id}/{diff,pane,log,events}` | reads + SSE stream |
+| `POST /api/sessions/{id}/{note,summarize,merge,adopt}` | actions |
+| `GET /api/sessions/{id}/{diff,log,events}` | reads + SSE stream |
+| `GET /api/sessions/{id}/terminal` | WebSocket: xterm.js ⇄ PTY ⇄ tmux (the interaction surface) |
 | `GET /api/branches` / `GET PATCH /api/branches/{id}` | list / inspect / edit tracked branches |
 | `GET POST /api/branches/{id}/issues` | issue list / create |
 | `GET PATCH DELETE /api/issues/{id}` | per-issue CRUD |

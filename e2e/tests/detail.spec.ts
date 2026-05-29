@@ -37,26 +37,23 @@ test.describe('session detail view', () => {
     await expect(page.locator('textarea').first()).toHaveValue('Updated goal text');
   });
 
-  test('sending a line reaches the agent and shows on the live screen', async ({
+  test('renders an interactive terminal that connects to the agent', async ({
     page,
     weaver,
   }) => {
-    const s = await weaver.seedSession({ goal: 'Receive a command', name: 'send-task' });
+    const s = await weaver.seedSession({ goal: 'Receive a command', name: 'term-task' });
 
     await page.goto(`${weaver.baseUrl}/#/s/${s.id}`);
 
-    const sendInput = page.getByPlaceholder('Send a line to the agent…');
-    await expect(sendInput).toBeVisible();
-    await sendInput.fill('echo E2E_MARKER_OK');
-    await page.getByRole('button', { name: 'Send' }).click();
+    // The xterm.js terminal mounts.
+    await expect(page.locator('.xterm')).toBeVisible();
+    await expect(page.locator('.xterm-screen')).toBeVisible();
 
-    // The shell echoes the marker; the live <pre> updates via SSE.
-    await expect(page.locator('pre').first()).toContainText('E2E_MARKER_OK', {
-      timeout: 20_000,
-    });
-
-    // Confirm independently via the pane API.
-    const pane = await weaver.waitForPane(s.id, 'E2E_MARKER_OK');
-    expect(pane).toContain('E2E_MARKER_OK');
+    // It connects: the connection-state overlay (connecting/reconnecting/
+    // disconnected) clears once the WebSocket reaches the PTY. This is
+    // renderer-independent; the keystroke→PTY→output byte round-trip itself is
+    // covered deterministically by the Rust integration test (WebGL draws to a
+    // canvas, so asserting rendered text here would be renderer-dependent).
+    await expect(page.getByTestId('term-status')).toHaveCount(0, { timeout: 20_000 });
   });
 });

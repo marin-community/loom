@@ -1,4 +1,5 @@
 target/
+crates/loom/static/
 static/dist/
 *.sqlite
 *.sqlite-shm

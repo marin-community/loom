@@ -1,8 +1,10 @@
 //! loom — the orchestration CLI.
 //!
 //! Most subcommands talk to the running loom daemon over HTTP (session
-//! lifecycle, send/interrupt, summary, merge, adopt). `serve` runs the daemon
-//! itself; `start`/`stop`/`restart`/`status` manage its background lifecycle.
+//! lifecycle, summary, merge, adopt). `serve` runs the daemon itself;
+//! `start`/`stop`/`restart`/`status` manage its background lifecycle. To
+//! interact with an agent, `attach` to its tmux (the browser terminal is the
+//! other interaction surface).
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -11,7 +13,11 @@ use serde_json::{json, Value};
 use loom::client::Client;
 
 #[derive(Parser)]
-#[command(name = "loom", version, about = "Orchestrate concurrent agent workstreams")]
+#[command(
+    name = "loom",
+    version,
+    about = "Orchestrate concurrent agent workstreams"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -59,10 +65,6 @@ enum Cmd {
     Show { branch: String },
     /// Attach your terminal to a session's tmux.
     Attach { branch: String },
-    /// Send text to a session's agent.
-    Send { branch: String, text: Vec<String> },
-    /// Interrupt a session's agent (sends Esc).
-    Interrupt { branch: String },
     /// Force a fresh summary of a session.
     Summary { branch: String },
     /// Merge a session's branch into its base branch.
@@ -113,12 +115,13 @@ async fn run() -> Result<()> {
         Cmd::Ps => cmd_ps().await,
         Cmd::Show { branch } => cmd_show(branch).await,
         Cmd::Attach { branch } => cmd_attach(branch).await,
-        Cmd::Send { branch, text } => cmd_send(branch, text.join(" ")).await,
-        Cmd::Interrupt { branch } => cmd_interrupt(branch).await,
         Cmd::Summary { branch } => cmd_summary(branch).await,
         Cmd::Merge { branch } => cmd_merge(branch).await,
         Cmd::Adopt { branch } => cmd_adopt(branch).await,
-        Cmd::Rm { branch, keep_branch } => cmd_rm(branch, keep_branch).await,
+        Cmd::Rm {
+            branch,
+            keep_branch,
+        } => cmd_rm(branch, keep_branch).await,
         Cmd::Open => cmd_open().await,
         Cmd::Completions { shell } => {
             let mut cmd = Cli::command();
@@ -216,7 +219,10 @@ async fn cmd_status() -> Result<()> {
     }
     match loom::server::read_state() {
         Some(state) => {
-            print!("loom: running at http://{}  (pid {})", state.addr, state.pid);
+            print!(
+                "loom: running at http://{}  (pid {})",
+                state.addr, state.pid
+            );
             match uptime_secs(&state.started_at) {
                 Some(secs) => println!("  up {}", format_uptime(secs)),
                 None => println!(),
@@ -292,7 +298,10 @@ async fn cmd_stop() -> Result<()> {
         .status()
         .context("failed to run `kill`")?;
     if !status.success() {
-        bail!("`kill {}` failed — the process may already be gone", state.pid);
+        bail!(
+            "`kill {}` failed — the process may already be gone",
+            state.pid
+        );
     }
     if wait_for_health(&base, false, std::time::Duration::from_secs(10)).await {
         println!("loom stopped (pid {})", state.pid);
@@ -388,11 +397,18 @@ async fn cmd_show(key: String) -> Result<()> {
 }
 
 fn print_session(ws: &Value) {
-    println!("session {}  ({})", str_field(ws, "id"), branch_str(ws, "name"));
+    println!(
+        "session {}  ({})",
+        str_field(ws, "id"),
+        branch_str(ws, "name")
+    );
     println!("  title:    {}", branch_str(ws, "title"));
     println!("  status:   {}", str_field(ws, "status"));
     let goal = branch_str(ws, "goal");
-    println!("  goal:     {}", if goal.is_empty() { "(none)" } else { goal });
+    println!(
+        "  goal:     {}",
+        if goal.is_empty() { "(none)" } else { goal }
+    );
     let description = branch_str(ws, "description");
     if !description.is_empty() {
         println!("  summary:  {description}");
@@ -428,31 +444,11 @@ async fn cmd_attach(key: String) -> Result<()> {
         .get("tmux_session")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("session has no tmux session"))?;
+    let target = loom::tmux::exact(session);
     let err = std::process::Command::new("tmux")
-        .args(["attach-session", "-t", session])
+        .args(["attach-session", "-t", &target])
         .exec();
     Err(anyhow!("failed to exec tmux: {err}"))
-}
-
-async fn cmd_send(key: String, text: String) -> Result<()> {
-    if text.is_empty() {
-        bail!("nothing to send");
-    }
-    let client = Client::new();
-    client
-        .post(&format!("/api/sessions/{key}/send"), json!({ "text": text }))
-        .await?;
-    println!("sent");
-    Ok(())
-}
-
-async fn cmd_interrupt(key: String) -> Result<()> {
-    let client = Client::new();
-    client
-        .post(&format!("/api/sessions/{key}/interrupt"), json!({}))
-        .await?;
-    println!("interrupt sent");
-    Ok(())
 }
 
 async fn cmd_summary(key: String) -> Result<()> {

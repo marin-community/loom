@@ -1,16 +1,19 @@
 //! End-to-end test driving a real server with a shell-backed session.
 //! Requires `git` and `tmux` on PATH.
 
+use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use serde_json::json;
-use tokio::net::TcpListener;
+use futures_util::{SinkExt, StreamExt};
 use loom::client::Client;
 use loom::events::EventBus;
 use loom::web::AppState;
 use loom::{db, server, tmux};
+use serde_json::json;
+use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite::Message;
 
 fn sh(dir: &Path, program: &str, args: &[&str]) {
     let status = Command::new(program)
@@ -19,6 +22,60 @@ fn sh(dir: &Path, program: &str, args: &[&str]) {
         .status()
         .unwrap_or_else(|e| panic!("failed to run {program}: {e}"));
     assert!(status.success(), "{program} {args:?} failed");
+}
+
+type TermWs =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Connect a terminal WebSocket to a session. No `Origin` header is sent, so the
+/// server's same-origin check takes the missing-Origin (non-browser) path.
+async fn connect_terminal(addr: &SocketAddr, id: &str) -> TermWs {
+    let url = format!("ws://{addr}/api/sessions/{id}/terminal");
+    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("terminal websocket should connect");
+    ws
+}
+
+/// A `0x00`-prefixed keystroke frame.
+fn input_frame(s: &str) -> Vec<u8> {
+    let mut v = vec![0x00u8];
+    v.extend_from_slice(s.as_bytes());
+    v
+}
+
+/// A `0x01 <cols_be> <rows_be>` resize frame.
+fn resize_frame(cols: u16, rows: u16) -> Vec<u8> {
+    let mut v = vec![0x01u8];
+    v.extend_from_slice(&cols.to_be_bytes());
+    v.extend_from_slice(&rows.to_be_bytes());
+    v
+}
+
+/// Accumulate ALL binary output frames into one buffer (the marker may span
+/// frames and is interleaved with ANSI escapes) until `marker` appears or the
+/// timeout elapses. Returns the decoded buffer either way.
+async fn drain_until(ws: &mut TermWs, marker: &str, timeout: Duration) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, ws.next()).await {
+            Ok(Some(Ok(Message::Binary(b)))) => {
+                buf.extend_from_slice(&b);
+                if String::from_utf8_lossy(&buf).contains(marker) {
+                    break;
+                }
+            }
+            Ok(Some(Ok(_))) => {}                 // text/ping/pong/close
+            Ok(Some(Err(_))) | Ok(None) => break, // stream error / end
+            Err(_) => break,                      // timeout
+        }
+    }
+    String::from_utf8_lossy(&buf).to_string()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -93,46 +150,89 @@ async fn session_lifecycle() {
 
     let recent = client.get("/api/repos/recent").await.unwrap();
     let recent = recent.as_array().unwrap();
-    assert_eq!(recent.len(), 1, "repo should be recorded after first session");
+    assert_eq!(
+        recent.len(),
+        1,
+        "repo should be recorded after first session"
+    );
     assert_eq!(recent[0]["repo_root"], repo_root);
     assert_eq!(recent[0]["active_branches"], 1);
 
-    // Text sent to the session reaches the pane.
-    client
-        .post(
-            &format!("/api/sessions/{id}/send"),
-            json!({ "text": "echo WEAVER_MARKER_123" }),
-        )
-        .await
-        .unwrap();
-    let mut found = false;
-    for _ in 0..40 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let pane = client
-            .get(&format!("/api/sessions/{id}/pane"))
+    // ---- Terminal WebSocket --------------------------------------------------
+    // Keystrokes reach the PTY and output round-trips; a resize propagates;
+    // disconnecting kills only the attach client (not the session); a burst of
+    // output survives the bounded-channel backpressure intact.
+    {
+        let mut term = connect_terminal(&addr, &id).await;
+
+        // Drive a real size, give tmux a moment to apply the SIGWINCH, then run
+        // a command that prints the terminal width. The 0x01 → master.resize →
+        // SIGWINCH → tmux pane path must reach the shell (width is unaffected by
+        // the status line, unlike height).
+        term.send(Message::Binary(resize_frame(120, 40).into()))
             .await
             .unwrap();
-        if pane["content"]
-            .as_str()
-            .unwrap_or("")
-            .contains("WEAVER_MARKER_123")
-        {
-            found = true;
-            break;
-        }
-    }
-    assert!(found, "sent text never appeared in the pane");
-
-    // Interrupting the agent sends an Esc keypress and leaves the session up.
-    let res = client
-        .post(&format!("/api/sessions/{id}/interrupt"), json!({}))
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        term.send(Message::Binary(
+            input_frame("echo DIMS COLS=$(tput cols)\n").into(),
+        ))
         .await
         .unwrap();
-    assert_eq!(res["interrupted"], true);
-    assert!(
-        tmux::has_session(&session).await,
-        "interrupt should not kill the tmux session"
-    );
+        let dims = drain_until(&mut term, "COLS=120", Duration::from_secs(8)).await;
+        assert!(
+            dims.contains("COLS=120"),
+            "resize did not propagate to the pty width; got:\n{dims}"
+        );
+
+        // Output round-trip (the echoed keystrokes alone prove input→PTY→output).
+        term.send(Message::Binary(input_frame("echo WS_MARKER_123\n").into()))
+            .await
+            .unwrap();
+        let out = drain_until(&mut term, "WS_MARKER_123", Duration::from_secs(8)).await;
+        assert!(
+            out.contains("WS_MARKER_123"),
+            "marker never appeared in terminal output:\n{out}"
+        );
+
+        // Backpressure: a large burst must arrive without truncation/deadlock.
+        // "line_5000" appears only in the OUTPUT, never in the typed command.
+        term.send(Message::Binary(
+            input_frame("for i in $(seq 1 5000); do echo line_$i; done\n").into(),
+        ))
+        .await
+        .unwrap();
+        let burst = drain_until(&mut term, "line_5000", Duration::from_secs(20)).await;
+        assert!(
+            burst.contains("line_1") && burst.contains("line_5000"),
+            "burst output was truncated under backpressure"
+        );
+
+        // Closing the socket must kill only the `tmux attach` client.
+        term.send(Message::Close(None)).await.ok();
+        drop(term);
+        let mut alive = true;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            alive = tmux::has_session(&session).await;
+            if !alive {
+                break;
+            }
+        }
+        assert!(alive, "closing the terminal must not kill the tmux session");
+
+        // A second connection still works — proves attach-client-only teardown.
+        let mut term2 = connect_terminal(&addr, &id).await;
+        term2
+            .send(Message::Binary(input_frame("echo WS_MARKER_456\n").into()))
+            .await
+            .unwrap();
+        let out2 = drain_until(&mut term2, "WS_MARKER_456", Duration::from_secs(8)).await;
+        assert!(
+            out2.contains("WS_MARKER_456"),
+            "reconnected terminal never echoed:\n{out2}"
+        );
+        term2.send(Message::Close(None)).await.ok();
+    }
 
     // A hook flips the session status. The monitor consumes new `hook`
     // event rows on its next tick.
@@ -140,14 +240,9 @@ async fn session_lifecycle() {
         let s = loom::session::get(&pool, &id).await.unwrap().unwrap();
         s.branch_id
     };
-    weaver_core::events::record_local(
-        &pool,
-        &branch_id,
-        "hook",
-        json!({ "event": "working" }),
-    )
-    .await
-    .unwrap();
+    weaver_core::events::record_local(&pool, &branch_id, "hook", json!({ "event": "working" }))
+        .await
+        .unwrap();
     let mut working = false;
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -208,7 +303,8 @@ async fn session_lifecycle() {
         .unwrap();
     let arr = branches_q.as_array().unwrap();
     assert!(
-        arr.iter().any(|b| b["name"] == "main" && b["current"] == true),
+        arr.iter()
+            .any(|b| b["name"] == "main" && b["current"] == true),
         "main should be listed as current, got {arr:?}"
     );
 
@@ -301,7 +397,10 @@ async fn session_lifecycle() {
         .post(&format!("/api/sessions/{id}/adopt"), json!({}))
         .await
         .unwrap();
-    assert_eq!(adopted["status"], "launching", "adopt sets status launching");
+    assert_eq!(
+        adopted["status"], "launching",
+        "adopt sets status launching"
+    );
     assert!(
         tmux::has_session(&session).await,
         "adopt should recreate the tmux session"
@@ -335,10 +434,7 @@ async fn session_lifecycle() {
         .unwrap();
 
     // Deleting the session tears down the tmux session and the DB row.
-    client
-        .delete(&format!("/api/sessions/{id}"))
-        .await
-        .unwrap();
+    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
     assert!(
         !tmux::has_session(&session).await,
         "tmux session was not killed"

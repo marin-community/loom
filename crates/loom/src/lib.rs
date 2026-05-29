@@ -15,6 +15,7 @@ pub mod repo;
 pub mod server;
 pub mod session;
 pub mod summary;
+pub mod terminal;
 pub mod tmux;
 pub mod web;
 

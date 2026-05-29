@@ -42,9 +42,22 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// An exact-match, session-scoped `-t` target for a session name.
+///
+/// The leading `=` forces an exact (not prefix) match, so a name containing
+/// `:`/`.`/`%` can't accidentally retarget another session/window/pane. The
+/// trailing `:` scopes the target to the *session* — this matters because
+/// window/pane-context commands (`capture-pane`, `set-option`, `display-message`)
+/// otherwise parse a bare `=name` as a *window* name and fail with
+/// "no such window". The `=name:` form is correct for both those and the
+/// session-context commands (`has-session`, `kill-session`, `attach-session`).
+pub fn exact(name: &str) -> String {
+    format!("={name}:")
+}
+
 /// Whether a session with exactly this name exists.
 pub async fn has_session(name: &str) -> bool {
-    raw(&["has-session", "-t", &format!("={name}")])
+    raw(&["has-session", "-t", &exact(name)])
         .await
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -54,35 +67,34 @@ pub async fn has_session(name: &str) -> bool {
 pub async fn new_session(name: &str, cwd: &Path, script: &str) -> Result<()> {
     let cwd = cwd.to_string_lossy();
     run(&[
-        "new-session", "-d", "-s", name, "-c", &cwd, "sh", "-c", script,
+        "new-session",
+        "-d",
+        "-s",
+        name,
+        "-c",
+        &cwd,
+        "sh",
+        "-c",
+        script,
     ])
     .await?;
+    // Let an attached client drive the window size: `window-size latest` makes
+    // the window track the most-recently-active client (so a browser PTY can
+    // resize it via SIGWINCH) instead of clamping to the smallest attached
+    // client. Set defensively in case the user's tmux.conf overrode the
+    // default. Best-effort: a failure here only affects terminal sizing.
+    let t = exact(name);
+    let _ = run(&["set-option", "-t", &t, "window-size", "latest"]).await;
+    let _ = run(&["set-option", "-t", &t, "aggressive-resize", "on"]).await;
     tracing::info!(session = name, cwd = %cwd, "tmux session created");
-    Ok(())
-}
-
-/// Type `text` into the session's active pane, followed by Enter.
-pub async fn send_text(name: &str, text: &str) -> Result<()> {
-    run(&["send-keys", "-t", name, "-l", "--", text]).await?;
-    run(&["send-keys", "-t", name, "Enter"]).await?;
-    Ok(())
-}
-
-/// Send named keys (e.g. `Escape`, `C-c`) to the session's active pane.
-///
-/// Unlike [`send_text`], the arguments are interpreted by tmux as key names
-/// rather than literal text, and no trailing Enter is appended.
-pub async fn send_keys(name: &str, keys: &[&str]) -> Result<()> {
-    let mut args = vec!["send-keys", "-t", name];
-    args.extend_from_slice(keys);
-    run(&args).await?;
     Ok(())
 }
 
 /// Capture the session's pane. `history` extra scrollback lines (0 = visible screen only).
 pub async fn capture(name: &str, history: usize) -> Result<String> {
     let start;
-    let mut args = vec!["capture-pane", "-p", "-t", name];
+    let target = exact(name);
+    let mut args = vec!["capture-pane", "-p", "-t", &target];
     if history > 0 {
         start = format!("-{history}");
         args.push("-S");
@@ -94,7 +106,7 @@ pub async fn capture(name: &str, history: usize) -> Result<String> {
 pub async fn kill_session(name: &str) -> Result<()> {
     // Ignore "session not found"; the goal is just for it to be gone.
     tracing::debug!(session = name, "running tmux kill-session");
-    let _ = raw(&["kill-session", "-t", &format!("={name}")]).await;
+    let _ = raw(&["kill-session", "-t", &exact(name)]).await;
     tracing::info!(session = name, "tmux session killed");
     Ok(())
 }
@@ -102,4 +114,62 @@ pub async fn kill_session(name: &str) -> Result<()> {
 pub async fn list_sessions() -> Result<Vec<String>> {
     let out = run(&["list-sessions", "-F", "#{session_name}"]).await?;
     Ok(out.lines().map(|s| s.to_string()).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_is_session_scoped() {
+        assert_eq!(exact("weaver-abc123"), "=weaver-abc123:");
+    }
+
+    /// Guards the target form against a regression: a bare `=name` works for
+    /// `has-session`/`kill-session` but makes `capture-pane`/`set-option` fail
+    /// with "no such window", which would silently break the monitor and
+    /// browser-driven sizing. Requires `tmux` on PATH (as the rest of the suite
+    /// already does).
+    #[tokio::test]
+    async fn capture_and_set_option_work_through_exact() {
+        let name = format!("weaver-tmuxtest-{}", std::process::id());
+        // Best-effort cleanup of a stale session from a previous aborted run.
+        let _ = kill_session(&name).await;
+
+        let dir = std::env::temp_dir();
+        new_session(&name, &dir, "echo TMUX_EXACT_MARKER; exec sleep 30")
+            .await
+            .expect("new_session should succeed");
+        assert!(
+            has_session(&name).await,
+            "session should exist after create"
+        );
+
+        // set-option through the session-scoped target must succeed (rc=0).
+        run(&["set-option", "-t", &exact(&name), "window-size", "latest"])
+            .await
+            .expect("set-option through exact() target should succeed");
+
+        // capture-pane through the same target must return Ok and see the marker.
+        let mut seen = false;
+        for _ in 0..40 {
+            match capture(&name, 0).await {
+                Ok(screen) => {
+                    if screen.contains("TMUX_EXACT_MARKER") {
+                        seen = true;
+                        break;
+                    }
+                }
+                Err(e) => panic!("capture through exact() target failed: {e}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(seen, "capture should see the marker printed in the pane");
+
+        kill_session(&name).await.unwrap();
+        assert!(
+            !has_session(&name).await,
+            "session should be gone after kill"
+        );
+    }
 }

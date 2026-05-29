@@ -5,8 +5,10 @@
 //! * `/api/sessions` — list + create active sessions (each session is one
 //!   tmux + one agent attached to a branch).
 //! * `/api/sessions/{id}` — GET / PATCH / DELETE a single session, plus the
-//!   action subroutes `/send`, `/interrupt`, `/note`, `/summarize`, `/merge`,
-//!   `/adopt`, `/diff`, `/pane`, `/log`, `/events`.
+//!   action subroutes `/note`, `/summarize`, `/merge`, `/adopt`, `/diff`,
+//!   `/log`, `/events`, and `/terminal` (a WebSocket bridged to the session's
+//!   tmux via a PTY — see `crate::terminal`). Interacting with the agent
+//!   (keystrokes, keys, TUIs) happens entirely over `/terminal`.
 //! * `/api/branches` — list every tracked branch (with or without an active
 //!   session). `/api/branches/{id}` — GET / PATCH (goal / title / description).
 //! * `/api/branches/{id}/issues` — list / POST issues for a branch.
@@ -73,11 +75,11 @@ use tower_http::services::{ServeDir, ServeFile};
 
 use crate::db::Db;
 use crate::events::{Event, EventBus};
-use weaver_core::branch::Branch;
-use weaver_core::issue::Issue;
 use crate::session::{self as session_mod, NewSession, Session};
 use crate::{agent, config, db, events, git, github, repo, tmux};
 use weaver_core::branch as branch_mod;
+use weaver_core::branch::Branch;
+use weaver_core::issue::Issue;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -170,7 +172,9 @@ pub struct BranchView {
 
 impl BranchView {
     async fn build(db: &Db, branch: &Branch) -> ApiResult<Self> {
-        let open = weaver_core::issue::open_count(db, &branch.id).await.unwrap_or(0);
+        let open = weaver_core::issue::open_count(db, &branch.id)
+            .await
+            .unwrap_or(0);
         Ok(Self::from_parts(branch, open))
     }
 
@@ -268,7 +272,7 @@ impl From<Issue> for IssueView {
 /// Resolve a session key (session id, branch id, branch name, or `repo:branch`)
 /// to `(Session, Branch)`. The session must exist and be active; clients hitting
 /// a branch with no live session get a 404.
-async fn require_session(db: &Db, key: &str) -> ApiResult<(Session, Branch)> {
+pub async fn require_session(db: &Db, key: &str) -> ApiResult<(Session, Branch)> {
     if let Some((session, branch)) = session_mod::with_branch(db, key).await? {
         return Ok((session, branch));
     }
@@ -312,16 +316,14 @@ pub fn router(state: AppState) -> Router {
             "/sessions/{id}",
             get(get_session).patch(patch_session).delete(delete_session),
         )
-        .route("/sessions/{id}/send", post(send_session))
-        .route("/sessions/{id}/interrupt", post(interrupt_session))
         .route("/sessions/{id}/note", post(note_session))
         .route("/sessions/{id}/summarize", post(summarize_session))
         .route("/sessions/{id}/merge", post(merge_session))
         .route("/sessions/{id}/adopt", post(adopt_session))
         .route("/sessions/{id}/diff", get(diff_session))
-        .route("/sessions/{id}/pane", get(pane_session))
         .route("/sessions/{id}/log", get(log_session))
         .route("/sessions/{id}/events", get(events_sse))
+        .route("/sessions/{id}/terminal", get(crate::terminal::terminal_ws))
         // Branches & issues
         .route("/branches", get(list_branches))
         .route("/branches/{id}", get(get_branch).patch(patch_branch))
@@ -438,7 +440,13 @@ async fn create_session(
         .as_deref()
         .map(str::trim)
         .filter(|b| !b.is_empty());
-    if existing.is_some() && req.name.as_deref().map(str::trim).is_some_and(|n| !n.is_empty()) {
+    if existing.is_some()
+        && req
+            .name
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|n| !n.is_empty())
+    {
         return Err(AppError::bad_request(
             "`name` and `existing_branch` are mutually exclusive",
         ));
@@ -691,7 +699,9 @@ async fn delete_session(
             warnings.push(format!("delete branch: {e}"));
         }
     }
-    tokio::fs::remove_dir_all(db::run_dir(&session.id)).await.ok();
+    tokio::fs::remove_dir_all(db::run_dir(&session.id))
+        .await
+        .ok();
     session_mod::delete(&st.db, &session.id).await?;
     // Drop the branch row too — deleting a session takes its branch with it.
     branch_mod::delete(&st.db, &branch.id).await?;
@@ -706,54 +716,6 @@ async fn delete_session(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct SendReq {
-    text: String,
-}
-
-async fn send_session(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Json(req): Json<SendReq>,
-) -> ApiResult<Json<Value>> {
-    let (session, branch) = require_session(&st.db, &key).await?;
-    tmux::send_text(&session.tmux_session, &req.text)
-        .await
-        .map_err(|e| AppError::bad_request(e.to_string()))?;
-    session_mod::touch(&st.db, &session.id).await.ok();
-    events::record(
-        &st.db,
-        &st.bus,
-        &branch.id,
-        "note",
-        json!({ "text": format!("sent to agent: {}", req.text) }),
-    )
-    .await
-    .ok();
-    Ok(Json(json!({ "sent": true })))
-}
-
-async fn interrupt_session(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-) -> ApiResult<Json<Value>> {
-    let (session, branch) = require_session(&st.db, &key).await?;
-    tmux::send_keys(&session.tmux_session, &["Escape"])
-        .await
-        .map_err(|e| AppError::bad_request(e.to_string()))?;
-    session_mod::touch(&st.db, &session.id).await.ok();
-    events::record(
-        &st.db,
-        &st.bus,
-        &branch.id,
-        "note",
-        json!({ "text": "interrupted agent (Esc)" }),
-    )
-    .await
-    .ok();
-    Ok(Json(json!({ "interrupted": true })))
-}
-
-#[derive(Debug, Deserialize)]
 struct NoteReq {
     text: String,
 }
@@ -765,7 +727,14 @@ async fn note_session(
 ) -> ApiResult<Json<Value>> {
     let (session, branch) = require_session(&st.db, &key).await?;
     weaver_core::note::add(&st.db, &branch.id, &req.text).await?;
-    events::record(&st.db, &st.bus, &branch.id, "note", json!({ "text": req.text })).await?;
+    events::record(
+        &st.db,
+        &st.bus,
+        &branch.id,
+        "note",
+        json!({ "text": req.text }),
+    )
+    .await?;
     session_mod::touch(&st.db, &session.id).await.ok();
     Ok(Json(json!({ "ok": true })))
 }
@@ -815,7 +784,9 @@ async fn merge_session(
     )
     .await
     .ok();
-    Ok(Json(json!({ "merged": true, "branch": branch.branch, "output": output })))
+    Ok(Json(
+        json!({ "merged": true, "branch": branch.branch, "output": output }),
+    ))
 }
 
 /// Recreate an orphaned session's tmux and resume its agent.
@@ -892,17 +863,6 @@ async fn diff_session(
         "stat": stat,
         "patch": patch,
     })))
-}
-
-async fn pane_session(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-) -> ApiResult<Json<Value>> {
-    let (session, _) = require_session(&st.db, &key).await?;
-    let content = tmux::capture(&session.tmux_session, 2000)
-        .await
-        .unwrap_or_default();
-    Ok(Json(json!({ "content": content })))
 }
 
 async fn log_session(
@@ -1048,10 +1008,7 @@ async fn create_branch_issue(
     Ok(Json(IssueView::from(issue)))
 }
 
-async fn get_issue(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-) -> ApiResult<Json<IssueView>> {
+async fn get_issue(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<Json<IssueView>> {
     let issue = weaver_core::issue::get(&st.db, id)
         .await?
         .ok_or_else(|| AppError::not_found("issue"))?;
@@ -1102,15 +1059,13 @@ async fn patch_issue(
     if req.title.is_some() || req.body.is_some() {
         let new_title = req.title.as_deref().unwrap_or(&existing.title);
         let new_body = req.body.as_deref().unwrap_or(&existing.body);
-        sqlx::query(
-            "UPDATE issues SET title = ?, body = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(new_title)
-        .bind(new_body)
-        .bind(weaver_core::db::now_iso())
-        .bind(id)
-        .execute(&st.db)
-        .await?;
+        sqlx::query("UPDATE issues SET title = ?, body = ?, updated_at = ? WHERE id = ?")
+            .bind(new_title)
+            .bind(new_body)
+            .bind(weaver_core::db::now_iso())
+            .bind(id)
+            .execute(&st.db)
+            .await?;
     }
     let issue = weaver_core::issue::get(&st.db, id)
         .await?
@@ -1118,10 +1073,7 @@ async fn patch_issue(
     Ok(Json(IssueView::from(issue)))
 }
 
-async fn delete_issue(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-) -> ApiResult<Json<Value>> {
+async fn delete_issue(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
     let _ = weaver_core::issue::get(&st.db, id)
         .await?
         .ok_or_else(|| AppError::not_found("issue"))?;
@@ -1224,7 +1176,10 @@ async fn patch_settings(
             Value::Bool(b) => Some(b.to_string()),
             Value::Number(n) => Some(n.to_string()),
             _ => {
-                errors.insert(key, json!("value must be a string, number, boolean, or null"));
+                errors.insert(
+                    key,
+                    json!("value must be a string, number, boolean, or null"),
+                );
                 continue;
             }
         };

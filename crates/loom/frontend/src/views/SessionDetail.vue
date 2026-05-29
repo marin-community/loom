@@ -1,15 +1,15 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { get, post, patch, del } from '../api';
 import type { Session, WeaverEvent, DiffStat, Issue } from '../types';
 import StatusBadge from '../components/StatusBadge.vue';
+import AgentTerminal from '../components/AgentTerminal.vue';
 
 const props = defineProps<{ id: string }>();
 const router = useRouter();
 
 const ws = ref<Session | null>(null);
-const screen = ref('');
 const events = ref<WeaverEvent[]>([]);
 const issues = ref<Issue[]>([]);
 const error = ref('');
@@ -18,12 +18,10 @@ const notice = ref('');
 const titleDraft = ref('');
 const goalDraft = ref('');
 const descDraft = ref('');
-const sendText = ref('');
 
 const diff = ref<{ stat: DiffStat; patch: string } | null>(null);
 const busy = ref('');
 
-const screenBox = ref<HTMLElement | null>(null);
 let source: EventSource | null = null;
 
 async function loadSession() {
@@ -45,29 +43,16 @@ async function loadIssues() {
 async function loadAll() {
   try {
     await loadSession();
-    const pane = (await get(`/sessions/${props.id}/pane`)) as { content: string };
-    screen.value = pane.content;
     events.value = (await get(`/sessions/${props.id}/log`)) as WeaverEvent[];
     await loadIssues();
-    await scrollScreen();
     error.value = '';
   } catch (e) {
     error.value = (e as Error).message;
   }
 }
 
-async function scrollScreen() {
-  await nextTick();
-  if (screenBox.value) screenBox.value.scrollTop = screenBox.value.scrollHeight;
-}
-
 function openStream() {
   source = new EventSource(`/api/sessions/${props.id}/events`);
-  source.addEventListener('screen', (e) => {
-    const ev = JSON.parse((e as MessageEvent).data) as WeaverEvent;
-    screen.value = String(ev.data.content ?? '');
-    scrollScreen();
-  });
   for (const kind of ['status', 'summary', 'note']) {
     source.addEventListener(kind, (e) => {
       const ev = JSON.parse((e as MessageEvent).data) as WeaverEvent;
@@ -114,19 +99,6 @@ const saveDesc = () =>
     await patch(`/sessions/${props.id}`, { description: descDraft.value });
     notice.value = 'Description saved.';
     await loadSession();
-  });
-
-const send = () =>
-  act('send', async () => {
-    if (!sendText.value.trim()) return;
-    await post(`/sessions/${props.id}/send`, { text: sendText.value });
-    sendText.value = '';
-  });
-
-const stop = () =>
-  act('stop', async () => {
-    await post(`/sessions/${props.id}/interrupt`);
-    notice.value = 'Interrupt sent to the agent.';
   });
 
 const summarize = () =>
@@ -213,7 +185,7 @@ onUnmounted(() => source?.close());
         class="max-h-72 overflow-auto rounded bg-black p-3 text-xs leading-snug text-neutral-200 whitespace-pre-wrap"
       >{{ ws.pending_prompt }}</pre>
       <p class="mt-2 text-xs text-neutral-500">
-        Answer it with the send box below, or <code>loom attach {{ ws.id }}</code>.
+        Answer it directly in the terminal below, or <code>loom attach {{ ws.id }}</code>.
       </p>
     </section>
 
@@ -330,37 +302,11 @@ onUnmounted(() => source?.close());
         </section>
       </div>
 
-      <!-- Right: live screen, send box, events, diff -->
+      <!-- Right: live terminal, events, diff -->
       <div class="space-y-5 lg:col-span-2">
         <section class="rounded border border-neutral-800 bg-neutral-900 p-4">
-          <div class="text-xs text-neutral-400 mb-2">Live agent screen</div>
-          <pre
-            ref="screenBox"
-            class="h-72 overflow-auto rounded bg-black p-3 text-xs leading-snug text-neutral-200 whitespace-pre-wrap"
-          >{{ screen || '(no output yet)' }}</pre>
-          <form class="mt-2 flex gap-2" @submit.prevent="send">
-            <input
-              v-model="sendText"
-              placeholder="Send a line to the agent…"
-              class="flex-1 rounded bg-neutral-800 px-2 py-1.5 text-sm outline-none"
-            />
-            <button
-              type="submit"
-              class="rounded bg-emerald-700 hover:bg-emerald-600 px-3 py-1.5 text-sm"
-              :disabled="busy === 'send'"
-            >
-              Send
-            </button>
-            <button
-              type="button"
-              class="rounded bg-rose-700 hover:bg-rose-600 px-3 py-1.5 text-sm"
-              :disabled="busy === 'stop'"
-              title="Send Esc to the agent — interrupts whatever it is doing"
-              @click="stop"
-            >
-              {{ busy === 'stop' ? 'Stopping…' : 'Stop' }}
-            </button>
-          </form>
+          <div class="text-xs text-neutral-400 mb-2">Terminal</div>
+          <AgentTerminal :id="props.id" />
         </section>
 
         <section class="rounded border border-neutral-800 bg-neutral-900 p-4">

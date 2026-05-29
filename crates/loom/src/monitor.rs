@@ -1,15 +1,19 @@
-//! Background task: mirrors each session's tmux screen, detects when a
-//! session has ended, drives screen-stillness idle detection, and consumes
-//! `hook` events written by the `weaver hook` CLI to update session status.
+//! Background task: detects when a session's tmux has ended, drives
+//! screen-stillness idle detection, and consumes `hook` events written by the
+//! `weaver hook` CLI to update session status.
+//!
+//! The browser terminal (xterm.js over a PTY) is the live-screen surface; this
+//! loop no longer pushes a `screen` mirror to clients. It still `capture`s the
+//! pane internally to hash for stillness/idle/orphan detection.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use serde_json::json;
 
+use crate::session as session_mod;
 use crate::web::AppState;
 use crate::{events, tmux};
-use crate::session as session_mod;
 
 const TICK: Duration = Duration::from_millis(1500);
 const IDLE_TICKS: u32 = 10;
@@ -65,20 +69,15 @@ pub async fn run(state: AppState) {
                         } else {
                             String::new()
                         };
-                        let _ = session_mod::set_pending_prompt(&state.db, &session.id, &prompt)
-                            .await;
+                        let _ =
+                            session_mod::set_pending_prompt(&state.db, &session.id, &prompt).await;
                         let mut data = json!({ "status": status, "source": "hook" });
                         if !prompt.is_empty() {
                             data["prompt"] = json!(prompt);
                         }
-                        let _ = events::record(
-                            &state.db,
-                            &state.bus,
-                            &ev.branch_id,
-                            "status",
-                            data,
-                        )
-                        .await;
+                        let _ =
+                            events::record(&state.db, &state.bus, &ev.branch_id, "status", data)
+                                .await;
                         // Bump the watermark past our own freshly-recorded
                         // event so we don't loop on it.
                         last_event = events::max_id(&state.db).await.unwrap_or(last_event);
@@ -125,13 +124,14 @@ pub async fn run(state: AppState) {
                 continue;
             }
 
-            let screen = tmux::capture(&session.tmux_session, 0).await.unwrap_or_default();
-            let h = hash(&screen);
+            let screen = tmux::capture(&session.tmux_session, 0)
+                .await
+                .unwrap_or_default();
+            let h = hash(&normalize_screen(&screen));
             if screen_hash.get(&session.id) != Some(&h) {
                 screen_hash.insert(session.id.clone(), h);
                 still_ticks.insert(session.id.clone(), 0);
                 let _ = session_mod::touch(&state.db, &session.id).await;
-                events::emit(&state.bus, &session.branch_id, "screen", json!({ "content": screen }));
             } else {
                 let ticks = still_ticks.entry(session.id.clone()).or_insert(0);
                 *ticks += 1;
@@ -163,4 +163,40 @@ fn hash(s: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut hasher);
     hasher.finish()
+}
+
+/// Normalize a captured pane for stillness hashing so that a *resize* — which
+/// changes the captured row count and pads/re-wraps lines — does not read as a
+/// content change. With browser-driven `window-size latest`, an attached
+/// client's size drives the captured geometry; without this normalization every
+/// fit/resize/tab-open/tab-close would flip the hash, reset `still_ticks`, and
+/// prevent a genuinely-idle non-hook agent from ever being marked idle. We strip
+/// trailing whitespace per line and drop trailing blank rows.
+fn normalize_screen(s: &str) -> String {
+    let mut lines: Vec<&str> = s.lines().map(|l| l.trim_end()).collect();
+    while matches!(lines.last(), Some(&"")) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_screen;
+
+    #[test]
+    fn normalize_ignores_resize_padding() {
+        // Same content, different captured geometry (extra blank rows + trailing
+        // padding from a wider/taller client) must hash identically.
+        let narrow = "bash-5.2$ ls\nfile.txt\nbash-5.2$";
+        let wide = "bash-5.2$ ls   \nfile.txt        \nbash-5.2$\n\n\n";
+        assert_eq!(normalize_screen(narrow), normalize_screen(wide));
+    }
+
+    #[test]
+    fn normalize_keeps_real_changes() {
+        let before = "bash-5.2$ ls\nfile.txt";
+        let after = "bash-5.2$ ls\nfile.txt\nother.txt";
+        assert_ne!(normalize_screen(before), normalize_screen(after));
+    }
 }
