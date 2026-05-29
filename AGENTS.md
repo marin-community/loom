@@ -2,7 +2,7 @@
 
 Engineer-facing notes for hacking on weaver itself. For user-facing docs read
 [README.md](README.md); for the prompt the in-workspace agent sees, read
-[primer.md](primer.md).
+[crates/weaver-core/primer.md](crates/weaver-core/primer.md).
 
 ## Mental model
 
@@ -143,13 +143,21 @@ There is **no** `/api/hook` endpoint — see "Status detection" below.
 
 Two paths, picked per agent kind:
 
-1. **Claude Code hooks** — `loom launch` installs them into the worktree's
-   `.claude/settings.local.json`. Each hook shells out to
-   `weaver hook --event {working|waiting|idle|session-start}`, which writes
-   an `events` row keyed on the branch resolved from `$WEAVER_BRANCH` (set by
-   the launcher). Loom's monitor consumes new `hook` rows on its next tick
-   and flips `sessions.status` accordingly. On `waiting`, the monitor
-   snapshots the tmux pane into `pending_prompt`.
+1. **Claude Code hooks** — `loom launch` merges a `hooks` block into the
+   worktree's `.claude/settings.local.json` (see `loom::agent::install_hooks`
+   and `weaver_core::agent::hooks_json`). The mapping is:
+
+   | Claude hook event | shells out to |
+   |---|---|
+   | `SessionStart` | `weaver hook --event session-start` (also injects [[crates/weaver-core/primer.md]] as `additionalContext`) |
+   | `UserPromptSubmit` | `weaver hook --event working` |
+   | `Notification` | `weaver hook --event waiting` |
+   | `Stop` | `weaver hook --event idle` |
+
+   `weaver hook` writes an `events` row keyed on the branch resolved from
+   `$WEAVER_BRANCH` (set by the launcher) — no HTTP. Loom's monitor consumes
+   new `hook` rows on its next tick and flips `sessions.status` accordingly.
+   On `waiting`, the monitor snapshots the tmux pane into `pending_prompt`.
 2. **Tmux stillness** — for non-Claude agents the monitor diffs pane captures
    over time and demotes `working` → `idle` after enough still ticks.
 

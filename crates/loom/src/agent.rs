@@ -86,12 +86,11 @@ pub struct LaunchSpec<'a> {
 
 /// Bring up the session's tmux running the agent.
 pub async fn launch(spec: &LaunchSpec<'_>, mode: LaunchMode) -> Result<()> {
-    let weaver_exe = std::env::current_exe().ok();
-    let weaver_bin = weaver_exe
-        .as_deref()
-        .map(|p| p.display().to_string())
+    let loom_exe = std::env::current_exe().ok();
+    let weaver_dir = loom_exe.as_deref().and_then(Path::parent);
+    let weaver_bin = weaver_dir
+        .map(|d| d.join("weaver").display().to_string())
         .unwrap_or_else(|| "weaver".to_string());
-    let weaver_dir = weaver_exe.as_deref().and_then(Path::parent);
 
     if spec.agent_kind == "claude" {
         install_hooks(spec.work_dir, &weaver_bin).await.ok();

@@ -10,7 +10,7 @@ use tokio::net::TcpListener;
 
 use crate::events::EventBus;
 use crate::web::AppState;
-use crate::{config, db, monitor, summary, tmux, web};
+use crate::{config, db, monitor, tmux, web};
 use weaver_core::branch as branch_mod;
 use crate::session as session_mod;
 
@@ -114,8 +114,7 @@ async fn reconcile_sessions(state: &AppState) {
 
 pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     tokio::spawn(monitor::run(state.clone()));
-    tokio::spawn(summary::run(state.clone()));
-    tracing::debug!("background tasks spawned (monitor, summary)");
+    tracing::debug!("background tasks spawned (monitor)");
     axum::serve(listener, web::router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await?;

@@ -316,8 +316,21 @@ async fn cmd_hook(event: String) -> Result<()> {
         let db = open_db().await?;
         let b = branch::resolve(&db).await?;
         events::record_local(&db, &b.id, "hook", json!({ "event": event })).await?;
-        if event == "session-start" {
-            print!("{}", weaver_core::agent::session_primer());
+        match event.as_str() {
+            "session-start" => {
+                print!("{}", weaver_core::agent::session_primer());
+            }
+            "idle" => {
+                // Claude Code's Stop hook pipes a JSON payload on stdin that
+                // includes `transcript_path`. Pull the last assistant message
+                // out of the transcript and persist it as the branch summary —
+                // the agent's own framing of what just happened, no extra
+                // headless agent invocation required.
+                if let Some(text) = read_last_assistant_text_from_stdin() {
+                    branch::set_description(&db, &b.id, &text).await?;
+                }
+            }
+            _ => {}
         }
         Ok(())
     })
@@ -326,6 +339,50 @@ async fn cmd_hook(event: String) -> Result<()> {
         eprintln!("weaver hook: {e}");
     }
     Ok(())
+}
+
+/// Best-effort: read the Stop-hook stdin payload, locate `transcript_path`,
+/// and pull the text of the last assistant message out of the JSONL file.
+/// Any failure (no stdin, malformed JSON, missing file) returns `None`.
+fn read_last_assistant_text_from_stdin() -> Option<String> {
+    use std::io::Read;
+    let mut buf = String::new();
+    if std::io::stdin().read_to_string(&mut buf).is_err() || buf.trim().is_empty() {
+        return None;
+    }
+    let payload: Value = serde_json::from_str(&buf).ok()?;
+    let path = payload.get("transcript_path")?.as_str()?;
+    let contents = std::fs::read_to_string(path).ok()?;
+    for line in contents.lines().rev() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record.get("type").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let content = record.pointer("/message/content")?.as_array()?;
+        let mut text = String::new();
+        for chunk in content {
+            if chunk.get("type").and_then(Value::as_str) == Some("text") {
+                if let Some(s) = chunk.get("text").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(s);
+                }
+            }
+        }
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        return Some(truncate(text, 600));
+    }
+    None
 }
 
 async fn cmd_config(cmd: ConfigCmd) -> Result<()> {

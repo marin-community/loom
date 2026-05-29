@@ -42,8 +42,12 @@ pub async fn run(state: AppState) {
                     if kind.is_empty() {
                         continue;
                     }
+                    // `session-start` fires only to inject the primer via
+                    // `additionalContext`; it intentionally does not change
+                    // session status (otherwise a resume would flip an idle
+                    // session to working with no user action).
                     let status = match kind.as_str() {
-                        "working" | "session-start" => "working",
+                        "working" => "working",
                         "waiting" => "waiting",
                         "idle" => "idle",
                         _ => continue,
