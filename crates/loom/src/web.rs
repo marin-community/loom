@@ -57,7 +57,8 @@ use std::convert::Infallible;
 use std::path::PathBuf;
 
 use axum::{
-    extract::{Path, Query, State},
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     response::{
         sse::{self, KeepAlive, Sse},
@@ -325,6 +326,10 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/merge", post(merge_session))
         .route("/sessions/{id}/adopt", post(adopt_session))
         .route("/sessions/{id}/diff", get(diff_session))
+        .route(
+            "/sessions/{id}/scratch",
+            get(list_scratch).post(upload_scratch).delete(delete_scratch),
+        )
         .route("/sessions/{id}/log", get(log_session))
         .route("/sessions/{id}/events", get(events_sse))
         .route("/sessions/{id}/terminal", get(crate::terminal::terminal_ws))
@@ -343,6 +348,8 @@ pub fn router(state: AppState) -> Router {
         .route("/repos/recent", get(recent_repos))
         .route("/repos/branches", get(repo_branches))
         .route("/settings", get(get_settings).patch(patch_settings))
+        // Scratch uploads can carry images / logs; lift the default 2 MB cap.
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(state);
 
     let index = static_dir().join("index.html");
@@ -896,6 +903,110 @@ async fn diff_session(
         "stat": stat,
         "patch": patch,
     })))
+}
+
+// ---------------------------------------------------------------------------
+// Scratch files — drag-and-drop reference material dropped into the worktree's
+// `scratch/` directory so the agent can read it (e.g. "see scratch/error.log").
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct ScratchQuery {
+    name: String,
+}
+
+/// Validate a client-supplied scratch file name: a single path component, no
+/// separators, no `.`/`..`. Returns the bare name on success.
+fn scratch_name(raw: &str) -> ApiResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::bad_request("file name is required"));
+    }
+    let name = std::path::Path::new(trimmed)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    if name != trimmed || name == "." || name == ".." {
+        return Err(AppError::bad_request(
+            "file name must be a single path component",
+        ));
+    }
+    Ok(name.to_string())
+}
+
+async fn list_scratch(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<Vec<Value>>> {
+    let (session, _) = require_session(&st.db, &key).await?;
+    let dir = PathBuf::from(&session.work_dir).join("scratch");
+    let mut out: Vec<Value> = Vec::new();
+    match tokio::fs::read_dir(&dir).await {
+        Ok(mut rd) => {
+            while let Some(entry) = rd.next_entry().await? {
+                let meta = entry.metadata().await?;
+                if !meta.is_file() {
+                    continue;
+                }
+                if let Some(name) = entry.file_name().to_str() {
+                    // Hide housekeeping dotfiles (e.g. the .gitignore we write).
+                    if name.starts_with('.') {
+                        continue;
+                    }
+                    out.push(json!({ "name": name, "bytes": meta.len() }));
+                }
+            }
+        }
+        // No scratch directory yet just means nothing has been dropped.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    out.sort_by(|a, b| {
+        a["name"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["name"].as_str().unwrap_or(""))
+    });
+    Ok(Json(out))
+}
+
+async fn upload_scratch(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Query(q): Query<ScratchQuery>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let (session, _) = require_session(&st.db, &key).await?;
+    let name = scratch_name(&q.name)?;
+    let dir = PathBuf::from(&session.work_dir).join("scratch");
+    tokio::fs::create_dir_all(&dir).await?;
+    // Reference material isn't meant to be committed; keep the whole directory
+    // out of git so it never shows up in the agent's diff.
+    let gitignore = dir.join(".gitignore");
+    if !gitignore.exists() {
+        tokio::fs::write(&gitignore, "*\n").await?;
+    }
+    tokio::fs::write(dir.join(&name), &body).await?;
+    Ok(Json(json!({
+        "name": name,
+        "bytes": body.len(),
+        "path": format!("scratch/{name}"),
+    })))
+}
+
+async fn delete_scratch(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Query(q): Query<ScratchQuery>,
+) -> ApiResult<StatusCode> {
+    let (session, _) = require_session(&st.db, &key).await?;
+    let name = scratch_name(&q.name)?;
+    let path = PathBuf::from(&session.work_dir).join("scratch").join(&name);
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(AppError::not_found("scratch file")),
+        Err(e) => Err(e.into()),
+    }
 }
 
 async fn log_session(

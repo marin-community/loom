@@ -39,3 +39,5 @@ tempfile = "3"
 # axum 0.8's own tokio-tungstenite, so the two speak the same protocol stack.
 tokio-tungstenite = "0.29"
 futures-util = "0.3"
+# Raw-body HTTP client for the scratch-upload integration test.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
