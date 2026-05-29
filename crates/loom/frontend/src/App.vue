@@ -1,11 +1,25 @@
+<script setup lang="ts">
+import { theme, toggleTheme } from './theme';
+</script>
+
 <template>
-  <div class="min-h-screen bg-neutral-950 text-neutral-100 font-sans">
-    <header class="border-b border-neutral-800 px-6 py-3 flex items-center gap-3">
+  <div class="min-h-screen bg-canvas text-fg font-sans">
+    <header class="border-b border-line px-6 py-3 flex items-center gap-3">
       <router-link to="/" class="text-lg font-semibold tracking-tight">loom</router-link>
-      <span class="text-neutral-500 text-sm">agent sessions</span>
+      <span class="text-muted text-sm">agent sessions</span>
+      <button
+        type="button"
+        class="ml-auto rounded p-1.5 text-muted hover:text-fg hover:bg-subtle"
+        :title="theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'"
+        aria-label="Toggle color theme"
+        @click="toggleTheme"
+      >
+        <span v-if="theme === 'dark'">☀</span>
+        <span v-else>☾</span>
+      </button>
       <router-link
         to="/settings"
-        class="ml-auto text-sm text-neutral-400 hover:text-neutral-100"
+        class="text-sm text-muted hover:text-fg"
       >
         Settings
       </router-link>

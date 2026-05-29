@@ -1,7 +1,69 @@
 @import "tailwindcss";
 
+/* Manual (class-based) dark mode: `dark:` applies when <html> has `.dark`,
+   rather than tracking the OS preference. theme.ts toggles the class. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Semantic color tokens. Each is exposed to Tailwind as a color (so
+   `bg-surface`, `text-muted`, `border-line`, etc. work) and resolves to a CSS
+   variable that we swap between the light and dark palettes below. Keeping the
+   palette small and boring is deliberate — neutral slate surfaces with a single
+   blue accent, no neon. */
+@theme {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-input: var(--input);
+  --color-line: var(--line);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-subtle: var(--subtle);
+  --color-subtle-hover: var(--subtle-hover);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-fg: var(--accent-fg);
+  --color-code: var(--code);
+  --color-code-fg: var(--code-fg);
+}
+
+/* Light palette (default). */
+:root {
+  --canvas: #f8fafc;        /* slate-50  — page background */
+  --surface: #ffffff;       /* cards / panels */
+  --input: #f1f5f9;         /* slate-100 — form fields */
+  --line: #e2e8f0;          /* slate-200 — borders */
+  --fg: #0f172a;            /* slate-900 — primary text */
+  --muted: #64748b;         /* slate-500 — secondary text */
+  --faint: #94a3b8;         /* slate-400 — tertiary text */
+  --subtle: #e2e8f0;        /* slate-200 — secondary buttons */
+  --subtle-hover: #cbd5e1;  /* slate-300 */
+  --accent: #2563eb;        /* blue-600  — primary action */
+  --accent-hover: #1d4ed8;  /* blue-700 */
+  --accent-fg: #ffffff;
+  --code: #f1f5f9;          /* preformatted blocks (diffs, prompts) */
+  --code-fg: #334155;       /* slate-700 */
+}
+
+/* Dark palette — soft slate, not pure black. */
+.dark {
+  --canvas: #0f172a;        /* slate-900 */
+  --surface: #1e293b;       /* slate-800 */
+  --input: #334155;         /* slate-700 */
+  --line: #334155;          /* slate-700 */
+  --fg: #f1f5f9;            /* slate-100 */
+  --muted: #94a3b8;         /* slate-400 */
+  --faint: #64748b;         /* slate-500 */
+  --subtle: #334155;        /* slate-700 */
+  --subtle-hover: #475569;  /* slate-600 */
+  --accent: #3b82f6;        /* blue-500 */
+  --accent-hover: #2563eb;  /* blue-600 */
+  --accent-fg: #ffffff;
+  --code: #0f172a;          /* slate-900 */
+  --code-fg: #cbd5e1;       /* slate-300 */
+}
+
 html,
 body {
   margin: 0;
-  background: #0a0a0a;
+  background: var(--canvas);
 }

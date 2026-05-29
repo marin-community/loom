@@ -4,17 +4,17 @@ import { computed } from 'vue';
 const props = defineProps<{ status: string }>();
 
 const palette: Record<string, string> = {
-  created: 'bg-neutral-700 text-neutral-200',
+  created: 'bg-subtle text-fg',
   launching: 'bg-sky-800 text-sky-100',
-  working: 'bg-emerald-800 text-emerald-100',
+  working: 'bg-accent text-accent-fg',
   waiting: 'bg-amber-700 text-amber-100',
-  idle: 'bg-neutral-700 text-neutral-200',
+  idle: 'bg-subtle text-fg',
   orphaned: 'bg-amber-900 text-amber-200',
   done: 'bg-indigo-800 text-indigo-100',
   error: 'bg-red-800 text-red-100',
 };
 
-const cls = computed(() => palette[props.status] ?? 'bg-neutral-700 text-neutral-200');
+const cls = computed(() => palette[props.status] ?? 'bg-subtle text-fg');
 </script>
 
 <template>

@@ -79,6 +79,12 @@ export interface DiffStat {
   deletions: number;
 }
 
+/** A file dropped into the worktree's `scratch/` directory. */
+export interface ScratchFile {
+  name: string;
+  bytes: number;
+}
+
 export type SettingKind = 'string' | 'int' | 'bool';
 
 /** One configurable setting: its registry metadata plus its current value. */

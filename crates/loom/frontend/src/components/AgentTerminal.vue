@@ -216,12 +216,12 @@ onUnmounted(() => {
 
 <template>
   <div class="relative">
-    <div ref="host" class="h-[70vh] w-full overflow-hidden rounded bg-black"></div>
+    <div ref="host" class="h-[70vh] w-full overflow-hidden rounded bg-code text-code-fg"></div>
     <div
       v-if="state !== 'open'"
       data-testid="term-status"
       class="absolute right-2 top-2 rounded px-2 py-1 text-xs"
-      :class="state === 'error' ? 'bg-red-950/90 text-red-300' : 'bg-neutral-800/90 text-amber-300'"
+      :class="state === 'error' ? 'bg-red-950/90 text-red-300' : 'bg-input/90 text-amber-300'"
     >
       <span v-if="state === 'connecting'">connecting…</span>
       <span v-else-if="state === 'reconnecting'">reconnecting…</span>
