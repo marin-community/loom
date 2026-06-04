@@ -24,6 +24,27 @@ fn sh(dir: &Path, program: &str, args: &[&str]) {
     assert!(status.success(), "{program} {args:?} failed");
 }
 
+/// Pins tmux to a throwaway server (`tmux -L <name>`) for the test and kills it
+/// on drop — so the suite can never see or disturb the user's real sessions,
+/// even if the test panics. See `loom::tmux::socket_args`.
+struct TmuxSocket(String);
+
+impl TmuxSocket {
+    fn install() -> Self {
+        let name = format!("weaver-test-{}", std::process::id());
+        std::env::set_var("WEAVER_TMUX_SOCKET", &name);
+        // Clear any stale server left by a crashed prior run with this pid.
+        let _ = Command::new("tmux").args(["-L", &name, "kill-server"]).status();
+        TmuxSocket(name)
+    }
+}
+
+impl Drop for TmuxSocket {
+    fn drop(&mut self) {
+        let _ = Command::new("tmux").args(["-L", &self.0, "kill-server"]).status();
+    }
+}
+
 type TermWs =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -83,6 +104,8 @@ async fn session_lifecycle() {
     // Isolate all weaver state in a temp dir.
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("WEAVER_HOME", home.path());
+    // Isolate tmux onto a private server for the duration of the test.
+    let _tmux = TmuxSocket::install();
 
     // Build a throwaway git repo with a single commit on `main`.
     let repo = tempfile::tempdir().unwrap();
@@ -318,6 +341,84 @@ async fn session_lifecycle() {
             .await
             .unwrap();
         assert_eq!(after.as_array().unwrap().len(), 0, "scratch empty after delete");
+    }
+
+    // File viewer: the tree lists worktree files and badges changes vs base;
+    // /file returns text content (working or base ref); /raw returns bytes; and
+    // path traversal is refused just like scratch.
+    {
+        // Fresh worktree: README is listed and not yet changed.
+        let tree = client.get(&format!("/api/sessions/{id}/tree")).await.unwrap();
+        let files: Vec<String> = tree["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(files.contains(&"README.md".to_string()), "tree lists README.md, got {files:?}");
+        assert!(
+            !tree["changed"].as_object().unwrap().contains_key("README.md"),
+            "README unchanged before any edit"
+        );
+
+        let file = client
+            .get(&format!("/api/sessions/{id}/file?path=README.md"))
+            .await
+            .unwrap();
+        assert_eq!(file["content"], "hello\n");
+        assert_eq!(file["binary"], false);
+
+        // Edit a tracked file and drop a brand-new one.
+        std::fs::write(Path::new(&work_dir).join("README.md"), "hello world\n").unwrap();
+        std::fs::write(Path::new(&work_dir).join("new.txt"), "fresh\n").unwrap();
+
+        let tree = client.get(&format!("/api/sessions/{id}/tree")).await.unwrap();
+        let changed = tree["changed"].as_object().unwrap();
+        assert_eq!(changed["README.md"], "modified");
+        assert_eq!(changed["new.txt"], "added", "untracked file shows as added");
+        let files: Vec<String> = tree["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(files.contains(&"new.txt".to_string()), "untracked file listed in tree");
+
+        // base ref reads the merge-base version; working ref reads the edit.
+        let base = client
+            .get(&format!("/api/sessions/{id}/file?path=README.md&ref=base"))
+            .await
+            .unwrap();
+        assert_eq!(base["content"], "hello\n", "base ref reads the merge-base version");
+        let work = client
+            .get(&format!("/api/sessions/{id}/file?path=README.md"))
+            .await
+            .unwrap();
+        assert_eq!(work["content"], "hello world\n");
+
+        // Raw bytes carry the working-tree content.
+        let http = reqwest::Client::new();
+        let raw = http
+            .get(&format!("{}/api/sessions/{id}/raw?path=new.txt", client.base()))
+            .send()
+            .await
+            .unwrap();
+        assert!(raw.status().is_success());
+        assert_eq!(raw.text().await.unwrap(), "fresh\n");
+
+        // Traversal / absolute paths are refused on both reads.
+        let bad = http
+            .get(&format!("{}/api/sessions/{id}/file?path=../escape", client.base()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad.status().as_u16(), 400, "file path traversal rejected");
+        let bad = http
+            .get(&format!("{}/api/sessions/{id}/raw?path=/etc/passwd", client.base()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad.status().as_u16(), 400, "absolute raw path rejected");
     }
 
     // Branches endpoint lists this branch with the right metadata.

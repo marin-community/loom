@@ -24,10 +24,31 @@ fn sh(dir: &Path, program: &str, args: &[&str]) {
     assert!(status.success(), "{program} {args:?} failed");
 }
 
+/// Pins tmux to a throwaway server (`tmux -L <name>`) for the test and kills it
+/// on drop, so the suite never touches the user's real sessions. See
+/// `loom::tmux::socket_args`.
+struct TmuxSocket(String);
+
+impl TmuxSocket {
+    fn install() -> Self {
+        let name = format!("weaver-test-{}", std::process::id());
+        std::env::set_var("WEAVER_TMUX_SOCKET", &name);
+        let _ = Command::new("tmux").args(["-L", &name, "kill-server"]).status();
+        TmuxSocket(name)
+    }
+}
+
+impl Drop for TmuxSocket {
+    fn drop(&mut self) {
+        let _ = Command::new("tmux").args(["-L", &self.0, "kill-server"]).status();
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hook_event_drives_session_status() {
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("WEAVER_HOME", home.path());
+    let _tmux = TmuxSocket::install();
 
     let repo = tempfile::tempdir().unwrap();
     sh(repo.path(), "git", &["init", "-b", "main"]);

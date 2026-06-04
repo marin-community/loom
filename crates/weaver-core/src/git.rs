@@ -289,3 +289,92 @@ pub async fn merge(repo_root: &Path, branch: &str) -> Result<String> {
     tracing::info!(%branch, repo = %repo_root.display(), "branch merged");
     Ok(out)
 }
+
+// ---------------------------------------------------------------------------
+// Worktree browsing — file listing, change detection, and blob reads, used by
+// loom's file-viewer endpoints.
+// ---------------------------------------------------------------------------
+
+/// One changed file relative to a base ref, with its change status.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChangedFile {
+    pub path: String,
+    /// One of `added`, `modified`, `deleted`, `renamed`, `copied`.
+    pub status: String,
+}
+
+/// Every file git considers part of the worktree: tracked files plus untracked
+/// files that are **not** gitignored (so `target/`, `node_modules/`, and the
+/// `scratch/` drop directory are skipped). Paths are repo-relative,
+/// `/`-separated, sorted and de-duplicated. `-z` keeps names with spaces or
+/// unicode intact.
+pub async fn list_files(work_dir: &Path) -> Result<Vec<String>> {
+    let out = git(
+        work_dir,
+        &["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+    )
+    .await?;
+    let mut files: Vec<String> = out
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+/// Files changed since `since`, including still-untracked ones (staged into a
+/// throwaway index, the same trick [`diff`] uses). Renames/copies report the
+/// destination path. weaver's own `.claude` injections are excluded.
+pub async fn changed_files(work_dir: &Path, since: &str) -> Result<Vec<ChangedFile>> {
+    let mut args = vec!["diff", "--cached", "--name-status", "-z", since, "--"];
+    args.extend_from_slice(DIFF_PATHSPEC);
+    let out = inclusive_diff(work_dir, &args).await?;
+    // `-z --name-status` emits NUL-separated fields: `<status>\0<path>\0`, except
+    // renames/copies which carry two paths: `<status>\0<old>\0<new>\0`.
+    let mut fields = out.split('\0').filter(|s| !s.is_empty());
+    let mut files = Vec::new();
+    while let Some(code) = fields.next() {
+        let letter = code.chars().next().unwrap_or('?');
+        // R/C carry an old path then a new path; keep the destination.
+        let path = if letter == 'R' || letter == 'C' {
+            fields.next();
+            fields.next()
+        } else {
+            fields.next()
+        };
+        let Some(path) = path else { break };
+        let status = match letter {
+            'A' => "added",
+            'D' => "deleted",
+            'R' => "renamed",
+            'C' => "copied",
+            _ => "modified", // M, T (type change), and anything unexpected
+        };
+        files.push(ChangedFile {
+            path: path.to_string(),
+            status: status.to_string(),
+        });
+    }
+    Ok(files)
+}
+
+/// Raw bytes of `path` at revision `rev` (e.g. a merge-base sha). Returns `None`
+/// when the path does not exist at that revision — i.e. a file the branch added,
+/// which the file viewer renders as an empty original side of the diff.
+pub async fn read_blob(work_dir: &Path, rev: &str, path: &str) -> Result<Option<Vec<u8>>> {
+    let spec = format!("{rev}:{path}");
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(work_dir)
+        .args(["show", &spec])
+        .output()
+        .await
+        .context("failed to spawn git show")?;
+    if out.status.success() {
+        Ok(Some(out.stdout))
+    } else {
+        Ok(None)
+    }
+}

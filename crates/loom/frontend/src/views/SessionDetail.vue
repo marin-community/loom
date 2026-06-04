@@ -170,7 +170,10 @@ onUnmounted(() => source?.close());
       {{ ws.agent_kind }} · {{ ws.tmux_session }}
       <span v-if="ws.github_repo"> · {{ ws.github_repo }}</span>
     </div>
-    <div class="text-xs text-faint font-mono mb-4">worktree: {{ ws.work_dir }}</div>
+    <div class="text-xs text-faint font-mono mb-4">
+      worktree: {{ ws.work_dir }} ·
+      <router-link :to="`/s/${props.id}/files`" class="text-accent hover:underline">browse files →</router-link>
+    </div>
 
     <p v-if="error" class="mb-3 text-sm text-red-400">{{ error }}</p>
     <p v-if="notice" class="mb-3 text-sm text-accent">{{ notice }}</p>

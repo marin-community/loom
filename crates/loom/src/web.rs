@@ -54,12 +54,12 @@
 //! ```
 
 use std::convert::Infallible;
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 use axum::{
     body::Bytes,
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{
         sse::{self, KeepAlive, Sse},
         IntoResponse, Response,
@@ -326,6 +326,9 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/merge", post(merge_session))
         .route("/sessions/{id}/adopt", post(adopt_session))
         .route("/sessions/{id}/diff", get(diff_session))
+        .route("/sessions/{id}/tree", get(tree_session))
+        .route("/sessions/{id}/file", get(file_session))
+        .route("/sessions/{id}/raw", get(raw_session))
         .route(
             "/sessions/{id}/scratch",
             get(list_scratch).post(upload_scratch).delete(delete_scratch),
@@ -903,6 +906,167 @@ async fn diff_session(
         "stat": stat,
         "patch": patch,
     })))
+}
+
+// ---------------------------------------------------------------------------
+// File viewer — a read-only window onto the worktree: a file tree, text content
+// (for an embedded editor), and raw bytes (for images). The worktree is the
+// agent's own checkout; these endpoints never write.
+// ---------------------------------------------------------------------------
+
+/// Text files larger than this aren't shipped to the editor — beyond a couple
+/// of MB the browser editor stops being useful and starts being a memory hog.
+const MAX_TEXT_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Debug, Deserialize)]
+struct FileQuery {
+    path: String,
+    /// `working` (default, read from disk) or `base` (read from the merge-base).
+    #[serde(rename = "ref")]
+    reference: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawQuery {
+    path: String,
+}
+
+/// Validate a client-supplied repo-relative path: reject absolute paths and any
+/// `.`/`..`/prefix component, so it cannot escape the worktree. Returns the
+/// normalized (`/`-separated) relative path.
+fn rel_path(raw: &str) -> ApiResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::bad_request("path is required"));
+    }
+    let p = std::path::Path::new(trimmed);
+    if p.is_absolute() {
+        return Err(AppError::bad_request("path must be relative to the worktree"));
+    }
+    if !p.components().all(|c| matches!(c, Component::Normal(_))) {
+        return Err(AppError::bad_request(
+            "path must not contain '.' or '..' segments",
+        ));
+    }
+    Ok(trimmed.replace('\\', "/"))
+}
+
+/// Best-effort content type from the file extension, for the raw-bytes endpoint.
+/// Only the formats the viewer renders inline get a real type; everything else
+/// downloads as an opaque blob.
+fn content_type_for(path: &str) -> &'static str {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "pdf" => "application/pdf",
+        _ => "application/octet-stream",
+    }
+}
+
+/// The worktree file tree: every git-known path plus any base-only deletions, so
+/// removed files are still browsable, with a `path → status` map of changes vs
+/// the base branch. The flat list is assembled into a tree client-side.
+async fn tree_session(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let (session, branch) = require_session(&st.db, &key).await?;
+    let work_dir = PathBuf::from(&session.work_dir);
+    let files = git::list_files(&work_dir).await?;
+    // A missing/odd base shouldn't sink the whole tree — just show no badges.
+    let changed = match git::merge_base(&work_dir, &branch.base_branch).await {
+        Ok(base) => git::changed_files(&work_dir, &base).await.unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    let changed: serde_json::Map<String, Value> = changed
+        .into_iter()
+        .map(|c| (c.path, Value::String(c.status)))
+        .collect();
+    Ok(Json(json!({ "files": files, "changed": changed })))
+}
+
+/// Text content of a single worktree file for the editor. Binary and oversized
+/// files report a flag instead of content so the client can fall back to the raw
+/// endpoint or a placeholder. `ref=base` reads the file as of the merge-base
+/// (the original side of a diff).
+async fn file_session(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Query(q): Query<FileQuery>,
+) -> ApiResult<Json<Value>> {
+    let (session, branch) = require_session(&st.db, &key).await?;
+    let work_dir = PathBuf::from(&session.work_dir);
+    let rel = rel_path(&q.path)?;
+
+    let bytes: Vec<u8> = if q.reference.as_deref() == Some("base") {
+        match git::merge_base(&work_dir, &branch.base_branch).await {
+            Ok(base) => git::read_blob(&work_dir, &base, &rel).await?.unwrap_or_default(),
+            // No base means nothing to compare against; treat as empty original.
+            Err(_) => Vec::new(),
+        }
+    } else {
+        match tokio::fs::read(work_dir.join(&rel)).await {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(AppError::not_found("file"))
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
+
+    let size = bytes.len();
+    // A NUL byte in the first 8 KiB is the usual "this is binary" heuristic.
+    let head = &bytes[..size.min(8192)];
+    if head.contains(&0) {
+        return Ok(Json(json!({ "path": rel, "binary": true, "bytes": size })));
+    }
+    if size > MAX_TEXT_BYTES {
+        return Ok(Json(json!({ "path": rel, "too_large": true, "bytes": size })));
+    }
+    Ok(Json(json!({
+        "path": rel,
+        "content": String::from_utf8_lossy(&bytes),
+        "bytes": size,
+        "binary": false,
+    })))
+}
+
+/// Raw bytes of a worktree file, with a guessed content type — for `<img>` tags
+/// and downloads. Always reads the working tree (never a git ref).
+async fn raw_session(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Query(q): Query<RawQuery>,
+) -> ApiResult<Response> {
+    let (session, _) = require_session(&st.db, &key).await?;
+    let work_dir = PathBuf::from(&session.work_dir);
+    let rel = rel_path(&q.path)?;
+    let bytes = match tokio::fs::read(work_dir.join(&rel)).await {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AppError::not_found("file"))
+        }
+        Err(e) => return Err(e.into()),
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type_for(&rel)),
+            (header::CONTENT_DISPOSITION, "inline"),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------

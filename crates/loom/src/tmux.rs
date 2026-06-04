@@ -5,8 +5,21 @@ use std::path::Path;
 use std::process::Output;
 use tokio::process::Command;
 
+/// Server-socket flags (`-L <name>`) prepended to every tmux invocation when
+/// `WEAVER_TMUX_SOCKET` is set. This pins tmux to a dedicated server so the test
+/// suite never touches the user's real sessions; unset in production, tmux uses
+/// its default socket and behaviour is unchanged. `-L` is a server option, so it
+/// must precede the command.
+pub fn socket_args() -> Vec<String> {
+    match std::env::var("WEAVER_TMUX_SOCKET") {
+        Ok(s) if !s.is_empty() => vec!["-L".to_string(), s],
+        _ => Vec::new(),
+    }
+}
+
 async fn raw(args: &[&str]) -> Result<Output> {
     Command::new("tmux")
+        .args(socket_args())
         .args(args)
         .output()
         .await
@@ -132,6 +145,12 @@ mod tests {
     /// already does).
     #[tokio::test]
     async fn capture_and_set_option_work_through_exact() {
+        // Pin tmux to a throwaway server so this never touches the user's real
+        // sessions; killing the lone session below lets it exit-empty.
+        std::env::set_var(
+            "WEAVER_TMUX_SOCKET",
+            format!("weaver-unittest-{}", std::process::id()),
+        );
         let name = format!("weaver-tmuxtest-{}", std::process::id());
         // Best-effort cleanup of a stale session from a previous aborted run.
         let _ = kill_session(&name).await;

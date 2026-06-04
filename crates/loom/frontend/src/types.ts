@@ -85,6 +85,26 @@ export interface ScratchFile {
   bytes: number;
 }
 
+/** The worktree file tree: a flat list of repo-relative paths plus a
+ *  `path → status` map of changes vs the base branch. Assembled into a tree
+ *  client-side. Returned by `/api/sessions/{id}/tree`. */
+export interface FileTree {
+  files: string[];
+  /** status is one of "added" | "modified" | "deleted" | "renamed" | "copied". */
+  changed: Record<string, string>;
+}
+
+/** A single file's content for the editor. For binary or oversized files the
+ *  content is omitted and a flag is set instead. Returned by
+ *  `/api/sessions/{id}/file`. */
+export interface FileContent {
+  path: string;
+  content?: string;
+  binary?: boolean;
+  too_large?: boolean;
+  bytes: number;
+}
+
 export type SettingKind = 'string' | 'int' | 'bool';
 
 /** One configurable setting: its registry metadata plus its current value. */

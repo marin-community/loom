@@ -158,6 +158,11 @@ fn open_attach(target: &str) -> anyhow::Result<Attach> {
 
     let exact = tmux::exact(target);
     let mut cmd = CommandBuilder::new("tmux");
+    // `-L <socket>` (when WEAVER_TMUX_SOCKET is set) must precede the command, so
+    // the attach lands on the same server `tmux::new_session` created it on.
+    for flag in tmux::socket_args() {
+        cmd.arg(flag);
+    }
     cmd.args(["attach-session", "-t", exact.as_str()]);
     // Inherit env (same uid → same tmux socket) but drop $TMUX so attach works
     // even when loom itself runs inside tmux, and force a known TERM.
