@@ -116,6 +116,30 @@ fn issue_lifecycle() {
 }
 
 #[test]
+fn issue_ls_separates_branch_work_from_repo_backlog() {
+    let env = setup();
+    // Default add → claimed by this branch. `--repo` → unclaimed backlog.
+    run(&env, &["issue", "add", "my", "task"]);
+    run(&env, &["issue", "add", "--repo", "backlog", "task"]);
+
+    // Default ls shows both, under separate sections.
+    let out = run(&env, &["issue", "ls"]);
+    assert!(out.contains("On this branch"), "ls: {out}");
+    assert!(out.contains("my task"), "ls: {out}");
+    assert!(out.contains("Repo backlog"), "ls: {out}");
+    assert!(out.contains("backlog task"), "ls: {out}");
+
+    // `--mine` drops the backlog section.
+    let out = run(&env, &["issue", "ls", "--mine"]);
+    assert!(out.contains("my task"), "mine: {out}");
+    assert!(!out.contains("backlog task"), "mine should hide backlog: {out}");
+
+    // The badge counts only this branch's claimed work, not the backlog.
+    let out = run(&env, &["status"]);
+    assert!(out.contains("open issues: 1"), "status: {out}");
+}
+
+#[test]
 fn note_writes_an_event() {
     let env = setup();
     run(&env, &["note", "made", "a", "decision"]);

@@ -10,8 +10,10 @@ It is on your `PATH`. From anywhere in the worktree you can run:
 - `weaver note "<text>"` — append a progress note, or a decision and its
   rationale, to the branch log.
 - `weaver describe "<text>"` — set the one-line status shown on the dashboard.
-- `weaver issue add "<title>"` — add a task to the branch's issue list.
-- `weaver issue ls` / `weaver issue close N` — manage the issue list.
+- `weaver issue add "<title>"` — add a task claimed by this branch (`--repo`
+  files it in the shared repo backlog instead).
+- `weaver issue ls` — this branch's tasks plus the unclaimed repo backlog
+  (`--mine` for just yours, `--repo` for the whole repo). `weaver issue close N`.
 - `weaver status` — show the current goal, open-issue count, and latest summary.
 
 These talk directly to the weaver database — no daemon required.

@@ -38,9 +38,15 @@ export interface Session {
   branch: Branch;
 }
 
+/** An issue belongs to a repo (`repo_root`). `claimed_branch` is the branch
+ *  currently working it; `null` is the unclaimed repo backlog. `source_branch`
+ *  records where it was created. */
 export interface Issue {
   id: number;
-  branch_id: string;
+  repo_root: string;
+  github_repo: string | null;
+  source_branch: string | null;
+  claimed_branch: string | null;
   title: string;
   body: string;
   /** "open" or "closed". */

@@ -428,7 +428,8 @@ async fn session_lifecycle() {
     assert_eq!(arr[0]["branch"], "weaver/integration-test-goal");
     assert_eq!(arr[0]["open_issue_count"], 0);
 
-    // Issue CRUD lives at /api/branches/{id}/issues + /api/issues/{id}.
+    // Branch issues are claimed by the branch; the repo-wide board lives at
+    // /api/repos/issues.
     let created = client
         .post(
             &format!("/api/branches/{branch_id}/issues"),
@@ -438,6 +439,10 @@ async fn session_lifecycle() {
         .unwrap();
     let issue_id = created["id"].as_i64().unwrap();
     assert_eq!(created["status"], "open");
+    assert_eq!(
+        created["claimed_branch"], "weaver/integration-test-goal",
+        "a branch issue is claimed by its branch"
+    );
     let listed = client
         .get(&format!("/api/branches/{branch_id}/issues"))
         .await
@@ -448,10 +453,19 @@ async fn session_lifecycle() {
         .await
         .unwrap();
     assert_eq!(branch_view["open_issue_count"], 1);
-    let _ = client
-        .delete(&format!("/api/issues/{issue_id}"))
+    // The repo board sees the claimed issue; the unclaimed backlog does not.
+    let board = client
+        .get(&format!("/api/repos/issues?repo_root={repo_root}"))
         .await
         .unwrap();
+    assert_eq!(board.as_array().unwrap().len(), 1);
+    let backlog = client
+        .get(&format!("/api/repos/issues?repo_root={repo_root}&scope=backlog"))
+        .await
+        .unwrap();
+    assert_eq!(backlog.as_array().unwrap().len(), 0, "issue is claimed, not backlog");
+    // Leave the issue in place: session teardown (below) must release it, not
+    // delete it.
 
     // ---- Attach to an existing branch -----------------------------------
     let branches_q = client
@@ -601,6 +615,20 @@ async fn session_lifecycle() {
     );
     let list = client.get("/api/sessions").await.unwrap();
     assert_eq!(list.as_array().unwrap().len(), 0);
+
+    // The claimed issue is repo-owned: it outlives its session, returning to
+    // the unclaimed backlog rather than being deleted with the branch.
+    let board = client
+        .get(&format!("/api/repos/issues?repo_root={repo_root}&all=true"))
+        .await
+        .unwrap();
+    let board = board.as_array().unwrap();
+    assert_eq!(board.len(), 1, "issue survived teardown");
+    assert_eq!(board[0]["id"].as_i64().unwrap(), issue_id);
+    assert!(
+        board[0]["claimed_branch"].is_null(),
+        "claim was released on teardown"
+    );
 
     let recent = client.get("/api/repos/recent").await.unwrap();
     let recent = recent.as_array().unwrap();

@@ -107,8 +107,9 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `GET /api/sessions/{id}/{diff,log,events}` | reads + SSE stream |
 | `GET /api/sessions/{id}/terminal` | WebSocket: xterm.js ⇄ PTY ⇄ tmux (the interaction surface) |
 | `GET /api/branches` / `GET PATCH /api/branches/{id}` | list / inspect / edit tracked branches |
-| `GET POST /api/branches/{id}/issues` | issue list / create |
+| `GET POST /api/branches/{id}/issues` | issues claimed by the branch / create one |
 | `GET PATCH DELETE /api/issues/{id}` | per-issue CRUD |
+| `GET POST /api/repos/issues?repo_root=…` | repo-wide board (`scope=repo\|backlog`) / create a backlog item |
 | `GET /api/repos/recent` / `GET /api/repos/branches?cwd=…` | recent repos / branches in a repo |
 | `GET PATCH /api/settings` | settings registry |
 
@@ -176,7 +177,10 @@ weaver goal                             # print the goal
 weaver describe "Wired up routes; tests pass"
 weaver note   "blocked on the DB schema"
 weaver issue add "Backfill old rows" --body "ETA after the schema change"
-weaver issue ls                         # default: open only; --all shows closed too
+weaver issue add "Audit the logger" --repo  # unclaimed repo backlog item
+weaver issue ls                         # this branch's work + unclaimed backlog
+weaver issue ls --mine --all            # just this branch, including closed
+weaver issue ls --repo                  # whole repo, grouped by branch
 weaver issue close 7
 weaver where                            # debug: print resolved repo / branch / branch-id
 weaver log --limit 50                   # recent events for the current branch

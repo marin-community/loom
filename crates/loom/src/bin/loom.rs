@@ -55,6 +55,10 @@ enum Cmd {
         title: Option<String>,
         #[arg(long)]
         issue: Option<i64>,
+        /// Claim an existing weaver issue (by id) for this session: seeds the
+        /// goal from it and moves it out of the repo backlog.
+        #[arg(long)]
+        claim: Option<i64>,
         /// Attach to this existing branch rather than creating a new one.
         #[arg(long)]
         branch: Option<String>,
@@ -69,6 +73,15 @@ enum Cmd {
     },
     /// List active sessions.
     Ps,
+    /// Show the repo's issue board (every issue across branches + backlog).
+    Issues {
+        /// Include closed issues.
+        #[arg(long)]
+        all: bool,
+        /// Show only the unclaimed backlog.
+        #[arg(long)]
+        backlog: bool,
+    },
     /// Show one session's details.
     Show { branch: String },
     /// Attach your terminal to a session's tmux.
@@ -118,11 +131,13 @@ async fn run() -> Result<()> {
             goal,
             title,
             issue,
+            claim,
             branch,
             model,
             effort,
-        } => cmd_launch(name, agent, base, goal, title, issue, branch, model, effort).await,
+        } => cmd_launch(name, agent, base, goal, title, issue, claim, branch, model, effort).await,
         Cmd::Ps => cmd_ps().await,
+        Cmd::Issues { all, backlog } => cmd_issues(all, backlog).await,
         Cmd::Show { branch } => cmd_show(branch).await,
         Cmd::Attach { branch } => cmd_attach(branch).await,
         Cmd::Summary { branch } => cmd_summary(branch).await,
@@ -168,6 +183,20 @@ fn truncate(s: &str, max: usize) -> String {
         t.push('…');
         t
     }
+}
+
+/// Percent-encode a query-string value (paths can contain spaces).
+fn encode_query(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -341,6 +370,7 @@ async fn cmd_launch(
     goal: Option<String>,
     title: Option<String>,
     issue: Option<i64>,
+    claim: Option<i64>,
     branch: Option<String>,
     model: Option<String>,
     effort: Option<String>,
@@ -360,6 +390,7 @@ async fn cmd_launch(
                 "name": name,
                 "existing_branch": branch,
                 "issue": issue,
+                "claim_issue": claim,
                 "model": model,
                 "effort": effort,
             }),
@@ -407,6 +438,43 @@ async fn cmd_ps() -> Result<()> {
             str_field(&ws, "status"),
             truncate(branch_str(&ws, "name"), 24),
             truncate(branch_str(&ws, "title"), 46),
+        );
+    }
+    Ok(())
+}
+
+async fn cmd_issues(all: bool, backlog: bool) -> Result<()> {
+    let client = Client::new();
+    let cwd = std::env::current_dir()?;
+    let scope = if backlog { "backlog" } else { "repo" };
+    let path = format!(
+        "/api/repos/issues?cwd={}&all={all}&scope={scope}",
+        encode_query(&cwd.display().to_string()),
+    );
+    let rows = client.get(&path).await?.as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        println!("(no issues)");
+        return Ok(());
+    }
+    println!("{:<6}  {:<5}  {:<18}  TITLE", "ID", "STATE", "CLAIM");
+    for i in rows {
+        let id = i.get("id").and_then(Value::as_i64).unwrap_or(0);
+        let state = if str_field(&i, "status") == "open" {
+            "open"
+        } else {
+            "done"
+        };
+        let claim = i
+            .get("claimed_branch")
+            .and_then(Value::as_str)
+            .map(|b| b.strip_prefix("weaver/").unwrap_or(b))
+            .unwrap_or("(backlog)");
+        println!(
+            "{:<6}  {:<5}  {:<18}  {}",
+            format!("#{id}"),
+            state,
+            truncate(claim, 18),
+            truncate(str_field(&i, "title"), 50),
         );
     }
     Ok(())

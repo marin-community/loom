@@ -13,6 +13,7 @@ const router = useRouter();
 const ws = ref<Session | null>(null);
 const events = ref<WeaverEvent[]>([]);
 const issues = ref<Issue[]>([]);
+const backlog = ref<Issue[]>([]);
 const error = ref('');
 const notice = ref('');
 
@@ -34,10 +35,17 @@ async function loadSession() {
 
 async function loadIssues() {
   if (!ws.value) return;
+  // The session's own claimed work, plus the repo's unclaimed backlog.
   try {
     issues.value = (await get(`/branches/${ws.value.branch.id}/issues`)) as Issue[];
   } catch {
     // Issues are read-only here; failure is non-fatal for the view.
+  }
+  try {
+    const repo = encodeURIComponent(ws.value.branch.repo_root);
+    backlog.value = (await get(`/repos/issues?repo_root=${repo}&scope=backlog`)) as Issue[];
+  } catch {
+    // Backlog is best-effort context; ignore failures.
   }
 }
 
@@ -276,6 +284,30 @@ onUnmounted(() => source?.close());
                 v-if="i.body"
                 class="mt-1 whitespace-pre-wrap text-xs text-muted"
               >{{ i.body }}</pre>
+            </li>
+          </ul>
+        </section>
+
+        <section
+          v-if="backlog.length"
+          class="rounded border border-line bg-surface p-4"
+          data-testid="backlog-panel"
+        >
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-xs text-muted">
+              Repo backlog
+              <span class="text-faint">({{ backlog.length }})</span>
+            </span>
+            <span class="text-xs text-faint">unclaimed · whole repo</span>
+          </div>
+          <ul class="space-y-1 text-sm">
+            <li
+              v-for="i in backlog"
+              :key="i.id"
+              class="flex items-baseline gap-2 rounded bg-canvas/60 p-2"
+            >
+              <span class="font-mono text-xs text-muted">#{{ i.id }}</span>
+              <span class="text-fg">{{ i.title }}</span>
             </li>
           </ul>
         </section>

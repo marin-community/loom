@@ -7,9 +7,9 @@ weaver ships two binaries:
 
 - **`weaver`** — the **agent-facing CLI**. It is database-direct (no daemon,
   no HTTP) and runs sub-50ms cold. The agent inside a worktree uses it to
-  read and update the branch's **goal**, **description**, **notes**, and
-  per-branch **issue list**. It works whether or not the orchestrator is
-  running.
+  read and update the branch's **goal**, **description**, **notes**, and the
+  repo's **issues** (each claimed by a branch or sitting in the shared
+  backlog). It works whether or not the orchestrator is running.
 - **`loom`** — the **optional orchestrator**. It runs the REST + SSE server,
   hosts a Vue dashboard, creates worktrees, launches agents into tmux, and
   periodically summarizes each branch's diff against its merge base. Without
@@ -58,7 +58,10 @@ weaver goal                           # print the current goal
 weaver describe "Wired up routes; tests pass."
 weaver note    "blocked on the DB schema"
 weaver issue add "Backfill old rows" --body "ETA after the schema change"
-weaver issue ls
+weaver issue add "Audit the logger" --repo   # unclaimed repo backlog item
+weaver issue ls                       # this branch's work + the repo backlog
+weaver issue ls --mine                # just this branch's claimed issues
+weaver issue ls --repo                # the whole repo, grouped by branch
 weaver issue close 7
 weaver status                         # title + goal + open-issue count
 weaver where                          # debug: print resolved repo / branch / branch-id
@@ -66,7 +69,9 @@ weaver log --limit 50                 # recent events for the current branch
 ```
 
 `loom launch --issue 123` seeds the branch's title / goal / description from a
-GitHub issue (via the `gh` CLI).
+GitHub issue (via the `gh` CLI). `loom launch --claim 7` does the same from an
+existing weaver issue and moves it out of the repo backlog; `loom issues` prints
+the repo's board across branches.
 
 `loom launch --model <haiku|sonnet|opus> --effort <low|medium|high|xhigh|max>`
 (both also selectors in the web create form) pin the session's Claude model
@@ -120,9 +125,10 @@ Loom serves a JSON API under `/api`; the Vue SPA is the primary consumer.
   `GET /api/sessions/{id}/{diff,log,events}`,
   `GET /api/sessions/{id}/terminal` (WebSocket: xterm.js ⇄ PTY ⇄ tmux)
 - `GET /api/branches`, `GET PATCH /api/branches/{id}`,
-  `GET POST /api/branches/{id}/issues`,
+  `GET POST /api/branches/{id}/issues` (issues claimed by the branch),
   `GET PATCH DELETE /api/issues/{id}`
-- `GET /api/repos/recent`, `GET /api/repos/branches?cwd=…`
+- `GET /api/repos/recent`, `GET /api/repos/branches?cwd=…`,
+  `GET POST /api/repos/issues?repo_root=…` (the repo-wide board / backlog)
 - `GET PATCH /api/settings`
 
 See `AGENTS.md` for the shape of `SessionView`.

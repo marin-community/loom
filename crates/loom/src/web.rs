@@ -173,7 +173,8 @@ pub struct BranchView {
 
 impl BranchView {
     async fn build(db: &Db, branch: &Branch) -> ApiResult<Self> {
-        let open = weaver_core::issue::open_count(db, &branch.id)
+        // The badge counts the work this branch has claimed, not the whole repo.
+        let open = weaver_core::issue::open_count_for_branch(db, &branch.repo_root, &branch.branch)
             .await
             .unwrap_or(0);
         Ok(Self::from_parts(branch, open))
@@ -248,7 +249,12 @@ impl SessionView {
 #[derive(Debug, Clone, Serialize)]
 pub struct IssueView {
     pub id: i64,
-    pub branch_id: String,
+    pub repo_root: String,
+    pub github_repo: Option<String>,
+    /// Branch the issue was created from (provenance).
+    pub source_branch: Option<String>,
+    /// Branch currently working it; `null` is the unclaimed repo backlog.
+    pub claimed_branch: Option<String>,
     pub title: String,
     pub body: String,
     pub status: String,
@@ -262,7 +268,10 @@ impl From<Issue> for IssueView {
     fn from(i: Issue) -> Self {
         IssueView {
             id: i.id,
-            branch_id: i.branch_id,
+            repo_root: i.repo_root,
+            github_repo: i.github_repo,
+            source_branch: i.source_branch,
+            claimed_branch: i.claimed_branch,
             title: i.title,
             body: i.body,
             status: i.status,
@@ -350,6 +359,7 @@ pub fn router(state: AppState) -> Router {
         // Misc
         .route("/repos/recent", get(recent_repos))
         .route("/repos/branches", get(repo_branches))
+        .route("/repos/issues", get(list_repo_issues).post(create_repo_issue))
         .route("/settings", get(get_settings).patch(patch_settings))
         // Scratch uploads can carry images / logs; lift the default 2 MB cap.
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
@@ -396,6 +406,10 @@ struct CreateReq {
     agent: Option<String>,
     name: Option<String>,
     issue: Option<i64>,
+    /// A pre-existing weaver issue id to claim for this session (fan-out
+    /// pickup). Seeds title/goal/description and stamps `claimed_branch`.
+    #[serde(default)]
+    claim_issue: Option<i64>,
     #[serde(default)]
     existing_branch: Option<String>,
     /// Model tier ('haiku' | 'sonnet' | 'opus'); blank/absent inherits the
@@ -416,6 +430,9 @@ async fn create_session(
     let repo_root = git::repo_root(&cwd)
         .await
         .map_err(|e| AppError::bad_request(e.to_string()))?;
+    // Canonicalize so repo identity matches the `weaver` CLI's resolver — issues
+    // are keyed on this path and the two binaries must agree on it.
+    let repo_root = repo_root.canonicalize().unwrap_or(repo_root);
 
     let agent = match req.agent {
         Some(a) => a,
@@ -466,6 +483,34 @@ async fn create_session(
         github_issue = Some(number);
         github_repo = github::repo_slug(&repo_root).await.ok();
     }
+
+    // Claiming an existing weaver issue seeds the same three fields from it.
+    let repo_root_str = repo_root.display().to_string();
+    let mut claimed_issue_id: Option<i64> = None;
+    if let Some(issue_id) = req.claim_issue {
+        let issue = weaver_core::issue::get(&st.db, issue_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("issue"))?;
+        if issue.repo_root != repo_root_str {
+            return Err(AppError::bad_request(format!(
+                "issue #{issue_id} belongs to a different repo"
+            )));
+        }
+        if title.is_none() {
+            title = Some(issue.title.clone());
+        }
+        if goal.is_empty() {
+            goal = if issue.body.trim().is_empty() {
+                issue.title.clone()
+            } else {
+                format!("{}\n\n{}", issue.title, issue.body)
+            };
+        }
+        if description.is_empty() {
+            description = issue.body.clone();
+        }
+        claimed_issue_id = Some(issue_id);
+    }
     let title = title.unwrap_or_else(|| {
         if goal.is_empty() {
             "Untitled session".to_string()
@@ -495,8 +540,6 @@ async fn create_session(
         Some(b) => b,
         None => git::current_branch(&repo_root).await?,
     };
-
-    let repo_root_str = repo_root.display().to_string();
 
     let (branch_name, work_dir) = if let Some(existing_branch) = existing {
         if !git::branch_exists(&repo_root, existing_branch).await {
@@ -623,16 +666,43 @@ async fn create_session(
             model,
             effort,
             status: status.to_string(),
-            github_repo,
+            github_repo: github_repo.clone(),
         },
     )
     .await?;
 
-    // Track GitHub issue link on the branch via an issues row.
+    // Track a seeding GitHub issue as a claimed issue row on this branch.
     if let Some(number) = github_issue {
-        weaver_core::issue::add(&st.db, &branch.id, &title, &description, Some(number))
+        weaver_core::issue::add(
+            &st.db,
+            &weaver_core::issue::NewIssue {
+                repo_root: branch.repo_root.clone(),
+                github_repo: github_repo.clone(),
+                source_branch: Some(branch.branch.clone()),
+                claimed_branch: Some(branch.branch.clone()),
+                title: title.clone(),
+                body: description.clone(),
+                github_issue: Some(number),
+            },
+        )
+        .await
+        .ok();
+    }
+
+    // Fan-out pickup: a pre-existing weaver issue this session is claiming.
+    if let Some(issue_id) = claimed_issue_id {
+        weaver_core::issue::set_claim(&st.db, issue_id, Some(&branch.branch))
             .await
             .ok();
+        events::record(
+            &st.db,
+            &st.bus,
+            &branch.id,
+            "issue_claimed",
+            json!({ "id": issue_id }),
+        )
+        .await
+        .ok();
     }
 
     if let Err(e) = repo::record_use(&st.db, &branch.repo_root).await {
@@ -745,6 +815,11 @@ async fn delete_session(
         .await
         .ok();
     session_mod::delete(&st.db, &session.id).await?;
+    // Release this branch's claimed issues back to the repo backlog before the
+    // branch row goes away — issues are repo-owned and must outlive teardown.
+    weaver_core::issue::unclaim_branch(&st.db, &branch.repo_root, &branch.branch)
+        .await
+        .ok();
     // Drop the branch row too — deleting a session takes its branch with it.
     branch_mod::delete(&st.db, &branch.id).await?;
     if !warnings.is_empty() {
@@ -1268,13 +1343,16 @@ struct IssueListQuery {
     all: bool,
 }
 
+/// Issues claimed by this branch — the session's working set.
 async fn list_branch_issues(
     State(st): State<AppState>,
     Path(key): Path<String>,
     Query(q): Query<IssueListQuery>,
 ) -> ApiResult<Json<Vec<IssueView>>> {
     let branch = require_branch(&st.db, &key).await?;
-    let issues = weaver_core::issue::list_for_branch(&st.db, &branch.id, q.all).await?;
+    let issues =
+        weaver_core::issue::list_for_branch(&st.db, &branch.repo_root, &branch.branch, q.all)
+            .await?;
     Ok(Json(issues.into_iter().map(IssueView::from).collect()))
 }
 
@@ -1287,6 +1365,7 @@ struct CreateIssueReq {
     github_issue: Option<i64>,
 }
 
+/// Create an issue claimed by this branch.
 async fn create_branch_issue(
     State(st): State<AppState>,
     Path(key): Path<String>,
@@ -1298,10 +1377,15 @@ async fn create_branch_issue(
     let branch = require_branch(&st.db, &key).await?;
     let issue = weaver_core::issue::add(
         &st.db,
-        &branch.id,
-        req.title.trim(),
-        &req.body,
-        req.github_issue,
+        &weaver_core::issue::NewIssue {
+            repo_root: branch.repo_root.clone(),
+            source_branch: Some(branch.branch.clone()),
+            claimed_branch: Some(branch.branch.clone()),
+            title: req.title.trim().to_string(),
+            body: req.body,
+            github_issue: req.github_issue,
+            ..Default::default()
+        },
     )
     .await?;
     events::record(
@@ -1314,6 +1398,18 @@ async fn create_branch_issue(
     .await
     .ok();
     Ok(Json(IssueView::from(issue)))
+}
+
+/// Resolve the branch row an issue event should be attributed to: the branch
+/// currently working it, else the branch it came from. `None` for a pure
+/// repo-level backlog item (no session feed to notify).
+async fn issue_event_branch(db: &Db, issue: &Issue) -> Option<String> {
+    let name = issue.claimed_branch.as_deref().or(issue.source_branch.as_deref())?;
+    let branch = branch_mod::find_by_repo_branch(db, &issue.repo_root, name)
+        .await
+        .ok()
+        .flatten()?;
+    Some(branch.id)
 }
 
 async fn get_issue(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<Json<IssueView>> {
@@ -1354,15 +1450,11 @@ async fn patch_issue(
         } else {
             "issue_closed"
         };
-        events::record(
-            &st.db,
-            &st.bus,
-            &existing.branch_id,
-            kind,
-            json!({ "id": id }),
-        )
-        .await
-        .ok();
+        if let Some(branch_id) = issue_event_branch(&st.db, &existing).await {
+            events::record(&st.db, &st.bus, &branch_id, kind, json!({ "id": id }))
+                .await
+                .ok();
+        }
     }
     if req.title.is_some() || req.body.is_some() {
         let new_title = req.title.as_deref().unwrap_or(&existing.title);
@@ -1387,6 +1479,95 @@ async fn delete_issue(State(st): State<AppState>, Path(id): Path<i64>) -> ApiRes
         .ok_or_else(|| AppError::not_found("issue"))?;
     weaver_core::issue::delete(&st.db, id).await?;
     Ok(Json(json!({ "deleted": true })))
+}
+
+// ---------------------------------------------------------------------------
+// Repo-scoped issues (the backlog / board surface)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct RepoIssuesQuery {
+    /// Repo to scope to (canonical primary-worktree path). The frontend has
+    /// this from any `BranchView`.
+    repo_root: Option<String>,
+    /// Alternative for callers that only know a directory (e.g. the `loom`
+    /// CLI): the repo root is resolved from it server-side.
+    cwd: Option<String>,
+    #[serde(default)]
+    all: bool,
+    /// `repo` (default) = every issue; `backlog` = unclaimed only.
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// Resolve a repo identity from an explicit `repo_root` or, failing that, a
+/// `cwd` — canonicalized to match how issues are keyed.
+async fn resolve_repo_root(repo_root: Option<&str>, cwd: Option<&str>) -> ApiResult<String> {
+    if let Some(rr) = repo_root.map(str::trim).filter(|s| !s.is_empty()) {
+        return Ok(rr.to_string());
+    }
+    let cwd = cwd
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::bad_request("repo_root or cwd is required"))?;
+    let root = git::repo_root(&PathBuf::from(cwd))
+        .await
+        .map_err(|e| AppError::bad_request(e.to_string()))?;
+    Ok(root.canonicalize().unwrap_or(root).display().to_string())
+}
+
+/// The repo-wide issue board: every issue in a repo, or just the unclaimed
+/// backlog with `?scope=backlog`.
+async fn list_repo_issues(
+    State(st): State<AppState>,
+    Query(q): Query<RepoIssuesQuery>,
+) -> ApiResult<Json<Vec<IssueView>>> {
+    let repo_root = resolve_repo_root(q.repo_root.as_deref(), q.cwd.as_deref()).await?;
+    let issues = match q.scope.as_deref() {
+        Some("backlog") => weaver_core::issue::list_backlog(&st.db, &repo_root, q.all).await?,
+        Some("repo") | None => weaver_core::issue::list_for_repo(&st.db, &repo_root, q.all).await?,
+        Some(other) => {
+            return Err(AppError::bad_request(format!(
+                "invalid scope '{other}' (expected 'repo' or 'backlog')"
+            )))
+        }
+    };
+    Ok(Json(issues.into_iter().map(IssueView::from).collect()))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateRepoIssueReq {
+    repo_root: String,
+    title: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    github_issue: Option<i64>,
+}
+
+/// Create an unclaimed repo-level backlog item.
+async fn create_repo_issue(
+    State(st): State<AppState>,
+    Json(req): Json<CreateRepoIssueReq>,
+) -> ApiResult<Json<IssueView>> {
+    if req.title.trim().is_empty() {
+        return Err(AppError::bad_request("issue title is required"));
+    }
+    if req.repo_root.trim().is_empty() {
+        return Err(AppError::bad_request("repo_root is required"));
+    }
+    let issue = weaver_core::issue::add(
+        &st.db,
+        &weaver_core::issue::NewIssue {
+            repo_root: req.repo_root,
+            title: req.title.trim().to_string(),
+            body: req.body,
+            github_issue: req.github_issue,
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(Json(IssueView::from(issue)))
 }
 
 // ---------------------------------------------------------------------------

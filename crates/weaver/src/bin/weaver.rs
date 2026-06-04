@@ -59,18 +59,32 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum IssueCmd {
-    /// Add a new issue to the current branch.
+    /// Add an issue. By default it is claimed by the current branch; `--repo`
+    /// creates an unclaimed repo-level backlog item instead.
     Add {
         title: Vec<String>,
         #[arg(long)]
         body: Option<String>,
         #[arg(long)]
         github: Option<i64>,
+        /// Create an unclaimed repo backlog item, not attached to this branch.
+        #[arg(long)]
+        repo: bool,
     },
-    /// List issues for the current branch (default: open only).
+    /// List issues. Default: this branch's work + the unclaimed repo backlog.
     Ls {
+        /// Include closed issues.
         #[arg(long)]
         all: bool,
+        /// Show every issue in the repo (all branches + backlog), uncapped.
+        #[arg(long)]
+        repo: bool,
+        /// Show only this branch's claimed issues (suppress the backlog).
+        #[arg(long)]
+        mine: bool,
+        /// Use a different branch as "this branch" (by name).
+        #[arg(long)]
+        branch: Option<String>,
     },
     /// Show one issue.
     Show { id: i64 },
@@ -210,7 +224,9 @@ async fn cmd_log(limit: i64) -> Result<()> {
 async fn cmd_status() -> Result<()> {
     let db = open_db().await?;
     let b = branch::resolve(&db).await?;
-    let open = issue::open_count(&db, &b.id).await.unwrap_or(0);
+    let open = issue::open_count_for_branch(&db, &b.repo_root, &b.branch)
+        .await
+        .unwrap_or(0);
     println!("repo:        {}", b.repo_root);
     println!("branch:      {}", b.branch);
     println!("base:        {}", b.base_branch);
@@ -228,45 +244,60 @@ async fn cmd_status() -> Result<()> {
     Ok(())
 }
 
+/// How many backlog items to print before collapsing the rest into a hint.
+const BACKLOG_CAP: usize = 10;
+
 async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
     let db = open_db().await?;
     let b = branch::resolve(&db).await?;
     match cmd {
-        IssueCmd::Add { title, body, github } => {
+        IssueCmd::Add {
+            title,
+            body,
+            github,
+            repo,
+        } => {
             let title = title.join(" ");
             if title.trim().is_empty() {
                 bail!("issue title is required");
             }
-            let body = body.unwrap_or_default();
-            let i = issue::add(&db, &b.id, &title, &body, github).await?;
+            let new = issue::NewIssue {
+                repo_root: b.repo_root.clone(),
+                github_repo: None,
+                source_branch: Some(b.branch.clone()),
+                // `--repo` leaves it unclaimed in the backlog; otherwise this
+                // branch claims it.
+                claimed_branch: (!repo).then(|| b.branch.clone()),
+                title: title.clone(),
+                body: body.unwrap_or_default(),
+                github_issue: github,
+            };
+            let i = issue::add(&db, &new).await?;
             events::record_local(&db, &b.id, "issue_added", json!({ "id": i.id, "title": title }))
                 .await?;
             println!("#{} {}", i.id, i.title);
         }
-        IssueCmd::Ls { all } => {
-            let issues = issue::list_for_branch(&db, &b.id, all).await?;
-            if issues.is_empty() {
-                println!("(no issues)");
-                return Ok(());
-            }
-            for i in issues {
-                let marker = if i.status == "open" { "[ ]" } else { "[x]" };
-                let gh = i
-                    .github_issue
-                    .map(|n| format!(" (gh #{n})"))
-                    .unwrap_or_default();
-                println!("#{:<4} {} {}{}", i.id, marker, i.title, gh);
+        IssueCmd::Ls {
+            all,
+            repo,
+            mine,
+            branch,
+        } => {
+            let target = branch.unwrap_or_else(|| b.branch.clone());
+            if repo {
+                cmd_issue_ls_repo(&db, &b.repo_root, &target, all).await?;
+            } else {
+                cmd_issue_ls_default(&db, &b.repo_root, &target, all, mine).await?;
             }
         }
         IssueCmd::Show { id } => {
-            let i = issue::get(&db, id)
-                .await?
-                .ok_or_else(|| anyhow!("no issue #{id}"))?;
-            if i.branch_id != b.id {
-                bail!("issue #{id} belongs to a different branch");
-            }
+            let i = ensure_issue_in_repo(&db, id, &b.repo_root).await?;
             println!("#{} {}", i.id, i.title);
             println!("  status:  {}", i.status);
+            println!("  claimed: {}", i.claimed_branch.as_deref().unwrap_or("(backlog)"));
+            if let Some(src) = &i.source_branch {
+                println!("  from:    {src}");
+            }
             if let Some(n) = i.github_issue {
                 println!("  github:  #{n}");
             }
@@ -280,19 +311,19 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
             }
         }
         IssueCmd::Close { id } => {
-            ensure_issue_on_branch(&db, id, &b.id).await?;
+            ensure_issue_in_repo(&db, id, &b.repo_root).await?;
             issue::close(&db, id).await?;
             events::record_local(&db, &b.id, "issue_closed", json!({ "id": id })).await?;
             println!("closed #{id}");
         }
         IssueCmd::Reopen { id } => {
-            ensure_issue_on_branch(&db, id, &b.id).await?;
+            ensure_issue_in_repo(&db, id, &b.repo_root).await?;
             issue::reopen(&db, id).await?;
             events::record_local(&db, &b.id, "issue_reopened", json!({ "id": id })).await?;
             println!("reopened #{id}");
         }
         IssueCmd::Rm { id } => {
-            ensure_issue_on_branch(&db, id, &b.id).await?;
+            ensure_issue_in_repo(&db, id, &b.repo_root).await?;
             issue::delete(&db, id).await?;
             println!("removed #{id}");
         }
@@ -300,14 +331,107 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
     Ok(())
 }
 
-async fn ensure_issue_on_branch(db: &db::Db, id: i64, branch_id: &str) -> Result<()> {
+fn issue_line(i: &issue::Issue) -> String {
+    let marker = if i.status == "open" { "[ ]" } else { "[x]" };
+    let gh = i
+        .github_issue
+        .map(|n| format!(" (gh #{n})"))
+        .unwrap_or_default();
+    format!("#{:<4} {} {}{}", i.id, marker, i.title, gh)
+}
+
+/// Default `ls`: this branch's working set, plus the unclaimed repo backlog
+/// (capped). `--mine` drops the backlog section.
+async fn cmd_issue_ls_default(
+    db: &db::Db,
+    repo_root: &str,
+    target: &str,
+    all: bool,
+    mine: bool,
+) -> Result<()> {
+    let working = issue::list_for_branch(db, repo_root, target, all).await?;
+    let mut printed = false;
+    if !working.is_empty() {
+        println!("On this branch ({}):", working.len());
+        for i in &working {
+            println!("  {}", issue_line(i));
+        }
+        printed = true;
+    }
+    if !mine {
+        let backlog = issue::list_backlog(db, repo_root, all).await?;
+        if !backlog.is_empty() {
+            let shown = backlog.len().min(BACKLOG_CAP);
+            println!("Repo backlog ({} unclaimed, showing {}):", backlog.len(), shown);
+            for i in backlog.iter().take(BACKLOG_CAP) {
+                println!("  {}", issue_line(i));
+            }
+            if backlog.len() > BACKLOG_CAP {
+                println!(
+                    "  (+{} more — weaver issue ls --repo)",
+                    backlog.len() - BACKLOG_CAP
+                );
+            }
+            printed = true;
+        }
+    }
+    if !printed {
+        println!("(no issues)");
+    }
+    Ok(())
+}
+
+/// `ls --repo`: every open (or, with `--all`, every) issue in the repo, grouped
+/// into this branch / unclaimed backlog / other branches.
+async fn cmd_issue_ls_repo(db: &db::Db, repo_root: &str, target: &str, all: bool) -> Result<()> {
+    let issues = issue::list_for_repo(db, repo_root, all).await?;
+    if issues.is_empty() {
+        println!("(no issues)");
+        return Ok(());
+    }
+    let mut mine = Vec::new();
+    let mut backlog = Vec::new();
+    let mut others = Vec::new();
+    for i in &issues {
+        match i.claimed_branch.as_deref() {
+            Some(b) if b == target => mine.push(i),
+            Some(_) => others.push(i),
+            None => backlog.push(i),
+        }
+    }
+    let section = |title: String, items: &[&issue::Issue]| {
+        if items.is_empty() {
+            return;
+        }
+        println!("{title}");
+        for i in items {
+            // Annotate cross-branch items with who holds them.
+            let who = i
+                .claimed_branch
+                .as_deref()
+                .filter(|b| *b != target)
+                .map(|b| format!("  ← {b}"))
+                .unwrap_or_default();
+            println!("  {}{}", issue_line(i), who);
+        }
+    };
+    section(format!("On this branch ({}):", mine.len()), &mine);
+    section(format!("Repo backlog ({} unclaimed):", backlog.len()), &backlog);
+    section(format!("Other branches ({}):", others.len()), &others);
+    Ok(())
+}
+
+/// Confirm an issue exists and lives in `repo_root`. Cross-*repo* access is the
+/// real mistake to guard; within a repo, claimed and backlog items are all fair
+/// game. Returns the issue so callers can reuse it.
+async fn ensure_issue_in_repo(db: &db::Db, id: i64, repo_root: &str) -> Result<issue::Issue> {
     let i = issue::get(db, id)
         .await?
         .ok_or_else(|| anyhow!("no issue #{id}"))?;
-    if i.branch_id != branch_id {
-        bail!("issue #{id} belongs to a different branch");
+    if i.repo_root != repo_root {
+        bail!("issue #{id} belongs to a different repo");
     }
-    Ok(())
+    Ok(i)
 }
 
 async fn cmd_hook(event: String) -> Result<()> {
