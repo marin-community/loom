@@ -74,20 +74,14 @@ pub async fn record(
 
 /// Persist an event without going through a bus (the `weaver hook` path that
 /// runs without a daemon).
-pub async fn record_local(
-    db: &Db,
-    branch_id: &str,
-    kind: &str,
-    data: Value,
-) -> Result<i64> {
-    let row = sqlx::query(
-        "INSERT INTO events (branch_id, kind, data) VALUES (?, ?, ?) RETURNING id",
-    )
-    .bind(branch_id)
-    .bind(kind)
-    .bind(data.to_string())
-    .fetch_one(db)
-    .await?;
+pub async fn record_local(db: &Db, branch_id: &str, kind: &str, data: Value) -> Result<i64> {
+    let row =
+        sqlx::query("INSERT INTO events (branch_id, kind, data) VALUES (?, ?, ?) RETURNING id")
+            .bind(branch_id)
+            .bind(kind)
+            .bind(data.to_string())
+            .fetch_one(db)
+            .await?;
     Ok(row.get("id"))
 }
 

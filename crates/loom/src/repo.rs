@@ -66,8 +66,12 @@ mod tests {
     async fn counts_tracked_branches() {
         let db = connect_in_memory().await.unwrap();
         record_use(&db, "/code/alpha").await.unwrap();
-        branch::upsert(&db, "/code/alpha", "main", "main").await.unwrap();
-        branch::upsert(&db, "/code/alpha", "feature", "main").await.unwrap();
+        branch::upsert(&db, "/code/alpha", "main", "main")
+            .await
+            .unwrap();
+        branch::upsert(&db, "/code/alpha", "feature", "main")
+            .await
+            .unwrap();
         let rows = recent(&db, 10).await.unwrap();
         assert_eq!(rows[0].active_branches, 2);
     }

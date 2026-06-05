@@ -44,7 +44,14 @@ async fn gh(dir: &Path, args: &[&str]) -> Result<String> {
 pub async fn repo_slug(repo_root: &Path) -> Result<String> {
     gh(
         repo_root,
-        &["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+        &[
+            "repo",
+            "view",
+            "--json",
+            "nameWithOwner",
+            "-q",
+            ".nameWithOwner",
+        ],
     )
     .await
 }

@@ -38,7 +38,13 @@ pub struct Session {
 /// "idle"). Liveness is all the orchestrator can know for sure; the agent
 /// reports the rest via `weaver status`.
 pub const STATUSES: &[&str] = &[
-    "created", "launching", "running", "orphaned", "done", "error", "archived",
+    "created",
+    "launching",
+    "running",
+    "orphaned",
+    "done",
+    "error",
+    "archived",
 ];
 
 pub fn is_terminal(status: &str) -> bool {
@@ -124,12 +130,11 @@ pub async fn with_branch(db: &Db, id: &str) -> Result<Option<(Session, Branch)>>
 }
 
 pub async fn set_status(db: &Db, id: &str, status: &str) -> Result<()> {
-    let old: Option<String> =
-        sqlx::query_scalar("SELECT status FROM sessions WHERE id = ?")
-            .bind(id)
-            .fetch_optional(db)
-            .await
-            .unwrap_or(None);
+    let old: Option<String> = sqlx::query_scalar("SELECT status FROM sessions WHERE id = ?")
+        .bind(id)
+        .fetch_optional(db)
+        .await
+        .unwrap_or(None);
     sqlx::query("UPDATE sessions SET status = ? WHERE id = ?")
         .bind(status)
         .bind(id)

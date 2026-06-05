@@ -108,18 +108,13 @@ pub async fn get(db: &Db, id: &str) -> Result<Option<Branch>> {
     Ok(row)
 }
 
-pub async fn find_by_repo_branch(
-    db: &Db,
-    repo_root: &str,
-    branch: &str,
-) -> Result<Option<Branch>> {
-    let row = sqlx::query_as::<_, Branch>(
-        "SELECT * FROM branches WHERE repo_root = ? AND branch = ?",
-    )
-    .bind(repo_root)
-    .bind(branch)
-    .fetch_optional(db)
-    .await?;
+pub async fn find_by_repo_branch(db: &Db, repo_root: &str, branch: &str) -> Result<Option<Branch>> {
+    let row =
+        sqlx::query_as::<_, Branch>("SELECT * FROM branches WHERE repo_root = ? AND branch = ?")
+            .bind(repo_root)
+            .bind(branch)
+            .fetch_optional(db)
+            .await?;
     Ok(row)
 }
 
@@ -177,12 +172,7 @@ pub async fn insert(
 }
 
 /// Get or create a branch by `(repo_root, branch)`.
-pub async fn upsert(
-    db: &Db,
-    repo_root: &str,
-    branch: &str,
-    base_branch: &str,
-) -> Result<Branch> {
+pub async fn upsert(db: &Db, repo_root: &str, branch: &str, base_branch: &str) -> Result<Branch> {
     if let Some(b) = find_by_repo_branch(db, repo_root, branch).await? {
         return Ok(b);
     }
@@ -365,7 +355,10 @@ mod tests {
 
     #[test]
     fn derive_title_uses_first_line() {
-        assert_eq!(derive_title("Add a /health endpoint"), "Add a /health endpoint");
+        assert_eq!(
+            derive_title("Add a /health endpoint"),
+            "Add a /health endpoint"
+        );
         assert_eq!(derive_title("\n\nFix the bug\nmore detail"), "Fix the bug");
         assert_eq!(derive_title("   "), "Untitled");
         assert!(derive_title(&"x".repeat(200)).chars().count() <= 72);

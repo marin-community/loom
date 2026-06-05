@@ -347,7 +347,9 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/raw", get(raw_session))
         .route(
             "/sessions/{id}/scratch",
-            get(list_scratch).post(upload_scratch).delete(delete_scratch),
+            get(list_scratch)
+                .post(upload_scratch)
+                .delete(delete_scratch),
         )
         .route("/sessions/{id}/log", get(log_session))
         .route("/sessions/{id}/events", get(events_sse))
@@ -366,7 +368,10 @@ pub fn router(state: AppState) -> Router {
         // Misc
         .route("/repos/recent", get(recent_repos))
         .route("/repos/branches", get(repo_branches))
-        .route("/repos/issues", get(list_repo_issues).post(create_repo_issue))
+        .route(
+            "/repos/issues",
+            get(list_repo_issues).post(create_repo_issue),
+        )
         .route("/settings", get(get_settings).patch(patch_settings))
         // Scratch uploads can carry images / logs; lift the default 2 MB cap.
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
@@ -448,14 +453,24 @@ async fn create_session(
 
     // Normalize and validate the model / effort selections. Blank means
     // "inherit the configured default"; anything non-blank must be known.
-    let model = req.model.as_deref().map(str::trim).unwrap_or("").to_string();
+    let model = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
     if !model.is_empty() && !agent::MODELS.contains(&model.as_str()) {
         return Err(AppError::bad_request(format!(
             "unknown model '{model}' — expected one of {}",
             agent::MODELS.join(", ")
         )));
     }
-    let effort = req.effort.as_deref().map(str::trim).unwrap_or("").to_string();
+    let effort = req
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
     if !effort.is_empty() && !agent::EFFORTS.contains(&effort.as_str()) {
         return Err(AppError::bad_request(format!(
             "unknown effort '{effort}' — expected one of {}",
@@ -774,7 +789,9 @@ async fn apply_attention_patch(
             branch_mod::ATTENTION_LEVELS.join(", ")
         )));
     }
-    let note = note.map(str::trim).unwrap_or(branch.attention_note.as_str());
+    let note = note
+        .map(str::trim)
+        .unwrap_or(branch.attention_note.as_str());
     branch_mod::set_attention(&st.db, &branch.id, &level, note).await?;
     events::record(
         &st.db,
@@ -794,8 +811,13 @@ async fn patch_session(
     Json(req): Json<PatchSessionReq>,
 ) -> ApiResult<Json<SessionView>> {
     let (session, branch) = require_session(&st.db, &key).await?;
-    apply_attention_patch(&st, &branch, req.attention.as_deref(), req.attention_note.as_deref())
-        .await?;
+    apply_attention_patch(
+        &st,
+        &branch,
+        req.attention.as_deref(),
+        req.attention_note.as_deref(),
+    )
+    .await?;
     if let Some(title) = &req.title {
         branch_mod::set_title(&st.db, &branch.id, title).await?;
     }
@@ -1054,7 +1076,9 @@ fn rel_path(raw: &str) -> ApiResult<String> {
     }
     let p = std::path::Path::new(trimmed);
     if p.is_absolute() {
-        return Err(AppError::bad_request("path must be relative to the worktree"));
+        return Err(AppError::bad_request(
+            "path must be relative to the worktree",
+        ));
     }
     if !p.components().all(|c| matches!(c, Component::Normal(_))) {
         return Err(AppError::bad_request(
@@ -1099,7 +1123,9 @@ async fn tree_session(
     let files = git::list_files(&work_dir).await?;
     // A missing/odd base shouldn't sink the whole tree — just show no badges.
     let changed = match git::merge_base(&work_dir, &branch.base_branch).await {
-        Ok(base) => git::changed_files(&work_dir, &base).await.unwrap_or_default(),
+        Ok(base) => git::changed_files(&work_dir, &base)
+            .await
+            .unwrap_or_default(),
         Err(_) => Vec::new(),
     };
     let changed: serde_json::Map<String, Value> = changed
@@ -1124,7 +1150,9 @@ async fn file_session(
 
     let bytes: Vec<u8> = if q.reference.as_deref() == Some("base") {
         match git::merge_base(&work_dir, &branch.base_branch).await {
-            Ok(base) => git::read_blob(&work_dir, &base, &rel).await?.unwrap_or_default(),
+            Ok(base) => git::read_blob(&work_dir, &base, &rel)
+                .await?
+                .unwrap_or_default(),
             // No base means nothing to compare against; treat as empty original.
             Err(_) => Vec::new(),
         }
@@ -1145,7 +1173,9 @@ async fn file_session(
         return Ok(Json(json!({ "path": rel, "binary": true, "bytes": size })));
     }
     if size > MAX_TEXT_BYTES {
-        return Ok(Json(json!({ "path": rel, "too_large": true, "bytes": size })));
+        return Ok(Json(
+            json!({ "path": rel, "too_large": true, "bytes": size }),
+        ));
     }
     Ok(Json(json!({
         "path": rel,
@@ -1281,7 +1311,9 @@ async fn delete_scratch(
     let path = PathBuf::from(&session.work_dir).join("scratch").join(&name);
     match tokio::fs::remove_file(&path).await {
         Ok(()) => Ok(StatusCode::NO_CONTENT),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(AppError::not_found("scratch file")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(AppError::not_found("scratch file"))
+        }
         Err(e) => Err(e.into()),
     }
 }
@@ -1349,8 +1381,13 @@ async fn patch_branch(
     Json(req): Json<PatchBranchReq>,
 ) -> ApiResult<Json<BranchView>> {
     let branch = require_branch(&st.db, &key).await?;
-    apply_attention_patch(&st, &branch, req.attention.as_deref(), req.attention_note.as_deref())
-        .await?;
+    apply_attention_patch(
+        &st,
+        &branch,
+        req.attention.as_deref(),
+        req.attention_note.as_deref(),
+    )
+    .await?;
     if let Some(title) = &req.title {
         branch_mod::set_title(&st.db, &branch.id, title).await?;
     }
@@ -1446,7 +1483,10 @@ async fn create_branch_issue(
 /// currently working it, else the branch it came from. `None` for a pure
 /// repo-level backlog item (no session feed to notify).
 async fn issue_event_branch(db: &Db, issue: &Issue) -> Option<String> {
-    let name = issue.claimed_branch.as_deref().or(issue.source_branch.as_deref())?;
+    let name = issue
+        .claimed_branch
+        .as_deref()
+        .or(issue.source_branch.as_deref())?;
     let branch = branch_mod::find_by_repo_branch(db, &issue.repo_root, name)
         .await
         .ok()

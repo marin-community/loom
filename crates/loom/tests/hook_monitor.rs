@@ -7,13 +7,13 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use serde_json::json;
-use tokio::net::TcpListener;
 use loom::client::Client;
 use loom::events::EventBus;
 use loom::session as session_mod;
 use loom::web::AppState;
 use loom::{db, server};
+use serde_json::json;
+use tokio::net::TcpListener;
 
 fn sh(dir: &Path, program: &str, args: &[&str]) {
     let status = Command::new(program)
@@ -33,14 +33,18 @@ impl TmuxSocket {
     fn install() -> Self {
         let name = format!("weaver-test-{}", std::process::id());
         std::env::set_var("WEAVER_TMUX_SOCKET", &name);
-        let _ = Command::new("tmux").args(["-L", &name, "kill-server"]).status();
+        let _ = Command::new("tmux")
+            .args(["-L", &name, "kill-server"])
+            .status();
         TmuxSocket(name)
     }
 }
 
 impl Drop for TmuxSocket {
     fn drop(&mut self) {
-        let _ = Command::new("tmux").args(["-L", &self.0, "kill-server"]).status();
+        let _ = Command::new("tmux")
+            .args(["-L", &self.0, "kill-server"])
+            .status();
     }
 }
 
@@ -97,14 +101,9 @@ async fn hook_event_drives_session_status() {
 
     // What `weaver hook --event working` would do: write a `hook` event row.
     // Any hook means the agent process is alive → lifecycle `running`.
-    weaver_core::events::record_local(
-        &pool,
-        &branch_id,
-        "hook",
-        json!({ "event": "working" }),
-    )
-    .await
-    .unwrap();
+    weaver_core::events::record_local(&pool, &branch_id, "hook", json!({ "event": "working" }))
+        .await
+        .unwrap();
 
     // Wait up to a couple of monitor ticks for the status to flip.
     let mut got = String::new();
@@ -116,7 +115,10 @@ async fn hook_event_drives_session_status() {
             break;
         }
     }
-    assert_eq!(got, "running", "monitor should have flipped status to running");
+    assert_eq!(
+        got, "running",
+        "monitor should have flipped status to running"
+    );
 
     // A `waiting` hook (Claude blocked asking the user) raises the agent-declared
     // attention axis to `attention` with a note — the dashboard's "needs me" flag.
@@ -133,7 +135,10 @@ async fn hook_event_drives_session_status() {
             break;
         }
     }
-    assert_eq!(attention, "attention", "waiting hook should raise attention");
+    assert_eq!(
+        attention, "attention",
+        "waiting hook should raise attention"
+    );
 
     // Verify the hook event row landed too.
     let log = client
@@ -146,5 +151,8 @@ async fn hook_event_drives_session_status() {
         .iter()
         .filter_map(|e| e["kind"].as_str())
         .collect();
-    assert!(kinds.contains(&"hook"), "events should include a hook row: {kinds:?}");
+    assert!(
+        kinds.contains(&"hook"),
+        "events should include a hook row: {kinds:?}"
+    );
 }

@@ -33,11 +33,9 @@ pub async fn add(db: &Db, branch_id: &str, text: &str) -> Result<Note> {
 }
 
 pub async fn list_for_branch(db: &Db, branch_id: &str) -> Result<Vec<Note>> {
-    let rows = sqlx::query_as::<_, Note>(
-        "SELECT * FROM notes WHERE branch_id = ? ORDER BY id ASC",
-    )
-    .bind(branch_id)
-    .fetch_all(db)
-    .await?;
+    let rows = sqlx::query_as::<_, Note>("SELECT * FROM notes WHERE branch_id = ? ORDER BY id ASC")
+        .bind(branch_id)
+        .fetch_all(db)
+        .await?;
     Ok(rows)
 }

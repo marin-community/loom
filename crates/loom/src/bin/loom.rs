@@ -528,7 +528,12 @@ async fn cmd_issues(all: bool, backlog: bool) -> Result<()> {
         "/api/repos/issues?cwd={}&all={all}&scope={scope}",
         encode_query(&cwd.display().to_string()),
     );
-    let rows = client.get(&path).await?.as_array().cloned().unwrap_or_default();
+    let rows = client
+        .get(&path)
+        .await?
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     if rows.is_empty() {
         println!("(no issues)");
         return Ok(());
@@ -762,17 +767,38 @@ mod tests {
     #[test]
     fn anything_to_work_on_is_enough() {
         let cases = [
-            LaunchArgs { goal: "fix the bug".into(), ..empty_launch() },
-            LaunchArgs { name: Some("scratch".into()), ..empty_launch() },
-            LaunchArgs { title: Some("A title".into()), ..empty_launch() },
-            LaunchArgs { issue: Some(42), ..empty_launch() },
-            LaunchArgs { claim: Some(7), ..empty_launch() },
-            LaunchArgs { branch: Some("weaver/foo".into()), ..empty_launch() },
+            LaunchArgs {
+                goal: "fix the bug".into(),
+                ..empty_launch()
+            },
+            LaunchArgs {
+                name: Some("scratch".into()),
+                ..empty_launch()
+            },
+            LaunchArgs {
+                title: Some("A title".into()),
+                ..empty_launch()
+            },
+            LaunchArgs {
+                issue: Some(42),
+                ..empty_launch()
+            },
+            LaunchArgs {
+                claim: Some(7),
+                ..empty_launch()
+            },
+            LaunchArgs {
+                branch: Some("weaver/foo".into()),
+                ..empty_launch()
+            },
         ];
         for a in cases {
             assert!(!launch_underspecified(&a));
         }
         // Whitespace-only task words still count as empty.
-        assert!(launch_underspecified(&LaunchArgs { goal: "   ".into(), ..empty_launch() }));
+        assert!(launch_underspecified(&LaunchArgs {
+            goal: "   ".into(),
+            ..empty_launch()
+        }));
     }
 }

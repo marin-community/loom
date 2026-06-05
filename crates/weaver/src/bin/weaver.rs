@@ -13,7 +13,11 @@ use serde_json::{json, Value};
 use weaver_core::{branch, config, db, events, issue, note};
 
 #[derive(Parser)]
-#[command(name = "weaver", version, about = "Agent-facing helpers for branches and issues")]
+#[command(
+    name = "weaver",
+    version,
+    about = "Agent-facing helpers for branches and issues"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -274,12 +278,7 @@ async fn cmd_status(level: Option<String>, note: String) -> Result<()> {
 /// Declare the agent's attention level (and optional note) on the branch. Writes
 /// the branch fields directly (daemon-less) and an `attention` event so a
 /// running loom can push the change to the dashboard on its next tick.
-async fn cmd_status_set(
-    db: &db::Db,
-    b: &branch::Branch,
-    level: &str,
-    note: &str,
-) -> Result<()> {
+async fn cmd_status_set(db: &db::Db, b: &branch::Branch, level: &str, note: &str) -> Result<()> {
     let level = level.trim().to_ascii_lowercase();
     if !branch::is_valid_attention(&level) {
         bail!(
@@ -289,7 +288,13 @@ async fn cmd_status_set(
     }
     let note = note.trim();
     branch::set_attention(db, &b.id, &level, note).await?;
-    events::record_local(db, &b.id, "attention", json!({ "level": level, "note": note })).await?;
+    events::record_local(
+        db,
+        &b.id,
+        "attention",
+        json!({ "level": level, "note": note }),
+    )
+    .await?;
     if note.is_empty() {
         println!("status: {level}");
     } else {
@@ -327,8 +332,13 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
                 github_issue: github,
             };
             let i = issue::add(&db, &new).await?;
-            events::record_local(&db, &b.id, "issue_added", json!({ "id": i.id, "title": title }))
-                .await?;
+            events::record_local(
+                &db,
+                &b.id,
+                "issue_added",
+                json!({ "id": i.id, "title": title }),
+            )
+            .await?;
             println!("#{} {}", i.id, i.title);
         }
         IssueCmd::Ls {
@@ -348,7 +358,10 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
             let i = ensure_issue_in_repo(&db, id, &b.repo_root).await?;
             println!("#{} {}", i.id, i.title);
             println!("  status:  {}", i.status);
-            println!("  claimed: {}", i.claimed_branch.as_deref().unwrap_or("(backlog)"));
+            println!(
+                "  claimed: {}",
+                i.claimed_branch.as_deref().unwrap_or("(backlog)")
+            );
             if let Some(src) = &i.source_branch {
                 println!("  from:    {src}");
             }
@@ -416,7 +429,11 @@ async fn cmd_issue_ls_default(
         let backlog = issue::list_backlog(db, repo_root, all).await?;
         if !backlog.is_empty() {
             let shown = backlog.len().min(BACKLOG_CAP);
-            println!("Repo backlog ({} unclaimed, showing {}):", backlog.len(), shown);
+            println!(
+                "Repo backlog ({} unclaimed, showing {}):",
+                backlog.len(),
+                shown
+            );
             for i in backlog.iter().take(BACKLOG_CAP) {
                 println!("  {}", issue_line(i));
             }
@@ -470,7 +487,10 @@ async fn cmd_issue_ls_repo(db: &db::Db, repo_root: &str, target: &str, all: bool
         }
     };
     section(format!("On this branch ({}):", mine.len()), &mine);
-    section(format!("Repo backlog ({} unclaimed):", backlog.len()), &backlog);
+    section(
+        format!("Repo backlog ({} unclaimed):", backlog.len()),
+        &backlog,
+    );
     section(format!("Other branches ({}):", others.len()), &others);
     Ok(())
 }

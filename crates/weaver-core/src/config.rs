@@ -303,7 +303,10 @@ mod tests {
     async fn describe_reports_defaults_then_stored_values() {
         let db = crate::db::connect_in_memory().await.unwrap();
         let before = describe(&db).await.unwrap();
-        let auto_adopt = before.iter().find(|v| v.spec.key == "server.auto_adopt").unwrap();
+        let auto_adopt = before
+            .iter()
+            .find(|v| v.spec.key == "server.auto_adopt")
+            .unwrap();
         assert!(auto_adopt.is_default);
         assert_eq!(auto_adopt.value, "false");
 
@@ -311,7 +314,10 @@ mod tests {
             .await
             .unwrap();
         let after = describe(&db).await.unwrap();
-        let auto_adopt = after.iter().find(|v| v.spec.key == "server.auto_adopt").unwrap();
+        let auto_adopt = after
+            .iter()
+            .find(|v| v.spec.key == "server.auto_adopt")
+            .unwrap();
         assert!(!auto_adopt.is_default);
         assert_eq!(auto_adopt.value, "true");
     }
@@ -319,10 +325,16 @@ mod tests {
     #[tokio::test]
     async fn apply_is_atomic_and_a_none_change_resets_to_default() {
         let db = crate::db::connect_in_memory().await.unwrap();
-        apply(&db, &[("agent.claude_args".into(), Some("--model x".into()))])
-            .await
-            .unwrap();
-        assert_eq!(get(&db, "agent.claude_args").await.as_deref(), Some("--model x"));
+        apply(
+            &db,
+            &[("agent.claude_args".into(), Some("--model x".into()))],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            get(&db, "agent.claude_args").await.as_deref(),
+            Some("--model x")
+        );
         // A `None` change clears the row so the default applies again.
         apply(&db, &[("agent.claude_args".into(), None)])
             .await

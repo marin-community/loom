@@ -96,7 +96,9 @@ pub fn run_dir(id: &str) -> PathBuf {
 
 /// Current UTC time as an ISO-8601 string, matching the SQLite default format.
 pub fn now_iso() -> String {
-    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+    chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string()
 }
 
 pub async fn connect(path: &Path) -> Result<Db> {
@@ -137,12 +139,13 @@ async fn migrate(pool: &Db) -> Result<()> {
     // dropped wholesale before the new schema is applied. Old data is gone by
     // design (the user OK'd this). Detect "legacy" by the presence of a
     // `workspaces` table; once that's gone, the drops never run again.
-    let legacy: Option<String> =
-        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name='workspaces'")
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
+    let legacy: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='workspaces'",
+    )
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
     if legacy.is_some() {
         tracing::warn!("dropping legacy workspaces/events/summaries tables for the new schema");
         const DROPS: &[&str] = &[
@@ -190,7 +193,13 @@ async fn migrate(pool: &Db) -> Result<()> {
     // existed. `CREATE TABLE IF NOT EXISTS` above is a no-op on such DBs, so we
     // add the column explicitly and ignore the "duplicate column" error.
     add_column_if_missing(pool, "branches", "attention", "TEXT NOT NULL DEFAULT 'ok'").await?;
-    add_column_if_missing(pool, "branches", "attention_note", "TEXT NOT NULL DEFAULT ''").await?;
+    add_column_if_missing(
+        pool,
+        "branches",
+        "attention_note",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    .await?;
     Ok(())
 }
 
@@ -322,14 +331,18 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("INSERT INTO branches (id, repo_root, branch) VALUES ('b1', '/repo', 'feature')")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO issues (branch_id, title, status) VALUES ('b1', 'old issue', 'open')")
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO branches (id, repo_root, branch) VALUES ('b1', '/repo', 'feature')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO issues (branch_id, title, status) VALUES ('b1', 'old issue', 'open')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         migrate_issues_to_repo_scope(&pool).await.unwrap();
 

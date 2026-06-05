@@ -83,7 +83,10 @@ fn goal_set_and_get() {
 fn where_reports_resolved_branch() {
     let env = setup();
     let out = run(&env, &["where"]);
-    assert!(out.contains("branch:    feature-test"), "where output: {out}");
+    assert!(
+        out.contains("branch:    feature-test"),
+        "where output: {out}"
+    );
 }
 
 #[test]
@@ -100,10 +103,16 @@ fn issue_lifecycle() {
     // Close #1, then list defaults to open only (should drop it).
     run(&env, &["issue", "close", "1"]);
     let out = run(&env, &["issue", "ls"]);
-    assert!(!out.contains("fix the thing"), "closed issue should be hidden");
+    assert!(
+        !out.contains("fix the thing"),
+        "closed issue should be hidden"
+    );
 
     let out = run(&env, &["issue", "ls", "--all"]);
-    assert!(out.contains("[x]"), "closed marker should appear with --all");
+    assert!(
+        out.contains("[x]"),
+        "closed marker should appear with --all"
+    );
 
     // Reopen, then rm.
     run(&env, &["issue", "reopen", "1"]);
@@ -132,7 +141,10 @@ fn issue_ls_separates_branch_work_from_repo_backlog() {
     // `--mine` drops the backlog section.
     let out = run(&env, &["issue", "ls", "--mine"]);
     assert!(out.contains("my task"), "mine: {out}");
-    assert!(!out.contains("backlog task"), "mine should hide backlog: {out}");
+    assert!(
+        !out.contains("backlog task"),
+        "mine should hide backlog: {out}"
+    );
 
     // The badge counts only this branch's claimed work, not the backlog.
     let out = run(&env, &["status"]);
@@ -152,8 +164,14 @@ fn hook_writes_an_event_row() {
     let env = setup();
     run(&env, &["hook", "--event", "working"]);
     let log = run(&env, &["log"]);
-    assert!(log.contains("hook"), "log should mention the hook event: {log}");
-    assert!(log.contains("working"), "log should mention the event name: {log}");
+    assert!(
+        log.contains("hook"),
+        "log should mention the hook event: {log}"
+    );
+    assert!(
+        log.contains("working"),
+        "log should mention the event name: {log}"
+    );
 }
 
 #[test]
@@ -173,8 +191,14 @@ fn status_with_no_id_reports_current_branch() {
 fn status_set_attention_level_and_note() {
     let env = setup();
     // Declare an attention level with a note, then read it back.
-    let out = run(&env, &["status", "attention", "Waiting", "for", "PR", "feedback"]);
-    assert!(out.contains("attention — Waiting for PR feedback"), "set output: {out}");
+    let out = run(
+        &env,
+        &["status", "attention", "Waiting", "for", "PR", "feedback"],
+    );
+    assert!(
+        out.contains("attention — Waiting for PR feedback"),
+        "set output: {out}"
+    );
 
     let out = run(&env, &["status"]);
     assert!(
@@ -186,11 +210,17 @@ fn status_set_attention_level_and_note() {
     run(&env, &["status", "ok"]);
     let out = run(&env, &["status"]);
     assert!(out.contains("attention:   ok"), "status read: {out}");
-    assert!(!out.contains("Waiting for PR feedback"), "note should be cleared: {out}");
+    assert!(
+        !out.contains("Waiting for PR feedback"),
+        "note should be cleared: {out}"
+    );
 
     // The set also writes an `attention` event to the branch log.
     let log = run(&env, &["log"]);
-    assert!(log.contains("attention"), "log should record attention events: {log}");
+    assert!(
+        log.contains("attention"),
+        "log should record attention events: {log}"
+    );
 }
 
 #[test]
@@ -205,7 +235,10 @@ fn status_set_rejects_unknown_level() {
         .expect("failed to spawn weaver");
     assert!(!out.status.success(), "unknown level should fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("unknown status 'bogus'"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("unknown status 'bogus'"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -214,7 +247,8 @@ fn auto_creates_branch_row_on_first_write() {
     // The branch row should not exist before any write.
     let db = env.home_path.join("weaver.db");
     assert!(
-        !db.exists() || std::fs::metadata(&db).map(|m| m.len()).unwrap_or(0) == 0
+        !db.exists()
+            || std::fs::metadata(&db).map(|m| m.len()).unwrap_or(0) == 0
             || count_branches(&db) == 0
     );
     run(&env, &["goal", "first", "write"]);

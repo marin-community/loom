@@ -147,12 +147,13 @@ async fn apply_hook(state: &AppState, branch_id: &str, kind: &str) -> Option<i64
         _ => return None,
     };
 
-    let session = session_mod::active_for_branch(&state.db, branch_id).await.ok()??;
+    let session = session_mod::active_for_branch(&state.db, branch_id)
+        .await
+        .ok()??;
 
     // Lifecycle: alive → running. Idempotent once running; never overrides a
     // terminal state.
-    let status_changed =
-        session.status != "running" && !session_mod::is_terminal(&session.status);
+    let status_changed = session.status != "running" && !session_mod::is_terminal(&session.status);
     if status_changed {
         let _ = session_mod::set_status(&state.db, &session.id, "running").await;
     }

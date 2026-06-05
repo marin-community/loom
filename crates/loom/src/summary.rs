@@ -8,11 +8,11 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::json;
 
+use crate::session::{self as session_mod, Session};
 use crate::web::AppState;
 use crate::{agent, config, events, git};
-use weaver_core::branch::Branch;
 use weaver_core::branch as branch_mod;
-use crate::session::{self as session_mod, Session};
+use weaver_core::branch::Branch;
 
 pub async fn run(state: AppState) {
     tracing::info!("summary loop started");
@@ -59,10 +59,7 @@ fn is_due(session: &Session, interval: i64) -> bool {
         Some(d) => (Utc::now() - d).num_seconds() >= interval,
         None => true,
     };
-    let has_activity = match (
-        session.last_activity_at.as_deref().and_then(parse),
-        last_dt,
-    ) {
+    let has_activity = match (session.last_activity_at.as_deref().and_then(parse), last_dt) {
         (Some(activity), Some(summarized)) => activity > summarized,
         _ => true,
     };

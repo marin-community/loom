@@ -236,16 +236,28 @@ mod tests {
 
         let open = list_for_branch(&db, "/r", "feature", false).await.unwrap();
         assert_eq!(open.len(), 1);
-        assert_eq!(open_count_for_branch(&db, "/r", "feature").await.unwrap(), 1);
+        assert_eq!(
+            open_count_for_branch(&db, "/r", "feature").await.unwrap(),
+            1
+        );
 
         close(&db, i.id).await.unwrap();
-        assert_eq!(list_for_branch(&db, "/r", "feature", false).await.unwrap().len(), 0);
+        assert_eq!(
+            list_for_branch(&db, "/r", "feature", false)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
         let all = list_for_branch(&db, "/r", "feature", true).await.unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].status, "closed");
 
         reopen(&db, i.id).await.unwrap();
-        assert_eq!(open_count_for_branch(&db, "/r", "feature").await.unwrap(), 1);
+        assert_eq!(
+            open_count_for_branch(&db, "/r", "feature").await.unwrap(),
+            1
+        );
 
         delete(&db, i.id).await.unwrap();
         assert_eq!(list_for_repo(&db, "/r", true).await.unwrap().len(), 0);
@@ -271,21 +283,35 @@ mod tests {
 
         // The branch view sees only its claimed issue; the backlog sees only
         // the unclaimed one; the repo view sees both.
-        assert_eq!(list_for_branch(&db, "/r", "feature", false).await.unwrap().len(), 1);
+        assert_eq!(
+            list_for_branch(&db, "/r", "feature", false)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         let backlog = list_backlog(&db, "/r", false).await.unwrap();
         assert_eq!(backlog.len(), 1);
         assert_eq!(backlog[0].id, backlog_item.id);
         assert_eq!(list_for_repo(&db, "/r", false).await.unwrap().len(), 2);
 
         // Claiming moves a backlog item into a branch's working set.
-        set_claim(&db, backlog_item.id, Some("feature")).await.unwrap();
+        set_claim(&db, backlog_item.id, Some("feature"))
+            .await
+            .unwrap();
         assert_eq!(list_backlog(&db, "/r", false).await.unwrap().len(), 0);
-        assert_eq!(open_count_for_branch(&db, "/r", "feature").await.unwrap(), 2);
+        assert_eq!(
+            open_count_for_branch(&db, "/r", "feature").await.unwrap(),
+            2
+        );
 
         // Teardown releases every claim back to the backlog (issues survive).
         let released = unclaim_branch(&db, "/r", "feature").await.unwrap();
         assert_eq!(released, 2);
-        assert_eq!(open_count_for_branch(&db, "/r", "feature").await.unwrap(), 0);
+        assert_eq!(
+            open_count_for_branch(&db, "/r", "feature").await.unwrap(),
+            0
+        );
         assert_eq!(list_backlog(&db, "/r", false).await.unwrap().len(), 2);
         assert_eq!(list_for_repo(&db, "/r", false).await.unwrap().len(), 2);
     }
@@ -298,6 +324,12 @@ mod tests {
         assert_eq!(list_for_repo(&db, "/a", false).await.unwrap().len(), 1);
         assert_eq!(open_count_for_repo(&db, "/a").await.unwrap(), 1);
         // Same branch name, different repo — must not bleed across.
-        assert_eq!(list_for_branch(&db, "/a", "feature", false).await.unwrap().len(), 1);
+        assert_eq!(
+            list_for_branch(&db, "/a", "feature", false)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

@@ -6,8 +6,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 pub use weaver_core::db::{
-    connect_in_memory as core_connect_in_memory, default_db_path, now_iso, run_dir, weaver_home,
-    Db,
+    connect_in_memory as core_connect_in_memory, default_db_path, now_iso, run_dir, weaver_home, Db,
 };
 
 const LOOM_SCHEMA: &str = r#"

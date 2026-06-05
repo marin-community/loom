@@ -75,7 +75,9 @@ pub async fn ensure_excluded(repo_root: &Path, pattern: &str) -> Result<()> {
     let info = PathBuf::from(common).join("info");
     tokio::fs::create_dir_all(&info).await.ok();
     let exclude = info.join("exclude");
-    let current = tokio::fs::read_to_string(&exclude).await.unwrap_or_default();
+    let current = tokio::fs::read_to_string(&exclude)
+        .await
+        .unwrap_or_default();
     if current.lines().any(|l| l.trim() == pattern) {
         return Ok(());
     }
@@ -96,7 +98,12 @@ pub async fn current_branch(dir: &Path) -> Result<String> {
 pub async fn branch_exists(dir: &Path, branch: &str) -> bool {
     git(
         dir,
-        &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")],
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
     )
     .await
     .is_ok()
@@ -105,11 +112,7 @@ pub async fn branch_exists(dir: &Path, branch: &str) -> bool {
 /// Create a new worktree at `path` on a new `branch` forked from `base`.
 pub async fn worktree_add(repo_root: &Path, path: &Path, branch: &str, base: &str) -> Result<()> {
     let path = path.to_string_lossy();
-    git(
-        repo_root,
-        &["worktree", "add", "-b", branch, &path, base],
-    )
-    .await?;
+    git(repo_root, &["worktree", "add", "-b", branch, &path, base]).await?;
     tracing::info!(%branch, base, path = %path, "worktree created");
     Ok(())
 }
@@ -229,7 +232,9 @@ async fn temp_index(work_dir: &Path) -> Result<PathBuf> {
     );
     let dst = std::env::temp_dir().join(unique);
     if tokio::fs::try_exists(&src).await.unwrap_or(false) {
-        tokio::fs::copy(&src, &dst).await.context("copying git index")?;
+        tokio::fs::copy(&src, &dst)
+            .await
+            .context("copying git index")?;
     }
     Ok(dst)
 }
@@ -299,7 +304,13 @@ pub struct ChangedFile {
 pub async fn list_files(work_dir: &Path) -> Result<Vec<String>> {
     let out = git(
         work_dir,
-        &["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
     )
     .await?;
     let mut files: Vec<String> = out

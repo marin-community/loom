@@ -216,9 +216,12 @@ pub async fn summarize(work_dir: &Path, command: &str, diff: &str) -> Result<Str
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(diff.as_bytes()).await;
     }
-    let out = tokio::time::timeout(std::time::Duration::from_secs(180), child.wait_with_output())
-        .await
-        .context("claude summary timed out")??;
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(180),
+        child.wait_with_output(),
+    )
+    .await
+    .context("claude summary timed out")??;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -286,7 +289,10 @@ mod tests {
 
     #[test]
     fn combine_args_layers_model_and_effort_onto_base() {
-        assert_eq!(combine_args("", "opus", "high"), "--model opus --effort high");
+        assert_eq!(
+            combine_args("", "opus", "high"),
+            "--model opus --effort high"
+        );
         assert_eq!(combine_args("--verbose", "", ""), "--verbose");
         assert_eq!(combine_args("", "", "max"), "--effort max");
         assert_eq!(combine_args("", "haiku", ""), "--model haiku");
