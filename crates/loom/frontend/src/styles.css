@@ -1,4 +1,8 @@
 @import "tailwindcss";
+/* Rendered-markdown typography for the file browser's Preview mode. Split out
+   so the viewer styles live next to `markdown.ts`/`MarkdownView.vue`; it relies
+   on the semantic tokens declared below. */
+@import "./markdown.css";
 
 /* Manual (class-based) dark mode: `dark:` applies when <html> has `.dark`,
    rather than tracking the OS preference. theme.ts toggles the class. */
