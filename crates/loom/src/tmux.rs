@@ -116,6 +116,18 @@ pub async fn capture(name: &str, history: usize) -> Result<String> {
     run(&args).await
 }
 
+/// Cleanly detach a single client identified by its controlling tty (e.g.
+/// `/dev/pts/5`). This is the principled way to end a `tmux attach`: the server
+/// tells that client to detach and the `tmux attach` process exits 0 on its own,
+/// without the disconnect forwarding a stray Ctrl-D (EOF) into the pane — which
+/// is what kills a shell session when a browser terminal closes abruptly.
+/// Best-effort: a missing client (already gone) is not an error for our purposes.
+pub async fn detach_client(tty: &str) -> Result<()> {
+    // `-t <tty>` targets the client whose controlling terminal is `tty`.
+    let _ = raw(&["detach-client", "-t", tty]).await;
+    Ok(())
+}
+
 pub async fn kill_session(name: &str) -> Result<()> {
     // Ignore "session not found"; the goal is just for it to be gone.
     tracing::debug!(session = name, "running tmux kill-session");

@@ -965,6 +965,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "futures-util",
+ "libc",
  "portable-pty",
  "rand",
  "reqwest",

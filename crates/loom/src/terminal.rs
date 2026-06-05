@@ -19,6 +19,7 @@
 //! dropped.
 
 use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
 
 use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
@@ -194,7 +195,7 @@ fn open_attach(target: &str) -> anyhow::Result<Attach> {
 }
 
 /// Pump bytes between the WebSocket and a freshly-attached PTY until either side
-/// closes, then tear down — killing only the `tmux attach` client, never the
+/// closes, then tear down — detaching only the `tmux attach` client, never the
 /// session (so the agent keeps running detached and a refresh reconnects).
 async fn bridge(mut socket: WebSocket, target: String) -> anyhow::Result<()> {
     let Attach {
@@ -217,6 +218,25 @@ async fn bridge(mut socket: WebSocket, target: String) -> anyhow::Result<()> {
             return Err(e);
         }
     };
+
+    // The slave pty path (e.g. `/dev/pts/5`) is this attach client's controlling
+    // tty as tmux sees it — captured now so teardown can detach exactly this
+    // client by tty.
+    let client_tty = master
+        .tty_name()
+        .and_then(|p| p.to_str().map(str::to_owned));
+
+    // Keep `master` owned by *this* scope, not the input pump, so it outlives the
+    // tmux client. This matters on disconnect: if the pty master is torn down
+    // while `tmux attach` is still attached, tmux reacts to its terminal going
+    // away by forwarding a stray Ctrl-D (EOF) to the pane — which a shell at its
+    // prompt reads as end-of-input and exits on, destroying the whole session on
+    // nothing more than a browser tab closing. So we detach the client first
+    // (while the pty is intact) and only drop the master once the client is gone
+    // (see teardown). The input pump just borrows the master (behind a mutex) to
+    // apply resizes.
+    let master = Arc::new(Mutex::new(master));
+    let master_for_resize = Arc::clone(&master);
 
     // PTY output → ws: blocking reader thread → bounded mpsc → async sink.
     let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(CHANNEL_BOUND);
@@ -263,6 +283,16 @@ async fn bridge(mut socket: WebSocket, target: String) -> anyhow::Result<()> {
 
     // Input pump: decode each frame into the bytes to forward to the PTY (a
     // resize is applied inline and forwards nothing), then send once.
+    //
+    // When the socket closes, this is also where we *first* learn the viewer is
+    // gone — and it is the right place to detach the tmux client, BEFORE any of
+    // the pty fds are torn down. Detaching here (server-driven, while the client
+    // terminal is still fully intact) makes `tmux attach` exit cleanly. If we
+    // instead waited for the teardown below, the input pump would already have
+    // ended — dropping `in_tx`/`master_for_resize` and disturbing the client
+    // terminal — and tmux can react to that disturbance by forwarding a stray
+    // Ctrl-D (EOF) to the pane, which exits the shell and kills the session.
+    let in_task_tty = client_tty.clone();
     let mut in_task = tokio::spawn(async move {
         while let Some(msg) = stream.next().await {
             let input: Vec<u8> = match msg {
@@ -276,12 +306,14 @@ async fn bridge(mut socket: WebSocket, target: String) -> anyhow::Result<()> {
                         OP_RESIZE if payload.len() == 5 => {
                             let cols = u16::from_be_bytes([payload[1], payload[2]]).clamp(1, 1000);
                             let rows = u16::from_be_bytes([payload[3], payload[4]]).clamp(1, 1000);
-                            let _ = master.resize(PtySize {
-                                rows,
-                                cols,
-                                pixel_width: 0,
-                                pixel_height: 0,
-                            });
+                            if let Ok(m) = master_for_resize.lock() {
+                                let _ = m.resize(PtySize {
+                                    rows,
+                                    cols,
+                                    pixel_width: 0,
+                                    pixel_height: 0,
+                                });
+                            }
                             continue;
                         }
                         _ => continue, // malformed resize / unknown opcode: drop
@@ -289,15 +321,19 @@ async fn bridge(mut socket: WebSocket, target: String) -> anyhow::Result<()> {
                 }
                 // Tolerate text frames as raw keystrokes (no opcode prefix).
                 Ok(Message::Text(t)) => t.as_str().as_bytes().to_vec(),
-                Ok(Message::Close(_)) => break,
+                Ok(Message::Close(_)) | Err(_) => break,
                 Ok(_) => continue, // Ping/Pong are handled by axum
-                Err(_) => break,
             };
             if in_tx.send(input).await.is_err() {
                 break;
             }
         }
-        // Dropping `in_tx` (and `master`) here ends the writer thread.
+        // The viewer is gone. Detach our tmux client NOW, while every pty fd is
+        // still open and the client terminal is undisturbed, so `tmux attach`
+        // exits cleanly without forwarding a stray Ctrl-D to the pane. Only then
+        // does this task return, dropping `in_tx` (which ends the writer thread)
+        // and `master_for_resize` (the bridge keeps the master alive regardless).
+        detach_attached_client(in_task_tty.as_deref()).await;
     });
 
     // Whichever pump finishes first, abort the other.
@@ -306,14 +342,31 @@ async fn bridge(mut socket: WebSocket, target: String) -> anyhow::Result<()> {
         _ = &mut in_task => out_task.abort(),
     }
 
-    // Teardown (ordered, normative — each unit has a definite cause of death):
-    //   1. select! returned: one async pump finished, the other is aborted.
-    //   2. kill the `tmux attach` child. This closes the last slave fd, so the
-    //      master reader gets EIO → Ok(0) and the reader thread exits even if the
-    //      agent is idle (a parked read() would otherwise leak the thread + fd).
-    //   3. wait() on a blocking task so a tokio worker is never blocked.
-    //   4. join both blocking threads so nothing outlives this connection.
-    let _ = killer.kill();
+    // Teardown. End ONLY this attach client, never the session. The input pump
+    // already issued the clean, server-driven `detach-client` (above) while the
+    // pty was intact; this is the ordered finish:
+    //
+    //   1. Backstop detach: if the *output* pump finished first, the input pump
+    //      was aborted before it could detach — so detach here. A no-op if the
+    //      pump already did it.
+    //   2. Wait, bounded, for `tmux attach` to exit. Escalate SIGHUP then SIGKILL
+    //      only for a wedged client that ignores the detach.
+    //   3. Drop the master — safe now that the client is gone (no one is attached
+    //      to receive the pty-close EOF).
+    //   4. Reap on a blocking task so no tokio worker is blocked; join both I/O
+    //      threads so nothing outlives this connection.
+    detach_attached_client(client_tty.as_deref()).await;
+    if !wait_for_exit(&mut child, std::time::Duration::from_millis(750)).await {
+        let _ = killer.kill(); // SIGHUP
+        if !wait_for_exit(&mut child, std::time::Duration::from_millis(250)).await {
+            if let Some(pid) = child.process_id() {
+                // SAFETY: just a signal to a pid we own; ESRCH if already reaped.
+                unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            }
+            wait_for_exit(&mut child, std::time::Duration::from_millis(250)).await;
+        }
+    }
+    drop(master);
     let _ = tokio::task::spawn_blocking(move || {
         let _ = child.wait();
     })
@@ -324,6 +377,34 @@ async fn bridge(mut socket: WebSocket, target: String) -> anyhow::Result<()> {
     })
     .await;
     Ok(())
+}
+
+/// Detach the single `tmux attach` client whose controlling tty is `tty`
+/// (`None` is a no-op). Server-driven detach is the clean way to end the
+/// browser bridge: the client process exits on its own without its terminal
+/// teardown forwarding a stray Ctrl-D to the pane.
+async fn detach_attached_client(tty: Option<&str>) {
+    if let Some(tty) = tty {
+        let _ = tmux::detach_client(tty).await;
+    }
+}
+
+/// Poll `child` for exit up to `timeout` without blocking a tokio worker
+/// (`try_wait` is non-blocking). Returns whether it exited in time.
+async fn wait_for_exit(
+    child: &mut Box<dyn portable_pty::Child + Send + Sync>,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Ok(Some(_)) = child.try_wait() {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 #[cfg(test)]
