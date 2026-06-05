@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 
-// The agent-declared attention axis: does this session need me? Green = ok,
-// amber = wants attention, red = blocked / needs help. Distinct from the
-// mechanical lifecycle StatusBadge. Solid status hues (no semantic token
-// exists for green/amber/red) read on both light and dark themes.
+// The agent-declared attention axis: does this session need me? This is the ONE
+// reserved loud signal in the UI. `ok` is intentionally a quiet ghost chip — it
+// should recede so the loud amber/red states are the only thing that pops.
+// Colors come from semantic tokens (attn/block) so they auto-swap light/dark.
 const props = defineProps<{ level: string; note?: string }>();
 
 interface Style {
@@ -14,13 +14,25 @@ interface Style {
 }
 
 const styles: Record<string, Style> = {
-  ok: { label: 'OK', cls: 'bg-emerald-700 text-emerald-50', dot: 'bg-emerald-300' },
-  attention: { label: 'Attention', cls: 'bg-amber-600 text-amber-50', dot: 'bg-amber-200' },
-  blocked: { label: 'Blocked', cls: 'bg-red-700 text-red-50', dot: 'bg-red-300' },
+  ok: {
+    label: 'OK',
+    cls: 'bg-transparent text-faint ring-1 ring-inset ring-line',
+    dot: 'bg-faint',
+  },
+  attention: {
+    label: 'Attention',
+    cls: 'bg-attn text-attn-fg',
+    dot: 'bg-attn-fg/80',
+  },
+  blocked: {
+    label: 'Blocked',
+    cls: 'bg-block text-block-fg',
+    dot: 'bg-block-fg/80',
+  },
 };
 
 const style = computed(
-  () => styles[props.level] ?? { label: props.level, cls: 'bg-subtle text-fg', dot: 'bg-faint' },
+  () => styles[props.level] ?? { label: props.level, cls: 'bg-transparent text-faint ring-1 ring-inset ring-line', dot: 'bg-faint' },
 );
 </script>
 

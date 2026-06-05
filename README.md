@@ -101,8 +101,8 @@ backed sessions drive it via Claude Code hooks installed into
 `weaver hook --event {working|waiting|idle|session-start}`, writing an `events`
 row the monitor consumes on its next tick; any hook means the agent process is
 alive → `running`. When Claude blocks asking the user (the `waiting`/Notification
-hook), the monitor snapshots the tmux pane into `pending_prompt` so the UI can
-show what the agent is waiting on.
+hook), the monitor raises the branch's **attention** to `attention`; the live
+prompt itself is read straight from the terminal, one tab away.
 
 The **attention** axis is the agent's own signal of whether it needs you:
 `ok` (going fine, or blocked on something external like a CI run or PR review),

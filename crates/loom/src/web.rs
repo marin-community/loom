@@ -31,7 +31,6 @@
 //!   "work_dir": "/path/to/.worktrees/foo",
 //!   "tmux_session": "weaver-abcd1234",
 //!   "agent_kind": "claude",
-//!   "pending_prompt": "",
 //!   "github_repo": null,
 //!   "last_activity_at": "...",
 //!   "created_at": "...",
@@ -221,7 +220,6 @@ pub struct SessionView {
     pub agent_kind: String,
     pub model: String,
     pub effort: String,
-    pub pending_prompt: String,
     pub github_repo: Option<String>,
     pub last_activity_at: String,
     pub created_at: String,
@@ -240,7 +238,6 @@ impl SessionView {
             agent_kind: session.agent_kind.clone(),
             model: session.model.clone(),
             effort: session.effort.clone(),
-            pending_prompt: session.pending_prompt.clone(),
             github_repo: session.github_repo.clone(),
             last_activity_at: session
                 .last_activity_at
@@ -964,17 +961,12 @@ async fn archive_session(
     }
     session_mod::set_status(&st.db, &session.id, "archived").await?;
     // An archived session is finished with: its agent is gone, so it can no
-    // longer "need me". Clear any lingering attention (and the snapshotted
-    // pending prompt) so the dashboard stops flagging a torn-down workstream.
-    // Attention is the agent's live "does this need a human?" signal; nothing
-    // is live here any more. The history (goal, notes, description) is kept.
+    // longer "need me". Clear any lingering attention so the dashboard stops
+    // flagging a torn-down workstream. Attention is the agent's live "does this
+    // need a human?" signal; nothing is live here any more. The history (goal,
+    // notes, description) is kept.
     if branch.attention != branch_mod::DEFAULT_ATTENTION {
         branch_mod::set_attention(&st.db, &branch.id, branch_mod::DEFAULT_ATTENTION).await?;
-    }
-    if !session.pending_prompt.is_empty() {
-        session_mod::set_pending_prompt(&st.db, &session.id, "")
-            .await
-            .ok();
     }
     events::record(
         &st.db,

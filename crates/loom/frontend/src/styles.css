@@ -24,6 +24,27 @@
   --color-accent-fg: var(--accent-fg);
   --color-code: var(--code);
   --color-code-fg: var(--code-fg);
+
+  /* Attention axis — the ONE reserved "needs a human" signal. Amber = wants
+     attention, red = blocked. These are the only loud hues in the UI; every
+     lifecycle/status surface stays neutral so this truly pops. */
+  --color-attn: var(--attn);
+  --color-attn-fg: var(--attn-fg);
+  --color-attn-soft: var(--attn-soft);
+  --color-attn-line: var(--attn-line);
+  --color-block: var(--block);
+  --color-block-fg: var(--block-fg);
+  --color-block-soft: var(--block-soft);
+  --color-block-line: var(--block-line);
+
+  /* Type. Dependency-free system stacks (no CDN/@fontsource — must work
+     offline). Sans for prose; a characterful mono for identifiers, refs,
+     ids, branch names, timestamps and all metadata. */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "Cascadia Mono", "SF Mono",
+    "JetBrains Mono", "Fira Code", "Roboto Mono", Menlo, Consolas,
+    "DejaVu Sans Mono", monospace;
 }
 
 /* Light palette (default). */
@@ -42,6 +63,16 @@
   --accent-fg: #ffffff;
   --code: #f1f5f9;          /* preformatted blocks (diffs, prompts) */
   --code-fg: #334155;       /* slate-700 */
+
+  /* Attention (amber) + Blocked (red) — the reserved loud signal. */
+  --attn: #b45309;          /* amber-700 — loud fill */
+  --attn-fg: #fffbeb;       /* amber-50  — text on fill */
+  --attn-soft: #fef3c7;     /* amber-100 — row wash */
+  --attn-line: #f59e0b;     /* amber-500 — left accent border */
+  --block: #b91c1c;         /* red-700 */
+  --block-fg: #fef2f2;      /* red-50 */
+  --block-soft: #fee2e2;    /* red-100 */
+  --block-line: #ef4444;    /* red-500 */
 }
 
 /* Dark palette — soft slate, not pure black. */
@@ -60,10 +91,101 @@
   --accent-fg: #ffffff;
   --code: #0f172a;          /* slate-900 */
   --code-fg: #cbd5e1;       /* slate-300 */
+
+  /* Attention (amber) + Blocked (red) — tuned for the slate-900 canvas. */
+  --attn: #d97706;          /* amber-600 */
+  --attn-fg: #fffbeb;       /* amber-50 */
+  --attn-soft: #78350f33;   /* amber-900 @ 20% — subtle row wash on dark */
+  --attn-line: #f59e0b;     /* amber-500 */
+  --block: #dc2626;         /* red-600 */
+  --block-fg: #fef2f2;      /* red-50 */
+  --block-soft: #7f1d1d33;  /* red-900 @ 20% */
+  --block-line: #ef4444;    /* red-500 */
 }
 
 html,
 body {
   margin: 0;
   background: var(--canvas);
+  font-family: var(--font-sans);
+}
+
+/* ── Motion ─────────────────────────────────────────────────────────────────
+   CSS-only. Reduced-motion users get the final state with no animation. */
+@media (prefers-reduced-motion: no-preference) {
+  /* One staggered list reveal on load. Each item sets --i to its index:
+       <tr class="stagger-in" :style="{ '--i': i }">
+     Delay is capped so long fleets don't crawl in. */
+  @keyframes loom-stagger-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .stagger-in {
+    opacity: 0;
+    animation: loom-stagger-in 0.28s ease-out forwards;
+    /* min(index, 12) * 30ms — caps cumulative delay at ~360ms. */
+    animation-delay: calc(min(var(--i, 0), 12) * 30ms);
+  }
+
+  /* Subtle, slow breath for rows that need a human. Pair with the amber/red
+     row wash (bg-attn-soft / border-l-2 border-attn-line). Not a flash. */
+  @keyframes loom-pulse-attention {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.72;
+    }
+  }
+
+  .pulse-attention {
+    animation: loom-pulse-attention 2.8s ease-in-out infinite;
+  }
+}
+
+/* Reduced motion: ensure staggered items are visible (no animation ran). */
+@media (prefers-reduced-motion: reduce) {
+  .stagger-in {
+    opacity: 1;
+  }
+}
+
+/* Reusable presentation primitives. Token-only, so they're auto light/dark
+   correct. Both pages use these instead of re-typing the class run. */
+
+/* Mono metadata chip — for ids, refs, agent/model, paths in the header run. */
+@utility meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  border-radius: 0.25rem;
+  background: var(--input);
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1rem;
+  padding: 0.0625rem 0.375rem;
+  white-space: nowrap;
+}
+
+/* Neutral pill — generic count/label pill (filter counts, issue counts,
+   the "N archived" reveal chip). Lifecycle StatusBadge keeps its own markup. */
+@utility pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  border-radius: 9999px;
+  background: var(--subtle);
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1rem;
+  padding: 0.0625rem 0.5rem;
 }

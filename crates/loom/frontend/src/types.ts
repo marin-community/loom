@@ -34,7 +34,6 @@ export interface Session {
   model: string;
   /** Reasoning effort ('', 'low', 'medium', 'high', 'xhigh', 'max') — `--effort`. */
   effort: string;
-  pending_prompt: string;
   github_repo: string | null;
   last_activity_at: string;
   created_at: string;

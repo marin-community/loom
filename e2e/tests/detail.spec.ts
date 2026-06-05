@@ -1,40 +1,50 @@
 import { test, expect } from '../fixtures/weaver';
 
 test.describe('session detail view', () => {
-  test('renders goal, description, status and branch', async ({ page, weaver }) => {
+  test('renders goal, status and identity metadata', async ({ page, weaver }) => {
     const s = await weaver.seedSession({ goal: 'Render my details', name: 'detail-task' });
 
     await page.goto(`${weaver.baseUrl}/#/s/${s.id}`);
 
     await expect(page.getByRole('heading', { name: 'detail-task' })).toBeVisible();
-    // Goal textarea is the first textarea on the page.
-    await expect(page.locator('textarea').first()).toHaveValue('Render my details');
-    // Metadata line includes id, branch and base branch.
-    await expect(page.getByText(s.id, { exact: false })).toBeVisible();
-    await expect(page.getByText(s.branch.branch, { exact: false })).toBeVisible();
-    await expect(page.getByText(`base ${s.branch.base_branch}`, { exact: false })).toBeVisible();
-    // Status badge is present in the header.
+    // Status (lifecycle) badge is present in the header.
     await expect(page.getByTestId('status-badge').first()).toBeVisible();
+
+    // The goal is the agent's launch prompt — read-only prose on the Overview
+    // tab, not an editable field.
+    await page.getByRole('button', { name: 'Overview' }).click();
+    await expect(page.getByText('Render my details')).toBeVisible();
+
+    // Identity metadata (id, branch, base) lives behind the ⌄ details popover,
+    // not cluttering the header. Scope to the popover and match exactly so the
+    // id doesn't also match the `weaver-<id>` tmux line.
+    await page.getByRole('button', { name: 'details' }).click();
+    const details = page.getByTestId('details-popover');
+    await expect(details.getByText(s.id, { exact: true })).toBeVisible();
+    await expect(details.getByText(s.branch.branch, { exact: true })).toBeVisible();
+    await expect(details.getByText(`base ${s.branch.base_branch}`)).toBeVisible();
   });
 
-  test('editing the goal and saving persists across reload', async ({ page, weaver }) => {
-    const s = await weaver.seedSession({ goal: 'Original goal', name: 'edit-task' });
+  test('Mark OK acknowledges the agent’s attention', async ({ page, weaver }) => {
+    const s = await weaver.seedSession({ goal: 'Acknowledge me', name: 'ack-task' });
+    // The agent raises its attention; the human's only write here is to clear it.
+    await weaver.setStatus(s, 'attention', 'waiting on review');
 
     await page.goto(`${weaver.baseUrl}/#/s/${s.id}`);
 
-    const goalArea = page.locator('textarea').first();
-    await expect(goalArea).toHaveValue('Original goal');
-    await goalArea.fill('Updated goal text');
-    await page.getByRole('button', { name: 'Save goal' }).click();
-    await expect(page.getByText('Goal saved.')).toBeVisible();
+    // Attention is shown once, on the conversation-state strip, with the one
+    // human control beside it.
+    const conv = page.getByTestId('conversation-state');
+    await expect(conv).toHaveText(/needs attention/i);
 
-    // Server-side state changed.
+    await page.getByTestId('acknowledge').click();
+
+    // The strip clears (and the acknowledge control goes away)…
+    await expect(conv).not.toHaveText(/needs attention/i);
+    await expect(page.getByTestId('acknowledge')).toHaveCount(0);
+    // …and it's cleared server-side.
     const updated = await weaver.getSession(s.id);
-    expect(updated.branch.goal).toBe('Updated goal text');
-
-    // And it survives a full reload.
-    await page.reload();
-    await expect(page.locator('textarea').first()).toHaveValue('Updated goal text');
+    expect(updated.branch.attention).toBe('ok');
   });
 
   test('renders an interactive terminal that connects to the agent', async ({

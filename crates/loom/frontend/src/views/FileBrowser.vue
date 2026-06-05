@@ -5,8 +5,18 @@ import { get } from '../api';
 import type { Session, FileTree, FileContent } from '../types';
 import { theme } from '../theme';
 import { loadMonaco, monacoTheme, languageForPath } from '../monaco';
+import { useRouter } from 'vue-router';
+import SessionTabs from '../components/SessionTabs.vue';
 
 const props = defineProps<{ id: string }>();
+const router = useRouter();
+
+// Selecting a non-Files tab from the file browser returns to the session page,
+// which always lands on its default (Terminal) surface — cross-surface tab
+// memory isn't worth a query param.
+function selectTab() {
+  router.push(`/s/${props.id}`);
+}
 
 // ---------------------------------------------------------------------------
 // Tree model — a flat path list from the API assembled into a folder tree.
@@ -358,13 +368,13 @@ onUnmounted(teardownEditors);
 
 <template>
   <div class="flex flex-col">
-    <!-- Header -->
+    <!-- Header — the shared session sub-nav (Files active) over the title row. -->
+    <SessionTabs :tab="'files'" :id="props.id" :issue-count="0" @select="selectTab" />
     <div class="flex items-center gap-3 mb-3">
-      <router-link :to="`/s/${props.id}`" class="text-muted hover:text-fg text-sm">← session</router-link>
       <h1 class="text-lg font-semibold truncate">
         {{ session?.branch.title || session?.branch.name || 'Files' }}
       </h1>
-      <span v-if="changedCount" class="text-xs text-amber-500">{{ changedCount }} changed</span>
+      <span v-if="changedCount" class="text-xs text-attn">{{ changedCount }} changed</span>
       <button
         class="ml-auto rounded bg-subtle hover:bg-subtle-hover px-2 py-1 text-xs"
         @click="refresh"

@@ -25,7 +25,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     model              TEXT NOT NULL DEFAULT '',
     effort             TEXT NOT NULL DEFAULT '',
     status             TEXT NOT NULL,
-    pending_prompt     TEXT NOT NULL DEFAULT '',
     github_repo        TEXT,
     last_activity_at   TEXT,
     created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))

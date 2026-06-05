@@ -22,8 +22,8 @@ an agent and they are both worse than a terminal:
   (degraded: line-at-a-time, no keys, no TUI, no feedback except the next
   screenshot).
 
-The structured/status data plane (working / waiting / idle / `pending_prompt`)
-already comes from the **weaver hooks → events → SSE** pipeline. The browser
+The structured/status data plane (working / waiting / idle → lifecycle +
+attention) already comes from the **weaver hooks → events → SSE** pipeline. The browser
 stream's *only* job is interacting with a PTY. So we collapse the two degraded
 input paths into one real one and delete the rest.
 

@@ -86,7 +86,6 @@ pub async fn run(state: AppState) {
                         "tmux session ended; marking orphaned"
                     );
                     let _ = session_mod::set_status(&state.db, &session.id, "orphaned").await;
-                    let _ = session_mod::set_pending_prompt(&state.db, &session.id, "").await;
                     let _ = events::record(
                         &state.db,
                         &state.bus,
@@ -127,24 +126,17 @@ pub async fn run(state: AppState) {
 /// (this also promotes a freshly-`launching` session). Beyond that:
 ///
 /// * `working` (a prompt was submitted — the user is engaged) clears attention
-///   back to `ok` and drops any pending prompt.
+///   back to `ok`.
 /// * `waiting` (Claude is blocked asking the user) raises attention to
-///   `attention` and snapshots the pane as the pending prompt.
+///   `attention`.
 /// * `idle` (a turn ended) leaves attention untouched — a finished-but-fine
 ///   agent must not be mistaken for one that needs the user. If it actually
 ///   needs something it will have said so via `weaver set-status`.
 async fn apply_hook(state: &AppState, branch_id: &str, kind: &str) -> Option<i64> {
-    enum Prompt {
-        Capture,
-        Clear,
-        Leave,
-    }
-    let (attention, prompt): (Option<&str>, Prompt) = match kind {
-        "working" => (Some("ok"), Prompt::Clear),
-        // The captured pane (the pending prompt) is what conveys "waiting for
-        // input"; the hook just raises the level.
-        "waiting" => (Some("attention"), Prompt::Capture),
-        "idle" => (None, Prompt::Leave),
+    let attention: Option<&str> = match kind {
+        "working" => Some("ok"),
+        "waiting" => Some("attention"),
+        "idle" => None,
         // `session-start` and anything unknown carry no status signal.
         _ => return None,
     };
@@ -160,20 +152,6 @@ async fn apply_hook(state: &AppState, branch_id: &str, kind: &str) -> Option<i64
         let _ = session_mod::set_status(&state.db, &session.id, "running").await;
     }
     let _ = session_mod::touch(&state.db, &session.id).await;
-
-    match prompt {
-        Prompt::Capture => {
-            let p = tmux::capture(&session.tmux_session, 0)
-                .await
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default();
-            let _ = session_mod::set_pending_prompt(&state.db, &session.id, &p).await;
-        }
-        Prompt::Clear => {
-            let _ = session_mod::set_pending_prompt(&state.db, &session.id, "").await;
-        }
-        Prompt::Leave => {}
-    }
 
     // Attention, only when the hook carries a signal and the level differs.
     let mut attention_changed: Option<&str> = None;

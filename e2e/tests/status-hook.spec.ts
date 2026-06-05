@@ -6,7 +6,8 @@ test.describe('status reflects hook and attention events', () => {
 
     await page.goto(`${weaver.baseUrl}/#/s/${s.id}`);
     const status = page.getByTestId('status-badge').first();
-    const attention = page.getByTestId('attention-badge').first();
+    // The agent's attention is shown once, on the conversation-state strip.
+    const conv = page.getByTestId('conversation-state');
     await expect(status).toBeVisible();
 
     // Any hook means the agent process is alive → lifecycle `running`.
@@ -15,18 +16,18 @@ test.describe('status reflects hook and attention events', () => {
 
     // A `waiting` hook (Claude blocked on the user) raises the attention axis.
     await weaver.hook(s, 'waiting');
-    await expect(attention).toHaveText(/attention/i);
+    await expect(conv).toHaveText(/needs attention/i);
   });
 
   test('detail view: weaver set-status sets level + message via SSE', async ({ page, weaver }) => {
     const s = await weaver.seedSession({ goal: 'Declare my status', name: 'status-detail' });
 
     await page.goto(`${weaver.baseUrl}/#/s/${s.id}`);
-    const attention = page.getByTestId('attention-badge').first();
-    await expect(attention).toBeVisible();
+    const conv = page.getByTestId('conversation-state');
+    await expect(conv).toBeVisible();
 
     await weaver.setStatus(s, 'blocked', 'tests failing, need help');
-    await expect(attention).toHaveText(/blocked/i);
+    await expect(conv).toHaveText(/blocked/i);
     await expect(page.getByTestId('status-message')).toHaveText(/tests failing, need help/i);
   });
 

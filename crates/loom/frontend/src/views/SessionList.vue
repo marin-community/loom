@@ -5,6 +5,8 @@ import type { Session, RecentRepo, RepoBranch } from '../types';
 import StatusBadge from '../components/StatusBadge.vue';
 import AttentionBadge from '../components/AttentionBadge.vue';
 import ScratchPicker from '../components/ScratchPicker.vue';
+import { timeAgo } from '../lib/time';
+import { levelOf, messageOf } from '../lib/sessionState';
 
 const sessions = ref<Session[]>([]);
 
@@ -12,36 +14,54 @@ const sessions = ref<Session[]>([]);
 type AttentionFilter = 'all' | 'attention' | 'ok';
 const filter = ref<AttentionFilter>('all');
 
-// The agent-declared attention level, with two guards: an unset value counts as
-// 'ok' (older rows), and an archived session is forced to 'ok' — its agent is
-// gone, so it can't need a human, regardless of any attention left on the
-// branch. Mirrors the backend, which clears attention when a session is
-// archived; this also keeps pre-existing archived rows quiet.
-function levelOf(s: Session): string {
-  if (s.status === 'archived') return 'ok';
-  return s.branch.attention || 'ok';
+// Archived sessions are torn-down workstreams: kept for reference but clutter
+// the live fleet view. Hide them by default; a reveal chip brings them back.
+// They still show when there's nothing else to look at (an all-archived fleet),
+// so the list never reads as empty while archived rows exist.
+const showArchived = ref(false);
+
+const archivedCount = computed(
+  () => sessions.value.filter((s) => s.status === 'archived').length,
+);
+
+// Attention rank: blocked and attention both "need a human" and pin to the top;
+// ok sinks below. Within a rank, preserve the server order (most-recent-first),
+// so the sort is stable and rows don't jitter between 3s polls.
+function rank(s: Session): number {
+  const lvl = levelOf(s);
+  if (lvl === 'blocked') return 0;
+  if (lvl === 'attention') return 1;
+  return 2;
 }
 
-// The agent's current-state message (set with the level via `weaver set-status`)
-// shown beside the attention badge — suppressed for archived sessions so a
-// torn-down workstream doesn't keep displaying a stale message.
-function messageOf(s: Session): string {
-  return s.status === 'archived' ? '' : s.branch.description;
-}
+// The ordered, archived-aware base list: attention pinned to the top, archived
+// hidden unless revealed (or unless every session is archived — see above).
+const ordered = computed<Session[]>(() => {
+  const all = sessions.value;
+  const live = all.filter((s) => s.status !== 'archived');
+  // Hide archived by default; reveal on toggle; always show if nothing else.
+  const base = showArchived.value || live.length === 0 ? all : live;
+  // Stable sort by attention rank (Array.prototype.sort is stable in modern JS).
+  return [...base].sort((a, b) => rank(a) - rank(b));
+});
 
+// Counts reflect the full fleet (NOT the archived-hidden view) so the filter
+// chips read the true picture; levelOf() already forces archived → ok, keeping
+// "needs attention" honest.
 const counts = computed(() => {
   const c = { all: sessions.value.length, attention: 0, ok: 0 };
   for (const s of sessions.value) {
     if (levelOf(s) === 'ok') c.ok += 1;
-    else c.attention += 1; // 'attention' and 'blocked' both "need me"
+    else c.attention += 1; // 'attention' and 'blocked' both need a human
   }
   return c;
 });
 
+// Apply the attention filter on top of the ordered/archived-aware base list.
 const filteredSessions = computed(() => {
-  if (filter.value === 'all') return sessions.value;
-  if (filter.value === 'ok') return sessions.value.filter((s) => levelOf(s) === 'ok');
-  return sessions.value.filter((s) => levelOf(s) !== 'ok');
+  if (filter.value === 'all') return ordered.value;
+  if (filter.value === 'ok') return ordered.value.filter((s) => levelOf(s) === 'ok');
+  return ordered.value.filter((s) => levelOf(s) !== 'ok');
 });
 const recentRepos = ref<RecentRepo[]>([]);
 const error = ref('');
@@ -371,7 +391,7 @@ onUnmounted(() => clearInterval(timer));
             spellcheck="false"
             class="w-full rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent font-mono"
           />
-          <p v-if="branchesError" class="mt-1 text-xs text-red-400">{{ branchesError }}</p>
+          <p v-if="branchesError" class="mt-1 text-xs text-block">{{ branchesError }}</p>
           <ul
             v-if="branchFocused && branchMatches.length"
             data-testid="branch-options"
@@ -409,88 +429,121 @@ onUnmounted(() => clearInterval(timer));
       </button>
     </form>
 
-    <p v-if="error" class="mb-4 text-sm text-red-400">{{ error }}</p>
+    <p v-if="error" class="mb-4 text-sm text-block">{{ error }}</p>
 
     <p v-if="!sessions.length" class="text-muted text-sm">
       No sessions yet.
     </p>
 
-    <!-- Attention filter: jump straight to the sessions that need a human. -->
-    <div v-if="sessions.length" class="mb-3 inline-flex rounded border border-line text-xs overflow-hidden">
+    <div v-if="sessions.length" class="mb-3 flex items-center gap-3">
+      <!-- Attention filter: jump straight to the sessions that need a human. -->
+      <div class="inline-flex rounded border border-line text-xs overflow-hidden">
+        <button
+          v-for="opt in (['all', 'attention', 'ok'] as const)"
+          :key="opt"
+          type="button"
+          :data-testid="`filter-${opt}`"
+          :class="[
+            'px-3 py-1 border-l border-line first:border-l-0',
+            filter === opt ? 'bg-accent text-accent-fg' : 'bg-input text-muted hover:bg-subtle',
+          ]"
+          @click="filter = opt"
+        >
+          {{ opt === 'all' ? 'All' : opt === 'attention' ? 'Needs attention' : 'OK' }}
+          <span class="opacity-70">{{ counts[opt] }}</span>
+        </button>
+      </div>
+
+      <!-- Archived live below the fold: a quiet chip reveals/hides them. -->
       <button
-        v-for="opt in (['all', 'attention', 'ok'] as const)"
-        :key="opt"
+        v-if="archivedCount"
         type="button"
-        :data-testid="`filter-${opt}`"
+        :aria-pressed="showArchived"
         :class="[
-          'px-3 py-1 border-l border-line first:border-l-0',
-          filter === opt ? 'bg-accent text-accent-fg' : 'bg-input text-muted hover:bg-subtle',
+          'pill transition-colors',
+          showArchived ? 'ring-1 ring-inset ring-line text-fg' : 'hover:bg-subtle-hover',
         ]"
-        @click="filter = opt"
+        @click="showArchived = !showArchived"
       >
-        {{ opt === 'all' ? 'All' : opt === 'attention' ? 'Needs attention' : 'OK' }}
-        <span class="opacity-70">{{ counts[opt] }}</span>
+        {{ showArchived ? 'Hide' : 'Show' }} {{ archivedCount }} archived
       </button>
     </div>
 
     <!--
-      Two orthogonal status axes, one column each, no stacking:
-        · Status — the agent's single "does this need me?" signal: the
-          attention level plus its current-state message (weaver set-status)
-        · State  — the mechanical lifecycle: is the session working or not
-      Session (title + goal) describes the work itself.
+      One signal row per session. Left→right: the agent's single attention
+      signal, the dominant title, its muted current-state line, a neutral
+      lifecycle pill, and the mono branch ref pushed far-right. Attention rows
+      pin to the top (sort in script) and get a left accent-border + slow pulse;
+      ok rows stay quiet. Staggered reveal on load via --i.
     -->
-    <div v-if="sessions.length" class="overflow-x-auto rounded border border-line">
-      <table class="w-full border-collapse text-sm">
-        <thead>
-          <tr class="border-b border-line bg-surface text-left text-xs uppercase tracking-wide text-muted">
-            <th class="px-3 py-2 font-medium">Status</th>
-            <th class="px-3 py-2 font-medium">State</th>
-            <th class="px-3 py-2 font-medium">Session</th>
-            <th class="px-3 py-2 font-medium">Ref</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr
-            v-for="s in filteredSessions"
-            :key="s.id"
-            data-testid="session-card"
-            :data-session-id="s.id"
-            class="border-b border-line last:border-0 hover:bg-surface cursor-pointer"
-            @click="$router.push(`/s/${s.id}`)"
+    <ul v-if="sessions.length" class="overflow-hidden rounded border border-line bg-surface">
+      <li
+        v-for="(s, i) in filteredSessions"
+        :key="s.id"
+        data-testid="session-card"
+        :data-session-id="s.id"
+        :style="{ '--i': i }"
+        :class="[
+          'stagger-in group flex cursor-pointer items-start gap-3 border-b border-line px-3 py-3 last:border-0',
+          'min-h-[3.25rem] transition-colors hover:bg-subtle',
+          levelOf(s) === 'blocked'
+            ? 'border-l-2 border-l-block-line bg-block-soft pulse-attention'
+            : levelOf(s) === 'attention'
+              ? 'border-l-2 border-l-attn-line bg-attn-soft pulse-attention'
+              : '',
+        ]"
+        @click="$router.push(`/s/${s.id}`)"
+      >
+        <!-- Signal: the one reserved loud axis. -->
+        <div class="shrink-0 pt-0.5">
+          <AttentionBadge :level="levelOf(s)" :note="messageOf(s)" />
+        </div>
+
+        <!-- Title + current-state (the work, in prose). -->
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2">
+            <router-link
+              :to="`/s/${s.id}`"
+              class="truncate text-base font-semibold text-fg hover:text-accent"
+              @click.stop
+            >
+              {{ s.branch.title || s.branch.name }}
+            </router-link>
+            <!-- Lifecycle: demoted, neutral, mono pill (StatusBadge). -->
+            <StatusBadge :status="s.status" class="shrink-0" />
+          </div>
+
+          <!-- Current-state headline (agent's set-status message), else the goal. -->
+          <p
+            v-if="messageOf(s)"
+            class="mt-0.5 truncate text-sm text-muted"
           >
-            <td class="px-3 py-2 align-top">
-              <AttentionBadge :level="levelOf(s)" :note="messageOf(s)" />
-              <span v-if="messageOf(s)" class="mt-1 block max-w-[22rem] truncate text-xs text-muted">
-                {{ messageOf(s) }}
-              </span>
-            </td>
-            <td class="px-3 py-2 align-top">
-              <StatusBadge :status="s.status" />
-            </td>
-            <td class="px-3 py-2 align-top">
-              <router-link
-                :to="`/s/${s.id}`"
-                class="block max-w-[24rem] truncate font-medium text-fg hover:text-accent"
-                @click.stop
-              >
-                {{ s.branch.title || s.branch.name }}
-              </router-link>
-              <span v-if="s.branch.goal" class="block max-w-[24rem] truncate text-xs text-muted">
-                {{ s.branch.goal }}
-              </span>
-            </td>
-            <td class="px-3 py-2 align-top">
-              <div class="font-mono text-xs text-faint">
-                <span class="block truncate">{{ s.branch.branch }}</span>
-                <span v-if="s.branch.open_issue_count" class="text-muted">
-                  {{ s.branch.open_issue_count }} open issue{{ s.branch.open_issue_count === 1 ? '' : 's' }}
-                </span>
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+            {{ messageOf(s) }}
+          </p>
+          <p
+            v-if="s.branch.goal"
+            class="mt-0.5 truncate text-xs text-faint"
+          >
+            {{ s.branch.goal }}
+          </p>
+        </div>
+
+        <!-- Ref: machine identity, mono, pushed far-right and receding. -->
+        <div class="shrink-0 text-right">
+          <span class="block truncate font-mono text-xs text-faint">{{ s.branch.branch }}</span>
+          <router-link
+            v-if="s.branch.open_issue_count"
+            :to="`/s/${s.id}?tab=issues`"
+            class="font-mono text-xs text-muted hover:text-accent"
+            @click.stop
+          >
+            {{ s.branch.open_issue_count }} open issue{{ s.branch.open_issue_count === 1 ? '' : 's' }}
+          </router-link>
+          <span v-if="s.last_activity_at" class="mt-0.5 block text-xs text-faint">
+            {{ timeAgo(s.last_activity_at) }}
+          </span>
+        </div>
+      </li>
+    </ul>
   </div>
 </template>

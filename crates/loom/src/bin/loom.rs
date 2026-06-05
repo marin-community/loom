@@ -611,13 +611,6 @@ fn print_session(ws: &Value) {
         }
     }
     println!("  activity: {}", str_field(ws, "last_activity_at"));
-    let prompt = str_field(ws, "pending_prompt");
-    if !prompt.is_empty() {
-        println!("  waiting on:");
-        for line in prompt.lines() {
-            println!("    {line}");
-        }
-    }
 }
 
 async fn cmd_attach(key: String) -> Result<()> {

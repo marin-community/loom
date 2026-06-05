@@ -1,8 +1,8 @@
 {
   "private": true,
   "scripts": {
-    "build": "rspack build",
-    "dev": "rspack serve"
+    "build": "rspack build --mode production",
+    "dev": "rspack serve --mode development"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
@@ -16,6 +16,7 @@
   "devDependencies": {
     "@rspack/cli": "^2.0",
     "@rspack/core": "^2.0",
+    "@rspack/dev-server": "^2.0.3",
     "@tailwindcss/postcss": "^4.2.1",
     "postcss": "^8.5.15",
     "postcss-loader": "^8.2.1",

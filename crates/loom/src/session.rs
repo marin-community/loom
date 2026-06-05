@@ -20,7 +20,6 @@ pub struct Session {
     /// Reasoning effort ('', 'low', 'medium', 'high', 'xhigh', 'max') — `--effort`.
     pub effort: String,
     pub status: String,
-    pub pending_prompt: String,
     pub github_repo: Option<String>,
     pub last_activity_at: Option<String>,
     pub created_at: String,
@@ -151,15 +150,6 @@ pub async fn set_status(db: &Db, id: &str, status: &str) -> Result<()> {
 pub async fn touch(db: &Db, id: &str) -> Result<()> {
     sqlx::query("UPDATE sessions SET last_activity_at = ? WHERE id = ?")
         .bind(now_iso())
-        .bind(id)
-        .execute(db)
-        .await?;
-    Ok(())
-}
-
-pub async fn set_pending_prompt(db: &Db, id: &str, prompt: &str) -> Result<()> {
-    sqlx::query("UPDATE sessions SET pending_prompt = ? WHERE id = ?")
-        .bind(prompt)
         .bind(id)
         .execute(db)
         .await?;

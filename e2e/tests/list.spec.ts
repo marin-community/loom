@@ -66,6 +66,8 @@ test.describe('session list view', () => {
 
     await expect(page).toHaveURL(new RegExp(`#/s/${s.id}$`));
     await expect(page.getByRole('heading', { name: 'nav-task' })).toBeVisible();
-    await expect(page.locator('textarea').first()).toHaveValue('Navigate to me');
+    // The goal is read-only prose on the Overview tab (agent-authored).
+    await page.getByRole('button', { name: 'Overview' }).click();
+    await expect(page.getByText('Navigate to me')).toBeVisible();
   });
 });
