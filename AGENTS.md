@@ -79,6 +79,34 @@ cd e2e && npm test                    # Playwright suite
 The integration test shells out to real `git` and `tmux`. If it hangs, look
 for stray `weaver-test-*` tmux sessions.
 
+### End-to-end (Playwright)
+
+The `e2e/` suite drives the real UI against a real server. Each test file spins
+up its **own** isolated `loom serve` on a random port with its own
+`WEAVER_HOME` / sqlite db and a throwaway git repo (see `e2e/fixtures/weaver.ts`),
+and uses the deterministic `shell` agent. Never point the suite at a
+long-running dev server or your `~/.weaver` db — tests create and tear down
+sessions (killing machine-global tmux sessions), so they must own the server
+they talk to.
+
+```sh
+cd e2e
+npm install            # first run only; also fetches the browser (see below)
+npx playwright install chromium
+npm test               # runs the suite; rebuilds loom + the SPA if stale
+```
+
+On a Linux distro Playwright doesn't ship a prebuilt browser for (e.g.
+`ubuntu26.04`, where `playwright install` errors with "does not support
+chromium"), force the nearest supported fallback build with
+`PLAYWRIGHT_HOST_PLATFORM_OVERRIDE`, and set it for the test run too so the same
+binary is launched:
+
+```sh
+PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npx playwright install chromium
+PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
+```
+
 ## Landing changes
 
 **Open a pull request by default.** Don't push to or merge into `main` directly.
@@ -114,9 +142,10 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | Method + path | What it does |
 |---|---|
 | `GET /api/health` | liveness probe |
-| `GET /api/sessions` / `POST /api/sessions` | list / create sessions |
+| `GET /api/sessions` / `POST /api/sessions` | list / create sessions (create takes optional `scratch: [{name, content_base64}]`) |
 | `GET PATCH DELETE /api/sessions/{id}` | session CRUD (status, title, goal, description) |
 | `POST /api/sessions/{id}/{note,summarize,archive,adopt}` | actions |
+| `GET POST DELETE /api/sessions/{id}/scratch` | list / drop / remove worktree `scratch/` reference files |
 | `GET /api/sessions/{id}/{diff,log,events}` | reads + SSE stream |
 | `GET /api/sessions/{id}/terminal` | WebSocket: xterm.js ⇄ PTY ⇄ tmux (the interaction surface) |
 | `GET /api/branches` / `GET PATCH /api/branches/{id}` | list / inspect / edit tracked branches |
@@ -141,6 +170,14 @@ the **agent-declared** "does this need me?" signal: `ok` / `attention` /
 `blocked`, set via `weaver status`. The dashboard filters on `attention`.
 
 There is **no** `/api/hook` endpoint — see "Status detection" below.
+
+**Scratch files** are reference material dropped into the worktree's `scratch/`
+directory (git-ignored, so it never enters the agent's diff). They can be added
+to a live session via `POST /api/sessions/{id}/scratch`, or attached up-front in
+the New Session form: those ride in the create request as `scratch` and are
+written *before* the agent launches, with a note appended to the launch prompt
+so a fresh agent knows the files are there. The stored branch goal stays the
+clean text the user typed.
 
 ## Conventions
 
@@ -199,6 +236,11 @@ directly (daemon-less, like `weaver describe`) and an `attention` event the
 monitor re-broadcasts over SSE. Last write wins, so an explicit declaration
 overrides the hook-inferred default. The PATCH `/api/sessions/{id}` and
 `/api/branches/{id}` routes accept `attention`/`attention_note` too, for the UI.
+
+Archiving a session clears its attention back to `ok` (and drops any snapshotted
+`pending_prompt`): the agent is gone, so a torn-down workstream can't still "need
+me", and the dashboard stops flagging it. The UI also treats any `archived`
+session as `ok` regardless of a stale attention value left on the branch.
 
 Orphan detection is independent: if `tmux has-session` says no, the session
 becomes `orphaned` and is eligible for `loom adopt`.

@@ -53,6 +53,32 @@ test.describe('creating a session via the UI form', () => {
     await expect(page.getByTestId('recent-repo')).toBeHidden();
   });
 
+  test('attached scratch files land in the new worktree', async ({ page, weaver }) => {
+    await page.goto(weaver.baseUrl);
+    await page.getByRole('button', { name: 'New session' }).click();
+
+    await page.getByPlaceholder('/home/you/code/project').fill(weaver.repoPath);
+    await page.getByPlaceholder('Add a /health endpoint').fill('Investigate the attached trace');
+
+    // Drop two reference files via the (hidden) file input behind the dropper.
+    const input = page.getByTestId('scratch-picker-dropzone').locator('input[type=file]');
+    await input.setInputFiles([
+      { name: 'trace.log', mimeType: 'text/plain', buffer: Buffer.from('panic at line 42\n') },
+      { name: 'shot.png', mimeType: 'image/png', buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+    ]);
+    await expect(page.getByTestId('scratch-picker-file')).toHaveCount(2);
+
+    await page.getByRole('button', { name: 'Create' }).click();
+    await expect(page.getByTestId('session-card')).toHaveCount(1);
+
+    // The server dropped them into the worktree's scratch/ dir, exposed via the
+    // per-session scratch endpoint.
+    const all = await weaver.listSessions();
+    const res = await fetch(`${weaver.baseUrl}/api/sessions/${all[0].id}/scratch`);
+    const files = (await res.json()) as { name: string }[];
+    expect(files.map((f) => f.name).sort()).toEqual(['shot.png', 'trace.log']);
+  });
+
   test('Cancel hides the form again', async ({ page, weaver }) => {
     await page.goto(weaver.baseUrl);
     await page.getByRole('button', { name: 'New session' }).click();

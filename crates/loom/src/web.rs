@@ -69,6 +69,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_stream::wrappers::BroadcastStream;
@@ -96,6 +97,7 @@ pub struct AppState {
 // Error handling
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub struct AppError {
     status: StatusCode,
     message: String,
@@ -432,6 +434,20 @@ struct CreateReq {
     /// blank/absent inherits the configured `agent.claude_args`.
     #[serde(default)]
     effort: Option<String>,
+    /// Reference files to drop into the new worktree's `scratch/` directory
+    /// before the agent launches. The agent is told they are there (see
+    /// `write_initial_scratch`). Empty/absent for a plain session.
+    #[serde(default)]
+    scratch: Vec<ScratchUpload>,
+}
+
+/// One launch-time scratch file: a name plus its base64-encoded bytes. JSON
+/// can't carry raw binary, so the UI reads each dropped file as base64.
+#[derive(Debug, Deserialize)]
+struct ScratchUpload {
+    name: String,
+    #[serde(default)]
+    content_base64: String,
 }
 
 async fn create_session(
@@ -646,11 +662,23 @@ async fn create_session(
     let session_id = branch_mod::new_id();
     let run_dir = db::run_dir(&session_id);
     tokio::fs::create_dir_all(&run_dir).await?;
-    let goal_file = if goal.is_empty() {
+
+    // Drop any attached reference files into the worktree before the agent
+    // launches, then tell the agent they are there. The branch goal stays the
+    // clean text the user typed; the scratch note rides on the launch prompt
+    // (goal.txt) only, so it reaches the agent without cluttering the dashboard.
+    let scratch_names = write_initial_scratch(&work_dir, &req.scratch).await?;
+    let launch_prompt = match (goal.is_empty(), scratch_note(&scratch_names)) {
+        (true, None) => String::new(),
+        (false, None) => goal.clone(),
+        (true, Some(note)) => note,
+        (false, Some(note)) => format!("{goal}\n\n{note}"),
+    };
+    let goal_file = if launch_prompt.is_empty() {
         None
     } else {
         let f = run_dir.join("goal.txt");
-        tokio::fs::write(&f, &goal).await?;
+        tokio::fs::write(&f, &launch_prompt).await?;
         Some(f)
     };
 
@@ -965,6 +993,19 @@ async fn archive_session(
         }
     }
     session_mod::set_status(&st.db, &session.id, "archived").await?;
+    // An archived session is finished with: its agent is gone, so it can no
+    // longer "need me". Clear any lingering attention (and the snapshotted
+    // pending prompt) so the dashboard stops flagging a torn-down workstream.
+    // Attention is the agent's live "does this need a human?" signal; nothing
+    // is live here any more. The history (goal, notes, summaries) is kept.
+    if branch.attention != branch_mod::DEFAULT_ATTENTION || !branch.attention_note.is_empty() {
+        branch_mod::set_attention(&st.db, &branch.id, branch_mod::DEFAULT_ATTENTION, "").await?;
+    }
+    if !session.pending_prompt.is_empty() {
+        session_mod::set_pending_prompt(&st.db, &session.id, "")
+            .await
+            .ok();
+    }
     events::record(
         &st.db,
         &st.bus,
@@ -1239,6 +1280,59 @@ fn scratch_name(raw: &str) -> ApiResult<String> {
         ));
     }
     Ok(name.to_string())
+}
+
+/// Write launch-time scratch files into `<work_dir>/scratch/`, returning the
+/// bare names written (sorted, de-duplicated). The directory is git-ignored
+/// exactly as [`upload_scratch`] does it, so reference material never enters
+/// the agent's diff. The whole batch is rejected if any name or body is
+/// malformed — a launch shouldn't half-succeed.
+async fn write_initial_scratch(
+    work_dir: &std::path::Path,
+    files: &[ScratchUpload],
+) -> ApiResult<Vec<String>> {
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dir = work_dir.join("scratch");
+    tokio::fs::create_dir_all(&dir).await?;
+    let gitignore = dir.join(".gitignore");
+    if !gitignore.exists() {
+        tokio::fs::write(&gitignore, "*\n").await?;
+    }
+    let mut names: Vec<String> = Vec::with_capacity(files.len());
+    for f in files {
+        let name = scratch_name(&f.name)?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(f.content_base64.trim())
+            .map_err(|e| {
+                AppError::bad_request(format!("scratch file '{name}': invalid base64: {e}"))
+            })?;
+        tokio::fs::write(dir.join(&name), &bytes).await?;
+        names.push(name);
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+/// A sentence telling the agent about its launch-time scratch files, or `None`
+/// when none were attached. Appended to the launch prompt so a fresh agent
+/// knows the reference material exists without the user having to mention it.
+fn scratch_note(names: &[String]) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let list = names
+        .iter()
+        .map(|n| format!("scratch/{n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "Reference files have been attached for this task in the `scratch/` \
+         directory of your worktree (it is kept out of git): {list}. \
+         Read them as needed."
+    ))
 }
 
 async fn list_scratch(
@@ -1774,4 +1868,77 @@ async fn patch_settings(
     }
     config::apply(&st.db, &changes).await?;
     settings_envelope(&st.db).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn b64(s: &str) -> String {
+        base64::engine::general_purpose::STANDARD.encode(s)
+    }
+
+    #[test]
+    fn scratch_note_lists_files_or_is_empty() {
+        assert!(scratch_note(&[]).is_none());
+        let note = scratch_note(&["error.log".into(), "design.png".into()]).unwrap();
+        assert!(note.contains("scratch/error.log"));
+        assert!(note.contains("scratch/design.png"));
+        // Mentions the directory so the agent knows where to look.
+        assert!(note.contains("scratch/"));
+    }
+
+    #[tokio::test]
+    async fn write_initial_scratch_drops_files_and_gitignores() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![
+            ScratchUpload {
+                name: "notes.txt".into(),
+                content_base64: b64("hello scratch"),
+            },
+            ScratchUpload {
+                name: "trace.log".into(),
+                content_base64: b64("panic"),
+            },
+        ];
+        let names = write_initial_scratch(dir.path(), &files).await.unwrap();
+        assert_eq!(
+            names,
+            vec!["notes.txt".to_string(), "trace.log".to_string()]
+        );
+
+        let scratch = dir.path().join("scratch");
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("notes.txt")).unwrap(),
+            "hello scratch"
+        );
+        // The directory is kept out of git so reference material never enters
+        // the agent's diff.
+        assert_eq!(
+            std::fs::read_to_string(scratch.join(".gitignore")).unwrap(),
+            "*\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_initial_scratch_rejects_bad_input() {
+        let dir = tempfile::tempdir().unwrap();
+        // A path-traversal name is refused (same rule as the upload endpoint).
+        let bad_name = vec![ScratchUpload {
+            name: "../escape".into(),
+            content_base64: b64("x"),
+        }];
+        assert!(write_initial_scratch(dir.path(), &bad_name).await.is_err());
+        // Malformed base64 is refused — a launch shouldn't half-write garbage.
+        let bad_b64 = vec![ScratchUpload {
+            name: "ok.txt".into(),
+            content_base64: "not!base64!".into(),
+        }];
+        assert!(write_initial_scratch(dir.path(), &bad_b64).await.is_err());
+        // Nothing to do for an empty batch.
+        assert!(write_initial_scratch(dir.path(), &[])
+            .await
+            .unwrap()
+            .is_empty());
+    }
 }

@@ -16,6 +16,7 @@ path = "src/bin/loom.rs"
 weaver-core = { path = "../weaver-core" }
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"

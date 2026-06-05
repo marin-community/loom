@@ -4,6 +4,7 @@ import { get, post } from '../api';
 import type { Session, RecentRepo, RepoBranch } from '../types';
 import StatusBadge from '../components/StatusBadge.vue';
 import AttentionBadge from '../components/AttentionBadge.vue';
+import ScratchPicker from '../components/ScratchPicker.vue';
 
 const sessions = ref<Session[]>([]);
 
@@ -11,9 +12,20 @@ const sessions = ref<Session[]>([]);
 type AttentionFilter = 'all' | 'attention' | 'ok';
 const filter = ref<AttentionFilter>('all');
 
-// Treat an unset/unknown level as 'ok' so older rows count as fine.
+// The agent-declared attention level, with two guards: an unset value counts as
+// 'ok' (older rows), and an archived session is forced to 'ok' — its agent is
+// gone, so it can't need a human, regardless of any attention left on the
+// branch. Mirrors the backend, which clears attention when a session is
+// archived; this also keeps pre-existing archived rows quiet.
 function levelOf(s: Session): string {
+  if (s.status === 'archived') return 'ok';
   return s.branch.attention || 'ok';
+}
+
+// The attention reason to show in the list — suppressed for archived sessions
+// so a torn-down workstream doesn't keep displaying "Waiting for input".
+function noteOf(s: Session): string {
+  return s.status === 'archived' ? '' : s.branch.attention_note;
 }
 
 const counts = computed(() => {
@@ -42,6 +54,21 @@ const effort = ref('');
 const name = ref('');
 const nameEdited = ref(false);
 const creating = ref(false);
+// Reference files staged in the form; base64-encoded into the create request
+// so they land in the new worktree's scratch/ before the agent launches.
+const scratchFiles = ref<File[]>([]);
+
+// Read a File as base64 (JSON can't carry raw binary). Chunked so large files
+// don't blow the argument limit of String.fromCharCode(...).
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
 
 type BranchMode = 'new' | 'existing';
 const branchMode = ref<BranchMode>('new');
@@ -148,6 +175,14 @@ async function create() {
     } else {
       body.name = name.value || undefined;
     }
+    if (scratchFiles.value.length) {
+      body.scratch = await Promise.all(
+        scratchFiles.value.map(async (f) => ({
+          name: f.name,
+          content_base64: await fileToBase64(f),
+        })),
+      );
+    }
     await post('/sessions', body);
     title.value = '';
     goal.value = '';
@@ -155,6 +190,7 @@ async function create() {
     effort.value = '';
     name.value = '';
     existingBranch.value = '';
+    scratchFiles.value = [];
     nameEdited.value = false;
     branchMode.value = 'new';
     showForm.value = false;
@@ -362,6 +398,7 @@ onUnmounted(() => clearInterval(timer));
           </ul>
         </div>
       </div>
+      <ScratchPicker v-model="scratchFiles" />
       <button
         type="submit"
         :disabled="creating"
@@ -395,14 +432,20 @@ onUnmounted(() => clearInterval(timer));
       </button>
     </div>
 
+    <!--
+      Two orthogonal status axes, one column each, no stacking:
+        · Attention — the agent's single "does this need me?" signal (weaver status)
+        · State     — the mechanical lifecycle: is the session working or not
+      Session (title + goal) and Summary describe the work itself.
+    -->
     <div v-if="sessions.length" class="overflow-x-auto rounded border border-line">
       <table class="w-full border-collapse text-sm">
         <thead>
           <tr class="border-b border-line bg-surface text-left text-xs uppercase tracking-wide text-muted">
             <th class="px-3 py-2 font-medium">Attention</th>
-            <th class="px-3 py-2 font-medium">Title</th>
-            <th class="px-3 py-2 font-medium">Goal</th>
-            <th class="px-3 py-2 font-medium">Latest status</th>
+            <th class="px-3 py-2 font-medium">State</th>
+            <th class="px-3 py-2 font-medium">Session</th>
+            <th class="px-3 py-2 font-medium">Summary</th>
             <th class="px-3 py-2 font-medium">Ref</th>
           </tr>
         </thead>
@@ -416,32 +459,31 @@ onUnmounted(() => clearInterval(timer));
             @click="$router.push(`/s/${s.id}`)"
           >
             <td class="px-3 py-2 align-top">
-              <router-link :to="`/s/${s.id}`" class="block space-y-1" @click.stop>
-                <AttentionBadge :level="levelOf(s)" :note="s.branch.attention_note" />
-                <span v-if="s.branch.attention_note" class="block max-w-[14rem] truncate text-xs text-muted">
-                  {{ s.branch.attention_note }}
-                </span>
-                <StatusBadge :status="s.status" class="opacity-80" />
-              </router-link>
+              <AttentionBadge :level="levelOf(s)" :note="noteOf(s)" />
+              <span v-if="noteOf(s)" class="mt-1 block max-w-[14rem] truncate text-xs text-muted">
+                {{ noteOf(s) }}
+              </span>
+            </td>
+            <td class="px-3 py-2 align-top">
+              <StatusBadge :status="s.status" />
             </td>
             <td class="px-3 py-2 align-top">
               <router-link
                 :to="`/s/${s.id}`"
-                class="block max-w-[16rem] truncate font-medium text-fg hover:text-accent"
+                class="block max-w-[20rem] truncate font-medium text-fg hover:text-accent"
                 @click.stop
               >
                 {{ s.branch.title || s.branch.name }}
               </router-link>
-            </td>
-            <td class="px-3 py-2 align-top">
-              <span class="block max-w-[20rem] truncate text-muted">{{ s.branch.goal }}</span>
+              <span v-if="s.branch.goal" class="block max-w-[20rem] truncate text-xs text-muted">
+                {{ s.branch.goal }}
+              </span>
             </td>
             <td class="px-3 py-2 align-top">
               <span class="block max-w-[24rem] truncate text-muted">{{ s.branch.description }}</span>
             </td>
             <td class="px-3 py-2 align-top">
               <div class="font-mono text-xs text-faint">
-                <span class="block truncate">{{ s.id }}</span>
                 <span class="block truncate">{{ s.branch.branch }}</span>
                 <span v-if="s.branch.open_issue_count" class="text-muted">
                   {{ s.branch.open_issue_count }} open issue{{ s.branch.open_issue_count === 1 ? '' : 's' }}

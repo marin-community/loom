@@ -683,6 +683,15 @@ async fn session_lifecycle() {
         )
         .await
         .unwrap();
+    // Flag the session for attention; archiving must clear it (a torn-down
+    // workstream can't still "need me").
+    client
+        .patch(
+            &format!("/api/sessions/{arch_id}"),
+            json!({ "attention": "attention", "attention_note": "Waiting for input" }),
+        )
+        .await
+        .unwrap();
 
     let res = client
         .post(&format!("/api/sessions/{arch_id}/archive"), json!({}))
@@ -703,6 +712,15 @@ async fn session_lifecycle() {
         .await
         .unwrap();
     assert_eq!(view["status"], "archived");
+    // Archiving cleared the attention signal so the dashboard stops flagging it.
+    assert_eq!(
+        view["branch"]["attention"], "ok",
+        "archive should clear attention"
+    );
+    assert_eq!(
+        view["branch"]["attention_note"], "",
+        "archive should clear the attention note"
+    );
     // The git branch is left intact for future reference.
     assert!(
         weaver_core::git::branch_exists(repo.path(), "weaver/archive-me").await,
