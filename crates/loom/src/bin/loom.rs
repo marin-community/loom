@@ -39,27 +39,48 @@ enum Cmd {
     /// Stop and re-start the loom daemon.
     Restart,
 
-    /// Launch a new session: worktree + tmux + agent.
+    /// Launch a new session: worktree + tmux + agent, seeded with a task.
+    ///
+    /// The positional argument is the task the agent should work on — it
+    /// becomes the branch goal and the agent's opening prompt:
+    ///
+    ///     loom launch "Add a /health endpoint and a test for it"
+    ///
+    /// The branch name (`weaver/<slug>`) is derived from the task; override it
+    /// with `--name`. To pick up existing work instead of describing a new
+    /// task, use `--claim <id>`, `--issue <n>`, or `--branch <name>`.
     Launch {
-        /// Optional name (becomes the `weaver/<name>` branch slug). When the
-        /// name matches an existing branch in the repo, that branch is adopted
-        /// instead of creating a new one.
+        /// What the agent should do. Sets the branch goal and is fed to the
+        /// agent as its first prompt. Multiple words are joined, so quoting is
+        /// optional. Omit only when seeding from `--claim`/`--issue`/`--branch`.
+        task: Vec<String>,
+        /// Branch slug to create (`weaver/<name>`). Defaults to a slug derived
+        /// from the task. Mutually exclusive with `--branch`.
+        #[arg(long)]
         name: Option<String>,
+        /// Agent to run: `claude` (the default), `shell` for a plain shell, or
+        /// any other command. Optional — omit to use the configured
+        /// `agent.default` (see `weaver config get agent.default`).
         #[arg(long)]
         agent: Option<String>,
+        /// Branch to fork the new worktree from. Defaults to the repo's current
+        /// branch.
         #[arg(long)]
         base: Option<String>,
-        #[arg(long)]
-        goal: Option<String>,
+        /// One-line title shown on the dashboard. Defaults to a title derived
+        /// from the task.
         #[arg(long)]
         title: Option<String>,
+        /// Seed the task from a GitHub issue (by number, via the `gh` CLI):
+        /// fills in title, goal, and description.
         #[arg(long)]
         issue: Option<i64>,
         /// Claim an existing weaver issue (by id) for this session: seeds the
         /// goal from it and moves it out of the repo backlog.
         #[arg(long)]
         claim: Option<i64>,
-        /// Attach to this existing branch rather than creating a new one.
+        /// Resume an existing branch rather than creating a new one. Mutually
+        /// exclusive with `--name`.
         #[arg(long)]
         branch: Option<String>,
         /// Model tier: haiku, sonnet, or opus. Omit to inherit the configured
@@ -125,17 +146,31 @@ async fn run() -> Result<()> {
         Cmd::Stop => cmd_stop().await,
         Cmd::Restart => cmd_restart().await,
         Cmd::Launch {
+            task,
             name,
             agent,
             base,
-            goal,
             title,
             issue,
             claim,
             branch,
             model,
             effort,
-        } => cmd_launch(name, agent, base, goal, title, issue, claim, branch, model, effort).await,
+        } => {
+            cmd_launch(LaunchArgs {
+                goal: task.join(" "),
+                name,
+                agent,
+                base,
+                title,
+                issue,
+                claim,
+                branch,
+                model,
+                effort,
+            })
+            .await
+        }
         Cmd::Ps => cmd_ps().await,
         Cmd::Issues { all, backlog } => cmd_issues(all, backlog).await,
         Cmd::Show { branch } => cmd_show(branch).await,
@@ -362,22 +397,60 @@ async fn cmd_restart() -> Result<()> {
 // Session commands (HTTP)
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
-async fn cmd_launch(
+/// Parsed `loom launch` inputs, after folding the positional task words into a
+/// single `goal` string.
+struct LaunchArgs {
+    goal: String,
     name: Option<String>,
     agent: Option<String>,
     base: Option<String>,
-    goal: Option<String>,
     title: Option<String>,
     issue: Option<i64>,
     claim: Option<i64>,
     branch: Option<String>,
     model: Option<String>,
     effort: Option<String>,
-) -> Result<()> {
+}
+
+/// A bare `loom launch` with nothing to work on — no task, no name, no title,
+/// and nothing to pick up (`--claim`/`--issue`/`--branch`). Launching anyway
+/// would spawn an agent with an empty goal that "starts unprompted", so we
+/// stop and point the user at the useful forms instead.
+fn launch_underspecified(a: &LaunchArgs) -> bool {
+    a.goal.trim().is_empty()
+        && a.name.is_none()
+        && a.title.is_none()
+        && a.issue.is_none()
+        && a.claim.is_none()
+        && a.branch.is_none()
+}
+
+const LAUNCH_HINT: &str = "nothing to do — give the agent a task or something to pick up:
+  loom launch \"<what the agent should do>\"   # the common case
+  loom launch --claim <id>                     # pick up a weaver issue
+  loom launch --issue <n>                      # seed from a GitHub issue
+  loom launch --branch <name>                  # resume an existing branch
+  loom launch --name <slug> --agent shell      # an empty named worktree (no task)
+See `loom launch --help` for all options.";
+
+async fn cmd_launch(a: LaunchArgs) -> Result<()> {
+    if launch_underspecified(&a) {
+        bail!("{LAUNCH_HINT}");
+    }
+    let LaunchArgs {
+        goal,
+        name,
+        agent,
+        base,
+        title,
+        issue,
+        claim,
+        branch,
+        model,
+        effort,
+    } = a;
     let client = Client::new();
     let cwd = std::env::current_dir()?;
-    let goal = goal.unwrap_or_default();
     let ws = client
         .post(
             "/api/sessions",
@@ -427,7 +500,7 @@ async fn cmd_ps() -> Result<()> {
     let list = client.get("/api/sessions").await?;
     let rows = list.as_array().cloned().unwrap_or_default();
     if rows.is_empty() {
-        println!("no sessions — start one with `loom launch \"<name>\"`");
+        println!("no sessions — start one with `loom launch \"<task>\"`");
         return Ok(());
     }
     println!(
@@ -655,5 +728,51 @@ mod tests {
     fn truncate_respects_the_max_length() {
         assert_eq!(truncate("short", 10), "short");
         assert_eq!(truncate("a very long string", 6), "a ver…");
+    }
+
+    fn empty_launch() -> LaunchArgs {
+        LaunchArgs {
+            goal: String::new(),
+            name: None,
+            agent: None,
+            base: None,
+            title: None,
+            issue: None,
+            claim: None,
+            branch: None,
+            model: None,
+            effort: None,
+        }
+    }
+
+    #[test]
+    fn bare_launch_is_underspecified() {
+        // `loom launch` with nothing, or only an agent/model/effort/base
+        // selector, has no actual task to run.
+        assert!(launch_underspecified(&empty_launch()));
+        let only_agent = LaunchArgs {
+            agent: Some("shell".into()),
+            base: Some("main".into()),
+            model: Some("opus".into()),
+            ..empty_launch()
+        };
+        assert!(launch_underspecified(&only_agent));
+    }
+
+    #[test]
+    fn anything_to_work_on_is_enough() {
+        let cases = [
+            LaunchArgs { goal: "fix the bug".into(), ..empty_launch() },
+            LaunchArgs { name: Some("scratch".into()), ..empty_launch() },
+            LaunchArgs { title: Some("A title".into()), ..empty_launch() },
+            LaunchArgs { issue: Some(42), ..empty_launch() },
+            LaunchArgs { claim: Some(7), ..empty_launch() },
+            LaunchArgs { branch: Some("weaver/foo".into()), ..empty_launch() },
+        ];
+        for a in cases {
+            assert!(!launch_underspecified(&a));
+        }
+        // Whitespace-only task words still count as empty.
+        assert!(launch_underspecified(&LaunchArgs { goal: "   ".into(), ..empty_launch() }));
     }
 }

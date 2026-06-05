@@ -41,8 +41,9 @@ key decoupling — the agent CLI never speaks HTTP.
 ```sh
 # Orchestrator (optional)
 loom serve                            # run the daemon (REST + UI + tmux + monitor)
-loom launch "add-health-endpoint"     # new worktree + tmux + agent
-loom launch "big-refactor" --model opus --effort high   # pick model tier + reasoning effort
+loom launch "Add a /health endpoint"  # new worktree + tmux + agent, seeded with the task
+loom launch "Refactor the parser" --name parser-refactor   # override the branch slug
+loom launch "Big refactor" --model opus --effort high      # pick model tier + reasoning effort
 loom ps                               # list active sessions
 loom show <branch>                    # session detail
 loom attach <branch>                  # exec tmux attach (or use the browser terminal)
@@ -69,10 +70,19 @@ weaver where                          # debug: print resolved repo / branch / br
 weaver log --limit 50                 # recent events for the current branch
 ```
 
-`loom launch --issue 123` seeds the branch's title / goal / description from a
-GitHub issue (via the `gh` CLI). `loom launch --claim 7` does the same from an
-existing weaver issue and moves it out of the repo backlog; `loom issues` prints
-the repo's board across branches.
+`loom launch`'s positional argument is the **task**: it becomes the branch goal
+and the agent's opening prompt, and the `weaver/<slug>` branch name is derived
+from it (override with `--name`). The agent is `claude` unless you pass
+`--agent` or change `agent.default`, so the common case is just `loom launch
+"<what to do>"`. A `loom launch` with no task and nothing to pick up prints a
+usage hint and exits without launching.
+
+Three flags seed the task from existing work instead of a fresh description:
+`loom launch --issue 123` takes the branch's title / goal / description from a
+GitHub issue (via the `gh` CLI), `loom launch --claim 7` takes them from an
+existing weaver issue and moves it out of the repo backlog, and `loom launch
+--branch <name>` resumes an existing branch. `loom issues` prints the repo's
+board across branches.
 
 `loom launch --model <haiku|sonnet|opus> --effort <low|medium|high|xhigh|max>`
 (both also selectors in the web create form) pin the session's Claude model

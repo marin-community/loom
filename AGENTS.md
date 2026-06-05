@@ -79,6 +79,18 @@ cd e2e && npm test                    # Playwright suite
 The integration test shells out to real `git` and `tmux`. If it hangs, look
 for stray `weaver-test-*` tmux sessions.
 
+## Landing changes
+
+**Open a pull request by default.** Don't push to or merge into `main` directly.
+Work on a branch, run the checks above (formatters, `cargo clippy`, and
+`WEAVER_SKIP_FRONTEND=1 cargo test --workspace`), make them pass, then
+`gh pr create` and let review + CI gate the merge. This holds for every change —
+features, fixes, docs, refactors — unless the user explicitly tells you to
+commit straight to the base branch. Agents working in a weaver worktree are
+already on their own branch; finishing the work means committing it and opening
+the PR, not integrating it yourself (see the builtin
+[crates/weaver-core/WEAVER.md](crates/weaver-core/WEAVER.md)).
+
 ## Storage & state
 
 - **SQLite** at `$WEAVER_HOME/weaver.db` (default `~/.weaver/weaver.db`),
