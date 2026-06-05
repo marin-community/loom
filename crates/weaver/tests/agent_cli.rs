@@ -165,6 +165,47 @@ fn status_with_no_id_reports_current_branch() {
     assert!(out.contains("branch:      feature-test"), "status: {out}");
     assert!(out.contains("goal:        do the thing"), "status: {out}");
     assert!(out.contains("open issues: 1"), "status: {out}");
+    // A fresh branch defaults to the calm `ok` attention level.
+    assert!(out.contains("attention:   ok"), "status: {out}");
+}
+
+#[test]
+fn status_set_attention_level_and_note() {
+    let env = setup();
+    // Declare an attention level with a note, then read it back.
+    let out = run(&env, &["status", "attention", "Waiting", "for", "PR", "feedback"]);
+    assert!(out.contains("attention — Waiting for PR feedback"), "set output: {out}");
+
+    let out = run(&env, &["status"]);
+    assert!(
+        out.contains("attention:   attention — Waiting for PR feedback"),
+        "status read: {out}"
+    );
+
+    // Setting a level with no note clears the note.
+    run(&env, &["status", "ok"]);
+    let out = run(&env, &["status"]);
+    assert!(out.contains("attention:   ok"), "status read: {out}");
+    assert!(!out.contains("Waiting for PR feedback"), "note should be cleared: {out}");
+
+    // The set also writes an `attention` event to the branch log.
+    let log = run(&env, &["log"]);
+    assert!(log.contains("attention"), "log should record attention events: {log}");
+}
+
+#[test]
+fn status_set_rejects_unknown_level() {
+    let env = setup();
+    let out = Command::new(weaver_bin())
+        .args(["status", "bogus"])
+        .current_dir(&env.repo_path)
+        .env("WEAVER_HOME", &env.home_path)
+        .env("WEAVER_API", "http://127.0.0.1:1")
+        .output()
+        .expect("failed to spawn weaver");
+    assert!(!out.status.success(), "unknown level should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown status 'bogus'"), "stderr: {stderr}");
 }
 
 #[test]

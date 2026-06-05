@@ -23,8 +23,21 @@ struct Cli {
 enum Cmd {
     /// Print or set the goal of the current branch.
     Goal { text: Vec<String> },
-    /// Show the current branch's title, goal, and open-issue count.
-    Status,
+    /// Show the current branch's status, or set the agent's attention level.
+    ///
+    /// With no arguments it prints the title, goal, attention, and open-issue
+    /// count. Given a level (`ok`, `attention`, or `blocked`) and an optional
+    /// note, it declares how the agent is doing — what the dashboard surfaces
+    /// and filters on. Use `attention` to ask the user to look ("ready for
+    /// review", a question) and `blocked` when stuck and needing help; `ok`
+    /// covers both progressing normally and being blocked on something external
+    /// (a CI run, a PR review) that is not the user.
+    Status {
+        /// Attention level to set: `ok`, `attention`, or `blocked`. Omit to read.
+        level: Option<String>,
+        /// Short reason shown beside the level, e.g. "Waiting for PR feedback".
+        note: Vec<String>,
+    },
     /// Set the description of the current branch.
     Describe { text: Vec<String> },
     /// Append a note to the current branch.
@@ -116,7 +129,7 @@ async fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Goal { text } => cmd_goal(text.join(" ")).await,
-        Cmd::Status => cmd_status().await,
+        Cmd::Status { level, note } => cmd_status(level, note.join(" ")).await,
         Cmd::Describe { text } => cmd_describe(text.join(" ")).await,
         Cmd::Note { text } => cmd_note(text.join(" ")).await,
         Cmd::Issue { cmd } => cmd_issue(cmd).await,
@@ -204,6 +217,11 @@ async fn cmd_log(limit: i64) -> Result<()> {
             s.to_string()
         } else if let Some(s) = ev.data.get("status").and_then(Value::as_str) {
             s.to_string()
+        } else if let Some(level) = ev.data.get("level").and_then(Value::as_str) {
+            match ev.data.get("note").and_then(Value::as_str) {
+                Some(n) if !n.is_empty() => format!("{level} — {n}"),
+                _ => level.to_string(),
+            }
         } else if let Some(s) = ev.data.get("event").and_then(Value::as_str) {
             s.to_string()
         } else if let Some(s) = ev.data.get("goal").and_then(Value::as_str) {
@@ -221,9 +239,12 @@ async fn cmd_log(limit: i64) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_status() -> Result<()> {
+async fn cmd_status(level: Option<String>, note: String) -> Result<()> {
     let db = open_db().await?;
     let b = branch::resolve(&db).await?;
+    if let Some(level) = level {
+        return cmd_status_set(&db, &b, &level, &note).await;
+    }
     let open = issue::open_count_for_branch(&db, &b.repo_root, &b.branch)
         .await
         .unwrap_or(0);
@@ -240,7 +261,40 @@ async fn cmd_status() -> Result<()> {
     if !b.description.is_empty() {
         println!("summary:     {}", b.description);
     }
+    let attention = if b.attention_note.is_empty() {
+        b.attention.clone()
+    } else {
+        format!("{} — {}", b.attention, b.attention_note)
+    };
+    println!("attention:   {attention}");
     println!("open issues: {open}");
+    Ok(())
+}
+
+/// Declare the agent's attention level (and optional note) on the branch. Writes
+/// the branch fields directly (daemon-less) and an `attention` event so a
+/// running loom can push the change to the dashboard on its next tick.
+async fn cmd_status_set(
+    db: &db::Db,
+    b: &branch::Branch,
+    level: &str,
+    note: &str,
+) -> Result<()> {
+    let level = level.trim().to_ascii_lowercase();
+    if !branch::is_valid_attention(&level) {
+        bail!(
+            "unknown status '{level}' — expected one of {}",
+            branch::ATTENTION_LEVELS.join(", ")
+        );
+    }
+    let note = note.trim();
+    branch::set_attention(db, &b.id, &level, note).await?;
+    events::record_local(db, &b.id, "attention", json!({ "level": level, "note": note })).await?;
+    if note.is_empty() {
+        println!("status: {level}");
+    } else {
+        println!("status: {level} — {note}");
+    }
     Ok(())
 }
 

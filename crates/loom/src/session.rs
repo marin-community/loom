@@ -27,8 +27,18 @@ pub struct Session {
     pub created_at: String,
 }
 
+/// Session **lifecycle** states — the mechanical, orchestrator-owned axis: is
+/// the agent process being set up, alive, lost, or finished. How the agent is
+/// *doing* (whether it needs the user) is the separate, agent-declared
+/// `attention` axis on the branch — see [`weaver_core::branch::ATTENTION_LEVELS`].
+///
+/// `running` replaces the old inferred `working`/`waiting`/`idle` trio: those
+/// guessed at the agent's state from hooks and screen stillness and were
+/// frequently wrong (e.g. an agent waiting on a background workflow looked
+/// "idle"). Liveness is all the orchestrator can know for sure; the agent
+/// reports the rest via `weaver status`.
 pub const STATUSES: &[&str] = &[
-    "created", "launching", "working", "waiting", "idle", "orphaned", "done", "error",
+    "created", "launching", "running", "orphaned", "done", "error",
 ];
 
 pub fn is_terminal(status: &str) -> bool {

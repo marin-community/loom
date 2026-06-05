@@ -57,13 +57,14 @@ weaver goal "ship the feature"
 weaver goal                           # print the current goal
 weaver describe "Wired up routes; tests pass."
 weaver note    "blocked on the DB schema"
+weaver status attention "ready for review"   # how the agent is doing (ok|attention|blocked)
 weaver issue add "Backfill old rows" --body "ETA after the schema change"
 weaver issue add "Audit the logger" --repo   # unclaimed repo backlog item
 weaver issue ls                       # this branch's work + the repo backlog
 weaver issue ls --mine                # just this branch's claimed issues
 weaver issue ls --repo                # the whole repo, grouped by branch
 weaver issue close 7
-weaver status                         # title + goal + open-issue count
+weaver status                         # goal + attention + open-issue count
 weaver where                          # debug: print resolved repo / branch / branch-id
 weaver log --limit 50                 # recent events for the current branch
 ```
@@ -80,19 +81,28 @@ and spliced into the launch as `--model` / `--effort`. Both are stored per
 session, so adopting a recovered session resumes with the same settings. Omit
 either to inherit `agent.claude_args`.
 
-## Status detection
+## Status & attention
 
-A session's status is one of `created`, `launching`, `working`, `waiting`,
-`idle`, `orphaned`, `done`, or `error`. `done` and `error` are terminal; the
-rest, including `orphaned`, are recoverable.
+Status has two independent axes.
 
-Claude-backed sessions report status via Claude Code hooks installed into
+The **lifecycle** (`session.status`) is mechanical and orchestrator-owned:
+`created`, `launching`, `running`, `orphaned`, `done`, or `error`. `done` and
+`error` are terminal; the rest, including `orphaned`, are recoverable. Claude-
+backed sessions drive it via Claude Code hooks installed into
 `.claude/settings.local.json` by `loom launch`. Each hook shells out to
-`weaver hook --event {working|waiting|idle|session-start}`, which writes an
-`events` row keyed on the branch. The loom monitor consumes new `hook` rows
-on its next tick. Other agents fall back to tmux screen-stillness detection.
-When a session goes `waiting`, the monitor snapshots the tmux pane into
-`pending_prompt` so the UI can show what the agent is blocked on.
+`weaver hook --event {working|waiting|idle|session-start}`, writing an `events`
+row the monitor consumes on its next tick; any hook means the agent process is
+alive → `running`. When Claude blocks asking the user (the `waiting`/Notification
+hook), the monitor snapshots the tmux pane into `pending_prompt` so the UI can
+show what the agent is waiting on.
+
+The **attention** axis is the agent's own signal of whether it needs you:
+`ok` (going fine, or blocked on something external like a CI run or PR review),
+`attention` (a question, a decision, "ready for review"), or `blocked` (stuck,
+needs help). Agents set it with `weaver status <level> "<note>"`; the dashboard
+shows it and lets you filter for sessions that need a human. It replaces the old
+guessed working/waiting/idle indicator, which was often wrong — e.g. it read
+"idle" while the agent was actually waiting on a background workflow.
 
 ## Adoption
 

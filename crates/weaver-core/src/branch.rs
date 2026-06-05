@@ -17,8 +17,33 @@ pub struct Branch {
     pub goal: String,
     pub title: String,
     pub description: String,
+    /// Agent-declared attention level: one of [`ATTENTION_LEVELS`].
+    pub attention: String,
+    /// Short free-text reason for the current attention level.
+    pub attention_note: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Agent-declared attention levels, ordered calm → urgent:
+///
+/// * `ok` — progressing fine, or blocked on something external (a CI run, a PR
+///   review) that is *not* the user. No action needed.
+/// * `attention` — the agent wants the user to look: a question, a decision to
+///   confirm, or "done, ready for review".
+/// * `blocked` — the agent is stuck or hit an error and needs help to proceed.
+///
+/// This is the agent's own signal, distinct from the orchestrator's mechanical
+/// session lifecycle (`launching` / `running` / `orphaned` / …). It is what the
+/// dashboard surfaces and filters on for "which sessions need me?".
+pub const ATTENTION_LEVELS: &[&str] = &["ok", "attention", "blocked"];
+
+/// The default attention level for a freshly-created branch.
+pub const DEFAULT_ATTENTION: &str = "ok";
+
+/// Whether `level` is a recognized attention level.
+pub fn is_valid_attention(level: &str) -> bool {
+    ATTENTION_LEVELS.contains(&level)
 }
 
 /// An 8-character lowercase-alphanumeric id (re-used for branches and sessions).
@@ -192,6 +217,21 @@ pub async fn set_description(db: &Db, id: &str, description: &str) -> Result<()>
         .bind(id)
         .execute(db)
         .await?;
+    Ok(())
+}
+
+/// Set the agent-declared attention level and its short note in one write.
+/// `level` is assumed already validated by the caller (see [`is_valid_attention`]).
+pub async fn set_attention(db: &Db, id: &str, level: &str, note: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE branches SET attention = ?, attention_note = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(level)
+    .bind(note)
+    .bind(now_iso())
+    .bind(id)
+    .execute(db)
+    .await?;
     Ok(())
 }
 

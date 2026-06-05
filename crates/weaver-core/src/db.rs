@@ -17,6 +17,11 @@ CREATE TABLE IF NOT EXISTS branches (
     goal         TEXT NOT NULL DEFAULT '',
     title        TEXT NOT NULL DEFAULT '',
     description  TEXT NOT NULL DEFAULT '',
+    -- Agent-declared attention: an urgency level (ok | attention | blocked) and
+    -- a short free-text reason ("Waiting for PR review feedback"). This is the
+    -- agent's own signal of whether it needs the user, set via `weaver status`.
+    attention      TEXT NOT NULL DEFAULT 'ok',
+    attention_note TEXT NOT NULL DEFAULT '',
     created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     UNIQUE(repo_root, branch)
@@ -181,7 +186,25 @@ async fn migrate(pool: &Db) -> Result<()> {
             .await
             .with_context(|| format!("running migration: {trimmed}"))?;
     }
+    // Additive column migrations for databases created before the column
+    // existed. `CREATE TABLE IF NOT EXISTS` above is a no-op on such DBs, so we
+    // add the column explicitly and ignore the "duplicate column" error.
+    add_column_if_missing(pool, "branches", "attention", "TEXT NOT NULL DEFAULT 'ok'").await?;
+    add_column_if_missing(pool, "branches", "attention_note", "TEXT NOT NULL DEFAULT ''").await?;
     Ok(())
+}
+
+/// Run `ALTER TABLE … ADD COLUMN`, treating an already-present column as success.
+async fn add_column_if_missing(pool: &Db, table: &str, column: &str, decl: &str) -> Result<()> {
+    let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {decl}");
+    match sqlx::query(&sql).execute(pool).await {
+        Ok(_) => {
+            tracing::info!(%table, %column, "added column");
+            Ok(())
+        }
+        Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("adding column {table}.{column}")),
+    }
 }
 
 /// Column names of `table`, or empty if it doesn't exist.

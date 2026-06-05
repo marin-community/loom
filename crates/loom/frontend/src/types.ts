@@ -9,6 +9,12 @@ export interface Branch {
   title: string;
   goal: string;
   description: string;
+  /** Agent-declared attention level: 'ok' | 'attention' | 'blocked'. The
+   *  "does this need me?" signal, set by the agent via `weaver status`. */
+  attention: string;
+  /** Short free-text reason for the attention level, e.g. "Waiting for PR
+   *  review feedback". */
+  attention_note: string;
   repo_root: string;
   branch: string;
   base_branch: string;

@@ -126,7 +126,7 @@ mod tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO sessions (id, branch_id, work_dir, tmux_session, status)
-             VALUES ('s1', 't1', '/w', 'weaver-s1', 'idle')",
+             VALUES ('s1', 't1', '/w', 'weaver-s1', 'running')",
         )
         .execute(&db)
         .await

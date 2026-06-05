@@ -47,7 +47,7 @@ needing the daemon to be reachable.
 | Path | What's in it |
 |---|---|
 | `crates/weaver-core/` | lib: `branches`, `issues`, `notes`, `events`, `db`, `git`, `config`, agent helpers. Pure logic; used by both binaries. |
-| `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`goal`, `describe`, `note`, `issue …`, `where`, `log`, `hook`, `status`, `config`) |
+| `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`goal`, `describe`, `note`, `status` [read or set attention], `issue …`, `where`, `log`, `hook`, `config`) |
 | `crates/loom/src/web.rs` | axum routes, request/response types, SSE — **the API surface** |
 | `crates/loom/src/server.rs` | bind, write `server.json`, spawn bg tasks |
 | `crates/loom/src/monitor.rs` | status detection, orphan marking, hook-event consumer |
@@ -117,8 +117,15 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 top-level (`id`, `status`, `work_dir`, `tmux_session`, `agent_kind`, `model`,
 `effort`, `pending_prompt`, `github_repo`, `last_activity_at`, `summary_updated_at`,
 `created_at`, `updated_at`) plus a nested `branch: BranchView`
-(`id`, `name`, `title`, `goal`, `description`, `repo_root`, `branch`,
-`base_branch`, `created_at`, `updated_at`, `open_issue_count`).
+(`id`, `name`, `title`, `goal`, `description`, `attention`, `attention_note`,
+`repo_root`, `branch`, `base_branch`, `created_at`, `updated_at`,
+`open_issue_count`).
+
+Status is two orthogonal axes. The session's `status` is the **lifecycle**
+(orchestrator-owned, mechanical): `created` / `launching` / `running` /
+`orphaned` / `done` / `error`. The branch's `attention` (+ `attention_note`) is
+the **agent-declared** "does this need me?" signal: `ok` / `attention` /
+`blocked`, set via `weaver status`. The dashboard filters on `attention`.
 
 There is **no** `/api/hook` endpoint — see "Status detection" below.
 
@@ -142,27 +149,43 @@ There is **no** `/api/hook` endpoint — see "Status detection" below.
   first-class status, recovered via `loom adopt` (or the Adopt button in the
   UI).
 
-## Status detection
+## Status & attention
 
-Two paths, picked per agent kind:
+Two distinct axes (see the SessionView note above): the mechanical **lifecycle**
+`sessions.status`, and the agent-declared **attention** on the branch.
 
-1. **Claude Code hooks** — `loom launch` merges a `hooks` block into the
-   worktree's `.claude/settings.local.json` (see `loom::agent::install_hooks`
-   and `weaver_core::agent::hooks_json`). The mapping is:
+**Lifecycle** is driven by Claude Code hooks. `loom launch` merges a `hooks`
+block into the worktree's `.claude/settings.local.json` (see
+`loom::agent::install_hooks` and `weaver_core::agent::hooks_json`):
 
-   | Claude hook event | shells out to |
-   |---|---|
-   | `SessionStart` | `weaver hook --event session-start` (also injects [[crates/weaver-core/primer.md]] as `additionalContext`) |
-   | `UserPromptSubmit` | `weaver hook --event working` |
-   | `Notification` | `weaver hook --event waiting` |
-   | `Stop` | `weaver hook --event idle` |
+| Claude hook event | shells out to |
+|---|---|
+| `SessionStart` | `weaver hook --event session-start` (also injects [[crates/weaver-core/primer.md]] as `additionalContext`) |
+| `UserPromptSubmit` | `weaver hook --event working` |
+| `Notification` | `weaver hook --event waiting` |
+| `Stop` | `weaver hook --event idle` |
 
-   `weaver hook` writes an `events` row keyed on the branch resolved from
-   `$WEAVER_BRANCH` (set by the launcher) — no HTTP. Loom's monitor consumes
-   new `hook` rows on its next tick and flips `sessions.status` accordingly.
-   On `waiting`, the monitor snapshots the tmux pane into `pending_prompt`.
-2. **Tmux stillness** — for non-Claude agents the monitor diffs pane captures
-   over time and demotes `working` → `idle` after enough still ticks.
+`weaver hook` writes an `events` row keyed on the branch resolved from
+`$WEAVER_BRANCH` (set by the launcher) — no HTTP. Loom's monitor (`apply_hook`)
+consumes new `hook` rows on its next tick. Any hook means the agent process is
+alive, so all three set `status = running` (this also promotes a freshly
+`launching` session). The orchestrator no longer guesses working/waiting/idle:
+liveness is all it can know for sure, so there is no stillness-based idle
+demotion any more.
+
+The hooks also nudge **attention** where they carry a genuine signal:
+`working` clears it to `ok` and drops any pending prompt (the user is engaged);
+`waiting` raises it to `attention` ("Waiting for input") and snapshots the tmux
+pane into `pending_prompt` (Claude is blocked asking the user); `idle` (a turn
+ending) leaves attention untouched, so a finished-but-fine agent isn't mistaken
+for one that needs you.
+
+**Attention** is otherwise the agent's own call, set via `weaver status <level>
+["<note>"]`. That writes the branch's `attention`/`attention_note` columns
+directly (daemon-less, like `weaver describe`) and an `attention` event the
+monitor re-broadcasts over SSE. Last write wins, so an explicit declaration
+overrides the hook-inferred default. The PATCH `/api/sessions/{id}` and
+`/api/branches/{id}` routes accept `attention`/`attention_note` too, for the UI.
 
 Orphan detection is independent: if `tmux has-session` says no, the session
 becomes `orphaned` and is eligible for `loom adopt`.
@@ -176,6 +199,9 @@ weaver goal "ship the feature"          # set the branch's goal
 weaver goal                             # print the goal
 weaver describe "Wired up routes; tests pass"
 weaver note   "blocked on the DB schema"
+weaver status attention "ready for review"   # declare how the agent is doing
+weaver status ok "waiting on PR review feedback"
+weaver status                           # read goal + attention + open issues
 weaver issue add "Backfill old rows" --body "ETA after the schema change"
 weaver issue add "Audit the logger" --repo  # unclaimed repo backlog item
 weaver issue ls                         # this branch's work + unclaimed backlog

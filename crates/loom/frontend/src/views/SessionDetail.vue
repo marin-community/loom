@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router';
 import { get, post, patch, del } from '../api';
 import type { Session, WeaverEvent, Issue } from '../types';
 import StatusBadge from '../components/StatusBadge.vue';
+import AttentionBadge from '../components/AttentionBadge.vue';
 import AgentTerminal from '../components/AgentTerminal.vue';
 import ScratchPanel from '../components/ScratchPanel.vue';
 
@@ -20,6 +21,8 @@ const notice = ref('');
 const titleDraft = ref('');
 const goalDraft = ref('');
 const descDraft = ref('');
+const attnLevelDraft = ref('ok');
+const attnNoteDraft = ref('');
 
 const busy = ref('');
 
@@ -30,6 +33,8 @@ async function loadSession() {
   titleDraft.value = ws.value.branch.title;
   goalDraft.value = ws.value.branch.goal;
   descDraft.value = ws.value.branch.description;
+  attnLevelDraft.value = ws.value.branch.attention || 'ok';
+  attnNoteDraft.value = ws.value.branch.attention_note;
 }
 
 async function loadIssues() {
@@ -59,9 +64,19 @@ async function loadAll() {
   }
 }
 
+const saveAttention = () =>
+  act('attention', async () => {
+    await patch(`/sessions/${props.id}`, {
+      attention: attnLevelDraft.value,
+      attention_note: attnNoteDraft.value,
+    });
+    notice.value = 'Attention updated.';
+    await loadSession();
+  });
+
 function openStream() {
   source = new EventSource(`/api/sessions/${props.id}/events`);
-  for (const kind of ['status', 'summary', 'note']) {
+  for (const kind of ['status', 'attention', 'summary', 'note']) {
     source.addEventListener(kind, (e) => {
       const ev = JSON.parse((e as MessageEvent).data) as WeaverEvent;
       events.value.push(ev);
@@ -142,6 +157,8 @@ const adopt = () =>
 function eventLine(ev: WeaverEvent): string {
   const d = ev.data || {};
   if (ev.kind === 'status') return `status → ${d.status ?? '?'}`;
+  if (ev.kind === 'attention')
+    return `attention → ${d.level ?? '?'}${d.note ? ` (${d.note})` : ''}`;
   if (ev.kind === 'summary') return `summary: ${d.description ?? ''}`;
   if (ev.kind === 'note') return String(d.text ?? '');
   if (ev.kind === 'issue_added') return `issue added: ${d.title ?? ''}`;
@@ -162,8 +179,16 @@ onUnmounted(() => source?.close());
     <div class="flex items-center gap-3 mb-1">
       <router-link to="/" class="text-muted hover:text-muted text-sm">← all</router-link>
       <h1 class="text-xl font-semibold">{{ ws.branch.title || ws.branch.name }}</h1>
+      <AttentionBadge :level="ws.branch.attention || 'ok'" :note="ws.branch.attention_note" />
       <StatusBadge :status="ws.status" />
     </div>
+    <p
+      v-if="ws.branch.attention_note"
+      class="text-sm text-muted mb-1"
+      data-testid="attention-note"
+    >
+      {{ ws.branch.attention_note }}
+    </p>
     <div class="text-xs text-faint font-mono mb-1">
       {{ ws.id }} · {{ ws.branch.branch }} (base {{ ws.branch.base_branch }}) ·
       {{ ws.agent_kind }} · {{ ws.tmux_session }}
@@ -225,6 +250,35 @@ onUnmounted(() => source?.close());
             @click="saveGoal"
           >
             Save goal
+          </button>
+        </section>
+
+        <section class="rounded border border-line bg-surface p-4">
+          <label class="block text-xs text-muted mb-1">
+            Attention — the agent's signal, set via <code>weaver status</code>
+          </label>
+          <div class="flex gap-2">
+            <select
+              v-model="attnLevelDraft"
+              data-testid="attention-select"
+              class="rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent"
+            >
+              <option value="ok">OK</option>
+              <option value="attention">Attention</option>
+              <option value="blocked">Blocked</option>
+            </select>
+            <input
+              v-model="attnNoteDraft"
+              placeholder="Waiting for PR review feedback"
+              class="min-w-0 flex-1 rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent"
+            />
+          </div>
+          <button
+            class="mt-2 rounded bg-subtle hover:bg-subtle-hover px-2 py-1 text-xs"
+            :disabled="busy === 'attention'"
+            @click="saveAttention"
+          >
+            Save attention
           </button>
         </section>
 

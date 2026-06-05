@@ -1,10 +1,11 @@
-//! Background task: detects when a session's tmux has ended, drives
-//! screen-stillness idle detection, and consumes `hook` events written by the
-//! `weaver hook` CLI to update session status.
+//! Background task: detects when a session's tmux has ended and consumes the
+//! event rows the `weaver` CLI writes — `hook` events (Claude lifecycle) and
+//! `attention` events (`weaver status`) — reflecting them onto the session and
+//! the dashboard.
 //!
 //! The browser terminal (xterm.js over a PTY) is the live-screen surface; this
 //! loop no longer pushes a `screen` mirror to clients. It still `capture`s the
-//! pane internally to hash for stillness/idle/orphan detection.
+//! pane internally to hash for activity (last-activity) and orphan detection.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -14,13 +15,12 @@ use serde_json::json;
 use crate::session as session_mod;
 use crate::web::AppState;
 use crate::{events, tmux};
+use weaver_core::branch as branch_mod;
 
 const TICK: Duration = Duration::from_millis(1500);
-const IDLE_TICKS: u32 = 10;
 
 pub async fn run(state: AppState) {
     let mut screen_hash: HashMap<String, u64> = HashMap::new();
-    let mut still_ticks: HashMap<String, u32> = HashMap::new();
     // Watermark: process every event written after this id, then advance.
     let mut last_event = events::max_id(&state.db).await.unwrap_or(0);
     tracing::info!(tick_ms = TICK.as_millis() as u64, "monitor loop started");
@@ -28,14 +28,23 @@ pub async fn run(state: AppState) {
     loop {
         tokio::time::sleep(TICK).await;
 
-        // 1. Consume any new event rows (hooks, etc.) and reflect them on the
-        //    relevant session.
+        // 1. Consume any new event rows and reflect them on the relevant
+        //    session / branch.
         match events::since(&state.db, last_event).await {
             Ok(new_events) => {
                 for ev in new_events {
                     last_event = last_event.max(ev.id);
-                    if ev.kind != "hook" {
-                        continue;
+                    match ev.kind.as_str() {
+                        // `weaver status` wrote the branch's attention fields
+                        // directly (daemon-less) but, going through the CLI,
+                        // never touched the bus. Re-broadcast so live dashboards
+                        // refresh; nothing else to do.
+                        "attention" => {
+                            state.bus.publish(ev.clone());
+                            continue;
+                        }
+                        "hook" => {}
+                        _ => continue,
                     }
                     let kind = ev
                         .data
@@ -46,42 +55,9 @@ pub async fn run(state: AppState) {
                     if kind.is_empty() {
                         continue;
                     }
-                    // `session-start` fires only to inject the primer via
-                    // `additionalContext`; it intentionally does not change
-                    // session status (otherwise a resume would flip an idle
-                    // session to working with no user action).
-                    let status = match kind.as_str() {
-                        "working" => "working",
-                        "waiting" => "waiting",
-                        "idle" => "idle",
-                        _ => continue,
-                    };
-                    if let Ok(Some(session)) =
-                        session_mod::active_for_branch(&state.db, &ev.branch_id).await
-                    {
-                        let _ = session_mod::set_status(&state.db, &session.id, status).await;
-                        let _ = session_mod::touch(&state.db, &session.id).await;
-                        let prompt = if status == "waiting" {
-                            tmux::capture(&session.tmux_session, 0)
-                                .await
-                                .map(|s| s.trim().to_string())
-                                .unwrap_or_default()
-                        } else {
-                            String::new()
-                        };
-                        let _ =
-                            session_mod::set_pending_prompt(&state.db, &session.id, &prompt).await;
-                        let mut data = json!({ "status": status, "source": "hook" });
-                        if !prompt.is_empty() {
-                            data["prompt"] = json!(prompt);
-                        }
-                        let _ =
-                            events::record(&state.db, &state.bus, &ev.branch_id, "status", data)
-                                .await;
-                        // Bump the watermark past our own freshly-recorded
-                        // event so we don't loop on it.
-                        last_event = events::max_id(&state.db).await.unwrap_or(last_event);
-                    }
+                    last_event = apply_hook(&state, &ev.branch_id, &kind)
+                        .await
+                        .unwrap_or(last_event);
                 }
             }
             Err(e) => tracing::warn!("monitor: reading new events failed: {e}"),
@@ -124,38 +100,113 @@ pub async fn run(state: AppState) {
                 continue;
             }
 
+            // Hash the pane to detect activity and bump `last_activity_at`.
+            // Inferred working→idle demotion is gone: liveness is all we can
+            // know, and the agent reports the rest via `weaver status`.
             let screen = tmux::capture(&session.tmux_session, 0)
                 .await
                 .unwrap_or_default();
             let h = hash(&normalize_screen(&screen));
             if screen_hash.get(&session.id) != Some(&h) {
                 screen_hash.insert(session.id.clone(), h);
-                still_ticks.insert(session.id.clone(), 0);
                 let _ = session_mod::touch(&state.db, &session.id).await;
-            } else {
-                let ticks = still_ticks.entry(session.id.clone()).or_insert(0);
-                *ticks += 1;
-                if session.agent_kind != "claude"
-                    && session.status == "working"
-                    && *ticks >= IDLE_TICKS
-                {
-                    let _ = session_mod::set_status(&state.db, &session.id, "idle").await;
-                    let _ = events::record(
-                        &state.db,
-                        &state.bus,
-                        &session.branch_id,
-                        "status",
-                        json!({ "status": "idle", "source": "monitor" }),
-                    )
-                    .await;
-                    last_event = events::max_id(&state.db).await.unwrap_or(last_event);
-                }
             }
         }
 
         screen_hash.retain(|k, _| alive.contains(k));
-        still_ticks.retain(|k, _| alive.contains(k));
     }
+}
+
+/// Reflect a Claude lifecycle hook (`working` / `waiting` / `idle`) onto the
+/// active session and its branch, broadcasting only what actually changed.
+/// Returns the new event watermark (it records its own bus events). `None` when
+/// there is no active session for the branch.
+///
+/// Mapping rationale: hooks now drive only liveness and the genuine
+/// attention signals. Any hook means the agent process is alive → `running`
+/// (this also promotes a freshly-`launching` session). Beyond that:
+///
+/// * `working` (a prompt was submitted — the user is engaged) clears attention
+///   back to `ok` and drops any pending prompt.
+/// * `waiting` (Claude is blocked asking the user) raises attention to
+///   `attention` and snapshots the pane as the pending prompt.
+/// * `idle` (a turn ended) leaves attention untouched — a finished-but-fine
+///   agent must not be mistaken for one that needs the user. If it actually
+///   needs something it will have said so via `weaver status`.
+async fn apply_hook(state: &AppState, branch_id: &str, kind: &str) -> Option<i64> {
+    enum Prompt {
+        Capture,
+        Clear,
+        Leave,
+    }
+    let (attention, prompt): (Option<(&str, &str)>, Prompt) = match kind {
+        "working" => (Some(("ok", "")), Prompt::Clear),
+        "waiting" => (Some(("attention", "Waiting for input")), Prompt::Capture),
+        "idle" => (None, Prompt::Leave),
+        // `session-start` and anything unknown carry no status signal.
+        _ => return None,
+    };
+
+    let session = session_mod::active_for_branch(&state.db, branch_id).await.ok()??;
+
+    // Lifecycle: alive → running. Idempotent once running; never overrides a
+    // terminal state.
+    let status_changed =
+        session.status != "running" && !session_mod::is_terminal(&session.status);
+    if status_changed {
+        let _ = session_mod::set_status(&state.db, &session.id, "running").await;
+    }
+    let _ = session_mod::touch(&state.db, &session.id).await;
+
+    match prompt {
+        Prompt::Capture => {
+            let p = tmux::capture(&session.tmux_session, 0)
+                .await
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            let _ = session_mod::set_pending_prompt(&state.db, &session.id, &p).await;
+        }
+        Prompt::Clear => {
+            let _ = session_mod::set_pending_prompt(&state.db, &session.id, "").await;
+        }
+        Prompt::Leave => {}
+    }
+
+    // Attention, only when the hook carries a signal and the value differs.
+    let mut attention_changed: Option<(&str, &str)> = None;
+    if let Some((level, note)) = attention {
+        if let Ok(Some(branch)) = branch_mod::get(&state.db, branch_id).await {
+            if branch.attention != level || branch.attention_note != note {
+                let _ = branch_mod::set_attention(&state.db, branch_id, level, note).await;
+                attention_changed = Some((level, note));
+            }
+        }
+    }
+
+    if status_changed {
+        let _ = events::record(
+            &state.db,
+            &state.bus,
+            branch_id,
+            "status",
+            json!({ "status": "running", "source": "hook" }),
+        )
+        .await;
+    }
+    if let Some((level, note)) = attention_changed {
+        let _ = events::record(
+            &state.db,
+            &state.bus,
+            branch_id,
+            "attention",
+            json!({ "level": level, "note": note, "source": "hook" }),
+        )
+        .await;
+    }
+    // Advance the watermark past our own freshly-recorded events so the next
+    // tick doesn't reprocess them. `None` on a read error just leaves the
+    // caller's watermark untouched (the consumed event is already accounted for).
+    events::max_id(&state.db).await.ok()
 }
 
 fn hash(s: &str) -> u64 {

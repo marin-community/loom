@@ -96,6 +96,7 @@ async fn hook_event_drives_session_status() {
     };
 
     // What `weaver hook --event working` would do: write a `hook` event row.
+    // Any hook means the agent process is alive → lifecycle `running`.
     weaver_core::events::record_local(
         &pool,
         &branch_id,
@@ -111,11 +112,28 @@ async fn hook_event_drives_session_status() {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let ws = client.get(&format!("/api/sessions/{id}")).await.unwrap();
         got = ws["status"].as_str().unwrap_or("").to_string();
-        if got == "working" {
+        if got == "running" {
             break;
         }
     }
-    assert_eq!(got, "working", "monitor should have flipped status to working");
+    assert_eq!(got, "running", "monitor should have flipped status to running");
+
+    // A `waiting` hook (Claude blocked asking the user) raises the agent-declared
+    // attention axis to `attention` with a note — the dashboard's "needs me" flag.
+    weaver_core::events::record_local(&pool, &branch_id, "hook", json!({ "event": "waiting" }))
+        .await
+        .unwrap();
+    let mut attention = String::new();
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let ws = client.get(&format!("/api/sessions/{id}")).await.unwrap();
+        attention = ws["branch"]["attention"].as_str().unwrap_or("").to_string();
+        if attention == "attention" {
+            assert_eq!(ws["branch"]["attention_note"], "Waiting for input");
+            break;
+        }
+    }
+    assert_eq!(attention, "attention", "waiting hook should raise attention");
 
     // Verify the hook event row landed too.
     let log = client

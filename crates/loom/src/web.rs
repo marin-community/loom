@@ -27,7 +27,7 @@
 //! ```json
 //! {
 //!   "id": "<session id>",
-//!   "status": "working",
+//!   "status": "running",            // lifecycle: created|launching|running|orphaned|done|error
 //!   "work_dir": "/path/to/.worktrees/foo",
 //!   "tmux_session": "weaver-abcd1234",
 //!   "agent_kind": "claude",
@@ -43,6 +43,8 @@
 //!     "title": "...",
 //!     "goal": "...",
 //!     "description": "...",
+//!     "attention": "ok",            // agent-declared: ok|attention|blocked
+//!     "attention_note": "",         // short reason, e.g. "Waiting for PR feedback"
 //!     "repo_root": "/path/to/repo",
 //!     "branch": "weaver/feature-x",
 //!     "base_branch": "main",
@@ -163,6 +165,10 @@ pub struct BranchView {
     pub title: String,
     pub goal: String,
     pub description: String,
+    /// Agent-declared attention level (`ok` | `attention` | `blocked`) and its
+    /// short note — the "does this need me?" signal the dashboard filters on.
+    pub attention: String,
+    pub attention_note: String,
     pub repo_root: String,
     pub branch: String,
     pub base_branch: String,
@@ -192,6 +198,8 @@ impl BranchView {
             title: branch.title.clone(),
             goal: branch.goal.clone(),
             description: branch.description.clone(),
+            attention: branch.attention.clone(),
+            attention_note: branch.attention_note.clone(),
             repo_root: branch.repo_root.clone(),
             branch: branch.branch.clone(),
             base_branch: branch.base_branch.clone(),
@@ -650,7 +658,7 @@ async fn create_session(
     .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let status = if matches!(agent.as_str(), "shell" | "none") {
-        "idle"
+        "running"
     } else {
         "launching"
     };
@@ -736,6 +744,48 @@ struct PatchSessionReq {
     title: Option<String>,
     goal: Option<String>,
     description: Option<String>,
+    /// Agent-declared attention level (`ok` | `attention` | `blocked`) and note.
+    /// Branch-level; lets the dashboard set/clear what the agent set via
+    /// `weaver status`.
+    attention: Option<String>,
+    attention_note: Option<String>,
+}
+
+/// Apply an attention patch to a branch: validate the level, update the branch
+/// fields, and broadcast an `attention` event. A missing `level`/`note` keeps the
+/// branch's current value, so a caller can change one without clobbering the
+/// other. No-op when neither is supplied.
+async fn apply_attention_patch(
+    st: &AppState,
+    branch: &Branch,
+    level: Option<&str>,
+    note: Option<&str>,
+) -> ApiResult<()> {
+    if level.is_none() && note.is_none() {
+        return Ok(());
+    }
+    let level = level
+        .map(str::trim)
+        .unwrap_or(branch.attention.as_str())
+        .to_ascii_lowercase();
+    if !branch_mod::is_valid_attention(&level) {
+        return Err(AppError::bad_request(format!(
+            "invalid attention '{level}' — expected one of {}",
+            branch_mod::ATTENTION_LEVELS.join(", ")
+        )));
+    }
+    let note = note.map(str::trim).unwrap_or(branch.attention_note.as_str());
+    branch_mod::set_attention(&st.db, &branch.id, &level, note).await?;
+    events::record(
+        &st.db,
+        &st.bus,
+        &branch.id,
+        "attention",
+        json!({ "level": level, "note": note, "source": "manual" }),
+    )
+    .await
+    .ok();
+    Ok(())
 }
 
 async fn patch_session(
@@ -744,6 +794,8 @@ async fn patch_session(
     Json(req): Json<PatchSessionReq>,
 ) -> ApiResult<Json<SessionView>> {
     let (session, branch) = require_session(&st.db, &key).await?;
+    apply_attention_patch(&st, &branch, req.attention.as_deref(), req.attention_note.as_deref())
+        .await?;
     if let Some(title) = &req.title {
         branch_mod::set_title(&st.db, &branch.id, title).await?;
     }
@@ -1284,6 +1336,8 @@ struct PatchBranchReq {
     title: Option<String>,
     goal: Option<String>,
     description: Option<String>,
+    attention: Option<String>,
+    attention_note: Option<String>,
 }
 
 async fn patch_branch(
@@ -1292,6 +1346,8 @@ async fn patch_branch(
     Json(req): Json<PatchBranchReq>,
 ) -> ApiResult<Json<BranchView>> {
     let branch = require_branch(&st.db, &key).await?;
+    apply_attention_patch(&st, &branch, req.attention.as_deref(), req.attention_note.as_deref())
+        .await?;
     if let Some(title) = &req.title {
         branch_mod::set_title(&st.db, &branch.id, title).await?;
     }

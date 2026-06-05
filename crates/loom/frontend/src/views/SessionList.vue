@@ -3,8 +3,33 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { get, post } from '../api';
 import type { Session, RecentRepo, RepoBranch } from '../types';
 import StatusBadge from '../components/StatusBadge.vue';
+import AttentionBadge from '../components/AttentionBadge.vue';
 
 const sessions = ref<Session[]>([]);
+
+// Attention filter — the dashboard's "which sessions need me?" control.
+type AttentionFilter = 'all' | 'attention' | 'ok';
+const filter = ref<AttentionFilter>('all');
+
+// Treat an unset/unknown level as 'ok' so older rows count as fine.
+function levelOf(s: Session): string {
+  return s.branch.attention || 'ok';
+}
+
+const counts = computed(() => {
+  const c = { all: sessions.value.length, attention: 0, ok: 0 };
+  for (const s of sessions.value) {
+    if (levelOf(s) === 'ok') c.ok += 1;
+    else c.attention += 1; // 'attention' and 'blocked' both "need me"
+  }
+  return c;
+});
+
+const filteredSessions = computed(() => {
+  if (filter.value === 'all') return sessions.value;
+  if (filter.value === 'ok') return sessions.value.filter((s) => levelOf(s) === 'ok');
+  return sessions.value.filter((s) => levelOf(s) !== 'ok');
+});
 const recentRepos = ref<RecentRepo[]>([]);
 const error = ref('');
 const showForm = ref(false);
@@ -352,11 +377,29 @@ onUnmounted(() => clearInterval(timer));
       No sessions yet.
     </p>
 
+    <!-- Attention filter: jump straight to the sessions that need a human. -->
+    <div v-if="sessions.length" class="mb-3 inline-flex rounded border border-line text-xs overflow-hidden">
+      <button
+        v-for="opt in (['all', 'attention', 'ok'] as const)"
+        :key="opt"
+        type="button"
+        :data-testid="`filter-${opt}`"
+        :class="[
+          'px-3 py-1 border-l border-line first:border-l-0',
+          filter === opt ? 'bg-accent text-accent-fg' : 'bg-input text-muted hover:bg-subtle',
+        ]"
+        @click="filter = opt"
+      >
+        {{ opt === 'all' ? 'All' : opt === 'attention' ? 'Needs attention' : 'OK' }}
+        <span class="opacity-70">{{ counts[opt] }}</span>
+      </button>
+    </div>
+
     <div v-if="sessions.length" class="overflow-x-auto rounded border border-line">
       <table class="w-full border-collapse text-sm">
         <thead>
           <tr class="border-b border-line bg-surface text-left text-xs uppercase tracking-wide text-muted">
-            <th class="px-3 py-2 font-medium">Status</th>
+            <th class="px-3 py-2 font-medium">Attention</th>
             <th class="px-3 py-2 font-medium">Title</th>
             <th class="px-3 py-2 font-medium">Goal</th>
             <th class="px-3 py-2 font-medium">Latest status</th>
@@ -365,7 +408,7 @@ onUnmounted(() => clearInterval(timer));
         </thead>
         <tbody>
           <tr
-            v-for="s in sessions"
+            v-for="s in filteredSessions"
             :key="s.id"
             data-testid="session-card"
             :data-session-id="s.id"
@@ -373,8 +416,12 @@ onUnmounted(() => clearInterval(timer));
             @click="$router.push(`/s/${s.id}`)"
           >
             <td class="px-3 py-2 align-top">
-              <router-link :to="`/s/${s.id}`" class="inline-block" @click.stop>
-                <StatusBadge :status="s.status" />
+              <router-link :to="`/s/${s.id}`" class="block space-y-1" @click.stop>
+                <AttentionBadge :level="levelOf(s)" :note="s.branch.attention_note" />
+                <span v-if="s.branch.attention_note" class="block max-w-[14rem] truncate text-xs text-muted">
+                  {{ s.branch.attention_note }}
+                </span>
+                <StatusBadge :status="s.status" class="opacity-80" />
               </router-link>
             </td>
             <td class="px-3 py-2 align-top">

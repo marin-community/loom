@@ -18,6 +18,9 @@ export interface Branch {
   title: string;
   goal: string;
   description: string;
+  /** Agent-declared attention level: 'ok' | 'attention' | 'blocked'. */
+  attention: string;
+  attention_note: string;
   repo_root: string;
   branch: string;
   base_branch: string;
@@ -63,6 +66,12 @@ export interface WeaverFixture {
   listSessions(): Promise<Session[]>;
   /** Flip a session's status by writing a hook event row via `weaver hook`. */
   hook(session: Session, event: 'working' | 'waiting' | 'idle'): Promise<void>;
+  /** Declare the agent's attention level + note via `weaver status`. */
+  setStatus(
+    session: Session,
+    level: 'ok' | 'attention' | 'blocked',
+    note?: string,
+  ): Promise<void>;
 }
 
 /** Ensure the loom binary and the Vue frontend bundle both exist. */
@@ -226,6 +235,16 @@ export const test = base.extend<{ weaver: WeaverFixture }>({
         // `weaver hook` writes an `events` row keyed on the branch resolved
         // from $WEAVER_BRANCH; the loom monitor consumes it on its next tick.
         execFileSync(WEAVER_BINARY, ['hook', '--event', event], {
+          env: { ...childEnv, WEAVER_BRANCH: session.branch.id },
+          stdio: 'pipe',
+        });
+      },
+
+      async setStatus(session, level, note) {
+        // `weaver status <level> [note]` writes the branch's attention fields
+        // directly and records an `attention` event the monitor re-broadcasts.
+        const args = ['status', level, ...(note ? [note] : [])];
+        execFileSync(WEAVER_BINARY, args, {
           env: { ...childEnv, WEAVER_BRANCH: session.branch.id },
           stdio: 'pipe',
         });

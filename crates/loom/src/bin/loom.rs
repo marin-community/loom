@@ -430,13 +430,17 @@ async fn cmd_ps() -> Result<()> {
         println!("no sessions — start one with `loom launch \"<name>\"`");
         return Ok(());
     }
-    println!("{:<10}  {:<9}  {:<24}  TITLE", "ID", "STATUS", "NAME");
+    println!(
+        "{:<10}  {:<9}  {:<10}  {:<22}  TITLE",
+        "ID", "STATUS", "ATTENTION", "NAME"
+    );
     for ws in rows {
         println!(
-            "{:<10}  {:<9}  {:<24}  {}",
+            "{:<10}  {:<9}  {:<10}  {:<22}  {}",
             str_field(&ws, "id"),
             str_field(&ws, "status"),
-            truncate(branch_str(&ws, "name"), 24),
+            branch_str(&ws, "attention"),
+            truncate(branch_str(&ws, "name"), 22),
             truncate(branch_str(&ws, "title"), 46),
         );
     }
@@ -495,6 +499,14 @@ fn print_session(ws: &Value) {
     );
     println!("  title:    {}", branch_str(ws, "title"));
     println!("  status:   {}", str_field(ws, "status"));
+    let attention = branch_str(ws, "attention");
+    let attention_note = branch_str(ws, "attention_note");
+    let attention = if attention_note.is_empty() {
+        attention.to_string()
+    } else {
+        format!("{attention} — {attention_note}")
+    };
+    println!("  attention: {attention}");
     let goal = branch_str(ws, "goal");
     println!(
         "  goal:     {}",

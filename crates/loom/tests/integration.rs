@@ -258,7 +258,7 @@ async fn session_lifecycle() {
     }
 
     // A hook flips the session status. The monitor consumes new `hook`
-    // event rows on its next tick.
+    // event rows on its next tick; any hook means the agent is alive → running.
     let branch_id = {
         let s = loom::session::get(&pool, &id).await.unwrap().unwrap();
         s.branch_id
@@ -266,16 +266,16 @@ async fn session_lifecycle() {
     weaver_core::events::record_local(&pool, &branch_id, "hook", json!({ "event": "working" }))
         .await
         .unwrap();
-    let mut working = false;
+    let mut running = false;
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let ws = client.get(&format!("/api/sessions/{id}")).await.unwrap();
-        if ws["status"] == "working" {
-            working = true;
+        if ws["status"] == "running" {
+            running = true;
             break;
         }
     }
-    assert!(working, "monitor should have flipped status to working");
+    assert!(running, "monitor should have flipped status to running");
 
     // Scratch files: empty to start, then an upload lands at scratch/<name> in
     // the worktree, is listed, and can be deleted. Path-traversal names are
