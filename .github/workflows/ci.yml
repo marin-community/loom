@@ -1,0 +1,63 @@
+name: CI
+
+# Gates merges into main. The `build` job compiles the whole workspace
+# *including* the frontend (build.rs runs `npm install` + rspack), so a broken
+# frontend dependency tree — e.g. an rspack peer-dependency conflict from a
+# Dependabot bump — fails CI here instead of on a contributor's machine.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Newer pushes to the same branch cancel in-flight runs.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/loom/frontend/package-lock.json
+      # Full build: build.rs runs the frontend toolchain (npm + rspack). This is
+      # the check that catches frontend dependency breakage.
+      - run: cargo build --workspace --locked
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    env:
+      WEAVER_SKIP_FRONTEND: 1 # the `build` job covers the frontend; skip it here
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    env:
+      WEAVER_SKIP_FRONTEND: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Integration tests shell out to real `git` and `tmux` (see AGENTS.md).
+      - run: sudo apt-get update && sudo apt-get install -y tmux
+      - run: cargo test --workspace --locked
