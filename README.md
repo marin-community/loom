@@ -188,7 +188,7 @@ Loom serves a JSON API under `/api`; the Vue SPA is the primary consumer.
   `GET POST /api/repos/issues?repo_root=…` (the repo-wide board / backlog)
 - `GET PATCH /api/settings`
 
-See `AGENTS.md` for the shape of `SessionView`.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the shape of `SessionView`.
 
 ## Server address
 
