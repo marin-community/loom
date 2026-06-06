@@ -24,7 +24,7 @@ use tokio::sync::OnceCell;
 use crate::db::{now_iso, Db};
 use crate::session::{self as session_mod, Session};
 use crate::web::AppState;
-use crate::{branch as branch_mod, config, events, note};
+use crate::{branch as branch_mod, config, events};
 use weaver_core::branch::Branch;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -400,8 +400,8 @@ async fn apply_snapshot(
     }
 
     if archive_on_merge && snap.pr_state == "MERGED" && !session_mod::is_terminal(&session.status) {
-        let msg = format!("PR #{} merged — archiving the worktree.", snap.pr_number);
-        note::add(&state.db, &branch.id, &msg).await.ok();
+        // The merge is already on the record as a `github` event (above) and the
+        // archive records a `status` event, so no extra log line is needed.
         match crate::web::archive(state, session, branch).await {
             Ok(_) => tracing::info!(
                 branch = %branch.branch,

@@ -56,7 +56,6 @@ loom open                             # open the web UI
 weaver goal "ship the feature"
 weaver goal                           # print the current goal
 weaver summary                        # goal + outstanding tasks + next-step hints
-weaver note    "blocked on the DB schema"
 weaver set-status attention "ready for review"   # level (ok|attention|blocked) + current-state message
 weaver issue add "Backfill old rows" --body "ETA after the schema change"
 weaver issue add "Audit the logger" --repo   # unclaimed repo backlog item

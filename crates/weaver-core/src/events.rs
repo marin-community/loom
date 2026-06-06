@@ -120,6 +120,30 @@ pub async fn history(db: &Db, branch_id: &str, limit: i64) -> Result<Vec<Event>>
     Ok(events)
 }
 
+/// The most recent status message: the `note` carried by the latest `attention`
+/// event that has one, or `None` if the agent has never set a message. These
+/// messages — set via `weaver set-status` — are the branch's progress trail now
+/// that free-form notes are gone. Scans a small recent window so a run of
+/// bare level changes (which carry no message) still finds the last real one.
+pub async fn last_status_message(db: &Db, branch_id: &str) -> Result<Option<String>> {
+    let rows = sqlx::query(
+        "SELECT data FROM events WHERE branch_id = ? AND kind = 'attention'
+         ORDER BY id DESC LIMIT 20",
+    )
+    .bind(branch_id)
+    .fetch_all(db)
+    .await?;
+    for r in rows {
+        let data: Value = serde_json::from_str(&r.get::<String, _>("data")).unwrap_or(Value::Null);
+        if let Some(note) = data.get("note").and_then(Value::as_str) {
+            if !note.trim().is_empty() {
+                return Ok(Some(note.to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Fetch every event with id strictly greater than `since`, oldest first.
 /// Used by the monitor to consume hook events written by the `weaver hook`
 /// command.

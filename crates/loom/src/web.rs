@@ -5,7 +5,7 @@
 //! * `/api/sessions` — list + create active sessions (each session is one
 //!   tmux + one agent attached to a branch).
 //! * `/api/sessions/{id}` — GET / PATCH / DELETE a single session, plus the
-//!   action subroutes `/note`, `/archive`, `/adopt`,
+//!   action subroutes `/archive`, `/adopt`,
 //!   `/log`, `/events`, and `/terminal` (a WebSocket bridged to the session's
 //!   tmux via a PTY — see `crate::terminal`). Interacting with the agent
 //!   (keystrokes, keys, TUIs) happens entirely over `/terminal`.
@@ -355,7 +355,6 @@ pub fn router(state: AppState) -> Router {
             "/sessions/{id}",
             get(get_session).patch(patch_session).delete(delete_session),
         )
-        .route("/sessions/{id}/note", post(note_session))
         .route("/sessions/{id}/archive", post(archive_session))
         .route("/sessions/{id}/adopt", post(adopt_session))
         .route("/sessions/{id}/github", post(refresh_github_session))
@@ -990,15 +989,6 @@ async fn patch_session(
     }
     if let Some(description) = &req.description {
         branch_mod::set_description(&st.db, &branch.id, description).await?;
-        events::record(
-            &st.db,
-            &st.bus,
-            &branch.id,
-            "note",
-            json!({ "text": "description updated" }),
-        )
-        .await
-        .ok();
     }
     if let Some(status) = &req.status {
         if !session_mod::STATUSES.contains(&status.as_str()) {
@@ -1066,32 +1056,8 @@ async fn delete_session(
 // Session actions
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-struct NoteReq {
-    text: String,
-}
-
-async fn note_session(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Json(req): Json<NoteReq>,
-) -> ApiResult<Json<Value>> {
-    let (session, branch) = require_session(&st.db, &key).await?;
-    weaver_core::note::add(&st.db, &branch.id, &req.text).await?;
-    events::record(
-        &st.db,
-        &st.bus,
-        &branch.id,
-        "note",
-        json!({ "text": req.text }),
-    )
-    .await?;
-    session_mod::touch(&st.db, &session.id).await.ok();
-    Ok(Json(json!({ "ok": true })))
-}
-
 /// Archive a session: tear down its tmux and remove the worktree, but keep the
-/// branch (and its commits), the session row, notes and run history.
+/// branch (and its commits), the session row, and run history.
 /// This is the "I'm done with this workstream" action — unlike delete, the
 /// weaver/loom record is preserved for future reference, and the git branch is
 /// left intact so the work can be revisited or a worktree recreated later.
@@ -1120,7 +1086,7 @@ pub async fn archive(
     // longer "need me". Clear any lingering attention so the dashboard stops
     // flagging a torn-down workstream. Attention is the agent's live "does this
     // need a human?" signal; nothing is live here any more. The history (goal,
-    // notes, description) is kept.
+    // status, events) is kept.
     if branch.attention != branch_mod::DEFAULT_ATTENTION {
         branch_mod::set_attention(&st.db, &branch.id, branch_mod::DEFAULT_ATTENTION).await?;
     }
@@ -1867,15 +1833,6 @@ async fn patch_branch(
     }
     if let Some(description) = &req.description {
         branch_mod::set_description(&st.db, &branch.id, description).await?;
-        events::record(
-            &st.db,
-            &st.bus,
-            &branch.id,
-            "note",
-            json!({ "text": "description updated" }),
-        )
-        .await
-        .ok();
     }
     let branch = branch_mod::get(&st.db, &branch.id)
         .await?

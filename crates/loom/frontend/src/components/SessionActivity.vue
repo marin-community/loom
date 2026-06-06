@@ -3,7 +3,7 @@ import { computed, ref } from 'vue';
 import type { WeaverEvent } from '../types';
 
 // The Overview activity feed: de-noised to meaningful kinds (status, attention,
-// note, issue_*), newest first, capped at 6 with an "older →" reveal. High-volume
+// issue_*), newest first, capped at 6 with an "older →" reveal. High-volume
 // `hook` events are dropped — they never stream in live, but the initial GET /log
 // may include them, so filter defensively.
 const props = defineProps<{ events: WeaverEvent[]; format: (ev: WeaverEvent) => string }>();
@@ -11,7 +11,6 @@ const props = defineProps<{ events: WeaverEvent[]; format: (ev: WeaverEvent) => 
 const MEANINGFUL = new Set([
   'status',
   'attention',
-  'note',
   'issue_added',
   'issue_closed',
   'issue_reopened',

@@ -13,7 +13,7 @@ weaver ships **two binaries** and a **shared sqlite database**:
   no HTTP) and resolves "the current branch" from `$WEAVER_BRANCH` or, failing
   that, the git checkout under cwd. Cold start is sub-50ms; the binary
   intentionally has no `axum` / `reqwest` / SPA dependencies. Agents call
-  `weaver` to read and update the goal, append notes, add and triage issues,
+  `weaver` to read and update the goal, report status, add and triage issues,
   and emit hook events. **`weaver` works fine whether or not `loom` is
   running** — that decoupling is the whole point of the split.
 
@@ -47,8 +47,8 @@ needing the daemon to be reachable.
 
 | Path | What's in it |
 |---|---|
-| `crates/weaver-core/` | lib: `branches`, `issues`, `notes`, `events`, `db`, `git`, `config`, `plan` (parser + reconcile), `repo_config` (`.weaver/config.toml`), agent helpers. Pure logic; used by both binaries. |
-| `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`goal`, `summary`, `note`, `set-status` [read or set level + message], `issue …`, `where`, `log`, `hook`, `config`) |
+| `crates/weaver-core/` | lib: `branches`, `issues`, `events`, `db`, `migrations` (ordered SQL + `schema_migrations` indicator), `git`, `config`, `plan` (parser + reconcile), `repo_config` (`.weaver/config.toml`), agent helpers. Pure logic; used by both binaries. |
+| `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`goal`, `summary`, `set-status` [read or set level + message], `issue …`, `where`, `log`, `hook`, `config`) |
 | `crates/loom/src/web.rs` | axum routes, request/response types, SSE — **the API surface** |
 | `crates/loom/src/server.rs` | bind, write `server.json`, spawn bg tasks |
 | `crates/loom/src/monitor.rs` | status detection, orphan marking, hook-event consumer |
@@ -164,10 +164,16 @@ the PR, not integrating it yourself (see the builtin
 
 - **SQLite** at `$WEAVER_HOME/weaver.db` (default `~/.weaver/weaver.db`),
   shared by `weaver` and `loom`. WAL mode handles concurrency.
-  - Core tables (`weaver-core/src/db.rs`): `branches`, `issues`, `notes`,
-    `events`, `settings`.
+  - Core tables: `branches`, `issues`, `events`, `settings`.
   - Loom tables (`crates/loom/src/db.rs`): `sessions`, `recent_repos`,
     `branch_github` (per-branch PR snapshot).
+  - **Schema migrations** (`weaver-core/src/migrations.rs`): ordered SQL files
+    under `crates/weaver-core/migrations/` (`NNNN_name.sql`, embedded with
+    `include_str!`), applied at startup and recorded in a `schema_migrations`
+    indicator table so each runs once. Add a change as a new numbered file plus
+    a row in `MIGRATIONS`; never edit one that has shipped. A pre-framework
+    database is brought to the baseline by a one-time `legacy_bootstrap` on
+    first run.
 - **`server.json`** in `$WEAVER_HOME`: pid + bound addr, written when `loom`
   comes up. The `loom` CLI uses it to find the daemon when `WEAVER_API` is
   unset.
@@ -189,7 +195,7 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `GET /api/health` | liveness probe |
 | `GET /api/sessions` / `POST /api/sessions` | list / create sessions (create takes optional `scratch: [{name, content_base64}]` and `parent_branch`; opens a tracking issue and returns its id as `tracking_issue`) |
 | `GET PATCH DELETE /api/sessions/{id}` | session CRUD (status, title, goal, description, attention) |
-| `POST /api/sessions/{id}/{note,archive,adopt}` | actions |
+| `POST /api/sessions/{id}/{archive,adopt}` | actions |
 | `POST /api/sessions/{id}/github` | re-poll the branch's GitHub PR now and return the updated session |
 | `GET POST DELETE /api/sessions/{id}/scratch` | list / drop / remove worktree `scratch/` reference files |
 | `PUT /api/sessions/{id}/file?path=…` | write raw bytes to a worktree file (the editor save primitive) |
@@ -347,7 +353,6 @@ When working inside a worktree the agent can run, with no daemon required:
 weaver goal "ship the feature"          # set the branch's goal
 weaver goal                             # print the goal
 weaver summary                          # goal + outstanding tasks + next-step hints
-weaver note   "blocked on the DB schema"
 weaver set-status attention "ready for review"   # level + current-state message
 weaver set-status ok "waiting on PR review feedback"
 weaver set-status blocked                # change level only; keep the last message

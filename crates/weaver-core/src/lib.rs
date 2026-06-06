@@ -9,7 +9,7 @@ pub mod db;
 pub mod events;
 pub mod git;
 pub mod issue;
-pub mod note;
+pub mod migrations;
 pub mod plan;
 pub mod repo_config;
 

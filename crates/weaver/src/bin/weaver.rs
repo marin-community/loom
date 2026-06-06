@@ -10,7 +10,7 @@ use anyhow::{anyhow, bail, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::{json, Value};
 
-use weaver_core::{branch, config, db, events, issue, note, plan, repo_config};
+use weaver_core::{branch, config, db, events, issue, plan, repo_config};
 
 #[derive(Parser)]
 #[command(
@@ -44,8 +44,6 @@ enum Cmd {
         /// Current-state message, e.g. "Wired up routes; tests pass".
         message: Vec<String>,
     },
-    /// Append a note to the current branch.
-    Note { text: Vec<String> },
     /// Print a quick orientation for the current branch.
     ///
     /// A one-shot catch-up for an agent picking up (or resuming) a branch: the
@@ -192,7 +190,6 @@ async fn run() -> Result<()> {
     match cli.cmd {
         Cmd::Goal { text } => cmd_goal(text.join(" ")).await,
         Cmd::SetStatus { level, message } => cmd_set_status(level, message.join(" ")).await,
-        Cmd::Note { text } => cmd_note(text.join(" ")).await,
         Cmd::Summary => cmd_summary().await,
         Cmd::Issue { cmd } => cmd_issue(cmd).await,
         Cmd::Plan { cmd } => cmd_plan(cmd).await,
@@ -230,18 +227,6 @@ async fn cmd_goal(text: String) -> Result<()> {
     }
     events::record_local(&db, &b.id, "goal_set", json!({ "goal": text })).await?;
     println!("goal updated");
-    Ok(())
-}
-
-async fn cmd_note(text: String) -> Result<()> {
-    if text.is_empty() {
-        bail!("note text is required");
-    }
-    let db = open_db().await?;
-    let b = branch::resolve(&db).await?;
-    note::add(&db, &b.id, &text).await?;
-    events::record_local(&db, &b.id, "note", json!({ "text": text })).await?;
-    println!("noted");
     Ok(())
 }
 
@@ -322,13 +307,12 @@ async fn cmd_summary() -> Result<()> {
         }
     }
 
-    // Hints for next steps: the most recent note (where work was left off) plus
-    // a generated next-action drawn from the open work.
+    // Hints for next steps: the latest status message (where work was left off,
+    // drawn from the status-description trail) plus a generated next-action.
     println!();
-    println!("Next steps:  (weaver log · weaver note)");
-    let notes = note::list_for_branch(&db, &b.id).await?;
-    if let Some(last) = notes.last() {
-        println!("  - last note: {}", truncate(&last.text, 100));
+    println!("Next steps:  (weaver log · weaver set-status)");
+    if let Some(last) = events::last_status_message(&db, &b.id).await? {
+        println!("  - last status: {}", truncate(&last, 100));
     }
     println!("  - {}", next_action_hint(&open, &delegated));
     Ok(())

@@ -13,12 +13,12 @@ It is on your `PATH`. From anywhere in the worktree you can run:
 - `weaver summary` — a quick catch-up on the branch: the goal, your current
   status, the outstanding tasks, and a hint or two for what to do next. Run it
   when you pick up or resume a branch.
-- `weaver note "<text>"` — append a progress note, or a decision and its
-  rationale, to the branch log.
 - `weaver set-status <level> "<message>"` — tell the dashboard how you are
   doing. `level` is one of `ok`, `attention`, or `blocked`; the message is a
   short current-state note ("Wired up routes; tests pass"). This is your single
-  channel for reporting status — both the level and the message in one call.
+  channel for reporting status — both the level and the message in one call —
+  and the trail of these messages is your progress log: record a decision or
+  where you left off by setting the status, not in a separate note.
 - `weaver issue add "<title>"` — add a task claimed by this branch (`--repo`
   files it in the shared repo backlog instead).
 - `weaver issue ls` — this branch's tasks plus the unclaimed repo backlog
@@ -96,13 +96,13 @@ often wrong (e.g. it read "idle" while you were really waiting on a workflow).
 
 ## How to work here
 
-- Prefer to make a well-reasoned decision, record it with `weaver note`, and
-  keep going. Default to recording and continuing rather than stopping.
+- Prefer to make a well-reasoned decision, record it with `weaver set-status`,
+  and keep going. Default to recording and continuing rather than stopping.
 - You may still ask the user for feedback in plain prose when a choice genuinely
   matters. But **never block on an interactive TUI prompt** — multiple-choice
   menus, plan-approval dialogs, and the like cannot be answered from the
-  dashboard. State the question as plain text, record it with `weaver note`,
-  set `weaver set-status attention "<the question>"`, and continue with your
+  dashboard. State the question as plain text and
+  set `weaver set-status attention "<the question>"`, then continue with your
   best assumption.
 
 ## Finishing work
@@ -119,12 +119,12 @@ the work is ready:
   unless the user has told you otherwise. Most teams gate integration on review
   and CI; respect that. Use the project's normal PR workflow (e.g. `gh pr
   create`).
-- Record what you did and any follow-ups with `weaver note`, then raise
-  `weaver set-status attention "ready for review"` (the message doubles as your
-  concise summary) so the user knows to look.
+- Raise `weaver set-status attention "ready for review"` (the message doubles as
+  your concise summary, and file any follow-ups as issues with `weaver issue
+  add`) so the user knows to look.
 
 When a session is finished with, the user may **archive** it from the dashboard:
 that tears down this tmux session and removes the worktree, but preserves the
-branch and the weaver history (goal, notes, status) for future reference. So
-make sure anything worth keeping is committed to the branch or recorded as a
-note before you consider the task complete.
+branch and the weaver history (goal, status, events) for future reference. So
+make sure anything worth keeping is committed to the branch or filed as an issue
+before you consider the task complete.

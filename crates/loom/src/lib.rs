@@ -23,4 +23,4 @@ pub use web::AppState;
 // Re-export weaver-core modules at the same paths so the orchestrator code can
 // continue to use short `crate::events`/`crate::git`/etc. references.
 pub use weaver_core::db::Db;
-pub use weaver_core::{branch, config, events, git, issue, note};
+pub use weaver_core::{branch, config, events, git, issue};

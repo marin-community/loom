@@ -64,7 +64,7 @@ async function loadAll() {
 
 function openStream() {
   source = new EventSource(`/api/sessions/${props.id}/events`);
-  for (const kind of ['status', 'attention', 'note', 'github']) {
+  for (const kind of ['status', 'attention', 'github']) {
     source.addEventListener(kind, (e) => {
       const ev = JSON.parse((e as MessageEvent).data) as WeaverEvent;
       events.value.push(ev);
@@ -83,7 +83,6 @@ function eventLine(ev: WeaverEvent): string {
   if (ev.kind === 'status') return `status → ${d.status ?? '?'}`;
   if (ev.kind === 'attention')
     return `status → ${d.level ?? '?'}${d.note ? ` (${d.note})` : ''}`;
-  if (ev.kind === 'note') return String(d.text ?? '');
   if (ev.kind === 'github')
     return `PR #${d.pr ?? '?'} → ${d.state ?? '?'}${d.checks ? ` · checks ${d.checks}` : ''}`;
   if (ev.kind === 'issue_added') return `issue added: ${d.title ?? ''}`;
