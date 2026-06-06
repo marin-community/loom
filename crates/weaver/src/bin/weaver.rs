@@ -300,24 +300,25 @@ async fn cmd_summary() -> Result<()> {
     if open.is_empty() && delegated.is_empty() {
         println!("Outstanding: none  (weaver issue ls)");
     } else {
-        println!(
-            "Outstanding ({}):  (weaver issue ls)",
-            open.len() + delegated.len()
-        );
+        let total = open.len() + delegated.len();
+        println!("Outstanding ({total}):  (weaver issue ls)");
+        // Cap the whole list (own issues first, then delegated sub-trees) so a
+        // branch that delegated many sub-trees can't blow the summary up; the
+        // overflow collapses into one trailing line.
+        let mut shown = 0;
         for i in open.iter().take(SUMMARY_TASK_CAP) {
             println!("  #{:<4} {}", i.id, i.title);
+            shown += 1;
         }
-        if open.len() > SUMMARY_TASK_CAP {
-            println!(
-                "  (+{} more — weaver issue ls)",
-                open.len() - SUMMARY_TASK_CAP
-            );
-        }
-        for i in &delegated {
+        for i in delegated.iter().take(SUMMARY_TASK_CAP - shown) {
             let who = working_branch_status(&db, i)
                 .await
                 .unwrap_or_else(|| i.claimed_branch.clone().unwrap_or_else(|| "?".to_string()));
             println!("  #{:<4} {}  → {who} (delegated)", i.id, i.title);
+            shown += 1;
+        }
+        if total > shown {
+            println!("  (+{} more — weaver issue ls)", total - shown);
         }
     }
 

@@ -522,7 +522,8 @@ Just do it now.
         let with = scaffold("p", "P", "  Rewrite search to use the new index  ");
         assert!(with.contains("Rewrite search to use the new index"));
         assert!(!with.contains("What are we building")); // prompt replaced
-                                                         // Empty goal keeps the prompt.
+
+        // An empty goal keeps the prompt.
         assert!(scaffold("p", "P", "   ").contains("What are we building"));
     }
 

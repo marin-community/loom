@@ -308,6 +308,29 @@ fn summary_orients_an_agent_on_the_branch() {
     }
 }
 
+/// The outstanding list is capped (across own issues *and* delegated sub-trees)
+/// so a branch with lots of work can't blow up the summary; the overflow
+/// collapses into a single "(+N more)" line.
+#[test]
+fn summary_caps_a_long_outstanding_list() {
+    let env = setup();
+    for n in 0..13 {
+        let title = format!("task{n}");
+        run(&env, &["issue", "add", title.as_str()]);
+    }
+    let out = run(&env, &["summary"]);
+    assert!(out.contains("Outstanding (13):"), "summary: {out}");
+    // Cap is 10 → the last 3 collapse into one line, not three rows.
+    assert!(
+        out.contains("(+3 more"),
+        "summary should collapse the overflow: {out}"
+    );
+    assert!(
+        !out.contains("task12"),
+        "capped tasks should not be printed individually: {out}"
+    );
+}
+
 /// With nothing open, summary flips its hint to "wrap up / open a PR".
 #[test]
 fn summary_with_no_open_tasks_suggests_wrapping_up() {
