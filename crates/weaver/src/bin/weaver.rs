@@ -307,13 +307,11 @@ async fn cmd_summary() -> Result<()> {
         }
     }
 
-    // Hints for next steps: the latest status message (where work was left off,
-    // drawn from the status-description trail) plus a generated next-action.
+    // Hint for the next step: a generated next-action drawn from the open work.
+    // The current status (where work was left off) is already on the `Status:`
+    // line above, sourced from the status-description trail.
     println!();
     println!("Next steps:  (weaver log · weaver set-status)");
-    if let Some(last) = events::last_status_message(&db, &b.id).await? {
-        println!("  - last status: {}", truncate(&last, 100));
-    }
     println!("  - {}", next_action_hint(&open, &delegated));
     Ok(())
 }

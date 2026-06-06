@@ -280,20 +280,17 @@ fn summary_orients_an_agent_on_the_branch() {
     run(&env, &["goal", "ship", "the", "feature"]);
     run(&env, &["issue", "add", "wire", "up", "routes"]);
     run(&env, &["issue", "add", "add", "tests"]);
-    // Two status updates: the latest is what "last status" surfaces.
-    run(&env, &["set-status", "blocked", "build", "broken"]);
     run(&env, &["set-status", "ok", "routes", "wired"]);
 
     let out = run(&env, &["summary"]);
     assert!(out.contains("ship the feature"), "summary: {out}");
+    // The current status (level + message) is the where-you-left-off signal.
     assert!(out.contains("ok — routes wired"), "summary: {out}");
     // Outstanding lists the tasks themselves, not just a count.
     assert!(out.contains("Outstanding (2):"), "summary: {out}");
     assert!(out.contains("#1    wire up routes"), "summary: {out}");
     assert!(out.contains("#2    add tests"), "summary: {out}");
-    // Hints: the latest status message (from the status-description trail) plus
-    // a next-action pointing at the first task.
-    assert!(out.contains("last status: routes wired"), "summary: {out}");
+    // The next-action hint points at the first open task.
     assert!(out.contains("pick up #1"), "summary: {out}");
     // Every section advertises the command that drills into it.
     for hint in [
