@@ -335,8 +335,25 @@ issue status), a `sync` endpoint, and the file-write endpoint in `web.rs`,
 consumed by the SPA and the `loom` CLI alike; the agent-facing `weaver plan`
 talks straight to the file + DB. No browser-only state ([[ui-built-on-rest-api]]).
 
-A repo-wide plan board (all plans, not session-scoped) is the natural follow-on
-once the per-session Overview render exists — same components, a different route.
+## Scope: a plan lives on a branch
+
+A plan is **branch-scoped by construction**, not a repo-wide registry. The file
+lives in the worktree, so a session only ever lists or opens the plans on *its
+own branch*; sub-sessions inherit a plan by **branching from its parent** — the
+file descends through git, exactly the way the rest of the worktree does. There
+is no global plan table and no cross-branch plan list: you look at the plan
+you're working on, not someone else's.
+
+The one repo-wide thread is the materialized **issue ledger** (`issues` is
+repo-scoped by design — [[repo-scoped-issues]]). A plan's tasks key on
+`<slug>#<id>` across the repo, which is exactly what lets a parent's plan project
+status across its whole fan-out: sub-sessions claim the backlog issues the parent
+materialized, and the parent's plan view shows who's working what. The slug is
+therefore a repo-wide identity (like the filename it is); `weaver plan new`
+refuses a slug already materialized on another branch so two *unrelated* plans
+can't cross-talk. A genuine cross-branch "all plans in the repo" board would be a
+deliberate departure — easy to add later (same components, a glob across
+worktrees) but intentionally not the default.
 
 ## When to use it (right-sizing)
 
@@ -363,13 +380,13 @@ stays single-goal by default; `--plan` is the deliberate escalation.
 
 - **Storage — no `plans` table.** The file is canonical for prose + structure;
   the **only** DB addition is a `plan_task` annotation on `issues`
-  (`"<slug>#<id>"`), the link the board groups and joins on. Enumerating plans
-  is a filesystem glob of the plan dir in the worktree (loom already reads
-  worktree files for the file/raw endpoints), and a plan's task→status is
-  parse-the-file + query-issues-by-`plan_task`. A `plans` table would only
-  duplicate facts the file and the `issues` rows already own — it earns its
-  migration only if repo-wide plan listing ever proves too slow as a glob, which
-  at weaver's scale it won't. **Decision: file scan + `plan_task`, no table.**
+  (`"<slug>#<id>"`), the link the board groups and joins on. Enumerating plans is
+  a filesystem glob of the plan dir **in the worktree** (loom already reads
+  worktree files for the file/raw endpoints) — which is *why* plans are
+  branch-scoped: a branch sees only the plan files in its own checkout. A plan's
+  task→status is parse-the-file + query-issues-by-`plan_task`. A `plans` table
+  would only duplicate facts the file and the `issues` rows already own.
+  **Decision: file scan + `plan_task`, no table.**
 - **CLI (`weaver`, file+DB direct):**
   `weaver plan new <slug>`, `weaver plan show <slug>`,
   `weaver plan sync <slug> [--apply]`, `weaver plan ls` (glob the plan dir).
@@ -427,7 +444,10 @@ Each step is independently shippable and independently useful.
 - **Noun:** `plan`. ✅
 - **Location:** `docs/plans/<slug>.md` by default, **per-repo configurable** via
   `.weaver/config.toml` `[plan].dir`. ✅
-- **Plans per repo:** **many**, slug-keyed, each spanning its own fan-out. ✅
+- **Scope:** a plan is **branch-scoped** — a worktree file that descends to
+  sub-sessions through git; many per branch, slug-keyed, each spanning its own
+  fan-out. The slug is a repo-wide identity for the issue join, so `plan new`
+  refuses a slug already materialized on another branch. ✅
 - **`plans` DB row:** **no** — file scan for enumeration, `plan_task` on issues
   for the link/status join. The file and `issues` already own every fact a table
   would hold. ✅

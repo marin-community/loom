@@ -649,6 +649,28 @@ async fn cmd_plan(cmd: PlanCmd) -> Result<()> {
             if path.exists() {
                 bail!("plan already exists: {}", path.display());
             }
+            // A plan's issues key on `<slug>#<task>` across the whole repo, so a
+            // slug already materialized elsewhere would cross-talk with this
+            // one. Plans are shared *down a branch lineage* — a sub-session
+            // inherits the plan by branching from its parent (the file descends
+            // through git), never by re-creating the same slug. So a collision
+            // here means an unrelated plan: refuse and let the user rename.
+            let claimed = issue::list_for_plan(&db, &b.repo_root, &slug, true).await?;
+            if !claimed.is_empty() {
+                let owners: std::collections::BTreeSet<&str> = claimed
+                    .iter()
+                    .filter_map(|i| i.source_branch.as_deref())
+                    .collect();
+                let who = if owners.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (materialized on {})", owners.into_iter().collect::<Vec<_>>().join(", "))
+                };
+                bail!(
+                    "plan slug '{slug}' is already in use in this repo{who} — \
+                     pick a different title or pass --slug"
+                );
+            }
             std::fs::create_dir_all(&dir)
                 .map_err(|e| anyhow!("creating {}: {e}", dir.display()))?;
             std::fs::write(&path, plan::scaffold(&slug, &title))?;
