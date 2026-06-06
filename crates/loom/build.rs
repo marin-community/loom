@@ -10,20 +10,17 @@ fn mtime(path: &Path) -> SystemTime {
         .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
-// Builds the Vue frontend into `static/dist`, but only under the `embed-frontend`
-// cargo feature (and when npm + the frontend sources are present). The SPA is
-// served from `static/dist` at runtime (see `web::static_dir`), not embedded in
-// the binary, so the bundle is independent of the Rust compile: a plain
-// `cargo build` / `cargo test` skips it — the fast, Node-free path for backend
-// work — and writes a placeholder page instead. Build a UI-bearing tree with
-// `cargo build --features embed-frontend`, or run the SPA build directly with
-// `npm --prefix crates/loom/frontend run build`.
+// Builds the Vue frontend into `static/dist` as part of `cargo build`, so a
+// successful build always leaves a ready-to-serve bundle (loom serves it from
+// `static/dist` at runtime — see `web::static_dir`). `rerun-if-changed` keeps it
+// cheap: rspack only re-runs when a frontend source changes, so backend-only
+// edits don't pay for it. When npm or the frontend sources are missing (a
+// Node-less, backend-only checkout), it degrades to a placeholder page instead
+// of failing the build.
 fn main() {
     // Every file that feeds the frontend build: changing any of them reruns
     // this script (and therefore rspack). `frontend/src` covers the Vue/TS
-    // sources and the HTML template; the rest are build-config inputs. (Cargo
-    // already reruns build scripts when the active feature set changes, so the
-    // `embed-frontend` toggle needs no explicit rerun directive.)
+    // sources and the HTML template; the rest are build-config inputs.
     println!("cargo:rerun-if-changed=frontend/src");
     println!("cargo:rerun-if-changed=frontend/package.json");
     println!("cargo:rerun-if-changed=frontend/package-lock.json");
@@ -34,7 +31,6 @@ fn main() {
     let dist = Path::new("static/dist");
     let frontend = Path::new("frontend");
 
-    let embed = std::env::var_os("CARGO_FEATURE_EMBED_FRONTEND").is_some();
     let have_npm = Command::new("npm")
         .arg("--version")
         .stdout(std::process::Stdio::null())
@@ -44,7 +40,7 @@ fn main() {
         .unwrap_or(false);
     let have_sources = frontend.join("src/main.ts").exists();
 
-    if !embed || !have_npm || !have_sources {
+    if !have_npm || !have_sources {
         std::fs::create_dir_all(dist).ok();
         let index = dist.join("index.html");
         if !index.exists() {
@@ -52,10 +48,10 @@ fn main() {
                 &index,
                 "<!doctype html><meta charset=utf-8><title>weaver</title>\
                  <body style=\"font-family:sans-serif;padding:2rem\">\
-                 <h1>weaver</h1><p>Frontend not built. Build it with \
-                 <code>cargo build --features embed-frontend</code> \
-                 (needs Node + npm), or \
-                 <code>npm --prefix crates/loom/frontend run build</code>.</p>",
+                 <h1>weaver</h1><p>Frontend not built: npm or the frontend \
+                 sources were unavailable at build time. Install Node + npm and \
+                 rebuild, or run <code>npm --prefix crates/loom/frontend run \
+                 build</code>.</p>",
             )
             .ok();
         }

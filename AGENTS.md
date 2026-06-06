@@ -63,26 +63,24 @@ needing the daemon to be reachable.
 | `crates/loom/static/dist/` | Build output (placeholder; real build overwrites) |
 | `crates/loom/tests/` | integration tests: `integration/` (server suites) + `hook_monitor.rs`; need `git` + `tmux` |
 | `e2e/` | Playwright; talks to a real `loom serve`. Separate `package.json` |
-| `crates/loom/build.rs` | Builds the SPA into `static/dist` under `--features embed-frontend`; writes a placeholder otherwise |
+| `crates/loom/build.rs` | Builds the SPA into `static/dist` (npm + rspack); writes a placeholder when Node is unavailable |
 
 ## Build & test
 
-Backend and frontend build and test independently — invoke the one you need:
-
 ```sh
-cargo build                              # backend only — fastest iteration, no Node
+cargo build                              # builds the backend + the Vue SPA (needs Node + npm)
 cargo test --workspace                   # backend unit + integration tests (git, tmux)
-cargo build --features embed-frontend    # also build the Vue SPA into static/dist (Node + npm)
 cd crates/loom/frontend && npm run dev   # live-reloading SPA against `loom serve`
 cd e2e && npm test                       # frontend end-to-end tests (Playwright)
 ```
 
-The default `cargo` build is **backend-only**: the SPA is served from
-`static/dist` at runtime (`web::static_dir`), not embedded in the binary, so
-building it is decoupled from the Rust compile and gated behind the
-`embed-frontend` cargo feature. Backend tests are the Rust suites; the
-frontend's tests are the Playwright `e2e/` suite, which builds the SPA itself.
-No env var is needed to skip the frontend — it is off unless you opt in.
+`cargo build` builds the SPA into `static/dist` via `build.rs`; loom serves it
+from there at runtime (`web::static_dir`). `rerun-if-changed` makes the SPA build
+a no-op when no frontend source changed, so backend-only edits don't re-run
+rspack; a Node-less checkout still builds (the backend) and serves a placeholder.
+There is no skip flag — backend and frontend are separated at the **test** level
+(`cargo test` for the backend, the Playwright `e2e/` suite for the frontend), not
+the build level.
 
 The integration tests shell out to real `git` and `tmux`. If one hangs, look
 for stray `weaver-test-*` tmux sessions.
@@ -114,13 +112,17 @@ WEAVER_TMUX_SOCKET=loom-dev-$$ WEAVER_HOME=$(mktemp -d) loom serve --addr 127.0.
 
 ### End-to-end (Playwright)
 
-The `e2e/` suite drives the real UI against a real server. Each test spins up
-its **own** isolated `loom serve` on a random port with its own `WEAVER_HOME` /
-sqlite db, a private tmux socket (`WEAVER_TMUX_SOCKET`, reaped on teardown), and
-a throwaway git repo (see `e2e/fixtures/weaver.ts`), and uses the deterministic
-`shell` agent. Because every session it creates and tears down is scoped to that
-private socket and db, the suite owns the world it talks to and can't disturb a
-long-running dev server or your `~/.weaver` sessions.
+The `e2e/` suite drives the real UI against a real server. It boots **one**
+`loom serve` per Playwright *worker* (not per test) on a random port, each with
+its own `WEAVER_HOME` / sqlite db, a private tmux socket (`WEAVER_TMUX_SOCKET`,
+reaped on teardown), and a throwaway git repo (see `e2e/fixtures/weaver.ts`),
+using the deterministic `shell` agent. The per-test `weaver` fixture wipes every
+session (branch + worktree) between tests, so each starts from a clean slate and
+count-based assertions hold regardless of order. Workers are fully isolated, so
+the suite runs in parallel (`fullyParallel`, `workers > 1`) and — because every
+session it touches is scoped to a worker's private socket and db — can't disturb
+a long-running dev server or your `~/.weaver` sessions. A `globalSetup` runs
+`cargo build` once up front so workers never race on the build.
 
 ```sh
 cd e2e

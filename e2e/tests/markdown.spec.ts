@@ -39,7 +39,7 @@ test.describe('rich markdown preview', () => {
     writeFileSync(join(session.work_dir, 'DESIGN.md'), DOC);
     writeFileSync(join(session.work_dir, 'shot.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
 
-    await page.goto(`${weaver.baseUrl}/#/s/${session.id}/files`);
+    await page.goto(`${weaver.baseUrl}/s/${session.id}/files`);
 
     // Open the doc — markdown files default to the rendered Preview.
     await page.getByText('DESIGN.md', { exact: true }).first().click();
@@ -70,8 +70,13 @@ test.describe('rich markdown preview', () => {
       new RegExp(`/api/sessions/${session.id}/raw\\?path=shot\\.png$`),
     );
 
-    // The mermaid block is rendered to an SVG (its bundle is lazy-loaded).
-    await expect(body.locator('.mermaid-diagram svg')).toBeVisible();
+    // The mermaid block is rendered to an SVG. Its bundle is lazy-loaded and the
+    // render is async, so allow extra time and wait on actual rendered geometry
+    // (a <g> node inside the svg) rather than first-paint visibility of a still-
+    // empty <svg>, which flakes when the machine is loaded by parallel workers.
+    const mermaidSvg = body.locator('.mermaid-diagram svg');
+    await expect(mermaidSvg).toBeVisible({ timeout: 30_000 });
+    await expect(mermaidSvg.locator('g').first()).toBeVisible({ timeout: 30_000 });
 
     // Source flips to the Monaco editor showing the raw markdown…
     await page.getByRole('button', { name: 'Source', exact: true }).click();
@@ -87,7 +92,7 @@ test.describe('rich markdown preview', () => {
     const session = await weaver.seedSession({ goal: 'code', name: 'no-preview' });
     writeFileSync(join(session.work_dir, 'main.rs'), 'fn main() {}\n');
 
-    await page.goto(`${weaver.baseUrl}/#/s/${session.id}/files`);
+    await page.goto(`${weaver.baseUrl}/s/${session.id}/files`);
     await page.getByText('main.rs', { exact: true }).first().click();
 
     // Source code opens in Monaco; non-markdown gets neither a Preview button

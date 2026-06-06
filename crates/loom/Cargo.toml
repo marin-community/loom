@@ -4,14 +4,6 @@ version = "0.2.0"
 edition = "2021"
 build = "build.rs"
 
-[features]
-# Build the Vue SPA into `static/dist` as part of `cargo build` (build.rs shells
-# out to npm + rspack). Off by default so backend builds/tests need no Node
-# toolchain; turn it on to produce a UI-bearing tree: `cargo build --features
-# embed-frontend`. The e2e suite and `npm --prefix crates/loom/frontend run
-# build` build the SPA without it.
-embed-frontend = []
-
 [lib]
 name = "loom"
 path = "src/lib.rs"

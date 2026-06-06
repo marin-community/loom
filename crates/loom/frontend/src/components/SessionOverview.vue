@@ -46,7 +46,11 @@ async function refreshGithub() {
     <!-- Goal — the agent's launch prompt. Read-only. -->
     <section class="rounded border border-line bg-surface p-4">
       <div class="mb-1 text-xs font-medium uppercase tracking-wide text-faint">Goal</div>
-      <p v-if="ws.branch.goal" class="whitespace-pre-wrap text-sm text-fg">{{ ws.branch.goal }}</p>
+      <p
+        v-if="ws.branch.goal"
+        data-testid="session-goal"
+        class="whitespace-pre-wrap text-sm text-fg"
+      >{{ ws.branch.goal }}</p>
       <p v-else class="text-sm text-faint">No goal set.</p>
     </section>
 

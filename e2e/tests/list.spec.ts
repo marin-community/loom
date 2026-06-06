@@ -66,8 +66,9 @@ test.describe('session list view', () => {
 
     await expect(page).toHaveURL(new RegExp(`/s/${s.id}$`));
     await expect(page.getByRole('heading', { name: 'nav-task' })).toBeVisible();
-    // The goal is read-only prose on the Overview tab (agent-authored).
+    // The goal is read-only prose on the Overview tab (agent-authored). Scope to
+    // the goal element — the text also appears in the tracking issue's body.
     await page.getByRole('button', { name: 'Overview' }).click();
-    await expect(page.getByText('Navigate to me')).toBeVisible();
+    await expect(page.getByTestId('session-goal')).toHaveText('Navigate to me');
   });
 });
