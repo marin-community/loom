@@ -1090,16 +1090,9 @@ fn read_hook_source() -> Option<String> {
 /// blocking TUI prompts, PR-not-merge, close the tracking issue). The full guide
 /// is one `weaver readme` away.
 fn compact_replay(b: &branch::Branch, summary: &str) -> String {
+    let summary = summary.trim_end();
     format!(
-        "Context was just compacted — you are still in a **weaver session** on branch \
-         `{branch}` (a detached agent workstream in a git worktree; the user reviews \
-         asynchronously via the loom dashboard, not this terminal). Re-orientation:\n\n\
-         {summary}\n\
-         Reminders: keep your status honest with `weaver set-status <ok|attention|blocked> \
-         \"<message>\"`; never block on an interactive TUI prompt — state the question as plain \
-         text and raise `weaver set-status attention`; finish by opening a PR (`gh pr create`) \
-         rather than merging, and `weaver issue close <id>` your tracking issue when the work is \
-         done. Run `weaver readme` for the full weaver workflow guide.\n",
+        "Context was just compacted — you are still in a **weaver session** on branch `{branch}` (a detached agent workstream in a git worktree; the user reviews asynchronously via the loom dashboard, not this terminal). Re-orientation:\n\n{summary}\n\nReminders: keep your status honest with `weaver set-status <ok|attention|blocked> \"<message>\"`; never block on an interactive TUI prompt — state the question as plain text and raise `weaver set-status attention`; finish by opening a PR (`gh pr create`) rather than merging, and `weaver issue close <id>` your tracking issue when the work is done. Run `weaver readme` for the full weaver workflow guide.\n",
         branch = b.branch,
     )
 }
