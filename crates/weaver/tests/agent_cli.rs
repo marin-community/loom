@@ -272,6 +272,43 @@ fn canonical_repo_root(repo: &Path) -> String {
         .to_string()
 }
 
+/// `summary` is the agent catch-up: it surfaces the goal, the current status,
+/// the actual list of outstanding tasks, and a generated next-step hint.
+#[test]
+fn summary_orients_an_agent_on_the_branch() {
+    let env = setup();
+    run(&env, &["goal", "ship", "the", "feature"]);
+    run(&env, &["issue", "add", "wire", "up", "routes"]);
+    run(&env, &["issue", "add", "add", "tests"]);
+    run(&env, &["set-status", "ok", "routes", "wired"]);
+    run(&env, &["note", "left", "off", "mid-refactor"]);
+
+    let out = run(&env, &["summary"]);
+    assert!(out.contains("Goal:   ship the feature"), "summary: {out}");
+    assert!(out.contains("Status: ok — routes wired"), "summary: {out}");
+    // Outstanding lists the tasks themselves, not just a count.
+    assert!(out.contains("Outstanding (2):"), "summary: {out}");
+    assert!(out.contains("#1    wire up routes"), "summary: {out}");
+    assert!(out.contains("#2    add tests"), "summary: {out}");
+    // Hints: the most recent note plus a next-action pointing at the first task.
+    assert!(
+        out.contains("last note: left off mid-refactor"),
+        "summary: {out}"
+    );
+    assert!(out.contains("pick up #1"), "summary: {out}");
+}
+
+/// With nothing open, summary flips its hint to "wrap up / open a PR".
+#[test]
+fn summary_with_no_open_tasks_suggests_wrapping_up() {
+    let env = setup();
+    run(&env, &["goal", "tidy", "up"]);
+    let out = run(&env, &["summary"]);
+    assert!(out.contains("Outstanding: none"), "summary: {out}");
+    assert!(out.contains("no open tasks"), "summary: {out}");
+    assert!(out.contains("open a PR"), "summary: {out}");
+}
+
 #[test]
 fn note_writes_an_event() {
     let env = setup();

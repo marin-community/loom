@@ -203,9 +203,7 @@ fn strip_separators(raw: &str) -> String {
 fn parse_deps(raw: &str) -> Vec<String> {
     raw.split(',')
         .map(str::trim)
-        .filter(|s| {
-            !s.is_empty() && !matches!(*s, "—" | "–" | "-" | "none" | "None" | "NONE")
-        })
+        .filter(|s| !s.is_empty() && !matches!(*s, "—" | "–" | "-" | "none" | "None" | "NONE"))
         .map(str::to_string)
         .collect()
 }
@@ -524,7 +522,7 @@ Just do it now.
         let with = scaffold("p", "P", "  Rewrite search to use the new index  ");
         assert!(with.contains("Rewrite search to use the new index"));
         assert!(!with.contains("What are we building")); // prompt replaced
-        // Empty goal keeps the prompt.
+                                                         // Empty goal keeps the prompt.
         assert!(scaffold("p", "P", "   ").contains("What are we building"));
     }
 

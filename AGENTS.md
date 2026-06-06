@@ -48,7 +48,7 @@ needing the daemon to be reachable.
 | Path | What's in it |
 |---|---|
 | `crates/weaver-core/` | lib: `branches`, `issues`, `notes`, `events`, `db`, `git`, `config`, `plan` (parser + reconcile), `repo_config` (`.weaver/config.toml`), agent helpers. Pure logic; used by both binaries. |
-| `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`goal`, `note`, `set-status` [read or set level + message], `issue …`, `where`, `log`, `hook`, `config`) |
+| `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`goal`, `summary`, `note`, `set-status` [read or set level + message], `issue …`, `where`, `log`, `hook`, `config`) |
 | `crates/loom/src/web.rs` | axum routes, request/response types, SSE — **the API surface** |
 | `crates/loom/src/server.rs` | bind, write `server.json`, spawn bg tasks |
 | `crates/loom/src/monitor.rs` | status detection, orphan marking, hook-event consumer |
@@ -84,6 +84,12 @@ the build level.
 
 The integration tests shell out to real `git` and `tmux`. If one hangs, look
 for stray `weaver-test-*` tmux sessions.
+
+### Pre-commit checks
+
+Run `./scripts/pre-commit.sh` before committing; it runs the same fmt + clippy
+gate the CI `lint` job enforces. Enable it as an automatic hook with `git config
+core.hooksPath .githooks`.
 
 ### Don't spin up your own `loom` — it shares the user's tmux + db
 
@@ -340,6 +346,7 @@ When working inside a worktree the agent can run, with no daemon required:
 ```sh
 weaver goal "ship the feature"          # set the branch's goal
 weaver goal                             # print the goal
+weaver summary                          # goal + outstanding tasks + next-step hints
 weaver note   "blocked on the DB schema"
 weaver set-status attention "ready for review"   # level + current-state message
 weaver set-status ok "waiting on PR review feedback"

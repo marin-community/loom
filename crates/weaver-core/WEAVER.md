@@ -10,6 +10,9 @@ This document describes how to work *with weaver*. It is distinct from any
 It is on your `PATH`. From anywhere in the worktree you can run:
 
 - `weaver goal` — print the task this branch was created for.
+- `weaver summary` — a quick catch-up on the branch: the goal, your current
+  status, the outstanding tasks, and a hint or two for what to do next. Run it
+  when you pick up or resume a branch.
 - `weaver note "<text>"` — append a progress note, or a decision and its
   rationale, to the branch log.
 - `weaver set-status <level> "<message>"` — tell the dashboard how you are

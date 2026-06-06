@@ -116,12 +116,7 @@ mod tests {
     #[test]
     fn escaping_dir_falls_back_to_default() {
         // A hostile committed config must not steer reads outside the worktree.
-        for bad in [
-            "../../etc",
-            "/etc/passwd",
-            "foo/../../bar",
-            "./docs/plans",
-        ] {
+        for bad in ["../../etc", "/etc/passwd", "foo/../../bar", "./docs/plans"] {
             let tmp = tempfile::tempdir().unwrap();
             write_config(tmp.path(), &format!("[plan]\ndir = \"{bad}\"\n"));
             assert_eq!(
@@ -136,10 +131,7 @@ mod tests {
     fn nested_relative_dir_is_allowed() {
         let tmp = tempfile::tempdir().unwrap();
         write_config(tmp.path(), "[plan]\ndir = \"design/specs/plans\"\n");
-        assert_eq!(
-            plan_dir(&[tmp.path().to_path_buf()]),
-            "design/specs/plans"
-        );
+        assert_eq!(plan_dir(&[tmp.path().to_path_buf()]), "design/specs/plans");
     }
 
     #[test]
