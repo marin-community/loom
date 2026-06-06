@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import type { Session } from '../types';
 
-// The "⌄ details" popover for the page header: the low-frequency identity +
-// machine metadata trimmed out of the header run (id, branch, base, tmux,
-// worktree, github) plus the standalone Files-route affordance. Read-only; the
-// page owns open-state.
-const props = defineProps<{ ws: Session; open: boolean }>();
+// The "⌄ details" menu for the page header. Holds everything low-frequency so
+// it stays out of the always-visible header run, yet reachable from any scroll
+// position (the lifecycle actions used to sit at the bottom of a long Overview,
+// where they scrolled out of sight). Two stacked sections:
+//   • identity / machine metadata (id, branch, base, tmux, worktree, github)
+//   • lifecycle actions, injected by the header via the #actions slot
+// Read-only metadata; the page owns open-state.
+defineProps<{ ws: Session; open: boolean }>();
 const emit = defineEmits<{ 'update:open': [boolean] }>();
 
 function close() {
@@ -47,11 +50,11 @@ function close() {
           <dd class="min-w-0 break-all font-mono text-muted">{{ ws.github_repo }}</dd>
         </div>
       </dl>
-      <div class="mt-3 border-t border-line pt-2">
-        <router-link
-          :to="`/s/${ws.id}/files`"
-          class="text-xs text-accent hover:underline"
-        >browse files →</router-link>
+      <!-- Lifecycle actions (Adopt / Archive / Remove), supplied by the header.
+           Kept here so destructive, low-frequency operations live one click
+           away from anywhere on the page, not buried below a long Overview. -->
+      <div class="mt-3 border-t border-line pt-3">
+        <slot name="actions" />
       </div>
     </div>
   </div>

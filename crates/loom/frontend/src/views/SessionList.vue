@@ -536,7 +536,7 @@ onUnmounted(() => clearInterval(timer));
           <GithubStatus v-if="s.branch.github" :gh="s.branch.github" compact class="mt-0.5 justify-end" />
           <router-link
             v-if="s.branch.open_issue_count"
-            :to="`/s/${s.id}?tab=issues`"
+            :to="`/s/${s.id}?tab=overview`"
             class="block font-mono text-xs text-muted hover:text-accent"
             @click.stop
           >

@@ -1,17 +1,15 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
-import { get, post, patch, del } from '../api';
+import { useRoute } from 'vue-router';
+import { get } from '../api';
 import type { Session, WeaverEvent, Issue } from '../types';
 import AgentTerminal from '../components/AgentTerminal.vue';
+import ScratchPanel from '../components/ScratchPanel.vue';
 import SessionPageHeader from '../components/SessionPageHeader.vue';
-import SessionStatusStrip from '../components/SessionStatusStrip.vue';
 import SessionTabs from '../components/SessionTabs.vue';
 import SessionOverview from '../components/SessionOverview.vue';
-import SessionIssues from '../components/SessionIssues.vue';
 
 const props = defineProps<{ id: string }>();
-const router = useRouter();
 const route = useRoute();
 
 const ws = ref<Session | null>(null);
@@ -19,19 +17,15 @@ const events = ref<WeaverEvent[]>([]);
 const issues = ref<Issue[]>([]);
 const backlog = ref<Issue[]>([]);
 const error = ref('');
-const notice = ref('');
-
-const busy = ref('');
 
 // Work-area tab. Terminal is the default surface — "show me what it's doing" —
-// and stays mounted under v-show across all tabs (tearing down the
-// WebSocket/xterm/WebGL is the worst thing on a terminal-first page). Files is
-// a route, not a tab here, so Monaco never loads just because a session opened.
-// A `?tab=` query deep-links a tab (e.g. the list's open-issue link → issues).
+// and stays mounted under v-show across both tabs (tearing down the
+// WebSocket/xterm/WebGL is the worst thing on a terminal-first page). Files is a
+// route, not a tab here, so Monaco never loads just because a session opened. A
+// `?tab=overview` query deep-links the Overview tab (the list's open-issue link,
+// and the cross-surface return from the file browser).
 const initialTab = route.query.tab;
-const tab = ref<'terminal' | 'overview' | 'issues'>(
-  initialTab === 'overview' || initialTab === 'issues' ? initialTab : 'terminal',
-);
+const tab = ref<'terminal' | 'overview'>(initialTab === 'overview' ? 'overview' : 'terminal');
 
 const issueCount = computed(() => issues.value.length + backlog.value.length);
 
@@ -84,73 +78,6 @@ function openStream() {
   }
 }
 
-async function act(name: string, fn: () => Promise<void>) {
-  busy.value = name;
-  error.value = '';
-  notice.value = '';
-  try {
-    await fn();
-  } catch (e) {
-    error.value = (e as Error).message;
-  } finally {
-    busy.value = '';
-  }
-}
-
-// Title is the one branch field a human authors (a label for the workstream);
-// it is renamed inline from the header. Goal and the status message are written
-// by the AGENT (`weaver set-status`, the launch prompt) and are read-only here.
-const rename = (title: string) =>
-  act('title', async () => {
-    await patch(`/sessions/${props.id}`, { title });
-    notice.value = 'Title saved.';
-    await loadSession();
-  });
-
-// The only attention write a human makes: acknowledge the agent's signal by
-// clearing it back to `ok`. Leaves the current-state message untouched.
-const acknowledge = () =>
-  act('acknowledge', async () => {
-    await patch(`/sessions/${props.id}`, { attention: 'ok' });
-    notice.value = 'Marked OK.';
-    await loadSession();
-  });
-
-const archive = () =>
-  act('archive', async () => {
-    if (
-      !confirm(
-        'Archive this session? This tears down its tmux and removes the worktree, ' +
-          'but keeps the branch and its weaver history for reference.',
-      )
-    )
-      return;
-    const res = (await post(`/sessions/${props.id}/archive`)) as { branch: string };
-    notice.value = `Archived ${res.branch}.`;
-    await loadSession();
-  });
-
-const remove = () =>
-  act('remove', async () => {
-    if (!confirm('Remove this session, its worktree and tmux session?')) return;
-    await del(`/sessions/${props.id}`);
-    router.push('/');
-  });
-
-const adopt = () =>
-  act('adopt', async () => {
-    await post(`/sessions/${props.id}/adopt`);
-    notice.value = 'Session adopted — tmux session recreated.';
-    await loadSession();
-  });
-
-const refreshGithub = () =>
-  act('refreshGithub', async () => {
-    await post(`/sessions/${props.id}/github`);
-    notice.value = 'GitHub status refreshed.';
-    await loadSession();
-  });
-
 function eventLine(ev: WeaverEvent): string {
   const d = ev.data || {};
   if (ev.kind === 'status') return `status → ${d.status ?? '?'}`;
@@ -173,38 +100,40 @@ onUnmounted(() => source?.close());
 </script>
 
 <template>
-  <div v-if="ws">
-    <SessionPageHeader :ws="ws" @rename="rename" />
-    <SessionStatusStrip :ws="ws" @acknowledge="acknowledge" />
-
-    <p v-if="error" class="mb-3 text-sm text-block">{{ error }}</p>
-    <p v-if="notice" class="mb-3 text-sm text-accent">{{ notice }}</p>
-
+  <!-- The page fills the viewport below the app bar: header + tabs stay put
+       while the work area (terminal, or the scrolling Overview) takes the rest.
+       This is what lets the terminal grow to fill instead of a fixed 70vh. -->
+  <div v-if="ws" class="flex h-[calc(100vh-5.5rem)] min-h-[30rem] flex-col">
+    <SessionPageHeader :ws="ws" @reload="loadAll" />
     <SessionTabs :tab="tab" :id="props.id" :issue-count="issueCount" @select="tab = $event" />
 
-    <!-- Terminal (default) — the full-width hero. v-show, NEVER v-if: keeping
-         the host in the DOM means AgentTerminal's zero-size guard skips the
-         bogus resize while hidden, and its ResizeObserver re-fits on return.
-         No wrapper chrome — the terminal IS the surface. -->
-    <section v-show="tab === 'terminal'">
-      <AgentTerminal :id="props.id" />
-    </section>
+    <p v-if="error" class="mb-3 text-sm text-block">{{ error }}</p>
 
-    <!-- Overview — read-only context (goal, activity, scratch) + lifecycle. -->
-    <SessionOverview
-      v-if="tab === 'overview'"
-      :ws="ws"
-      :events="events"
-      :format="eventLine"
-      :busy="busy"
-      @adopt="adopt"
-      @archive="archive"
-      @remove="remove"
-      @refresh-github="refreshGithub"
-    />
+    <div class="min-h-0 flex-1">
+      <!-- Terminal (default) — the working zone: the live agent fills the space,
+           with the scratch drop docked beneath it. v-show, NEVER v-if: keeping
+           the host in the DOM means AgentTerminal's zero-size guard skips the
+           bogus resize while hidden, and its ResizeObserver re-fits on return. -->
+      <section v-show="tab === 'terminal'" class="flex h-full flex-col gap-2">
+        <div class="min-h-0 flex-1">
+          <AgentTerminal :id="props.id" />
+        </div>
+        <ScratchPanel :id="props.id" />
+      </section>
 
-    <!-- Issues — claimed work + repo backlog. -->
-    <SessionIssues v-if="tab === 'issues'" :issues="issues" :backlog="backlog" />
+      <!-- Overview — read-only context (goal, GitHub, issues, activity). Scrolls
+           within the work area so the header/tabs stay anchored. -->
+      <div v-if="tab === 'overview'" class="h-full overflow-auto pb-1">
+        <SessionOverview
+          :ws="ws"
+          :events="events"
+          :format="eventLine"
+          :issues="issues"
+          :backlog="backlog"
+          @reload="loadAll"
+        />
+      </div>
+    </div>
   </div>
   <p v-else class="text-muted">Loading…</p>
 </template>

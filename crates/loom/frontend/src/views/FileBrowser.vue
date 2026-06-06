@@ -7,16 +7,28 @@ import { theme } from '../theme';
 import { loadMonaco, monacoTheme, languageForPath } from '../monaco';
 import { useRouter } from 'vue-router';
 import SessionTabs from '../components/SessionTabs.vue';
+import SessionPageHeader from '../components/SessionPageHeader.vue';
 import MarkdownView from '../components/MarkdownView.vue';
 
 const props = defineProps<{ id: string }>();
 const router = useRouter();
 
-// Selecting a non-Files tab from the file browser returns to the session page,
-// which always lands on its default (Terminal) surface — cross-surface tab
-// memory isn't worth a query param.
-function selectTab() {
-  router.push(`/s/${props.id}`);
+// Selecting a work-area tab from the file browser returns to the session page,
+// carrying which tab so Overview lands on Overview (Terminal is the default).
+function selectTab(t: 'terminal' | 'overview') {
+  router.push(t === 'terminal' ? `/s/${props.id}` : `/s/${props.id}?tab=${t}`);
+}
+
+// A header write (rename / acknowledge / archive / adopt) happened — re-fetch
+// the session so the shared header reflects it, and refresh the tree in case the
+// worktree changed underneath us.
+async function reloadSession() {
+  try {
+    session.value = (await get(`/sessions/${props.id}`)) as Session;
+  } catch {
+    // Best-effort — the tree is still the point of this view.
+  }
+  await loadTree();
 }
 
 // ---------------------------------------------------------------------------
@@ -131,8 +143,6 @@ function toggle(node: Node) {
 function statusOf(path: string): string | undefined {
   return tree.value?.changed[path];
 }
-
-const changedCount = computed(() => Object.keys(tree.value?.changed ?? {}).length);
 
 // Just the changed files, flat and sorted, for the pinned Changes list — the
 // review surface, reachable without hunting through the full tree. Honours the
@@ -447,15 +457,16 @@ onUnmounted(teardownEditors);
 </script>
 
 <template>
-  <div class="flex flex-col">
-    <!-- Header — the shared session sub-nav (Files active) over the title row. -->
+  <!-- Fills the viewport below the app bar: the shared header + sub-nav stay put
+       (so the session's context no longer vanishes on the Files surface) while
+       the two-pane browser takes the remaining height. -->
+  <div class="flex h-[calc(100vh-5.5rem)] min-h-[30rem] flex-col">
+    <SessionPageHeader v-if="session" :ws="session" @reload="reloadSession" />
     <SessionTabs :tab="'files'" :id="props.id" :issue-count="0" @select="selectTab" />
-    <div class="flex items-center gap-3 mb-3">
-      <h1 class="text-lg font-semibold truncate">
-        {{ session?.branch.title || session?.branch.name || 'Files' }}
-      </h1>
-      <span v-if="changedCount" class="text-xs text-attn">{{ changedCount }} changed</span>
-      <!-- Diff baseline: branch-since-fork (default) vs uncommitted-only. -->
+    <!-- Diff baseline selector — branch-since-fork (default) vs uncommitted-only.
+         The title lives in the shared header above; Refresh sits in the tree's
+         filter row. This slim row just carries the tree-wide diff baseline. -->
+    <div class="mb-3 flex items-center">
       <div class="ml-auto flex items-center overflow-hidden rounded border border-line text-xs">
         <button
           v-for="opt in baseOptions"
@@ -468,27 +479,30 @@ onUnmounted(teardownEditors);
           {{ opt.label }}
         </button>
       </div>
-      <button
-        class="rounded bg-subtle hover:bg-subtle-hover px-2 py-1 text-xs"
-        @click="refresh"
-      >
-        Refresh
-      </button>
     </div>
 
-    <p v-if="loadError" class="mb-3 text-sm text-red-400">{{ loadError }}</p>
+    <p v-if="loadError" class="mb-3 text-sm text-block">{{ loadError }}</p>
 
     <!-- Two-pane body -->
-    <div class="flex gap-3 rounded border border-line bg-surface overflow-hidden" style="height: calc(100vh - 11rem)">
+    <div class="flex min-h-0 flex-1 gap-3 rounded border border-line bg-surface overflow-hidden">
       <!-- Tree -->
       <div class="flex w-72 shrink-0 flex-col border-r border-line">
-        <div class="border-b border-line p-2">
+        <div class="flex items-center gap-1.5 border-b border-line p-2">
           <input
             v-model="search"
             type="text"
             placeholder="Filter files…"
-            class="w-full rounded bg-input px-2 py-1 text-xs outline-none"
+            class="min-w-0 flex-1 rounded bg-input px-2 py-1 text-xs outline-none"
           />
+          <button
+            type="button"
+            class="shrink-0 rounded bg-subtle px-2 py-1 text-xs text-muted hover:bg-subtle-hover hover:text-fg"
+            title="Refresh file tree"
+            aria-label="Refresh file tree"
+            @click="refresh"
+          >
+            ⟳
+          </button>
         </div>
         <!-- Changes: a flat, pinned list of just the changed files, so the
              review surface is reachable without hunting through the tree.

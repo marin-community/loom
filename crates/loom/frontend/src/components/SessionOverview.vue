@@ -1,24 +1,46 @@
 <script setup lang="ts">
-import type { Session, WeaverEvent } from '../types';
+import { ref } from 'vue';
+import { post } from '../api';
+import type { Session, WeaverEvent, Issue } from '../types';
 import SessionActivity from './SessionActivity.vue';
-import ScratchPanel from './ScratchPanel.vue';
+import SessionIssues from './SessionIssues.vue';
 import SessionPlan from './SessionPlan.vue';
 import GithubStatus from './GithubStatus.vue';
 import { timeAgo } from '../lib/time';
 
-// The Overview tab: read-only context for a session, plus its lifecycle
-// actions. Goal and the status message are authored by the AGENT (the launch
-// prompt, `weaver set-status`) — shown here as prose, never as editable forms.
-// The only writes on this page are acknowledging attention (the status strip),
-// refreshing the GitHub snapshot, and lifecycle (Adopt / Archive / Remove).
+// The Overview tab: the read-only context for a session — the plan (the launch
+// goal at minimum, growing into tasks), the GitHub PR snapshot, claimed work +
+// repo backlog, and the de-noised activity feed.
+// Everything here is authored by the AGENT (the launch prompt, `weaver
+// set-status`, `weaver issue`) or polled server-side (the PR snapshot); the
+// page's writes (acknowledge attention, rename, lifecycle) all live in the
+// header now, and the live working surface (terminal + scratch) is the Terminal
+// tab. This tab is purely "what is this session about, and what has it done".
 const props = defineProps<{
   ws: Session;
   events: WeaverEvent[];
   format: (ev: WeaverEvent) => string;
-  busy: string;
+  issues: Issue[];
+  backlog: Issue[];
 }>();
 
-const emit = defineEmits<{ adopt: []; archive: []; remove: []; refreshGithub: [] }>();
+// A header/lifecycle write isn't owned here, but the GitHub snapshot is read-
+// only context that belongs with the rest of it — so this tab owns its own
+// re-poll and asks the page to reload the session when the snapshot changes.
+const emit = defineEmits<{ reload: [] }>();
+
+const refreshing = ref(false);
+async function refreshGithub() {
+  refreshing.value = true;
+  try {
+    await post(`/sessions/${props.ws.id}/github`);
+    emit('reload');
+  } catch {
+    // Best-effort — a failed poll leaves the last snapshot in place.
+  } finally {
+    refreshing.value = false;
+  }
+}
 </script>
 
 <template>
@@ -29,23 +51,24 @@ const emit = defineEmits<{ adopt: []; archive: []; remove: []; refreshGithub: []
     <SessionPlan :id="ws.id" :goal="ws.branch.goal" />
 
     <!-- GitHub — the branch's PR snapshot, polled server-side via `gh`. Shown
-         only once a snapshot exists; the Refresh button forces a re-poll. -->
-    <section class="rounded border border-line bg-surface p-4">
+         for GitHub-backed repos; the Refresh button forces an immediate re-poll. -->
+    <section
+      v-if="ws.branch.github || ws.github_repo"
+      class="rounded border border-line bg-surface p-4"
+    >
       <div class="mb-2 flex items-center justify-between">
         <div class="text-xs font-medium uppercase tracking-wide text-faint">GitHub</div>
         <button
           class="rounded bg-subtle px-2 py-1 text-xs text-muted hover:bg-subtle-hover disabled:opacity-50"
-          :disabled="busy === 'refreshGithub'"
-          @click="emit('refreshGithub')"
+          :disabled="refreshing"
+          @click="refreshGithub"
         >
-          {{ busy === 'refreshGithub' ? 'Refreshing…' : 'Refresh' }}
+          {{ refreshing ? 'Refreshing…' : 'Refresh' }}
         </button>
       </div>
       <template v-if="ws.branch.github">
         <GithubStatus :gh="ws.branch.github" />
-        <p class="mt-2 text-xs text-faint">
-          Snapshot {{ timeAgo(ws.branch.github.fetched_at) }}.
-        </p>
+        <p class="mt-2 text-xs text-faint">Snapshot {{ timeAgo(ws.branch.github.fetched_at) }}.</p>
       </template>
       <p v-else class="text-sm text-faint">
         No pull request found for this branch yet. loom polls automatically while
@@ -53,42 +76,12 @@ const emit = defineEmits<{ adopt: []; archive: []; remove: []; refreshGithub: []
       </p>
     </section>
 
+    <!-- Issues — claimed work + repo backlog (only when there's something). -->
+    <SessionIssues v-if="issues.length || backlog.length" :issues="issues" :backlog="backlog" />
+
     <!-- Activity — de-noised event feed (read-only context). -->
     <section class="rounded border border-line bg-surface p-4">
       <SessionActivity :events="events" :format="format" />
-    </section>
-
-    <!-- Scratch files. -->
-    <ScratchPanel :id="ws.id" />
-
-    <!-- Lifecycle actions — neutral; only Remove reads danger. Adopt carries a
-         single suggested-action accent ring (it's the recovery path the strip
-         flags); Archive is plain neutral; Remove is a quiet block-token ghost,
-         loud only on hover. -->
-    <section class="flex flex-wrap gap-2 rounded border border-line bg-surface p-4">
-      <button
-        v-if="ws.status === 'orphaned'"
-        class="rounded bg-subtle px-3 py-1.5 text-sm text-accent ring-1 ring-inset ring-accent/30 hover:bg-subtle-hover"
-        :disabled="busy === 'adopt'"
-        @click="emit('adopt')"
-      >
-        {{ busy === 'adopt' ? 'Adopting…' : 'Adopt' }}
-      </button>
-      <button
-        v-if="ws.status !== 'archived'"
-        class="rounded bg-subtle px-3 py-1.5 text-sm text-fg hover:bg-subtle-hover"
-        :disabled="busy === 'archive'"
-        @click="emit('archive')"
-      >
-        {{ busy === 'archive' ? 'Archiving…' : 'Archive' }}
-      </button>
-      <button
-        class="ml-auto rounded bg-transparent px-3 py-1.5 text-sm text-block ring-1 ring-inset ring-block-line hover:bg-block-soft"
-        :disabled="busy === 'remove'"
-        @click="emit('remove')"
-      >
-        Remove
-      </button>
     </section>
   </div>
 </template>

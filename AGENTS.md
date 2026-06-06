@@ -78,6 +78,32 @@ cd e2e && npm test                    # Playwright suite
 The integration test shells out to real `git` and `tmux`. If it hangs, look
 for stray `weaver-test-*` tmux sessions.
 
+### Don't spin up your own `loom` — it shares the user's tmux + db
+
+A real `loom serve` and the agent sessions it owns are **machine-global**: one
+default tmux server (the `weaver-<id>` sessions) and one `~/.weaver/weaver.db`.
+The user is normally running loom there with live agents inside it — including
+the one running *you*. So, unless the user explicitly asks for it:
+
+- **Don't** start your own `loom serve` / `loom launch`, create or kill
+  `weaver-*` tmux sessions on the default socket, or run broad tmux cleanup
+  (`tmux kill-server`, `pkill -f weaver-…`, `tmux -L 'weaver*' kill-server`).
+  Each of these tears down the user's running agents at a stroke.
+- **If a task seems to need a live loom session, ask the user first.**
+
+To exercise loom or tmux behaviour, use the test infrastructure instead. The
+Rust integration tests (`crates/loom/tests/`) pin tmux to a throwaway server via
+`WEAVER_TMUX_SOCKET` (→ `tmux -L <name>`, see `tmux::socket_args`) and a temp
+`WEAVER_HOME`, so they can never see — let alone kill — the user's real
+sessions; extend them rather than driving a real server by hand. (The Playwright
+`e2e/` suite does **not** yet isolate its tmux socket — it still drives a server
+on the machine-global default socket; that's tracked in #22.) If you genuinely
+must run loom ad-hoc, isolate it the same way:
+
+```sh
+WEAVER_TMUX_SOCKET=loom-dev-$$ WEAVER_HOME=$(mktemp -d) loom serve --addr 127.0.0.1:0
+```
+
 ### End-to-end (Playwright)
 
 The `e2e/` suite drives the real UI against a real server. Each test file spins
@@ -347,5 +373,6 @@ These are all `weaver-core` calls against the sqlite database. They write
 | `WEAVER_DB` | sqlite path | `$WEAVER_HOME/weaver.db` |
 | `WEAVER_API` | loom URL (both sides — server binds, CLI talks) | `http://127.0.0.1:7878` |
 | `WEAVER_BRANCH` | override the branch resolver (set by `loom launch` in the worktree) | — |
+| `WEAVER_TMUX_SOCKET` | pin tmux to a dedicated server (`tmux -L <name>`) so ops can't touch real sessions; set by the test harness | unset → default socket |
 | `WEAVER_SKIP_FRONTEND` | skip `npm run build` in `build.rs` | unset |
 | `RUST_LOG` / `EnvFilter` | tracing filter | `loom=info,weaver_core=info,tower_http=warn` |

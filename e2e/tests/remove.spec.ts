@@ -10,8 +10,9 @@ test.describe('removing a session', () => {
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
     await expect(page.getByRole('heading', { name: 'remove-task' })).toBeVisible();
 
-    // Lifecycle actions live on the Overview tab, off the terminal-first default.
-    await page.getByRole('button', { name: 'Overview' }).click();
+    // Lifecycle actions live in the header's ⌄ details menu — reachable from any
+    // surface and scroll position, not buried at the foot of the Overview tab.
+    await page.getByRole('button', { name: 'details' }).click();
 
     // Remove uses a native confirm() dialog — accept it.
     page.once('dialog', (dialog) => {
@@ -34,7 +35,7 @@ test.describe('removing a session', () => {
     const s = await weaver.seedSession({ goal: 'Keep me', name: 'keep-task' });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
-    await page.getByRole('button', { name: 'Overview' }).click();
+    await page.getByRole('button', { name: 'details' }).click();
 
     page.once('dialog', (dialog) => dialog.dismiss());
     await page.getByRole('button', { name: 'Remove' }).click();

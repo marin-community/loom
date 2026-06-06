@@ -215,8 +215,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="relative">
-    <div ref="host" class="h-[70vh] w-full overflow-hidden rounded bg-code text-code-fg"></div>
+  <div class="relative h-full min-h-0">
+    <div ref="host" class="h-full w-full overflow-hidden rounded bg-code text-code-fg"></div>
     <div
       v-if="state !== 'open'"
       data-testid="term-status"

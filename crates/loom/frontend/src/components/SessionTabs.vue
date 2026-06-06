@@ -1,18 +1,21 @@
 <script setup lang="ts">
-// Work-area sub-nav. Terminal/Overview/Issues are component-local tabs (the
-// terminal must never unmount, so the parent flips a ref and v-shows it);
-// Files is a real route to FileBrowser (Monaco is heavy and mustn't load on
-// session-open). Neutral underline indicator — no loud fills; only the active
-// tab gets text-fg + an accent underline.
-type Tab = 'terminal' | 'overview' | 'issues' | 'files';
+// Work-area sub-nav. Terminal/Overview are component-local tabs (the terminal
+// must never unmount, so the parent flips a ref and v-shows it); Files is a real
+// route to FileBrowser (Monaco is heavy and mustn't load on session-open).
+// Neutral underline indicator — no loud fills; only the active tab gets text-fg
+// + an accent underline.
+//
+// Terminal is the working zone (live agent + scratch drop); Overview is the
+// read-only context (goal, claimed issues, activity) — the issue count rides on
+// the Overview tab as a quiet pill rather than owning a tab of its own.
+type Tab = 'terminal' | 'overview' | 'files';
 
-const props = defineProps<{ tab: Tab; id: string; issueCount: number }>();
+defineProps<{ tab: Tab; id: string; issueCount: number }>();
 defineEmits<{ select: [Exclude<Tab, 'files'>] }>();
 
 const LOCAL_TABS: { key: Exclude<Tab, 'files'>; label: string }[] = [
   { key: 'terminal', label: 'Terminal' },
   { key: 'overview', label: 'Overview' },
-  { key: 'issues', label: 'Issues' },
 ];
 </script>
 
@@ -30,7 +33,7 @@ const LOCAL_TABS: { key: Exclude<Tab, 'files'>; label: string }[] = [
       @click="$emit('select', t.key)"
     >
       {{ t.label }}
-      <span v-if="t.key === 'issues' && issueCount" class="pill ml-1">{{ issueCount }}</span>
+      <span v-if="t.key === 'overview' && issueCount" class="pill ml-1">{{ issueCount }}</span>
     </button>
     <router-link
       :to="`/s/${id}/files`"
