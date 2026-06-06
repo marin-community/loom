@@ -48,7 +48,7 @@ needing the daemon to be reachable.
 | Path | What's in it |
 |---|---|
 | `crates/weaver-core/` | lib: `branches`, `issues`, `notes`, `events`, `db`, `git`, `config`, `plan` (parser + reconcile), `repo_config` (`.weaver/config.toml`), agent helpers. Pure logic; used by both binaries. |
-| `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`goal`, `summary`, `note`, `set-status` [read or set level + message], `issue …`, `where`, `log`, `hook`, `config`) |
+| `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`goal`, `summary`, `readme`, `note`, `set-status` [read or set level + message], `issue …`, `where`, `log`, `hook`, `config`) |
 | `crates/loom/src/web.rs` | axum routes, request/response types, SSE — **the API surface** |
 | `crates/loom/src/server.rs` | bind, write `server.json`, spawn bg tasks |
 | `crates/loom/src/monitor.rs` | status detection, orphan marking, hook-event consumer |
@@ -266,7 +266,7 @@ block into the worktree's `.claude/settings.local.json` (see
 
 | Claude hook event | shells out to |
 |---|---|
-| `SessionStart` | `weaver hook --event session-start` (also injects the repo's `WEAVER.md`, or the builtin [[crates/weaver-core/WEAVER.md]], as `additionalContext`) |
+| `SessionStart` | `weaver hook --event session-start` (also injects `additionalContext`: the repo's `WEAVER.md`, or the builtin [[crates/weaver-core/WEAVER.md]], on a genuine start/resume/clear; after a **compaction** — `source: "compact"` on the hook's stdin — a concise `weaver summary` re-orientation instead, so the agent isn't re-fed the whole guide. `weaver readme` pulls the full guide back on demand) |
 | `UserPromptSubmit` | `weaver hook --event working` |
 | `Notification` | `weaver hook --event waiting` |
 | `Stop` | `weaver hook --event idle` |
@@ -347,6 +347,7 @@ When working inside a worktree the agent can run, with no daemon required:
 weaver goal "ship the feature"          # set the branch's goal
 weaver goal                             # print the goal
 weaver summary                          # goal + outstanding tasks + next-step hints
+weaver readme                           # print the full weaver workflow guide (WEAVER.md)
 weaver note   "blocked on the DB schema"
 weaver set-status attention "ready for review"   # level + current-state message
 weaver set-status ok "waiting on PR review feedback"

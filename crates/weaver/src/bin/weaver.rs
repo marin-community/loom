@@ -53,6 +53,14 @@ enum Cmd {
     /// issues and any open sub-trees it delegated), and a line or two of hints
     /// for what to do next. Read-only; derived straight from the database.
     Summary,
+    /// Print the full weaver workflow guide (the WEAVER.md for this branch).
+    ///
+    /// The same primer injected at session start — how a weaver session works
+    /// and what is expected of the agent. Re-read it when you need the full
+    /// rules back (e.g. after a context compaction, when only the concise
+    /// catch-up was replayed). Uses the repo's own `WEAVER.md` when it ships
+    /// one, else the builtin.
+    Readme,
     /// Manage the current branch's issue list.
     Issue {
         #[command(subcommand)]
@@ -194,6 +202,7 @@ async fn run() -> Result<()> {
         Cmd::SetStatus { level, message } => cmd_set_status(level, message.join(" ")).await,
         Cmd::Note { text } => cmd_note(text.join(" ")).await,
         Cmd::Summary => cmd_summary().await,
+        Cmd::Readme => cmd_readme().await,
         Cmd::Issue { cmd } => cmd_issue(cmd).await,
         Cmd::Plan { cmd } => cmd_plan(cmd).await,
         Cmd::Where => cmd_where().await,
@@ -258,6 +267,16 @@ const SUMMARY_TASK_CAP: usize = 10;
 async fn cmd_summary() -> Result<()> {
     let db = open_db().await?;
     let b = branch::resolve(&db).await?;
+    print!("{}", render_summary(&db, &b).await?);
+    Ok(())
+}
+
+/// Render the `weaver summary` catch-up as a string (see [`cmd_summary`]). Kept
+/// separate from the printing so the post-compaction hook can replay the same
+/// text into the agent's context as `additionalContext` (see [`cmd_hook`]).
+async fn render_summary(db: &db::Db, b: &branch::Branch) -> Result<String> {
+    use std::fmt::Write as _;
+    let mut out = String::new();
 
     // Each section trails the command that drills into it, so the summary
     // doubles as a map of where to look next.
@@ -268,69 +287,86 @@ async fn cmd_summary() -> Result<()> {
     } else {
         "(none set)".to_string()
     };
-    println!("Goal:    {goal}  (weaver goal)");
+    let _ = writeln!(out, "Goal:    {goal}  (weaver goal)");
 
     let status = if b.description.is_empty() {
         b.attention.clone()
     } else {
         format!("{} — {}", b.attention, b.description)
     };
-    println!("Status:  {status}  (weaver set-status)");
+    let _ = writeln!(out, "Status:  {status}  (weaver set-status)");
 
     // Plans on this branch — large multi-session efforts. Status comes from the
     // plan file itself, so this stays a cheap read (no issue join).
-    let plans = read_plans(&plan_dir(&b));
+    let plans = read_plans(&plan_dir(b));
     match plans.as_slice() {
-        [] => println!("Plan:    none  (weaver plan new \"<title>\")"),
-        [p] => println!(
-            "Plan:    {} [{}]  (weaver plan show {})",
-            p.slug, p.status, p.slug
-        ),
+        [] => {
+            let _ = writeln!(out, "Plan:    none  (weaver plan new \"<title>\")");
+        }
+        [p] => {
+            let _ = writeln!(
+                out,
+                "Plan:    {} [{}]  (weaver plan show {})",
+                p.slug, p.status, p.slug
+            );
+        }
         many => {
             let slugs = many.iter().map(|p| p.slug.as_str()).collect::<Vec<_>>();
-            println!("Plan:    {}  (weaver plan ls)", slugs.join(", "));
+            let _ = writeln!(out, "Plan:    {}  (weaver plan ls)", slugs.join(", "));
         }
     }
 
     // Outstanding work: this branch's own open issues, then any open sub-trees
     // it delegated (each carrying its sub-agent's live status).
-    let open = issue::list_for_branch(&db, &b.repo_root, &b.branch, false).await?;
-    let delegated = issue::list_delegated_by(&db, &b.repo_root, &b.branch, false).await?;
-    println!();
+    let open = issue::list_for_branch(db, &b.repo_root, &b.branch, false).await?;
+    let delegated = issue::list_delegated_by(db, &b.repo_root, &b.branch, false).await?;
+    out.push('\n');
     if open.is_empty() && delegated.is_empty() {
-        println!("Outstanding: none  (weaver issue ls)");
+        let _ = writeln!(out, "Outstanding: none  (weaver issue ls)");
     } else {
         let total = open.len() + delegated.len();
-        println!("Outstanding ({total}):  (weaver issue ls)");
+        let _ = writeln!(out, "Outstanding ({total}):  (weaver issue ls)");
         // Cap the whole list (own issues first, then delegated sub-trees) so a
         // branch that delegated many sub-trees can't blow the summary up; the
         // overflow collapses into one trailing line.
         let mut shown = 0;
         for i in open.iter().take(SUMMARY_TASK_CAP) {
-            println!("  #{:<4} {}", i.id, i.title);
+            let _ = writeln!(out, "  #{:<4} {}", i.id, i.title);
             shown += 1;
         }
         for i in delegated.iter().take(SUMMARY_TASK_CAP - shown) {
-            let who = working_branch_status(&db, i)
+            let who = working_branch_status(db, i)
                 .await
                 .unwrap_or_else(|| i.claimed_branch.clone().unwrap_or_else(|| "?".to_string()));
-            println!("  #{:<4} {}  → {who} (delegated)", i.id, i.title);
+            let _ = writeln!(out, "  #{:<4} {}  → {who} (delegated)", i.id, i.title);
             shown += 1;
         }
         if total > shown {
-            println!("  (+{} more — weaver issue ls)", total - shown);
+            let _ = writeln!(out, "  (+{} more — weaver issue ls)", total - shown);
         }
     }
 
     // Hints for next steps: the most recent note (where work was left off) plus
     // a generated next-action drawn from the open work.
-    println!();
-    println!("Next steps:  (weaver log · weaver note)");
-    let notes = note::list_for_branch(&db, &b.id).await?;
+    out.push('\n');
+    let _ = writeln!(out, "Next steps:  (weaver log · weaver note)");
+    let notes = note::list_for_branch(db, &b.id).await?;
     if let Some(last) = notes.last() {
-        println!("  - last note: {}", truncate(&last.text, 100));
+        let _ = writeln!(out, "  - last note: {}", truncate(&last.text, 100));
     }
-    println!("  - {}", next_action_hint(&open, &delegated));
+    let _ = writeln!(out, "  - {}", next_action_hint(&open, &delegated));
+    Ok(out)
+}
+
+/// Print the full weaver workflow guide for this branch (the repo's own
+/// `WEAVER.md` when it ships one, else the builtin). The same primer injected at
+/// session start; `weaver readme` lets the agent pull it back on demand — most
+/// usefully after a context compaction, when only the concise catch-up was
+/// replayed.
+async fn cmd_readme() -> Result<()> {
+    let db = open_db().await?;
+    let b = branch::resolve(&db).await?;
+    print!("{}", weaver_md_for_branch(&b));
     Ok(())
 }
 
@@ -1032,15 +1068,69 @@ fn weaver_md_for_branch(branch: &branch::Branch) -> String {
     weaver_core::agent::builtin_weaver_md().to_string()
 }
 
+/// Read the `source` field a SessionStart hook receives as JSON on stdin
+/// (`startup` | `resume` | `clear` | `compact`). Returns `None` when stdin is a
+/// terminal (a human running the hook by hand), empty, or unparseable — callers
+/// then fall back to the full-primer behaviour, which is always safe.
+fn read_hook_source() -> Option<String> {
+    use std::io::{IsTerminal, Read};
+    let mut stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return None;
+    }
+    let mut buf = String::new();
+    stdin.read_to_string(&mut buf).ok()?;
+    let v: Value = serde_json::from_str(buf.trim()).ok()?;
+    v.get("source")?.as_str().map(str::to_owned)
+}
+
+/// The concise weaver re-orientation replayed after a context compaction: a
+/// short reminder that this is still a weaver session, the `weaver summary`
+/// catch-up, and the load-bearing rules an agent must not lose (status, no
+/// blocking TUI prompts, PR-not-merge, close the tracking issue). The full guide
+/// is one `weaver readme` away.
+fn compact_replay(b: &branch::Branch, summary: &str) -> String {
+    let summary = summary.trim_end();
+    format!(
+        "Context was just compacted — you are still in a **weaver session** on branch `{branch}` (a detached agent workstream in a git worktree; the user reviews asynchronously via the loom dashboard, not this terminal). Re-orientation:\n\n{summary}\n\nReminders: keep your status honest with `weaver set-status <ok|attention|blocked> \"<message>\"`; never block on an interactive TUI prompt — state the question as plain text and raise `weaver set-status attention`; finish by opening a PR (`gh pr create`) rather than merging, and `weaver issue close <id>` your tracking issue when the work is done. Run `weaver readme` for the full weaver workflow guide.\n",
+        branch = b.branch,
+    )
+}
+
 async fn cmd_hook(event: String) -> Result<()> {
     // Hooks must never break the agent: best-effort, swallow errors.
     let result: Result<()> = (async {
         let db = open_db().await?;
         let b = branch::resolve(&db).await?;
-        events::record_local(&db, &b.id, "hook", json!({ "event": event })).await?;
-        if event == "session-start" {
-            let weaver_md = weaver_md_for_branch(&b);
-            print!("{}", weaver_core::agent::session_primer(&weaver_md));
+        // SessionStart carries a `source` on stdin (startup|resume|clear|compact);
+        // we only read it for that event so other hooks don't touch stdin.
+        let is_session_start = event == "session-start";
+        let source = if is_session_start {
+            read_hook_source()
+        } else {
+            None
+        };
+        let is_compact = source.as_deref() == Some("compact");
+        events::record_local(
+            &db,
+            &b.id,
+            "hook",
+            json!({ "event": event, "source": source }),
+        )
+        .await?;
+        if is_session_start {
+            // After a compaction the agent has lost its working context but the
+            // session is unchanged — replay a concise re-orientation (the
+            // `weaver summary` catch-up) rather than the full WEAVER.md, which it
+            // can pull back with `weaver readme` if it needs the full rules. On a
+            // genuine start/resume/clear, inject the full primer.
+            let context = if is_compact {
+                let summary = render_summary(&db, &b).await.unwrap_or_default();
+                compact_replay(&b, &summary)
+            } else {
+                weaver_md_for_branch(&b)
+            };
+            print!("{}", weaver_core::agent::session_primer(&context));
         }
         Ok(())
     })

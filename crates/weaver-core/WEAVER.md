@@ -12,7 +12,11 @@ It is on your `PATH`. From anywhere in the worktree you can run:
 - `weaver goal` — print the task this branch was created for.
 - `weaver summary` — a quick catch-up on the branch: the goal, your current
   status, the outstanding tasks, and a hint or two for what to do next. Run it
-  when you pick up or resume a branch.
+  when you pick up or resume a branch. After a context compaction weaver replays
+  this catch-up for you automatically, so you don't lose track of where you are.
+- `weaver readme` — print this guide (the full weaver workflow). Re-read it when
+  you need the rules back — e.g. after a compaction, when only the concise
+  catch-up was replayed.
 - `weaver note "<text>"` — append a progress note, or a decision and its
   rationale, to the branch log.
 - `weaver set-status <level> "<message>"` — tell the dashboard how you are

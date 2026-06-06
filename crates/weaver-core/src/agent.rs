@@ -38,15 +38,17 @@ pub fn builtin_weaver_md() -> &'static str {
     BUILTIN_WEAVER_MD
 }
 
-/// Context injected at SessionStart (via the `session-start` weaver hook): a
-/// WEAVER.md telling the agent it is in a weaver session and how it is expected
-/// to behave. `weaver_md` is the repo's own WEAVER.md when present, else
-/// [`builtin_weaver_md`].
-pub fn session_primer(weaver_md: &str) -> String {
+/// Wrap `context` as the JSON a SessionStart hook prints to inject it into the
+/// agent's context (`hookSpecificOutput.additionalContext`). On a genuine
+/// start/resume/clear this carries the full WEAVER.md primer (the repo's own
+/// when present, else [`builtin_weaver_md`]); after a compaction the weaver hook
+/// passes a concise re-orientation instead, so the agent isn't re-fed the whole
+/// guide every time its context is summarized.
+pub fn session_primer(context: &str) -> String {
     json!({
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": weaver_md,
+            "additionalContext": context,
         }
     })
     .to_string()

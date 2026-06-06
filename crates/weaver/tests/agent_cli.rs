@@ -3,8 +3,9 @@
 //! These drive the `weaver` binary directly (`cargo run -- ...`) inside a
 //! scratch git repo and assert on stdout and the resulting sqlite rows.
 
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn sh(dir: &Path, program: &str, args: &[&str]) {
     let status = Command::new(program)
@@ -362,6 +363,127 @@ fn hook_writes_an_event_row() {
     assert!(
         log.contains("working"),
         "log should mention the event name: {log}"
+    );
+}
+
+/// Run the weaver binary with `stdin` piped in, returning captured stdout. Used
+/// to drive the SessionStart hook, which reads its `source` from a JSON payload
+/// on stdin.
+fn run_with_stdin(env: &Env, args: &[&str], stdin: &str) -> String {
+    let mut child = Command::new(weaver_bin())
+        .args(args)
+        .current_dir(&env.repo_path)
+        .env("WEAVER_HOME", &env.home_path)
+        .env("WEAVER_API", "http://127.0.0.1:1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn weaver");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("weaver did not exit");
+    assert!(
+        out.status.success(),
+        "weaver {args:?} failed: {} / {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// `weaver readme` prints the full weaver workflow guide so an agent can pull
+/// the rules back on demand (e.g. after a compaction replayed only the catch-up).
+#[test]
+fn readme_prints_the_full_weaver_guide() {
+    let env = setup();
+    let out = run(&env, &["readme"]);
+    assert!(
+        out.contains("weaver session"),
+        "readme should print the WEAVER.md guide: {out}"
+    );
+    assert!(
+        out.contains("weaver set-status"),
+        "readme should describe the weaver CLI: {out}"
+    );
+}
+
+/// On a genuine start/resume/clear (no `compact` source), the session-start hook
+/// injects the full WEAVER.md primer as `additionalContext`.
+#[test]
+fn session_start_hook_injects_the_full_primer() {
+    let env = setup();
+    let payload = r#"{"hook_event_name":"SessionStart","source":"startup"}"#;
+    let out = run_with_stdin(&env, &["hook", "--event", "session-start"], payload);
+    assert!(
+        out.contains("\"hookEventName\":\"SessionStart\""),
+        "hook should emit SessionStart additionalContext JSON: {out}"
+    );
+    // The full guide — not the compact catch-up.
+    assert!(
+        out.contains("review progress asynchronously"),
+        "startup should replay the full WEAVER.md: {out}"
+    );
+    assert!(
+        !out.contains("Context was just compacted"),
+        "startup must not use the compaction replay: {out}"
+    );
+}
+
+/// After a context compaction (`source: "compact"`), the hook replays a concise
+/// re-orientation — the `weaver summary` catch-up plus the load-bearing rules and
+/// a pointer to `weaver readme` — instead of the whole WEAVER.md.
+#[test]
+fn session_start_hook_after_compaction_replays_the_concise_summary() {
+    let env = setup();
+    run(&env, &["goal", "ship", "the", "feature"]);
+    run(&env, &["issue", "add", "wire", "up", "routes"]);
+    run(&env, &["set-status", "ok", "routes", "wired"]);
+
+    let payload = r#"{"hook_event_name":"SessionStart","source":"compact"}"#;
+    let out = run_with_stdin(&env, &["hook", "--event", "session-start"], payload);
+
+    // Still a SessionStart context injection.
+    assert!(
+        out.contains("\"hookEventName\":\"SessionStart\""),
+        "compact replay should still be SessionStart additionalContext: {out}"
+    );
+    // The concise catch-up: framing, the live branch state, and how-to pointers.
+    assert!(
+        out.contains("Context was just compacted"),
+        "compact replay should re-orient the agent: {out}"
+    );
+    assert!(
+        out.contains("ship the feature"),
+        "replay omits the goal: {out}"
+    );
+    assert!(
+        out.contains("ok — routes wired"),
+        "replay omits the live status: {out}"
+    );
+    assert!(
+        out.contains("wire up routes"),
+        "replay omits the outstanding work: {out}"
+    );
+    assert!(
+        out.contains("weaver readme"),
+        "replay should point at the full guide: {out}"
+    );
+    // It must stay concise — not re-feed the whole WEAVER.md.
+    assert!(
+        !out.contains("review progress asynchronously"),
+        "compact replay must not dump the full WEAVER.md: {out}"
+    );
+
+    // The hook still records the lifecycle event (with its source) for the monitor.
+    let log = run(&env, &["log"]);
+    assert!(
+        log.contains("session-start"),
+        "the hook should record a session-start event: {log}"
     );
 }
 
