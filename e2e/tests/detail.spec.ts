@@ -4,7 +4,7 @@ test.describe('session detail view', () => {
   test('renders goal, status and identity metadata', async ({ page, weaver }) => {
     const s = await weaver.seedSession({ goal: 'Render my details', name: 'detail-task' });
 
-    await page.goto(`${weaver.baseUrl}/#/s/${s.id}`);
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
 
     await expect(page.getByRole('heading', { name: 'detail-task' })).toBeVisible();
     // Status (lifecycle) badge is present in the header.
@@ -30,7 +30,7 @@ test.describe('session detail view', () => {
     // The agent raises its attention; the human's only write here is to clear it.
     await weaver.setStatus(s, 'attention', 'waiting on review');
 
-    await page.goto(`${weaver.baseUrl}/#/s/${s.id}`);
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
 
     // Attention is shown once, on the conversation-state strip, with the one
     // human control beside it.
@@ -53,7 +53,7 @@ test.describe('session detail view', () => {
   }) => {
     const s = await weaver.seedSession({ goal: 'Receive a command', name: 'term-task' });
 
-    await page.goto(`${weaver.baseUrl}/#/s/${s.id}`);
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
 
     // The xterm.js terminal mounts.
     await expect(page.locator('.xterm')).toBeVisible();

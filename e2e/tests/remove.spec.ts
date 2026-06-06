@@ -7,7 +7,7 @@ test.describe('removing a session', () => {
   }) => {
     const s = await weaver.seedSession({ goal: 'Delete me', name: 'remove-task' });
 
-    await page.goto(`${weaver.baseUrl}/#/s/${s.id}`);
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
     await expect(page.getByRole('heading', { name: 'remove-task' })).toBeVisible();
 
     // Lifecycle actions live on the Overview tab, off the terminal-first default.
@@ -21,7 +21,7 @@ test.describe('removing a session', () => {
     await page.getByRole('button', { name: 'Remove' }).click();
 
     // Router pushes back to the list.
-    await expect(page).toHaveURL(/#\/$/);
+    await expect(page).toHaveURL(/\/$/);
     await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
     await expect(page.getByText('No sessions yet.')).toBeVisible();
 
@@ -33,14 +33,14 @@ test.describe('removing a session', () => {
   test('dismissing the confirm dialog keeps the session', async ({ page, weaver }) => {
     const s = await weaver.seedSession({ goal: 'Keep me', name: 'keep-task' });
 
-    await page.goto(`${weaver.baseUrl}/#/s/${s.id}`);
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
     await page.getByRole('button', { name: 'Overview' }).click();
 
     page.once('dialog', (dialog) => dialog.dismiss());
     await page.getByRole('button', { name: 'Remove' }).click();
 
     // Still on the detail page, still present server-side.
-    await expect(page).toHaveURL(new RegExp(`#/s/${s.id}$`));
+    await expect(page).toHaveURL(new RegExp(`/s/${s.id}$`));
     const all = await weaver.listSessions();
     expect(all).toHaveLength(1);
   });

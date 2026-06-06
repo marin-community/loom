@@ -4,7 +4,7 @@ test.describe('status reflects hook and attention events', () => {
   test('detail view: hooks drive lifecycle + attention via SSE', async ({ page, weaver }) => {
     const s = await weaver.seedSession({ goal: 'Watch my status', name: 'hook-detail' });
 
-    await page.goto(`${weaver.baseUrl}/#/s/${s.id}`);
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
     const status = page.getByTestId('status-badge').first();
     // The agent's attention is shown once, on the conversation-state strip.
     const conv = page.getByTestId('conversation-state');
@@ -22,7 +22,7 @@ test.describe('status reflects hook and attention events', () => {
   test('detail view: weaver set-status sets level + message via SSE', async ({ page, weaver }) => {
     const s = await weaver.seedSession({ goal: 'Declare my status', name: 'status-detail' });
 
-    await page.goto(`${weaver.baseUrl}/#/s/${s.id}`);
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
     const conv = page.getByTestId('conversation-state');
     await expect(conv).toBeVisible();
 

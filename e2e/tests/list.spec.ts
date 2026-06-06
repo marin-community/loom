@@ -64,7 +64,7 @@ test.describe('session list view', () => {
     await page.goto(weaver.baseUrl);
     await page.locator(`[data-session-id="${s.id}"]`).click();
 
-    await expect(page).toHaveURL(new RegExp(`#/s/${s.id}$`));
+    await expect(page).toHaveURL(new RegExp(`/s/${s.id}$`));
     await expect(page.getByRole('heading', { name: 'nav-task' })).toBeVisible();
     // The goal is read-only prose on the Overview tab (agent-authored).
     await page.getByRole('button', { name: 'Overview' }).click();

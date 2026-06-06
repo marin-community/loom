@@ -20,6 +20,10 @@ module.exports = (_env, argv) => {
     output: {
       path: path.resolve(__dirname, '../static/dist'),
       filename: isDev ? 'app.js' : 'app.[contenthash:8].js',
+      // Absolute so assets resolve from any route depth. With HTML5 history
+      // routing a deep link like /s/abc/files must still load /app.xxxx.js, not
+      // /s/abc/app.xxxx.js — the default 'auto' would emit a relative src.
+      publicPath: '/',
       clean: !isDev,
     },
     resolve: {
@@ -47,7 +51,8 @@ module.exports = (_env, argv) => {
       hot: true,
       // Don't gzip; it buffers the `/api/.../events` SSE stream.
       compress: false,
-      // SPA deep links (the app uses hash routing, but keep this for safety).
+      // Serve index.html for SPA deep links (HTML5 history routing) so a
+      // hard refresh on /s/abc doesn't 404.
       historyApiFallback: true,
       client: {
         overlay: { errors: true, warnings: false },
