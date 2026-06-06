@@ -259,21 +259,38 @@ async fn cmd_summary() -> Result<()> {
     let db = open_db().await?;
     let b = branch::resolve(&db).await?;
 
+    // Each section trails the command that drills into it, so the summary
+    // doubles as a map of where to look next.
     let goal = if !b.goal.is_empty() {
         b.goal.clone()
     } else if !b.title.is_empty() {
         b.title.clone()
     } else {
-        "(none set — `weaver goal \"…\"`)".to_string()
+        "(none set)".to_string()
     };
-    println!("Goal:   {goal}");
+    println!("Goal:    {goal}  (weaver goal)");
 
     let status = if b.description.is_empty() {
         b.attention.clone()
     } else {
         format!("{} — {}", b.attention, b.description)
     };
-    println!("Status: {status}");
+    println!("Status:  {status}  (weaver set-status)");
+
+    // Plans on this branch — large multi-session efforts. Status comes from the
+    // plan file itself, so this stays a cheap read (no issue join).
+    let plans = read_plans(&plan_dir(&b));
+    match plans.as_slice() {
+        [] => println!("Plan:    none  (weaver plan new \"<title>\")"),
+        [p] => println!(
+            "Plan:    {} [{}]  (weaver plan show {})",
+            p.slug, p.status, p.slug
+        ),
+        many => {
+            let slugs = many.iter().map(|p| p.slug.as_str()).collect::<Vec<_>>();
+            println!("Plan:    {}  (weaver plan ls)", slugs.join(", "));
+        }
+    }
 
     // Outstanding work: this branch's own open issues, then any open sub-trees
     // it delegated (each carrying its sub-agent's live status).
@@ -281,9 +298,12 @@ async fn cmd_summary() -> Result<()> {
     let delegated = issue::list_delegated_by(&db, &b.repo_root, &b.branch, false).await?;
     println!();
     if open.is_empty() && delegated.is_empty() {
-        println!("Outstanding: none");
+        println!("Outstanding: none  (weaver issue ls)");
     } else {
-        println!("Outstanding ({}):", open.len() + delegated.len());
+        println!(
+            "Outstanding ({}):  (weaver issue ls)",
+            open.len() + delegated.len()
+        );
         for i in open.iter().take(SUMMARY_TASK_CAP) {
             println!("  #{:<4} {}", i.id, i.title);
         }
@@ -304,7 +324,7 @@ async fn cmd_summary() -> Result<()> {
     // Hints for next steps: the most recent note (where work was left off) plus
     // a generated next-action drawn from the open work.
     println!();
-    println!("Next steps:");
+    println!("Next steps:  (weaver log · weaver note)");
     let notes = note::list_for_branch(&db, &b.id).await?;
     if let Some(last) = notes.last() {
         println!("  - last note: {}", truncate(&last.text, 100));

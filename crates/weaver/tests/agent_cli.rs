@@ -284,8 +284,8 @@ fn summary_orients_an_agent_on_the_branch() {
     run(&env, &["note", "left", "off", "mid-refactor"]);
 
     let out = run(&env, &["summary"]);
-    assert!(out.contains("Goal:   ship the feature"), "summary: {out}");
-    assert!(out.contains("Status: ok — routes wired"), "summary: {out}");
+    assert!(out.contains("ship the feature"), "summary: {out}");
+    assert!(out.contains("ok — routes wired"), "summary: {out}");
     // Outstanding lists the tasks themselves, not just a count.
     assert!(out.contains("Outstanding (2):"), "summary: {out}");
     assert!(out.contains("#1    wire up routes"), "summary: {out}");
@@ -296,6 +296,16 @@ fn summary_orients_an_agent_on_the_branch() {
         "summary: {out}"
     );
     assert!(out.contains("pick up #1"), "summary: {out}");
+    // Every section advertises the command that drills into it.
+    for hint in [
+        "(weaver goal)",
+        "(weaver set-status)",
+        "(weaver issue ls)",
+        "weaver plan",
+        "weaver log",
+    ] {
+        assert!(out.contains(hint), "summary should surface `{hint}`: {out}");
+    }
 }
 
 /// With nothing open, summary flips its hint to "wrap up / open a PR".
