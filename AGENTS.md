@@ -61,21 +61,28 @@ needing the daemon to be reachable.
 | `crates/loom/src/bin/loom.rs` | the orchestrator CLI (`serve`, `launch`, `ps`, `attach`, …) |
 | `crates/loom/frontend/` | Vue 3 SPA, rspack, Tailwind. `api.ts` + views in `views/` |
 | `crates/loom/static/dist/` | Build output (placeholder; real build overwrites) |
-| `crates/loom/tests/` | integration tests (need `git` + `tmux`) |
+| `crates/loom/tests/` | integration tests: `integration/` (server suites) + `hook_monitor.rs`; need `git` + `tmux` |
 | `e2e/` | Playwright; talks to a real `loom serve`. Separate `package.json` |
-| `crates/loom/build.rs` | Runs `npm run build` in `frontend/`. Honors `WEAVER_SKIP_FRONTEND` |
+| `crates/loom/build.rs` | Builds the SPA into `static/dist` (npm + rspack); writes a placeholder when Node is unavailable |
 
 ## Build & test
 
 ```sh
-cargo build                           # also runs `npm run build` in the SPA
-WEAVER_SKIP_FRONTEND=1 cargo build    # backend only — fastest iteration
-WEAVER_SKIP_FRONTEND=1 cargo test --workspace
-cd crates/loom/frontend && npm run dev  # live-reloading SPA against `loom serve`
-cd e2e && npm test                    # Playwright suite
+cargo build                              # builds the backend + the Vue SPA (needs Node + npm)
+cargo test --workspace                   # backend unit + integration tests (git, tmux)
+cd crates/loom/frontend && npm run dev   # live-reloading SPA against `loom serve`
+cd e2e && npm test                       # frontend end-to-end tests (Playwright)
 ```
 
-The integration test shells out to real `git` and `tmux`. If it hangs, look
+`cargo build` builds the SPA into `static/dist` via `build.rs`; loom serves it
+from there at runtime (`web::static_dir`). `rerun-if-changed` makes the SPA build
+a no-op when no frontend source changed, so backend-only edits don't re-run
+rspack; a Node-less checkout still builds (the backend) and serves a placeholder.
+There is no skip flag — backend and frontend are separated at the **test** level
+(`cargo test` for the backend, the Playwright `e2e/` suite for the frontend), not
+the build level.
+
+The integration tests shell out to real `git` and `tmux`. If one hangs, look
 for stray `weaver-test-*` tmux sessions.
 
 ### Don't spin up your own `loom` — it shares the user's tmux + db
@@ -91,14 +98,13 @@ the one running *you*. So, unless the user explicitly asks for it:
   Each of these tears down the user's running agents at a stroke.
 - **If a task seems to need a live loom session, ask the user first.**
 
-To exercise loom or tmux behaviour, use the test infrastructure instead. The
-Rust integration tests (`crates/loom/tests/`) pin tmux to a throwaway server via
-`WEAVER_TMUX_SOCKET` (→ `tmux -L <name>`, see `tmux::socket_args`) and a temp
-`WEAVER_HOME`, so they can never see — let alone kill — the user's real
-sessions; extend them rather than driving a real server by hand. (The Playwright
-`e2e/` suite does **not** yet isolate its tmux socket — it still drives a server
-on the machine-global default socket; that's tracked in #22.) If you genuinely
-must run loom ad-hoc, isolate it the same way:
+To exercise loom or tmux behaviour, use the test infrastructure instead. Both
+test suites pin tmux to a throwaway server via `WEAVER_TMUX_SOCKET`
+(→ `tmux -L <name>`, see `tmux::socket_args`) and a temp `WEAVER_HOME`, so they
+can never see — let alone kill — the user's real sessions: the Rust integration
+tests (`crates/loom/tests/`) and the Playwright `e2e/` suite each use their own
+private socket. Extend them rather than driving a real server by hand. If you
+genuinely must run loom ad-hoc, isolate it the same way:
 
 ```sh
 WEAVER_TMUX_SOCKET=loom-dev-$$ WEAVER_HOME=$(mktemp -d) loom serve --addr 127.0.0.1:0
@@ -106,13 +112,17 @@ WEAVER_TMUX_SOCKET=loom-dev-$$ WEAVER_HOME=$(mktemp -d) loom serve --addr 127.0.
 
 ### End-to-end (Playwright)
 
-The `e2e/` suite drives the real UI against a real server. Each test file spins
-up its **own** isolated `loom serve` on a random port with its own
-`WEAVER_HOME` / sqlite db and a throwaway git repo (see `e2e/fixtures/weaver.ts`),
-and uses the deterministic `shell` agent. Never point the suite at a
-long-running dev server or your `~/.weaver` db — tests create and tear down
-sessions (killing machine-global tmux sessions), so they must own the server
-they talk to.
+The `e2e/` suite drives the real UI against a real server. It boots **one**
+`loom serve` per Playwright *worker* (not per test) on a random port, each with
+its own `WEAVER_HOME` / sqlite db, a private tmux socket (`WEAVER_TMUX_SOCKET`,
+reaped on teardown), and a throwaway git repo (see `e2e/fixtures/weaver.ts`),
+using the deterministic `shell` agent. The per-test `weaver` fixture wipes every
+session (branch + worktree) between tests, so each starts from a clean slate and
+count-based assertions hold regardless of order. Workers are fully isolated, so
+the suite runs in parallel (`fullyParallel`, `workers > 1`) and — because every
+session it touches is scoped to a worker's private socket and db — can't disturb
+a long-running dev server or your `~/.weaver` sessions. A `globalSetup` runs
+`cargo build` once up front so workers never race on the build.
 
 ```sh
 cd e2e
@@ -136,7 +146,7 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
 
 **Open a pull request by default.** Don't push to or merge into `main` directly.
 Work on a branch, run the checks above (formatters, `cargo clippy`, and
-`WEAVER_SKIP_FRONTEND=1 cargo test --workspace`), make them pass, then
+`cargo test --workspace`), make them pass, then
 `gh pr create` and let review + CI gate the merge. This holds for every change —
 features, fixes, docs, refactors — unless the user explicitly tells you to
 commit straight to the base branch. Agents working in a weaver worktree are
@@ -373,6 +383,5 @@ These are all `weaver-core` calls against the sqlite database. They write
 | `WEAVER_DB` | sqlite path | `$WEAVER_HOME/weaver.db` |
 | `WEAVER_API` | loom URL (both sides — server binds, CLI talks) | `http://127.0.0.1:7878` |
 | `WEAVER_BRANCH` | override the branch resolver (set by `loom launch` in the worktree) | — |
-| `WEAVER_TMUX_SOCKET` | pin tmux to a dedicated server (`tmux -L <name>`) so ops can't touch real sessions; set by the test harness | unset → default socket |
-| `WEAVER_SKIP_FRONTEND` | skip `npm run build` in `build.rs` | unset |
+| `WEAVER_TMUX_SOCKET` | pin tmux to a dedicated server (`tmux -L <name>`) so ops can't touch real sessions; set by the test harnesses | unset → default socket |
 | `RUST_LOG` / `EnvFilter` | tracing filter | `loom=info,weaver_core=info,tower_http=warn` |

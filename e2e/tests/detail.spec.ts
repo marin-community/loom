@@ -13,7 +13,9 @@ test.describe('session detail view', () => {
     // The goal is the agent's launch prompt — read-only prose on the Overview
     // tab, not an editable field.
     await page.getByRole('button', { name: 'Overview' }).click();
-    await expect(page.getByText('Render my details')).toBeVisible();
+    // Scope to the goal element — the goal text also appears in the tracking
+    // issue's body in the issues panel, so a bare getByText is ambiguous.
+    await expect(page.getByTestId('session-goal')).toHaveText('Render my details');
 
     // Identity metadata (id, branch, base) lives behind the ⌄ details popover,
     // not cluttering the header. Scope to the popover and match exactly so the

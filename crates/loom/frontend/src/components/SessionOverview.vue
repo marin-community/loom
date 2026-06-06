@@ -47,7 +47,8 @@ async function refreshGithub() {
   <div class="space-y-5">
     <!-- Plan — one surface for "what this branch is doing": the agent's launch
          goal at minimum, growing into the structured plan (tasks, diagram, live
-         status projected from the issue ledger) once one is scaffolded. -->
+         status projected from the issue ledger) once one is scaffolded. The goal
+         element carries `session-goal` for the detail/list specs. -->
     <SessionPlan :id="ws.id" :goal="ws.branch.goal" />
 
     <!-- GitHub — the branch's PR snapshot, polled server-side via `gh`. Shown

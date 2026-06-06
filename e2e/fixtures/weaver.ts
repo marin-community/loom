@@ -1,6 +1,7 @@
 import { test as base, expect } from '@playwright/test';
 import { type ChildProcess, execFileSync, spawn } from 'child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { randomBytes } from 'crypto';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -8,6 +9,7 @@ import { join } from 'path';
 const WEAVER_ROOT = join(__dirname, '..', '..');
 const LOOM_BINARY = join(WEAVER_ROOT, 'target', 'debug', 'loom');
 const WEAVER_BINARY = join(WEAVER_ROOT, 'target', 'debug', 'weaver');
+const FRONTEND_DIR = join(WEAVER_ROOT, 'crates', 'loom', 'frontend');
 const DIST_INDEX = join(WEAVER_ROOT, 'crates', 'loom', 'static', 'dist', 'index.html');
 
 /** The branch-level fields embedded in a SessionView. */
@@ -72,49 +74,36 @@ export interface WeaverFixture {
   ): Promise<void>;
 }
 
-let built = false;
-
 /**
- * Build the loom + weaver binaries and the real frontend bundle from the
- * current source, then sanity-check the outputs. Memoized per worker process.
- *
- * This always runs an (incremental) `cargo build` rather than checking only
- * that the outputs *exist*: cargo's own freshness tracking rebuilds just what
- * changed, and loom's `build.rs` re-runs rspack into `static/dist` whenever
- * `frontend/src` changes. So editing a `.vue`/`.ts`/`.rs` file and re-running
- * the suite always tests current code — no manual rebuild step. An
- * existence-only check (the old behavior) would silently serve a stale or
- * placeholder bundle, which is exactly the kind of ghost failure this avoids.
- *
- * `WEAVER_SKIP_FRONTEND` is forced off: the e2e suite drives the real UI, so
- * the placeholder page that flag produces is never acceptable here. Flipping
- * the var also makes cargo re-run `build.rs`, undoing any prior placeholder.
+ * Ensure the loom/weaver binaries and the Vue SPA bundle all exist. Called once
+ * from `globalSetup` (see playwright.config.ts) — before any worker spawns — so
+ * parallel workers never race on a concurrent `cargo build` / rspack write.
  */
-function ensureBuilt() {
-  if (built) return;
-
-  const env = { ...process.env };
-  delete env.WEAVER_SKIP_FRONTEND;
-  execFileSync('cargo', ['build'], { cwd: WEAVER_ROOT, stdio: 'inherit', env });
-
-  for (const [label, path] of [
-    ['loom binary', LOOM_BINARY],
-    ['weaver binary', WEAVER_BINARY],
-    ['frontend bundle', DIST_INDEX],
-  ] as const) {
-    if (!existsSync(path)) throw new Error(`${label} missing after build: ${path}`);
+export function ensureBuilt() {
+  // Always run an incremental `cargo build` (it builds both binaries and the SPA
+  // into static/dist via build.rs). `rerun-if-changed` makes it a fast no-op when
+  // nothing changed, but it rebuilds a stale bundle after a backend *or* frontend
+  // edit — so the suite never tests an out-of-date or placeholder UI.
+  execFileSync('cargo', ['build'], {
+    cwd: WEAVER_ROOT,
+    stdio: 'inherit',
+    env: process.env,
+  });
+  if (!existsSync(LOOM_BINARY)) {
+    throw new Error(`loom binary missing after build: ${LOOM_BINARY}`);
   }
-  // `build.rs` writes this placeholder when it can't build the real SPA (npm
-  // missing, or sources absent). Serving it would make every UI assertion time
-  // out mysteriously — fail loudly with the cause instead.
-  if (readFileSync(DIST_INDEX, 'utf8').includes('Frontend not built')) {
-    throw new Error(
-      `frontend bundle at ${DIST_INDEX} is the placeholder, not a real build ` +
-        `(is npm available?). The e2e suite needs the real SPA.`,
-    );
+  if (!existsSync(WEAVER_BINARY)) {
+    throw new Error(`weaver binary missing after build: ${WEAVER_BINARY}`);
   }
-
-  built = true;
+  if (!existsSync(DIST_INDEX)) {
+    // build.rs writes a placeholder when Node is unavailable; build the SPA
+    // directly so the UI under test is the real one.
+    execFileSync('npx', ['rspack', 'build'], {
+      cwd: FRONTEND_DIR,
+      stdio: 'inherit',
+      env: process.env,
+    });
+  }
 }
 
 /** Create a throwaway git repo with a single commit on `main`. */
@@ -142,83 +131,175 @@ async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
   return text ? JSON.parse(text) : null;
 }
 
-export const test = base.extend<{ weaver: WeaverFixture }>({
-  weaver: async ({}, use) => {
-    ensureBuilt();
-
-    const tmpDir = mkdtempSync(join(tmpdir(), 'weaver-e2e-'));
-    const weaverHome = join(tmpDir, 'home');
-    const dbPath = join(tmpDir, 'db.sqlite');
-    const repoPath = join(tmpDir, 'repo');
-    mkdirSync(weaverHome, { recursive: true });
-    makeRepo(repoPath);
-
-    // Per-test env: every spawned process (loom + weaver hooks) sees the same
-    // WEAVER_HOME / WEAVER_DB so they read and write the same database.
-    const childEnv = {
-      ...process.env,
-      WEAVER_HOME: weaverHome,
-      WEAVER_DB: dbPath,
-      RUST_LOG: 'loom=warn,weaver_core=warn',
-    };
-
-    // Bind to a random free port (0) and parse the actual port from stdout.
-    const server: ChildProcess = spawn(LOOM_BINARY, ['serve', '--addr', '127.0.0.1:0'], {
-      env: childEnv,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    let baseUrl = '';
-    let serverLog = '';
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error(`loom did not start in 20s. Output:\n${serverLog}`)),
-        20_000,
-      );
-      const onData = (chunk: Buffer) => {
-        serverLog += chunk.toString();
-        const m = serverLog.match(/listening on (http:\/\/[\d.]+:\d+)/);
-        if (m && !baseUrl) {
-          baseUrl = m[1];
-          clearTimeout(timer);
-          resolve();
-        }
-      };
-      server.stdout!.on('data', onData);
-      server.stderr!.on('data', onData);
-      server.on('error', (err) => {
-        clearTimeout(timer);
-        reject(err);
-      });
-      server.on('exit', (code) => {
-        if (!baseUrl) {
-          clearTimeout(timer);
-          reject(new Error(`loom exited with code ${code} before listening:\n${serverLog}`));
-        }
-      });
-    });
-
-    // Wait for the API to actually answer.
-    let healthy = false;
-    for (let i = 0; i < 50; i++) {
+/** Delete every session on a server (and its branch/worktree), best-effort. */
+async function deleteAllSessions(baseUrl: string) {
+  try {
+    const all = (await fetchJson(`${baseUrl}/api/sessions`)) as Session[];
+    for (const s of all) {
       try {
-        const res = await fetch(`${baseUrl}/api/health`);
-        if (res.ok) {
-          healthy = true;
-          break;
-        }
+        await fetch(`${baseUrl}/api/sessions/${s.id}?keep_branch=false`, {
+          method: 'DELETE',
+        });
       } catch {
-        /* not ready */
+        /* best effort */
       }
-      await new Promise((r) => setTimeout(r, 100));
     }
-    if (!healthy) throw new Error(`loom /api/health never returned ok:\n${serverLog}`);
+  } catch {
+    /* server may already be gone */
+  }
+}
 
-    // UI-created sessions should use a plain shell, never the real claude CLI.
-    await fetchJson(`${baseUrl}/api/settings`, {
-      method: 'PATCH',
-      body: JSON.stringify({ 'agent.default': 'shell' }),
-    });
+/** A loom server shared by every test in one Playwright worker. */
+interface ServerHandle {
+  baseUrl: string;
+  repoPath: string;
+  /** Env for spawning `weaver` against this server (WEAVER_HOME/DB/TMUX_SOCKET). */
+  childEnv: NodeJS.ProcessEnv;
+}
+
+interface WorkerFixtures {
+  server: ServerHandle;
+}
+
+export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
+  // One loom server per worker, reused across all of that worker's tests. Booting
+  // a server (build a throwaway repo, spawn `loom serve`, start a private tmux
+  // server) is the expensive part; the per-test `weaver` fixture below just wipes
+  // sessions between tests so each starts from a clean slate. Workers are fully
+  // isolated (own WEAVER_HOME/db, port, and tmux socket), so they run in parallel
+  // safely — see playwright.config.ts.
+  server: [
+    async ({}, use, workerInfo) => {
+      const tmpDir = mkdtempSync(join(tmpdir(), 'weaver-e2e-'));
+      const weaverHome = join(tmpDir, 'home');
+      const dbPath = join(tmpDir, 'db.sqlite');
+      const repoPath = join(tmpDir, 'repo');
+      mkdirSync(weaverHome, { recursive: true });
+      makeRepo(repoPath);
+
+      // Pin tmux to a private throwaway server (`tmux -L <name>`), exactly like
+      // the Rust integration harness, so a worker's sessions never land on — or
+      // get torn down from — the machine-global default socket where the user's
+      // real weaver-<id> agents (including the one running you) live.
+      // `socket_args()` prepends `-L <name>` to every loom tmux call (create /
+      // kill / capture / attach), so this one var namespaces the whole worker.
+      // The name is unique per worker; reap any stale server from a crashed run.
+      const tmuxSocket = `weaver-e2e-${process.pid}-w${workerInfo.workerIndex}-${randomBytes(3).toString('hex')}`;
+      try {
+        execFileSync('tmux', ['-L', tmuxSocket, 'kill-server'], { stdio: 'ignore' });
+      } catch {
+        /* no such server yet — fine */
+      }
+
+      // Per-worker env: every spawned process (loom + weaver hooks) sees the same
+      // WEAVER_HOME / WEAVER_DB so they share one database, and the same
+      // WEAVER_TMUX_SOCKET so all tmux ops stay on the private server above.
+      const childEnv = {
+        ...process.env,
+        WEAVER_HOME: weaverHome,
+        WEAVER_DB: dbPath,
+        WEAVER_TMUX_SOCKET: tmuxSocket,
+        RUST_LOG: 'loom=warn,weaver_core=warn',
+      };
+
+      // Bind to a random free port (0) and parse the actual port from stdout.
+      const server: ChildProcess = spawn(LOOM_BINARY, ['serve', '--addr', '127.0.0.1:0'], {
+        env: childEnv,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      let baseUrl = '';
+      let serverLog = '';
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error(`loom did not start in 20s. Output:\n${serverLog}`)),
+          20_000,
+        );
+        const onData = (chunk: Buffer) => {
+          serverLog += chunk.toString();
+          const m = serverLog.match(/listening on (http:\/\/[\d.]+:\d+)/);
+          if (m && !baseUrl) {
+            baseUrl = m[1];
+            clearTimeout(timer);
+            resolve();
+          }
+        };
+        server.stdout!.on('data', onData);
+        server.stderr!.on('data', onData);
+        server.on('error', (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+        server.on('exit', (code) => {
+          if (!baseUrl) {
+            clearTimeout(timer);
+            reject(new Error(`loom exited with code ${code} before listening:\n${serverLog}`));
+          }
+        });
+      });
+
+      // Wait for the API to actually answer.
+      let healthy = false;
+      for (let i = 0; i < 50; i++) {
+        try {
+          const res = await fetch(`${baseUrl}/api/health`);
+          if (res.ok) {
+            healthy = true;
+            break;
+          }
+        } catch {
+          /* not ready */
+        }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      if (!healthy) throw new Error(`loom /api/health never returned ok:\n${serverLog}`);
+
+      // UI-created sessions should use a plain shell, never the real claude CLI.
+      await fetchJson(`${baseUrl}/api/settings`, {
+        method: 'PATCH',
+        body: JSON.stringify({ 'agent.default': 'shell' }),
+      });
+
+      await use({ baseUrl, repoPath, childEnv });
+
+      // --- Worker teardown: stop the server, reap the private tmux server, and
+      // remove temp dirs. Everything here is scoped to this worker's private
+      // socket and db, so the user's real sessions are never touched.
+      await deleteAllSessions(baseUrl);
+      await new Promise<void>((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (!done) {
+            done = true;
+            resolve();
+          }
+        };
+        const force = setTimeout(() => {
+          server.kill('SIGKILL');
+          finish();
+        }, 5_000);
+        server.on('exit', () => {
+          clearTimeout(force);
+          finish();
+        });
+        server.kill('SIGTERM');
+      });
+      try {
+        execFileSync('tmux', ['-L', tmuxSocket, 'kill-server'], { stdio: 'ignore' });
+      } catch {
+        /* already gone */
+      }
+      rmSync(tmpDir, { recursive: true, force: true });
+    },
+    { scope: 'worker' },
+  ],
+
+  // Per-test handle on the worker's server. The server is reused; this fixture
+  // just resets it to a clean slate after each test by deleting every session
+  // (and its branch + worktree), so count-based assertions like "0 sessions" or
+  // "exactly 2 cards" hold regardless of test order.
+  weaver: async ({ server }, use) => {
+    const { baseUrl, repoPath, childEnv } = server;
 
     const fixture: WeaverFixture = {
       baseUrl,
@@ -269,43 +350,8 @@ export const test = base.extend<{ weaver: WeaverFixture }>({
 
     await use(fixture);
 
-    // --- Teardown: delete every session (kills machine-global tmux sessions),
-    // then stop the server and remove temp dirs.
-    try {
-      const all = (await fetchJson(`${baseUrl}/api/sessions`)) as Session[];
-      for (const s of all) {
-        try {
-          await fetch(`${baseUrl}/api/sessions/${s.id}?keep_branch=false`, {
-            method: 'DELETE',
-          });
-        } catch {
-          /* best effort */
-        }
-      }
-    } catch {
-      /* server may already be gone */
-    }
-
-    await new Promise<void>((resolve) => {
-      let done = false;
-      const finish = () => {
-        if (!done) {
-          done = true;
-          resolve();
-        }
-      };
-      const force = setTimeout(() => {
-        server.kill('SIGKILL');
-        finish();
-      }, 5_000);
-      server.on('exit', () => {
-        clearTimeout(force);
-        finish();
-      });
-      server.kill('SIGTERM');
-    });
-
-    rmSync(tmpDir, { recursive: true, force: true });
+    // Reset for the next test in this worker.
+    await deleteAllSessions(baseUrl);
   },
 });
 

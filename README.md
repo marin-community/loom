@@ -228,10 +228,16 @@ Notable settings:
 ## Building
 
 ```sh
-cargo build                              # builds the Vue frontend too (needs Node + npm)
-WEAVER_SKIP_FRONTEND=1 cargo build       # backend only
-cargo test --workspace                   # unit + integration (needs git, tmux)
+cargo build                              # builds the backend + the Vue SPA (needs Node + npm)
+cargo test --workspace                   # backend unit + integration tests (need git, tmux)
+cd e2e && npm test                       # frontend end-to-end tests (Playwright)
 ```
+
+`cargo build` builds the SPA into `crates/loom/static/dist` (via `build.rs`),
+which `loom serve` serves at runtime; `rerun-if-changed` keeps it a no-op when no
+frontend source changed, so backend-only edits don't re-run rspack. On a checkout
+without Node the build still succeeds and serves a placeholder page. Backend
+tests are the Rust suites; the frontend's tests are the Playwright `e2e/` suite.
 
 ## Environment
 
@@ -239,4 +245,3 @@ cargo test --workspace                   # unit + integration (needs git, tmux)
 - `WEAVER_DB` — database path (default `$WEAVER_HOME/weaver.db`)
 - `WEAVER_API` — loom URL the `loom` CLI talks to (default `http://127.0.0.1:7878`)
 - `WEAVER_BRANCH` — override the branch resolver (set by `loom launch` in the worktree)
-- `WEAVER_SKIP_FRONTEND` — skip `npm run build` in `build.rs`

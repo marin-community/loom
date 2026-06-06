@@ -10,10 +10,13 @@ fn mtime(path: &Path) -> SystemTime {
         .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
-// Builds the Vue frontend into `static/dist`. Skipped (with a placeholder page
-// written instead) when `WEAVER_SKIP_FRONTEND` is set, npm is unavailable, or
-// the frontend sources do not exist yet — so the backend can be built/tested
-// without a Node toolchain.
+// Builds the Vue frontend into `static/dist` as part of `cargo build`, so a
+// successful build always leaves a ready-to-serve bundle (loom serves it from
+// `static/dist` at runtime — see `web::static_dir`). `rerun-if-changed` keeps it
+// cheap: rspack only re-runs when a frontend source changes, so backend-only
+// edits don't pay for it. When npm or the frontend sources are missing (a
+// Node-less, backend-only checkout), it degrades to a placeholder page instead
+// of failing the build.
 fn main() {
     // Every file that feeds the frontend build: changing any of them reruns
     // this script (and therefore rspack). `frontend/src` covers the Vue/TS
@@ -24,12 +27,10 @@ fn main() {
     println!("cargo:rerun-if-changed=frontend/rspack.config.js");
     println!("cargo:rerun-if-changed=frontend/postcss.config.mjs");
     println!("cargo:rerun-if-changed=frontend/tsconfig.json");
-    println!("cargo:rerun-if-env-changed=WEAVER_SKIP_FRONTEND");
 
     let dist = Path::new("static/dist");
     let frontend = Path::new("frontend");
 
-    let skip = std::env::var("WEAVER_SKIP_FRONTEND").is_ok();
     let have_npm = Command::new("npm")
         .arg("--version")
         .stdout(std::process::Stdio::null())
@@ -39,7 +40,7 @@ fn main() {
         .unwrap_or(false);
     let have_sources = frontend.join("src/main.ts").exists();
 
-    if skip || !have_npm || !have_sources {
+    if !have_npm || !have_sources {
         std::fs::create_dir_all(dist).ok();
         let index = dist.join("index.html");
         if !index.exists() {
@@ -47,8 +48,10 @@ fn main() {
                 &index,
                 "<!doctype html><meta charset=utf-8><title>weaver</title>\
                  <body style=\"font-family:sans-serif;padding:2rem\">\
-                 <h1>weaver</h1><p>Frontend not built. \
-                 Rebuild with npm available and <code>WEAVER_SKIP_FRONTEND</code> unset.</p>",
+                 <h1>weaver</h1><p>Frontend not built: npm or the frontend \
+                 sources were unavailable at build time. Install Node + npm and \
+                 rebuild, or run <code>npm --prefix crates/loom/frontend run \
+                 build</code>.</p>",
             )
             .ok();
         }

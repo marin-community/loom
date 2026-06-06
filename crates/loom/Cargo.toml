@@ -43,3 +43,7 @@ tokio-tungstenite = "0.29"
 futures-util = "0.3"
 # Raw-body HTTP client for the scratch-upload integration test.
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# The integration tests share a `TestServer` harness that sets process-global
+# env (WEAVER_HOME / WEAVER_API / WEAVER_TMUX_SOCKET), so they must not run
+# concurrently within the test binary; `#[serial]` serializes them.
+serial_test = "3"
