@@ -112,12 +112,15 @@ export interface ScratchFile {
 }
 
 /** The worktree file tree: a flat list of repo-relative paths plus a
- *  `path → status` map of changes vs the base branch. Assembled into a tree
- *  client-side. Returned by `/api/sessions/{id}/tree`. */
+ *  `path → status` map of changes vs the chosen baseline. Assembled into a tree
+ *  client-side. Returned by `/api/sessions/{id}/tree`; the optional `base`
+ *  query param ("branch" | "uncommitted") selects the baseline, echoed back. */
 export interface FileTree {
   files: string[];
   /** status is one of "added" | "modified" | "deleted" | "renamed" | "copied". */
   changed: Record<string, string>;
+  /** The baseline these changes are measured against: "branch" | "uncommitted". */
+  base: string;
 }
 
 /** A single file's content for the editor. For binary or oversized files the

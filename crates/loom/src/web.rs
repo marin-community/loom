@@ -1103,12 +1103,22 @@ async fn adopt_session(
 /// of MB the browser editor stops being useful and starts being a memory hog.
 const MAX_TEXT_BYTES: usize = 2 * 1024 * 1024;
 
+/// `base` selects the diff baseline: `branch` (default, the branch's fork point)
+/// or `uncommitted` (vs `HEAD`). Shared by the tree and file endpoints; absent
+/// or unknown values fall back to `branch` (see [`git::DiffBase::from_query`]).
+#[derive(Debug, Deserialize)]
+struct TreeQuery {
+    base: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct FileQuery {
     path: String,
-    /// `working` (default, read from disk) or `base` (read from the merge-base).
+    /// `working` (default, read from disk) or `base` (read from the diff base).
     #[serde(rename = "ref")]
     reference: Option<String>,
+    /// Which baseline the `base` ref resolves to — see [`TreeQuery`].
+    base: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1167,13 +1177,15 @@ fn content_type_for(path: &str) -> &'static str {
 async fn tree_session(
     State(st): State<AppState>,
     Path(key): Path<String>,
+    Query(q): Query<TreeQuery>,
 ) -> ApiResult<Json<Value>> {
     let (session, branch) = require_session(&st.db, &key).await?;
     let work_dir = PathBuf::from(&session.work_dir);
+    let mode = git::DiffBase::from_query(q.base.as_deref());
     let files = git::list_files(&work_dir).await?;
     // A missing/odd base shouldn't sink the whole tree — just show no badges.
-    let changed = match git::merge_base(&work_dir, &branch.base_branch).await {
-        Ok(base) => git::changed_files(&work_dir, &base)
+    let changed = match git::diff_since(&work_dir, &branch.base_branch, mode).await {
+        Ok(since) => git::changed_files(&work_dir, &since)
             .await
             .unwrap_or_default(),
         Err(_) => Vec::new(),
@@ -1182,7 +1194,9 @@ async fn tree_session(
         .into_iter()
         .map(|c| (c.path, Value::String(c.status)))
         .collect();
-    Ok(Json(json!({ "files": files, "changed": changed })))
+    Ok(Json(
+        json!({ "files": files, "changed": changed, "base": mode.as_str() }),
+    ))
 }
 
 /// Text content of a single worktree file for the editor. Binary and oversized
@@ -1199,8 +1213,9 @@ async fn file_session(
     let rel = rel_path(&q.path)?;
 
     let bytes: Vec<u8> = if q.reference.as_deref() == Some("base") {
-        match git::merge_base(&work_dir, &branch.base_branch).await {
-            Ok(base) => git::read_blob(&work_dir, &base, &rel)
+        let mode = git::DiffBase::from_query(q.base.as_deref());
+        match git::diff_since(&work_dir, &branch.base_branch, mode).await {
+            Ok(since) => git::read_blob(&work_dir, &since, &rel)
                 .await?
                 .unwrap_or_default(),
             // No base means nothing to compare against; treat as empty original.

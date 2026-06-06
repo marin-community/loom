@@ -456,6 +456,61 @@ async fn session_lifecycle() {
             .await
             .unwrap();
         assert_eq!(bad.status().as_u16(), 400, "absolute raw path rejected");
+
+        // Diff baseline selector: commit the current edits, then make one more
+        // uncommitted change. `base=branch` (the default) shows everything the
+        // branch introduced; `base=uncommitted` shows only what's not committed.
+        let wt = Path::new(&work_dir);
+        sh(wt, "git", &["add", "-A"]);
+        sh(wt, "git", &["commit", "-q", "-m", "branch work"]);
+        std::fs::write(wt.join("README.md"), "hello world again\n").unwrap();
+
+        let branch_scope = client
+            .get(&format!("/api/sessions/{id}/tree?base=branch"))
+            .await
+            .unwrap();
+        let changed = branch_scope["changed"].as_object().unwrap();
+        assert_eq!(branch_scope["base"], "branch");
+        assert_eq!(changed["README.md"], "modified");
+        assert_eq!(
+            changed["new.txt"], "added",
+            "branch scope still shows the committed addition"
+        );
+
+        let uncommitted = client
+            .get(&format!("/api/sessions/{id}/tree?base=uncommitted"))
+            .await
+            .unwrap();
+        let changed = uncommitted["changed"].as_object().unwrap();
+        assert_eq!(uncommitted["base"], "uncommitted");
+        assert_eq!(changed["README.md"], "modified");
+        assert!(
+            !changed.contains_key("new.txt"),
+            "uncommitted scope hides the already-committed addition, got {changed:?}"
+        );
+
+        // The `base` ref read honours the scope too: vs HEAD the original is the
+        // committed README; vs the branch fork point it's the pre-branch one.
+        let head_side = client
+            .get(&format!(
+                "/api/sessions/{id}/file?path=README.md&ref=base&base=uncommitted"
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            head_side["content"], "hello world\n",
+            "uncommitted base reads the committed (HEAD) version"
+        );
+        let fork_side = client
+            .get(&format!(
+                "/api/sessions/{id}/file?path=README.md&ref=base&base=branch"
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            fork_side["content"], "hello\n",
+            "branch base reads the fork-point version"
+        );
     }
 
     // Branches endpoint lists this branch with the right metadata.

@@ -38,6 +38,26 @@ const loadError = ref('');
 const showChanges = ref(true);
 const showFiles = ref(true);
 
+// Which baseline "changed" is measured against. `branch` (default) is the
+// branch's fork point — everything it introduced; `uncommitted` is just what
+// hasn't been committed yet (vs HEAD). The server resolves the actual ref (and
+// for `branch` picks the up-to-date base so a stale local mainline doesn't drag
+// unrelated upstream commits into the diff).
+type DiffBase = 'branch' | 'uncommitted';
+const baseOptions: { value: DiffBase; label: string; title: string }[] = [
+  {
+    value: 'branch',
+    label: 'Branch',
+    title: 'Everything this branch changed since it forked from its base',
+  },
+  {
+    value: 'uncommitted',
+    label: 'Uncommitted',
+    title: "Only changes that haven't been committed yet (vs HEAD)",
+  },
+];
+const diffBase = ref<DiffBase>('branch');
+
 const session = ref<Session | null>(null);
 
 function buildTree(t: FileTree): Node {
@@ -186,10 +206,12 @@ function rawUrl(path: string): string {
 }
 
 async function getFile(path: string, ref?: 'base'): Promise<FileContent> {
-  const suffix = ref === 'base' ? '&ref=base' : '';
-  return (await get(
-    `/sessions/${props.id}/file?path=${encodeURIComponent(path)}${suffix}`,
-  )) as FileContent;
+  const params = new URLSearchParams({ path });
+  if (ref === 'base') {
+    params.set('ref', 'base');
+    params.set('base', diffBase.value);
+  }
+  return (await get(`/sessions/${props.id}/file?${params.toString()}`)) as FileContent;
 }
 
 function disposeModels() {
@@ -363,12 +385,20 @@ function setMode(m: ViewMode) {
 
 async function loadTree() {
   try {
-    tree.value = (await get(`/sessions/${props.id}/tree`)) as FileTree;
+    tree.value = (await get(`/sessions/${props.id}/tree?base=${diffBase.value}`)) as FileTree;
     autoExpand();
     loadError.value = '';
   } catch (e) {
     loadError.value = (e as Error).message;
   }
+}
+
+// Switch the diff baseline: reload the change set and re-render the open file
+// (its diff is now taken against the new base).
+async function setDiffBase(v: DiffBase) {
+  if (diffBase.value === v) return;
+  diffBase.value = v;
+  await refresh();
 }
 
 // Open folders that contain changes (and every top-level folder) so the tree
@@ -425,8 +455,21 @@ onUnmounted(teardownEditors);
         {{ session?.branch.title || session?.branch.name || 'Files' }}
       </h1>
       <span v-if="changedCount" class="text-xs text-attn">{{ changedCount }} changed</span>
+      <!-- Diff baseline: branch-since-fork (default) vs uncommitted-only. -->
+      <div class="ml-auto flex items-center overflow-hidden rounded border border-line text-xs">
+        <button
+          v-for="opt in baseOptions"
+          :key="opt.value"
+          class="px-2 py-1"
+          :class="diffBase === opt.value ? 'bg-subtle text-fg' : 'text-muted hover:bg-subtle/60'"
+          :title="opt.title"
+          @click="setDiffBase(opt.value)"
+        >
+          {{ opt.label }}
+        </button>
+      </div>
       <button
-        class="ml-auto rounded bg-subtle hover:bg-subtle-hover px-2 py-1 text-xs"
+        class="rounded bg-subtle hover:bg-subtle-hover px-2 py-1 text-xs"
         @click="refresh"
       >
         Refresh

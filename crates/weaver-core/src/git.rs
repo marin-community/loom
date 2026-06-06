@@ -179,6 +179,80 @@ pub async fn merge_base(work_dir: &Path, base: &str) -> Result<String> {
     git(work_dir, &["merge-base", base, "HEAD"]).await
 }
 
+/// Is `a` an ancestor of `b`? (`git merge-base --is-ancestor` exits 0 when so.)
+async fn is_ancestor(work_dir: &Path, a: &str, b: &str) -> bool {
+    git(work_dir, &["merge-base", "--is-ancestor", a, b])
+        .await
+        .is_ok()
+}
+
+/// Merge-base of `HEAD` with the branch's base, choosing between the local
+/// `<base>` ref and its `origin/<base>` tracking counterpart whichever sits
+/// *closer to* `HEAD`.
+///
+/// A weaver branch is forked from the local `<base>` at creation, but that local
+/// ref then often falls behind `origin/<base>` (nobody checks `main` out to pull
+/// it) while the branch itself gets rebased onto the remote. Diffing against the
+/// stale local ref would then replay every intervening upstream commit as a
+/// spurious change — the "cruft from unrelated upstream changes" a long-lived
+/// branch accumulates. Taking the more recent of the two merge-bases keeps the
+/// diff to the branch's own work whichever ref it actually tracks.
+pub async fn merge_base_fresh(work_dir: &Path, base: &str) -> Result<String> {
+    let remote = format!("origin/{base}");
+    let mut best: Option<String> = None;
+    for cand in [base, remote.as_str()] {
+        let Ok(mb) = git(work_dir, &["merge-base", cand, "HEAD"]).await else {
+            continue; // ref doesn't resolve (no such branch / no remote) — skip it
+        };
+        best = Some(match best {
+            None => mb,
+            // Prefer the merge-base nearer HEAD: if the previous pick is an
+            // ancestor of this one, this one is the more recent fork point.
+            Some(prev) if is_ancestor(work_dir, &prev, &mb).await => mb,
+            Some(prev) => prev,
+        });
+    }
+    best.ok_or_else(|| anyhow!("no merge-base between HEAD and {base} or origin/{base}"))
+}
+
+/// Which baseline a worktree diff is taken against. The string values are the
+/// wire form carried by the file-viewer's `base` query parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffBase {
+    /// The branch's fork point — everything the branch introduced. The default.
+    Branch,
+    /// `HEAD` — only changes not yet committed.
+    Uncommitted,
+}
+
+impl DiffBase {
+    /// Parse the `base` query value; anything unrecognized (or absent) is `Branch`.
+    pub fn from_query(s: Option<&str>) -> Self {
+        match s {
+            Some("uncommitted") => DiffBase::Uncommitted,
+            _ => DiffBase::Branch,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DiffBase::Branch => "branch",
+            DiffBase::Uncommitted => "uncommitted",
+        }
+    }
+}
+
+/// Resolve the git revision a worktree diff should compare against for `mode`:
+/// the freshest merge-base with `base` for [`DiffBase::Branch`], or plain `HEAD`
+/// for [`DiffBase::Uncommitted`]. Feed the result to [`changed_files`],
+/// [`diff`], or [`read_blob`] as `since`.
+pub async fn diff_since(work_dir: &Path, base: &str, mode: DiffBase) -> Result<String> {
+    match mode {
+        DiffBase::Branch => merge_base_fresh(work_dir, base).await,
+        DiffBase::Uncommitted => Ok("HEAD".to_string()),
+    }
+}
+
 async fn git_with_index(work_dir: &Path, index: &Path, args: &[&str]) -> Result<String> {
     tracing::debug!(
         ?args,
@@ -375,5 +449,93 @@ pub async fn read_blob(work_dir: &Path, rev: &str, path: &str) -> Result<Option<
         Ok(Some(out.stdout))
     } else {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn run(dir: &Path, args: &[&str]) -> String {
+        git(dir, args).await.unwrap()
+    }
+
+    async fn commit(dir: &Path, msg: &str) -> String {
+        run(dir, &["commit", "--allow-empty", "-q", "-m", msg]).await;
+        run(dir, &["rev-parse", "HEAD"]).await
+    }
+
+    /// A stale local `main` left behind at the fork point must not drag the
+    /// upstream commits the branch was rebased onto into its diff. The freshest
+    /// merge-base (here `origin/main`) keeps the diff to the branch's own work.
+    #[tokio::test]
+    async fn merge_base_fresh_prefers_up_to_date_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        run(dir, &["init", "-q", "-b", "main"]).await;
+        run(dir, &["config", "user.email", "t@t.t"]).await;
+        run(dir, &["config", "user.name", "t"]).await;
+
+        let t0 = commit(dir, "T0").await;
+        // Two upstream commits the branch will be rebased onto.
+        std::fs::write(dir.join("SKILL.md"), "s\n").unwrap();
+        run(dir, &["add", "-A"]).await;
+        commit(dir, "U1 upstream").await;
+        std::fs::write(dir.join("dependabot.yml"), "d\n").unwrap();
+        run(dir, &["add", "-A"]).await;
+        let upstream = commit(dir, "U2 upstream").await;
+        // origin/main tracks the up-to-date upstream tip.
+        run(dir, &["update-ref", "refs/remotes/origin/main", &upstream]).await;
+
+        // The branch forks from the up-to-date remote and adds one real change.
+        run(dir, &["checkout", "-q", "-b", "feature", &upstream]).await;
+        std::fs::write(dir.join("mine.txt"), "m\n").unwrap();
+        run(dir, &["add", "-A"]).await;
+        commit(dir, "my real change").await;
+
+        // Local `main` is left stale at the original fork point.
+        run(dir, &["update-ref", "refs/heads/main", &t0]).await;
+
+        // Plain merge-base against the stale local ref is the bug: it predates
+        // the upstream commits, so the diff replays them as cruft.
+        assert_eq!(merge_base(dir, "main").await.unwrap(), t0);
+        let crufty = changed_files(dir, &t0).await.unwrap();
+        let names: Vec<&str> = crufty.iter().map(|c| c.path.as_str()).collect();
+        assert!(names.contains(&"SKILL.md") && names.contains(&"dependabot.yml"));
+
+        // The fresh resolution snaps to origin/main, dropping the upstream churn.
+        let since = diff_since(dir, "main", DiffBase::Branch).await.unwrap();
+        assert_eq!(since, upstream, "should diff against the up-to-date remote");
+        let clean = changed_files(dir, &since).await.unwrap();
+        assert_eq!(clean.len(), 1);
+        assert_eq!(clean[0].path, "mine.txt");
+    }
+
+    /// `DiffBase::Uncommitted` scopes to working-tree changes vs `HEAD`, ignoring
+    /// everything the branch has already committed.
+    #[tokio::test]
+    async fn diff_since_uncommitted_is_vs_head() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        run(dir, &["init", "-q", "-b", "main"]).await;
+        run(dir, &["config", "user.email", "t@t.t"]).await;
+        run(dir, &["config", "user.name", "t"]).await;
+        commit(dir, "T0").await;
+        std::fs::write(dir.join("committed.txt"), "c\n").unwrap();
+        run(dir, &["add", "-A"]).await;
+        commit(dir, "committed work").await;
+
+        // An as-yet-uncommitted edit.
+        std::fs::write(dir.join("scratchpad.txt"), "wip\n").unwrap();
+
+        assert_eq!(
+            diff_since(dir, "main", DiffBase::Uncommitted)
+                .await
+                .unwrap(),
+            "HEAD"
+        );
+        let changed = changed_files(dir, "HEAD").await.unwrap();
+        assert_eq!(changed.len(), 1, "only the uncommitted file");
+        assert_eq!(changed[0].path, "scratchpad.txt");
     }
 }
