@@ -121,7 +121,7 @@ onUnmounted(() => source?.close());
         <ScratchPanel :id="props.id" />
       </section>
 
-      <!-- Overview — read-only context (goal, GitHub, issues, activity). Scrolls
+      <!-- Overview — read-only context (goal, issues, activity). Scrolls
            within the work area so the header/tabs stay anchored. -->
       <div v-if="tab === 'overview'" class="h-full overflow-auto pb-1">
         <SessionOverview
@@ -130,7 +130,6 @@ onUnmounted(() => source?.close());
           :format="eventLine"
           :issues="issues"
           :backlog="backlog"
-          @reload="loadAll"
         />
       </div>
     </div>

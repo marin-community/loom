@@ -6,6 +6,7 @@ import { timeAgo } from '../lib/time';
 import { useSessionActions } from '../lib/sessionActions';
 import StatusBadge from './StatusBadge.vue';
 import SessionDetailsPopover from './SessionDetailsPopover.vue';
+import GithubStatus from './GithubStatus.vue';
 
 // The session page header — one compact chrome block shared by both the detail
 // view and the file browser, so the "where am I / what is this" context never
@@ -14,7 +15,7 @@ import SessionDetailsPopover from './SessionDetailsPopover.vue';
 //   row 1  ← all · title (inline rename) · [attention chip + Mark OK]ⁱ
 //           · lifecycle badge · ⌄ details menu
 //   row 2  the agent's current-state message as prose (the point of the page)
-//   row 3  repo/branch · agent · the quiet conversation-state + freshness
+//   row 3  repo/branch · agent · PR link · the quiet conversation-state + freshness
 //
 // The old full-width "▶ Working … last activity" strip is gone: when the agent
 // is calm, its state is a quiet note on row 3; when it raises attention, the
@@ -204,6 +205,13 @@ const washClass = computed(() =>
       <span class="shrink-0 text-muted">
         {{ ws.agent_kind }}<template v-if="ws.model"> · {{ ws.model }}</template>
       </span>
+      <!-- The branch's PR, surfaced inline as a small link — the one place you
+           already look — rather than buried in the Overview tab. Compact mode is
+           the same tight glyphline the dashboard list uses. -->
+      <template v-if="ws.branch.github">
+        <span class="text-faint">·</span>
+        <GithubStatus :gh="ws.branch.github" compact class="min-w-0" />
+      </template>
       <div class="ml-auto flex shrink-0 items-center gap-1.5">
         <span v-if="!loud" data-testid="conversation-state" :class="toneClass">
           {{ conv.glyph }} {{ conv.label }}
