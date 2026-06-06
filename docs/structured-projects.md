@@ -147,11 +147,13 @@ DB "is the issue for T3 closed?" and draws the checkbox.
 
 ### 1. The plan: one file, stable task IDs, a diagram
 
-A single markdown file — call the noun `plan` (alternatives: *blueprint*, *map*;
-deliberately not *spec*, to dodge the EARS/requirements-ceremony connotation).
-Concretely, `docs/plans/<slug>.md` (lives with the code, rides the PR, merges to
-`main` as the project's living design doc), with frontmatter linking it to the
-repo:
+A single markdown file. The noun is **`plan`** (settled; deliberately not
+*spec*, to dodge the EARS/requirements-ceremony connotation). It lives at
+`docs/plans/<slug>.md` **by default** — with the code, riding the PR, merging to
+`main` as the project's living design doc — but the directory is a **per-repo
+setting** (see [Per-repo configuration](#per-repo-configuration)) for teams with
+a different convention. A repo can hold **many** plans, one per large effort,
+keyed by slug. The file carries frontmatter linking it to the repo:
 
 ````markdown
 ---
@@ -278,26 +280,51 @@ The plan file then keeps living as the project's design doc and its status map.
 ## The interaction surface (loom)
 
 The dashboard is where "understand and interact with the workflow" actually
-happens, and it is the payoff for storing structure-in-file / state-in-DB:
+happens, and it is the payoff for storing structure-in-file / state-in-DB. The
+good news after merging #16/#17: **almost the entire renderer already ships.**
+`markdown.ts` + `MarkdownView.vue` give GFM markdown, `mermaid` diagrams
+(client-side, theme-aware), and `- [ ]`/`- [x]` task lists today; Monaco is
+already wired (read-only) in the file browser; the session detail already has a
+**Terminal / Overview / Issues / Files** tab bar. So the plan view is mostly
+*composition*, not new infrastructure.
 
-- **Render the plan**: `mermaid` diagrams drawn client-side (mermaid.js), the
-  task list sorted by `value`, each task showing a **live status badge joined
-  from its issue** (open / claimed-by-`<branch>` / closed) — never a stale
-  hand-typed checkbox.
-- **A task-dependency graph** from `deps:`, with each node colored by status, so
-  the user sees the critical path and what's unblocked *right now*.
+**Where it lands: the Overview tab.** A session's Overview is today read-only
+context (goal, activity, scratch). For a session whose claimed issue carries a
+`plan_task`, render *that plan* at the top of Overview via `MarkdownView` (with
+the session's own task highlighted) — the big picture, with "your part" called
+out. Sessions with no plan keep today's Overview unchanged.
+
+**Read-first, with a deliberate Edit mode.** Overview's design rule is "the
+agent authors, the human reads." The plan is the one principled exception — the
+design loop *is* the user editing it — so the affordance must be explicit, not
+ambient. Reuse the pattern the file browser already proved: a **preview ⇄ source
+toggle**. An **Edit** button swaps the rendered plan for **Monaco in the same
+panel** (editable, not the read-only viewer), with **Save** and **Cancel**; Save
+writes the file and offers *Reconcile* (the plan's task set may have changed).
+This is a mode-flip on one object, not a separate modal or destination — and it
+generalizes: the same file-write path makes the Files tab editable for free.
+
+- **Status, projected not authored.** The plan view is `MarkdownView` plus a
+  post-render pass that joins each task's `plan_task` to its issue and stamps a
+  live badge (open / claimed-by-`<branch>` / closed) — never a stale hand-typed
+  checkbox. (v1 can ship the plain render; the badge overlay is step 4.)
+- **A task-dependency graph** from `deps:`, nodes colored by status, surfacing
+  the critical path and what's unblocked *right now*.
 - **Drill-down**: task → its issue → its session → its live terminal/diff. The
   plan becomes the single index into a sprawling fan-out — the thing that's
   missing today when ten sessions are in flight.
-- **Actions**: *Reconcile* (run `plan sync`, show the delta), *Materialize*
-  (create issues for new tasks), *Launch* (per ready task → `loom launch
-  --claim`). Editing is either in-place or "edit the file in your editor, then
-  Reconcile."
+- **Actions**: *Reconcile* (`plan sync`, show the delta), *Launch* (per ready
+  task → `loom launch --claim`).
 
-All of this lands API-first — a `plan` read/render endpoint and a `plan sync`
-endpoint in `web.rs`, consumed by the SPA and the `loom` CLI alike, with the
-agent-facing `weaver plan` talking straight to the DB + file. No browser-only
-state ([[ui-built-on-rest-api]]).
+The one genuinely new backend piece is a **file-write endpoint** (today
+`/sessions/{id}/raw` and `/file` are read-only; Monaco is `readOnly: true`).
+Everything lands API-first — a plan read endpoint (parsed + tasks joined to
+issue status), a `sync` endpoint, and the file-write endpoint in `web.rs`,
+consumed by the SPA and the `loom` CLI alike; the agent-facing `weaver plan`
+talks straight to the file + DB. No browser-only state ([[ui-built-on-rest-api]]).
+
+A repo-wide plan board (all plans, not session-scoped) is the natural follow-on
+once the per-session Overview render exists — same components, a different route.
 
 ## When to use it (right-sizing)
 
@@ -320,23 +347,48 @@ stays single-goal by default; `--plan` is the deliberate escalation.
   exist (issues, sessions, sub-agent workflows). The plan is the durable,
   interactive *index*; the muscle underneath stays as it is.
 
-## Data, CLI, and API sketch (for discussion)
+## Data, CLI, and API sketch
 
-Deliberately thin, to be argued before building:
-
-- **Storage.** The file is canonical for prose + structure. The DB carries only
-  a lightweight index for fast dashboard queries and the link:
-  - a `plan_task` annotation on `issues` (`"<slug>#<id>"`), and
-  - optionally a `plans` row (repo_root, slug, file path, status) so the board
-    can list plans without scanning the worktree. Open question: is the row
-    worth it, or is "scan `docs/plans/*.md` on the planning branch" enough?
-- **CLI (`weaver`, DB+file direct):**
+- **Storage — no `plans` table.** The file is canonical for prose + structure;
+  the **only** DB addition is a `plan_task` annotation on `issues`
+  (`"<slug>#<id>"`), the link the board groups and joins on. Enumerating plans
+  is a filesystem glob of the plan dir in the worktree (loom already reads
+  worktree files for the file/raw endpoints), and a plan's task→status is
+  parse-the-file + query-issues-by-`plan_task`. A `plans` table would only
+  duplicate facts the file and the `issues` rows already own — it earns its
+  migration only if repo-wide plan listing ever proves too slow as a glob, which
+  at weaver's scale it won't. **Decision: file scan + `plan_task`, no table.**
+- **CLI (`weaver`, file+DB direct):**
   `weaver plan new <slug>`, `weaver plan show <slug>`,
-  `weaver plan sync <slug> [--apply]`, `weaver plan ls`.
-- **API (`loom`):** `GET /api/plans`, `GET /api/plans/{slug}` (parsed + tasks
-  joined to issue status), `POST /api/plans/{slug}/sync`.
+  `weaver plan sync <slug> [--apply]`, `weaver plan ls` (glob the plan dir).
+- **API (`loom`):** `GET /api/sessions/{id}/plan` (the session's plan, parsed +
+  tasks joined to issue status), `POST /api/sessions/{id}/plan/sync`, and a
+  **file-write** endpoint (e.g. `PUT /api/sessions/{id}/file`) backing the Edit
+  mode — the one new primitive, useful well beyond plans.
 - **Launch:** `loom launch --plan <slug>` (planning session);
   reuse `--claim` for the fan-out.
+
+## Per-repo configuration
+
+Issue feedback raised a real gap: the plan directory (and, in time, other
+conventions) should be **per-repo**, not a global setting — a vendored repo with
+plans under `design/` shouldn't have to reconfigure every clone. weaver already
+has the precedent that a repo ships its own `WEAVER.md` to override the builtin;
+extend the same idea to a small, repo-committed config file:
+
+```toml
+# .weaver/config.toml  (committed; travels with the repo; reviewable)
+[plan]
+dir = "docs/plans"      # default; override per repo
+```
+
+Resolution precedence for such keys: **repo `.weaver/config.toml` → builtin
+default.** This is distinct from the existing global `settings` table (machine/
+user scope: `agent.default`, `server.auto_adopt`), which stays as-is. `plan.dir`
+is simply the first per-repo key; the file is the seed of a mechanism, kept
+deliberately minimal (one key) until more conventions actually need it. Open
+sub-question only: `.weaver/config.toml` (namespaced dir) vs a flat
+`.weaver.toml` — a coin-flip; I lean on the dir for room to grow.
 
 ## Incremental delivery
 
@@ -347,27 +399,32 @@ Deliberately thin, to be argued before building:
    only. The fan-out works end to end from a plan.
 3. **In-flight flagging.** The "don't clobber claimed work" rules; raise
    `attention`. This is the bit that makes the design loop *safe*.
-4. **loom plan view.** Render markdown + mermaid, status badges from issues,
-   dependency graph, drill-down, the Reconcile/Launch actions.
+4. **loom plan view + Edit.** Render the plan on Overview (`MarkdownView`, the
+   status-badge overlay, dependency graph, drill-down), plus the file-write
+   endpoint and the preview ⇄ Monaco Edit toggle, and the Reconcile/Launch
+   actions. The file-write endpoint can land earlier if Files-tab editing is
+   wanted sooner.
 
 Each step is independently shippable and independently useful.
 
-## Open questions (for the user)
+## Resolved decisions (issue #14 feedback)
 
-- **The noun.** `plan` (my preference), `blueprint`, or `map`? Avoiding `spec`
-  on purpose.
-- **File location.** `docs/plans/<slug>.md` (rides the PR, becomes living docs)
-  vs `.weaver/plan.md` (tool-owned, out of the diff) vs the planning branch
-  only. I lean `docs/plans/` — it makes the design a reviewable, mergeable
-  artifact, which is half the point.
-- **One plan or many per repo?** I've assumed many (slug-keyed), each spanning
-  its own fan-out. A single repo-wide `PLAN.md` is simpler but doesn't fit
-  parallel large efforts.
-- **Do we need the `plans` DB row at all**, or is the file plus the `plan_task`
-  links on issues sufficient (scan the worktree to enumerate plans)?
-- **Does the dashboard edit the file**, or is it render-only with "edit in your
-  editor, then Reconcile"? Render-only is far less work and dodges concurrent-
-  edit headaches with the agent.
+- **Noun:** `plan`. ✅
+- **Location:** `docs/plans/<slug>.md` by default, **per-repo configurable** via
+  `.weaver/config.toml` `[plan].dir`. ✅
+- **Plans per repo:** **many**, slug-keyed, each spanning its own fan-out. ✅
+- **`plans` DB row:** **no** — file scan for enumeration, `plan_task` on issues
+  for the link/status join. The file and `issues` already own every fact a table
+  would hold. ✅
+- **Dashboard editing:** read-first on the **Overview** tab with an explicit
+  **Edit** button that flips the rendered plan to **Monaco** in-place (Save +
+  Cancel, then offer Reconcile) — reusing the file browser's proven preview ⇄
+  source pattern. Needs one new backend primitive: a file-write endpoint. ✅
+
+Remaining minor sub-question: `.weaver/config.toml` vs flat `.weaver.toml`
+(cosmetic), and optimistic-concurrency handling if the agent rewrites the plan
+while a human has it open in Monaco (a "file changed on disk" guard on Save —
+noted, not over-built).
 
 ## Sources
 
