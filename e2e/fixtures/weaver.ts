@@ -1,5 +1,6 @@
 import { test as base, expect } from '@playwright/test';
 import { type ChildProcess, execFileSync, spawn } from 'child_process';
+import { randomBytes } from 'crypto';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -73,12 +74,12 @@ export interface WeaverFixture {
   ): Promise<void>;
 }
 
-/** Ensure the loom binary and the Vue frontend bundle both exist. */
+/** Ensure the loom/weaver binaries and the Vue frontend bundle all exist. */
 function ensureBuilt() {
-  const needBinary = !existsSync(LOOM_BINARY) || !existsSync(WEAVER_BINARY);
-  const needFrontend = !existsSync(DIST_INDEX);
-  if (needBinary || needFrontend) {
-    // A full `cargo build` also builds the frontend into static/dist.
+  // `cargo build` is backend-only (the SPA lives behind the `embed-frontend`
+  // feature, served from static/dist at runtime), so the binaries and the SPA
+  // bundle are two independent build steps.
+  if (!existsSync(LOOM_BINARY) || !existsSync(WEAVER_BINARY)) {
     execFileSync('cargo', ['build'], {
       cwd: WEAVER_ROOT,
       stdio: 'inherit',
@@ -92,7 +93,7 @@ function ensureBuilt() {
     throw new Error(`weaver binary missing after build: ${WEAVER_BINARY}`);
   }
   if (!existsSync(DIST_INDEX)) {
-    // Binary built with WEAVER_SKIP_FRONTEND, or stale: build the SPA directly.
+    // The frontend suite owns its own SPA build; loom serves static/dist.
     execFileSync('npx', ['rspack', 'build'], {
       cwd: FRONTEND_DIR,
       stdio: 'inherit',
@@ -137,12 +138,28 @@ export const test = base.extend<{ weaver: WeaverFixture }>({
     mkdirSync(weaverHome, { recursive: true });
     makeRepo(repoPath);
 
+    // Pin tmux to a private throwaway server (`tmux -L <name>`), exactly like the
+    // Rust integration harness, so the suite's sessions never land on — or get
+    // torn down from — the machine-global default socket where the user's real
+    // weaver-<id> agents (including the one running you) live. `socket_args()`
+    // prepends `-L <name>` to every loom tmux call (create / kill / capture /
+    // attach), so this one var namespaces the whole run. The name is unique per
+    // fixture instance; reap any stale server a crashed prior run left behind.
+    const tmuxSocket = `weaver-e2e-${process.pid}-${randomBytes(4).toString('hex')}`;
+    try {
+      execFileSync('tmux', ['-L', tmuxSocket, 'kill-server'], { stdio: 'ignore' });
+    } catch {
+      /* no such server yet — fine */
+    }
+
     // Per-test env: every spawned process (loom + weaver hooks) sees the same
-    // WEAVER_HOME / WEAVER_DB so they read and write the same database.
+    // WEAVER_HOME / WEAVER_DB so they share one database, and the same
+    // WEAVER_TMUX_SOCKET so all tmux ops stay on the private server above.
     const childEnv = {
       ...process.env,
       WEAVER_HOME: weaverHome,
       WEAVER_DB: dbPath,
+      WEAVER_TMUX_SOCKET: tmuxSocket,
       RUST_LOG: 'loom=warn,weaver_core=warn',
     };
 
@@ -253,8 +270,10 @@ export const test = base.extend<{ weaver: WeaverFixture }>({
 
     await use(fixture);
 
-    // --- Teardown: delete every session (kills machine-global tmux sessions),
-    // then stop the server and remove temp dirs.
+    // --- Teardown: delete every session, stop the server, reap the private tmux
+    // server, and remove temp dirs. Every session delete and tmux kill below is
+    // scoped to this run's private socket, so the user's real sessions on the
+    // default socket are never touched.
     try {
       const all = (await fetchJson(`${baseUrl}/api/sessions`)) as Session[];
       for (const s of all) {
@@ -288,6 +307,15 @@ export const test = base.extend<{ weaver: WeaverFixture }>({
       });
       server.kill('SIGTERM');
     });
+
+    // Reap the private tmux server. Even if a session delete above was missed
+    // (or the run panicked), this leaves nothing behind — and only ever targets
+    // this run's `-L` socket, never the default one.
+    try {
+      execFileSync('tmux', ['-L', tmuxSocket, 'kill-server'], { stdio: 'ignore' });
+    } catch {
+      /* already gone */
+    }
 
     rmSync(tmpDir, { recursive: true, force: true });
   },

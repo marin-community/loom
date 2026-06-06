@@ -4,6 +4,14 @@ version = "0.2.0"
 edition = "2021"
 build = "build.rs"
 
+[features]
+# Build the Vue SPA into `static/dist` as part of `cargo build` (build.rs shells
+# out to npm + rspack). Off by default so backend builds/tests need no Node
+# toolchain; turn it on to produce a UI-bearing tree: `cargo build --features
+# embed-frontend`. The e2e suite and `npm --prefix crates/loom/frontend run
+# build` build the SPA without it.
+embed-frontend = []
+
 [lib]
 name = "loom"
 path = "src/lib.rs"
@@ -43,3 +51,7 @@ tokio-tungstenite = "0.29"
 futures-util = "0.3"
 # Raw-body HTTP client for the scratch-upload integration test.
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# The integration tests share a `TestServer` harness that sets process-global
+# env (WEAVER_HOME / WEAVER_API / WEAVER_TMUX_SOCKET), so they must not run
+# concurrently within the test binary; `#[serial]` serializes them.
+serial_test = "3"

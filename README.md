@@ -228,10 +228,16 @@ Notable settings:
 ## Building
 
 ```sh
-cargo build                              # builds the Vue frontend too (needs Node + npm)
-WEAVER_SKIP_FRONTEND=1 cargo build       # backend only
-cargo test --workspace                   # unit + integration (needs git, tmux)
+cargo build                              # backend only — fast, no Node needed
+cargo build --features embed-frontend    # also builds the Vue SPA into static/dist (needs Node + npm)
+cargo test --workspace                   # backend unit + integration tests (need git, tmux)
 ```
+
+`loom serve` serves the SPA from `crates/loom/static/dist`, so build with
+`--features embed-frontend` (or run `npm --prefix crates/loom/frontend run
+build`) when you want the web UI; a plain `cargo build` shows a placeholder
+page. The frontend's own tests are the Playwright suite under `e2e/`
+(`cd e2e && npm test`).
 
 ## Environment
 
@@ -239,4 +245,3 @@ cargo test --workspace                   # unit + integration (needs git, tmux)
 - `WEAVER_DB` — database path (default `$WEAVER_HOME/weaver.db`)
 - `WEAVER_API` — loom URL the `loom` CLI talks to (default `http://127.0.0.1:7878`)
 - `WEAVER_BRANCH` — override the branch resolver (set by `loom launch` in the worktree)
-- `WEAVER_SKIP_FRONTEND` — skip `npm run build` in `build.rs`

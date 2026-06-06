@@ -1,9 +1,10 @@
 name: CI
 
-# Gates merges into main. The `build` job compiles the whole workspace
-# *including* the frontend (build.rs runs `npm install` + rspack), so a broken
+# Gates merges into main. The `build` job compiles the whole workspace with the
+# `embed-frontend` feature, so build.rs runs `npm install` + rspack and a broken
 # frontend dependency tree — e.g. an rspack peer-dependency conflict from a
-# Dependabot bump — fails CI here instead of on a contributor's machine.
+# Dependabot bump — fails CI here instead of on a contributor's machine. The
+# `lint`/`test` jobs build backend-only (the default), so they need no Node.
 
 on:
   push:
@@ -31,15 +32,14 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: crates/loom/frontend/package-lock.json
-      # Full build: build.rs runs the frontend toolchain (npm + rspack). This is
-      # the check that catches frontend dependency breakage.
-      - run: cargo build --workspace --locked
+      # Full build: `embed-frontend` makes build.rs run the frontend toolchain
+      # (npm + rspack). This is the check that catches frontend dependency
+      # breakage.
+      - run: cargo build --workspace --features loom/embed-frontend --locked
 
   lint:
     name: lint
     runs-on: ubuntu-latest
-    env:
-      WEAVER_SKIP_FRONTEND: 1 # the `build` job covers the frontend; skip it here
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -52,8 +52,6 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
-    env:
-      WEAVER_SKIP_FRONTEND: 1
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

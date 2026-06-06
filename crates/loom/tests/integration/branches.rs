@@ -1,0 +1,229 @@
+//! Branches and their issues: the tracking issue a launch opens, branch-claimed
+//! issues vs the repo-wide board, claim release on teardown, and attaching a
+//! session to a pre-existing git branch (with or without an existing worktree).
+
+use serde_json::json;
+use serial_test::serial;
+
+use crate::fixtures::{sh, TestServer};
+
+/// A launch opens a self-sourced tracking issue; hand-created issues are claimed
+/// by the branch and show on the repo board; teardown releases the claims but
+/// keeps the issues.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn branch_issues_and_repo_board() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+    let repo_root = ts.cwd();
+
+    let ws = client
+        .post(
+            "/api/sessions",
+            json!({
+                "goal": "integration test goal",
+                "cwd": repo_root,
+                "agent": "shell",
+            }),
+        )
+        .await
+        .unwrap();
+    let id = ws["id"].as_str().unwrap().to_string();
+    let branch_id = ws["branch"]["id"].as_str().unwrap().to_string();
+
+    // Branches endpoint lists this branch with the right metadata.
+    let branches = client.get("/api/branches").await.unwrap();
+    let arr = branches.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "one branch tracked");
+    assert_eq!(arr[0]["branch"], "weaver/integration-test-goal");
+    // The launch opened one tracking issue, claimed by the new branch. With no
+    // parent agent it is self-sourced (source_branch == claimed_branch).
+    assert_eq!(
+        arr[0]["open_issue_count"], 1,
+        "launch opens a tracking issue"
+    );
+    let tracking = client
+        .get(&format!("/api/branches/{branch_id}/issues"))
+        .await
+        .unwrap();
+    let tracking = tracking.as_array().unwrap();
+    assert_eq!(tracking.len(), 1, "exactly the tracking issue");
+    assert_eq!(
+        tracking[0]["claimed_branch"],
+        "weaver/integration-test-goal"
+    );
+    assert_eq!(
+        tracking[0]["source_branch"], "weaver/integration-test-goal",
+        "self-sourced when no parent launched it"
+    );
+
+    // Branch issues are claimed by the branch; the repo-wide board lives at
+    // /api/repos/issues.
+    let created = client
+        .post(
+            &format!("/api/branches/{branch_id}/issues"),
+            json!({ "title": "fix it", "body": "details" }),
+        )
+        .await
+        .unwrap();
+    let issue_id = created["id"].as_i64().unwrap();
+    assert_eq!(created["status"], "open");
+    assert_eq!(
+        created["claimed_branch"], "weaver/integration-test-goal",
+        "a branch issue is claimed by its branch"
+    );
+    let listed = client
+        .get(&format!("/api/branches/{branch_id}/issues"))
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.as_array().unwrap().len(),
+        2,
+        "the tracking issue plus the hand-created one"
+    );
+    let branch_view = client
+        .get(&format!("/api/branches/{branch_id}"))
+        .await
+        .unwrap();
+    assert_eq!(branch_view["open_issue_count"], 2);
+    // The repo board sees both claimed issues; the unclaimed backlog does not.
+    let board = client
+        .get(&format!("/api/repos/issues?repo_root={repo_root}"))
+        .await
+        .unwrap();
+    assert_eq!(board.as_array().unwrap().len(), 2);
+    let backlog = client
+        .get(&format!(
+            "/api/repos/issues?repo_root={repo_root}&scope=backlog"
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        backlog.as_array().unwrap().len(),
+        0,
+        "issue is claimed, not backlog"
+    );
+
+    // Issues are repo-owned: deleting the session returns its claimed issues to
+    // the unclaimed backlog rather than deleting them. The tracking issue and
+    // the hand-created "fix it" both survive, every claim released.
+    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    let board = client
+        .get(&format!("/api/repos/issues?repo_root={repo_root}&all=true"))
+        .await
+        .unwrap();
+    let board = board.as_array().unwrap();
+    assert_eq!(board.len(), 2, "tracking + manual issues survived teardown");
+    assert!(
+        board.iter().all(|i| i["claimed_branch"].is_null()),
+        "every claim was released on teardown"
+    );
+    assert!(
+        board.iter().any(|i| i["id"].as_i64() == Some(issue_id)),
+        "the hand-created issue survived"
+    );
+}
+
+/// Attaching to an existing branch reuses its worktree if one exists, creates
+/// `.worktrees/<slug>` otherwise, and rejects a branch that doesn't exist.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attach_to_existing_branch() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+    let repo = ts.repo_path().to_path_buf();
+    let cwd = ts.cwd();
+
+    let branches_q = client
+        .get(&format!("/api/repos/branches?cwd={cwd}"))
+        .await
+        .unwrap();
+    let arr = branches_q.as_array().unwrap();
+    assert!(
+        arr.iter()
+            .any(|b| b["name"] == "main" && b["current"] == true),
+        "main should be listed as current, got {arr:?}"
+    );
+
+    // A branch with no worktree gets a fresh .worktrees/<slug>.
+    sh(&repo, "git", &["branch", "feature/x", "main"]);
+    let attached = client
+        .post(
+            "/api/sessions",
+            json!({
+                "cwd": cwd,
+                "goal": "attach to feature/x",
+                "agent": "shell",
+                "existing_branch": "feature/x",
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(attached["branch"]["branch"], "feature/x");
+    let attached_id = attached["id"].as_str().unwrap().to_string();
+    let attached_dir = attached["work_dir"].as_str().unwrap().to_string();
+    assert!(
+        attached_dir.ends_with("/.worktrees/feature-x"),
+        "attached worktree should live at .worktrees/feature-x, got {attached_dir}"
+    );
+    assert!(std::path::Path::new(&attached_dir).join(".git").exists());
+
+    // A branch that already has a worktree reuses that exact path.
+    sh(&repo, "git", &["branch", "feature/y", "main"]);
+    let preexisting = repo.join("custom-worktree-y");
+    sh(
+        &repo,
+        "git",
+        &[
+            "worktree",
+            "add",
+            preexisting.to_str().unwrap(),
+            "feature/y",
+        ],
+    );
+    let attached_y = client
+        .post(
+            "/api/sessions",
+            json!({
+                "cwd": cwd,
+                "goal": "attach to feature/y",
+                "agent": "shell",
+                "existing_branch": "feature/y",
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(attached_y["branch"]["branch"], "feature/y");
+    let dir_y = attached_y["work_dir"].as_str().unwrap().to_string();
+    assert_eq!(
+        std::fs::canonicalize(&dir_y).unwrap(),
+        std::fs::canonicalize(&preexisting).unwrap(),
+        "weaver should reuse the pre-existing worktree path"
+    );
+
+    // A non-existent branch is rejected.
+    let missing = client
+        .post(
+            "/api/sessions",
+            json!({
+                "cwd": cwd,
+                "goal": "missing branch",
+                "agent": "shell",
+                "existing_branch": "no/such/branch",
+            }),
+        )
+        .await;
+    assert!(missing.is_err(), "missing branch should be rejected");
+
+    client
+        .delete(&format!("/api/sessions/{attached_id}"))
+        .await
+        .unwrap();
+    client
+        .delete(&format!(
+            "/api/sessions/{}",
+            attached_y["id"].as_str().unwrap()
+        ))
+        .await
+        .unwrap();
+}
