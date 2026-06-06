@@ -55,9 +55,66 @@ export interface Issue {
   /** "open" or "closed". */
   status: string;
   github_issue: number | null;
+  /** Link to a plan task (`"<slug>#T3"`) when materialized from a plan. */
+  plan_task: string | null;
   created_at: string;
   updated_at: string;
   closed_at: string | null;
+}
+
+/** One task in a plan. The structure (id, title, exec, value, deps) comes from
+ *  the plan file; the status fields are PROJECTED from the linked issue at read
+ *  time — never authored into the file. Returned within {@link PlanView}. */
+export interface PlanTask {
+  /** Stable id, `T<n>`. */
+  id: string;
+  title: string;
+  /** 'session' | 'issue' (materialize into the ledger) | 'inline' | 'workflow'. */
+  exec: string;
+  /** Priority hint ('high' | 'med' | 'low' | …); drives sorting. */
+  value: string;
+  /** Ids of tasks this one depends on. */
+  deps: string[];
+  /** Linked issue id, or null when not (yet) materialized. */
+  issue_id: number | null;
+  /** Linked issue status ('open' | 'closed'), or null. */
+  issue_status: string | null;
+  /** Branch working the linked issue, or null (backlog / unmaterialized). */
+  claimed_branch: string | null;
+}
+
+/** A structured project plan: design + task breakdown from a markdown file, with
+ *  each task's status joined from the issue ledger. Returned by
+ *  `/api/sessions/{id}/plan`. */
+export interface PlanView {
+  slug: string;
+  /** Worktree-relative path, for saving edits via the file-write endpoint. */
+  path: string;
+  title: string;
+  /** Frontmatter status ('draft' | 'active' | 'done' | …). */
+  status: string;
+  /** Raw markdown source — rendered read-first, edited in Monaco. */
+  content: string;
+  tasks: PlanTask[];
+  /** Every plan slug in the repo, for the picker. */
+  available: string[];
+}
+
+/** One reconcile action returned by `POST /api/sessions/{id}/plan/sync`. */
+export interface PlanSyncAction {
+  kind: 'create' | 'close' | 'update_title' | 'flag';
+  task: string;
+  title?: string;
+  issue_id?: number;
+  branch?: string;
+  reason?: string;
+}
+
+/** The result of a plan reconcile: the delta, plus the in-flight flag count. */
+export interface PlanSyncResult {
+  applied: boolean;
+  flags: number;
+  actions: PlanSyncAction[];
 }
 
 export interface RecentRepo {
