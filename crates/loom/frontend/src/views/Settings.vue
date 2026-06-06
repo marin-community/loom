@@ -136,6 +136,14 @@ onMounted(load);
                 drafts[s.key] === 'true' ? 'Enabled' : 'Disabled'
               }}</span>
             </label>
+            <select
+              v-else-if="s.kind === 'enum'"
+              :id="s.key"
+              v-model="drafts[s.key]"
+              class="flex-1 rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent"
+            >
+              <option v-for="opt in s.options" :key="opt" :value="opt">{{ opt }}</option>
+            </select>
             <input
               v-else
               :id="s.key"

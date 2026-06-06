@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue';
-import { Terminal } from '@xterm/xterm';
+import { Terminal, type ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
+import { get } from '../api';
+import type { SettingView } from '../types';
 
 // A real terminal in the browser: xterm.js bridged over a WebSocket to a
 // server-owned PTY running `tmux attach`. The PTY is the single interaction
@@ -36,6 +38,61 @@ let lastRows = 0;
 
 const OP_INPUT = 0x00;
 const OP_RESIZE = 0x01;
+
+// Terminal palettes, selected by the `terminal.theme` server setting. The dark
+// palette is the long-standing default — a black background with xterm's own
+// ANSI colours, which already assume a dark terminal — so it stays minimal to
+// preserve the exact prior appearance. The light palette (Solarized Light) must
+// supply its own foreground, cursor, and full 16-colour set, because xterm's
+// defaults are unreadable on a light background.
+const DARK_THEME: ITheme = { background: '#000000' };
+const LIGHT_THEME: ITheme = {
+  background: '#fdf6e3',
+  foreground: '#586e75',
+  cursor: '#586e75',
+  cursorAccent: '#fdf6e3',
+  selectionBackground: '#eee8d5',
+  black: '#073642',
+  red: '#dc322f',
+  green: '#859900',
+  yellow: '#b58900',
+  blue: '#268bd2',
+  magenta: '#d33682',
+  cyan: '#2aa198',
+  white: '#eee8d5',
+  brightBlack: '#002b36',
+  brightRed: '#cb4b16',
+  brightGreen: '#586e75',
+  brightYellow: '#657b83',
+  brightBlue: '#839496',
+  brightMagenta: '#6c71c4',
+  brightCyan: '#93a1a1',
+  brightWhite: '#fdf6e3',
+};
+
+function themeFor(name: string | undefined): ITheme {
+  return name === 'light' ? LIGHT_THEME : DARK_THEME;
+}
+
+// How long to wait for the theme fetch before opening the terminal with the
+// dark default anyway. Same-origin localhost answers in single-digit ms; this
+// ceiling only matters if the request stalls, so the terminal never hangs
+// closed waiting on it.
+const THEME_FETCH_TIMEOUT_MS = 1000;
+
+// Best-effort fetch of the configured terminal theme. Any failure (offline,
+// stale server without the setting) falls back to the dark default. The caller
+// races this against a timeout so a *slow* (not just failed) request can't hold
+// the terminal closed either.
+async function loadTheme(): Promise<ITheme> {
+  try {
+    const res = (await get('/settings')) as { settings?: SettingView[] };
+    const s = res?.settings?.find((x) => x.key === 'terminal.theme');
+    return themeFor(s?.value);
+  } catch {
+    return DARK_THEME;
+  }
+}
 
 function wsUrl(): string {
   // http→ws / https→wss on the page origin.
@@ -136,15 +193,26 @@ function onVisible() {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   if (!host.value) return;
+  // Resolve the configured palette before constructing the terminal so it
+  // paints in the right theme from the first frame (no dark→light flash on the
+  // common fast path). But never let a slow/stalled request hold the terminal
+  // closed: race the fetch against a short timeout, open with the dark default
+  // if it loses, and upgrade to the configured palette once it lands.
+  const themePromise = loadTheme();
+  const initialTheme = await Promise.race([
+    themePromise,
+    new Promise<ITheme>((resolve) => setTimeout(() => resolve(DARK_THEME), THEME_FETCH_TIMEOUT_MS)),
+  ]);
+  if (disposed || !host.value) return; // unmounted while the fetch was in flight
   term = new Terminal({
     convertEol: false,
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
     fontSize: 13,
     scrollback: 5000,
     allowProposedApi: true, // required to activate the unicode11 addon
-    theme: { background: '#000000' },
+    theme: initialTheme,
     // Constrain agent-supplied OSC 8 hyperlinks to http(s); reject
     // javascript:/data:/file: which an untrusted agent could otherwise emit.
     linkHandler: {
@@ -161,6 +229,14 @@ onMounted(() => {
     },
   });
   term.open(host.value);
+
+  // If the timeout won the race above, apply the real palette once the fetch
+  // resolves. Reference equality holds because the palettes are module-level
+  // singletons, so a no-op (configured theme === fallback) doesn't churn the
+  // renderer.
+  themePromise.then((t) => {
+    if (!disposed && term && t !== initialTheme) term.options.theme = t;
+  });
 
   fit = new FitAddon();
   term.loadAddon(fit);

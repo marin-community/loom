@@ -194,7 +194,7 @@ export interface FileContent {
   bytes: number;
 }
 
-export type SettingKind = 'string' | 'int' | 'bool';
+export type SettingKind = 'string' | 'int' | 'bool' | 'enum';
 
 /** One configurable setting: its registry metadata plus its current value. */
 export interface SettingView {
@@ -204,6 +204,8 @@ export interface SettingView {
   kind: SettingKind;
   default: string;
   group: string;
+  /** Allowed values for an `enum` setting, in display order; empty otherwise. */
+  options: string[];
   value: string;
   is_default: boolean;
 }

@@ -188,7 +188,7 @@ Loom serves a JSON API under `/api`; the Vue SPA is the primary consumer.
   `GET POST /api/repos/issues?repo_root=…` (the repo-wide board / backlog)
 - `GET PATCH /api/settings`
 
-See `AGENTS.md` for the shape of `SessionView`.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the shape of `SessionView`.
 
 ## Server address
 
@@ -224,6 +224,8 @@ Notable settings:
   check status (on by default; a no-op without `gh` or a GitHub remote).
 - `github.archive_on_merge` — archive a session automatically once its PR
   merges (on by default).
+- `terminal.theme` — colour palette for the in-browser terminal: `dark` (the
+  classic black background, default) or `light`.
 
 ## Building
 
