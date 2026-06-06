@@ -23,6 +23,9 @@ pub const DEFAULT_GITHUB_POLL: bool = true;
 /// Whether loom archives a session automatically once its pull request merges.
 /// On by default — a merged branch's worktree has served its purpose.
 pub const DEFAULT_GITHUB_ARCHIVE_ON_MERGE: bool = true;
+/// The palette the browser terminal (xterm.js) renders with. `dark` keeps the
+/// classic black background; `light` swaps in a light, readable palette.
+pub const DEFAULT_TERMINAL_THEME: &str = "dark";
 
 // ---------------------------------------------------------------------------
 // Setting registry
@@ -39,6 +42,9 @@ pub enum SettingKind {
     Int,
     /// A boolean — stored as `true`/`false`.
     Bool,
+    /// A choice from a fixed set of strings ([`SettingSpec::options`]). Renders
+    /// as a dropdown; validated against the allowed values.
+    Enum,
 }
 
 /// A statically declared setting: everything the UI and validator need to know
@@ -57,6 +63,9 @@ pub struct SettingSpec {
     pub default: &'static str,
     /// Heading the setting is grouped under in the UI.
     pub group: &'static str,
+    /// The allowed values for an [`SettingKind::Enum`] setting, in display
+    /// order. Empty for every other kind.
+    pub options: &'static [&'static str],
 }
 
 /// Every setting weaver knows about. Adding a row here is all it takes to make
@@ -72,6 +81,7 @@ pub const REGISTRY: &[SettingSpec] = &[
         kind: SettingKind::String,
         default: DEFAULT_AGENT,
         group: "Agents",
+        options: &[],
     },
     SettingSpec {
         key: "agent.claude_args",
@@ -83,6 +93,7 @@ pub const REGISTRY: &[SettingSpec] = &[
         kind: SettingKind::String,
         default: "",
         group: "Agents",
+        options: &[],
     },
     SettingSpec {
         key: "server.auto_adopt",
@@ -93,6 +104,7 @@ pub const REGISTRY: &[SettingSpec] = &[
         kind: SettingKind::Bool,
         default: "false",
         group: "Server",
+        options: &[],
     },
     SettingSpec {
         key: "github.poll",
@@ -105,6 +117,7 @@ pub const REGISTRY: &[SettingSpec] = &[
         kind: SettingKind::Bool,
         default: "true",
         group: "GitHub",
+        options: &[],
     },
     SettingSpec {
         key: "github.archive_on_merge",
@@ -116,6 +129,18 @@ pub const REGISTRY: &[SettingSpec] = &[
         kind: SettingKind::Bool,
         default: "true",
         group: "GitHub",
+        options: &[],
+    },
+    SettingSpec {
+        key: "terminal.theme",
+        label: "Terminal theme",
+        description: "Colour palette for the in-browser terminal. `dark` is \
+            the classic black background; `light` swaps in a light, readable \
+            palette. Takes effect the next time a terminal is opened.",
+        kind: SettingKind::Enum,
+        default: DEFAULT_TERMINAL_THEME,
+        group: "Appearance",
+        options: &["dark", "light"],
     },
 ];
 
@@ -143,6 +168,16 @@ pub fn validate(key: &str, value: &str) -> std::result::Result<(), String> {
             "true" | "1" | "yes" | "on" | "false" | "0" | "no" | "off" => Ok(()),
             _ => Err(format!("expects true or false, got '{value}'")),
         },
+        SettingKind::Enum => {
+            if spec.options.contains(&value.trim()) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "expects one of {}, got '{value}'",
+                    spec.options.join(", ")
+                ))
+            }
+        }
     }
 }
 
@@ -293,6 +328,53 @@ mod tests {
         assert!(validate("server.auto_adopt", "maybe").is_err());
         // Unregistered keys are free-form.
         assert!(validate("some.future.key", "anything").is_ok());
+    }
+
+    #[test]
+    fn validate_enum_accepts_only_listed_options() {
+        assert!(validate("terminal.theme", "dark").is_ok());
+        assert!(validate("terminal.theme", "light").is_ok());
+        // Surrounding whitespace is tolerated, like the other kinds.
+        assert!(validate("terminal.theme", " light ").is_ok());
+        // Anything outside the option set is rejected, and the error lists them.
+        let err = validate("terminal.theme", "solarized").unwrap_err();
+        assert!(err.contains("dark"), "error should list the options: {err}");
+        assert!(
+            err.contains("light"),
+            "error should list the options: {err}"
+        );
+    }
+
+    #[test]
+    fn enum_kind_iff_options_present() {
+        // The two are coupled: an Enum must declare its choices, and only an
+        // Enum may. This keeps the dropdown and validator in lockstep.
+        for s in REGISTRY {
+            let is_enum = s.kind == SettingKind::Enum;
+            assert_eq!(
+                is_enum,
+                !s.options.is_empty(),
+                "'{}': options must be non-empty iff kind is Enum",
+                s.key
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn describe_serializes_enum_kind_and_options_for_the_frontend() {
+        // The settings pane keys off `kind` and `options` to render a dropdown,
+        // so guard the JSON shape the API hands it.
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let views = describe(&db).await.unwrap();
+        let theme = views
+            .iter()
+            .find(|v| v.spec.key == "terminal.theme")
+            .expect("terminal.theme should be registered");
+        let json = serde_json::to_value(theme).unwrap();
+        assert_eq!(json["kind"], "enum");
+        assert_eq!(json["options"], serde_json::json!(["dark", "light"]));
+        assert_eq!(json["value"], "dark");
+        assert_eq!(json["is_default"], true);
     }
 
     #[tokio::test]

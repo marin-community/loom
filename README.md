@@ -224,6 +224,8 @@ Notable settings:
   check status (on by default; a no-op without `gh` or a GitHub remote).
 - `github.archive_on_merge` — archive a session automatically once its PR
   merges (on by default).
+- `terminal.theme` — colour palette for the in-browser terminal: `dark` (the
+  classic black background, default) or `light`.
 
 ## Building
 
