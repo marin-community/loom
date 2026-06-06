@@ -10,7 +10,7 @@ use anyhow::{anyhow, bail, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::{json, Value};
 
-use weaver_core::{branch, config, db, events, issue, note};
+use weaver_core::{branch, config, db, events, issue, note, plan, repo_config};
 
 #[derive(Parser)]
 #[command(
@@ -50,6 +50,16 @@ enum Cmd {
     Issue {
         #[command(subcommand)]
         cmd: IssueCmd,
+    },
+    /// Author and reconcile a structured project plan.
+    ///
+    /// A plan is a single markdown file (default `docs/plans/<slug>.md`) holding
+    /// the design and a task breakdown with stable ids. `weaver plan sync`
+    /// reconciles the plan's tasks against the issue ledger. See
+    /// `docs/structured-projects.md`.
+    Plan {
+        #[command(subcommand)]
+        cmd: PlanCmd,
     },
     /// Print the resolved repo / branch / branch-id for the current cwd.
     Where,
@@ -114,6 +124,29 @@ enum IssueCmd {
 }
 
 #[derive(Subcommand)]
+enum PlanCmd {
+    /// Scaffold a new plan file. The slug defaults to a kebab-case of the title.
+    New {
+        title: Vec<String>,
+        /// Override the slug (the filename stem and link-key prefix).
+        #[arg(long)]
+        slug: Option<String>,
+    },
+    /// List the plans in this repo.
+    Ls,
+    /// Show a plan: its tasks, each with status projected from the issue ledger.
+    Show { slug: String },
+    /// Reconcile a plan against the issue ledger. Prints the delta; `--apply`
+    /// writes it (create / close / update issues, and flag in-flight work).
+    Sync {
+        slug: String,
+        /// Apply the changes instead of just previewing them.
+        #[arg(long)]
+        apply: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum ConfigCmd {
     Get { key: String },
     Set { key: String, value: String },
@@ -136,6 +169,7 @@ async fn run() -> Result<()> {
         Cmd::SetStatus { level, message } => cmd_set_status(level, message.join(" ")).await,
         Cmd::Note { text } => cmd_note(text.join(" ")).await,
         Cmd::Issue { cmd } => cmd_issue(cmd).await,
+        Cmd::Plan { cmd } => cmd_plan(cmd).await,
         Cmd::Where => cmd_where().await,
         Cmd::Log { limit } => cmd_log(limit).await,
         Cmd::Hook { event } => cmd_hook(event).await,
@@ -325,6 +359,7 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
                 title: title.clone(),
                 body: body.unwrap_or_default(),
                 github_issue: github,
+                plan_task: None,
             };
             let i = issue::add(&db, &new).await?;
             events::record_local(
@@ -488,6 +523,204 @@ async fn cmd_issue_ls_repo(db: &db::Db, repo_root: &str, target: &str, all: bool
     );
     section(format!("Other branches ({}):", others.len()), &others);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Plans
+// ---------------------------------------------------------------------------
+
+/// The directory holding plan files for the current worktree, honoring the
+/// per-repo `.weaver/config.toml` `[plan].dir` (default `docs/plans`). Anchored
+/// at the worktree (cwd) like `WEAVER.md` resolution, so plans live with the
+/// branch the agent is on.
+fn plan_dir(b: &branch::Branch) -> std::path::PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let candidates = vec![cwd.clone(), std::path::PathBuf::from(&b.repo_root)];
+    cwd.join(repo_config::plan_dir(&candidates))
+}
+
+/// Parse the plan at `<dir>/<slug>.md`, or a helpful error if it's missing.
+fn load_plan(dir: &std::path::Path, slug: &str) -> Result<plan::Plan> {
+    let path = dir.join(format!("{slug}.md"));
+    let src = std::fs::read_to_string(&path)
+        .map_err(|_| anyhow!("no plan '{slug}' at {} — see `weaver plan ls`", path.display()))?;
+    Ok(plan::parse(slug, &src))
+}
+
+/// Every plan file in `dir`, parsed and sorted by slug. Missing dir → empty.
+fn read_plans(dir: &std::path::Path) -> Vec<plan::Plan> {
+    let mut plans = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return plans;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(slug) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if let Ok(src) = std::fs::read_to_string(&path) {
+            plans.push(plan::parse(slug, &src));
+        }
+    }
+    plans.sort_by(|a, b| a.slug.cmp(&b.slug));
+    plans
+}
+
+/// A kebab-case slug from free text: lowercase, runs of non-alphanumerics
+/// collapse to a single `-`, trimmed.
+fn slugify(text: &str) -> String {
+    let mut out = String::new();
+    let mut dash = false;
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            dash = false;
+        } else if !out.is_empty() && !dash {
+            out.push('-');
+            dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+async fn cmd_plan(cmd: PlanCmd) -> Result<()> {
+    let db = open_db().await?;
+    let b = branch::resolve(&db).await?;
+    let dir = plan_dir(&b);
+    match cmd {
+        PlanCmd::New { title, slug } => {
+            let title = title.join(" ");
+            if title.trim().is_empty() {
+                bail!("plan title is required");
+            }
+            let slug = slug.unwrap_or_else(|| slugify(&title));
+            if slug.is_empty() {
+                bail!("could not derive a slug from the title — pass --slug");
+            }
+            let path = dir.join(format!("{slug}.md"));
+            if path.exists() {
+                bail!("plan already exists: {}", path.display());
+            }
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| anyhow!("creating {}: {e}", dir.display()))?;
+            std::fs::write(&path, plan::scaffold(&slug, &title))?;
+            events::record_local(&db, &b.id, "plan_created", json!({ "slug": slug })).await?;
+            println!("created {}", path.display());
+            println!("edit it, then `weaver plan sync {slug} --apply` to materialize its tasks");
+        }
+        PlanCmd::Ls => {
+            let plans = read_plans(&dir);
+            if plans.is_empty() {
+                println!("(no plans in {})", dir.display());
+                return Ok(());
+            }
+            for p in &plans {
+                let tracked = p.tasks.iter().filter(|t| t.materializes()).count();
+                println!(
+                    "{:<24} {}  ({} tasks, {} tracked) [{}]",
+                    p.slug,
+                    p.title,
+                    p.tasks.len(),
+                    tracked,
+                    p.status
+                );
+            }
+        }
+        PlanCmd::Show { slug } => {
+            let p = load_plan(&dir, &slug)?;
+            let issues = issue::list_for_plan(&db, &b.repo_root, &p.slug, true).await?;
+            println!("{} — {}  [{}]", p.slug, p.title, p.status);
+            if p.tasks.is_empty() {
+                println!("  (no tasks yet)");
+            }
+            for t in &p.tasks {
+                let key = t.key(&p.slug);
+                let issue = issues
+                    .iter()
+                    .find(|i| i.plan_task.as_deref() == Some(key.as_str()));
+                let (marker, detail) = task_status(t, issue);
+                println!("  {:<3} [{}] {}", t.id, marker, t.title);
+                let mut bits = vec![format!("exec: {}", t.exec)];
+                if !t.value.is_empty() {
+                    bits.push(format!("value: {}", t.value));
+                }
+                if !t.deps.is_empty() {
+                    bits.push(format!("deps: {}", t.deps.join(", ")));
+                }
+                bits.push(detail);
+                println!("       {}", bits.join("  ·  "));
+            }
+        }
+        PlanCmd::Sync { slug, apply } => {
+            let p = load_plan(&dir, &slug)?;
+            let issues = issue::list_for_plan(&db, &b.repo_root, &p.slug, true).await?;
+            let delta = plan::diff(&p.slug, &p.tasks, &issues);
+            if delta.is_empty() {
+                println!("plan '{}' is in sync with its issues", p.slug);
+                return Ok(());
+            }
+            print_delta(&delta);
+            if apply {
+                plan::apply(&db, &b, &p.slug, &delta).await?;
+                events::record_local(
+                    &db,
+                    &b.id,
+                    "plan_synced",
+                    json!({ "slug": p.slug, "actions": delta.actions.len() }),
+                )
+                .await?;
+                println!("\napplied {} change(s)", delta.actions.len());
+                if delta.flags() > 0 {
+                    println!(
+                        "{} in-flight task(s) flagged — left untouched; status raised to attention",
+                        delta.flags()
+                    );
+                }
+            } else {
+                println!("\n(dry run — re-run with --apply to write these changes)");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A `(marker, detail)` for a plan task given its linked issue (if any), for
+/// `weaver plan show`. Status is projected from the ledger, never the file.
+fn task_status(t: &plan::PlanTask, issue: Option<&issue::Issue>) -> (char, String) {
+    match issue {
+        None if t.materializes() => (' ', "not yet materialized".to_string()),
+        None => ('·', "untracked".to_string()),
+        Some(i) if i.status == "closed" => ('x', format!("done (#{})", i.id)),
+        Some(i) => match i.claimed_branch.as_deref() {
+            Some(branch) => ('~', format!("in progress ← {branch} (#{})", i.id)),
+            None => (' ', format!("backlog (#{})", i.id)),
+        },
+    }
+}
+
+/// Print a reconcile delta as human-readable lines.
+fn print_delta(delta: &plan::SyncPlan) {
+    use plan::SyncAction::*;
+    for action in &delta.actions {
+        match action {
+            Create { task, title } => println!("  + create issue for {task}: {title}"),
+            Close { task, issue_id } => println!("  - close #{issue_id} ({task} removed from plan)"),
+            UpdateTitle {
+                task,
+                issue_id,
+                title,
+            } => println!("  ~ retitle #{issue_id} ({task}) → {title}"),
+            Flag {
+                task,
+                issue_id,
+                branch,
+                reason,
+            } => println!("  ! flag #{issue_id} ({task}, ← {branch}): {reason}"),
+        }
+    }
 }
 
 /// Confirm an issue exists and lives in `repo_root`. Cross-*repo* access is the

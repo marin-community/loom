@@ -81,6 +81,7 @@ use crate::{agent, config, db, events, git, github, repo, tmux};
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::Branch;
 use weaver_core::issue::Issue;
+use weaver_core::{plan, repo_config};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -263,6 +264,8 @@ pub struct IssueView {
     pub body: String,
     pub status: String,
     pub github_issue: Option<i64>,
+    /// Link to a plan task (`"<slug>#T3"`) when materialized from a plan.
+    pub plan_task: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,
@@ -280,6 +283,7 @@ impl From<Issue> for IssueView {
             body: i.body,
             status: i.status,
             github_issue: i.github_issue,
+            plan_task: i.plan_task,
             created_at: i.created_at,
             updated_at: i.updated_at,
             closed_at: i.closed_at,
@@ -338,8 +342,10 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/archive", post(archive_session))
         .route("/sessions/{id}/adopt", post(adopt_session))
         .route("/sessions/{id}/tree", get(tree_session))
-        .route("/sessions/{id}/file", get(file_session))
+        .route("/sessions/{id}/file", get(file_session).put(write_file))
         .route("/sessions/{id}/raw", get(raw_session))
+        .route("/sessions/{id}/plan", get(get_plan))
+        .route("/sessions/{id}/plan/sync", post(sync_plan))
         .route(
             "/sessions/{id}/scratch",
             get(list_scratch)
@@ -726,6 +732,7 @@ async fn create_session(
                 title: title.clone(),
                 body: description.clone(),
                 github_issue: Some(number),
+                plan_task: None,
             },
         )
         .await
@@ -1213,6 +1220,227 @@ async fn raw_session(
         bytes,
     )
         .into_response())
+}
+
+/// Write raw bytes to a worktree file — the editor's save primitive (the
+/// read-only `file`/`raw` endpoints never write). Reuses `rel_path` for
+/// traversal safety and creates parent directories as needed, so a new
+/// `docs/plans/<slug>.md` can be saved into a dir that doesn't exist yet.
+async fn write_file(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Query(q): Query<RawQuery>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let (session, branch) = require_session(&st.db, &key).await?;
+    let work_dir = PathBuf::from(&session.work_dir);
+    let rel = rel_path(&q.path)?;
+    let target = work_dir.join(&rel);
+    if let Some(parent) = target.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(&target, &body).await?;
+    events::record(
+        &st.db,
+        &st.bus,
+        &branch.id,
+        "file_written",
+        json!({ "path": rel }),
+    )
+    .await
+    .ok();
+    Ok(Json(json!({ "path": rel, "bytes": body.len() })))
+}
+
+// ---------------------------------------------------------------------------
+// Plan view — a structured project plan rendered with task status PROJECTED
+// from the issue ledger, plus reconcile. The plan FILE owns structure; the
+// `issues` table owns state. See docs/structured-projects.md.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+struct PlanTaskView {
+    id: String,
+    title: String,
+    exec: String,
+    value: String,
+    deps: Vec<String>,
+    /// Linked issue (the materialization), if any — the projected state.
+    issue_id: Option<i64>,
+    issue_status: Option<String>,
+    claimed_branch: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PlanView {
+    slug: String,
+    /// Worktree-relative path, for the file-write (Edit) endpoint.
+    path: String,
+    title: String,
+    status: String,
+    /// Raw markdown source — the dashboard renders and edits this.
+    content: String,
+    tasks: Vec<PlanTaskView>,
+    /// Every plan slug in the repo, for a picker.
+    available: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlanQuery {
+    slug: Option<String>,
+}
+
+/// The plan directory, worktree-relative, honoring `.weaver/config.toml`
+/// `[plan].dir` (default `docs/plans`).
+fn plan_dir_rel(work_dir: &std::path::Path, repo_root: &str) -> String {
+    repo_config::plan_dir(&[work_dir.to_path_buf(), PathBuf::from(repo_root)])
+}
+
+/// Plan slugs (markdown file stems) present under `dir`, sorted.
+fn plan_slugs(dir: &std::path::Path) -> Vec<String> {
+    let mut slugs = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    slugs.push(stem.to_string());
+                }
+            }
+        }
+    }
+    slugs.sort();
+    slugs
+}
+
+/// The plan a session is working, derived from its claimed issue's `plan_task`.
+async fn claimed_plan_slug(db: &Db, branch: &Branch) -> Option<String> {
+    let issues = weaver_core::issue::list_for_branch(db, &branch.repo_root, &branch.branch, true)
+        .await
+        .ok()?;
+    issues
+        .iter()
+        .find_map(|i| i.plan_task.as_deref())
+        .and_then(|k| k.split('#').next())
+        .map(str::to_string)
+}
+
+/// A session's plan, parsed, with each task's status joined from the ledger.
+/// `?slug=` selects a specific plan; otherwise the session's claimed-issue plan,
+/// then the first available, is used.
+async fn get_plan(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Query(q): Query<PlanQuery>,
+) -> ApiResult<Json<PlanView>> {
+    let (session, branch) = require_session(&st.db, &key).await?;
+    let work_dir = PathBuf::from(&session.work_dir);
+    let dir_rel = plan_dir_rel(&work_dir, &branch.repo_root);
+    let available = plan_slugs(&work_dir.join(&dir_rel));
+
+    let slug = match q.slug {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => match claimed_plan_slug(&st.db, &branch).await {
+            Some(s) => s,
+            None => match available.first() {
+                Some(s) => s.clone(),
+                None => return Err(AppError::not_found("plan")),
+            },
+        },
+    };
+
+    let rel = format!("{dir_rel}/{slug}.md");
+    let content = match tokio::fs::read_to_string(work_dir.join(&rel)).await {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AppError::not_found("plan"))
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    let parsed = plan::parse(&slug, &content);
+    let issues = weaver_core::issue::list_for_plan(&st.db, &branch.repo_root, &slug, true).await?;
+    let tasks = parsed
+        .tasks
+        .iter()
+        .map(|t| {
+            let task_key = t.key(&slug);
+            let issue = issues
+                .iter()
+                .find(|i| i.plan_task.as_deref() == Some(task_key.as_str()));
+            PlanTaskView {
+                id: t.id.clone(),
+                title: t.title.clone(),
+                exec: t.exec.clone(),
+                value: t.value.clone(),
+                deps: t.deps.clone(),
+                issue_id: issue.map(|i| i.id),
+                issue_status: issue.map(|i| i.status.clone()),
+                claimed_branch: issue.and_then(|i| i.claimed_branch.clone()),
+            }
+        })
+        .collect();
+
+    Ok(Json(PlanView {
+        slug,
+        path: rel,
+        title: parsed.title,
+        status: parsed.status,
+        content,
+        tasks,
+        available,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct SyncReq {
+    slug: String,
+    /// Apply the delta, not just preview it.
+    #[serde(default)]
+    apply: bool,
+}
+
+/// Reconcile a plan against the issue ledger. Returns the delta (and applies it
+/// when `apply`). In-flight tasks are flagged, never rewritten.
+async fn sync_plan(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Json(req): Json<SyncReq>,
+) -> ApiResult<Json<Value>> {
+    let (session, branch) = require_session(&st.db, &key).await?;
+    let work_dir = PathBuf::from(&session.work_dir);
+    let dir_rel = plan_dir_rel(&work_dir, &branch.repo_root);
+    let rel = format!("{dir_rel}/{}.md", req.slug);
+    let content = match tokio::fs::read_to_string(work_dir.join(&rel)).await {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AppError::not_found("plan"))
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let parsed = plan::parse(&req.slug, &content);
+    let issues =
+        weaver_core::issue::list_for_plan(&st.db, &branch.repo_root, &req.slug, true).await?;
+    let delta = plan::diff(&req.slug, &parsed.tasks, &issues);
+
+    if req.apply && !delta.is_empty() {
+        plan::apply(&st.db, &branch, &req.slug, &delta).await?;
+        events::record(
+            &st.db,
+            &st.bus,
+            &branch.id,
+            "plan_synced",
+            json!({ "slug": req.slug, "actions": delta.actions.len() }),
+        )
+        .await
+        .ok();
+    }
+
+    Ok(Json(json!({
+        "applied": req.apply,
+        "flags": delta.flags(),
+        "actions": delta.actions,
+    })))
 }
 
 // ---------------------------------------------------------------------------

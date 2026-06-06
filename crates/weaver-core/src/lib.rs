@@ -10,5 +10,7 @@ pub mod events;
 pub mod git;
 pub mod issue;
 pub mod note;
+pub mod plan;
+pub mod repo_config;
 
 pub use db::Db;

@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS issues (
     body           TEXT NOT NULL DEFAULT '',
     status         TEXT NOT NULL DEFAULT 'open',
     github_issue   INTEGER,
+    -- Link to a plan task, `"<slug>#T3"`, when this issue was materialized from
+    -- a plan (docs/structured-projects.md). NULL for ordinary issues.
+    plan_task      TEXT,
     created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     closed_at      TEXT
@@ -194,6 +197,7 @@ async fn migrate(pool: &Db) -> Result<()> {
     // existed. `CREATE TABLE IF NOT EXISTS` above is a no-op on such DBs, so we
     // add the column explicitly and ignore the "duplicate column" error.
     add_column_if_missing(pool, "branches", "attention", "TEXT NOT NULL DEFAULT 'ok'").await?;
+    add_column_if_missing(pool, "issues", "plan_task", "TEXT").await?;
     Ok(())
 }
 
