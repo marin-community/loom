@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#
+# weaver pre-commit hook — block commits that fail `cargo fmt` or `clippy`.
+#
+# Enable it (once per clone):  git config core.hooksPath .githooks
+# Bypass it for one commit:     git commit --no-verify
+#
+# The actual checks live in scripts/pre-commit.sh, shared with CI.
+exec "$(git rev-parse --show-toplevel)/scripts/pre-commit.sh"

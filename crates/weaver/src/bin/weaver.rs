@@ -46,6 +46,13 @@ enum Cmd {
     },
     /// Append a note to the current branch.
     Note { text: Vec<String> },
+    /// Print a quick orientation for the current branch.
+    ///
+    /// A one-shot catch-up for an agent picking up (or resuming) a branch: the
+    /// goal, the current status, the outstanding tasks (this branch's open
+    /// issues and any open sub-trees it delegated), and a line or two of hints
+    /// for what to do next. Read-only; derived straight from the database.
+    Summary,
     /// Manage the current branch's issue list.
     Issue {
         #[command(subcommand)]
@@ -186,6 +193,7 @@ async fn run() -> Result<()> {
         Cmd::Goal { text } => cmd_goal(text.join(" ")).await,
         Cmd::SetStatus { level, message } => cmd_set_status(level, message.join(" ")).await,
         Cmd::Note { text } => cmd_note(text.join(" ")).await,
+        Cmd::Summary => cmd_summary().await,
         Cmd::Issue { cmd } => cmd_issue(cmd).await,
         Cmd::Plan { cmd } => cmd_plan(cmd).await,
         Cmd::Where => cmd_where().await,
@@ -235,6 +243,116 @@ async fn cmd_note(text: String) -> Result<()> {
     events::record_local(&db, &b.id, "note", json!({ "text": text })).await?;
     println!("noted");
     Ok(())
+}
+
+/// How many outstanding tasks `weaver summary` lists before collapsing the rest.
+const SUMMARY_TASK_CAP: usize = 10;
+
+/// Print a quick orientation for the current branch: the goal, the current
+/// status, the outstanding tasks, and a hint or two for what to do next.
+///
+/// This is the catch-up an agent reads when it picks up a branch. Everything is
+/// pulled straight from the database — no LLM, no daemon. It overlaps `set-status`
+/// (read), but where that shows an open-issue *count*, summary lists the actual
+/// tasks and points at the next action.
+async fn cmd_summary() -> Result<()> {
+    let db = open_db().await?;
+    let b = branch::resolve(&db).await?;
+
+    // Each section trails the command that drills into it, so the summary
+    // doubles as a map of where to look next.
+    let goal = if !b.goal.is_empty() {
+        b.goal.clone()
+    } else if !b.title.is_empty() {
+        b.title.clone()
+    } else {
+        "(none set)".to_string()
+    };
+    println!("Goal:    {goal}  (weaver goal)");
+
+    let status = if b.description.is_empty() {
+        b.attention.clone()
+    } else {
+        format!("{} — {}", b.attention, b.description)
+    };
+    println!("Status:  {status}  (weaver set-status)");
+
+    // Plans on this branch — large multi-session efforts. Status comes from the
+    // plan file itself, so this stays a cheap read (no issue join).
+    let plans = read_plans(&plan_dir(&b));
+    match plans.as_slice() {
+        [] => println!("Plan:    none  (weaver plan new \"<title>\")"),
+        [p] => println!(
+            "Plan:    {} [{}]  (weaver plan show {})",
+            p.slug, p.status, p.slug
+        ),
+        many => {
+            let slugs = many.iter().map(|p| p.slug.as_str()).collect::<Vec<_>>();
+            println!("Plan:    {}  (weaver plan ls)", slugs.join(", "));
+        }
+    }
+
+    // Outstanding work: this branch's own open issues, then any open sub-trees
+    // it delegated (each carrying its sub-agent's live status).
+    let open = issue::list_for_branch(&db, &b.repo_root, &b.branch, false).await?;
+    let delegated = issue::list_delegated_by(&db, &b.repo_root, &b.branch, false).await?;
+    println!();
+    if open.is_empty() && delegated.is_empty() {
+        println!("Outstanding: none  (weaver issue ls)");
+    } else {
+        let total = open.len() + delegated.len();
+        println!("Outstanding ({total}):  (weaver issue ls)");
+        // Cap the whole list (own issues first, then delegated sub-trees) so a
+        // branch that delegated many sub-trees can't blow the summary up; the
+        // overflow collapses into one trailing line.
+        let mut shown = 0;
+        for i in open.iter().take(SUMMARY_TASK_CAP) {
+            println!("  #{:<4} {}", i.id, i.title);
+            shown += 1;
+        }
+        for i in delegated.iter().take(SUMMARY_TASK_CAP - shown) {
+            let who = working_branch_status(&db, i)
+                .await
+                .unwrap_or_else(|| i.claimed_branch.clone().unwrap_or_else(|| "?".to_string()));
+            println!("  #{:<4} {}  → {who} (delegated)", i.id, i.title);
+            shown += 1;
+        }
+        if total > shown {
+            println!("  (+{} more — weaver issue ls)", total - shown);
+        }
+    }
+
+    // Hints for next steps: the most recent note (where work was left off) plus
+    // a generated next-action drawn from the open work.
+    println!();
+    println!("Next steps:  (weaver log · weaver note)");
+    let notes = note::list_for_branch(&db, &b.id).await?;
+    if let Some(last) = notes.last() {
+        println!("  - last note: {}", truncate(&last.text, 100));
+    }
+    println!("  - {}", next_action_hint(&open, &delegated));
+    Ok(())
+}
+
+/// A single suggested next action for `weaver summary`, derived from the open
+/// work: pick up the first open task, else poll a delegated sub-tree, else
+/// (nothing open) wrap up and open a PR.
+fn next_action_hint(open: &[issue::Issue], delegated: &[issue::Issue]) -> String {
+    if let Some(first) = open.first() {
+        format!(
+            "pick up #{} ({}); `weaver issue ls` for the rest",
+            first.id,
+            truncate(&first.title, 60)
+        )
+    } else if !delegated.is_empty() {
+        format!(
+            "{} delegated sub-tree(s) still open — `weaver issue show <id>` to poll",
+            delegated.len()
+        )
+    } else {
+        "no open tasks — wrap up and open a PR (`gh pr create`), or `weaver issue add` to track more"
+            .to_string()
+    }
 }
 
 async fn cmd_where() -> Result<()> {
@@ -587,8 +705,12 @@ fn plan_dir(b: &branch::Branch) -> std::path::PathBuf {
 /// Parse the plan at `<dir>/<slug>.md`, or a helpful error if it's missing.
 fn load_plan(dir: &std::path::Path, slug: &str) -> Result<plan::Plan> {
     let path = dir.join(format!("{slug}.md"));
-    let src = std::fs::read_to_string(&path)
-        .map_err(|_| anyhow!("no plan '{slug}' at {} — see `weaver plan ls`", path.display()))?;
+    let src = std::fs::read_to_string(&path).map_err(|_| {
+        anyhow!(
+            "no plan '{slug}' at {} — see `weaver plan ls`",
+            path.display()
+        )
+    })?;
     Ok(plan::parse(slug, &src))
 }
 
@@ -664,7 +786,10 @@ async fn cmd_plan(cmd: PlanCmd) -> Result<()> {
                 let who = if owners.is_empty() {
                     String::new()
                 } else {
-                    format!(" (materialized on {})", owners.into_iter().collect::<Vec<_>>().join(", "))
+                    format!(
+                        " (materialized on {})",
+                        owners.into_iter().collect::<Vec<_>>().join(", ")
+                    )
                 };
                 bail!(
                     "plan slug '{slug}' is already in use in this repo{who} — \
@@ -774,7 +899,9 @@ fn print_delta(delta: &plan::SyncPlan) {
     for action in &delta.actions {
         match action {
             Create { task, title } => println!("  + create issue for {task}: {title}"),
-            Close { task, issue_id } => println!("  - close #{issue_id} ({task} removed from plan)"),
+            Close { task, issue_id } => {
+                println!("  - close #{issue_id} ({task} removed from plan)")
+            }
             UpdateTitle {
                 task,
                 issue_id,
