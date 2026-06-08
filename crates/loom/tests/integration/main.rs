@@ -16,3 +16,4 @@ mod pane;
 mod scratch;
 mod sessions;
 mod terminal;
+mod typed_client;

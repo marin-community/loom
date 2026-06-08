@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use loom::client::Client;
+use loom::client;
 use loom::events::EventBus;
 use loom::session as session_mod;
 use loom::web::AppState;
@@ -73,7 +73,7 @@ async fn hook_event_drives_session_status() {
     tokio::spawn(server::serve(state, listener));
 
     std::env::set_var("WEAVER_API", format!("http://{addr}"));
-    let client = Client::new();
+    let client = client::default();
     for _ in 0..60 {
         if client.get("/api/health").await.is_ok() {
             break;

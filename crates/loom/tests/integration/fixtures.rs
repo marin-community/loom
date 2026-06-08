@@ -13,7 +13,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use futures_util::SinkExt;
-use loom::client::Client;
+use loom::client::{self, Client};
 use loom::events::EventBus;
 use loom::web::AppState;
 use loom::{db, server};
@@ -102,7 +102,7 @@ impl TestServer {
         tokio::spawn(server::serve(state, listener));
 
         std::env::set_var("WEAVER_API", format!("http://{addr}"));
-        let client = Client::new();
+        let client = client::default();
         for _ in 0..60 {
             if client.get("/api/health").await.is_ok() {
                 break;

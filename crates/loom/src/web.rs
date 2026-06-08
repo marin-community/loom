@@ -78,10 +78,15 @@ use crate::db::Db;
 use crate::events::{Event, EventBus};
 use crate::session::{self as session_mod, NewSession, Session};
 use crate::{agent, config, db, events, git, github, overlooker as ov_engine, repo, tmux};
+use weaver_api::{
+    BranchView, CreateIssueReq, CreateOverlookerReq, CreateRepoIssueReq, CreateReq, IssueView,
+    OverlookerRunView, OverlookerView, PatchIssueReq, PatchOverlookerReq, PatchSessionReq,
+    PlanTaskView, PlanView, RunOverlookerReq, ScratchUpload, SendReq, SessionView, TriageReq,
+};
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::Branch;
 use weaver_core::issue::Issue;
-use weaver_core::overlooker::{self as ov, Overlooker, OverlookerRun};
+use weaver_core::overlooker::{self as ov, Overlooker};
 use weaver_core::{plan, repo_config};
 
 #[derive(Clone)]
@@ -154,182 +159,49 @@ type ApiResult<T> = Result<T, AppError>;
 
 // ---------------------------------------------------------------------------
 // View payloads
+//
+// The wire structs (`BranchView`, `SessionView`, `IssueView`, …) live in
+// `weaver-api` — the one definition the server, the CLI, and the Python binding
+// share. The async builders below gather the parts the daemon owns (open-issue
+// counts, GitHub snapshots, run history) and hand them to the `from_parts`
+// constructors. The DB access stays here; the wire shape stays there.
 // ---------------------------------------------------------------------------
 
-/// Branch with denormalized open-issue count, returned by `/api/branches` and
-/// embedded under `SessionView::branch`.
-#[derive(Debug, Clone, Serialize)]
-pub struct BranchView {
-    pub id: String,
-    /// Short label: the branch name with the optional `weaver/` prefix stripped.
-    pub name: String,
-    pub title: String,
-    pub goal: String,
-    /// The agent's current-state message, set with `attention` via
-    /// `weaver set-status`.
-    pub description: String,
-    /// Agent-declared attention level (`ok` | `attention` | `blocked`) — the
-    /// "does this need me?" signal the dashboard filters on. The accompanying
-    /// message is `description`.
-    pub attention: String,
-    /// The overlooker's assessment — a third status axis distinct from
-    /// `attention`. Empty when unmarked; otherwise `ok` | `attention` |
-    /// `blocked`. The agent owns `attention`; an overlooker owns this.
-    pub triage_level: String,
-    /// One-line reason accompanying the triage mark.
-    pub triage_note: String,
-    /// Which overlooker (or `manual`) last set the mark.
-    pub triage_by: String,
-    /// When the mark was last set; `null` if never marked. The dashboard shows
-    /// the mark stale once `last_activity_at` advances past it.
-    pub triage_at: Option<String>,
-    pub repo_root: String,
-    pub branch: String,
-    pub base_branch: String,
-    pub created_at: String,
-    pub updated_at: String,
-    pub open_issue_count: i64,
-    /// The branch's latest GitHub pull-request snapshot (link, review decision,
-    /// check rollup), or `null` when GitHub polling is off, the repo has no
-    /// remote PR, or `gh` is unavailable. Maintained by the poll loop in
-    /// [`crate::github`].
-    pub github: Option<github::GithubStatus>,
+/// Build a [`BranchView`] for a branch, joining the denormalized open-issue
+/// count and the latest GitHub snapshot from the database.
+async fn branch_view(db: &Db, branch: &Branch) -> ApiResult<BranchView> {
+    // The badge counts the work this branch has claimed, not the whole repo.
+    let open = weaver_core::issue::open_count_for_branch(db, &branch.repo_root, &branch.branch)
+        .await
+        .unwrap_or(0);
+    // Best-effort: a missing/erroring snapshot just renders as no GitHub info.
+    let github = github::get_status(db, &branch.id).await.ok().flatten();
+    Ok(BranchView::from_parts(branch, open, github))
 }
 
-impl BranchView {
-    async fn build(db: &Db, branch: &Branch) -> ApiResult<Self> {
-        // The badge counts the work this branch has claimed, not the whole repo.
-        let open = weaver_core::issue::open_count_for_branch(db, &branch.repo_root, &branch.branch)
-            .await
-            .unwrap_or(0);
-        // Best-effort: a missing/erroring snapshot just renders as no GitHub info.
-        let github = github::get_status(db, &branch.id).await.ok().flatten();
-        Ok(Self::from_parts(branch, open, github))
-    }
-
-    fn from_parts(
-        branch: &Branch,
-        open_issue_count: i64,
-        github: Option<github::GithubStatus>,
-    ) -> Self {
-        let name = branch
-            .branch
-            .strip_prefix("weaver/")
-            .unwrap_or(&branch.branch)
-            .to_string();
-        BranchView {
-            id: branch.id.clone(),
-            name,
-            title: branch.title.clone(),
-            goal: branch.goal.clone(),
-            description: branch.description.clone(),
-            attention: branch.attention.clone(),
-            triage_level: branch.triage_level.clone(),
-            triage_note: branch.triage_note.clone(),
-            triage_by: branch.triage_by.clone(),
-            triage_at: branch.triage_at.clone(),
-            repo_root: branch.repo_root.clone(),
-            branch: branch.branch.clone(),
-            base_branch: branch.base_branch.clone(),
-            created_at: branch.created_at.clone(),
-            updated_at: branch.updated_at.clone(),
-            open_issue_count,
-            github,
-        }
-    }
-}
-
-/// Session-scoped view returned by the `/api/sessions[/...]` endpoints.
-#[derive(Debug, Clone, Serialize)]
-pub struct SessionView {
-    pub id: String,
-    pub status: String,
-    pub work_dir: String,
-    pub tmux_session: String,
-    pub agent_kind: String,
-    pub model: String,
-    pub effort: String,
-    pub github_repo: Option<String>,
-    pub last_activity_at: String,
-    pub created_at: String,
-    pub updated_at: String,
-    /// Branch id of the session that **launched** this one — the parent in the
-    /// dashboard's session tree — or `null` for a top-level session. Stamped on
-    /// the session row at launch from the resolved launcher (`parent_branch`), so
-    /// reads need no extra query and the link can't drift. The dashboard groups
-    /// the list into threads by it; a child whose parent is absent (archived, or
-    /// never tracked) renders at the top level.
-    pub parent_id: Option<String>,
-    /// The tracking issue opened for this session's task at launch (the handle
-    /// handed back to whoever launched it). Only populated on the create
-    /// response; `None` on the list/get/patch paths, which don't recompute it.
-    pub tracking_issue: Option<i64>,
-    pub branch: BranchView,
-}
-
-impl SessionView {
-    async fn build(db: &Db, session: &Session, branch: &Branch) -> ApiResult<Self> {
-        let bv = BranchView::build(db, branch).await?;
-        Ok(SessionView {
-            id: session.id.clone(),
-            status: session.status.clone(),
-            work_dir: session.work_dir.clone(),
-            tmux_session: session.tmux_session.clone(),
-            agent_kind: session.agent_kind.clone(),
-            model: session.model.clone(),
-            effort: session.effort.clone(),
-            github_repo: session.github_repo.clone(),
-            last_activity_at: session
-                .last_activity_at
-                .clone()
-                .unwrap_or_else(|| branch.updated_at.clone()),
-            created_at: session.created_at.clone(),
-            updated_at: branch.updated_at.clone(),
-            parent_id: session.parent_branch_id.clone(),
-            tracking_issue: None,
-            branch: bv,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct IssueView {
-    pub id: i64,
-    pub repo_root: String,
-    pub github_repo: Option<String>,
-    /// Branch the issue was created from (provenance).
-    pub source_branch: Option<String>,
-    /// Branch currently working it; `null` is the unclaimed repo backlog.
-    pub claimed_branch: Option<String>,
-    pub title: String,
-    pub body: String,
-    pub status: String,
-    pub github_issue: Option<i64>,
-    /// Link to a plan task (`"<slug>#T3"`) when materialized from a plan.
-    pub plan_task: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-    pub closed_at: Option<String>,
-}
-
-impl From<Issue> for IssueView {
-    fn from(i: Issue) -> Self {
-        IssueView {
-            id: i.id,
-            repo_root: i.repo_root,
-            github_repo: i.github_repo,
-            source_branch: i.source_branch,
-            claimed_branch: i.claimed_branch,
-            title: i.title,
-            body: i.body,
-            status: i.status,
-            github_issue: i.github_issue,
-            plan_task: i.plan_task,
-            created_at: i.created_at,
-            updated_at: i.updated_at,
-            closed_at: i.closed_at,
-        }
-    }
+/// Build a [`SessionView`] for a session + its branch. `tracking_issue` is left
+/// `None`; only the create path fills it.
+async fn session_view(db: &Db, session: &Session, branch: &Branch) -> ApiResult<SessionView> {
+    let bv = branch_view(db, branch).await?;
+    Ok(SessionView {
+        id: session.id.clone(),
+        status: session.status.clone(),
+        work_dir: session.work_dir.clone(),
+        tmux_session: session.tmux_session.clone(),
+        agent_kind: session.agent_kind.clone(),
+        model: session.model.clone(),
+        effort: session.effort.clone(),
+        github_repo: session.github_repo.clone(),
+        last_activity_at: session
+            .last_activity_at
+            .clone()
+            .unwrap_or_else(|| branch.updated_at.clone()),
+        created_at: session.created_at.clone(),
+        updated_at: branch.updated_at.clone(),
+        parent_id: session.parent_branch_id.clone(),
+        tracking_issue: None,
+        branch: bv,
+    })
 }
 
 /// Resolve a session key (session id, branch id, branch name, or `repo:branch`)
@@ -453,7 +325,7 @@ async fn list_sessions(State(st): State<AppState>) -> ApiResult<Json<Vec<Session
     let mut views: Vec<SessionView> = Vec::with_capacity(sessions.len());
     for s in sessions {
         if let Some(branch) = branch_mod::get(&st.db, &s.branch_id).await? {
-            views.push(SessionView::build(&st.db, &s, &branch).await?);
+            views.push(session_view(&st.db, &s, &branch).await?);
         }
     }
     Ok(Json(views))
@@ -464,55 +336,7 @@ async fn get_session(
     Path(key): Path<String>,
 ) -> ApiResult<Json<SessionView>> {
     let (session, branch) = require_session(&st.db, &key).await?;
-    Ok(Json(SessionView::build(&st.db, &session, &branch).await?))
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateReq {
-    cwd: String,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    goal: Option<String>,
-    base: Option<String>,
-    agent: Option<String>,
-    name: Option<String>,
-    issue: Option<i64>,
-    /// A pre-existing weaver issue id to claim for this session (fan-out
-    /// pickup). Seeds title/goal/description and stamps `claimed_branch`.
-    #[serde(default)]
-    claim_issue: Option<i64>,
-    #[serde(default)]
-    existing_branch: Option<String>,
-    /// The branch (id or name) of the agent launching this session, when it is
-    /// itself a weaver session delegating work. Recorded as the tracking
-    /// issue's `source_branch` so the parent's sub-trees are attributable. The
-    /// `loom` CLI fills this from `$WEAVER_BRANCH`; a human/dashboard launch
-    /// leaves it unset.
-    #[serde(default)]
-    parent_branch: Option<String>,
-    /// Model tier ('haiku' | 'sonnet' | 'opus'); blank/absent inherits the
-    /// configured `agent.claude_args`.
-    #[serde(default)]
-    model: Option<String>,
-    /// Reasoning effort ('low' | 'medium' | 'high' | 'xhigh' | 'max');
-    /// blank/absent inherits the configured `agent.claude_args`.
-    #[serde(default)]
-    effort: Option<String>,
-    /// Reference files to drop into the new worktree's `scratch/` directory
-    /// before the agent launches. The agent is told they are there (see
-    /// `write_initial_scratch`). Empty/absent for a plain session.
-    #[serde(default)]
-    scratch: Vec<ScratchUpload>,
-}
-
-/// One launch-time scratch file: a name plus its base64-encoded bytes. JSON
-/// can't carry raw binary, so the UI reads each dropped file as base64.
-#[derive(Debug, Deserialize)]
-struct ScratchUpload {
-    name: String,
-    #[serde(default)]
-    content_base64: String,
+    Ok(Json(session_view(&st.db, &session, &branch).await?))
 }
 
 async fn create_session(
@@ -851,7 +675,7 @@ async fn create_session(
         "session created"
     );
 
-    let mut view = SessionView::build(&st.db, &session, &branch).await?;
+    let mut view = session_view(&st.db, &session, &branch).await?;
     view.tracking_issue = tracking_issue;
     Ok(Json(view))
 }
@@ -971,24 +795,6 @@ async fn create_tracking_issue(
     Ok(Some(issue.id))
 }
 
-#[derive(Debug, Deserialize)]
-struct PatchSessionReq {
-    status: Option<String>,
-    // Branch-level fields kept here for backwards-friendly clients (the SPA
-    // patches goal/title/description on the session and we forward them to
-    // the underlying branch row).
-    title: Option<String>,
-    goal: Option<String>,
-    /// The agent's current-state message — the note shown beside the level.
-    /// Set together with `attention` via `weaver set-status`; the dashboard's
-    /// status editor patches both.
-    description: Option<String>,
-    /// Agent-declared attention level (`ok` | `attention` | `blocked`).
-    /// Branch-level; lets the dashboard set what the agent set via
-    /// `weaver set-status`.
-    attention: Option<String>,
-}
-
 /// Apply an attention-level patch to a branch: validate it, update the branch,
 /// and broadcast an `attention` event. No-op when no level is supplied. The
 /// accompanying message lives in `description` and is patched separately.
@@ -1020,18 +826,6 @@ async fn apply_attention_patch(
     Ok(())
 }
 
-/// Body for `POST /api/sessions/{id}/triage`: stamp the overlooker's mark.
-#[derive(Debug, Deserialize)]
-struct TriageReq {
-    /// `ok` | `attention` | `blocked`, or empty to clear the mark.
-    level: String,
-    #[serde(default)]
-    note: String,
-    /// Which overlooker is making the call; defaults to `manual`.
-    #[serde(default)]
-    by: Option<String>,
-}
-
 /// Write the triage axis on a session's branch: validate the level, update the
 /// branch, and broadcast a `triage` event. This is the overlooker's (and a hand
 /// operator's) channel; it never touches the agent's own `attention`.
@@ -1060,7 +854,7 @@ async fn triage_session(
     .await
     .ok();
     let (session, branch) = require_session(&st.db, &session.id).await?;
-    Ok(Json(SessionView::build(&st.db, &session, &branch).await?))
+    Ok(Json(session_view(&st.db, &session, &branch).await?))
 }
 
 async fn patch_session(
@@ -1098,7 +892,7 @@ async fn patch_session(
         .ok();
     }
     let (session, branch) = require_session(&st.db, &session.id).await?;
-    Ok(Json(SessionView::build(&st.db, &session, &branch).await?))
+    Ok(Json(session_view(&st.db, &session, &branch).await?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1226,7 +1020,7 @@ async fn refresh_github_session(
         .await
         .map_err(|e| AppError::new(StatusCode::BAD_GATEWAY, format!("gh: {e}")))?;
     let (session, branch) = require_session(&st.db, &session.id).await?;
-    Ok(Json(SessionView::build(&st.db, &session, &branch).await?))
+    Ok(Json(session_view(&st.db, &session, &branch).await?))
 }
 
 /// Recreate an orphaned session's tmux and resume its agent.
@@ -1287,7 +1081,7 @@ async fn adopt_session(
     let (session, branch) = require_session(&st.db, &key).await?;
     adopt(&st, &session, &branch).await?;
     let (session, branch) = require_session(&st.db, &session.id).await?;
-    Ok(Json(SessionView::build(&st.db, &session, &branch).await?))
+    Ok(Json(session_view(&st.db, &session, &branch).await?))
 }
 
 // ---------------------------------------------------------------------------
@@ -1509,33 +1303,6 @@ async fn write_file(
 // from the issue ledger, plus reconcile. The plan FILE owns structure; the
 // `issues` table owns state. See docs/structured-projects.md.
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize)]
-struct PlanTaskView {
-    id: String,
-    title: String,
-    exec: String,
-    value: String,
-    deps: Vec<String>,
-    /// Linked issue (the materialization), if any — the projected state.
-    issue_id: Option<i64>,
-    issue_status: Option<String>,
-    claimed_branch: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct PlanView {
-    slug: String,
-    /// Worktree-relative path, for the file-write (Edit) endpoint.
-    path: String,
-    title: String,
-    status: String,
-    /// Raw markdown source — the dashboard renders and edits this.
-    content: String,
-    tasks: Vec<PlanTaskView>,
-    /// Every plan slug in the repo, for a picker.
-    available: Vec<String>,
-}
 
 #[derive(Debug, Deserialize)]
 struct PlanQuery {
@@ -1902,20 +1669,6 @@ async fn require_live_tmux(session: &Session) -> ApiResult<()> {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct SendReq {
-    /// The text to type into the agent's pane.
-    text: String,
-    /// Whether to follow the text with Enter to submit it (and so trigger an
-    /// agent round). Defaults to true; pass false to stage input unsubmitted.
-    #[serde(default = "default_submit")]
-    submit: bool,
-}
-
-fn default_submit() -> bool {
-    true
-}
-
 /// Type a message into a session's agent pane and, by default, submit it with
 /// Enter to trigger an agent round.
 async fn send_session(
@@ -1981,7 +1734,7 @@ async fn list_branches(State(st): State<AppState>) -> ApiResult<Json<Vec<BranchV
     let branches = branch_mod::list(&st.db).await?;
     let mut out: Vec<BranchView> = Vec::with_capacity(branches.len());
     for b in branches {
-        out.push(BranchView::build(&st.db, &b).await?);
+        out.push(branch_view(&st.db, &b).await?);
     }
     Ok(Json(out))
 }
@@ -1991,7 +1744,7 @@ async fn get_branch(
     Path(key): Path<String>,
 ) -> ApiResult<Json<BranchView>> {
     let branch = require_branch(&st.db, &key).await?;
-    Ok(Json(BranchView::build(&st.db, &branch).await?))
+    Ok(Json(branch_view(&st.db, &branch).await?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2021,7 +1774,7 @@ async fn patch_branch(
     let branch = branch_mod::get(&st.db, &branch.id)
         .await?
         .ok_or_else(|| AppError::not_found("branch"))?;
-    Ok(Json(BranchView::build(&st.db, &branch).await?))
+    Ok(Json(branch_view(&st.db, &branch).await?))
 }
 
 // ---------------------------------------------------------------------------
@@ -2045,15 +1798,6 @@ async fn list_branch_issues(
         weaver_core::issue::list_for_branch(&st.db, &branch.repo_root, &branch.branch, q.all)
             .await?;
     Ok(Json(issues.into_iter().map(IssueView::from).collect()))
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateIssueReq {
-    title: String,
-    #[serde(default)]
-    body: String,
-    #[serde(default)]
-    github_issue: Option<i64>,
 }
 
 /// Create an issue claimed by this branch.
@@ -2111,14 +1855,6 @@ async fn get_issue(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult
         .await?
         .ok_or_else(|| AppError::not_found("issue"))?;
     Ok(Json(IssueView::from(issue)))
-}
-
-#[derive(Debug, Deserialize)]
-struct PatchIssueReq {
-    title: Option<String>,
-    body: Option<String>,
-    /// "open" or "closed".
-    status: Option<String>,
 }
 
 async fn patch_issue(
@@ -2227,16 +1963,6 @@ async fn list_repo_issues(
         }
     };
     Ok(Json(issues.into_iter().map(IssueView::from).collect()))
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateRepoIssueReq {
-    repo_root: String,
-    title: String,
-    #[serde(default)]
-    body: String,
-    #[serde(default)]
-    github_issue: Option<i64>,
 }
 
 /// Create an unclaimed repo-level backlog item.
@@ -2392,147 +2118,15 @@ async fn patch_settings(
 // Overlookers — the operator + authoring surface (server-owned state)
 // ---------------------------------------------------------------------------
 
-/// One overlooker, as the API exposes it. The JSON-bearing columns
-/// (`trigger`, `scope`, `params`) are returned as **parsed** structured JSON so
-/// a UI never re-parses strings; `capabilities` is a real array; the rest is the
-/// stored definition plus its schedule bookkeeping.
-#[derive(Debug, Clone, Serialize)]
-pub struct OverlookerView {
-    pub id: String,
-    pub name: String,
-    pub enabled: bool,
-    /// The event-match predicate, parsed: `{cron|every|event|level|repo}`.
-    pub trigger: Value,
-    /// The fleet query a round surveys, parsed: `{attention?, repo?}`.
-    pub scope: Value,
-    /// `builtin:<name>` for a stock program, or an absolute path under
-    /// `~/.weaver/overlookers/` for a custom one.
-    pub program: String,
-    /// Stock-program parameters (e.g. the judgement `prompt`), parsed.
-    pub params: Value,
-    /// The granted capability set (the intervention ladder). `observe` is
-    /// implicit; the rest are explicit grants.
-    pub capabilities: Vec<String>,
-    pub model: String,
-    pub effort: String,
-    pub cooldown_secs: i64,
-    pub last_run_at: Option<String>,
-    pub next_run_at: Option<String>,
-    /// The most recent round's outcome (`ok|noop|skipped|error`), or `null` if
-    /// it has never run — the at-a-glance health a list view shows.
-    pub last_outcome: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-impl OverlookerView {
-    async fn build(db: &Db, o: &Overlooker) -> ApiResult<Self> {
-        let last_outcome = ov::recent_runs(db, &o.id, 1)
-            .await?
-            .into_iter()
-            .next()
-            .map(|r| r.outcome);
-        Ok(Self {
-            id: o.id.clone(),
-            name: o.name.clone(),
-            enabled: o.enabled,
-            trigger: serde_json::to_value(o.trigger()).unwrap_or(Value::Null),
-            scope: serde_json::to_value(o.scope()).unwrap_or(Value::Null),
-            program: o.program.clone(),
-            params: o.params(),
-            capabilities: o.capabilities(),
-            model: o.model.clone(),
-            effort: o.effort.clone(),
-            cooldown_secs: o.cooldown_secs,
-            last_run_at: o.last_run_at.clone(),
-            next_run_at: o.next_run_at.clone(),
-            last_outcome,
-            created_at: o.created_at.clone(),
-            updated_at: o.updated_at.clone(),
-        })
-    }
-}
-
-/// One round in an overlooker's history (the audit trail), with `actions`
-/// parsed back into JSON for a UI to render.
-#[derive(Debug, Clone, Serialize)]
-pub struct OverlookerRunView {
-    pub id: i64,
-    pub trigger_reason: String,
-    pub started_at: String,
-    pub finished_at: Option<String>,
-    pub outcome: String,
-    pub summary: String,
-    /// The JSON array of marks / nudges / would-dos the round recorded.
-    pub actions: Value,
-}
-
-impl From<OverlookerRun> for OverlookerRunView {
-    fn from(r: OverlookerRun) -> Self {
-        Self {
-            id: r.id,
-            trigger_reason: r.trigger_reason,
-            started_at: r.started_at,
-            finished_at: r.finished_at,
-            outcome: r.outcome,
-            summary: r.summary,
-            actions: serde_json::from_str(&r.actions).unwrap_or(Value::Null),
-        }
-    }
-}
-
-/// Body for `POST /api/overlookers`. JSON-bearing fields take structured JSON
-/// (`trigger`/`scope`/`params`), which the handler serializes into the stored
-/// text columns. Optional fields fall back to the model's defaults.
-#[derive(Debug, Deserialize)]
-struct CreateOverlookerReq {
-    name: String,
-    #[serde(default)]
-    trigger: Option<Value>,
-    #[serde(default)]
-    scope: Option<Value>,
-    #[serde(default)]
-    program: Option<String>,
-    #[serde(default)]
-    params: Option<Value>,
-    #[serde(default)]
-    capabilities: Option<Vec<String>>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    effort: Option<String>,
-    #[serde(default)]
-    cooldown_secs: Option<i64>,
-}
-
-/// Body for `PATCH /api/overlookers/{id}`: every mutable field optional.
-#[derive(Debug, Deserialize)]
-struct PatchOverlookerReq {
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default)]
-    trigger: Option<Value>,
-    #[serde(default)]
-    scope: Option<Value>,
-    #[serde(default)]
-    program: Option<String>,
-    #[serde(default)]
-    params: Option<Value>,
-    #[serde(default)]
-    capabilities: Option<Vec<String>>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    effort: Option<String>,
-    #[serde(default)]
-    cooldown_secs: Option<i64>,
-}
-
-/// Body for `POST /api/overlookers/{id}/run`.
-#[derive(Debug, Deserialize, Default)]
-struct RunOverlookerReq {
-    #[serde(default)]
-    dry_run: bool,
+/// Build an [`OverlookerView`] for an overlooker, joining the most recent
+/// round's outcome from the run history.
+async fn overlooker_view(db: &Db, o: &Overlooker) -> ApiResult<OverlookerView> {
+    let last_outcome = ov::recent_runs(db, &o.id, 1)
+        .await?
+        .into_iter()
+        .next()
+        .map(|r| r.outcome);
+    Ok(OverlookerView::from_parts(o, last_outcome))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2578,7 +2172,7 @@ async fn require_overlooker(db: &Db, key: &str) -> ApiResult<Overlooker> {
 async fn list_overlookers(State(st): State<AppState>) -> ApiResult<Json<Vec<OverlookerView>>> {
     let mut out = Vec::new();
     for o in ov::list(&st.db).await? {
-        out.push(OverlookerView::build(&st.db, &o).await?);
+        out.push(overlooker_view(&st.db, &o).await?);
     }
     Ok(Json(out))
 }
@@ -2615,7 +2209,7 @@ async fn create_overlooker(
         cooldown_secs: req.cooldown_secs.unwrap_or(defaults.cooldown_secs),
     };
     let o = ov::create(&st.db, &new).await?;
-    Ok(Json(OverlookerView::build(&st.db, &o).await?))
+    Ok(Json(overlooker_view(&st.db, &o).await?))
 }
 
 async fn get_overlooker(
@@ -2623,7 +2217,7 @@ async fn get_overlooker(
     Path(key): Path<String>,
 ) -> ApiResult<Json<OverlookerView>> {
     let o = require_overlooker(&st.db, &key).await?;
-    Ok(Json(OverlookerView::build(&st.db, &o).await?))
+    Ok(Json(overlooker_view(&st.db, &o).await?))
 }
 
 async fn patch_overlooker(
@@ -2656,7 +2250,7 @@ async fn patch_overlooker(
         ov::update(&st.db, &o.id, &patch).await?;
     }
     let o = require_overlooker(&st.db, &o.id).await?;
-    Ok(Json(OverlookerView::build(&st.db, &o).await?))
+    Ok(Json(overlooker_view(&st.db, &o).await?))
 }
 
 async fn delete_overlooker(

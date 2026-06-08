@@ -10,7 +10,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde_json::{json, Value};
 
-use loom::client::Client;
+use loom::client::{self, Client};
 
 #[derive(Parser)]
 #[command(
@@ -681,7 +681,7 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
         model,
         effort,
     } = a;
-    let client = Client::new();
+    let client = client::default();
     let cwd = std::env::current_dir()?;
     // When an agent in a weaver session runs `loom session launch`,
     // `$WEAVER_BRANCH` is its own branch id — pass it so the tracking issue is
@@ -762,7 +762,7 @@ fn attention_summary(ws: &Value) -> String {
 
 /// `loom session poll` — a one-shot status read: lifecycle + attention.
 async fn cmd_session_poll(key: String) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let ws = fetch_session(&client, &key).await?;
     println!(
         "session {}  ({})",
@@ -786,7 +786,7 @@ async fn cmd_session_wait(
     interval: u64,
     lifecycle_only: bool,
 ) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     // Short-circuit if the session is already in a wake state at call time.
     let ws = fetch_session(&client, &key).await?;
     if let Some(reason) = wake_reason(&ws, &key, lifecycle_only) {
@@ -859,7 +859,7 @@ async fn cmd_session_send(key: String, message: String, submit: bool) -> Result<
     if message.trim().is_empty() {
         bail!("nothing to send — provide a message");
     }
-    let client = Client::new();
+    let client = client::default();
     client
         .post(
             &format!("/api/sessions/{key}/send"),
@@ -875,7 +875,7 @@ async fn cmd_session_send(key: String, message: String, submit: bool) -> Result<
 
 /// `loom session break` — send Escape to interrupt the agent's current turn.
 async fn cmd_session_break(key: String) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     client
         .post(&format!("/api/sessions/{key}/interrupt"), json!({}))
         .await?;
@@ -885,7 +885,7 @@ async fn cmd_session_break(key: String) -> Result<()> {
 
 /// `loom session preview` — print the session's recent tmux screen.
 async fn cmd_session_preview(key: String, lines: usize) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let res = client
         .get(&format!("/api/sessions/{key}/preview?lines={lines}"))
         .await?;
@@ -896,7 +896,7 @@ async fn cmd_session_preview(key: String, lines: usize) -> Result<()> {
 }
 
 async fn cmd_ps() -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let list = client.get("/api/sessions").await?;
     let rows = list.as_array().cloned().unwrap_or_default();
     if rows.is_empty() {
@@ -921,7 +921,7 @@ async fn cmd_ps() -> Result<()> {
 }
 
 async fn cmd_issues(all: bool, backlog: bool) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let cwd = std::env::current_dir()?;
     let scope = if backlog { "backlog" } else { "repo" };
     let path = format!(
@@ -963,7 +963,7 @@ async fn cmd_issues(all: bool, backlog: bool) -> Result<()> {
 }
 
 async fn cmd_show(key: String) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let ws = client.get(&format!("/api/sessions/{key}")).await?;
     print_session(&ws);
     Ok(())
@@ -1038,7 +1038,7 @@ fn print_session(ws: &Value) {
 
 async fn cmd_attach(key: String) -> Result<()> {
     use std::os::unix::process::CommandExt;
-    let client = Client::new();
+    let client = client::default();
     let ws = client.get(&format!("/api/sessions/{key}")).await?;
     let session = ws
         .get("tmux_session")
@@ -1052,7 +1052,7 @@ async fn cmd_attach(key: String) -> Result<()> {
 }
 
 async fn cmd_archive(key: String) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let res = client
         .post(&format!("/api/sessions/{key}/archive"), json!({}))
         .await?;
@@ -1071,7 +1071,7 @@ async fn cmd_archive(key: String) -> Result<()> {
 }
 
 async fn cmd_adopt(key: String) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let ws = client
         .post(&format!("/api/sessions/{key}/adopt"), json!({}))
         .await?;
@@ -1087,7 +1087,7 @@ async fn cmd_adopt(key: String) -> Result<()> {
 }
 
 async fn cmd_rm(key: String, keep_branch: bool) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let path = format!("/api/sessions/{key}?keep_branch={keep_branch}");
     let res = client.delete(&path).await?;
     println!("removed session {key}");
@@ -1102,7 +1102,7 @@ async fn cmd_rm(key: String, keep_branch: bool) -> Result<()> {
 }
 
 async fn cmd_open() -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let url = client.base().to_string();
     println!("opening {url}");
     if std::process::Command::new("xdg-open")
@@ -1248,7 +1248,7 @@ fn build_scope(opts: &AddOpts) -> Result<Value> {
 
 /// `loom overlooker add` — register an overlooker via POST /api/overlookers.
 async fn cmd_overlooker_add(opts: AddOpts) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let trigger = build_trigger(&opts);
     let scope = build_scope(&opts)?;
     let params = opts
@@ -1296,7 +1296,7 @@ async fn cmd_overlooker_add(opts: AddOpts) -> Result<()> {
 
 /// `loom overlooker rm` — delete an overlooker.
 async fn cmd_overlooker_rm(name: String) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     client.delete(&format!("/api/overlookers/{name}")).await?;
     println!("removed overlooker {name}");
     Ok(())
@@ -1304,7 +1304,7 @@ async fn cmd_overlooker_rm(name: String) -> Result<()> {
 
 /// `loom overlooker enable|disable` — PATCH the `enabled` toggle.
 async fn cmd_overlooker_set_enabled(name: String, enabled: bool) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let o = client
         .patch(
             &format!("/api/overlookers/{name}"),
@@ -1321,7 +1321,7 @@ async fn cmd_overlooker_set_enabled(name: String, enabled: bool) -> Result<()> {
 
 /// `loom overlooker ls` — a table of every overlooker.
 async fn cmd_overlooker_ls() -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let rows = client
         .get("/api/overlookers")
         .await?
@@ -1357,7 +1357,7 @@ async fn cmd_overlooker_ls() -> Result<()> {
 
 /// `loom overlooker run` — fire a round now and print outcome + summary.
 async fn cmd_overlooker_run(name: String, dry_run: bool) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let res = client
         .post(
             &format!("/api/overlookers/{name}/run"),
@@ -1377,7 +1377,7 @@ async fn cmd_overlooker_run(name: String, dry_run: bool) -> Result<()> {
 /// `loom overlooker runs` / `logs` — the round history. `verbose` (the `logs`
 /// alias) also prints each round's actions.
 async fn cmd_overlooker_runs(name: String, limit: i64, verbose: bool) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let rows = client
         .get(&format!("/api/overlookers/{name}/runs?limit={limit}"))
         .await?

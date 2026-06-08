@@ -1074,6 +1074,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "weaver-api",
  "weaver-core",
 ]
 
@@ -2311,6 +2312,17 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "weaver-core",
+]
+
+[[package]]
+name = "weaver-api"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
  "weaver-core",
 ]
 
