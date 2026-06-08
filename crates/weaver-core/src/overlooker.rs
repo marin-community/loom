@@ -148,6 +148,19 @@ impl Overlooker {
         serde_json::from_str(&self.params).unwrap_or(Value::Null)
     }
 
+    /// Whether this overlooker runs in **warm mode** — the engine keeps one
+    /// long-lived, engine-managed session for it (hidden from the fleet) so it
+    /// has across-round memory. Opt in via `params.warm = true`; off by default,
+    /// so an ordinary overlooker spawns no session. Carried in `params` rather
+    /// than a dedicated column to keep the opt-in a zero-migration knob the
+    /// existing `params` plumbing (REST, CLI, PyO3) already round-trips.
+    pub fn warm(&self) -> bool {
+        self.params()
+            .get("warm")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
     /// The declared capability set (the intervention ladder).
     pub fn capabilities(&self) -> Vec<String> {
         serde_json::from_str(&self.capabilities).unwrap_or_default()

@@ -18,7 +18,8 @@ use serial_test::serial;
 
 use loom::events::EventBus;
 use loom::web::AppState;
-use loom::{db, events, monitor, overlooker, session as session_mod};
+use loom::{db, events, monitor, overlooker, server, session as session_mod, tmux};
+use weaver_core::config as core_config;
 use weaver_core::overlooker as ov;
 
 use crate::fixtures::TestServer;
@@ -680,4 +681,319 @@ async fn rest_overlooker_lifecycle_and_validation() {
         .delete(&format!("/api/sessions/{session_id}"))
         .await
         .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// T12 — Warm-session lifecycle
+// ---------------------------------------------------------------------------
+
+/// Set a config key on the engine db (the registry-validated path).
+async fn set_config(state: &AppState, key: &str, value: &str) {
+    core_config::apply(&state.db, &[(key.to_string(), Some(value.to_string()))])
+        .await
+        .unwrap();
+}
+
+/// Insert a managed (warm) session row directly, owned by `overlooker_id`. The
+/// branch is a throwaway in the test repo. Returns the session id. A direct
+/// insert keeps the hide/reconcile logic deterministic without standing up a
+/// real agent.
+async fn insert_managed_session(
+    state: &AppState,
+    repo_root: &str,
+    overlooker_id: &str,
+    tmux_session: &str,
+    work_dir: &str,
+) -> String {
+    let branch =
+        weaver_core::branch::upsert(&state.db, repo_root, "weaver/overlooker-warm", "main")
+            .await
+            .unwrap();
+    let id = weaver_core::branch::new_id();
+    session_mod::insert(
+        &state.db,
+        &session_mod::NewSession {
+            id: id.clone(),
+            branch_id: branch.id,
+            work_dir: work_dir.to_string(),
+            tmux_session: tmux_session.to_string(),
+            agent_kind: "shell".to_string(),
+            model: String::new(),
+            effort: String::new(),
+            status: "running".to_string(),
+            github_repo: None,
+            parent_branch_id: None,
+            managed_by: Some(overlooker_id.to_string()),
+        },
+    )
+    .await
+    .unwrap();
+    id
+}
+
+/// T12: a managed (warm) session is hidden from the fleet — it appears in neither
+/// the dashboard `/sessions` listing nor an overlooker round's survey — while an
+/// ordinary session does.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warm_session_is_hidden_from_fleet_and_survey() {
+    let ts = TestServer::start().await;
+    let state = engine_state(&ts).await;
+
+    // An ordinary fleet session, reporting non-ok so the survey would mark it.
+    let (visible_id, _branch_id, repo_root) = make_session(&ts, "visible work").await;
+    ts.client
+        .patch(
+            &format!("/api/sessions/{visible_id}"),
+            json!({ "attention": "attention" }),
+        )
+        .await
+        .unwrap();
+
+    // An overlooker plus its warm session (inserted directly, also non-ok).
+    let o = enabled_overlooker(
+        &state,
+        ov::NewOverlooker {
+            name: "warm-watch".to_string(),
+            trigger_spec: json!({ "cron": "0 * * * *" }).to_string(),
+            scope: json!({ "attention": "!ok" }).to_string(),
+            program: "builtin:status".to_string(),
+            capabilities: vec!["observe".to_string(), "mark".to_string()],
+            ..Default::default()
+        },
+    )
+    .await;
+    let warm_id = insert_managed_session(
+        &state,
+        &repo_root,
+        &o.id,
+        "weaver-warm-hidden",
+        "/tmp/warm-hidden",
+    )
+    .await;
+    // The warm session reports non-ok too, so the only thing keeping it out of a
+    // mark is the visibility filter, not the scope predicate.
+    let warm = session_mod::get(&state.db, &warm_id)
+        .await
+        .unwrap()
+        .unwrap();
+    weaver_core::branch::set_attention(&state.db, &warm.branch_id, "blocked")
+        .await
+        .unwrap();
+
+    // The dashboard listing shows the ordinary session, not the warm one.
+    let list = ts.client.get("/api/sessions").await.unwrap();
+    let ids: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&visible_id.as_str()),
+        "fleet shows ordinary work"
+    );
+    assert!(
+        !ids.contains(&warm_id.as_str()),
+        "fleet hides the warm session: {ids:?}"
+    );
+
+    // A round surveys the ordinary session (marks it) but never the warm one.
+    overlooker::fire_now(&state, &o.name, false, "manual")
+        .await
+        .unwrap();
+    let visible_view = ts
+        .client
+        .get(&format!("/api/sessions/{visible_id}"))
+        .await
+        .unwrap();
+    assert_eq!(
+        visible_view["branch"]["triage_level"], "attention",
+        "the round marked the in-scope ordinary session"
+    );
+    let warm_after = session_mod::with_branch(&state.db, &warm_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        warm_after.1.triage_level, "",
+        "the round never surveyed (or marked) the warm session"
+    );
+
+    ts.client
+        .delete(&format!("/api/sessions/{visible_id}"))
+        .await
+        .unwrap();
+}
+
+/// T12: a warm session survives a daemon restart independent of
+/// `server.auto_adopt`. With auto-adopt OFF and `overlooker.adopt_warm` ON, the
+/// managed reconcile pass re-adopts a warm session whose tmux is gone — and the
+/// inverse: a warm session whose owning overlooker was deleted is archived, not
+/// adopted.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
+    let ts = TestServer::start().await;
+    let state = engine_state(&ts).await;
+
+    // The restart policy under test: fleet auto-adopt off, warm-adopt on.
+    set_config(&state, "server.auto_adopt", "false").await;
+    set_config(&state, "overlooker.adopt_warm", "true").await;
+    // Warm sessions launch the default agent; pin it to `shell` so creation is
+    // deterministic without a real `claude` on PATH.
+    set_config(&state, "agent.default", "shell").await;
+
+    let repo_root = ts.repo_path().canonicalize().unwrap().display().to_string();
+
+    // A warm overlooker, scoped to the test repo so its warm session anchors here.
+    let o = enabled_overlooker(
+        &state,
+        ov::NewOverlooker {
+            name: "memory-watch".to_string(),
+            trigger_spec: json!({ "cron": "0 * * * *" }).to_string(),
+            scope: json!({ "repo": repo_root }).to_string(),
+            params: json!({ "warm": true }).to_string(),
+            program: "builtin:status".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // First need: the engine creates the warm session (a real shell tmux).
+    let warm_id = overlooker::ensure_warm_session(&state, &o)
+        .await
+        .unwrap()
+        .expect("a warm overlooker gets a session");
+    let warm = session_mod::get(&state.db, &warm_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        tmux::has_session(&warm.tmux_session).await,
+        "the warm session has a live tmux"
+    );
+    assert_eq!(
+        ov::get(&state.db, &o.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .warm_session_id
+            .as_deref(),
+        Some(warm_id.as_str()),
+        "the overlooker is linked to its warm session"
+    );
+
+    // Simulate the daemon being down: its tmux is gone, the row remains.
+    tmux::kill_session(&warm.tmux_session).await.ok();
+    assert!(
+        !tmux::has_session(&warm.tmux_session).await,
+        "tmux is gone, as after a restart"
+    );
+
+    // The managed reconcile pass — the startup adopt for warm sessions — runs even
+    // though `server.auto_adopt` is false, and recreates the tmux.
+    server::reconcile_managed_sessions(&state).await;
+    // Adoption recreates the SAME row's tmux; poll briefly for the async launch.
+    let mut recreated = false;
+    for _ in 0..40 {
+        if tmux::has_session(&warm.tmux_session).await {
+            recreated = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        recreated,
+        "the warm session's tmux is recreated by warm-adopt"
+    );
+
+    // The session id and the overlooker linkage are stable across the restart.
+    let still = session_mod::get(&state.db, &warm_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(still.id, warm_id, "the warm session id is stable");
+    assert_eq!(
+        still.managed_by.as_deref(),
+        Some(o.id.as_str()),
+        "it is still owned by its overlooker"
+    );
+    assert_eq!(
+        ov::get(&state.db, &o.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .warm_session_id
+            .as_deref(),
+        Some(warm_id.as_str()),
+        "the warm_session_id linkage survives the restart"
+    );
+
+    // Inverse: a warm session whose owner is gone is archived, not adopted.
+    tmux::kill_session(&still.tmux_session).await.ok();
+    ov::delete(&state.db, &o.id).await.unwrap();
+    server::reconcile_managed_sessions(&state).await;
+    let orphaned = session_mod::get(&state.db, &warm_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        orphaned.status, "archived",
+        "an owner-less warm session is archived"
+    );
+    assert!(
+        !tmux::has_session(&orphaned.tmux_session).await,
+        "an archived warm session has no tmux (not re-adopted)"
+    );
+}
+
+/// T12: the engine reuses one warm session across rounds — asked twice to ensure
+/// a warm session for the same overlooker, it returns the same id and spawns no
+/// duplicate (the reuse that gives across-round memory).
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ensure_warm_session_reuses_the_same_session() {
+    let ts = TestServer::start().await;
+    let state = engine_state(&ts).await;
+    set_config(&state, "agent.default", "shell").await;
+
+    let repo_root = ts.repo_path().canonicalize().unwrap().display().to_string();
+    let o = enabled_overlooker(
+        &state,
+        ov::NewOverlooker {
+            name: "reuse-watch".to_string(),
+            trigger_spec: json!({ "cron": "0 * * * *" }).to_string(),
+            scope: json!({ "repo": repo_root }).to_string(),
+            params: json!({ "warm": true }).to_string(),
+            program: "builtin:status".to_string(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let first = overlooker::ensure_warm_session(&state, &o)
+        .await
+        .unwrap()
+        .unwrap();
+    // Re-fetch so the second call sees the persisted `warm_session_id` linkage.
+    let o = ov::get(&state.db, &o.id).await.unwrap().unwrap();
+    let second = overlooker::ensure_warm_session(&state, &o)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first, second, "the same warm session id is reused");
+
+    // Exactly one managed session exists for this overlooker — no duplicate spawn.
+    let managed = session_mod::list_managed(&state.db).await.unwrap();
+    let owned: Vec<_> = managed
+        .iter()
+        .filter(|s| s.managed_by.as_deref() == Some(o.id.as_str()))
+        .collect();
+    assert_eq!(owned.len(), 1, "no duplicate warm session is spawned");
+
+    // Clean up the warm session's tmux (the harness kills the whole socket too).
+    if let Some(s) = session_mod::get(&state.db, &first).await.unwrap() {
+        tmux::kill_session(&s.tmux_session).await.ok();
+    }
 }

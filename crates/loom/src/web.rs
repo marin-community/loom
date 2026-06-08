@@ -321,7 +321,10 @@ pub fn router(state: AppState) -> Router {
 // ---------------------------------------------------------------------------
 
 async fn list_sessions(State(st): State<AppState>) -> ApiResult<Json<Vec<SessionView>>> {
-    let sessions = session_mod::list(&st.db).await?;
+    // The fleet listing shows work, not infrastructure: engine-managed (warm)
+    // sessions are excluded here, so the dashboard never renders a watcher's own
+    // session. Internal liveness/adopt paths use `session::list` instead.
+    let sessions = session_mod::list_visible(&st.db).await?;
     let mut views: Vec<SessionView> = Vec::with_capacity(sessions.len());
     for s in sessions {
         if let Some(branch) = branch_mod::get(&st.db, &s.branch_id).await? {
@@ -651,6 +654,7 @@ async fn create_session(
             status: status.to_string(),
             github_repo: github_repo.clone(),
             parent_branch_id: parent.as_ref().map(|b| b.id.clone()),
+            managed_by: None,
         },
     )
     .await?;
@@ -1021,6 +1025,130 @@ async fn refresh_github_session(
         .map_err(|e| AppError::new(StatusCode::BAD_GATEWAY, format!("gh: {e}")))?;
     let (session, branch) = require_session(&st.db, &session.id).await?;
     Ok(Json(session_view(&st.db, &session, &branch).await?))
+}
+
+/// Bring up an engine-managed (warm) session for an overlooker, reusing the same
+/// branch/worktree/tmux launch machinery as an ordinary session — the only
+/// differences are that it forks a dedicated `weaver/overlooker-<name>` branch
+/// and the row is stamped `managed_by = overlooker.id` so the fleet listing and
+/// every survey hide it.
+///
+/// A warm session is the watcher's own long-lived agent; its persistence across
+/// rounds (the same tmux/worktree, resumed on adopt) is what gives the overlooker
+/// across-round memory. The engine calls this once, on first need
+/// ([`crate::overlooker::ensure_warm_session`]); thereafter it reuses the stored
+/// session id.
+pub async fn create_warm_session(
+    st: &AppState,
+    overlooker: &Overlooker,
+    repo_root: &std::path::Path,
+) -> Result<Session, AppError> {
+    let repo_root = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    let repo_root_str = repo_root.display().to_string();
+    let base = git::default_base(&repo_root).await?;
+
+    // A stable, collision-resistant branch slug per overlooker; if an old warm
+    // branch lingers (a prior warm session was archived), suffix to a fresh one.
+    let base_slug = format!("overlooker-{}", branch_mod::slugify(&overlooker.name));
+    let mut slug = base_slug.clone();
+    let mut suffix = 2;
+    loop {
+        let branch_name = format!("weaver/{slug}");
+        let dir = repo_root.join(".worktrees").join(&slug);
+        if !git::branch_exists(&repo_root, &branch_name).await && !dir.exists() {
+            break;
+        }
+        slug = format!("{base_slug}-{suffix}");
+        suffix += 1;
+    }
+    let branch_name = format!("weaver/{slug}");
+    let work_dir = repo_root.join(".worktrees").join(&slug);
+    tokio::fs::create_dir_all(repo_root.join(".worktrees")).await?;
+    git::ensure_excluded(&repo_root, ".worktrees/").await.ok();
+    git::worktree_add(&repo_root, &work_dir, &branch_name, &base)
+        .await
+        .map_err(|e| AppError::bad_request(e.to_string()))?;
+
+    let branch = branch_mod::upsert(&st.db, &repo_root_str, &branch_name, &base).await?;
+    branch_mod::set_title(
+        &st.db,
+        &branch.id,
+        &format!("overlooker {}", overlooker.name),
+    )
+    .await?;
+
+    let session_id = branch_mod::new_id();
+    let run_dir = db::run_dir(&session_id);
+    tokio::fs::create_dir_all(&run_dir).await?;
+
+    // The warm session runs the configured default agent (the overlooker's
+    // judging agent, normally `claude`); its `prompt` param, when set, seeds the
+    // first turn.
+    let agent = config::get_or(&st.db, "agent.default", config::DEFAULT_AGENT).await;
+    let goal_file = match overlooker
+        .params()
+        .get("prompt")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+    {
+        Some(prompt) => {
+            let f = run_dir.join("goal.txt");
+            tokio::fs::write(&f, prompt).await?;
+            Some(f)
+        }
+        None => None,
+    };
+
+    let tmux_session = format!("weaver-{session_id}");
+    let base_args = config::get_or(&st.db, "agent.claude_args", "").await;
+    let claude_args = agent::combine_args(&base_args, &overlooker.model, &overlooker.effort);
+    agent::launch(
+        &agent::LaunchSpec {
+            branch_id: &branch.id,
+            agent_kind: &agent,
+            work_dir: &work_dir,
+            tmux_session: &tmux_session,
+            goal_file: goal_file.as_deref(),
+            server_addr: &st.addr,
+            claude_args: &claude_args,
+        },
+        agent::LaunchMode::Fresh,
+    )
+    .await
+    .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let status = if matches!(agent.as_str(), "shell" | "none") {
+        "running"
+    } else {
+        "launching"
+    };
+    let session = session_mod::insert(
+        &st.db,
+        &NewSession {
+            id: session_id,
+            branch_id: branch.id.clone(),
+            work_dir: work_dir.display().to_string(),
+            tmux_session,
+            agent_kind: agent,
+            model: overlooker.model.clone(),
+            effort: overlooker.effort.clone(),
+            status: status.to_string(),
+            github_repo: None,
+            parent_branch_id: None,
+            managed_by: Some(overlooker.id.clone()),
+        },
+    )
+    .await?;
+
+    repo::record_use(&st.db, &repo_root_str).await.ok();
+    tracing::info!(
+        overlooker = %overlooker.id,
+        session = %session.id,
+        "warm session created"
+    );
+    Ok(session)
 }
 
 /// Recreate an orphaned session's tmux and resume its agent.

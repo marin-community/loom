@@ -355,6 +355,7 @@ mod tests {
             last_activity_at: last_activity_at.map(str::to_string),
             created_at: created_at.to_string(),
             parent_branch_id: None,
+            managed_by: None,
         }
     }
 

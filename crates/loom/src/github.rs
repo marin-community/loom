@@ -420,8 +420,9 @@ async fn poll_once(state: &AppState) -> Result<()> {
     )
     .await;
     // One active session per branch (enforced by a unique index), so iterating
-    // sessions visits each candidate branch once.
-    for session in session_mod::list(&state.db).await? {
+    // sessions visits each candidate branch once. Engine-managed (warm) sessions
+    // are infrastructure with no pull request, so the poller skips them.
+    for session in session_mod::list_visible(&state.db).await? {
         if session_mod::is_terminal(&session.status) {
             continue;
         }
@@ -602,6 +603,7 @@ mod tests {
                 status: "running".to_string(),
                 github_repo: None,
                 parent_branch_id: None,
+                managed_by: None,
             },
         )
         .await

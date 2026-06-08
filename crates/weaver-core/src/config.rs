@@ -177,6 +177,21 @@ pub const REGISTRY: &[SettingSpec] = &[
         options: &[],
     },
     SettingSpec {
+        key: "overlooker.adopt_warm",
+        label: "Adopt warm sessions on startup",
+        description: "When enabled, the server re-adopts each engine-managed \
+            (warm) overlooker session whose tmux is gone on startup — recreating \
+            it so a watcher resumes its across-round memory after a daemon \
+            restart. Independent of the fleet-wide `server.auto_adopt`: warm \
+            infrastructure is recovered even when ordinary sessions are left \
+            orphaned. A warm session whose owning overlooker has been deleted is \
+            archived instead of adopted.",
+        kind: SettingKind::Bool,
+        default: "true",
+        group: "Overlooker",
+        options: &[],
+    },
+    SettingSpec {
         key: "overlooker.stale_after_secs",
         label: "Stale-after (seconds)",
         description: "How long a non-terminal session may go without any activity \
@@ -192,6 +207,12 @@ pub const REGISTRY: &[SettingSpec] = &[
 
 /// Whether the Overlooker engine master switch is on. Off by default.
 pub const DEFAULT_OVERLOOKER_ENABLED: bool = false;
+
+/// Whether the server re-adopts engine-managed (warm) overlooker sessions on
+/// startup. On by default and independent of [`DEFAULT_AUTO_ADOPT`]: a warm
+/// session is infrastructure a watcher depends on, so it is recovered across a
+/// restart even when ordinary fleet sessions are left orphaned.
+pub const DEFAULT_OVERLOOKER_ADOPT_WARM: bool = true;
 
 /// How many seconds a non-terminal session may be idle before the monitor emits
 /// a one-shot `stale` event. 30 minutes by default.

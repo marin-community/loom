@@ -427,8 +427,10 @@ async fn run_program(
 }
 
 /// The set of every overlooker's warm session id — the sessions a round must
-/// never survey or act on (no-recursion: watchers don't watch watchers). Empty
-/// today (warm sessions are a later task) but enforced now.
+/// never survey or act on (no-recursion: watchers don't watch watchers). The
+/// survey already reads the *visible* fleet (managed sessions excluded), so this
+/// is the secondary guard for a warm session referenced by `warm_session_id`
+/// that is not yet marked `managed_by`.
 async fn warm_session_ids(state: &AppState) -> HashSet<String> {
     ov::list(&state.db)
         .await
@@ -461,7 +463,12 @@ async fn builtin_status(
     let can_mark = o.has_capability("mark");
     let can_nudge = o.has_capability("nudge");
 
-    let sessions = session_mod::list(&state.db).await?;
+    // The survey scope is the *visible* fleet: engine-managed (warm) sessions
+    // are excluded at the source, so no round ever surveys a watcher's own
+    // session (the no-recursion guarantee, enforced for every overlooker, not
+    // just the one that owns the session). `warm_session_ids` below is a belt-
+    // and-braces check for any warm session not yet marked `managed_by`.
+    let sessions = session_mod::list_visible(&state.db).await?;
     let mut actions: Vec<Value> = Vec::new();
     let mut surveyed = 0usize;
     let mut marked = 0usize;
@@ -745,6 +752,62 @@ pub async fn fire_now(
     fire(state, &in_flight, &o, reason, dry_run)
         .await
         .ok_or_else(|| anyhow::anyhow!("round skipped before it could open a run row"))
+}
+
+// ---------------------------------------------------------------------------
+// Warm-session lifecycle (T12)
+// ---------------------------------------------------------------------------
+
+/// Ensure the warm overlooker `o` has its long-lived, engine-managed session,
+/// returning its id. **Idempotent and reuse-first**: if `o` already owns a live
+/// managed session, that id is returned (and re-linked into `warm_session_id` if
+/// it had drifted) — no duplicate is spawned. The session id is stable across
+/// rounds and across a daemon restart, which is what gives the overlooker its
+/// across-round memory.
+///
+/// On first need it forks a dedicated worktree and brings up a real tmux session
+/// (via [`crate::web::create_warm_session`], the same launch machinery ordinary
+/// sessions use), stamps it `managed_by = o.id` so the fleet hides it, and
+/// records its id on the overlooker.
+///
+/// A non-warm overlooker (`params.warm` unset) returns `Ok(None)` without
+/// spawning anything. The repo to anchor the worktree is the overlooker's
+/// `scope.repo`, else the most recently used repo; an overlooker with no repo to
+/// anchor errors rather than guessing.
+pub async fn ensure_warm_session(
+    state: &AppState,
+    o: &Overlooker,
+) -> anyhow::Result<Option<String>> {
+    if !o.warm() {
+        return Ok(None);
+    }
+
+    // Reuse-first: an existing live managed session is the warm session. Keep its
+    // id and (cheaply) repair the overlooker linkage if it drifted.
+    if let Some(existing) = session_mod::active_managed_by(&state.db, &o.id).await? {
+        if o.warm_session_id.as_deref() != Some(existing.id.as_str()) {
+            ov::set_warm_session(&state.db, &o.id, Some(&existing.id)).await?;
+        }
+        return Ok(Some(existing.id));
+    }
+
+    // First need: anchor a worktree in the scoped repo, else the most-recent one.
+    let repo_root = match o.scope().repo {
+        Some(r) => std::path::PathBuf::from(r),
+        None => {
+            let recent = crate::repo::recent(&state.db, 1).await?;
+            let r = recent.into_iter().next().ok_or_else(|| {
+                anyhow::anyhow!("no repo to anchor a warm session for '{}'", o.name)
+            })?;
+            std::path::PathBuf::from(r.repo_root)
+        }
+    };
+
+    let session = crate::web::create_warm_session(state, o, &repo_root)
+        .await
+        .map_err(|e| anyhow::anyhow!("creating warm session: {}", e.message()))?;
+    ov::set_warm_session(&state.db, &o.id, Some(&session.id)).await?;
+    Ok(Some(session.id))
 }
 
 // ---------------------------------------------------------------------------
