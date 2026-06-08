@@ -8,6 +8,7 @@ import {
   triggerSummary,
   scopeSummary,
   repoLabel,
+  capabilitiesFrom,
   GRANTABLE_CAPABILITIES,
 } from '../lib/overlooker';
 
@@ -119,7 +120,7 @@ async function create() {
     if (form.repo.trim()) scope.repo = form.repo.trim();
 
     // `observe` is implicit; ship the explicitly-ticked grants on top of it.
-    const capabilities = ['observe', ...GRANTABLE_CAPABILITIES.filter((c) => form.capabilities[c])];
+    const capabilities = capabilitiesFrom(form.capabilities);
 
     const body: Record<string, unknown> = {
       name: form.name.trim(),

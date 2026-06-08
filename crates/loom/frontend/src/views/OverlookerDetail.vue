@@ -10,6 +10,7 @@ import {
   scopeSummary,
   repoLabel,
   promptOf,
+  capabilitiesFrom,
   GRANTABLE_CAPABILITIES,
 } from '../lib/overlooker';
 
@@ -24,6 +25,9 @@ const ov = ref<Overlooker | null>(null);
 const runs = ref<OverlookerRun[]>([]);
 const error = ref('');
 const notice = ref('');
+// A non-fatal note when the round-history fetch fails, so an empty list isn't
+// silently confused with a real "no rounds yet".
+const runsError = ref('');
 const loaded = ref(false);
 const busy = ref(false);
 // Per-run expansion of the actions list (the audit detail), keyed by run id.
@@ -67,8 +71,11 @@ async function loadOverlooker() {
 async function loadRuns() {
   try {
     runs.value = (await get(`/overlookers/${props.id}/runs?limit=50`)) as OverlookerRun[];
-  } catch {
-    // History is supplementary; a failure here shouldn't blank the page.
+    runsError.value = '';
+  } catch (e) {
+    // History is supplementary; a failure here shouldn't blank the page, but
+    // surface it so an empty list isn't mistaken for "no rounds yet".
+    runsError.value = (e as Error).message;
   }
 }
 
@@ -110,7 +117,7 @@ async function saveConfig() {
   error.value = '';
   notice.value = '';
   try {
-    const capabilities = ['observe', ...GRANTABLE_CAPABILITIES.filter((c) => draft.capabilities[c])];
+    const capabilities = capabilitiesFrom(draft.capabilities);
     const body: Record<string, unknown> = {
       params: draft.prompt.trim() ? { prompt: draft.prompt.trim() } : {},
       capabilities,
@@ -388,7 +395,10 @@ onMounted(() => {
           <span class="text-faint font-normal normal-case">({{ runs.length }})</span>
         </h2>
 
-        <p v-if="!runs.length" class="text-sm text-muted">
+        <p v-if="runsError" class="text-sm text-block">
+          Couldn't load round history: {{ runsError }}
+        </p>
+        <p v-else-if="!runs.length" class="text-sm text-muted">
           No rounds yet. Run one now (or dry-run it) to populate the history.
         </p>
 

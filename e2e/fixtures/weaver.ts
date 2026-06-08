@@ -57,6 +57,28 @@ export interface SeedOpts {
   parent?: string;
 }
 
+/** An overlooker as returned by `/api/overlookers` (the fields the e2e tests
+ *  read; the full DTO has more). */
+export interface Overlooker {
+  id: string;
+  name: string;
+  enabled: boolean;
+  program: string;
+  capabilities: string[];
+  last_outcome: string | null;
+}
+
+export interface SeedOverlookerOpts {
+  name: string;
+  /** Trigger predicate; defaults to a manual `{}` (only fires on Run now). */
+  trigger?: Record<string, unknown>;
+  /** Fleet scope; defaults to `{}` (whole fleet). */
+  scope?: Record<string, unknown>;
+  program?: string;
+  params?: Record<string, unknown>;
+  capabilities?: string[];
+}
+
 export interface WeaverFixture {
   /** Base URL of the running loom server, e.g. http://127.0.0.1:NNNN */
   baseUrl: string;
@@ -64,6 +86,8 @@ export interface WeaverFixture {
   repoPath: string;
   /** Create a session directly via the API using the `shell` agent. */
   seedSession(opts: SeedOpts): Promise<Session>;
+  /** Register an overlooker directly via the API. */
+  seedOverlooker(opts: SeedOverlookerOpts): Promise<Overlooker>;
   /** GET /api/sessions/{id}. */
   getSession(id: string): Promise<Session>;
   /** GET /api/sessions. */
@@ -144,6 +168,23 @@ async function deleteAllSessions(baseUrl: string) {
         await fetch(`${baseUrl}/api/sessions/${s.id}?keep_branch=false`, {
           method: 'DELETE',
         });
+      } catch {
+        /* best effort */
+      }
+    }
+  } catch {
+    /* server may already be gone */
+  }
+}
+
+/** Delete every overlooker on a server, best-effort — overlookers aren't tied
+ *  to a session, so the per-test wipe clears them explicitly. */
+async function deleteAllOverlookers(baseUrl: string) {
+  try {
+    const all = (await fetchJson(`${baseUrl}/api/overlookers`)) as { id: string }[];
+    for (const o of all) {
+      try {
+        await fetch(`${baseUrl}/api/overlookers/${o.id}`, { method: 'DELETE' });
       } catch {
         /* best effort */
       }
@@ -324,6 +365,20 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
         })) as Session;
       },
 
+      async seedOverlooker(opts) {
+        return (await fetchJson(`${baseUrl}/api/overlookers`, {
+          method: 'POST',
+          body: JSON.stringify({
+            name: opts.name,
+            trigger: opts.trigger ?? {},
+            scope: opts.scope ?? {},
+            program: opts.program ?? 'builtin:status',
+            params: opts.params ?? {},
+            capabilities: opts.capabilities ?? ['observe', 'mark', 'escalate'],
+          }),
+        })) as Overlooker;
+      },
+
       async getSession(id) {
         return (await fetchJson(`${baseUrl}/api/sessions/${id}`)) as Session;
       },
@@ -357,6 +412,7 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
 
     // Reset for the next test in this worker.
     await deleteAllSessions(baseUrl);
+    await deleteAllOverlookers(baseUrl);
   },
 });
 

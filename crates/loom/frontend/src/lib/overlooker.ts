@@ -11,6 +11,13 @@ export function repoLabel(path: string): string {
   return path.replace(/\/+$/, '').split('/').pop() || path;
 }
 
+// Assemble the capability set a create/edit form sends: the implicit `observe`
+// plus the explicitly-ticked grants, in ladder order. Both views feed it the
+// same {grant → bool} map so they can't drift on the observe-implicit rule.
+export function capabilitiesFrom(ticked: Record<string, boolean>): string[] {
+  return ['observe', ...GRANTABLE_CAPABILITIES.filter((c) => ticked[c])];
+}
+
 // A one-line, human-readable summary of a trigger — what wakes a round.
 // e.g. "cron 0 * * * *", "every 30m", "on attention=blocked", "on pr_red".
 // An empty/unset trigger reads as "manual" (only fires on Run now).
