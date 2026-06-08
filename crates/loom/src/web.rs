@@ -237,6 +237,13 @@ pub struct SessionView {
     pub last_activity_at: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Branch id of the session that **launched** this one — the parent in the
+    /// dashboard's session tree — or `null` for a top-level session. Stamped on
+    /// the session row at launch from the resolved launcher (`parent_branch`), so
+    /// reads need no extra query and the link can't drift. The dashboard groups
+    /// the list into threads by it; a child whose parent is absent (archived, or
+    /// never tracked) renders at the top level.
+    pub parent_id: Option<String>,
     /// The tracking issue opened for this session's task at launch (the handle
     /// handed back to whoever launched it). Only populated on the create
     /// response; `None` on the list/get/patch paths, which don't recompute it.
@@ -262,6 +269,7 @@ impl SessionView {
                 .unwrap_or_else(|| branch.updated_at.clone()),
             created_at: session.created_at.clone(),
             updated_at: branch.updated_at.clone(),
+            parent_id: session.parent_branch_id.clone(),
             tracking_issue: None,
             branch: bv,
         })
@@ -690,10 +698,12 @@ async fn create_session(
         .await?
         .ok_or_else(|| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "branch vanished"))?;
 
-    // Open this session's tracking issue before the launch prompt is written,
-    // so the agent can be told its issue number. When an agent delegated this
-    // work (`parent_branch`), the parent becomes the issue's `source_branch`.
-    let parent_branch_name = match req
+    // Resolve the launching parent once: it names the tracking issue's
+    // `source_branch` *and* the session's tree parent (`parent_branch_id`).
+    // Only attribute to a parent in *this* repo, and never to the branch itself
+    // — `resolve_key` searches globally, so a stray `$WEAVER_BRANCH` from a
+    // checkout elsewhere must not misattribute the link to an unrelated branch.
+    let parent = match req
         .parent_branch
         .as_deref()
         .map(str::trim)
@@ -701,14 +711,14 @@ async fn create_session(
     {
         Some(key) => branch_mod::resolve_key(&st.db, key)
             .await?
-            // Only attribute to a parent in *this* repo. `resolve_key` searches
-            // globally, and a stray `$WEAVER_BRANCH` from a checkout elsewhere
-            // must not misattribute `source_branch` to an unrelated branch.
-            .filter(|b| b.repo_root == branch.repo_root)
-            .map(|b| b.branch)
-            .filter(|name| name != &branch.branch),
+            .filter(|b| b.repo_root == branch.repo_root && b.branch != branch.branch),
         None => None,
     };
+    let parent_branch_name = parent.as_ref().map(|b| b.branch.clone());
+
+    // Open this session's tracking issue before the launch prompt is written,
+    // so the agent can be told its issue number. When an agent delegated this
+    // work (`parent_branch`), the parent becomes the issue's `source_branch`.
     let tracking_issue = create_tracking_issue(
         &st,
         &branch,
@@ -786,6 +796,7 @@ async fn create_session(
             effort,
             status: status.to_string(),
             github_repo: github_repo.clone(),
+            parent_branch_id: parent.as_ref().map(|b| b.id.clone()),
         },
     )
     .await?;

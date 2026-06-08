@@ -257,7 +257,7 @@ onUnmounted(teardownEditor);
     <!-- No plan file yet: the panel degrades to the branch goal — a plan is the
          goal grown up, and `weaver plan new` seeds its Problem from this goal. -->
     <div v-if="loaded && !plan && !error" class="px-4 py-5">
-      <p v-if="goal" class="whitespace-pre-wrap text-sm text-fg">{{ goal }}</p>
+      <p v-if="goal" data-testid="session-goal" class="whitespace-pre-wrap text-sm text-fg">{{ goal }}</p>
       <p v-else class="text-sm text-faint">No goal set.</p>
       <p class="mt-3 text-xs text-faint">
         Scaffold a structured plan with <code>weaver plan new "&lt;title&gt;"</code>

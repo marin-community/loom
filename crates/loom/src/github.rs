@@ -600,6 +600,7 @@ mod tests {
                 effort: String::new(),
                 status: "running".to_string(),
                 github_repo: None,
+                parent_branch_id: None,
             },
         )
         .await

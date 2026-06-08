@@ -61,6 +61,11 @@ export interface Session {
   last_activity_at: string;
   created_at: string;
   updated_at: string;
+  /** Branch id of the session that launched this one (its parent in the session
+   *  tree), or null for a top-level session. The dashboard groups the list into
+   *  threads by it; a child whose parent is absent (archived, or never tracked)
+   *  renders at the top level. Stamped on the session row at launch. */
+  parent_id: string | null;
   /** The tracking issue opened for this session's task at launch (the handle
    *  the launcher follows). Only set on the create response. */
   tracking_issue: number | null;

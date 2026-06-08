@@ -101,6 +101,11 @@ async fn migrate_loom(pool: &Db) -> Result<()> {
     // add the column explicitly and ignore the "duplicate column" error.
     add_column_if_missing(pool, "sessions", "model", "TEXT NOT NULL DEFAULT ''").await?;
     add_column_if_missing(pool, "sessions", "effort", "TEXT NOT NULL DEFAULT ''").await?;
+    // The branch id of the session that launched this one — its parent in the
+    // dashboard's session tree. Set once at create time from the known launcher;
+    // NULL for a top-level session. Sessions predating the column stay NULL (they
+    // render flat, as they did before threading existed).
+    add_column_if_missing(pool, "sessions", "parent_branch_id", "TEXT").await?;
     Ok(())
 }
 

@@ -62,6 +62,8 @@
   --faint: #94a3b8;         /* slate-400 — tertiary text */
   --subtle: #e2e8f0;        /* slate-200 — secondary buttons */
   --subtle-hover: #cbd5e1;  /* slate-300 */
+  --tree-line: #cbd5e1;     /* slate-300 — session-tree guides (a step up from
+                               --line so threading reads on white) */
   --accent: #2563eb;        /* blue-600  — primary action */
   --accent-hover: #1d4ed8;  /* blue-700 */
   --accent-fg: #ffffff;
@@ -90,6 +92,7 @@
   --faint: #64748b;         /* slate-500 */
   --subtle: #334155;        /* slate-700 */
   --subtle-hover: #475569;  /* slate-600 */
+  --tree-line: #475569;     /* slate-600 — session-tree guides on the dark canvas */
   --accent: #3b82f6;        /* blue-500 */
   --accent-hover: #2563eb;  /* blue-600 */
   --accent-fg: #ffffff;
@@ -178,6 +181,70 @@ body {
   line-height: 1rem;
   padding: 0.0625rem 0.375rem;
   white-space: nowrap;
+}
+
+/* ── Session tree guides ────────────────────────────────────────────────────
+   A quiet indent gutter that threads child sessions under the session that
+   launched them. One fixed-width column per depth level: ancestor columns carry
+   a vertical line while that ancestor still has siblings below; the node's own
+   column draws the ├/└ connector across to its row. Lines use the border token
+   so they stay subtle in both palettes.
+
+   `--tree-tick` is the connector height — where the elbow turns and the stub
+   crosses to the row content, tuned to land on the attention badge / title.
+   The gutter stretches to the row's content height, then negative margins
+   extend it over the row's vertical padding so a parent's line meets its
+   child's without a gap. */
+.tree-gutter {
+  /* `--tree-tick`: connector height — where the elbow turns and the stub crosses
+     to the badge, centered on the attention badge / title line. */
+  --tree-tick: 1.5rem;
+  align-self: stretch;
+  margin-top: -0.75rem;
+  margin-bottom: -0.75rem;
+  display: flex;
+  flex: none;
+}
+
+.tree-col {
+  position: relative;
+  width: 1.05rem;
+}
+
+/* Vertical line, centered in the column. `through`/`tee` run the full height
+   (the branch continues to a later sibling); `elbow` stops at the connector. */
+.tree-col--through::before,
+.tree-col--tee::before,
+.tree-col--elbow::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  width: 0;
+  top: 0;
+  border-left: 1px solid var(--tree-line);
+}
+
+.tree-col--through::before,
+.tree-col--tee::before {
+  bottom: 0;
+}
+
+.tree-col--elbow::before {
+  height: var(--tree-tick);
+}
+
+/* Horizontal stub from the vertical across to the row content, at the tick. The
+   negative right edge carries the line over the row's flex `gap` so the
+   connector meets the badge instead of stopping short of it. */
+.tree-col--tee::after,
+.tree-col--elbow::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  right: -0.55rem;
+  top: var(--tree-tick);
+  height: 0;
+  border-top: 1px solid var(--tree-line);
 }
 
 /* Neutral pill — generic count/label pill (filter counts, issue counts,

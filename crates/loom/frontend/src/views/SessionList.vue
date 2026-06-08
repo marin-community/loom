@@ -25,25 +25,19 @@ const archivedCount = computed(
   () => sessions.value.filter((s) => s.status === 'archived').length,
 );
 
-// Attention rank: blocked and attention both "need a human" and pin to the top;
-// ok sinks below. Within a rank, preserve the server order (most-recent-first),
-// so the sort is stable and rows don't jitter between 3s polls.
-function rank(s: Session): number {
-  const lvl = levelOf(s);
-  if (lvl === 'blocked') return 0;
-  if (lvl === 'attention') return 1;
-  return 2;
-}
-
-// The ordered, archived-aware base list: attention pinned to the top, archived
-// hidden unless revealed (or unless every session is archived — see above).
-const ordered = computed<Session[]>(() => {
+// The archived-aware, filtered set to display (membership only — the tree below
+// imposes the order). Archived rows are hidden by default; a reveal chip brings
+// them back, and they always show when there's nothing else, so the list never
+// reads empty while archived rows exist. Attention is no longer pinned to the
+// top — threading groups related work instead — but attention rows still get
+// their loud row wash + pulse, so they stay easy to spot.
+const visibleSessions = computed<Session[]>(() => {
   const all = sessions.value;
   const live = all.filter((s) => s.status !== 'archived');
-  // Hide archived by default; reveal on toggle; always show if nothing else.
   const base = showArchived.value || live.length === 0 ? all : live;
-  // Stable sort by attention rank (Array.prototype.sort is stable in modern JS).
-  return [...base].sort((a, b) => rank(a) - rank(b));
+  if (filter.value === 'attention') return base.filter((s) => levelOf(s) !== 'ok');
+  if (filter.value === 'ok') return base.filter((s) => levelOf(s) === 'ok');
+  return base;
 });
 
 // Counts reflect the full fleet (NOT the archived-hidden view) so the filter
@@ -58,11 +52,59 @@ const counts = computed(() => {
   return c;
 });
 
-// Apply the attention filter on top of the ordered/archived-aware base list.
-const filteredSessions = computed(() => {
-  if (filter.value === 'all') return ordered.value;
-  if (filter.value === 'ok') return ordered.value.filter((s) => levelOf(s) === 'ok');
-  return ordered.value.filter((s) => levelOf(s) !== 'ok');
+// One flattened tree row: the session, its depth, and the gutter guides drawn to
+// its left. `verticals[i]` is true when an ancestor's line keeps running down
+// past this row; `isLast` picks the connector (└ vs ├). Depth 0 (top-level)
+// draws no gutter, so a flat fleet with no sub-sessions looks exactly as before.
+interface TreeRow {
+  session: Session;
+  depth: number;
+  verticals: boolean[];
+  isLast: boolean;
+}
+
+// Group the visible sessions into threads: each hangs under the session that
+// launched it (`parent_id`, a branch id), with top-level sessions under an
+// implicit root. Siblings sort by launch time (newest first) and a parent always
+// sits directly above its children. A parent that's filtered/archived out of the
+// visible set (or was never tracked) drops its orphaned children to the top.
+const treeRows = computed<TreeRow[]>(() => {
+  const list = visibleSessions.value;
+  const present = new Set(list.map((s) => s.branch.id));
+  const children = new Map<string, Session[]>();
+  const roots: Session[] = [];
+  for (const s of list) {
+    const pid = s.parent_id;
+    if (pid && pid !== s.branch.id && present.has(pid)) {
+      const arr = children.get(pid);
+      if (arr) arr.push(s);
+      else children.set(pid, [s]);
+    } else {
+      roots.push(s);
+    }
+  }
+  // Newest-first within a sibling group, matching the dashboard's default feel.
+  const byNewest = (a: Session, b: Session) =>
+    b.created_at < a.created_at ? -1 : b.created_at > a.created_at ? 1 : 0;
+
+  const rows: TreeRow[] = [];
+  const seen = new Set<string>(); // guard against any cycle in the parent links
+  const walk = (node: Session, depth: number, verticals: boolean[], isLast: boolean) => {
+    if (seen.has(node.branch.id)) return;
+    seen.add(node.branch.id);
+    rows.push({ session: node, depth, verticals, isLast });
+    const kids = [...(children.get(node.branch.id) ?? [])].sort(byNewest);
+    kids.forEach((kid, i) => {
+      const last = i === kids.length - 1;
+      // The implicit root isn't a drawn column, so a top-level node's children
+      // start with no ancestor lines; deeper, append this node's continuation.
+      const childVerticals = depth === 0 ? [] : [...verticals, !isLast];
+      walk(kid, depth + 1, childVerticals, last);
+    });
+  };
+  const sortedRoots = [...roots].sort(byNewest);
+  sortedRoots.forEach((r, i) => walk(r, 0, [], i === sortedRoots.length - 1));
+  return rows;
 });
 const recentRepos = ref<RecentRepo[]>([]);
 const error = ref('');
@@ -502,18 +544,20 @@ onUnmounted(() => clearInterval(timer));
     </div>
 
     <!--
-      One signal row per session. Left→right: the agent's single attention
-      signal, the dominant title, its muted current-state line, a neutral
-      lifecycle pill, and the mono branch ref pushed far-right. Attention rows
-      pin to the top (sort in script) and get a left accent-border + slow pulse;
-      ok rows stay quiet. Staggered reveal on load via --i.
+      One signal row per session. Left→right: an optional tree gutter threading
+      child sessions under their launcher, the agent's single attention signal,
+      the dominant title, its muted current-state line, a neutral lifecycle pill,
+      and the mono branch ref pushed far-right. Rows are grouped into threads
+      (build in script) rather than attention-sorted; attention rows still get a
+      left accent-border + slow pulse so they stand out. Staggered reveal via --i.
     -->
-    <ul v-if="sessions.length" class="overflow-hidden rounded border border-line bg-surface">
+    <ul v-if="sessions.length" data-testid="session-list" class="overflow-hidden rounded border border-line bg-surface">
       <li
-        v-for="(s, i) in filteredSessions"
+        v-for="({ session: s, depth, verticals, isLast }, i) in treeRows"
         :key="s.id"
         data-testid="session-card"
         :data-session-id="s.id"
+        :data-depth="depth"
         :style="{ '--i': i }"
         :class="[
           'stagger-in group flex cursor-pointer items-start gap-3 border-b border-line px-3 py-3 last:border-0',
@@ -526,6 +570,18 @@ onUnmounted(() => clearInterval(timer));
         ]"
         @click="$router.push(`/s/${s.id}`)"
       >
+        <!-- Tree gutter: threads a child session under the one that launched it.
+             Drawn only for nested rows, so a flat fleet is visually unchanged. -->
+        <div v-if="depth > 0" class="tree-gutter" aria-hidden="true">
+          <span
+            v-for="(v, c) in verticals"
+            :key="c"
+            class="tree-col"
+            :class="{ 'tree-col--through': v }"
+          ></span>
+          <span class="tree-col" :class="isLast ? 'tree-col--elbow' : 'tree-col--tee'"></span>
+        </div>
+
         <!-- Signal: the one reserved loud axis. -->
         <div class="shrink-0 pt-0.5">
           <AttentionBadge :level="levelOf(s)" :note="messageOf(s)" />

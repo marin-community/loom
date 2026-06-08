@@ -189,11 +189,19 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 `SessionView` (`/api/sessions[/...]`) returns session-specific fields
 top-level (`id`, `status`, `work_dir`, `tmux_session`, `agent_kind`, `model`,
 `effort`, `pending_prompt`, `github_repo`, `last_activity_at`,
-`created_at`, `updated_at`, and — on the create response only —
+`created_at`, `updated_at`, `parent_id`, and — on the create response only —
 `tracking_issue`) plus a nested `branch: BranchView`
 (`id`, `name`, `title`, `goal`, `description`, `attention`,
 `repo_root`, `branch`, `base_branch`, `created_at`, `updated_at`,
 `open_issue_count`, `github`).
+
+`SessionView::parent_id` is the branch id of the session that **launched** this
+one — the parent in loom's session tree — or `null` for a top-level session. It
+is stamped onto the `sessions` row at create time from the resolved
+`parent_branch` (so reads need no extra query and the link can't drift), and is
+`null` too when that parent is later untracked. The dashboard's session list
+groups sessions into threads by it (children under their launcher, siblings by
+launch time); a flat fleet with no sub-sessions is unchanged.
 
 `BranchView::github` is the branch's latest GitHub pull-request snapshot
 (`pr_number`, `pr_url`, `pr_state`, `pr_title`, `is_draft`, `review_decision`,

@@ -23,6 +23,10 @@ pub struct Session {
     pub github_repo: Option<String>,
     pub last_activity_at: Option<String>,
     pub created_at: String,
+    /// Branch id of the session that launched this one — its parent in the
+    /// dashboard's session tree. `None` for a top-level session. Set once at
+    /// creation from the resolved launcher, never re-derived.
+    pub parent_branch_id: Option<String>,
 }
 
 /// Session **lifecycle** states — the mechanical, orchestrator-owned axis: is
@@ -59,6 +63,9 @@ pub struct NewSession {
     pub effort: String,
     pub status: String,
     pub github_repo: Option<String>,
+    /// Branch id of the launching session (the parent in the session tree), or
+    /// `None` for a top-level launch. See [`Session::parent_branch_id`].
+    pub parent_branch_id: Option<String>,
 }
 
 pub async fn insert(db: &Db, s: &NewSession) -> Result<Session> {
@@ -66,8 +73,8 @@ pub async fn insert(db: &Db, s: &NewSession) -> Result<Session> {
     sqlx::query(
         "INSERT INTO sessions
          (id, branch_id, work_dir, tmux_session, agent_kind, model, effort, status,
-          github_repo, last_activity_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          github_repo, parent_branch_id, last_activity_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&s.id)
     .bind(&s.branch_id)
@@ -78,6 +85,7 @@ pub async fn insert(db: &Db, s: &NewSession) -> Result<Session> {
     .bind(&s.effort)
     .bind(&s.status)
     .bind(&s.github_repo)
+    .bind(&s.parent_branch_id)
     .bind(&now)
     .bind(&now)
     .execute(db)

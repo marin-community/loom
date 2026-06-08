@@ -200,3 +200,69 @@ async fn adopt_recreates_killed_session() {
 
     client.delete(&format!("/api/sessions/{id}")).await.unwrap();
 }
+
+/// A delegated launch records its launcher as the session's tree parent
+/// (`parent_id`); a top-level launch has none. The link is stored on the session
+/// row at create time, so it survives a re-list unchanged.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_records_its_launcher_as_tree_parent() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+    let cwd = ts.cwd();
+
+    // A top-level (human) launch has no parent.
+    let parent = client
+        .post(
+            "/api/sessions",
+            json!({ "goal": "parent work", "cwd": cwd, "agent": "shell", "name": "parent" }),
+        )
+        .await
+        .unwrap();
+    let parent_branch_id = parent["branch"]["id"].as_str().unwrap().to_string();
+    assert!(
+        parent["parent_id"].is_null(),
+        "a top-level launch has no tree parent"
+    );
+
+    // A delegated launch names the parent branch; its session points back at it.
+    let child = client
+        .post(
+            "/api/sessions",
+            json!({
+                "goal": "child work",
+                "cwd": cwd,
+                "agent": "shell",
+                "name": "child",
+                "parent_branch": parent_branch_id,
+            }),
+        )
+        .await
+        .unwrap();
+    let child_id = child["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        child["parent_id"].as_str(),
+        Some(parent_branch_id.as_str()),
+        "the child's tree parent is the launching branch"
+    );
+
+    // Stored, not recomputed: the link is still there on a plain list.
+    let list = client.get("/api/sessions").await.unwrap();
+    let row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == child_id.as_str())
+        .expect("child session in list");
+    assert_eq!(row["parent_id"].as_str(), Some(parent_branch_id.as_str()));
+
+    client
+        .delete(&format!("/api/sessions/{child_id}"))
+        .await
+        .unwrap();
+    let parent_id = parent["id"].as_str().unwrap();
+    client
+        .delete(&format!("/api/sessions/{parent_id}"))
+        .await
+        .unwrap();
+}
