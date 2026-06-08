@@ -11,6 +11,7 @@ pub mod db;
 pub mod endpoint;
 pub mod github;
 pub mod monitor;
+pub mod overlooker;
 pub mod repo;
 pub mod server;
 pub mod session;

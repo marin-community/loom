@@ -11,7 +11,7 @@ use tokio::net::TcpListener;
 use crate::events::EventBus;
 use crate::session as session_mod;
 use crate::web::AppState;
-use crate::{config, db, github, monitor, tmux, web};
+use crate::{config, db, github, monitor, overlooker, tmux, web};
 use weaver_core::branch as branch_mod;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -150,7 +150,11 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     // setting and on `gh` being available, so it idles cheaply when GitHub
     // integration is off or unavailable.
     tokio::spawn(github::poll(state.clone()));
-    tracing::debug!("background tasks spawned (monitor, github poll)");
+    // The Overlooker engine (timer + dispatcher). Always spawned; it self-gates
+    // on the `overlooker.enabled` master switch, so a default loom runs it but it
+    // idles cheaply until the operator opts in.
+    tokio::spawn(overlooker::run(state.clone()));
+    tracing::debug!("background tasks spawned (monitor, github poll, overlooker)");
     axum::serve(listener, web::router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
