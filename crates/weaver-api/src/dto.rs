@@ -216,6 +216,13 @@ pub struct OverlookerView {
     pub model: String,
     pub effort: String,
     pub cooldown_secs: i64,
+    /// Warm mode (`params.warm`): the engine keeps one long-lived, fleet-hidden
+    /// session for this overlooker so it has across-round memory.
+    pub warm: bool,
+    /// The id of that warm session once the engine has created it, else `null`.
+    /// Its live terminal is reachable from the overlooker's detail page (the
+    /// session is hidden from the fleet listing).
+    pub warm_session_id: Option<String>,
     pub last_run_at: Option<String>,
     pub next_run_at: Option<String>,
     /// The most recent round's outcome (`ok|noop|skipped|error`), or `null` if
@@ -242,6 +249,8 @@ impl OverlookerView {
             model: o.model.clone(),
             effort: o.effort.clone(),
             cooldown_secs: o.cooldown_secs,
+            warm: o.warm(),
+            warm_session_id: o.warm_session_id.clone(),
             last_run_at: o.last_run_at.clone(),
             next_run_at: o.next_run_at.clone(),
             last_outcome,

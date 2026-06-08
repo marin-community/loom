@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router';
 import { get, post, patch, del } from '../api';
 import type { Overlooker, OverlookerRun, OverlookerRunResult } from '../types';
 import OutcomeBadge from '../components/OutcomeBadge.vue';
+import AgentTerminal from '../components/AgentTerminal.vue';
 import { timeAgo } from '../lib/time';
 import {
   triggerSummary,
@@ -15,9 +16,9 @@ import {
 } from '../lib/overlooker';
 
 // One overlooker's detail: its config (readable + editable), the round-history
-// audit trail (the marks/nudges/would-dos each round took), and the lifecycle
-// controls. The warm-session live terminal the plan mentions is omitted — warm
-// sessions don't exist yet (T12); a labelled placeholder stands in its place.
+// audit trail (the marks/nudges/would-dos each round took), the lifecycle
+// controls, and — for a warm overlooker — the live terminal of its persistent
+// session (hidden from the fleet, so this is its home).
 const props = defineProps<{ id: string }>();
 const router = useRouter();
 
@@ -378,13 +379,27 @@ onMounted(() => {
         </dl>
       </section>
 
-      <!-- Warm-session terminal placeholder (T12 — not yet built). -->
-      <section class="mb-6 rounded border border-dashed border-line bg-surface p-4">
+      <!-- Warm session: the live terminal of the overlooker's persistent
+           session when warm mode is on, else a note on how to enable it. -->
+      <section
+        v-if="ov.warm_session_id"
+        class="mb-6"
+        data-testid="overlooker-warm-terminal"
+      >
+        <h2 class="text-sm font-semibold text-muted uppercase tracking-wide mb-2">Warm session</h2>
+        <AgentTerminal :id="ov.warm_session_id" />
+      </section>
+      <section v-else class="mb-6 rounded border border-dashed border-line bg-surface p-4">
         <h2 class="text-sm font-semibold text-muted uppercase tracking-wide mb-1">Warm session</h2>
-        <p class="text-xs text-faint">
-          A live terminal for an overlooker that keeps a persistent session across
-          rounds will live here once warm sessions ship (T12). Today every round
-          runs fresh.
+        <p v-if="ov.warm" class="text-xs text-faint" data-testid="overlooker-warm-pending">
+          Warm mode is on. The engine brings up a persistent session on the next
+          round; its live terminal appears here, and it carries memory from one
+          round to the next.
+        </p>
+        <p v-else class="text-xs text-faint" data-testid="overlooker-warm-off">
+          Each round runs fresh. Turn on warm mode (set <code>params.warm</code>)
+          to keep one persistent session with across-round memory — its terminal
+          lives here.
         </p>
       </section>
 

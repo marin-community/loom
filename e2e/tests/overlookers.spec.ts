@@ -114,6 +114,21 @@ test.describe('overlooker panel', () => {
     expect(fresh.capabilities).toContain('interrupt');
   });
 
+  test('surfaces warm-session state on the detail page', async ({ page, weaver }) => {
+    // An ordinary overlooker runs each round fresh — no warm session.
+    const fresh = await weaver.seedOverlooker({ name: 'fresh-runner' });
+    await page.goto(`${weaver.baseUrl}/overlookers/${fresh.id}`);
+    await expect(page.getByTestId('overlooker-warm-off')).toBeVisible();
+    await expect(page.getByTestId('overlooker-warm-terminal')).toHaveCount(0);
+
+    // A warm overlooker that has not run yet shows the pending note (the engine
+    // creates its persistent session on the next round).
+    const warm = await weaver.seedOverlooker({ name: 'warm-runner', params: { warm: true } });
+    await page.goto(`${weaver.baseUrl}/overlookers/${warm.id}`);
+    await expect(page.getByTestId('overlooker-warm-pending')).toBeVisible();
+    await expect(page.getByTestId('overlooker-warm-off')).toHaveCount(0);
+  });
+
   test('deletes an overlooker from the detail page', async ({ page, weaver }) => {
     const o = await weaver.seedOverlooker({ name: 'doomed' });
 

@@ -251,6 +251,12 @@ export interface Overlooker {
   model: string;
   effort: string;
   cooldown_secs: number;
+  /** Warm mode (`params.warm`): the engine keeps one long-lived, fleet-hidden
+   *  session for this overlooker so it has across-round memory. */
+  warm: boolean;
+  /** The id of that warm session once the engine has created it, else null. Its
+   *  live terminal is reachable here (it is hidden from the fleet listing). */
+  warm_session_id: string | null;
   last_run_at: string | null;
   next_run_at: string | null;
   /** The most recent round's outcome, or null if it has never run. */
