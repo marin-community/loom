@@ -254,6 +254,7 @@ onUnmounted(() => clearInterval(timer));
     <form
       v-if="showForm"
       class="mb-5 rounded border border-line bg-surface p-4 space-y-3"
+      autocomplete="off"
       @submit.prevent="create"
     >
       <div class="relative">
@@ -303,6 +304,7 @@ onUnmounted(() => clearInterval(timer));
         <input
           v-model="title"
           placeholder="Health endpoint"
+          autocomplete="off"
           class="w-full rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent"
         />
       </div>
@@ -314,6 +316,7 @@ onUnmounted(() => clearInterval(timer));
           v-model="goal"
           rows="4"
           placeholder="Add a /health endpoint that returns 200"
+          autocomplete="off"
           class="w-full rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent resize-y"
         ></textarea>
       </div>
@@ -322,6 +325,7 @@ onUnmounted(() => clearInterval(timer));
           <label class="block text-xs text-muted mb-1">Model</label>
           <select
             v-model="model"
+            autocomplete="off"
             class="w-full rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent"
           >
             <option value="">Default</option>
@@ -334,6 +338,7 @@ onUnmounted(() => clearInterval(timer));
           <label class="block text-xs text-muted mb-1">Effort</label>
           <select
             v-model="effort"
+            autocomplete="off"
             class="w-full rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent"
           >
             <option value="">Default</option>
@@ -382,6 +387,8 @@ onUnmounted(() => clearInterval(timer));
               v-model="name"
               @input="nameEdited = true"
               placeholder="health-endpoint"
+              autocomplete="off"
+              spellcheck="false"
               class="w-full rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent font-mono"
             />
           </div>
