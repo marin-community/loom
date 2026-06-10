@@ -440,6 +440,7 @@ onUnmounted(() => clearInterval(timer));
               <option value="haiku">Haiku</option>
               <option value="sonnet">Sonnet</option>
               <option value="opus">Opus</option>
+              <option value="fable">Fable</option>
             </select>
           </div>
           <div>

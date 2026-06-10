@@ -53,7 +53,7 @@ export interface Session {
   work_dir: string;
   tmux_session: string;
   agent_kind: string;
-  /** Model tier ('', 'haiku', 'sonnet', 'opus') — spliced in as `--model`. */
+  /** Model tier ('', 'haiku', 'sonnet', 'opus', 'fable') — spliced in as `--model`. */
   model: string;
   /** Reasoning effort ('', 'low', 'medium', 'high', 'xhigh', 'max') — `--effort`. */
   effort: string;

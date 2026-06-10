@@ -156,7 +156,7 @@ tracking issue is attributed to it (`source_branch`), so its sub-trees show up
 under "Delegated by this branch" in `weaver issue ls` — agents can fan work out
 into parallel sub-sessions and poll or block on them the same way a human does.
 
-`loom session launch --model <haiku|sonnet|opus> --effort <low|medium|high|xhigh|max>`
+`loom session launch --model <haiku|sonnet|opus|fable> --effort <low|medium|high|xhigh|max>`
 (both also selectors in the web create form) pin the session's Claude model
 tier and reasoning effort. They are orthogonal — any model runs at any effort —
 and spliced into the launch as `--model` / `--effort`. Both are stored per

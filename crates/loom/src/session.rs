@@ -15,7 +15,8 @@ pub struct Session {
     pub work_dir: String,
     pub tmux_session: String,
     pub agent_kind: String,
-    /// Model tier ('', 'haiku', 'sonnet', 'opus') — spliced in as `--model`.
+    /// Model tier ('', 'haiku', 'sonnet', 'opus', 'fable') — spliced in as
+    /// `--model`.
     pub model: String,
     /// Reasoning effort ('', 'low', 'medium', 'high', 'xhigh', 'max') — `--effort`.
     pub effort: String,

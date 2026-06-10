@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     work_dir           TEXT NOT NULL,
     tmux_session       TEXT NOT NULL,
     agent_kind         TEXT NOT NULL DEFAULT 'claude',
-    -- Per-session model tier ('', 'haiku', 'sonnet', 'opus') and reasoning
+    -- Per-session model tier ('', 'haiku', 'sonnet', 'opus', 'fable') and reasoning
     -- effort ('', 'low', 'medium', 'high', 'xhigh', 'max'), spliced into the
     -- Claude launch as `--model` / `--effort`. Empty inherits the global
     -- `agent.claude_args`.

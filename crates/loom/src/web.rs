@@ -461,8 +461,8 @@ struct CreateReq {
     /// leaves it unset.
     #[serde(default)]
     parent_branch: Option<String>,
-    /// Model tier ('haiku' | 'sonnet' | 'opus'); blank/absent inherits the
-    /// configured `agent.claude_args`.
+    /// Model tier ('haiku' | 'sonnet' | 'opus' | 'fable'); blank/absent
+    /// inherits the configured `agent.claude_args`.
     #[serde(default)]
     model: Option<String>,
     /// Reasoning effort ('low' | 'medium' | 'high' | 'xhigh' | 'max');
