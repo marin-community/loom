@@ -341,8 +341,8 @@ pub struct CreateReq {
     /// a human/dashboard launch leaves it unset.
     #[serde(default)]
     pub parent_branch: Option<String>,
-    /// Model tier ('haiku' | 'sonnet' | 'opus'); blank/absent inherits the
-    /// configured `agent.claude_args`.
+    /// Model tier ('haiku' | 'sonnet' | 'opus' | 'fable'); blank/absent
+    /// inherits the configured `agent.claude_args`.
     #[serde(default)]
     pub model: Option<String>,
     /// Reasoning effort ('low' | 'medium' | 'high' | 'xhigh' | 'max');

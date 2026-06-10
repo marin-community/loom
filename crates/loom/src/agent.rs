@@ -12,7 +12,7 @@ use weaver_core::agent::hooks_json;
 pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
 /// Accepted per-session model tiers.
-pub const MODELS: &[&str] = &["haiku", "sonnet", "opus"];
+pub const MODELS: &[&str] = &["haiku", "sonnet", "opus", "fable"];
 
 /// `--effort <level>` for a known level, else empty (inherit the configured
 /// `agent.claude_args`).
@@ -208,6 +208,7 @@ mod tests {
         assert_eq!(effort_args("xhigh"), "--effort xhigh");
         assert_eq!(effort_args(""), "");
         assert_eq!(model_args("opus"), "--model opus");
+        assert_eq!(model_args("fable"), "--model fable");
         assert_eq!(model_args(""), "");
     }
 
