@@ -1,10 +1,18 @@
 <script setup lang="ts">
 import { ref, computed, nextTick } from 'vue';
 import type { Session } from '../types';
-import { messageOf, conversationState, levelOf, TONE_TEXT } from '../lib/sessionState';
+import {
+  messageOf,
+  conversationState,
+  levelOf,
+  effectiveAttention,
+  quietTags,
+  TONE_TEXT,
+} from '../lib/sessionState';
 import { timeAgo } from '../lib/time';
 import { useSessionActions } from '../lib/sessionActions';
 import StatusBadge from './StatusBadge.vue';
+import TagPill from './TagPill.vue';
 import SessionDetailsPopover from './SessionDetailsPopover.vue';
 import GithubStatus from './GithubStatus.vue';
 
@@ -28,7 +36,7 @@ const actions = useSessionActions(
   () => props.ws.id,
   () => emit('reload'),
 );
-const { busy, notice, error, rename, acknowledge, adopt, archive, remove } = actions;
+const { busy, notice, error, rename, acknowledge, clearTag, adopt, archive, remove } = actions;
 
 const showDetails = ref(false);
 
@@ -67,11 +75,25 @@ function repoName(p: string): string {
   return p.replace(/\/+$/, '').split('/').pop() || p;
 }
 
-// Derived conversation state (glyph + label + tone) and the attention wash.
+// Derived conversation state (glyph + label + tone) and the attention wash. The
+// wash follows the resolved signal (`effectiveAttention`), so an overlooker mark
+// washes the header loud just as the agent's own does.
 const conv = computed(() => conversationState(props.ws));
+const eff = computed(() => effectiveAttention(props.ws));
 const toneClass = computed(() => TONE_TEXT[conv.value.tone]);
 const lastActivity = computed(() => timeAgo(props.ws.last_activity_at));
+// "Mark OK" clears the agent's own `attention` tag, so it's offered only when the
+// agent itself raised attention (not when an overlooker did).
 const ackable = computed(() => levelOf(props.ws) !== 'ok');
+// One-line attribution when the loud signal came from an overlooker rather than
+// the agent — shown beside the loud chip.
+const raisedByOverlooker = computed(() => eff.value.raisedBy === 'triage');
+const attribution = computed(() => {
+  if (!raisedByOverlooker.value) return '';
+  const who = eff.value.by && eff.value.by !== 'manual' ? eff.value.by : 'overlooker';
+  return eff.value.stale ? `⊙ ${who} (stale)` : `⊙ ${who}`;
+});
+const quiet = computed(() => quietTags(props.ws));
 // Only true attention/blocked elevates to the loud header treatment.
 const loud = computed(() => conv.value.tone === 'block' || conv.value.tone === 'attn');
 const washClass = computed(() =>
@@ -120,10 +142,20 @@ const washClass = computed(() =>
         <template v-if="loud">
           <span
             data-testid="conversation-state"
-            class="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-semibold"
             :class="conv.tone === 'block' ? 'bg-block text-block-fg' : 'bg-attn text-attn-fg'"
+            class="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-semibold"
           >
             {{ conv.glyph }} {{ conv.label }}
+          </span>
+          <!-- When an overlooker raised it (not the agent), attribute the mark. -->
+          <span
+            v-if="raisedByOverlooker"
+            data-testid="attention-attribution"
+            :class="eff.stale ? 'opacity-60' : ''"
+            class="text-xs text-muted"
+            :title="eff.note || 'Raised by an overlooker'"
+          >
+            {{ attribution }}
           </span>
           <button
             v-if="ackable"
@@ -193,6 +225,18 @@ const washClass = computed(() =>
     <p v-else class="mt-1 text-sm text-faint">
       No status yet — agent hasn't run <code>weaver set-status</code>.
     </p>
+
+    <!-- Quiet tags — free-form, deletable pills (priority, needs-rebase, …),
+         never the reserved loud fill. Each × clears that tag. -->
+    <div v-if="quiet.length" class="mt-1.5 flex flex-wrap items-center gap-1.5">
+      <TagPill
+        v-for="t in quiet"
+        :key="t.key"
+        :tag="t"
+        :busy="busy === `tag:${t.key}`"
+        @clear="clearTag"
+      />
+    </div>
 
     <!-- Row 3 — one quiet meta line: repo/branch · agent, then the calm
          conversation-state + freshness pushed to the right. (When attention is

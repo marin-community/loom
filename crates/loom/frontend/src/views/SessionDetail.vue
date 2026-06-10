@@ -64,7 +64,10 @@ async function loadAll() {
 
 function openStream() {
   source = new EventSource(`/api/sessions/${props.id}/events`);
-  for (const kind of ['status', 'attention', 'github']) {
+  // `tag` covers every status axis (the agent's attention, an overlooker's
+  // triage, any free-form key); a tag write re-fetches the session so the
+  // resolved badge and the pill row refresh.
+  for (const kind of ['status', 'tag', 'github']) {
     source.addEventListener(kind, (e) => {
       const ev = JSON.parse((e as MessageEvent).data) as WeaverEvent;
       events.value.push(ev);
@@ -81,8 +84,12 @@ function openStream() {
 function eventLine(ev: WeaverEvent): string {
   const d = ev.data || {};
   if (ev.kind === 'status') return `status → ${d.status ?? '?'}`;
-  if (ev.kind === 'attention')
-    return `status → ${d.level ?? '?'}${d.note ? ` (${d.note})` : ''}`;
+  if (ev.kind === 'tag') {
+    // `{ key, value, note, by }`; an empty value means the tag was cleared.
+    const key = (d.key as string) ?? 'tag';
+    const note = d.note ? ` (${d.note})` : '';
+    return d.value ? `${key} → ${d.value}${note}` : `${key} cleared`;
+  }
   if (ev.kind === 'github')
     return `PR #${d.pr ?? '?'} → ${d.state ?? '?'}${d.checks ? ` · checks ${d.checks}` : ''}`;
   if (ev.kind === 'issue_added') return `issue added: ${d.title ?? ''}`;

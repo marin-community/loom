@@ -1,0 +1,29 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "weaver-py"
+version = "0.1.0"
+description = "Capability-gated Python bindings over the loom REST API (weaver-api)."
+requires-python = ">=3.9"
+license = { text = "MIT" }
+classifiers = [
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.maturin]
+# `manifest-path` lets maturin build this crate from its own directory while the
+# Cargo manifest stays beside the Rust source. The abi3 extension-module feature
+# is declared in Cargo.toml; nothing else is needed here. The module is a single
+# top-level extension (no pure-Python package), so there is no `python-source`;
+# the type stub in `python/weaver_py.pyi` is for in-repo editor/checker use.
+manifest-path = "Cargo.toml"
+module-name = "weaver_py"

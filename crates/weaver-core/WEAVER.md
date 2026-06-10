@@ -113,6 +113,23 @@ again. A bare `weaver set-status ok` lowers the level and keeps your last
 message. This replaces the old guessed working/waiting/idle indicator, which was
 often wrong (e.g. it read "idle" while you were really waiting on a workflow).
 
+Under the hood, status is stored as **tags** on your branch. A tag is a single
+`(key, value)` annotation with a note, an author, and a timestamp. Two keys are
+well known:
+
+- `attention` — your self-report, the value being `attention` or `blocked`. This
+  is what `weaver set-status` writes; `ok` is the absence of the tag, so
+  `set-status ok` clears it. Absence is the calm state — a calm branch carries no
+  attention tag, only its `description` message.
+- `triage` — an overlooker's outside assessment of your branch, the same
+  `attention`/`blocked` ladder but authored by an overlooker (or `manual`), never
+  by you. It is independent of your `attention` tag and carries its own reason
+  and attribution.
+
+Your prose `description` is separate from the tags and is shown even when you are
+calm. Any other key is a free-form, quiet tag. A tag is stale once your session
+has moved on since it was set (its timestamp predates your last activity).
+
 ## How to work here
 
 - Prefer to make a well-reasoned decision, record it with `weaver set-status`,

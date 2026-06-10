@@ -10,7 +10,7 @@ use anyhow::{anyhow, bail, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::{json, Value};
 
-use weaver_core::{branch, config, db, events, issue, plan, repo_config};
+use weaver_core::{branch, config, db, events, issue, plan, repo_config, tags};
 
 #[derive(Parser)]
 #[command(
@@ -43,6 +43,18 @@ enum Cmd {
         level: Option<String>,
         /// Current-state message, e.g. "Wired up routes; tests pass".
         message: Vec<String>,
+    },
+    /// Read, set, or clear a tag on a session.
+    ///
+    /// A tag is a single-valued `(key, value)` annotation on a branch with a
+    /// one-line note and an author. The well-known loud keys are `attention`
+    /// (the agent's own signal, normally written by `set-status`) and `triage`
+    /// (an overlooker's outside assessment); both accept `attention` or
+    /// `blocked`. Any other key is free-form and quiet. Daemon-less, like
+    /// `set-status`.
+    Tag {
+        #[command(subcommand)]
+        cmd: TagCmd,
     },
     /// Print a quick orientation for the current branch.
     ///
@@ -185,6 +197,44 @@ enum ConfigCmd {
     List,
 }
 
+#[derive(Subcommand)]
+enum TagCmd {
+    /// Set (insert or replace) a tag. The loud keys (`attention`, `triage`)
+    /// accept only `attention` or `blocked`; clear them with `tag rm`. Any
+    /// other key is free-form. Defaults to the current branch; `--session`
+    /// targets another.
+    Set {
+        /// The tag key, e.g. `attention`, `triage`, or any free-form name.
+        key: String,
+        /// The value to store.
+        value: String,
+        /// One-line reason accompanying the tag.
+        #[arg(long, default_value = "")]
+        note: String,
+        /// The session to tag: an id, `repo:branch`, or unambiguous prefix.
+        /// Defaults to the current branch.
+        #[arg(long)]
+        session: Option<String>,
+        /// Who is setting it (attribution); defaults to `manual`.
+        #[arg(long, default_value = "manual")]
+        by: String,
+    },
+    /// Clear a tag — return that axis to its calm/default (absent) state.
+    Rm {
+        /// The tag key to clear.
+        key: String,
+        /// The session to clear it on; defaults to the current branch.
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// List every tag on a session (defaults to the current branch).
+    Ls {
+        /// The session to list; defaults to the current branch.
+        #[arg(long)]
+        session: Option<String>,
+    },
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
@@ -198,6 +248,7 @@ async fn run() -> Result<()> {
     match cli.cmd {
         Cmd::Goal { text } => cmd_goal(text.join(" ")).await,
         Cmd::SetStatus { level, message } => cmd_set_status(level, message.join(" ")).await,
+        Cmd::Tag { cmd } => cmd_tag(cmd).await,
         Cmd::Summary => cmd_summary().await,
         Cmd::Readme => cmd_readme().await,
         Cmd::Issue { cmd } => cmd_issue(cmd).await,
@@ -274,10 +325,11 @@ async fn render_summary(db: &db::Db, b: &branch::Branch) -> Result<String> {
     };
     let _ = writeln!(out, "Goal:    {goal}  (weaver goal)");
 
+    let attention = resolve_attention(db, &b.id).await?;
     let status = if b.description.is_empty() {
-        b.attention.clone()
+        attention
     } else {
-        format!("{} — {}", b.attention, b.description)
+        format!("{attention} — {}", b.description)
     };
     let _ = writeln!(out, "Status:  {status}  (weaver set-status)");
 
@@ -437,22 +489,42 @@ async fn cmd_set_status(level: Option<String>, message: String) -> Result<()> {
         "goal:        {}",
         if b.goal.is_empty() { "(none)" } else { &b.goal }
     );
+    let attention = resolve_attention(&db, &b.id).await?;
     let status = if b.description.is_empty() {
-        b.attention.clone()
+        attention
     } else {
-        format!("{} — {}", b.attention, b.description)
+        format!("{attention} — {}", b.description)
     };
     println!("status:      {status}");
     println!("open issues: {open}");
     Ok(())
 }
 
+/// The attention value that means "calm" — the default when a branch has no
+/// `attention` tag. Never stored (absence is calm); it is both the resolved
+/// value the status reads fall back to and the `set-status` input that clears
+/// the tag.
+const CALM: &str = "ok";
+
+/// The resolved attention level for a branch: the `attention` tag's value, or
+/// [`CALM`] when there is no tag. The single read path the CLI's status displays
+/// and `issue wait` gating share. A DB read error propagates rather than masking
+/// as calm.
+async fn resolve_attention(db: &db::Db, branch_id: &str) -> Result<String> {
+    Ok(tags::get(db, branch_id, tags::ATTENTION_KEY)
+        .await?
+        .map(|t| t.value)
+        .unwrap_or_else(|| CALM.to_string()))
+}
+
 /// Report the agent's status: set the attention level and, when a message is
-/// given, the accompanying current-state note (the branch `description`). Writes
-/// the branch fields directly (daemon-less) and an `attention` event so a
-/// running loom can push the change to the dashboard on its next tick. An empty
-/// message leaves the previous message in place — `set-status ok` just lowers
-/// the level without wiping what the agent last said.
+/// given, the accompanying current-state note (the branch `description`). The
+/// level lives on the `attention` tag — `ok` clears it (absence is the calm
+/// state), `attention`/`blocked` set it. Writes the description directly
+/// (daemon-less) and records a `tag` event so a running loom can push the change
+/// to the dashboard on its next tick. An empty message leaves the previous
+/// message in place — `set-status ok` just lowers the level without wiping what
+/// the agent last said.
 async fn cmd_set_status_write(
     db: &db::Db,
     b: &branch::Branch,
@@ -460,28 +532,127 @@ async fn cmd_set_status_write(
     message: &str,
 ) -> Result<()> {
     let level = level.trim().to_ascii_lowercase();
-    if !branch::is_valid_attention(&level) {
-        bail!(
-            "unknown status '{level}' — expected one of {}",
-            branch::ATTENTION_LEVELS.join(", ")
-        );
+    // `ok` is a valid *input* (return to calm) but is never stored — it clears
+    // the tag. The two storable levels come from the tags registry.
+    if level != CALM && !tags::is_valid_value(tags::ATTENTION_KEY, &level) {
+        bail!("unknown status '{level}' — expected one of ok, attention, blocked");
     }
     let message = message.trim();
-    branch::set_attention(db, &b.id, &level).await?;
     if !message.is_empty() {
         branch::set_description(db, &b.id, message).await?;
     }
+    // `ok` returns to calm by clearing the tag; the two loud levels upsert it.
+    // Either way record a `tag` event (empty value = cleared) so the monitor
+    // re-broadcasts and live dashboards refresh.
+    let value = if level == CALM {
+        tags::clear(db, &b.id, tags::ATTENTION_KEY).await?;
+        ""
+    } else {
+        tags::set(db, &b.id, tags::ATTENTION_KEY, &level, "", "agent").await?;
+        level.as_str()
+    };
     events::record_local(
         db,
         &b.id,
-        "attention",
-        json!({ "level": level, "note": message }),
+        "tag",
+        json!({ "key": tags::ATTENTION_KEY, "value": value, "note": "", "by": "agent" }),
     )
     .await?;
     if message.is_empty() {
         println!("status: {level}");
     } else {
         println!("status: {level} — {message}");
+    }
+    Ok(())
+}
+
+/// Resolve the branch a tag command targets: the named `--session` (an id,
+/// `repo:branch`, or unambiguous prefix) when given, else the current branch.
+async fn resolve_tag_target(db: &db::Db, session: Option<&str>) -> Result<branch::Branch> {
+    match session {
+        Some(key) => branch::resolve_key(db, key)
+            .await?
+            .ok_or_else(|| anyhow!("no session matching '{key}'")),
+        None => branch::resolve(db).await,
+    }
+}
+
+/// Set, clear, or list a tag on a branch. Tags unify the agent's `attention`
+/// self-report and an overlooker's `triage` assessment with any free-form axis.
+/// Writes the tag directly (daemon-less) and records a `tag` event so a running
+/// loom can push the change to the dashboard on its next tick.
+async fn cmd_tag(cmd: TagCmd) -> Result<()> {
+    let db = open_db().await?;
+    match cmd {
+        TagCmd::Set {
+            key,
+            value,
+            note,
+            session,
+            by,
+        } => {
+            let b = resolve_tag_target(&db, session.as_deref()).await?;
+            let key = key.trim();
+            let value = value.trim();
+            let note = note.trim();
+            let by = by.trim();
+            if !tags::is_valid_value(key, value) {
+                if tags::is_loud(key) {
+                    bail!(
+                        "'{key}' accepts only {} — use `weaver tag rm {key}` to clear it",
+                        tags::ATTENTION_VALUES.join(", ")
+                    );
+                }
+                bail!("a tag value cannot be empty — use `weaver tag rm {key}` to clear it");
+            }
+            tags::set(&db, &b.id, key, value, note, by).await?;
+            events::record_local(
+                &db,
+                &b.id,
+                "tag",
+                json!({ "key": key, "value": value, "note": note, "by": by }),
+            )
+            .await?;
+            if note.is_empty() {
+                println!("tag: {} → {key} = {value} (by {by})", b.branch);
+            } else {
+                println!("tag: {} → {key} = {value} (by {by}) — {note}", b.branch);
+            }
+        }
+        TagCmd::Rm { key, session } => {
+            let b = resolve_tag_target(&db, session.as_deref()).await?;
+            let key = key.trim();
+            tags::clear(&db, &b.id, key).await?;
+            events::record_local(
+                &db,
+                &b.id,
+                "tag",
+                json!({ "key": key, "value": "", "note": "", "by": "manual" }),
+            )
+            .await?;
+            println!("tag: {} → cleared {key}", b.branch);
+        }
+        TagCmd::Ls { session } => {
+            let b = resolve_tag_target(&db, session.as_deref()).await?;
+            let all = tags::list(&db, &b.id).await?;
+            if all.is_empty() {
+                println!("(no tags)");
+                return Ok(());
+            }
+            for t in &all {
+                let by = if t.set_by.is_empty() {
+                    String::new()
+                } else {
+                    format!("  (by {})", t.set_by)
+                };
+                let note = if t.note.is_empty() {
+                    String::new()
+                } else {
+                    format!("  — {}", t.note)
+                };
+                println!("{} = {}{by}{note}", t.key, t.value);
+            }
+        }
     }
     Ok(())
 }
@@ -957,10 +1128,13 @@ async fn working_branch_status(db: &db::Db, issue: &issue::Issue) -> Option<Stri
         .await
         .ok()
         .flatten()?;
+    // Best-effort display helper: on a read error show nothing rather than
+    // fabricating a calm status.
+    let attention = resolve_attention(db, &row.id).await.ok()?;
     let status = if row.description.is_empty() {
-        row.attention.clone()
+        attention
     } else {
-        format!("{} — {}", row.attention, row.description)
+        format!("{attention} — {}", row.description)
     };
     Some(format!("{claimed} · {status}"))
 }
@@ -1007,11 +1181,15 @@ async fn cmd_issue_wait(
         if !closed_only {
             if let Some(name) = cur.claimed_branch.as_deref() {
                 if let Some(row) = branch::find_by_repo_branch(db, repo_root, name).await? {
-                    if row.attention != branch::DEFAULT_ATTENTION {
+                    // The sub-agent wants the user when its `attention` tag is
+                    // present with a loud value (`attention`/`blocked`); absence
+                    // is the calm `ok` state.
+                    let attention = resolve_attention(db, &row.id).await?;
+                    if tags::ATTENTION_VALUES.contains(&attention.as_str()) {
                         let msg = if row.description.is_empty() {
-                            row.attention.clone()
+                            attention
                         } else {
-                            format!("{} — {}", row.attention, row.description)
+                            format!("{attention} — {}", row.description)
                         };
                         println!("issue #{id} needs you — {name} is {msg}");
                         return Ok(());

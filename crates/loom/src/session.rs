@@ -27,12 +27,20 @@ pub struct Session {
     /// dashboard's session tree. `None` for a top-level session. Set once at
     /// creation from the resolved launcher, never re-derived.
     pub parent_branch_id: Option<String>,
+    /// The overlooker id that owns this session when it is engine-managed
+    /// infrastructure — a *warm session* a watcher keeps for its across-round
+    /// memory. `None` for an ordinary fleet session. A managed session is hidden
+    /// from the fleet listing ([`list_visible`]) and the survey scope, and its
+    /// restart adoption is governed by `overlooker.adopt_warm` rather than
+    /// `server.auto_adopt`.
+    pub managed_by: Option<String>,
 }
 
 /// Session **lifecycle** states — the mechanical, orchestrator-owned axis: is
 /// the agent process being set up, alive, lost, or finished. How the agent is
 /// *doing* (whether it needs the user) is the separate, agent-declared
-/// `attention` axis on the branch — see [`weaver_core::branch::ATTENTION_LEVELS`].
+/// `attention` axis — the branch's `attention` tag, see
+/// [`weaver_core::tags::ATTENTION_KEY`].
 ///
 /// `running` replaces the old inferred `working`/`waiting`/`idle` trio: those
 /// guessed at the agent's state from hooks and screen stillness and were
@@ -66,6 +74,9 @@ pub struct NewSession {
     /// Branch id of the launching session (the parent in the session tree), or
     /// `None` for a top-level launch. See [`Session::parent_branch_id`].
     pub parent_branch_id: Option<String>,
+    /// The owning overlooker id for an engine-managed (warm) session, or `None`
+    /// for an ordinary fleet session. See [`Session::managed_by`].
+    pub managed_by: Option<String>,
 }
 
 pub async fn insert(db: &Db, s: &NewSession) -> Result<Session> {
@@ -73,8 +84,8 @@ pub async fn insert(db: &Db, s: &NewSession) -> Result<Session> {
     sqlx::query(
         "INSERT INTO sessions
          (id, branch_id, work_dir, tmux_session, agent_kind, model, effort, status,
-          github_repo, parent_branch_id, last_activity_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          github_repo, parent_branch_id, managed_by, last_activity_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&s.id)
     .bind(&s.branch_id)
@@ -86,6 +97,7 @@ pub async fn insert(db: &Db, s: &NewSession) -> Result<Session> {
     .bind(&s.status)
     .bind(&s.github_repo)
     .bind(&s.parent_branch_id)
+    .bind(&s.managed_by)
     .bind(&now)
     .bind(&now)
     .execute(db)
@@ -117,11 +129,58 @@ pub async fn active_for_branch(db: &Db, branch_id: &str) -> Result<Option<Sessio
     Ok(row)
 }
 
+/// Every session, ordered newest-first — managed (warm) sessions included. The
+/// internal view: the monitor's liveness walk, the adopt reconcile, and any
+/// engine bookkeeping use this so a managed session is never dropped from
+/// orphan detection. The fleet/dashboard listing and the survey scope use
+/// [`list_visible`] instead.
 pub async fn list(db: &Db) -> Result<Vec<Session>> {
     let rows = sqlx::query_as::<_, Session>("SELECT * FROM sessions ORDER BY created_at DESC")
         .fetch_all(db)
         .await?;
     Ok(rows)
+}
+
+/// The **fleet** sessions only — ordinary work, with engine-managed (warm)
+/// sessions excluded. Warm sessions are infrastructure a watcher keeps for its
+/// across-round memory, not work to show or survey, so the dashboard `/sessions`
+/// listing and an overlooker round's scope survey both read this list.
+pub async fn list_visible(db: &Db) -> Result<Vec<Session>> {
+    let rows = sqlx::query_as::<_, Session>(
+        "SELECT * FROM sessions WHERE managed_by IS NULL ORDER BY created_at DESC",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows)
+}
+
+/// Every engine-managed (warm) session — those owned by an overlooker. The
+/// managed-session reconcile pass walks these to re-adopt a warm session whose
+/// tmux is gone (when `overlooker.adopt_warm` is on) and to clean up one whose
+/// owning overlooker has been deleted.
+pub async fn list_managed(db: &Db) -> Result<Vec<Session>> {
+    let rows = sqlx::query_as::<_, Session>(
+        "SELECT * FROM sessions WHERE managed_by IS NOT NULL ORDER BY created_at DESC",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows)
+}
+
+/// The owned (warm) session for an overlooker, if one exists and is not
+/// terminal. Lets the engine reuse the same warm session across rounds rather
+/// than spawning a duplicate.
+pub async fn active_managed_by(db: &Db, overlooker_id: &str) -> Result<Option<Session>> {
+    let row = sqlx::query_as::<_, Session>(
+        "SELECT * FROM sessions
+         WHERE managed_by = ? AND status NOT IN ('done', 'error', 'archived')
+         ORDER BY created_at DESC
+         LIMIT 1",
+    )
+    .bind(overlooker_id)
+    .fetch_optional(db)
+    .await?;
+    Ok(row)
 }
 
 /// `(Session, Branch)` for a session id. None if the session is missing.
@@ -170,4 +229,76 @@ pub async fn delete(db: &Db, id: &str) -> Result<()> {
         .execute(db)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn branch_id(db: &Db, name: &str) -> String {
+        branch_mod::upsert(db, "/repo", name, "main")
+            .await
+            .unwrap()
+            .id
+    }
+
+    fn new_session(id: &str, branch_id: &str, managed_by: Option<&str>) -> NewSession {
+        NewSession {
+            id: id.to_string(),
+            branch_id: branch_id.to_string(),
+            work_dir: "/w".to_string(),
+            tmux_session: format!("weaver-{id}"),
+            agent_kind: "shell".to_string(),
+            model: String::new(),
+            effort: String::new(),
+            status: "running".to_string(),
+            github_repo: None,
+            parent_branch_id: None,
+            managed_by: managed_by.map(str::to_string),
+        }
+    }
+
+    /// `managed_by` round-trips and partitions the listings: `list` is the whole
+    /// set, `list_visible` is the fleet (managed excluded), `list_managed` is the
+    /// warm sessions (managed only).
+    #[tokio::test]
+    async fn managed_by_partitions_the_listings() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let ordinary_branch = branch_id(&db, "weaver/work").await;
+        let warm_branch = branch_id(&db, "weaver/overlooker-x").await;
+
+        insert(&db, &new_session("ordinary", &ordinary_branch, None))
+            .await
+            .unwrap();
+        let warm = insert(&db, &new_session("warm", &warm_branch, Some("ov-1")))
+            .await
+            .unwrap();
+        assert_eq!(warm.managed_by.as_deref(), Some("ov-1"), "marker persists");
+
+        let all: Vec<String> = list(&db).await.unwrap().into_iter().map(|s| s.id).collect();
+        assert!(all.contains(&"ordinary".to_string()) && all.contains(&"warm".to_string()));
+
+        let visible: Vec<String> = list_visible(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(visible, vec!["ordinary".to_string()], "fleet hides managed");
+
+        let managed: Vec<String> = list_managed(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(managed, vec!["warm".to_string()], "only managed listed");
+
+        let owned = active_managed_by(&db, "ov-1").await.unwrap().unwrap();
+        assert_eq!(owned.id, "warm", "the overlooker's warm session resolves");
+        assert!(
+            active_managed_by(&db, "ov-other").await.unwrap().is_none(),
+            "no warm session for an overlooker that owns none"
+        );
+    }
 }

@@ -244,9 +244,23 @@ fn seed_delegated_issue(env: &Env, parent: &str, child: &str, attention: &str, d
         weaver_core::branch::insert(&db, &child_id, &repo_root, child, "main")
             .await
             .unwrap();
-        weaver_core::branch::set_attention(&db, &child_id, attention)
+        // The attention level lives on the `attention` tag now; `ok` is absence.
+        if attention == "ok" {
+            weaver_core::tags::clear(&db, &child_id, weaver_core::tags::ATTENTION_KEY)
+                .await
+                .unwrap();
+        } else {
+            weaver_core::tags::set(
+                &db,
+                &child_id,
+                weaver_core::tags::ATTENTION_KEY,
+                attention,
+                "",
+                "agent",
+            )
             .await
             .unwrap();
+        }
         weaver_core::branch::set_description(&db, &child_id, description)
             .await
             .unwrap();
@@ -531,11 +545,175 @@ fn set_status_sets_level_and_message() {
         "message should persist across a bare level change: {out}"
     );
 
-    // The set also writes an `attention` event to the branch log.
+    // The set also writes a `tag` event to the branch log (the attention tag).
     let log = run(&env, &["log"]);
+    assert!(log.contains("tag"), "log should record tag events: {log}");
     assert!(
         log.contains("attention"),
-        "log should record attention events: {log}"
+        "the tag event should carry the attention key: {log}"
+    );
+}
+
+/// `weaver tag set triage` stamps the overlooker's mark on a *named* session —
+/// a status axis distinct from the agent's own `attention` — and records a `tag`
+/// event for the audit trail. The agent's attention tag is never touched.
+#[test]
+fn triage_tag_marks_a_session_without_touching_attention() {
+    let env = setup();
+    // The agent declares its own attention about itself.
+    run(&env, &["set-status", "blocked", "build", "broke"]);
+
+    // No triage tag until an overlooker looks.
+    let out = run(&env, &["tag", "ls", "--session", "feature-test"]);
+    assert!(
+        !out.contains("triage"),
+        "fresh session has no triage tag: {out}"
+    );
+
+    // An overlooker stamps a *different* opinion on the same session via the
+    // triage tag.
+    let out = run(
+        &env,
+        &[
+            "tag",
+            "set",
+            "triage",
+            "attention",
+            "--note",
+            "looks stuck on tests",
+            "--by",
+            "status-check",
+            "--session",
+            "feature-test",
+        ],
+    );
+    assert!(out.contains("triage = attention"), "triage tag set: {out}");
+
+    // Read it back with its note and attribution.
+    let out = run(&env, &["tag", "ls", "--session", "feature-test"]);
+    assert!(out.contains("triage = attention"), "read level: {out}");
+    assert!(out.contains("looks stuck on tests"), "read note: {out}");
+    assert!(out.contains("status-check"), "read attribution: {out}");
+
+    // The agent's own attention is untouched — two actors, two axes. Its tag
+    // sits alongside the triage tag.
+    assert!(
+        out.contains("attention = blocked"),
+        "agent attention must survive a triage write: {out}"
+    );
+    let out = run(&env, &["set-status"]);
+    assert!(
+        out.contains("status:      blocked — build broke"),
+        "the resolved status reads the agent's attention tag: {out}"
+    );
+
+    // The mark is logged as a `tag` event.
+    let log = run(&env, &["log"]);
+    assert!(log.contains("tag"), "log should record tag events: {log}");
+
+    // Clearing the triage tag leaves the agent's attention untouched.
+    run(&env, &["tag", "rm", "triage", "--session", "feature-test"]);
+    let out = run(&env, &["tag", "ls", "--session", "feature-test"]);
+    assert!(
+        !out.contains("triage"),
+        "triage tag should be cleared: {out}"
+    );
+    assert!(
+        out.contains("attention = blocked"),
+        "clearing triage must not touch attention: {out}"
+    );
+}
+
+/// A loud key (`attention`/`triage`) rejects a value off the attention ladder
+/// with a non-zero exit, like `set-status`.
+#[test]
+fn tag_set_rejects_invalid_loud_value() {
+    let env = setup();
+    run(&env, &["goal", "exist"]); // materialize the branch row first
+    let out = Command::new(weaver_bin())
+        .args(["tag", "set", "triage", "bogus", "--session", "feature-test"])
+        .current_dir(&env.repo_path)
+        .env("WEAVER_HOME", &env.home_path)
+        .env("WEAVER_API", "http://127.0.0.1:1")
+        .output()
+        .expect("failed to spawn weaver");
+    assert!(!out.status.success(), "an invalid loud value should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("attention, blocked"),
+        "stderr should name the valid values: {stderr}"
+    );
+}
+
+/// `weaver tag set/ls/rm` round-trips a free-form (quiet) tag on the current
+/// branch with its note and author, and `tag rm` clears it.
+#[test]
+fn tag_set_ls_rm_roundtrip() {
+    let env = setup();
+    run(&env, &["goal", "exist"]); // materialize the branch row first
+
+    // No tags to begin with.
+    let out = run(&env, &["tag", "ls"]);
+    assert!(out.contains("(no tags)"), "fresh branch has no tags: {out}");
+
+    // Set a free-form tag with a note and author.
+    let out = run(
+        &env,
+        &[
+            "tag",
+            "set",
+            "priority",
+            "high",
+            "--note",
+            "ship by friday",
+            "--by",
+            "russell",
+        ],
+    );
+    assert!(out.contains("priority = high"), "tag set: {out}");
+
+    // List it back with its note and attribution.
+    let out = run(&env, &["tag", "ls"]);
+    assert!(out.contains("priority = high"), "tag ls value: {out}");
+    assert!(out.contains("by russell"), "tag ls author: {out}");
+    assert!(out.contains("ship by friday"), "tag ls note: {out}");
+
+    // Setting the same key again overwrites it (single-valued).
+    run(&env, &["tag", "set", "priority", "low"]);
+    let out = run(&env, &["tag", "ls"]);
+    assert!(out.contains("priority = low"), "tag overwrite: {out}");
+    assert_eq!(out.matches("priority").count(), 1, "single-valued: {out}");
+
+    // Remove it.
+    run(&env, &["tag", "rm", "priority"]);
+    let out = run(&env, &["tag", "ls"]);
+    assert!(out.contains("(no tags)"), "tag rm cleared it: {out}");
+}
+
+/// `set-status ok` clears the agent's `attention` tag (returns to calm) while
+/// leaving the branch `description` in place.
+#[test]
+fn set_status_ok_clears_attention_tag_but_keeps_description() {
+    let env = setup();
+    // Raise attention with a message.
+    run(&env, &["set-status", "attention", "ready", "for", "review"]);
+    let out = run(&env, &["tag", "ls"]);
+    assert!(
+        out.contains("attention = attention"),
+        "set-status should write the attention tag: {out}"
+    );
+
+    // Return to calm — the attention tag is cleared, the description survives.
+    run(&env, &["set-status", "ok"]);
+    let out = run(&env, &["tag", "ls"]);
+    assert!(
+        !out.contains("attention ="),
+        "set-status ok should clear the attention tag: {out}"
+    );
+    let out = run(&env, &["set-status"]);
+    assert!(
+        out.contains("status:      ok — ready for review"),
+        "ok must keep the last description beside the calm level: {out}"
     );
 }
 

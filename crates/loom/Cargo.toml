@@ -14,6 +14,7 @@ path = "src/bin/loom.rs"
 
 [dependencies]
 weaver-core = { path = "../weaver-core" }
+weaver-api = { path = "../weaver-api" }
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
@@ -34,6 +35,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+croner = "3"
 
 [dev-dependencies]
 tempfile = "3"

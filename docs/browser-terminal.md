@@ -22,10 +22,10 @@ an agent and they are both worse than a terminal:
   (degraded: line-at-a-time, no keys, no TUI, no feedback except the next
   screenshot).
 
-The structured/status data plane (working / waiting / idle → lifecycle +
-attention) already comes from the **weaver hooks → events → SSE** pipeline. The browser
-stream's *only* job is interacting with a PTY. So we collapse the two degraded
-input paths into one real one and delete the rest.
+The structured/status data plane (working / waiting / idle → lifecycle + the
+branch's `attention` tag) already comes from the **weaver hooks → events → SSE**
+pipeline. The browser stream's *only* job is interacting with a PTY. So we
+collapse the two degraded input paths into one real one and delete the rest.
 
 [xterm.js]: https://xtermjs.org/
 
@@ -78,7 +78,7 @@ The terminal is a parallel, purely-interactive channel.
 
 | Concern | Plane | Keep? |
 |---|---|---|
-| Status (lifecycle + agent-declared attention), pending prompt, notes, issues, diff | hooks → events → SSE | **keep** |
+| Status (lifecycle + the agent's `attention` tag), pending prompt, notes, issues, diff | hooks → events → SSE | **keep** |
 | Idle/orphan detection (screen stillness hash) | monitor `capture-pane` | **keep** (internal heartbeat) |
 | Interacting with the agent (keystrokes, keys, TUIs) | new PTY WebSocket | **add** |
 | Line input box (`POST /send`) | degraded interaction | **remove** |

@@ -18,6 +18,12 @@ import { theme, toggleTheme } from './theme';
         <span v-else>☾</span>
       </button>
       <router-link
+        to="/overlookers"
+        class="text-sm text-muted hover:text-fg"
+      >
+        Overlookers
+      </router-link>
+      <router-link
         to="/settings"
         class="text-sm text-muted hover:text-fg"
       >

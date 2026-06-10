@@ -10,7 +10,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde_json::{json, Value};
 
-use loom::client::Client;
+use loom::client::{self, Client};
 
 #[derive(Parser)]
 #[command(
@@ -53,6 +53,22 @@ enum Cmd {
     Session {
         #[command(subcommand)]
         cmd: SessionCmd,
+    },
+    /// Manage overlookers: periodic / triggered watch programs over the fleet.
+    ///
+    /// An overlooker wakes on a trigger (a cron tick or a session event),
+    /// surveys the fleet, and acts — marking a session, nudging a stuck one,
+    /// escalating to you. Author one as a plain file an agent can edit, then
+    /// register it and iterate with `--dry-run`:
+    ///
+    ///     loom overlooker new test-watch          # scaffold ~/.weaver/overlookers/test-watch.py
+    ///     loom overlooker add status --cron "0 * * * *" --capabilities observe,mark,escalate
+    ///     loom overlooker run status --dry-run     # simulate; mutating actions are stubbed
+    ///     loom overlooker enable status            # arm it
+    ///     loom overlooker ls                       # the fleet of watchers
+    Overlooker {
+        #[command(subcommand)]
+        cmd: OverlookerCmd,
     },
     /// Deprecated alias for `loom session launch`.
     #[command(hide = true)]
@@ -155,6 +171,112 @@ enum SessionCmd {
     },
 }
 
+/// Subcommands under `loom overlooker` — the operator + authoring surface. A
+/// thin client over the REST API ("the API is the CLI").
+#[derive(Subcommand)]
+enum OverlookerCmd {
+    /// Scaffold a starter program file at `~/.weaver/overlookers/<name>.py`.
+    ///
+    /// Writes a commented Python template using the `weaver` module decorators,
+    /// then prints the path. Edit it, then register it with
+    /// `loom overlooker add <name> --program <path>`.
+    New {
+        /// The overlooker name; also the file stem (`<name>.py`).
+        name: String,
+    },
+    /// Register an overlooker from flags (POST /api/overlookers).
+    Add(Box<AddOpts>),
+    /// Remove an overlooker (DELETE).
+    Rm {
+        /// Overlooker id or name.
+        name: String,
+    },
+    /// Enable an overlooker (arm it).
+    Enable {
+        /// Overlooker id or name.
+        name: String,
+    },
+    /// Disable an overlooker (stop it cold, no redeploy).
+    Disable {
+        /// Overlooker id or name.
+        name: String,
+    },
+    /// List every overlooker: name, enabled, trigger, program, last outcome.
+    Ls,
+    /// Fire a round now and print its outcome + summary.
+    Run {
+        /// Overlooker id or name.
+        name: String,
+        /// Simulate: every mutating action is stubbed and logged as "would do
+        /// X", nothing is performed. Safe to repeat — the iteration primitive.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show an overlooker's round history (time, reason, outcome, summary).
+    Runs {
+        /// Overlooker id or name.
+        name: String,
+        /// How many recent rounds to show.
+        #[arg(long, default_value = "20")]
+        limit: i64,
+    },
+    /// Show the actions each recent round took (a verbose `runs`).
+    Logs {
+        /// Overlooker id or name.
+        name: String,
+        /// How many recent rounds to show.
+        #[arg(long, default_value = "10")]
+        limit: i64,
+    },
+}
+
+/// Options for `loom overlooker add` — the flags build the trigger / scope /
+/// program / capability set the REST `CreateOverlookerReq` takes.
+#[derive(Args)]
+struct AddOpts {
+    /// The overlooker name (unique).
+    name: String,
+    /// Cron trigger: a standard 5-field crontab expression (e.g. "0 * * * *").
+    #[arg(long, group = "trigger")]
+    cron: Option<String>,
+    /// Interval trigger sugar: a duration like `30m`, `2h`, `45s`.
+    #[arg(long, group = "trigger")]
+    every: Option<String>,
+    /// Reactive trigger: fire on an event of this kind (e.g. `attention`).
+    #[arg(long, group = "trigger")]
+    on_event: Option<String>,
+    /// With `--on-event`, narrow to a single level (e.g. `blocked`).
+    #[arg(long)]
+    level: Option<String>,
+    /// Pin the overlooker to one repository (filters the trigger + scope).
+    #[arg(long)]
+    repo: Option<String>,
+    /// Raw scope JSON, merged over the repo filter (e.g. '{"attention":"!ok"}').
+    #[arg(long)]
+    scope: Option<String>,
+    /// The program: `builtin:<name>` (default `builtin:status`) or an absolute
+    /// path to a custom program file.
+    #[arg(long)]
+    program: Option<String>,
+    /// The stock-program judgement prompt; stored as `params.prompt`.
+    #[arg(long)]
+    prompt: Option<String>,
+    /// Comma-separated capability set (default `observe,mark,escalate`). Drawn
+    /// from observe, mark, escalate, nudge, interrupt, launch.
+    #[arg(long, value_delimiter = ',')]
+    capabilities: Option<Vec<String>>,
+    /// Model tier for `run_agent` judgement calls (e.g. sonnet, opus).
+    #[arg(long)]
+    model: Option<String>,
+    /// Reasoning effort for judgement calls.
+    #[arg(long)]
+    effort: Option<String>,
+    /// Minimum gap between rounds, in seconds (a non-manual re-fire inside the
+    /// gap is skipped).
+    #[arg(long)]
+    cooldown: Option<i64>,
+}
+
 /// Shared `launch` options, used by both `loom session launch` and the
 /// deprecated top-level `loom launch` alias.
 #[derive(Args)]
@@ -224,6 +346,7 @@ async fn run() -> Result<()> {
         Cmd::Stop => cmd_stop().await,
         Cmd::Restart => cmd_restart().await,
         Cmd::Session { cmd } => run_session(cmd).await,
+        Cmd::Overlooker { cmd } => run_overlooker(cmd).await,
         Cmd::Launch(opts) => {
             eprintln!("note: `loom launch` is deprecated — use `loom session launch`");
             cmd_launch(opts.into()).await
@@ -268,6 +391,21 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
     }
 }
 
+/// Dispatch the `loom overlooker <verb>` subcommands.
+async fn run_overlooker(cmd: OverlookerCmd) -> Result<()> {
+    match cmd {
+        OverlookerCmd::New { name } => cmd_overlooker_new(name).await,
+        OverlookerCmd::Add(opts) => cmd_overlooker_add(*opts).await,
+        OverlookerCmd::Rm { name } => cmd_overlooker_rm(name).await,
+        OverlookerCmd::Enable { name } => cmd_overlooker_set_enabled(name, true).await,
+        OverlookerCmd::Disable { name } => cmd_overlooker_set_enabled(name, false).await,
+        OverlookerCmd::Ls => cmd_overlooker_ls().await,
+        OverlookerCmd::Run { name, dry_run } => cmd_overlooker_run(name, dry_run).await,
+        OverlookerCmd::Runs { name, limit } => cmd_overlooker_runs(name, limit, false).await,
+        OverlookerCmd::Logs { name, limit } => cmd_overlooker_runs(name, limit, true).await,
+    }
+}
+
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env()
@@ -285,6 +423,21 @@ fn branch_str<'a>(v: &'a Value, key: &str) -> &'a str {
         .and_then(|b| b.get(key))
         .and_then(Value::as_str)
         .unwrap_or("")
+}
+
+/// The agent's resolved attention level from a `SessionView`'s `branch.tags` —
+/// the value of the `attention` tag, or `ok` when it is absent (the calm state).
+fn branch_attention(v: &Value) -> &str {
+    v.get("branch")
+        .and_then(|b| b.get("tags"))
+        .and_then(Value::as_array)
+        .and_then(|tags| {
+            tags.iter()
+                .find(|t| t.get("key").and_then(Value::as_str) == Some("attention"))
+        })
+        .and_then(|t| t.get("value").and_then(Value::as_str))
+        .filter(|v| !v.is_empty())
+        .unwrap_or("ok")
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -543,7 +696,7 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
         model,
         effort,
     } = a;
-    let client = Client::new();
+    let client = client::default();
     let cwd = std::env::current_dir()?;
     // When an agent in a weaver session runs `loom session launch`,
     // `$WEAVER_BRANCH` is its own branch id — pass it so the tracking issue is
@@ -611,9 +764,10 @@ async fn fetch_session(client: &Client, key: &str) -> Result<Value> {
         .with_context(|| format!("no live session for '{key}'"))
 }
 
-/// One-line attention summary: the level, plus its current-state message when set.
+/// One-line attention summary: the resolved level (the agent's `attention` tag,
+/// `ok` when absent), plus its current-state message when set.
 fn attention_summary(ws: &Value) -> String {
-    let attention = branch_str(ws, "attention");
+    let attention = branch_attention(ws);
     let message = branch_str(ws, "description");
     if message.is_empty() {
         attention.to_string()
@@ -624,7 +778,7 @@ fn attention_summary(ws: &Value) -> String {
 
 /// `loom session poll` — a one-shot status read: lifecycle + attention.
 async fn cmd_session_poll(key: String) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let ws = fetch_session(&client, &key).await?;
     println!(
         "session {}  ({})",
@@ -648,7 +802,7 @@ async fn cmd_session_wait(
     interval: u64,
     lifecycle_only: bool,
 ) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     // Short-circuit if the session is already in a wake state at call time.
     let ws = fetch_session(&client, &key).await?;
     if let Some(reason) = wake_reason(&ws, &key, lifecycle_only) {
@@ -701,7 +855,7 @@ fn wake_reason(ws: &Value, key: &str, lifecycle_only: bool) -> Option<String> {
             "session {key} is orphaned — its tmux was lost (try `loom adopt {key}`)"
         ));
     }
-    if !lifecycle_only && branch_str(ws, "attention") != "ok" {
+    if !lifecycle_only && branch_attention(ws) != "ok" {
         return Some(format!(
             "session {key} needs you — {}",
             attention_summary(ws)
@@ -721,7 +875,7 @@ async fn cmd_session_send(key: String, message: String, submit: bool) -> Result<
     if message.trim().is_empty() {
         bail!("nothing to send — provide a message");
     }
-    let client = Client::new();
+    let client = client::default();
     client
         .post(
             &format!("/api/sessions/{key}/send"),
@@ -737,7 +891,7 @@ async fn cmd_session_send(key: String, message: String, submit: bool) -> Result<
 
 /// `loom session break` — send Escape to interrupt the agent's current turn.
 async fn cmd_session_break(key: String) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     client
         .post(&format!("/api/sessions/{key}/interrupt"), json!({}))
         .await?;
@@ -747,7 +901,7 @@ async fn cmd_session_break(key: String) -> Result<()> {
 
 /// `loom session preview` — print the session's recent tmux screen.
 async fn cmd_session_preview(key: String, lines: usize) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let res = client
         .get(&format!("/api/sessions/{key}/preview?lines={lines}"))
         .await?;
@@ -758,7 +912,7 @@ async fn cmd_session_preview(key: String, lines: usize) -> Result<()> {
 }
 
 async fn cmd_ps() -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let list = client.get("/api/sessions").await?;
     let rows = list.as_array().cloned().unwrap_or_default();
     if rows.is_empty() {
@@ -774,7 +928,7 @@ async fn cmd_ps() -> Result<()> {
             "{:<10}  {:<9}  {:<10}  {:<22}  {}",
             str_field(&ws, "id"),
             str_field(&ws, "status"),
-            branch_str(&ws, "attention"),
+            branch_attention(&ws),
             truncate(branch_str(&ws, "name"), 22),
             truncate(branch_str(&ws, "title"), 46),
         );
@@ -783,7 +937,7 @@ async fn cmd_ps() -> Result<()> {
 }
 
 async fn cmd_issues(all: bool, backlog: bool) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let cwd = std::env::current_dir()?;
     let scope = if backlog { "backlog" } else { "repo" };
     let path = format!(
@@ -825,7 +979,7 @@ async fn cmd_issues(all: bool, backlog: bool) -> Result<()> {
 }
 
 async fn cmd_show(key: String) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let ws = client.get(&format!("/api/sessions/{key}")).await?;
     print_session(&ws);
     Ok(())
@@ -839,9 +993,10 @@ fn print_session(ws: &Value) {
     );
     println!("  title:    {}", branch_str(ws, "title"));
     println!("  status:   {}", str_field(ws, "status"));
-    // Agent-declared attention level plus its current-state message (the
-    // branch `description`), shown together — one signal.
-    let attention = branch_str(ws, "attention");
+    // Agent-declared attention level (the resolved `attention` tag) plus its
+    // current-state message (the branch `description`), shown together — one
+    // signal.
+    let attention = branch_attention(ws);
     let message = branch_str(ws, "description");
     let attention = if message.is_empty() {
         attention.to_string()
@@ -900,7 +1055,7 @@ fn print_session(ws: &Value) {
 
 async fn cmd_attach(key: String) -> Result<()> {
     use std::os::unix::process::CommandExt;
-    let client = Client::new();
+    let client = client::default();
     let ws = client.get(&format!("/api/sessions/{key}")).await?;
     let session = ws
         .get("tmux_session")
@@ -914,7 +1069,7 @@ async fn cmd_attach(key: String) -> Result<()> {
 }
 
 async fn cmd_archive(key: String) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let res = client
         .post(&format!("/api/sessions/{key}/archive"), json!({}))
         .await?;
@@ -933,7 +1088,7 @@ async fn cmd_archive(key: String) -> Result<()> {
 }
 
 async fn cmd_adopt(key: String) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let ws = client
         .post(&format!("/api/sessions/{key}/adopt"), json!({}))
         .await?;
@@ -949,7 +1104,7 @@ async fn cmd_adopt(key: String) -> Result<()> {
 }
 
 async fn cmd_rm(key: String, keep_branch: bool) -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let path = format!("/api/sessions/{key}?keep_branch={keep_branch}");
     let res = client.delete(&path).await?;
     println!("removed session {key}");
@@ -964,7 +1119,7 @@ async fn cmd_rm(key: String, keep_branch: bool) -> Result<()> {
 }
 
 async fn cmd_open() -> Result<()> {
-    let client = Client::new();
+    let client = client::default();
     let url = client.base().to_string();
     println!("opening {url}");
     if std::process::Command::new("xdg-open")
@@ -975,6 +1130,381 @@ async fn cmd_open() -> Result<()> {
         println!("open it manually: {url}");
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Overlooker commands (the operator + authoring surface)
+// ---------------------------------------------------------------------------
+
+/// The starter program a `loom overlooker new` scaffolds. A small commented
+/// template against the `weaver` module decorators — the file convention an
+/// agent edits. The `{name}` placeholder is the overlooker's name.
+fn scaffold_template(name: &str) -> String {
+    format!(
+        r##""""{name} — a weaver overlooker (a periodic / triggered watch over the fleet).
+
+This program is run by the loom overlooker engine as an env-stripped subprocess.
+It uses the `weaver` Python module — the PyO3 binding (`weaver-py`, shipped
+separately) that wraps the same loom REST API the `loom session ...` commands
+use. So the vocabulary you explore the fleet with on the CLI is the vocabulary
+you call here: `ov.sessions(...)`, `s.preview()`, `s.mark(...)`, `s.nudge(...)`.
+
+Register this file once you're happy with it:
+
+    loom overlooker add {name} --program {path} \
+        --cron "0 * * * *" --capabilities observe,mark,escalate
+
+Iterate safely — every mutating action is stubbed under --dry-run:
+
+    loom overlooker run {name} --dry-run
+"""
+
+import weaver
+
+
+@weaver.on_cron("0 * * * *")  # the trigger — a cron event source (hourly)
+def {ident}(ov):
+    # A round is level-triggered: survey the *current* scoped fleet and
+    # reconcile, rather than reacting to the one event that woke you.
+    for s in ov.sessions(attention="!ok"):
+        # Cheap mechanical rule — no model, no cost.
+        if s.idle_minutes() > 30 and s.pr_checks() == "failing":
+            s.mark("attention", "idle 30m with red CI")
+            continue
+
+        # …or a fresh agent for the judgement call.
+        verdict = ov.run_agent(
+            f"Is this session stuck? Screen:\n{{s.preview(200)}}"
+        )
+        s.mark(verdict.level, verdict.note)
+
+        # The nudge rung of the intervention ladder — capability-gated.
+        if verdict.level != "ok" and ov.can("nudge"):
+            s.nudge(verdict.suggestion)
+"##,
+        name = name,
+        ident = name.replace(['-', '.', ' '], "_"),
+        path = overlooker_path(name).display(),
+    )
+}
+
+/// The conventional path for an overlooker's program file:
+/// `~/.weaver/overlookers/<name>.py`.
+fn overlooker_path(name: &str) -> std::path::PathBuf {
+    loom::db::weaver_home()
+        .join("overlookers")
+        .join(format!("{name}.py"))
+}
+
+/// `loom overlooker new` — scaffold a starter program file and print its path.
+/// A local file-convention command: it touches no server (T8 file convention),
+/// so it works before the Python binding exists.
+async fn cmd_overlooker_new(name: String) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("name must not be empty");
+    }
+    let dir = loom::db::weaver_home().join("overlookers");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let path = overlooker_path(name);
+    if path.exists() {
+        bail!(
+            "{} already exists — edit it, or pick another name",
+            path.display()
+        );
+    }
+    std::fs::write(&path, scaffold_template(name))
+        .with_context(|| format!("writing {}", path.display()))?;
+    println!("scaffolded {}", path.display());
+    println!("  edit it, then register:");
+    println!(
+        "    loom overlooker add {name} --program {} --cron \"0 * * * *\"",
+        path.display()
+    );
+    Ok(())
+}
+
+/// Build the trigger JSON from the `add` flags. clap's `group = "trigger"`
+/// already makes cron/every/on-event mutually exclusive; `repo` is folded in
+/// when present. An empty trigger (`{}`) is a valid, never-firing default.
+fn build_trigger(opts: &AddOpts) -> Value {
+    let mut t = serde_json::Map::new();
+    if let Some(cron) = &opts.cron {
+        t.insert("cron".into(), json!(cron));
+    }
+    if let Some(every) = &opts.every {
+        t.insert("every".into(), json!(every));
+    }
+    if let Some(event) = &opts.on_event {
+        t.insert("event".into(), json!(event));
+        if let Some(level) = &opts.level {
+            t.insert("level".into(), json!(level));
+        }
+    }
+    if let Some(repo) = &opts.repo {
+        t.insert("repo".into(), json!(repo));
+    }
+    Value::Object(t)
+}
+
+/// Build the scope JSON: the explicit `--scope` JSON if given (parsed), with the
+/// `--repo` filter folded in so a repo-pinned overlooker only surveys its repo.
+fn build_scope(opts: &AddOpts) -> Result<Value> {
+    let mut scope = match &opts.scope {
+        Some(raw) => serde_json::from_str::<Value>(raw)
+            .with_context(|| format!("--scope is not valid JSON: {raw}"))?,
+        None => json!({}),
+    };
+    if let Some(repo) = &opts.repo {
+        if let Some(obj) = scope.as_object_mut() {
+            obj.entry("repo").or_insert_with(|| json!(repo));
+        }
+    }
+    Ok(scope)
+}
+
+/// `loom overlooker add` — register an overlooker via POST /api/overlookers.
+async fn cmd_overlooker_add(opts: AddOpts) -> Result<()> {
+    let client = client::default();
+    let trigger = build_trigger(&opts);
+    let scope = build_scope(&opts)?;
+    let params = opts
+        .prompt
+        .as_ref()
+        .map(|p| json!({ "prompt": p }))
+        .unwrap_or_else(|| json!({}));
+
+    let mut body = serde_json::Map::new();
+    body.insert("name".into(), json!(opts.name));
+    body.insert("trigger".into(), trigger);
+    body.insert("scope".into(), scope);
+    body.insert("params".into(), params);
+    if let Some(program) = &opts.program {
+        body.insert("program".into(), json!(program));
+    }
+    if let Some(caps) = &opts.capabilities {
+        body.insert("capabilities".into(), json!(caps));
+    }
+    if let Some(model) = &opts.model {
+        body.insert("model".into(), json!(model));
+    }
+    if let Some(effort) = &opts.effort {
+        body.insert("effort".into(), json!(effort));
+    }
+    if let Some(cooldown) = opts.cooldown {
+        body.insert("cooldown_secs".into(), json!(cooldown));
+    }
+
+    let o = client.post("/api/overlookers", Value::Object(body)).await?;
+    println!(
+        "registered overlooker {}  ({})",
+        str_field(&o, "name"),
+        str_field(&o, "id")
+    );
+    println!("  trigger: {}", trigger_summary(&o));
+    println!("  program: {}", str_field(&o, "program"));
+    println!("  caps:    {}", capabilities_summary(&o));
+    println!(
+        "  enabled: no — arm it with `loom overlooker enable {}`",
+        opts.name
+    );
+    Ok(())
+}
+
+/// `loom overlooker rm` — delete an overlooker.
+async fn cmd_overlooker_rm(name: String) -> Result<()> {
+    let client = client::default();
+    client.delete(&format!("/api/overlookers/{name}")).await?;
+    println!("removed overlooker {name}");
+    Ok(())
+}
+
+/// `loom overlooker enable|disable` — PATCH the `enabled` toggle.
+async fn cmd_overlooker_set_enabled(name: String, enabled: bool) -> Result<()> {
+    let client = client::default();
+    let o = client
+        .patch(
+            &format!("/api/overlookers/{name}"),
+            json!({ "enabled": enabled }),
+        )
+        .await?;
+    println!(
+        "{} overlooker {}",
+        if enabled { "enabled" } else { "disabled" },
+        str_field(&o, "name")
+    );
+    Ok(())
+}
+
+/// `loom overlooker ls` — a table of every overlooker.
+async fn cmd_overlooker_ls() -> Result<()> {
+    let client = client::default();
+    let rows = client
+        .get("/api/overlookers")
+        .await?
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if rows.is_empty() {
+        println!("no overlookers — scaffold one with `loom overlooker new <name>`");
+        return Ok(());
+    }
+    println!(
+        "{:<18}  {:<8}  {:<22}  {:<18}  LAST",
+        "NAME", "ENABLED", "TRIGGER", "PROGRAM"
+    );
+    for o in rows {
+        let enabled = if o.get("enabled").and_then(Value::as_bool).unwrap_or(false) {
+            "yes"
+        } else {
+            "no"
+        };
+        let last = o.get("last_outcome").and_then(Value::as_str).unwrap_or("—");
+        println!(
+            "{:<18}  {:<8}  {:<22}  {:<18}  {}",
+            truncate(str_field(&o, "name"), 18),
+            enabled,
+            truncate(&trigger_summary(&o), 22),
+            truncate(str_field(&o, "program"), 18),
+            last,
+        );
+    }
+    Ok(())
+}
+
+/// `loom overlooker run` — fire a round now and print outcome + summary.
+async fn cmd_overlooker_run(name: String, dry_run: bool) -> Result<()> {
+    let client = client::default();
+    let res = client
+        .post(
+            &format!("/api/overlookers/{name}/run"),
+            json!({ "dry_run": dry_run }),
+        )
+        .await?;
+    let outcome = str_field(&res, "outcome");
+    let summary = str_field(&res, "summary");
+    let kind = if dry_run { "dry run" } else { "run" };
+    println!("{name} {kind}: {outcome}");
+    if !summary.is_empty() {
+        println!("  {summary}");
+    }
+    Ok(())
+}
+
+/// `loom overlooker runs` / `logs` — the round history. `verbose` (the `logs`
+/// alias) also prints each round's actions.
+async fn cmd_overlooker_runs(name: String, limit: i64, verbose: bool) -> Result<()> {
+    let client = client::default();
+    let rows = client
+        .get(&format!("/api/overlookers/{name}/runs?limit={limit}"))
+        .await?
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if rows.is_empty() {
+        println!("no rounds yet for {name} — fire one with `loom overlooker run {name}`");
+        return Ok(());
+    }
+    if !verbose {
+        println!(
+            "{:<24}  {:<14}  {:<8}  SUMMARY",
+            "WHEN", "REASON", "OUTCOME"
+        );
+    }
+    for r in &rows {
+        let when = str_field(r, "started_at");
+        let reason = str_field(r, "trigger_reason");
+        let outcome = str_field(r, "outcome");
+        let summary = str_field(r, "summary");
+        if verbose {
+            println!("{when}  [{reason}]  {outcome}");
+            if !summary.is_empty() {
+                println!("  {summary}");
+            }
+            if let Some(actions) = r.get("actions").and_then(Value::as_array) {
+                for a in actions {
+                    println!("    - {}", action_summary(a));
+                }
+            }
+        } else {
+            println!(
+                "{:<24}  {:<14}  {:<8}  {}",
+                when,
+                truncate(reason, 14),
+                outcome,
+                truncate(summary, 60),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A one-line summary of a round action (a mark / nudge / would-do entry).
+fn action_summary(a: &Value) -> String {
+    // A mutating action carries `action`; a dry-run stub carries `would`.
+    let verb = a
+        .get("action")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            a.get("would")
+                .and_then(Value::as_str)
+                .map(|w| format!("would {w}"))
+        })
+        .unwrap_or_else(|| "?".to_string());
+    let session = a.get("session").and_then(Value::as_str).unwrap_or("");
+    let detail = a
+        .get("level")
+        .and_then(Value::as_str)
+        .map(|l| {
+            let note = a.get("note").and_then(Value::as_str).unwrap_or("");
+            if note.is_empty() {
+                l.to_string()
+            } else {
+                format!("{l} — {note}")
+            }
+        })
+        .or_else(|| a.get("text").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_default();
+    if detail.is_empty() {
+        format!("{verb} {session}")
+    } else {
+        format!("{verb} {session}: {detail}")
+    }
+}
+
+/// A compact human summary of an `OverlookerView`'s parsed `trigger` object.
+fn trigger_summary(o: &Value) -> String {
+    let Some(t) = o.get("trigger") else {
+        return "—".to_string();
+    };
+    if let Some(cron) = t.get("cron").and_then(Value::as_str) {
+        return format!("cron {cron}");
+    }
+    if let Some(every) = t.get("every").and_then(Value::as_str) {
+        return format!("every {every}");
+    }
+    if let Some(event) = t.get("event").and_then(Value::as_str) {
+        return match t.get("level").and_then(Value::as_str) {
+            Some(level) => format!("on {event}={level}"),
+            None => format!("on {event}"),
+        };
+    }
+    "—".to_string()
+}
+
+/// The granted capability set, comma-joined, for an `OverlookerView`.
+fn capabilities_summary(o: &Value) -> String {
+    o.get("capabilities")
+        .and_then(Value::as_array)
+        .map(|caps| {
+            caps.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "observe".to_string())
 }
 
 #[cfg(test)]
@@ -1017,9 +1547,16 @@ mod tests {
     }
 
     fn view(status: &str, attention: &str, description: &str) -> Value {
+        // `ok` is the calm, tag-less state; any other level is the `attention`
+        // tag's value, mirroring the wire `branch.tags` shape.
+        let tags = if attention == "ok" {
+            json!([])
+        } else {
+            json!([{ "key": "attention", "value": attention }])
+        };
         json!({
             "status": status,
-            "branch": { "attention": attention, "description": description },
+            "branch": { "tags": tags, "description": description },
         })
     }
 
@@ -1107,5 +1644,127 @@ mod tests {
             goal: "   ".into(),
             ..empty_launch()
         }));
+    }
+
+    fn empty_add(name: &str) -> AddOpts {
+        AddOpts {
+            name: name.to_string(),
+            cron: None,
+            every: None,
+            on_event: None,
+            level: None,
+            repo: None,
+            scope: None,
+            program: None,
+            prompt: None,
+            capabilities: None,
+            model: None,
+            effort: None,
+            cooldown: None,
+        }
+    }
+
+    /// The scaffolded program is valid Python: a module docstring, the
+    /// `import weaver`, and a cron-decorated round whose name is a safe ident.
+    #[test]
+    fn scaffold_template_is_well_formed() {
+        let out = scaffold_template("test-watch");
+        // The docstring opens with exactly three quotes (a malformed `""` would
+        // be the most likely raw-string bug).
+        assert!(out.starts_with("\"\"\"test-watch"), "got: {}", &out[..16]);
+        assert!(out.contains("import weaver"));
+        // `-` in the name becomes `_` so the function name is a valid ident.
+        assert!(out.contains("def test_watch(ov):"));
+        assert!(out.contains("loom overlooker add test-watch"));
+    }
+
+    /// `loom overlooker new` writes the file under `~/.weaver/overlookers/`,
+    /// creating the dir, and refuses to clobber an existing one.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn overlooker_new_scaffolds_under_weaver_home() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("WEAVER_HOME", home.path());
+        cmd_overlooker_new("scaffolded".to_string()).await.unwrap();
+        let path = home.path().join("overlookers").join("scaffolded.py");
+        assert!(path.exists(), "the program file was written");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("def scaffolded(ov):"));
+        // A second `new` of the same name refuses rather than clobbering.
+        assert!(cmd_overlooker_new("scaffolded".to_string()).await.is_err());
+        std::env::remove_var("WEAVER_HOME");
+    }
+
+    #[test]
+    fn build_trigger_maps_each_flag() {
+        let cron = build_trigger(&AddOpts {
+            cron: Some("0 * * * *".into()),
+            ..empty_add("a")
+        });
+        assert_eq!(cron, json!({ "cron": "0 * * * *" }));
+
+        let every = build_trigger(&AddOpts {
+            every: Some("30m".into()),
+            repo: Some("/r".into()),
+            ..empty_add("a")
+        });
+        assert_eq!(every, json!({ "every": "30m", "repo": "/r" }));
+
+        let event = build_trigger(&AddOpts {
+            on_event: Some("attention".into()),
+            level: Some("blocked".into()),
+            ..empty_add("a")
+        });
+        assert_eq!(event, json!({ "event": "attention", "level": "blocked" }));
+    }
+
+    #[test]
+    fn build_scope_folds_in_the_repo_filter() {
+        // `--repo` alone becomes a repo-scoped query.
+        let s = build_scope(&AddOpts {
+            repo: Some("/r".into()),
+            ..empty_add("a")
+        })
+        .unwrap();
+        assert_eq!(s, json!({ "repo": "/r" }));
+
+        // An explicit `--scope` is merged with the repo filter, not clobbered.
+        let s = build_scope(&AddOpts {
+            scope: Some(r#"{"attention":"!ok"}"#.into()),
+            repo: Some("/r".into()),
+            ..empty_add("a")
+        })
+        .unwrap();
+        assert_eq!(s, json!({ "attention": "!ok", "repo": "/r" }));
+
+        // Bad scope JSON is an error.
+        assert!(build_scope(&AddOpts {
+            scope: Some("not json".into()),
+            ..empty_add("a")
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn trigger_summary_reads_each_shape() {
+        let cron = json!({ "trigger": { "cron": "0 * * * *" } });
+        assert_eq!(trigger_summary(&cron), "cron 0 * * * *");
+        let every = json!({ "trigger": { "every": "30m" } });
+        assert_eq!(trigger_summary(&every), "every 30m");
+        let event = json!({ "trigger": { "event": "attention", "level": "blocked" } });
+        assert_eq!(trigger_summary(&event), "on attention=blocked");
+        let empty = json!({ "trigger": {} });
+        assert_eq!(trigger_summary(&empty), "—");
+    }
+
+    #[test]
+    fn action_summary_renders_marks_nudges_and_would_dos() {
+        let mark =
+            json!({ "action": "mark", "session": "s1", "level": "blocked", "note": "stuck" });
+        assert_eq!(action_summary(&mark), "mark s1: blocked — stuck");
+        let would = json!({ "would": "mark", "session": "s1", "level": "ok" });
+        assert_eq!(action_summary(&would), "would mark s1: ok");
+        let nudge = json!({ "action": "nudge", "session": "s1", "text": "try again" });
+        assert_eq!(action_summary(&nudge), "nudge s1: try again");
     }
 }

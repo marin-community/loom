@@ -1,6 +1,6 @@
 //! Archiving a session tears down its tmux session and worktree but — unlike
 //! delete — keeps the session row (marked `archived`), the git branch, and the
-//! weaver history, and clears the attention flag.
+//! weaver history, and clears the attention tag.
 
 use std::path::Path;
 
@@ -9,7 +9,7 @@ use serial_test::serial;
 
 use loom::tmux;
 
-use crate::fixtures::TestServer;
+use crate::fixtures::{branch_tag, TestServer};
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -41,13 +41,20 @@ async fn archive_keeps_branch_and_history() {
     );
 
     // Flag the session for attention; archiving must clear it (a torn-down
-    // workstream can't still "need me"). The recorded `attention` event (with
-    // its `source: manual` marker) doubles as branch history we expect to
-    // survive the archive.
+    // workstream can't still "need me"). The recorded `tag` event (authored
+    // `manual`) doubles as branch history we expect to survive the archive. The
+    // message (description) is a separate branch field, patched alongside.
+    client
+        .put(
+            &format!("/api/sessions/{arch_id}/tags/attention"),
+            json!({ "value": "attention", "by": "manual" }),
+        )
+        .await
+        .unwrap();
     client
         .patch(
             &format!("/api/sessions/{arch_id}"),
-            json!({ "attention": "attention", "description": "Waiting for input" }),
+            json!({ "description": "Waiting for input" }),
         )
         .await
         .unwrap();
@@ -72,11 +79,15 @@ async fn archive_keeps_branch_and_history() {
         .await
         .unwrap();
     assert_eq!(view["status"], "archived");
-    // Archiving cleared the attention level so the dashboard stops flagging it.
-    // The message (description) is kept as history.
+    // Archiving cleared the attention tag so the dashboard stops flagging it
+    // (absence is the calm state). The message (description) is kept as history.
+    assert!(
+        branch_tag(&view, "attention").is_none(),
+        "archive should clear the attention tag"
+    );
     assert_eq!(
-        view["branch"]["attention"], "ok",
-        "archive should clear attention"
+        view["branch"]["description"], "Waiting for input",
+        "archive keeps the status message as history"
     );
     // The git branch is left intact for future reference.
     assert!(

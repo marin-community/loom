@@ -1,0 +1,29 @@
+# An empty `[workspace]` table makes weaver-py its own standalone workspace, so
+# `cargo build --workspace` from the repo root never reaches it (it would
+# link-fail on pyo3's extension-module) and maturin builds it in isolation. The
+# root manifest also lists it under `workspace.exclude`; this is the belt to that
+# suspenders — and the one cargo actually requires when the package is nested
+# inside another checkout's workspace.
+[workspace]
+
+[package]
+name = "weaver-py"
+version = "0.1.0"
+edition = "2021"
+description = "PyO3 Python bindings over weaver-api: drive the loom fleet from Python, capability-gated."
+publish = false
+
+[lib]
+# `weaver_py` is the importable module name (`import weaver_py`). A cdylib is
+# the shared object Python loads; pyo3's extension-module feature keeps it from
+# linking libpython directly so the abi3 wheel is portable across CPython ≥ 3.9.
+name = "weaver_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+weaver-api = { path = "../weaver-api" }
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py39"] }
+pythonize = "0.28"
+tokio = { version = "1", features = ["rt"] }
+anyhow = "1"
+serde = "1"

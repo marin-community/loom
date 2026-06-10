@@ -208,7 +208,11 @@ function mermaidThemeVariables(dark: boolean): Record<string, string> {
 export async function renderMermaid(root: HTMLElement, dark: boolean): Promise<void> {
   const blocks = Array.from(root.querySelectorAll<HTMLElement>('pre.mermaid'));
   if (blocks.length === 0) return;
-  const mermaid = (await import('mermaid')).default;
+  const [mermaid, purifyMod] = await Promise.all([
+    import('mermaid').then((m) => m.default),
+    import('dompurify'),
+  ]);
+  const DOMPurify = purifyMod.default;
   // initialize is idempotent-ish but theme can change with the app theme, so
   // re-apply it each pass.
   mermaid.initialize({
@@ -226,7 +230,13 @@ export async function renderMermaid(root: HTMLElement, dark: boolean): Promise<v
       const { svg } = await mermaid.render(id, code);
       const wrap = document.createElement('div');
       wrap.className = 'mermaid-diagram';
-      wrap.innerHTML = svg;
+      // Mermaid already sanitises under `securityLevel: 'strict'`, but the SVG
+      // is derived from DOM text, so pass it through DOMPurify before innerHTML
+      // for defence-in-depth (and to keep the flow provably XSS-safe). The svg +
+      // html profiles keep mermaid's structure, incl. `<foreignObject>` labels.
+      wrap.innerHTML = DOMPurify.sanitize(svg, {
+        USE_PROFILES: { svg: true, svgFilters: true, html: true },
+      });
       block.replaceWith(wrap);
     } catch (e) {
       const err = document.createElement('div');

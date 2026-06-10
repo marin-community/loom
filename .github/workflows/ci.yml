@@ -19,6 +19,13 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Least-privilege GITHUB_TOKEN: every job below only checks out and builds/tests
+# — none writes to the repo, posts comments, or publishes — so the token is
+# read-only. (CodeQL's Analyze jobs live in a separate workflow with their own
+# `security-events: write`.)
+permissions:
+  contents: read
+
 jobs:
   build:
     name: build
@@ -71,3 +78,27 @@ jobs:
       # Integration tests shell out to real `git` and `tmux` (see AGENTS.md).
       - run: sudo apt-get update && sudo apt-get install -y tmux
       - run: cargo test --workspace --locked
+
+  python-binding:
+    name: python-binding
+    runs-on: ubuntu-latest
+    # weaver-py is a PyO3 extension over weaver-api, kept out of the Cargo
+    # workspace (it links libpython). This job is fully self-contained: it builds
+    # the abi3 wheel with maturin and runs the binding's pytest. It needs no Node
+    # (weaver-py doesn't touch loom/the frontend) and shares no steps with the
+    # build/lint/test jobs, so it can't affect them. The live round-trip test is
+    # opt-in (WEAVER_PY_LIVE) and stays out of CI; the server-free gating suite —
+    # the capability enforcement contract — is the coverage here.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/weaver-py
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install maturin pytest
+      - run: maturin build --release --manifest-path crates/weaver-py/Cargo.toml --out dist
+      - run: pip install --find-links dist weaver-py
+      - run: pytest crates/weaver-py/tests -v

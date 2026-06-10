@@ -1,3 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/weaver-core", "crates/weaver", "crates/loom"]
+members = ["crates/weaver-core", "crates/weaver-api", "crates/weaver", "crates/loom"]
+# weaver-py is the PyO3 extension module: a `cdylib` linking libpython, built by
+# maturin into a wheel — not a `cargo build --workspace` artifact. It is kept out
+# of the workspace so the build/lint/test jobs never compile it (they would
+# link-fail on pyo3's extension-module). It path-depends on workspace crates,
+# which is fine: deps pointing *into* members don't pull the excluded crate back
+# in.
+exclude = ["crates/weaver-py"]

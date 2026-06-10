@@ -63,6 +63,43 @@ test.describe('session list view', () => {
     await expect(page.getByTestId('filter-attention')).toContainText('0');
   });
 
+  test('an overlooker triage mark surfaces as the one resolved badge, attributed', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({ goal: 'Looks stuck', name: 'watched' });
+    // The agent itself is calm; an overlooker stamps a triage mark. The single
+    // resolved badge raises to its level and attributes it to the overlooker.
+    await weaver.mark(s, 'blocked', { note: 'no progress in an hour', by: 'status-check' });
+
+    await page.goto(weaver.baseUrl);
+    const card = page.locator(`[data-session-id="${s.id}"]`);
+    const badge = card.getByTestId('attention-badge');
+    await expect(badge).toHaveAttribute('data-level', 'blocked');
+    await expect(badge).toHaveAttribute('data-raised-by', 'triage');
+    // It counts toward "needs attention" even though the agent is calm.
+    await expect(page.getByTestId('filter-attention')).toContainText('1');
+  });
+
+  test('a quiet free-form tag renders as a deletable pill', async ({ page, weaver }) => {
+    const s = await weaver.seedSession({ goal: 'Tag me', name: 'tagged' });
+    await weaver.setTag(s, 'priority', 'high');
+
+    await page.goto(weaver.baseUrl);
+    const card = page.locator(`[data-session-id="${s.id}"]`);
+    const pill = card.getByTestId('tag-pill');
+    await expect(pill).toContainText('priority');
+    await expect(pill).toContainText('high');
+    // It's quiet — no loud attention treatment from a free-form key.
+    await expect(card.getByTestId('attention-badge')).toHaveAttribute('data-level', 'ok');
+
+    // The × clears it server-side, and the pill goes away.
+    await pill.getByTestId('tag-pill-clear').click();
+    await expect(card.getByTestId('tag-pill')).toHaveCount(0);
+    const updated = await weaver.getSession(s.id);
+    expect(updated.branch.tags.find((t) => t.key === 'priority')).toBeUndefined();
+  });
+
   test('clicking a card navigates to the detail view', async ({ page, weaver }) => {
     const s = await weaver.seedSession({ goal: 'Navigate to me', name: 'nav-task' });
 

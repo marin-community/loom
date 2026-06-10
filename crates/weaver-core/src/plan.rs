@@ -425,7 +425,15 @@ pub async fn apply(db: &Db, branch: &Branch, slug: &str, plan: &SyncPlan) -> Res
 
     let flags = plan.flags();
     if flags > 0 {
-        crate::branch::set_attention(db, &branch.id, "attention").await?;
+        crate::tags::set(
+            db,
+            &branch.id,
+            crate::tags::ATTENTION_KEY,
+            "attention",
+            "",
+            "agent",
+        )
+        .await?;
         crate::branch::set_description(
             db,
             &branch.id,
@@ -684,7 +692,14 @@ Just do it now.
         assert_eq!(d.flags(), 1);
         apply(&db, &branch, "pl", &d).await.unwrap();
 
+        // Flagging raises the agent's attention tag and records the reason in the
+        // branch description.
+        let tag = crate::tags::get(&db, &branch.id, crate::tags::ATTENTION_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tag.value, "attention");
         let refreshed = crate::branch::get(&db, &branch.id).await.unwrap().unwrap();
-        assert_eq!(refreshed.attention, "attention");
+        assert!(refreshed.description.contains("diverged from the plan"));
     }
 }

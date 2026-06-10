@@ -11,8 +11,9 @@ use tokio::net::TcpListener;
 use crate::events::EventBus;
 use crate::session as session_mod;
 use crate::web::AppState;
-use crate::{config, db, github, monitor, tmux, web};
+use crate::{config, db, github, monitor, overlooker, tmux, web};
 use weaver_core::branch as branch_mod;
+use weaver_core::overlooker as ov;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerState {
@@ -98,8 +99,23 @@ pub async fn run(addr: &str) -> Result<()> {
         Err(e) => tracing::warn!("could not serialize server state: {e}"),
     }
 
+    // Two independent startup adopt policies. The fleet-wide one recreates every
+    // recoverable *ordinary* session's tmux, gated on `server.auto_adopt`. The
+    // warm one recovers engine-managed (overlooker) sessions so a watcher resumes
+    // its across-round memory after a restart — gated on its own
+    // `overlooker.adopt_warm`, so warm infrastructure is recovered even when
+    // ordinary sessions are deliberately left orphaned.
     if config::get_bool(&state.db, "server.auto_adopt", config::DEFAULT_AUTO_ADOPT).await {
         reconcile_sessions(&state).await;
+    }
+    if config::get_bool(
+        &state.db,
+        "overlooker.adopt_warm",
+        config::DEFAULT_OVERLOOKER_ADOPT_WARM,
+    )
+    .await
+    {
+        reconcile_managed_sessions(&state).await;
     }
 
     tracing::info!(addr = %actual, pid = std::process::id(), "loom started");
@@ -114,7 +130,9 @@ pub async fn run(addr: &str) -> Result<()> {
     result
 }
 
-/// On startup, adopt every recoverable session whose tmux is gone.
+/// On startup, adopt every recoverable *ordinary* session whose tmux is gone.
+/// Engine-managed (warm) sessions are skipped here — they have their own adopt
+/// policy in [`reconcile_managed_sessions`], gated on `overlooker.adopt_warm`.
 async fn reconcile_sessions(state: &AppState) {
     let sessions = match session_mod::list(&state.db).await {
         Ok(s) => s,
@@ -124,6 +142,9 @@ async fn reconcile_sessions(state: &AppState) {
         }
     };
     for session in sessions {
+        if session.managed_by.is_some() {
+            continue;
+        }
         if session_mod::is_terminal(&session.status) {
             continue;
         }
@@ -144,13 +165,97 @@ async fn reconcile_sessions(state: &AppState) {
     }
 }
 
+/// Reconcile engine-managed (warm) overlooker sessions on startup, independent
+/// of `server.auto_adopt`. For each managed session:
+///
+/// * its **owning overlooker is gone** (deleted) → the session is orphaned
+///   infrastructure with no owner, so it is **archived** (tmux killed, worktree
+///   removed), not adopted — it would never be surveyed or reused again;
+/// * otherwise, if it is **non-terminal and its tmux is gone** → it is
+///   **re-adopted** (tmux recreated, agent resumed) so the watcher resumes its
+///   across-round memory. Its session id (and the overlooker's
+///   `warm_session_id` linkage) is stable across the restart — adoption recreates
+///   tmux for the *same* row rather than spawning a new session.
+pub async fn reconcile_managed_sessions(state: &AppState) {
+    let sessions = match session_mod::list_managed(&state.db).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("warm-adopt: listing managed sessions failed: {e}");
+            return;
+        }
+    };
+    for session in sessions {
+        let Some(owner_id) = session.managed_by.as_deref() else {
+            continue;
+        };
+        // Distinguish "owner deleted" from "owner unreadable": only a definitive
+        // miss archives the warm session. A transient DB error leaves it intact —
+        // destroying a live watcher's session over a flaky read is far worse than
+        // deferring its recovery to the next restart.
+        let owner = match ov::get(&state.db, owner_id).await {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(
+                    "warm-adopt: reading owner of managed session {} failed, leaving it intact: {e}",
+                    session.id
+                );
+                continue;
+            }
+        };
+        let Ok(Some(branch)) = branch_mod::get(&state.db, &session.branch_id).await else {
+            continue;
+        };
+
+        // The owner is gone: this warm session is unreferenced infrastructure.
+        // Tear it down rather than leave it dangling.
+        if owner.is_none() {
+            if session_mod::is_terminal(&session.status) {
+                continue;
+            }
+            match web::archive(state, &session, &branch).await {
+                Ok(_) => tracing::info!(
+                    "warm-adopt: archived orphaned managed session {} (owner gone)",
+                    session.id
+                ),
+                Err(e) => tracing::warn!(
+                    "warm-adopt: could not archive managed session {}: {}",
+                    session.id,
+                    e.message()
+                ),
+            }
+            continue;
+        }
+
+        // The owner is alive: re-adopt a recoverable warm session whose tmux is
+        // gone, so the watcher resumes its across-round memory.
+        if session_mod::is_terminal(&session.status) {
+            continue;
+        }
+        if tmux::has_session(&session.tmux_session).await {
+            continue;
+        }
+        match web::adopt(state, &session, &branch).await {
+            Ok(()) => tracing::info!("warm-adopt: adopted managed session {}", session.id),
+            Err(e) => tracing::warn!(
+                "warm-adopt: could not adopt managed session {}: {}",
+                session.id,
+                e.message()
+            ),
+        }
+    }
+}
+
 pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     tokio::spawn(monitor::run(state.clone()));
     // The GitHub poller is always spawned; it self-gates on the `github.poll`
     // setting and on `gh` being available, so it idles cheaply when GitHub
     // integration is off or unavailable.
     tokio::spawn(github::poll(state.clone()));
-    tracing::debug!("background tasks spawned (monitor, github poll)");
+    // The Overlooker engine (timer + dispatcher). Always spawned; it self-gates
+    // on the `overlooker.enabled` master switch, so a default loom runs it but it
+    // idles cheaply until the operator opts in.
+    tokio::spawn(overlooker::run(state.clone()));
+    tracing::debug!("background tasks spawned (monitor, github poll, overlooker)");
     axum::serve(listener, web::router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await?;

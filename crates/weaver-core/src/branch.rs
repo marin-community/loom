@@ -16,34 +16,12 @@ pub struct Branch {
     pub base_branch: String,
     pub goal: String,
     pub title: String,
-    /// The agent's current-state message, set together with [`Branch::attention`]
-    /// via `weaver set-status`. Free-form ("Wired up routes; tests pass").
+    /// The agent's current-state message, set via `weaver set-status`. Free-form
+    /// ("Wired up routes; tests pass"), shown even when the branch is calm. The
+    /// attention *level* is a separate [`crate::tags`] tag.
     pub description: String,
-    /// Agent-declared attention level: one of [`ATTENTION_LEVELS`].
-    pub attention: String,
     pub created_at: String,
     pub updated_at: String,
-}
-
-/// Agent-declared attention levels, ordered calm → urgent:
-///
-/// * `ok` — progressing fine, or blocked on something external (a CI run, a PR
-///   review) that is *not* the user. No action needed.
-/// * `attention` — the agent wants the user to look: a question, a decision to
-///   confirm, or "done, ready for review".
-/// * `blocked` — the agent is stuck or hit an error and needs help to proceed.
-///
-/// This is the agent's own signal, distinct from the orchestrator's mechanical
-/// session lifecycle (`launching` / `running` / `orphaned` / …). It is what the
-/// dashboard surfaces and filters on for "which sessions need me?".
-pub const ATTENTION_LEVELS: &[&str] = &["ok", "attention", "blocked"];
-
-/// The default attention level for a freshly-created branch.
-pub const DEFAULT_ATTENTION: &str = "ok";
-
-/// Whether `level` is a recognized attention level.
-pub fn is_valid_attention(level: &str) -> bool {
-    ATTENTION_LEVELS.contains(&level)
 }
 
 /// An 8-character lowercase-alphanumeric id (re-used for branches and sessions).
@@ -203,20 +181,6 @@ pub async fn set_title(db: &Db, id: &str, title: &str) -> Result<()> {
 pub async fn set_description(db: &Db, id: &str, description: &str) -> Result<()> {
     sqlx::query("UPDATE branches SET description = ?, updated_at = ? WHERE id = ?")
         .bind(description)
-        .bind(now_iso())
-        .bind(id)
-        .execute(db)
-        .await?;
-    Ok(())
-}
-
-/// Set the agent-declared attention level. The accompanying current-state
-/// message lives in [`Branch::description`] (see [`set_description`]); the two
-/// are written together by `weaver set-status`. `level` is assumed already
-/// validated by the caller (see [`is_valid_attention`]).
-pub async fn set_attention(db: &Db, id: &str, level: &str) -> Result<()> {
-    sqlx::query("UPDATE branches SET attention = ?, updated_at = ? WHERE id = ?")
-        .bind(level)
         .bind(now_iso())
         .bind(id)
         .execute(db)

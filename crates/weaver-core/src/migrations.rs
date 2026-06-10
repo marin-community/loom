@@ -35,6 +35,13 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "drop_notes",
         include_str!("../migrations/0002_drop_notes.sql"),
     ),
+    (3, "triage", include_str!("../migrations/0003_triage.sql")),
+    (
+        4,
+        "overlookers",
+        include_str!("../migrations/0004_overlookers.sql"),
+    ),
+    (5, "tags", include_str!("../migrations/0005_tags.sql")),
 ];
 
 /// Apply every pending migration, bringing the database up to the latest schema.
@@ -287,6 +294,12 @@ mod tests {
             .unwrap()
     }
 
+    /// Every migration version in order — the expected fully-migrated set, so
+    /// these assertions track [`MIGRATIONS`] instead of a hand-kept literal.
+    fn all_versions() -> Vec<i64> {
+        MIGRATIONS.iter().map(|(v, _, _)| *v).collect()
+    }
+
     /// A fresh database ends up with the current schema, every migration
     /// recorded, and no `notes` table (created by the baseline, dropped by 0002).
     #[tokio::test]
@@ -299,7 +312,7 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2]);
+        assert_eq!(versions, all_versions());
 
         assert!(!table_columns(&pool, "branches").await.unwrap().is_empty());
         assert!(
@@ -350,7 +363,7 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2]);
+        assert_eq!(versions, all_versions());
         assert!(
             table_columns(&pool, "notes").await.unwrap().is_empty(),
             "0002 should still drop the notes table"
@@ -389,6 +402,106 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    /// 0005 moves the agent's `attention` and an overlooker's `triage` marks
+    /// into the `tags` table, drops `ok`/unmarked rows (absence = calm), drops
+    /// the five replaced columns, and is idempotent under a re-run.
+    #[tokio::test]
+    async fn tags_migration_moves_marks_and_drops_columns() {
+        let pool = empty_pool().await;
+        // Stand up the schema through 0004 only, then seed marks on the old
+        // columns as a pre-0005 database would carry them.
+        ensure_indicator(&pool).await.unwrap();
+        for (version, name, sql) in MIGRATIONS.iter().take_while(|(v, _, _)| *v < 5) {
+            for stmt in split_statements(sql) {
+                sqlx::query(&stmt).execute(&pool).await.unwrap();
+            }
+            sqlx::query(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+            )
+            .bind(version)
+            .bind(*name)
+            .bind("2026-01-01T00:00:00.000Z")
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        // A branch the agent flagged AND an overlooker triaged…
+        sqlx::query(
+            "INSERT INTO branches
+               (id, repo_root, branch, attention, triage_level, triage_note, triage_by, triage_at, updated_at)
+             VALUES ('b1', '/repo', 'feature', 'blocked', 'attention', 'looks stuck',
+                     'status-check', '2026-02-02T00:00:00.000Z', '2026-02-03T00:00:00.000Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // …and a calm branch, whose `ok` marks must NOT become rows.
+        sqlx::query(
+            "INSERT INTO branches (id, repo_root, branch, attention, triage_level)
+             VALUES ('b2', '/repo', 'calm', 'ok', '')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        run(&pool).await.unwrap();
+
+        // The five columns are gone; `description` and the rest stay.
+        let cols = table_columns(&pool, "branches").await.unwrap();
+        for gone in [
+            "attention",
+            "triage_level",
+            "triage_note",
+            "triage_by",
+            "triage_at",
+        ] {
+            assert!(!cols.iter().any(|c| c == gone), "{gone} must be dropped");
+        }
+        assert!(cols.iter().any(|c| c == "description"));
+
+        // The non-ok marks moved across with attribution intact.
+        let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+            "SELECT key, value, note, set_by, set_at FROM tags WHERE branch_id = 'b1'
+             ORDER BY key",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "attention".into(),
+                    "blocked".into(),
+                    String::new(),
+                    "agent".into(),
+                    "2026-02-03T00:00:00.000Z".into(),
+                ),
+                (
+                    "triage".into(),
+                    "attention".into(),
+                    "looks stuck".into(),
+                    "status-check".into(),
+                    "2026-02-02T00:00:00.000Z".into(),
+                ),
+            ]
+        );
+        // The calm branch contributed no rows.
+        let calm: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tags WHERE branch_id = 'b2'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(calm, 0, "ok/unmarked branches yield no tags");
+
+        // Idempotent: a second run is a no-op and leaves the tags untouched.
+        run(&pool).await.unwrap();
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tags")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(total, 2);
     }
 
     #[tokio::test]

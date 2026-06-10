@@ -1,6 +1,7 @@
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { post, patch, del } from '../api';
+import { ATTENTION_KEY } from './sessionState';
 
 // The session's write surface, shared by every view that hosts the page header
 // (SessionDetail and FileBrowser). The header is otherwise identical on both
@@ -8,7 +9,8 @@ import { post, patch, del } from '../api';
 // duplicated per parent.
 //
 //   rename       — the one human-authored branch field (the workstream label)
-//   acknowledge  — clear the agent's attention signal back to `ok`
+//   acknowledge  — clear the agent's `attention` tag back to calm (DELETE it)
+//   clearTag     — delete any one tag (a quiet pill's × clears it)
 //   adopt        — recreate the tmux for an orphaned session
 //   archive      — tear down tmux + worktree, keep the branch/history
 //   remove        — delete the session entirely, then route back to the list
@@ -42,10 +44,19 @@ export function useSessionActions(getId: () => string, reload: () => void | Prom
       await reload();
     });
 
+  // Acknowledge = return the agent's attention axis to calm. Calm is the
+  // absence of the tag, so this DELETEs it rather than setting an `ok` value.
   const acknowledge = () =>
     act('acknowledge', async () => {
-      await patch(`/sessions/${getId()}`, { attention: 'ok' });
+      await del(`/sessions/${getId()}/tags/${ATTENTION_KEY}`);
       notice.value = 'Marked OK.';
+      await reload();
+    });
+
+  // Clear one tag — a quiet pill's × removes that annotation entirely.
+  const clearTag = (key: string) =>
+    act(`tag:${key}`, async () => {
+      await del(`/sessions/${getId()}/tags/${encodeURIComponent(key)}`);
       await reload();
     });
 
@@ -77,5 +88,5 @@ export function useSessionActions(getId: () => string, reload: () => void | Prom
       router.push('/');
     });
 
-  return { busy, notice, error, rename, acknowledge, adopt, archive, remove };
+  return { busy, notice, error, rename, acknowledge, clearTag, adopt, archive, remove };
 }

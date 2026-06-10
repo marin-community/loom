@@ -13,7 +13,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use futures_util::SinkExt;
-use loom::client::Client;
+use loom::client::{self, Client};
 use loom::events::EventBus;
 use loom::web::AppState;
 use loom::{db, server};
@@ -102,7 +102,7 @@ impl TestServer {
         tokio::spawn(server::serve(state, listener));
 
         std::env::set_var("WEAVER_API", format!("http://{addr}"));
-        let client = Client::new();
+        let client = client::default();
         for _ in 0..60 {
             if client.get("/api/health").await.is_ok() {
                 break;
@@ -128,6 +128,30 @@ impl TestServer {
     pub fn cwd(&self) -> String {
         self.repo.path().to_string_lossy().into_owned()
     }
+}
+
+/// One tag off a `SessionView` (or `BranchView`) JSON `branch.tags` array by
+/// key, or `None` when the branch carries no tag for that key. The status axes
+/// — the agent's `attention` and an overlooker's `triage` — are tags, so this is
+/// how a test reads a level/note/author off the wire.
+pub fn branch_tag<'a>(view: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    view.get("branch")
+        .and_then(|b| b.get("tags"))
+        .and_then(|t| t.as_array())
+        .and_then(|tags| {
+            tags.iter()
+                .find(|t| t.get("key").and_then(|k| k.as_str()) == Some(key))
+        })
+}
+
+/// The value of a `branch.tags` tag by key, or `""` when absent — the resolved
+/// level for the loud keys (absence is the calm `ok` state, so an unmarked axis
+/// reads as empty).
+pub fn branch_tag_value<'a>(view: &'a serde_json::Value, key: &str) -> &'a str {
+    branch_tag(view, key)
+        .and_then(|t| t.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
 }
 
 // ---------------------------------------------------------------------------

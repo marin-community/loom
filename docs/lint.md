@@ -849,7 +849,7 @@ Worked examples:
 
 ```
 crates/loom/src/monitor.rs:142: wl-reckless-unwrap (0.90) .unwrap() on git output; tmux/git failures will panic the monitor
-crates/weaver-core/src/branch.rs:31: wl-stringly-typed (0.85) attention: String holds a 3-value closed set; model as an enum
+crates/weaver-core/src/tags.rs:31: wl-stringly-typed (0.85) Tag.value: String holds a closed set for loud keys; model as an enum
 crates/loom/frontend/src/api.ts:88: wl-swallowed-error (0.88) empty catch hides PATCH failure from the UI
 crates/loom/src/utils.rs:1: wl-utils-module (0.75) generic utils module; name it for its responsibility
 ```

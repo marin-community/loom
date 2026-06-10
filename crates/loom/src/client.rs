@@ -1,79 +1,16 @@
-//! Thin HTTP client used by every CLI subcommand except `server run`.
+//! The loom HTTP client every CLI subcommand (except `server run`) uses.
+//!
+//! The client itself — typed methods and untyped JSON transport — lives in
+//! [`weaver_api::Client`], shared with the Python binding and any other
+//! out-of-process consumer. This module re-exports it and supplies the default
+//! base URL from [`crate::endpoint`], so loom's callers get a client pointed at
+//! the running daemon with no configuration.
 
-use anyhow::{anyhow, bail, Result};
-use reqwest::Method;
-use serde_json::Value;
+pub use weaver_api::Client;
 
-pub struct Client {
-    base: String,
-    http: reqwest::Client,
-}
-
-impl Default for Client {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Client {
-    pub fn new() -> Self {
-        Self {
-            base: crate::endpoint::base_url(),
-            http: reqwest::Client::new(),
-        }
-    }
-
-    /// Base URL of the server (also the web UI origin).
-    pub fn base(&self) -> &str {
-        &self.base
-    }
-
-    async fn send(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value> {
-        let url = format!("{}{}", self.base, path);
-        let mut req = self.http.request(method, &url);
-        if let Some(body) = body {
-            req = req.json(&body);
-        }
-        let resp = req.send().await.map_err(|e| {
-            if e.is_connect() {
-                anyhow!(
-                    "cannot reach loom at {} — start it with `loom start`",
-                    self.base
-                )
-            } else {
-                anyhow!("request to {url} failed: {e}")
-            }
-        })?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        let value: Value = if text.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_str(&text).unwrap_or_else(|_| Value::String(text.clone()))
-        };
-        if !status.is_success() {
-            let message = value
-                .get("error")
-                .and_then(|e| e.as_str())
-                .unwrap_or(text.as_str());
-            bail!("server returned {} — {}", status.as_u16(), message);
-        }
-        Ok(value)
-    }
-
-    pub async fn get(&self, path: &str) -> Result<Value> {
-        self.send(Method::GET, path, None).await
-    }
-
-    pub async fn post(&self, path: &str, body: Value) -> Result<Value> {
-        self.send(Method::POST, path, Some(body)).await
-    }
-
-    pub async fn patch(&self, path: &str, body: Value) -> Result<Value> {
-        self.send(Method::PATCH, path, Some(body)).await
-    }
-
-    pub async fn delete(&self, path: &str) -> Result<Value> {
-        self.send(Method::DELETE, path, None).await
-    }
+/// A client pointed at the running daemon — the base URL resolved from
+/// `$WEAVER_API`, the recorded server address, then the default
+/// (see [`crate::endpoint::base_url`]).
+pub fn default() -> Client {
+    Client::new(crate::endpoint::base_url())
 }

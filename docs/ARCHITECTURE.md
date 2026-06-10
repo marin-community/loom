@@ -11,7 +11,7 @@ weaver ships **two binaries** over a **shared sqlite database**:
   resolving "the current branch" from `$WEAVER_BRANCH` else the git checkout
   under cwd. Cold start is sub-50ms; it carries no `axum` / `reqwest` / SPA
   dependencies. Agents call it to read and update the goal, report status, add
-  and triage issues, and emit hook events. It **works whether or not `loom` is
+  issues, set tags, and emit hook events. It **works whether or not `loom` is
   running** — that decoupling is the point of the split.
 - **`loom`** — the **optional orchestrator**: the REST + SSE server, the Vue web
   UI, the per-branch tmux + agent process (via the `sessions` table), the
@@ -44,7 +44,7 @@ needing the daemon to be reachable.
 | Path | What's in it |
 |---|---|
 | `crates/weaver-core/` | lib: `branches`, `issues`, `events`, `db`, `migrations` (ordered SQL + `schema_migrations` indicator), `git`, `config`, `plan` (parser + reconcile), `repo_config` (`.weaver/config.toml`), agent helpers. Pure logic; used by both binaries. |
-| `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`goal`, `summary`, `readme`, `set-status` [read or set level + message], `issue …`, `where`, `log`, `hook`, `config`) |
+| `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`goal`, `summary`, `readme`, `set-status` [read or set level + message], `tag` [`set`/`rm`/`ls` a branch tag], `issue …`, `where`, `log`, `hook`, `config`) |
 | `crates/loom/src/web.rs` | axum routes, request/response types, SSE — **the API surface** |
 | `crates/loom/src/server.rs` | bind, write `server.json`, spawn bg tasks |
 | `crates/loom/src/monitor.rs` | status detection, orphan marking, hook-event consumer |
@@ -167,7 +167,8 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 |---|---|
 | `GET /api/health` | liveness probe |
 | `GET /api/sessions` / `POST /api/sessions` | list / create sessions (create takes optional `scratch: [{name, content_base64}]` and `parent_branch`; opens a tracking issue and returns its id as `tracking_issue`) |
-| `GET PATCH DELETE /api/sessions/{id}` | session CRUD (status, title, goal, description, attention) |
+| `GET PATCH DELETE /api/sessions/{id}` | session CRUD (status, title, goal, description) |
+| `PUT DELETE /api/sessions/{id}/tags/{key}` | set (upsert) / clear a branch tag — the well-known `attention` and `triage` keys plus any free-form key |
 | `POST /api/sessions/{id}/{archive,adopt}` | actions |
 | `POST /api/sessions/{id}/github` | re-poll the branch's GitHub PR now and return the updated session |
 | `GET POST DELETE /api/sessions/{id}/scratch` | list / drop / remove worktree `scratch/` reference files |
@@ -191,9 +192,16 @@ top-level (`id`, `status`, `work_dir`, `tmux_session`, `agent_kind`, `model`,
 `effort`, `pending_prompt`, `github_repo`, `last_activity_at`,
 `created_at`, `updated_at`, `parent_id`, and — on the create response only —
 `tracking_issue`) plus a nested `branch: BranchView`
-(`id`, `name`, `title`, `goal`, `description`, `attention`,
+(`id`, `name`, `title`, `goal`, `description`, `tags`,
 `repo_root`, `branch`, `base_branch`, `created_at`, `updated_at`,
 `open_issue_count`, `github`).
+
+`BranchView::tags` is the branch's tag list — each a `TagView`
+(`key`, `value`, `note`, `set_by`, `set_at`). A tag is a single-valued
+`(key, value)` annotation on a branch; the well-known keys are `attention` (the
+agent's self-report) and `triage` (an overlooker's assessment), and any other
+key is a free-form, quiet pill. Absence of a key is the calm/default state —
+there is no stored `ok` value; the list is empty for an unmarked branch.
 
 `SessionView::parent_id` is the branch id of the session that **launched** this
 one — the parent in loom's session tree — or `null` for a top-level session. It
@@ -211,12 +219,13 @@ integration](#github-integration).
 
 Status is two orthogonal axes. The session's `status` is the **lifecycle**
 (orchestrator-owned, mechanical): `created` / `launching` / `running` /
-`orphaned` / `done` / `error`. The branch's `attention` (level) plus its
-`description` (a one-line current-state message) are the **agent-declared**
-"does this need me?" signal: `ok` / `attention` / `blocked`, both set via
-`weaver set-status`. The dashboard filters on `attention`.
+`orphaned` / `done` / `error`. The branch's **`attention` tag** (value
+`attention` | `blocked`, absent ⇒ calm) plus its `description` (a one-line
+current-state message) are the **agent-declared** "does this need me?" signal,
+both set via `weaver set-status`. The dashboard resolves and filters on the
+attention signal.
 
-There is **no** `/api/hook` endpoint — see [Status & attention](#status--attention).
+There is **no** `/api/hook` endpoint — see [Status & tags](#status--tags).
 
 **Scratch files** are reference material dropped into the worktree's `scratch/`
 directory (git-ignored, so it never enters the agent's diff). They can be added
@@ -260,10 +269,23 @@ uniformly. Each requires a live tmux (else 409). The CLI's `loom session
   first-class status, recovered via `loom adopt` (or the Adopt button in the
   UI).
 
-## Status & attention
+## Status & tags
 
 Two distinct axes (see the SessionView note above): the mechanical **lifecycle**
-`sessions.status`, and the agent-declared **attention** on the branch.
+`sessions.status`, and the agent-declared **attention** carried as a tag on the
+branch.
+
+**Tags** are single-valued `(key, value)` annotations on a branch, each with a
+`note`, `set_by`, and `set_at`, stored in the shared `tags` table (one row per
+`(branch_id, key)`, registry in [`weaver_core::tags`](../crates/weaver-core/WEAVER.md)).
+The well-known keys are **`attention`** (the agent's own self-report) and
+**`triage`** (an overlooker's assessment); both are *loud* (they raise a badge)
+and hold `attention` | `blocked`. Any other key is a free-form, quiet pill.
+**Absence is the calm/default state** — there is no stored `ok`; returning to
+calm *clears* the tag. A tag is **stale** when its `set_at` predates the
+session's `last_activity_at` (the session moved on since it was set). The
+dashboard resolves the louder of the agent's `attention` tag and the non-stale
+`triage` tag into one attention signal, with attribution.
 
 **Lifecycle** is driven by Claude Code hooks. `loom session launch` merges a `hooks`
 block into the worktree's `.claude/settings.local.json` (see
@@ -283,27 +305,29 @@ alive, so all three set `status = running` (this also promotes a freshly
 `launching` session). Liveness is all a hook proves, so that is all the
 orchestrator tracks — it does not infer working/waiting/idle from stillness.
 
-The hooks also nudge the **attention** level where they carry a genuine signal:
-`working` clears it to `ok` and drops any pending prompt (the user is engaged);
-`waiting` raises it to `attention` and snapshots the tmux pane into
+The hooks also nudge the **`attention` tag** where they carry a genuine signal:
+`working` clears it (back to calm) and drops any pending prompt (the user is
+engaged); `waiting` raises it to `attention` and snapshots the tmux pane into
 `pending_prompt` (Claude is blocked asking the user — the snapshot conveys what
 it's waiting on, so no separate note is stored); `idle` (a turn ending) leaves
-attention untouched, so a finished-but-fine agent isn't mistaken for one that
+the tag untouched, so a finished-but-fine agent isn't mistaken for one that
 needs you.
 
-**Attention** is otherwise the agent's own call, set via `weaver set-status
-<level> ["<message>"]`. That writes the branch's `attention` level (and, when a
-message is given, the `description`) directly (daemon-less) and an `attention`
-event the monitor re-broadcasts over SSE. A bare `weaver set-status <level>`
-changes only the level and keeps the last message. Last write wins, so an
-explicit declaration overrides the hook-inferred default. The PATCH
-`/api/sessions/{id}` and `/api/branches/{id}` routes accept `attention` (and
-`description`) too, for the UI.
+The **`attention` tag** is otherwise the agent's own call, set via `weaver
+set-status <level> ["<message>"]`. That writes the tag (and, when a message is
+given, the `description`) directly (daemon-less) — `ok` clears the tag, the two
+loud levels upsert it — and records a `tag` event the monitor re-broadcasts over
+SSE. A bare `weaver set-status <level>` changes only the level and keeps the last
+message. Last write wins, so an explicit declaration overrides the hook-inferred
+default. The general `weaver tag set|rm|ls` group writes any key the same way;
+the `PUT`/`DELETE /api/sessions/{id}/tags/{key}` routes do it over HTTP for the
+UI and the [overlooker](plans/overlooker.md) (whose `mark` writes the `triage`
+tag).
 
-Archiving a session clears its attention back to `ok` (and drops any snapshotted
-`pending_prompt`): the agent is gone, so a torn-down workstream can't still "need
-me", and the dashboard stops flagging it. The UI also treats any `archived`
-session as `ok` regardless of a stale attention value left on the branch.
+Archiving a session clears its `attention` (and `triage`) tags (and drops any
+snapshotted `pending_prompt`): the agent is gone, so a torn-down workstream
+can't still "need me", and the dashboard stops flagging it. The UI also treats
+any `archived` session as calm regardless of a stale tag left on the branch.
 
 Orphan detection is independent: if `tmux has-session` says no, the session
 becomes `orphaned` and is eligible for `loom adopt`.

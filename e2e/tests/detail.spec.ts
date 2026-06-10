@@ -44,9 +44,10 @@ test.describe('session detail view', () => {
     // The strip clears (and the acknowledge control goes away)…
     await expect(conv).not.toHaveText(/needs attention/i);
     await expect(page.getByTestId('acknowledge')).toHaveCount(0);
-    // …and it's cleared server-side.
+    // …and it's cleared server-side: acknowledge DELETEs the `attention` tag,
+    // so the calm state is its absence (there is no stored `ok`).
     const updated = await weaver.getSession(s.id);
-    expect(updated.branch.attention).toBe('ok');
+    expect(updated.branch.tags.find((t) => t.key === 'attention')).toBeUndefined();
   });
 
   test('renders an interactive terminal that connects to the agent', async ({
