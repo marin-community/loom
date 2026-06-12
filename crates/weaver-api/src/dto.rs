@@ -57,7 +57,7 @@ pub struct BranchView {
     pub name: String,
     pub title: String,
     pub goal: String,
-    /// The agent's current-state message, set via `weaver set-status`, shown even
+    /// The agent's current-state message, set via `weaver status`, shown even
     /// when the branch is calm. The attention *level* is the `attention` tag.
     pub description: String,
     /// Every tag on the branch (the agent's `attention`, an overlooker's

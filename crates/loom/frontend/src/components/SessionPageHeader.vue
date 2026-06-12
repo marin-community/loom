@@ -186,7 +186,7 @@ const quiet = computed(() => quietTags(props.ws));
       {{ messageOf(ws) }}
     </p>
     <p v-else class="mt-1 text-sm text-faint">
-      No status yet — agent hasn't run <code>weaver set-status</code>.
+      No status yet — agent hasn't run <code>weaver status</code>.
     </p>
 
     <!-- Quiet tags — free-form, deletable pills (priority, needs-rebase, …),

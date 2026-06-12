@@ -1,6 +1,6 @@
 //! Background task: detects when a session's terminal has ended and consumes the
 //! event rows the `weaver` CLI writes — `hook` events (Claude lifecycle) and
-//! `tag` events (`weaver set-status` writing the `attention` tag) — reflecting
+//! `tag` events (`weaver status` writing the `attention` tag) — reflecting
 //! them onto the session and the dashboard.
 //!
 //! The browser terminal (xterm.js over a PTY) is the live-screen surface; this
@@ -42,7 +42,7 @@ pub async fn run(state: AppState) {
                 for ev in new_events {
                     last_event = last_event.max(ev.id);
                     match ev.kind.as_str() {
-                        // A `tag` write — `weaver set-status` (the agent's
+                        // A `tag` write — `weaver status` (the agent's
                         // `attention`), an overlooker's `triage`, or any free-form
                         // key — or an `artifact_written` from `weaver artifact
                         // write`: recorded daemon-less by the CLI, so it never
@@ -138,7 +138,7 @@ pub async fn run(state: AppState) {
 
             // Hash the pane to detect activity and bump `last_activity_at`.
             // Inferred working→idle demotion is gone: liveness is all we can
-            // know, and the agent reports the rest via `weaver set-status`.
+            // know, and the agent reports the rest via `weaver status`.
             let screen = backend::capture(&session.term_session, 0)
                 .await
                 .unwrap_or_default();
@@ -249,7 +249,7 @@ fn parse_iso(ts: &str) -> Option<DateTime<Utc>> {
 ///   `attention`.
 /// * `idle` (a turn ended) leaves attention untouched — a finished-but-fine
 ///   agent must not be mistaken for one that needs the user. If it actually
-///   needs something it will have said so via `weaver set-status`.
+///   needs something it will have said so via `weaver status`.
 async fn apply_hook(state: &AppState, branch_id: &str, kind: &str) -> Option<i64> {
     // The attention level the hook implies, or `None` to leave it untouched. An
     // empty string is the calm state — it clears the tag rather than storing.

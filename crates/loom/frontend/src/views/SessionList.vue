@@ -761,7 +761,7 @@ onUnmounted(() => clearInterval(timer));
             />
           </div>
 
-          <!-- Current-state headline (agent's set-status message), else the goal.
+          <!-- Current-state headline (agent's status message), else the goal.
                On an attention row the goal steps up from faint to muted so the
                metadata doesn't recede next to the loud chip. -->
           <p

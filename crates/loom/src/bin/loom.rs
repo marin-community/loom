@@ -1,10 +1,10 @@
 //! loom — the orchestration CLI.
 //!
 //! Most subcommands talk to the running loom daemon over HTTP (session
-//! lifecycle, archive, adopt). `serve` runs the daemon itself;
-//! `start`/`stop`/`restart`/`status` manage its background lifecycle. To
-//! interact with an agent, `attach` to its terminal (the browser terminal is the
-//! other interaction surface).
+//! lifecycle, archive, adopt). `loom server run` runs the daemon itself in the
+//! foreground; `loom server start`/`stop`/`restart`/`status` manage its
+//! background lifecycle. To interact with an agent, `loom session attach` to its
+//! terminal (the browser terminal is the other interaction surface).
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, CommandFactory, Parser, Subcommand};
@@ -25,31 +25,33 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run the loom server (REST API + Vue UI + monitor loop).
-    Serve {
-        #[arg(long)]
-        addr: Option<String>,
-    },
-    /// Show the running daemon's status.
-    Status,
-    /// Start the loom daemon in the background.
-    Start,
-    /// Stop the loom daemon.
-    Stop,
-    /// Stop and re-start the loom daemon.
-    Restart,
-
-    /// Manage sessions: launch, poll, wait, send, break, preview.
+    /// Manage the loom server daemon: run, start, stop, restart, status.
     ///
-    /// A uniform surface for driving a child session — start one, watch it, and
-    /// interact with its agent pane:
+    /// `loom server run` runs the server in the foreground (REST API + Vue UI +
+    /// monitor loop), blocking until interrupted — the form to run under a
+    /// process supervisor (systemd, Docker) or while developing. `loom server
+    /// start` runs that same process in the background and waits for it to come
+    /// up.
+    Server {
+        #[command(subcommand)]
+        cmd: ServerCmd,
+    },
+
+    /// Manage sessions: launch, ls, attach, poll, wait, send, break, preview.
+    ///
+    /// The uniform surface for a child session — start one, list the fleet,
+    /// watch one, and interact with its agent pane:
     ///
     ///     loom session launch "Add a /health endpoint and a test for it"
+    ///     loom session ls                      # the active fleet
     ///     loom session poll weaver/health      # one-shot status
     ///     loom session wait weaver/health      # block until done / needs you
     ///     loom session send weaver/health "try the curl again"
     ///     loom session break weaver/health     # interrupt the current turn
     ///     loom session preview weaver/health   # peek at the terminal screen
+    ///
+    /// The three you reach for constantly have top-level shortcuts: `loom
+    /// launch`, `loom ps`, `loom attach`.
     Session {
         #[command(subcommand)]
         cmd: SessionCmd,
@@ -75,7 +77,7 @@ enum Cmd {
     ///
     /// Mint a token to drive loom from GitHub Actions or any remote client:
     ///
-    ///     loom token create github-actions     # prints the secret once — copy it now
+    ///     loom token add github-actions        # prints the secret once — copy it now
     ///     loom token ls                         # name, prefix, last used
     ///     loom token rm <id>                    # revoke
     ///
@@ -86,13 +88,52 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TokenCmd,
     },
-    /// Deprecated alias for `loom session launch`.
-    #[command(hide = true)]
-    Launch(LaunchOpts),
-    /// List active sessions.
-    Ps,
     /// Show the repo's issue board (every issue across branches + backlog).
-    Issues {
+    Issue {
+        #[command(subcommand)]
+        cmd: IssueCmd,
+    },
+
+    /// Launch a new session — shortcut for `loom session launch`.
+    Launch(LaunchOpts),
+    /// List active sessions — shortcut for `loom session ls`.
+    Ps,
+    /// Attach your terminal to a session — shortcut for `loom session attach`.
+    Attach { branch: String },
+
+    /// Open the loom web UI in a browser.
+    Open,
+    /// Generate shell completions.
+    Completions { shell: clap_complete::Shell },
+}
+
+/// Subcommands under `loom server` — the daemon lifecycle.
+#[derive(Subcommand)]
+enum ServerCmd {
+    /// Run the server in the foreground (REST API + Vue UI + monitor loop).
+    ///
+    /// Blocks until interrupted — the form to run under a process supervisor
+    /// (systemd, Docker) or while developing/testing. `loom server start` runs
+    /// this same process in the background.
+    Run {
+        #[arg(long)]
+        addr: Option<String>,
+    },
+    /// Start the server in the background (daemonize) and wait for it to be healthy.
+    Start,
+    /// Stop the background server.
+    Stop,
+    /// Stop and re-start the background server.
+    Restart,
+    /// Show the running server's status.
+    Status,
+}
+
+/// Subcommands under `loom issue` — the read-only issue board.
+#[derive(Subcommand)]
+enum IssueCmd {
+    /// Show the repo's issue board (every issue across branches + backlog).
+    Ls {
         /// Include closed issues.
         #[arg(long)]
         all: bool,
@@ -100,24 +141,6 @@ enum Cmd {
         #[arg(long)]
         backlog: bool,
     },
-    /// Show one session's details.
-    Show { branch: String },
-    /// Attach your terminal to a session.
-    Attach { branch: String },
-    /// Archive a session: tear down terminal + worktree, keep branch + history.
-    Archive { branch: String },
-    /// Recreate the terminal session for an orphaned session.
-    Adopt { branch: String },
-    /// Remove a session (worktree + terminal + DB row).
-    Rm {
-        branch: String,
-        #[arg(long)]
-        keep_branch: bool,
-    },
-    /// Open the loom web UI in a browser.
-    Open,
-    /// Generate shell completions.
-    Completions { shell: clap_complete::Shell },
 }
 
 /// Subcommands under `loom session` — the uniform way to drive a child session.
@@ -177,13 +200,28 @@ enum SessionCmd {
         session: String,
     },
     /// Print a session's recent terminal screen.
-    #[command(alias = "sp")]
     Preview {
         /// Session key: id, branch id, branch name, or `repo:branch`.
         session: String,
         /// Extra scrollback lines above the visible screen (0 = visible only).
         #[arg(long, default_value = "0")]
         lines: usize,
+    },
+    /// List active sessions (also `loom ps`).
+    Ls,
+    /// Show one session's details.
+    Show { branch: String },
+    /// Attach your terminal to a session (also `loom attach`).
+    Attach { branch: String },
+    /// Archive a session: tear down terminal + worktree, keep branch + history.
+    Archive { branch: String },
+    /// Recreate the terminal session for an orphaned session.
+    Adopt { branch: String },
+    /// Remove a session (worktree + terminal + DB row).
+    Rm {
+        branch: String,
+        #[arg(long)]
+        keep_branch: bool,
     },
 }
 
@@ -257,7 +295,7 @@ enum OverlookerCmd {
 #[derive(Subcommand)]
 enum TokenCmd {
     /// Mint a new API token. Prints the secret once — copy it now.
-    Create {
+    Add {
         /// A label to recognise the token by (e.g. `github-actions`).
         name: String,
         /// Optional lifetime in days; omit for a non-expiring token.
@@ -321,7 +359,7 @@ struct AddOpts {
 }
 
 /// Shared `launch` options, used by both `loom session launch` and the
-/// deprecated top-level `loom launch` alias.
+/// top-level `loom launch` shortcut.
 #[derive(Args)]
 struct LaunchOpts {
     /// What the agent should do. Sets the branch goal and is fed to the agent as
@@ -379,38 +417,42 @@ async fn main() {
 async fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Serve { addr } => {
-            init_tracing();
-            let addr = loom::endpoint::bind_addr(addr.as_deref());
-            loom::server::run(&addr).await
-        }
-        Cmd::Status => cmd_status().await,
-        Cmd::Start => cmd_start().await,
-        Cmd::Stop => cmd_stop().await,
-        Cmd::Restart => cmd_restart().await,
+        Cmd::Server { cmd } => run_server(cmd).await,
         Cmd::Session { cmd } => run_session(cmd).await,
+        Cmd::Issue { cmd } => run_issue(cmd).await,
         Cmd::Overlooker { cmd } => run_overlooker(cmd).await,
         Cmd::Token { cmd } => run_token(cmd).await,
-        Cmd::Launch(opts) => {
-            eprintln!("note: `loom launch` is deprecated — use `loom session launch`");
-            cmd_launch(opts.into()).await
-        }
+        Cmd::Launch(opts) => cmd_launch(opts.into()).await,
         Cmd::Ps => cmd_ps().await,
-        Cmd::Issues { all, backlog } => cmd_issues(all, backlog).await,
-        Cmd::Show { branch } => cmd_show(branch).await,
         Cmd::Attach { branch } => cmd_attach(branch).await,
-        Cmd::Archive { branch } => cmd_archive(branch).await,
-        Cmd::Adopt { branch } => cmd_adopt(branch).await,
-        Cmd::Rm {
-            branch,
-            keep_branch,
-        } => cmd_rm(branch, keep_branch).await,
         Cmd::Open => cmd_open().await,
         Cmd::Completions { shell } => {
             let mut cmd = Cli::command();
             clap_complete::generate(shell, &mut cmd, "loom", &mut std::io::stdout());
             Ok(())
         }
+    }
+}
+
+/// Dispatch the `loom server <verb>` daemon-lifecycle subcommands.
+async fn run_server(cmd: ServerCmd) -> Result<()> {
+    match cmd {
+        ServerCmd::Run { addr } => {
+            init_tracing();
+            let addr = loom::endpoint::bind_addr(addr.as_deref());
+            loom::server::run(&addr).await
+        }
+        ServerCmd::Start => cmd_start().await,
+        ServerCmd::Stop => cmd_stop().await,
+        ServerCmd::Restart => cmd_restart().await,
+        ServerCmd::Status => cmd_status().await,
+    }
+}
+
+/// Dispatch the `loom issue <verb>` subcommands (the read-only board).
+async fn run_issue(cmd: IssueCmd) -> Result<()> {
+    match cmd {
+        IssueCmd::Ls { all, backlog } => cmd_issues(all, backlog).await,
     }
 }
 
@@ -432,6 +474,15 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
         } => cmd_session_send(session, message.join(" "), !no_enter).await,
         SessionCmd::Break { session } => cmd_session_break(session).await,
         SessionCmd::Preview { session, lines } => cmd_session_preview(session, lines).await,
+        SessionCmd::Ls => cmd_ps().await,
+        SessionCmd::Show { branch } => cmd_show(branch).await,
+        SessionCmd::Attach { branch } => cmd_attach(branch).await,
+        SessionCmd::Archive { branch } => cmd_archive(branch).await,
+        SessionCmd::Adopt { branch } => cmd_adopt(branch).await,
+        SessionCmd::Rm {
+            branch,
+            keep_branch,
+        } => cmd_rm(branch, keep_branch).await,
     }
 }
 
@@ -453,7 +504,7 @@ async fn run_overlooker(cmd: OverlookerCmd) -> Result<()> {
 
 async fn run_token(cmd: TokenCmd) -> Result<()> {
     match cmd {
-        TokenCmd::Create { name, expires_days } => cmd_token_create(name, expires_days).await,
+        TokenCmd::Add { name, expires_days } => cmd_token_create(name, expires_days).await,
         TokenCmd::Ls => cmd_token_ls().await,
         TokenCmd::Rm { id } => cmd_token_rm(id).await,
     }
@@ -484,7 +535,7 @@ async fn cmd_token_create(name: String, expires_days: Option<i64>) -> Result<()>
 async fn cmd_token_ls() -> Result<()> {
     let tokens = client::default().list_tokens().await?;
     if tokens.is_empty() {
-        println!("no tokens — create one with `loom token create <name>`");
+        println!("no tokens — create one with `loom token add <name>`");
         return Ok(());
     }
     println!("{:<18}  {:<20}  {:<16}  LAST USED", "ID", "NAME", "PREFIX");
@@ -663,14 +714,14 @@ async fn spawn_server() -> Result<()> {
 
     let mut command = std::process::Command::new(&exe);
     command
-        .args(["serve"])
+        .args(["server", "run"])
         .arg("--addr")
         .arg(&addr)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log))
         .stderr(std::process::Stdio::from(log_err))
         .process_group(0);
-    let child = command.spawn().context("spawning `loom serve`")?;
+    let child = command.spawn().context("spawning `loom server run`")?;
     drop(child);
 
     let base = format!("http://{addr}");
@@ -952,7 +1003,7 @@ fn wake_reason(ws: &Value, key: &str, lifecycle_only: bool) -> Option<String> {
     }
     if status == "orphaned" {
         return Some(format!(
-            "session {key} is orphaned — its terminal was lost (try `loom adopt {key}`)"
+            "session {key} is orphaned — its terminal was lost (try `loom session adopt {key}`)"
         ));
     }
     if !lifecycle_only && branch_attention(ws) != "ok" {

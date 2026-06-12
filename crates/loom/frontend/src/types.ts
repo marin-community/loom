@@ -27,7 +27,7 @@ export interface Branch {
   title: string;
   goal: string;
   /** The agent's current-state message, set together with the `attention` tag
-   *  via `weaver set-status` (e.g. "Wired up routes; tests pass"). Shown even
+   *  via `weaver status` (e.g. "Wired up routes; tests pass"). Shown even
    *  when the branch is calm. */
   description: string;
   /** Every tag on the branch: the agent's `attention`, an overlooker's

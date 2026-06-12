@@ -10,7 +10,7 @@ import MarkdownView from './MarkdownView.vue';
 // projected markdown), the pinned `plan` artifact, claimed work + repo backlog,
 // and the de-noised activity feed. The PR snapshot lives as a small link in the
 // session header rather than as a section here.
-// Everything here is authored by the AGENT (the goal, `weaver set-status`,
+// Everything here is authored by the AGENT (the goal, `weaver status`,
 // `weaver issue`, `weaver artifact write plan`); the page's writes (acknowledge
 // attention, rename, lifecycle) all live in the header, and the live working
 // surface (terminal + scratch) is the Terminal tab.

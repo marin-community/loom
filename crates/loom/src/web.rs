@@ -41,7 +41,7 @@
 //!     "name": "feature-x",            // short label (weaver/<slug> with prefix stripped)
 //!     "title": "...",
 //!     "goal": "...",
-//!     "description": "...",         // current-state message (weaver set-status)
+//!     "description": "...",         // current-state message (weaver status)
 //!     "tags": [                     // every (key, value) annotation on the branch
 //!       { "key": "attention", "value": "blocked", "note": "...",
 //!         "set_by": "agent", "set_at": "..." }
@@ -868,7 +868,7 @@ async fn create_session(
 fn tracking_note(issue_id: i64) -> String {
     format!(
         "This session is tracked as weaver issue #{issue_id}. Keep your status \
-         current with `weaver set-status <level> \"<message>\"` as you work, and \
+         current with `weaver status <level> \"<message>\"` as you work, and \
          run `weaver issue close {issue_id}` once the task is complete (e.g. the \
          PR is open) so whoever launched you knows you are done."
     )
@@ -3326,7 +3326,7 @@ mod tests {
         assert!(note.contains("weaver issue #42"));
         // It tells the agent exactly how to signal "done".
         assert!(note.contains("weaver issue close 42"));
-        assert!(note.contains("weaver set-status"));
+        assert!(note.contains("weaver status"));
     }
 
     #[test]

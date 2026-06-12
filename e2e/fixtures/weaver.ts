@@ -28,7 +28,7 @@ export interface Branch {
   name: string;
   title: string;
   goal: string;
-  /** Current-state message, set with the `attention` tag via `weaver set-status`. */
+  /** Current-state message, set with the `attention` tag via `weaver status`. */
   description: string;
   /** Every tag on the branch (the agent's `attention`, an overlooker's
    *  `triage`, any free-form key). Empty when calm — absence is the default. */
@@ -133,7 +133,7 @@ export interface WeaverFixture {
   listSessions(): Promise<Session[]>;
   /** Flip a session's status by writing a hook event row via `weaver hook`. */
   hook(session: Session, event: 'working' | 'waiting' | 'idle'): Promise<void>;
-  /** Declare the agent's status (level + message) via `weaver set-status`. It
+  /** Declare the agent's status (level + message) via `weaver status`. It
    *  writes the branch's `attention` tag (clearing it on `ok`) and the
    *  current-state message, recording a `tag` event the monitor re-broadcasts. */
   setStatus(
@@ -283,7 +283,7 @@ interface WorkerFixtures {
 
 export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
   // One loom server per worker, reused across all of that worker's tests. Booting
-  // a server (build a throwaway repo, spawn `loom serve`) is the expensive part;
+  // a server (build a throwaway repo, spawn `loom server run`) is the expensive part;
   // the per-test `weaver` fixture below just wipes sessions between tests so each
   // starts from a clean slate. Workers are fully isolated (own WEAVER_HOME/db and
   // port — the home also scopes the tapestry terminal sockets), so they run in
@@ -312,7 +312,7 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       };
 
       // Bind to a random free port (0) and parse the actual port from stdout.
-      const server: ChildProcess = spawn(LOOM_BINARY, ['serve', '--addr', '127.0.0.1:0'], {
+      const server: ChildProcess = spawn(LOOM_BINARY, ['server', 'run', '--addr', '127.0.0.1:0'], {
         env: childEnv,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -491,10 +491,10 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       },
 
       async setStatus(session, level, message) {
-        // `weaver set-status <level> [message]` writes the branch's `attention`
+        // `weaver status <level> [message]` writes the branch's `attention`
         // tag (clearing it on `ok`) and the current-state message, recording a
         // `tag` event the monitor re-broadcasts.
-        const args = ['set-status', level, ...(message ? [message] : [])];
+        const args = ['status', level, ...(message ? [message] : [])];
         execFileSync(WEAVER_BINARY, args, {
           env: { ...childEnv, WEAVER_BRANCH: session.branch.id },
           stdio: 'pipe',

@@ -133,11 +133,11 @@ up after a few idle hours). Each pass check **both**:
    bots comment after CI passes.
 
 Answer every comment: fix the clear ones (commit as a **new** commit, reply
-in-thread prefixed 🤖, resolve). Genuinely unclear → `weaver set-status attention
+in-thread prefixed 🤖, resolve). Genuinely unclear → `weaver status attention
 "<question>"`, keep monitoring while you wait.
 
 Status tracks the loop: `ok` while CI runs or you await review; `weaver
-set-status attention "ready for review"` only once green and every comment is
+status attention "ready for review"` only once green and every comment is
 handled. Close the tracking issue when the PR is open and the work is genuinely
 done — not before.
 

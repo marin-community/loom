@@ -125,24 +125,24 @@ fn issue_lifecycle() {
     assert!(!out.contains("fix the thing"));
 }
 
-/// `issue tag` sets a free-form label, `issue show` surfaces it, and `issue
-/// untag` clears it.
+/// `issue tag set` sets a free-form label, `issue show` surfaces it, and
+/// `issue tag rm` clears it.
 #[test]
 fn issue_tag_set_show_clear() {
     let env = setup();
     run(&env, &["issue", "add", "label", "me"]);
 
-    run(&env, &["issue", "tag", "1", "priority", "high"]);
+    run(&env, &["issue", "tag", "set", "1", "priority", "high"]);
     let out = run(&env, &["issue", "show", "1"]);
     assert!(out.contains("priority=high"), "show output: {out}");
 
     // A second set overwrites the value in place (single-valued per key).
-    run(&env, &["issue", "tag", "1", "priority", "low"]);
+    run(&env, &["issue", "tag", "set", "1", "priority", "low"]);
     let out = run(&env, &["issue", "show", "1"]);
     assert!(out.contains("priority=low"), "show output: {out}");
     assert!(!out.contains("priority=high"));
 
-    run(&env, &["issue", "untag", "1", "priority"]);
+    run(&env, &["issue", "tag", "rm", "1", "priority"]);
     let out = run(&env, &["issue", "show", "1"]);
     assert!(!out.contains("priority="), "tag should be cleared: {out}");
 }
@@ -170,7 +170,7 @@ fn issue_ls_separates_branch_work_from_repo_backlog() {
     );
 
     // The badge counts only this branch's claimed work, not the backlog.
-    let out = run(&env, &["set-status"]);
+    let out = run(&env, &["status"]);
     assert!(out.contains("open issues: 1"), "status: {out}");
 }
 
@@ -181,7 +181,7 @@ fn issue_show_includes_the_working_branch_status() {
     let env = setup();
     run(&env, &["issue", "add", "the", "sub-task"]);
     // The current branch claims it; give the branch a live status.
-    run(&env, &["set-status", "blocked", "build", "is", "broken"]);
+    run(&env, &["status", "blocked", "build", "is", "broken"]);
     let out = run(&env, &["issue", "show", "1"]);
     assert!(
         out.contains("working:"),
@@ -317,7 +317,7 @@ fn summary_orients_an_agent_on_the_branch() {
     run(&env, &["goal", "set", "ship", "the", "feature"]);
     run(&env, &["issue", "add", "wire", "up", "routes"]);
     run(&env, &["issue", "add", "add", "tests"]);
-    run(&env, &["set-status", "ok", "routes", "wired"]);
+    run(&env, &["status", "ok", "routes", "wired"]);
 
     let out = run(&env, &["summary"]);
     assert!(out.contains("ship the feature"), "summary: {out}");
@@ -332,7 +332,7 @@ fn summary_orients_an_agent_on_the_branch() {
     // Every section advertises the command that drills into it.
     for hint in [
         "(weaver goal)",
-        "(weaver set-status)",
+        "(weaver status)",
         "(weaver issue ls)",
         "weaver artifact",
         "weaver log",
@@ -492,7 +492,7 @@ fn readme_prints_the_full_weaver_guide() {
         "readme should print the WEAVER.md guide: {out}"
     );
     assert!(
-        out.contains("weaver set-status"),
+        out.contains("weaver status"),
         "readme should describe the weaver CLI: {out}"
     );
 }
@@ -527,7 +527,7 @@ fn session_start_hook_after_compaction_replays_the_concise_summary() {
     let env = setup();
     run(&env, &["goal", "set", "ship", "the", "feature"]);
     run(&env, &["issue", "add", "wire", "up", "routes"]);
-    run(&env, &["set-status", "ok", "routes", "wired"]);
+    run(&env, &["status", "ok", "routes", "wired"]);
 
     let payload = r#"{"hook_event_name":"SessionStart","source":"compact"}"#;
     let out = run_with_stdin(&env, &["hook", "--event", "session-start"], payload);
@@ -577,7 +577,7 @@ fn set_status_with_no_id_reports_current_branch() {
     let env = setup();
     run(&env, &["goal", "set", "do", "the", "thing"]);
     run(&env, &["issue", "add", "step", "one"]);
-    let out = run(&env, &["set-status"]);
+    let out = run(&env, &["status"]);
     assert!(out.contains("branch:      feature-test"), "status: {out}");
     assert!(out.contains("goal:        do the thing"), "status: {out}");
     assert!(out.contains("open issues: 1"), "status: {out}");
@@ -591,29 +591,22 @@ fn set_status_sets_level_and_message() {
     // Declare a level with a message, then read it back.
     let out = run(
         &env,
-        &[
-            "set-status",
-            "attention",
-            "Waiting",
-            "for",
-            "PR",
-            "feedback",
-        ],
+        &["status", "attention", "Waiting", "for", "PR", "feedback"],
     );
     assert!(
         out.contains("attention — Waiting for PR feedback"),
         "set output: {out}"
     );
 
-    let out = run(&env, &["set-status"]);
+    let out = run(&env, &["status"]);
     assert!(
         out.contains("status:      attention — Waiting for PR feedback"),
         "status read: {out}"
     );
 
     // A new message replaces the old one.
-    run(&env, &["set-status", "ok", "back", "to", "work"]);
-    let out = run(&env, &["set-status"]);
+    run(&env, &["status", "ok", "back", "to", "work"]);
+    let out = run(&env, &["status"]);
     assert!(
         out.contains("status:      ok — back to work"),
         "status read: {out}"
@@ -621,8 +614,8 @@ fn set_status_sets_level_and_message() {
 
     // A bare level change keeps the last message (the message is the persistent
     // current-state note; only the level is volatile).
-    run(&env, &["set-status", "blocked"]);
-    let out = run(&env, &["set-status"]);
+    run(&env, &["status", "blocked"]);
+    let out = run(&env, &["status"]);
     assert!(
         out.contains("status:      blocked — back to work"),
         "message should persist across a bare level change: {out}"
@@ -644,7 +637,7 @@ fn set_status_sets_level_and_message() {
 fn triage_tag_marks_a_session_without_touching_attention() {
     let env = setup();
     // The agent declares its own attention about itself.
-    run(&env, &["set-status", "blocked", "build", "broke"]);
+    run(&env, &["status", "blocked", "build", "broke"]);
 
     // No triage tag until an overlooker looks.
     let out = run(&env, &["tag", "ls", "--session", "feature-test"]);
@@ -684,7 +677,7 @@ fn triage_tag_marks_a_session_without_touching_attention() {
         out.contains("attention = blocked"),
         "agent attention must survive a triage write: {out}"
     );
-    let out = run(&env, &["set-status"]);
+    let out = run(&env, &["status"]);
     assert!(
         out.contains("status:      blocked — build broke"),
         "the resolved status reads the agent's attention tag: {out}"
@@ -708,7 +701,7 @@ fn triage_tag_marks_a_session_without_touching_attention() {
 }
 
 /// A loud key (`attention`/`triage`) rejects a value off the attention ladder
-/// with a non-zero exit, like `set-status`.
+/// with a non-zero exit, like `status`.
 #[test]
 fn tag_set_rejects_invalid_loud_value() {
     let env = setup();
@@ -773,27 +766,27 @@ fn tag_set_ls_rm_roundtrip() {
     assert!(out.contains("(no tags)"), "tag rm cleared it: {out}");
 }
 
-/// `set-status ok` clears the agent's `attention` tag (returns to calm) while
+/// `status ok` clears the agent's `attention` tag (returns to calm) while
 /// leaving the branch `description` in place.
 #[test]
 fn set_status_ok_clears_attention_tag_but_keeps_description() {
     let env = setup();
     // Raise attention with a message.
-    run(&env, &["set-status", "attention", "ready", "for", "review"]);
+    run(&env, &["status", "attention", "ready", "for", "review"]);
     let out = run(&env, &["tag", "ls"]);
     assert!(
         out.contains("attention = attention"),
-        "set-status should write the attention tag: {out}"
+        "status should write the attention tag: {out}"
     );
 
     // Return to calm — the attention tag is cleared, the description survives.
-    run(&env, &["set-status", "ok"]);
+    run(&env, &["status", "ok"]);
     let out = run(&env, &["tag", "ls"]);
     assert!(
         !out.contains("attention ="),
-        "set-status ok should clear the attention tag: {out}"
+        "status ok should clear the attention tag: {out}"
     );
-    let out = run(&env, &["set-status"]);
+    let out = run(&env, &["status"]);
     assert!(
         out.contains("status:      ok — ready for review"),
         "ok must keep the last description beside the calm level: {out}"
@@ -804,7 +797,7 @@ fn set_status_ok_clears_attention_tag_but_keeps_description() {
 fn set_status_rejects_unknown_level() {
     let env = setup();
     let out = Command::new(weaver_bin())
-        .args(["set-status", "bogus"])
+        .args(["status", "bogus"])
         .current_dir(&env.repo_path)
         .env("WEAVER_HOME", &env.home_path)
         .env("WEAVER_API", "http://127.0.0.1:1")

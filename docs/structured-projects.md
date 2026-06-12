@@ -88,7 +88,7 @@ agent implement it." Three reference points, then the lessons.
 | Tool | Artifacts | Tasks live in | Sync model | Where it hurts |
 |---|---|---|---|---|
 | **Kiro** (AWS) | `requirements.md` (user stories + EARS criteria), `design.md` (arch + sequence diagrams), `tasks.md` | `tasks.md`, traceable to requirement numbers; dependency "waves" run sequentially, concurrent within a wave | Linear phase gates; no persistent re-anchoring after tasks are cut | **Verbose for small problems** — a one-line bugfix expands into 4 user stories and 16 acceptance criteria |
-| **GitHub Spec Kit** | `specs/<branch>/` folder of 8+ files (`spec`, `plan`, `research`, `data-model`, `contracts/`, `tasks`…), a project "constitution", `[NEEDS CLARIFICATION]` markers | `tasks.md`, `[P]`-marked for parallel-safe, grouped by user story | `/specify`→`/plan`→`/tasks`→`/implement`; no defined re-sync after tasks generated | **Review overload** — verbose, repetitive with the code, agent ignores or over-follows |
+| **GitHub Spec Kit** | `specs/<branch>/` folder of 8+ files (`spec`, `plan`, `research`, `data-model`, `contracts/`, `tasks`…), a project "constitution", `[NEEDS CLARIFICATION]` markers | `tasks.md`, `[P]`-marked for parallel-safe, grouped by user story | `/specify` → `/plan` → `/tasks` → `/implement`; no defined re-sync after tasks generated | **Review overload** — verbose, repetitive with the code, agent ignores or over-follows |
 | **Tessl** | one `*.spec.md` per code file; `@generate`/`@test` tags; generated code stamped `DO NOT EDIT` | implicit in the spec | **Bidirectional** — `tessl build` regenerates code from spec | Model-Driven-Development risk: **inflexibility *and* non-determinism** |
 
 Sources: Martin Fowler's [three-tool comparison](https://martinfowler.com/articles/exploring-gen-ai/sdd-3-tools.html),
@@ -241,7 +241,7 @@ This is the missing front-end for the fan-out that
 [repo-scoped issues](repo-scoped-issues.md) was explicitly designed to enable —
 "create N issues up front, then launch one session per issue." Today a human
 hand-writes those N issues; the plan *generates* them from the design, keeps
-them linked, and gives the board something to group by. `loom session launch --claim N`
+them linked, and gives the board something to group by. `loom session launch --claim <n>`
 already turns an issue into a session and stamps `claimed_branch`; nothing in
 that path changes. The plan just sits one level above it as the index and the
 source of the breakdown.
@@ -273,7 +273,7 @@ The diff, by task ID:
 That last-two-rows nuance is the durable-HITL lesson made concrete: **in-flight
 work is preserved across a design change and surfaced for a human decision,
 never silently rewritten or dropped.** It is also pure weaver idiom — explicit,
-daemon-less, last-write-wins, agent-driven, exactly like `set-status`. No file
+daemon-less, last-write-wins, agent-driven, exactly like `status`. No file
 watcher, no continuous bidirectional codegen (that's the Tessl trap). The user
 edits the file, hits **Reconcile** in the dashboard (or the agent runs
 `weaver plan sync` after a design conversation), reviews the proposed delta, and
@@ -289,7 +289,7 @@ just a normal session whose deliverable is the plan file.** You
 (rendered, with diagrams) and iterates — asynchronously, the way they already
 review everything. Because the agent never blocks on a TUI prompt (per
 [WEAVER.md](../crates/weaver-core/WEAVER.md)), the loop is: agent drafts → sets
-`attention "plan ready for review"` → user edits the file or comments → agent
+`status attention "plan ready for review"` → user edits the file or comments → agent
 reconciles → repeat. When the plan is blessed, `weaver plan sync` materializes
 the issues and the human launches the fan-out, one session per high-value task.
 The plan file then keeps living as the project's design doc and its status map.

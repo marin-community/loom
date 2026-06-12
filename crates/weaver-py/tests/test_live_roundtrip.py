@@ -86,7 +86,7 @@ def isolated_loom():
         env["WEAVER_API"] = f"http://{addr}"
 
         proc = subprocess.Popen(
-            [binary, "serve", "--addr", addr],
+            [binary, "server", "run", "--addr", addr],
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -98,7 +98,7 @@ def isolated_loom():
             up = False
             while time.time() < deadline:
                 if proc.poll() is not None:
-                    raise RuntimeError("loom serve exited during startup")
+                    raise RuntimeError("loom server run exited during startup")
                 try:
                     with socket.create_connection(("127.0.0.1", port), timeout=0.5):
                         up = True
@@ -106,7 +106,7 @@ def isolated_loom():
                 except OSError:
                     time.sleep(0.1)
             if not up:
-                raise RuntimeError("loom serve never came up")
+                raise RuntimeError("loom server run never came up")
             # Give the HTTP stack a beat past the TCP accept.
             time.sleep(0.3)
             yield base

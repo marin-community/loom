@@ -47,7 +47,7 @@ enum Cmd {
     /// for review", a question) and `blocked` when stuck and needing help; `ok`
     /// covers both progressing normally and being blocked on something external
     /// (a CI run, a PR review) that is not the user.
-    SetStatus {
+    Status {
         /// Attention level: `ok`, `attention`, or `blocked`. Omit to read.
         level: Option<String>,
         /// Current-state message, e.g. "Wired up routes; tests pass".
@@ -57,10 +57,10 @@ enum Cmd {
     ///
     /// A tag is a single-valued `(key, value)` annotation on a branch with a
     /// one-line note and an author. The well-known loud keys are `attention`
-    /// (the agent's own signal, normally written by `set-status`) and `triage`
+    /// (the agent's own signal, normally written by `weaver status`) and `triage`
     /// (an overlooker's outside assessment); both accept `attention` or
     /// `blocked`. Any other key is free-form and quiet. Daemon-less, like
-    /// `set-status`.
+    /// `weaver status`.
     Tag {
         #[command(subcommand)]
         cmd: TagCmd,
@@ -105,6 +105,7 @@ enum Cmd {
     },
     /// Record an agent hook event. Writes an `events` row; loom's monitor
     /// consumes it on its next tick.
+    #[command(hide = true)]
     Hook {
         /// Hook event name (e.g. `working`, `waiting`, `idle`, `session-start`).
         #[arg(long)]
@@ -174,12 +175,22 @@ enum IssueCmd {
     Reopen { id: i64 },
     /// Delete an issue.
     Rm { id: i64 },
-    /// Label an issue: set (insert or replace) a free-form `(key, value)` tag.
+    /// Label an issue with free-form `(key, value)` tags: set, rm, or ls.
     ///
     /// Issue tags are quiet annotations (priority, area, kind, …) rendered as
     /// pills in the loom Issues pane — there is no loud `attention`/`triage`
-    /// ladder. The value must be non-empty; clear a label with `issue untag`.
+    /// ladder.
     Tag {
+        #[command(subcommand)]
+        cmd: IssueTagCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum IssueTagCmd {
+    /// Set (insert or replace) a tag on an issue. The value must be non-empty;
+    /// clear a label with `weaver issue tag rm`.
+    Set {
         id: i64,
         /// The tag key, e.g. `priority` or `area`.
         key: String,
@@ -193,7 +204,9 @@ enum IssueCmd {
         by: String,
     },
     /// Clear an issue label — delete the `(key)` tag.
-    Untag { id: i64, key: String },
+    Rm { id: i64, key: String },
+    /// List an issue's tags.
+    Ls { id: i64 },
 }
 
 #[derive(Subcommand)]
@@ -250,10 +263,14 @@ enum ArtifactCmd {
 
 #[derive(Subcommand)]
 enum ConfigCmd {
+    /// Print one setting's value.
     Get { key: String },
+    /// Set a setting.
     Set { key: String, value: String },
-    Unset { key: String },
-    List,
+    /// Clear a setting, restoring its default.
+    Rm { key: String },
+    /// List every setting and its value.
+    Ls,
 }
 
 #[derive(Subcommand)]
@@ -306,7 +323,7 @@ async fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Goal { cmd } => cmd_goal(cmd).await,
-        Cmd::SetStatus { level, message } => cmd_set_status(level, message.join(" ")).await,
+        Cmd::Status { level, message } => cmd_status(level, message.join(" ")).await,
         Cmd::Tag { cmd } => cmd_tag(cmd).await,
         Cmd::Summary => cmd_summary().await,
         Cmd::Readme => cmd_readme().await,
@@ -385,7 +402,7 @@ const SUMMARY_TASK_CAP: usize = 10;
 /// status, the outstanding tasks, and a hint or two for what to do next.
 ///
 /// This is the catch-up an agent reads when it picks up a branch. Everything is
-/// pulled straight from the database — no LLM, no daemon. It overlaps `set-status`
+/// pulled straight from the database — no LLM, no daemon. It overlaps `weaver status`
 /// (read), but where that shows an open-issue *count*, summary lists the actual
 /// tasks and points at the next action.
 async fn cmd_summary() -> Result<()> {
@@ -419,7 +436,7 @@ async fn render_summary(db: &db::Db, b: &branch::Branch) -> Result<String> {
     } else {
         format!("{attention} — {}", b.description)
     };
-    let _ = writeln!(out, "Status:  {status}  (weaver set-status)");
+    let _ = writeln!(out, "Status:  {status}  (weaver status)");
 
     // Artifacts visible from this branch (its own + repo-shared) — the documents
     // the agent has written to weaver (designs, reports, the `plan`).
@@ -480,7 +497,7 @@ async fn render_summary(db: &db::Db, b: &branch::Branch) -> Result<String> {
     // The current status (where work was left off) is already on the `Status:`
     // line above, sourced from the status-description trail.
     out.push('\n');
-    let _ = writeln!(out, "Next steps:  (weaver log · weaver set-status)");
+    let _ = writeln!(out, "Next steps:  (weaver log · weaver status)");
     let _ = writeln!(out, "  - {}", next_action_hint(&open, &delegated));
     Ok(out)
 }
@@ -563,11 +580,11 @@ async fn cmd_log(limit: i64) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_set_status(level: Option<String>, message: String) -> Result<()> {
+async fn cmd_status(level: Option<String>, message: String) -> Result<()> {
     let db = open_db().await?;
     let b = branch::resolve(&db).await?;
     if let Some(level) = level {
-        return cmd_set_status_write(&db, &b, &level, &message).await;
+        return cmd_status_write(&db, &b, &level, &message).await;
     }
     let open = issue::open_count_for_branch(&db, &b.repo_root, &b.branch)
         .await
@@ -595,7 +612,7 @@ async fn cmd_set_status(level: Option<String>, message: String) -> Result<()> {
 
 /// The attention value that means "calm" — the default when a branch has no
 /// `attention` tag. Never stored (absence is calm); it is both the resolved
-/// value the status reads fall back to and the `set-status` input that clears
+/// value the status reads fall back to and the `weaver status` input that clears
 /// the tag.
 const CALM: &str = "ok";
 
@@ -616,9 +633,9 @@ async fn resolve_attention(db: &db::Db, branch_id: &str) -> Result<String> {
 /// state), `attention`/`blocked` set it. Writes the description directly
 /// (daemon-less) and records a `tag` event so a running loom can push the change
 /// to the dashboard on its next tick. An empty message leaves the previous
-/// message in place — `set-status ok` just lowers the level without wiping what
+/// message in place — `weaver status ok` just lowers the level without wiping what
 /// the agent last said.
-async fn cmd_set_status_write(
+async fn cmd_status_write(
     db: &db::Db,
     b: &branch::Branch,
     level: &str,
@@ -864,14 +881,22 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
             issue::delete(&db, id).await?;
             println!("removed #{id}");
         }
-        IssueCmd::Tag {
+        IssueCmd::Tag { cmd } => cmd_issue_tag(&db, &b.repo_root, cmd).await?,
+    }
+    Ok(())
+}
+
+/// Set, clear, or list a free-form tag on an issue (`weaver issue tag …`).
+async fn cmd_issue_tag(db: &db::Db, repo_root: &str, cmd: IssueTagCmd) -> Result<()> {
+    match cmd {
+        IssueTagCmd::Set {
             id,
             key,
             value,
             note,
             by,
         } => {
-            ensure_issue_in_repo(&db, id, &b.repo_root).await?;
+            ensure_issue_in_repo(db, id, repo_root).await?;
             let key = key.trim();
             let value = value.trim();
             let note = note.trim();
@@ -881,20 +906,36 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
             }
             if value.is_empty() {
                 bail!(
-                    "a tag value cannot be empty — use `weaver issue untag {id} {key}` to clear it"
+                    "a tag value cannot be empty — use `weaver issue tag rm {id} {key}` to clear it"
                 );
             }
-            issue::set_tag(&db, id, key, value, note, by).await?;
+            issue::set_tag(db, id, key, value, note, by).await?;
             if note.is_empty() {
                 println!("tag: #{id} → {key} = {value} (by {by})");
             } else {
                 println!("tag: #{id} → {key} = {value} (by {by}) — {note}");
             }
         }
-        IssueCmd::Untag { id, key } => {
-            ensure_issue_in_repo(&db, id, &b.repo_root).await?;
-            issue::clear_tag(&db, id, key.trim()).await?;
+        IssueTagCmd::Rm { id, key } => {
+            ensure_issue_in_repo(db, id, repo_root).await?;
+            issue::clear_tag(db, id, key.trim()).await?;
             println!("tag: #{id} → cleared {}", key.trim());
+        }
+        IssueTagCmd::Ls { id } => {
+            ensure_issue_in_repo(db, id, repo_root).await?;
+            let tags = issue::list_tags(db, id).await?;
+            if tags.is_empty() {
+                println!("(no tags)");
+                return Ok(());
+            }
+            for t in &tags {
+                let note = if t.note.is_empty() {
+                    String::new()
+                } else {
+                    format!("  — {}", t.note)
+                };
+                println!("{} = {}{note}", t.key, t.value);
+            }
         }
     }
     Ok(())
@@ -1276,7 +1317,7 @@ fn read_hook_source() -> Option<String> {
 fn compact_replay(b: &branch::Branch, summary: &str) -> String {
     let summary = summary.trim_end();
     format!(
-        "Context was just compacted — you are still in a **weaver session** on branch `{branch}` (a detached agent workstream in a git worktree; the user reviews asynchronously via the loom dashboard, not this terminal). Re-orientation:\n\n{summary}\n\nReminders: keep your status honest with `weaver set-status <ok|attention|blocked> \"<message>\"`; never block on an interactive TUI prompt — state the question as plain text and raise `weaver set-status attention`; finish by opening a PR (`gh pr create`) rather than merging, and `weaver issue close <id>` your tracking issue when the work is done. Run `weaver readme` for the full weaver workflow guide.\n",
+        "Context was just compacted — you are still in a **weaver session** on branch `{branch}` (a detached agent workstream in a git worktree; the user reviews asynchronously via the loom dashboard, not this terminal). Re-orientation:\n\n{summary}\n\nReminders: keep your status honest with `weaver status <ok|attention|blocked> \"<message>\"`; never block on an interactive TUI prompt — state the question as plain text and raise `weaver status attention`; finish by opening a PR (`gh pr create`) rather than merging, and `weaver issue close <id>` your tracking issue when the work is done. Run `weaver readme` for the full weaver workflow guide.\n",
         branch = b.branch,
     )
 }
@@ -1328,7 +1369,7 @@ async fn cmd_hook(event: String) -> Result<()> {
 async fn cmd_config(cmd: ConfigCmd) -> Result<()> {
     let db = open_db().await?;
     match cmd {
-        ConfigCmd::List => {
+        ConfigCmd::Ls => {
             let settings = config::describe(&db).await?;
             for s in &settings {
                 let suffix = if s.is_default { "  (default)" } else { "" };
@@ -1339,7 +1380,7 @@ async fn cmd_config(cmd: ConfigCmd) -> Result<()> {
             let settings = config::describe(&db).await?;
             match settings.iter().find(|s| s.spec.key == key) {
                 Some(s) => println!("{}", s.value),
-                None => bail!("no setting '{key}' — see `weaver config list`"),
+                None => bail!("no setting '{key}' — see `weaver config ls`"),
             }
         }
         ConfigCmd::Set { key, value } => {
@@ -1352,9 +1393,9 @@ async fn cmd_config(cmd: ConfigCmd) -> Result<()> {
             config::apply(&db, &[(key.clone(), Some(value))]).await?;
             println!("set {key}");
         }
-        ConfigCmd::Unset { key } => {
+        ConfigCmd::Rm { key } => {
             config::apply(&db, &[(key.clone(), None)]).await?;
-            println!("unset {key}");
+            println!("removed {key}");
         }
     }
     Ok(())

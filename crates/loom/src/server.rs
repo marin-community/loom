@@ -34,7 +34,7 @@ pub fn read_state() -> Option<ServerState> {
 /// Remove the state file on shutdown, but only if it still describes *this*
 /// process.
 ///
-/// A restart overlaps two servers on the same port: `loom stop` drops the old
+/// A restart overlaps two servers on the same port: `loom server stop` drops the old
 /// listener (freeing the port) the instant it signals shutdown, but the old
 /// process keeps running until its in-flight connections drain — and the
 /// dashboard's SSE/terminal streams can hold those open for a long time. In
@@ -42,7 +42,7 @@ pub fn read_state() -> Option<ServerState> {
 /// `loom.json`. If the departing server then deleted the file unconditionally
 /// it would wipe the *successor's* state, leaving a live server with no state
 /// file — exactly the "loom is running but loom.json is missing" failure on the
-/// next `loom restart`. So we only remove the file when the pid on disk is
+/// next `loom server restart`. So we only remove the file when the pid on disk is
 /// still ours; otherwise a newer server owns it and we leave it be.
 fn remove_state_if_ours(path: &std::path::Path, my_pid: u32) {
     let owner = std::fs::read_to_string(path)

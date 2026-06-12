@@ -22,7 +22,7 @@ weaver ships **two binaries** over a **shared sqlite database**:
 ```
 weaver CLI ──sqlite──┐
                      ├─ ~/.weaver/weaver.db   (shared, WAL)
-loom serve  ─────────┘    │
+loom server run ────┘    │
   │                       │
   ├─ axum REST + SSE      │
   ├─ terminal + git wrap. │
@@ -45,7 +45,7 @@ needing the daemon to be reachable.
 |---|---|
 | `crates/weaver-core/` | lib: `branches`, `issues`, `events`, `db`, `migrations` (ordered SQL + `schema_migrations` indicator), `git`, `config`, `artifacts` (versioned documents), `repo_config` (`.weaver/config.toml`), agent helpers. Pure logic; used by both binaries. |
 | `crates/smartdoc/` | the markdown-convention layer: parse references (`#N`, `artifact:<name>`), project live status into the render. Dependency-free of weaver. See [artifacts.md](artifacts.md). |
-| `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`goal`, `summary`, `readme`, `set-status` [read or set level + message], `tag` [`set`/`rm`/`ls` a branch tag], `issue …`, `where`, `log`, `hook`, `config`) |
+| `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`goal`, `summary`, `readme`, `status` [read or set level + message], `tag` [`set`/`rm`/`ls` a branch tag], `issue …`, `where`, `log`, `hook`, `config`) |
 | `crates/loom/src/web.rs` | axum routes, request/response types, SSE — **the API surface** (incl. the auth middleware + login/token/user handlers) |
 | `crates/loom/src/auth.rs` | authentication core: token/password crypto, the `users`/`api_tokens`/`auth_sessions` tables, the machine-local token, and the GitHub OAuth calls. `axum`-free so it unit-tests directly |
 | `crates/loom/src/server.rs` | bind, write `server.json`, spawn bg tasks |
@@ -60,11 +60,11 @@ needing the daemon to be reachable.
 | `crates/loom/src/terminal.rs` | WebSocket ⇄ live-terminal bridge: xterm.js ⇄ the tapestry session socket |
 | `crates/loom/src/github.rs` | `gh` CLI shell-out: issue seeding, PR opening, and the PR-status poll loop (snapshots each branch's PR; archives on merge) |
 | `crates/loom/src/client.rs` | HTTP client used by the `loom` CLI to talk to its own daemon |
-| `crates/loom/src/bin/loom.rs` | the orchestrator CLI (`serve`, `launch`, `ps`, `attach`, …) |
+| `crates/loom/src/bin/loom.rs` | the orchestrator CLI (`server`, `session`, `ps`, `attach`, …) |
 | `crates/loom/frontend/` | Vue 3 SPA, rspack, Tailwind. `api.ts` + views in `views/`; the visual rules live in [loom-ui.md](loom-ui.md) |
 | `crates/loom/static/dist/` | Build output (placeholder; real build overwrites) |
 | `crates/loom/tests/` | integration tests: `integration/` (server suites) + `hook_monitor.rs`; need `git` (they spawn `tapestry` supervisors, built by the same `cargo test`) |
-| `e2e/` | Playwright; talks to a real `loom serve`. Separate `package.json` |
+| `e2e/` | Playwright; talks to a real `loom server run`. Separate `package.json` |
 | `crates/loom/build.rs` | Builds the SPA into `static/dist` (npm + rspack); writes a placeholder when Node is unavailable |
 
 ## Build internals
@@ -111,7 +111,7 @@ commit --no-verify`.
 ### End-to-end (Playwright)
 
 The `e2e/` suite drives the real UI against a real server. It boots **one**
-`loom serve` per Playwright *worker* (not per test) on a random port, each with
+`loom server run` per Playwright *worker* (not per test) on a random port, each with
 its own `WEAVER_HOME` / sqlite db (which also scopes the `tapestry` terminal
 sockets) and a throwaway git repo (see `e2e/fixtures/weaver.ts`),
 using the deterministic `shell` agent. The per-test `weaver` fixture wipes every
@@ -244,7 +244,7 @@ Status is two orthogonal axes. The session's `status` is the **lifecycle**
 `orphaned` / `done` / `error`. The branch's **`attention` tag** (value
 `attention` | `blocked`, absent ⇒ calm) plus its `description` (a one-line
 current-state message) are the **agent-declared** "does this need me?" signal,
-both set via `weaver set-status`. The dashboard resolves and filters on the
+both set via `weaver status`. The dashboard resolves and filters on the
 attention signal.
 
 There is **no** `/api/hook` endpoint — see [Status & tags](#status--tags).
@@ -289,8 +289,8 @@ uniformly. Each requires a live terminal (else 409). The CLI's `loom session
   change and a fresh `EventBus` notification.
 - **No tracking-branch state in the server:** loom can be killed and restarted
   at any time. Terminal supervisors and worktrees survive (the supervisor is a
-  detached process, independent of `loom serve`); "orphaned" is a first-class
-  status, recovered via `loom adopt` (or the Adopt button in the UI).
+  detached process, independent of `loom server run`); "orphaned" is a first-class
+  status, recovered via `loom session adopt` (or the Adopt button in the UI).
 
 ## Status & tags
 
@@ -337,10 +337,10 @@ the tag untouched, so a finished-but-fine agent isn't mistaken for one that
 needs you.
 
 The **`attention` tag** is otherwise the agent's own call, set via `weaver
-set-status <level> ["<message>"]`. That writes the tag (and, when a message is
+status <level> ["<message>"]`. That writes the tag (and, when a message is
 given, the `description`) directly (daemon-less) — `ok` clears the tag, the two
 loud levels upsert it — and records a `tag` event the monitor re-broadcasts over
-SSE. A bare `weaver set-status <level>` changes only the level and keeps the last
+SSE. A bare `weaver status <level>` changes only the level and keeps the last
 message. Last write wins, so an explicit declaration overrides the hook-inferred
 default. The general `weaver tag set|rm|ls` group writes any key the same way;
 the `PUT`/`DELETE /api/sessions/{id}/tags/{key}` routes do it over HTTP for the

@@ -37,8 +37,8 @@ parent first and hand it the children. The common reality is the opposite:
 So the missing primitive is a **retroactive, scheduled, fleet-wide watcher**: a
 thing that wakes on a trigger — a clock tick, or a session event — surveys
 whatever sessions exist *right now*, applies judgement, and acts: marks a
-session as fine, tags one that looks stuck, nudges a third, escalates a fourth
-to you. It is not tied to any one workstream. It is infrastructure that watches
+session as fine, tags one that looks stuck, nudges a third, escalates a fourth to you.
+It is not tied to any one workstream. It is infrastructure that watches
 the workstreams.
 
 ## What the field does (and what to steal)
@@ -209,7 +209,7 @@ shared crate:
 logic" true for everything outside the daemon **without** a second tmux owner,
 and it removes the `web.rs` ↔ `types.ts` drift on the Rust side as a bonus. The
 `weaver` agent CLI stays DB-direct for the daemon-less writes it already does
-(`set-status`, which writes the `attention` tag, and the general `weaver tag`
+(`status`, which writes the `attention` tag, and the general `weaver tag`
 group), exactly as the `attention` tag works.
 
 ## Execution: one program, one API
@@ -379,7 +379,7 @@ through the same `weaver-api` the out-of-process programs use.
 **CLI — `weaver` (DB-direct, the agent/program side):**
 
 - `weaver tag set triage <level> --note "<note>" --session <s>` — write the
-  mark, daemon-less, like `set-status`. The binding and any agent both call it;
+  mark, daemon-less, like `status`. The binding and any agent both call it;
   `weaver tag rm triage --session <s>` returns it to calm.
 
 **CLI — `loom overlooker` (the operator + authoring side):**
@@ -387,7 +387,7 @@ through the same `weaver-api` the out-of-process programs use.
 - `loom overlooker new <name>` — scaffold a program file.
 - `loom overlooker add|rm|enable|disable <name>` — register / manage.
 - `loom overlooker run <name> [--dry-run]` — fire now / simulate.
-- `loom overlooker ls | runs <name> | logs <name>`; `loom attach` a warm one.
+- `loom overlooker ls`, `loom overlooker runs <name>`, `loom overlooker logs <name>`; `loom attach` a warm one.
 
 **API — `loom` (`web.rs`, DTOs now in `weaver-api`):**
 
@@ -442,9 +442,8 @@ early. The equivalent **custom** form is the Python program shown
 
 The agent-authored path: you ask a session "make me an overlooker that watches
 for sessions stuck retrying a test"; it runs `loom overlooker new test-watch`,
-explores with `loom session preview`, writes the rule, `loom overlooker run
-test-watch --dry-run` until the would-do output looks right, then registers it
-with `nudge` enabled.
+explores with `loom session preview`, writes the rule, `loom overlooker run test-watch --dry-run`
+until the would-do output looks right, then registers it with `nudge` enabled.
 
 ## Tasks
 
