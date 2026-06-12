@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/smartdoc", "crates/weaver-core", "crates/weaver-api", "crates/weaver", "crates/loom"]
+members = ["crates/smartdoc", "crates/weaver-core", "crates/weaver-api", "crates/weaver", "crates/loom", "crates/tapestry"]
 # weaver-py is the PyO3 extension module: a `cdylib` linking libpython, built by
 # maturin into a wheel — not a `cargo build --workspace` artifact. It is kept out
 # of the workspace so the build/lint/test jobs never compile it (they would
