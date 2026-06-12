@@ -10,7 +10,7 @@ use anyhow::{anyhow, bail, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::{json, Value};
 
-use weaver_core::{branch, config, db, events, issue, plan, repo_config, tags};
+use weaver_core::{artifact, branch, config, db, events, issue, tags};
 
 #[derive(Parser)]
 #[command(
@@ -25,8 +25,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Print or set the goal of the current branch.
-    Goal { text: Vec<String> },
+    /// Print the goal, or set it (`goal set`).
+    ///
+    /// With no subcommand, prints the current branch's goal. `goal set` writes a
+    /// new goal — from text args, a `--file`, or stdin (`-`). A long markdown
+    /// goal stops being a shell-quoting exercise, so an agent can maintain the
+    /// goal as understanding evolves. The Overview renders it through the same
+    /// markdown pipeline as artifacts, projection included.
+    Goal {
+        #[command(subcommand)]
+        cmd: Option<GoalCmd>,
+    },
     /// Report the agent's status, or read it back.
     ///
     /// This is the agent's single channel for telling the dashboard how it is
@@ -76,15 +85,16 @@ enum Cmd {
         #[command(subcommand)]
         cmd: IssueCmd,
     },
-    /// Author and reconcile a structured project plan.
+    /// Read and write artifacts — named, versioned documents stored in weaver.
     ///
-    /// A plan is a single markdown file (default `docs/plans/<slug>.md`) holding
-    /// the design and a task breakdown with stable ids. `weaver plan sync`
-    /// reconciles the plan's tasks against the issue ledger. See
-    /// `docs/structured-projects.md`.
-    Plan {
+    /// An artifact is a design, report, diagram, or plan the agent writes *to
+    /// weaver*, not the repo: durable, out-of-repo, and surviving archive. Every
+    /// write appends an immutable revision. Scoped to the current branch by
+    /// default; `--repo` publishes it repo-shared (one plan, many child
+    /// sessions). See `docs/artifacts.md`.
+    Artifact {
         #[command(subcommand)]
-        cmd: PlanCmd,
+        cmd: ArtifactCmd,
     },
     /// Print the resolved repo / branch / branch-id for the current cwd.
     Where,
@@ -187,25 +197,54 @@ enum IssueCmd {
 }
 
 #[derive(Subcommand)]
-enum PlanCmd {
-    /// Scaffold a new plan file. The slug defaults to a kebab-case of the title.
-    New {
-        title: Vec<String>,
-        /// Override the slug (the filename stem and link-key prefix).
+enum GoalCmd {
+    /// Set the goal from text args, a `--file`, or stdin (`-`).
+    Set {
+        /// Goal text. Joined with spaces. Omit when using `--file` or `-`.
+        text: Vec<String>,
+        /// Read the goal from a file instead of the text args.
         #[arg(long)]
-        slug: Option<String>,
+        file: Option<String>,
     },
-    /// List the plans on this branch.
-    Ls,
-    /// Show a plan: its tasks, each with status projected from the issue ledger.
-    Show { slug: String },
-    /// Reconcile a plan against the issue ledger. Prints the delta; `--apply`
-    /// writes it (create / close / update issues, and flag in-flight work).
-    Sync {
-        slug: String,
-        /// Apply the changes instead of just previewing them.
+}
+
+#[derive(Subcommand)]
+enum ArtifactCmd {
+    /// Write an artifact: append a new revision (creating it if absent). Reads
+    /// `<file>`, or stdin when `<file>` is `-` or omitted.
+    Write {
+        /// The artifact name (its identity within the scope), e.g. `plan`.
+        name: String,
+        /// File to read the content from; `-` or omitted reads stdin.
+        file: Option<String>,
+        /// A human title for the artifact (envelope metadata).
+        #[arg(long, default_value = "")]
+        title: String,
+        /// The content kind; defaults to `markdown`.
+        #[arg(long, default_value = "markdown")]
+        kind: String,
+        /// Publish repo-shared (visible to every branch) instead of scoping it
+        /// to the current branch.
         #[arg(long)]
-        apply: bool,
+        repo: bool,
+    },
+    /// List artifacts: this branch's plus the repo-shared ones. `--repo` lists
+    /// every artifact in the repo, all scopes.
+    Ls {
+        /// List every artifact in the repo, regardless of scope.
+        #[arg(long)]
+        repo: bool,
+    },
+    /// Show an artifact's content (latest revision by default). `--meta` prints
+    /// the envelope (id, name, kind, title, scope, latest rev, timestamps).
+    Show {
+        name: String,
+        /// Show a specific revision instead of the latest.
+        #[arg(long)]
+        rev: Option<i64>,
+        /// Print the envelope metadata instead of the content.
+        #[arg(long)]
+        meta: bool,
     },
 }
 
@@ -266,13 +305,13 @@ async fn main() {
 async fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Goal { text } => cmd_goal(text.join(" ")).await,
+        Cmd::Goal { cmd } => cmd_goal(cmd).await,
         Cmd::SetStatus { level, message } => cmd_set_status(level, message.join(" ")).await,
         Cmd::Tag { cmd } => cmd_tag(cmd).await,
         Cmd::Summary => cmd_summary().await,
         Cmd::Readme => cmd_readme().await,
         Cmd::Issue { cmd } => cmd_issue(cmd).await,
-        Cmd::Plan { cmd } => cmd_plan(cmd).await,
+        Cmd::Artifact { cmd } => cmd_artifact(cmd).await,
         Cmd::Where => cmd_where().await,
         Cmd::Log { limit } => cmd_log(limit).await,
         Cmd::Hook { event } => cmd_hook(event).await,
@@ -293,19 +332,48 @@ async fn open_db() -> Result<db::Db> {
     db::connect(&db::default_db_path()).await
 }
 
-async fn cmd_goal(text: String) -> Result<()> {
+/// Read content from a file path, or stdin when `path` is `None` or `"-"`.
+fn read_file_or_stdin(path: Option<&str>) -> Result<String> {
+    use std::io::Read;
+    match path {
+        Some(p) if p != "-" => std::fs::read_to_string(p).map_err(|e| anyhow!("reading {p}: {e}")),
+        _ => {
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .map_err(|e| anyhow!("reading stdin: {e}"))?;
+            Ok(buf)
+        }
+    }
+}
+
+/// Print the goal, or set it. With no subcommand prints the current goal;
+/// `goal set` writes a new one from text args, a `--file`, or stdin (`-`).
+async fn cmd_goal(cmd: Option<GoalCmd>) -> Result<()> {
     let db = open_db().await?;
     let b = branch::resolve(&db).await?;
-    if text.is_empty() {
+    let Some(GoalCmd::Set { text, file }) = cmd else {
         println!("{}", b.goal);
         return Ok(());
+    };
+    // A `--file` (or `-` text) reads from disk/stdin; otherwise join the args.
+    let goal = if let Some(path) = file {
+        read_file_or_stdin(Some(&path))?
+    } else if text.as_slice() == ["-"] {
+        read_file_or_stdin(None)?
+    } else {
+        text.join(" ")
+    };
+    let goal = goal.trim_end().to_string();
+    if goal.is_empty() {
+        bail!("a goal is required — pass text, --file <path>, or pipe via '-'");
     }
-    branch::set_goal(&db, &b.id, &text).await?;
+    branch::set_goal(&db, &b.id, &goal).await?;
     if b.title.is_empty() {
-        let title = branch::derive_title(&text);
+        let title = branch::derive_title(&goal);
         branch::set_title(&db, &b.id, &title).await?;
     }
-    events::record_local(&db, &b.id, "goal_set", json!({ "goal": text })).await?;
+    events::record_local(&db, &b.id, "goal_set", json!({ "goal": goal })).await?;
     println!("goal updated");
     Ok(())
 }
@@ -353,23 +421,28 @@ async fn render_summary(db: &db::Db, b: &branch::Branch) -> Result<String> {
     };
     let _ = writeln!(out, "Status:  {status}  (weaver set-status)");
 
-    // Plans on this branch — large multi-session efforts. Status comes from the
-    // plan file itself, so this stays a cheap read (no issue join).
-    let plans = read_plans(&plan_dir(b));
-    match plans.as_slice() {
+    // Artifacts visible from this branch (its own + repo-shared) — the documents
+    // the agent has written to weaver (designs, reports, the `plan`).
+    let artifacts = artifact::list_for_session(db, &b.repo_root, &b.id)
+        .await
+        .unwrap_or_default();
+    match artifacts.as_slice() {
         [] => {
-            let _ = writeln!(out, "Plan:    none  (weaver plan new \"<title>\")");
-        }
-        [p] => {
             let _ = writeln!(
                 out,
-                "Plan:    {} [{}]  (weaver plan show {})",
-                p.slug, p.status, p.slug
+                "Artifacts: none  (weaver artifact write <name> <file>)"
+            );
+        }
+        [a] => {
+            let _ = writeln!(
+                out,
+                "Artifacts: {} [rev {}]  (weaver artifact show {})",
+                a.name, a.rev, a.name
             );
         }
         many => {
-            let slugs = many.iter().map(|p| p.slug.as_str()).collect::<Vec<_>>();
-            let _ = writeln!(out, "Plan:    {}  (weaver plan ls)", slugs.join(", "));
+            let names = many.iter().map(|a| a.name.as_str()).collect::<Vec<_>>();
+            let _ = writeln!(out, "Artifacts: {}  (weaver artifact ls)", names.join(", "));
         }
     }
 
@@ -704,7 +777,6 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
                 title: title.clone(),
                 body: body.unwrap_or_default(),
                 github_issue: github,
-                plan_task: None,
             };
             let i = issue::add(&db, &new).await?;
             events::record_local(
@@ -939,232 +1011,123 @@ async fn cmd_issue_ls_repo(db: &db::Db, repo_root: &str, target: &str, all: bool
 }
 
 // ---------------------------------------------------------------------------
-// Plans
+// Artifacts
 // ---------------------------------------------------------------------------
 
-/// The directory holding plan files for the current worktree, honoring the
-/// per-repo `.weaver/config.toml` `[plan].dir` (default `docs/plans`). Anchored
-/// at the worktree (cwd) like `WEAVER.md` resolution, so plans live with the
-/// branch the agent is on.
-fn plan_dir(b: &branch::Branch) -> std::path::PathBuf {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let candidates = vec![cwd.clone(), std::path::PathBuf::from(&b.repo_root)];
-    cwd.join(repo_config::plan_dir(&candidates))
-}
-
-/// Parse the plan at `<dir>/<slug>.md`, or a helpful error if it's missing.
-fn load_plan(dir: &std::path::Path, slug: &str) -> Result<plan::Plan> {
-    let path = dir.join(format!("{slug}.md"));
-    let src = std::fs::read_to_string(&path).map_err(|_| {
-        anyhow!(
-            "no plan '{slug}' at {} — see `weaver plan ls`",
-            path.display()
-        )
-    })?;
-    Ok(plan::parse(slug, &src))
-}
-
-/// Every plan file in `dir`, parsed and sorted by slug. Missing dir → empty.
-fn read_plans(dir: &std::path::Path) -> Vec<plan::Plan> {
-    let mut plans = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return plans;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-        let Some(slug) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if let Ok(src) = std::fs::read_to_string(&path) {
-            plans.push(plan::parse(slug, &src));
-        }
-    }
-    plans.sort_by(|a, b| a.slug.cmp(&b.slug));
-    plans
-}
-
-/// A kebab-case slug from free text: lowercase, runs of non-alphanumerics
-/// collapse to a single `-`, trimmed.
-fn slugify(text: &str) -> String {
-    let mut out = String::new();
-    let mut dash = false;
-    for c in text.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c.to_ascii_lowercase());
-            dash = false;
-        } else if !out.is_empty() && !dash {
-            out.push('-');
-            dash = true;
-        }
-    }
-    out.trim_matches('-').to_string()
-}
-
-async fn cmd_plan(cmd: PlanCmd) -> Result<()> {
+/// Read, write, and list artifacts — named, versioned documents stored in
+/// weaver.db. Scoped to the current branch by default; `--repo` is repo-shared.
+async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
     let db = open_db().await?;
     let b = branch::resolve(&db).await?;
-    let dir = plan_dir(&b);
     match cmd {
-        PlanCmd::New { title, slug } => {
-            let title = title.join(" ");
-            if title.trim().is_empty() {
-                bail!("plan title is required");
+        ArtifactCmd::Write {
+            name,
+            file,
+            title,
+            kind,
+            repo,
+        } => {
+            let content = read_file_or_stdin(file.as_deref())?;
+            // `--repo` writes the repo-shared scope (branch_id = NULL); otherwise
+            // the artifact is scoped to this branch.
+            let branch_id = (!repo).then_some(b.id.as_str());
+            let a = artifact::write(
+                &db,
+                &artifact::NewRevision {
+                    repo_root: &b.repo_root,
+                    branch_id,
+                    name: name.trim(),
+                    kind: kind.trim(),
+                    title: title.trim(),
+                    content: &content,
+                    author: "agent",
+                },
+            )
+            .await?;
+            events::record_local(
+                &db,
+                &b.id,
+                "artifact_written",
+                json!({ "name": a.name, "rev": a.rev, "title": a.title }),
+            )
+            .await?;
+            // Print the dashboard URL so the agent can hand it to the user. The
+            // write already succeeded (a plain DB write); without a running loom
+            // we fall back to the name + scope.
+            let scope = if repo { "repo-shared" } else { "this branch" };
+            match db::dashboard_addr() {
+                Some(addr) => println!(
+                    "http://{addr}/s/{}/artifacts/{}  (rev {}, {scope})",
+                    b.id, a.name, a.rev
+                ),
+                None => println!("{} (rev {}, {scope})", a.name, a.rev),
             }
-            let slug = slug.unwrap_or_else(|| slugify(&title));
-            if slug.is_empty() {
-                bail!("could not derive a slug from the title — pass --slug");
+        }
+        ArtifactCmd::Ls { repo } => {
+            let artifacts = if repo {
+                artifact::list_for_repo(&db, &b.repo_root).await?
+            } else {
+                artifact::list_for_session(&db, &b.repo_root, &b.id).await?
+            };
+            if artifacts.is_empty() {
+                println!("(no artifacts)");
+                return Ok(());
             }
-            let path = dir.join(format!("{slug}.md"));
-            if path.exists() {
-                bail!("plan already exists: {}", path.display());
-            }
-            // A plan's issues key on `<slug>#<task>` across the whole repo, so a
-            // slug already materialized elsewhere would cross-talk with this
-            // one. Plans are shared *down a branch lineage* — a sub-session
-            // inherits the plan by branching from its parent (the file descends
-            // through git), never by re-creating the same slug. So a collision
-            // here means an unrelated plan: refuse and let the user rename.
-            let claimed = issue::list_for_plan(&db, &b.repo_root, &slug, true).await?;
-            if !claimed.is_empty() {
-                let owners: std::collections::BTreeSet<&str> = claimed
-                    .iter()
-                    .filter_map(|i| i.source_branch.as_deref())
-                    .collect();
-                let who = if owners.is_empty() {
+            for a in &artifacts {
+                // A branch-scoped artifact is prefixed by its owning branch id;
+                // a repo-shared one is marked so the scope is legible at a glance.
+                let scope = match &a.branch_id {
+                    Some(bid) => format!("{bid}/"),
+                    None => "repo:".to_string(),
+                };
+                let title = if a.title.is_empty() {
                     String::new()
                 } else {
-                    format!(
-                        " (materialized on {})",
-                        owners.into_iter().collect::<Vec<_>>().join(", ")
-                    )
+                    format!("  {}", a.title)
                 };
-                bail!(
-                    "plan slug '{slug}' is already in use in this repo{who} — \
-                     pick a different title or pass --slug"
-                );
+                println!("{scope}{:<24} [rev {}] {}{title}", a.name, a.rev, a.kind);
             }
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| anyhow!("creating {}: {e}", dir.display()))?;
-            std::fs::write(&path, plan::scaffold(&slug, &title, &b.goal))?;
-            events::record_local(&db, &b.id, "plan_created", json!({ "slug": slug })).await?;
-            println!("created {}", path.display());
-            println!("edit it, then `weaver plan sync {slug} --apply` to materialize its tasks");
         }
-        PlanCmd::Ls => {
-            let plans = read_plans(&dir);
-            if plans.is_empty() {
-                println!("(no plans in {})", dir.display());
-                return Ok(());
-            }
-            for p in &plans {
-                let tracked = p.tasks.iter().filter(|t| t.materializes()).count();
+        ArtifactCmd::Show { name, rev, meta } => {
+            let a = artifact::get(&db, &b.repo_root, &b.id, name.trim())
+                .await?
+                .ok_or_else(|| {
+                    anyhow!("no artifact '{}' — see `weaver artifact ls`", name.trim())
+                })?;
+            if meta {
+                println!("id:      {}", a.id);
+                println!("name:    {}", a.name);
+                println!("kind:    {}", a.kind);
+                if !a.title.is_empty() {
+                    println!("title:   {}", a.title);
+                }
                 println!(
-                    "{:<24} {}  ({} tasks, {} tracked) [{}]",
-                    p.slug,
-                    p.title,
-                    p.tasks.len(),
-                    tracked,
-                    p.status
+                    "scope:   {}",
+                    match &a.branch_id {
+                        Some(bid) => format!("branch {bid}"),
+                        None => "repo-shared".to_string(),
+                    }
                 );
-            }
-        }
-        PlanCmd::Show { slug } => {
-            let p = load_plan(&dir, &slug)?;
-            let issues = issue::list_for_plan(&db, &b.repo_root, &p.slug, true).await?;
-            println!("{} — {}  [{}]", p.slug, p.title, p.status);
-            if p.tasks.is_empty() {
-                println!("  (no tasks yet)");
-            }
-            for t in &p.tasks {
-                let key = t.key(&p.slug);
-                let issue = issues
-                    .iter()
-                    .find(|i| i.plan_task.as_deref() == Some(key.as_str()));
-                let (marker, detail) = task_status(t, issue);
-                println!("  {:<3} [{}] {}", t.id, marker, t.title);
-                let mut bits = vec![format!("exec: {}", t.exec)];
-                if !t.value.is_empty() {
-                    bits.push(format!("value: {}", t.value));
-                }
-                if !t.deps.is_empty() {
-                    bits.push(format!("deps: {}", t.deps.join(", ")));
-                }
-                bits.push(detail);
-                println!("       {}", bits.join("  ·  "));
-            }
-        }
-        PlanCmd::Sync { slug, apply } => {
-            let p = load_plan(&dir, &slug)?;
-            let issues = issue::list_for_plan(&db, &b.repo_root, &p.slug, true).await?;
-            let delta = plan::diff(&p.slug, &p.tasks, &issues);
-            if delta.is_empty() {
-                println!("plan '{}' is in sync with its issues", p.slug);
+                println!("rev:     {}", a.rev);
+                println!("created: {}", a.created_at);
+                println!("updated: {}", a.updated_at);
                 return Ok(());
             }
-            print_delta(&delta);
-            if apply {
-                plan::apply(&db, &b, &p.slug, &delta).await?;
-                events::record_local(
-                    &db,
-                    &b.id,
-                    "plan_synced",
-                    json!({ "slug": p.slug, "actions": delta.actions.len() }),
-                )
-                .await?;
-                println!("\napplied {} change(s)", delta.actions.len());
-                if delta.flags() > 0 {
-                    println!(
-                        "{} in-flight task(s) flagged — left untouched; status raised to attention",
-                        delta.flags()
-                    );
-                }
-            } else {
-                println!("\n(dry run — re-run with --apply to write these changes)");
+            let version = match rev {
+                Some(r) => artifact::version(&db, a.id, r).await?,
+                None => artifact::latest_version(&db, a.id).await?,
+            };
+            match version {
+                Some(v) => print!("{}", v.content),
+                None => bail!(
+                    "no revision {} of artifact '{}'",
+                    rev.unwrap_or(a.rev),
+                    a.name
+                ),
             }
         }
     }
     Ok(())
-}
-
-/// A `(marker, detail)` for a plan task given its linked issue (if any), for
-/// `weaver plan show`. Status is projected from the ledger, never the file.
-fn task_status(t: &plan::PlanTask, issue: Option<&issue::Issue>) -> (char, String) {
-    match issue {
-        None if t.materializes() => (' ', "not yet materialized".to_string()),
-        None => ('·', "untracked".to_string()),
-        Some(i) if i.status == "closed" => ('x', format!("done (#{})", i.id)),
-        Some(i) => match i.claimed_branch.as_deref() {
-            Some(branch) => ('~', format!("in progress ← {branch} (#{})", i.id)),
-            None => (' ', format!("backlog (#{})", i.id)),
-        },
-    }
-}
-
-/// Print a reconcile delta as human-readable lines.
-fn print_delta(delta: &plan::SyncPlan) {
-    use plan::SyncAction::*;
-    for action in &delta.actions {
-        match action {
-            Create { task, title } => println!("  + create issue for {task}: {title}"),
-            Close { task, issue_id } => {
-                println!("  - close #{issue_id} ({task} removed from plan)")
-            }
-            UpdateTitle {
-                task,
-                issue_id,
-                title,
-            } => println!("  ~ retitle #{issue_id} ({task}) → {title}"),
-            Flag {
-                task,
-                issue_id,
-                branch,
-                reason,
-            } => println!("  ! flag #{issue_id} ({task}, ← {branch}): {reason}"),
-        }
-    }
 }
 
 /// Confirm an issue exists and lives in `repo_root`. Cross-*repo* access is the

@@ -147,8 +147,6 @@ pub struct IssueView {
     pub body: String,
     pub status: String,
     pub github_issue: Option<i64>,
-    /// Link to a plan task (`"<slug>#T3"`) when materialized from a plan.
-    pub plan_task: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,
@@ -171,7 +169,6 @@ impl IssueView {
             body: i.body,
             status: i.status,
             github_issue: i.github_issue,
-            plan_task: i.plan_task,
             created_at: i.created_at,
             updated_at: i.updated_at,
             closed_at: i.closed_at,
@@ -188,34 +185,74 @@ impl From<Issue> for IssueView {
     }
 }
 
-/// One task in a plan, with status PROJECTED from the linked issue.
+// ---------------------------------------------------------------------------
+// Artifacts — named, versioned documents an agent (or the user) writes to
+// weaver. The envelope, a version row, and the full view (content + projected
+// references). The projection backs both the SPA chips and `weaver artifact
+// show`. See docs/artifacts.md.
+// ---------------------------------------------------------------------------
+
+/// An artifact envelope as the API exposes it: identity, kind, title, scope, and
+/// its latest revision number.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanTaskView {
-    pub id: String,
+pub struct ArtifactMeta {
+    pub id: i64,
+    pub name: String,
+    pub kind: String,
     pub title: String,
-    pub exec: String,
-    pub value: String,
-    pub deps: Vec<String>,
-    /// Linked issue (the materialization), if any — the projected state.
-    pub issue_id: Option<i64>,
-    pub issue_status: Option<String>,
+    /// The branch that owns it, or `null` for a repo-shared artifact.
+    pub branch_id: Option<String>,
+    /// The latest revision number.
+    pub rev: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One revision of an artifact (metadata only — the version picker lists these;
+/// content is fetched per-rev through the artifact GET with `?rev=`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactVersion {
+    pub rev: i64,
+    /// `agent` | `user` — who wrote this revision.
+    pub author: String,
+    pub created_at: String,
+}
+
+/// The live status of one issue referenced from an artifact — what the renderer
+/// stamps into a `#N` chip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueRefStatus {
+    pub id: i64,
+    pub title: String,
+    /// `open` | `closed`.
+    pub status: String,
+    /// The branch working it; `null` is the unclaimed backlog.
     pub claimed_branch: Option<String>,
 }
 
-/// A session's structured project plan: design + task breakdown from a markdown
-/// file, with each task's status joined from the issue ledger.
+/// The projected reference map an artifact's content names. Keyed by id-as-string
+/// so it round-trips cleanly through JSON object keys. v1 projects issues; the
+/// `artifact:`/`session:` reference kinds are reserved for later probes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ArtifactRefs {
+    /// `{"<issue id>": { id, title, status, claimed_branch }}` for every `#N`
+    /// the content references.
+    #[serde(default)]
+    pub issues: std::collections::BTreeMap<String, IssueRefStatus>,
+}
+
+/// The full artifact view returned by the artifact GET/PUT: the envelope, the
+/// content of the selected (default latest) revision, the version list for a
+/// picker, and the projected reference map.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanView {
-    pub slug: String,
-    /// Worktree-relative path, for the file-write (Edit) endpoint.
-    pub path: String,
-    pub title: String,
-    pub status: String,
-    /// Raw markdown source — the dashboard renders and edits this.
+pub struct ArtifactView {
+    pub meta: ArtifactMeta,
+    /// Raw content of the selected revision — the dashboard renders and edits it.
     pub content: String,
-    pub tasks: Vec<PlanTaskView>,
-    /// Every plan slug in the repo, for a picker.
-    pub available: Vec<String>,
+    /// Every revision, newest first, for the version picker.
+    pub versions: Vec<ArtifactVersion>,
+    /// References found in the content, resolved against the live ledger.
+    pub refs: ArtifactRefs,
 }
 
 /// One overlooker, as the API exposes it. The JSON-bearing columns
@@ -500,6 +537,18 @@ pub struct CreateRepoIssueReq {
     pub body: String,
     #[serde(default)]
     pub github_issue: Option<i64>,
+}
+
+/// Body for `PUT /api/sessions/{id}/artifacts/{name}`: a user edit that appends
+/// a new revision (`author: user`). `title`/`kind` update the envelope; omit
+/// them to keep the current values.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ArtifactWriteBody {
+    pub content: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 /// Body for `POST /api/overlookers`. JSON-bearing fields take structured JSON

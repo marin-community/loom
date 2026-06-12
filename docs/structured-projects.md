@@ -1,5 +1,10 @@
 # Structuring larger projects
 
+> Superseded by [artifacts.md](artifacts.md) for the task-sync design. The
+> projection principle this doc established — *structure in a document, state in
+> the DB, the render joins them* — survives and generalizes; the `plan` noun,
+> the slug rules, and the reconcile engine built around it do not.
+
 Status: **implemented** (issue
 [#14](https://github.com/rjpower/weaver/issues/14)). This doc surveys how the
 field handles spec-driven, multi-step agent work, then argues for a weaver-shaped

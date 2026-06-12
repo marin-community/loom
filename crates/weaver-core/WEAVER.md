@@ -30,14 +30,23 @@ It is on your `PATH`. From anywhere in the worktree you can run:
 - `weaver issue show N` — an issue plus the live status of the branch working
   it; `weaver issue wait N` blocks until it closes or that branch needs you
   (see "Launching and tracking sub-sessions" below).
-- `weaver plan new "<title>"` — for a large, multi-step effort, scaffold a
-  structured plan (a markdown file under `docs/plans/`) holding the design, an
-  architecture diagram, and a task breakdown with stable ids. `weaver plan show
-  <slug>` prints it with each task's live status; `weaver plan sync <slug>
-  --apply` reconciles the plan's tasks into weaver issues (and flags, never
-  rewrites, work already in flight). Reach for this only when the work spans
-  many sessions; a small task stays goal-plus-issues. See
-  `docs/structured-projects.md`.
+- `weaver artifact write <name> [<file>]` — write a versioned document to
+  weaver (a design, a report, a diagram, a plan) for the user to read. Prints a
+  dashboard URL to hand them. Reads stdin with `-`; `--repo` makes it
+  repo-shared so a fan-out of child sessions sees one copy. `weaver artifact ls`
+  lists this branch's plus the shared ones; `weaver artifact show <name> [--rev
+  N]` prints content.
+- `weaver goal set <file|->` — set the branch goal from a file or stdin (long
+  markdown goals without the shell-quoting pain). `weaver goal` prints it.
+- Division of labor: **goal = the charter (what to do); issues = the only task
+  ledger; artifacts = documents for the user to read.** A "plan" is just *an
+  artifact named `plan`* following smartdoc conventions: prose, a mermaid
+  diagram, and a task list whose items **reference issues** (`- #41 Index
+  layer`) instead of declaring them. The doc never states status — the dashboard
+  projects live issue state at render time. There is no sync engine: **you are
+  the reconciler.** File the issues with `weaver issue add`, reference them in
+  the doc, and keep the two aligned as work moves. See the smartdoc skill
+  (`.agents/skills/smartdoc.md`).
 - `weaver set-status` — with no argument, show the goal, status, and open-issue
   count.
 

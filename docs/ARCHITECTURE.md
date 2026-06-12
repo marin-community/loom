@@ -43,7 +43,8 @@ needing the daemon to be reachable.
 
 | Path | What's in it |
 |---|---|
-| `crates/weaver-core/` | lib: `branches`, `issues`, `events`, `db`, `migrations` (ordered SQL + `schema_migrations` indicator), `git`, `config`, `plan` (parser + reconcile), `repo_config` (`.weaver/config.toml`), agent helpers. Pure logic; used by both binaries. |
+| `crates/weaver-core/` | lib: `branches`, `issues`, `events`, `db`, `migrations` (ordered SQL + `schema_migrations` indicator), `git`, `config`, `artifacts` (versioned documents), `repo_config` (`.weaver/config.toml`), agent helpers. Pure logic; used by both binaries. |
+| `crates/smartdoc/` | the markdown-convention layer: parse references (`#N`, `artifact:<name>`), project live status into the render. Dependency-free of weaver. See [artifacts.md](artifacts.md). |
 | `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`goal`, `summary`, `readme`, `set-status` [read or set level + message], `tag` [`set`/`rm`/`ls` a branch tag], `issue …`, `where`, `log`, `hook`, `config`) |
 | `crates/loom/src/web.rs` | axum routes, request/response types, SSE — **the API surface** |
 | `crates/loom/src/server.rs` | bind, write `server.json`, spawn bg tasks |
@@ -156,9 +157,9 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
 - **Settings** live in the `settings` table; each key is declared in
   `weaver-core::config::registry()`. Both binaries read it. This is the
   **global** (machine/user) store; **per-repo** conventions instead live in a
-  committed `.weaver/config.toml` read by `weaver-core::repo_config` (today just
-  `[plan].dir`, default `docs/plans`) — distinct from the settings table, and
-  resolved repo-file → builtin-default like a repo's own `WEAVER.md`.
+  committed `.weaver/config.toml` read by `weaver-core::repo_config` — distinct
+  from the settings table, and resolved repo-file → builtin-default like a repo's
+  own `WEAVER.md`.
 - **Worktrees** live under `<repo>/.worktrees/<slug>` on `weaver/<slug>`
   (unless `--branch` reused an existing branch).
 
@@ -176,8 +177,8 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `POST /api/sessions/{id}/github` | re-poll the branch's GitHub PR now and return the updated session |
 | `GET POST DELETE /api/sessions/{id}/scratch` | list / drop / remove worktree `scratch/` reference files |
 | `PUT /api/sessions/{id}/file?path=…` | write raw bytes to a worktree file (the editor save primitive) |
-| `GET /api/sessions/{id}/plan` | a [structured project plan](structured-projects.md), parsed + task status joined from issues |
-| `POST /api/sessions/{id}/plan/sync` | reconcile a plan against the issue ledger (`apply` to write) |
+| `GET /api/sessions/{id}/artifacts` | list the branch's [artifacts](artifacts.md) plus repo-shared ones |
+| `GET PUT /api/sessions/{id}/artifacts/{name}` | read content + projected refs (`rev=N` for a revision) / write a user edit as a new revision |
 | `GET /api/sessions/{id}/{diff,log,events}` | reads + SSE stream |
 | `GET /api/sessions/{id}/terminal` | WebSocket: xterm.js ⇄ PTY ⇄ tmux (the interaction surface) |
 | `POST /api/sessions/{id}/send` | type `{text}` into the agent's tmux pane; `submit` (default true) follows it with Enter to trigger a round |

@@ -42,12 +42,13 @@ pub async fn run(state: AppState) {
                 for ev in new_events {
                     last_event = last_event.max(ev.id);
                     match ev.kind.as_str() {
-                        // A tag write — `weaver set-status` (the agent's
+                        // A `tag` write — `weaver set-status` (the agent's
                         // `attention`), an overlooker's `triage`, or any free-form
-                        // key — written daemon-less by the CLI never touched the
-                        // bus. Re-broadcast so live dashboards refresh the badge or
-                        // pill; nothing else to do.
-                        "tag" => {
+                        // key — or an `artifact_written` from `weaver artifact
+                        // write`: recorded daemon-less by the CLI, so it never
+                        // touched the bus. Re-broadcast so live dashboards refresh
+                        // the badge, pill, or artifact list; nothing else to do.
+                        "tag" | "artifact_written" => {
                             state.bus.publish(ev.clone());
                             continue;
                         }

@@ -29,9 +29,6 @@ pub struct Issue {
     pub body: String,
     pub status: String,
     pub github_issue: Option<i64>,
-    /// Link back to the plan task that materialized this issue, `"<slug>#T3"`.
-    /// `None` for ordinary issues. See `docs/structured-projects.md`.
-    pub plan_task: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,
@@ -49,7 +46,6 @@ pub struct NewIssue {
     pub title: String,
     pub body: String,
     pub github_issue: Option<i64>,
-    pub plan_task: Option<String>,
 }
 
 /// Create a new issue. Returns the persisted row.
@@ -58,8 +54,8 @@ pub async fn add(db: &Db, new: &NewIssue) -> Result<Issue> {
     let row: (i64,) = sqlx::query_as(
         "INSERT INTO issues
             (repo_root, github_repo, source_branch, claimed_branch,
-             title, body, status, github_issue, plan_task, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?) RETURNING id",
+             title, body, status, github_issue, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?) RETURNING id",
     )
     .bind(&new.repo_root)
     .bind(&new.github_repo)
@@ -68,7 +64,6 @@ pub async fn add(db: &Db, new: &NewIssue) -> Result<Issue> {
     .bind(&new.title)
     .bind(&new.body)
     .bind(new.github_issue)
-    .bind(&new.plan_task)
     .bind(&now)
     .bind(&now)
     .fetch_one(db)
@@ -92,21 +87,6 @@ fn status_clause(include_closed: bool) -> &'static str {
     } else {
         " AND status = 'open'"
     }
-}
-
-/// Escape the LIKE metacharacters (`\`, `%`, `_`) in a literal so it matches
-/// itself rather than acting as a pattern. Pair with `LIKE ? ESCAPE '\'`.
-/// Plan slugs are slugified and shouldn't contain these, but the prefix match in
-/// [`list_for_plan`] would otherwise widen silently if one ever did.
-fn like_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if matches!(c, '\\' | '%' | '_') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
 }
 
 /// Issues claimed by `branch` in `repo_root` — the branch's working set.
@@ -212,38 +192,6 @@ pub async fn open_count_for_repo(db: &Db, repo_root: &str) -> Result<i64> {
             .fetch_one(db)
             .await?;
     Ok(n)
-}
-
-/// Issues materialized from a plan (`plan_task` like `"<slug>#…"`). Used by
-/// plan reconciliation to project task status and diff the plan against the
-/// live issue ledger.
-pub async fn list_for_plan(
-    db: &Db,
-    repo_root: &str,
-    slug: &str,
-    include_closed: bool,
-) -> Result<Vec<Issue>> {
-    let sql = format!(
-        "SELECT * FROM issues WHERE repo_root = ? AND plan_task LIKE ? ESCAPE '\\'{} ORDER BY id ASC",
-        status_clause(include_closed)
-    );
-    let rows = sqlx::query_as::<_, Issue>(&sql)
-        .bind(repo_root)
-        .bind(format!("{}#%", like_escape(slug)))
-        .fetch_all(db)
-        .await?;
-    Ok(rows)
-}
-
-/// Update an issue's title (plan reconciliation keeps it in step with the plan).
-pub async fn set_title(db: &Db, id: i64, title: &str) -> Result<()> {
-    sqlx::query("UPDATE issues SET title = ?, updated_at = ? WHERE id = ?")
-        .bind(title)
-        .bind(now_iso())
-        .bind(id)
-        .execute(db)
-        .await?;
-    Ok(())
 }
 
 /// Set (or, with `None`, clear) the claiming branch of a single issue.
@@ -582,24 +530,5 @@ mod tests {
         // Deleting the issue clears its remaining tags.
         delete(&db, i.id).await.unwrap();
         assert!(list_tags(&db, i.id).await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn list_for_plan_treats_slug_literally() {
-        let db = crate::db::connect_in_memory().await.unwrap();
-        // Two plans whose slugs differ only at a LIKE metacharacter position:
-        // unescaped, `a_b#%` would also match `axb#...` (`_` = any char).
-        let mk = |slug: &str| NewIssue {
-            repo_root: "/r".to_string(),
-            title: format!("from {slug}"),
-            plan_task: Some(format!("{slug}#T1")),
-            ..Default::default()
-        };
-        add(&db, &mk("a_b")).await.unwrap();
-        add(&db, &mk("axb")).await.unwrap();
-
-        let got = list_for_plan(&db, "/r", "a_b", true).await.unwrap();
-        assert_eq!(got.len(), 1, "must not match the `axb` plan");
-        assert_eq!(got[0].plan_task.as_deref(), Some("a_b#T1"));
     }
 }

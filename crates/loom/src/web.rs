@@ -62,6 +62,7 @@
 //! Absence is the calm state; there is no stored `ok` tag.
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
 use std::path::{Component, PathBuf};
@@ -92,16 +93,17 @@ use crate::events::{Event, EventBus};
 use crate::session::{self as session_mod, NewSession, Session};
 use crate::{agent, config, db, events, git, github, overlooker as ov_engine, repo, tmux};
 use weaver_api::{
-    AgentOneshotReq, BranchView, CreateIssueReq, CreateOverlookerReq, CreateRepoIssueReq,
-    CreateReq, IssueView, OverlookerRunView, OverlookerView, PatchIssueReq, PatchOverlookerReq,
-    PatchSessionReq, PlanTaskView, PlanView, ProgramView, RunOverlookerReq, ScratchUpload, SendReq,
-    SessionView, TagReq,
+    AgentOneshotReq, ArtifactMeta, ArtifactRefs, ArtifactView, ArtifactWriteBody, BranchView,
+    CreateIssueReq, CreateOverlookerReq, CreateRepoIssueReq, CreateReq, IssueRefStatus, IssueView,
+    OverlookerRunView, OverlookerView, PatchIssueReq, PatchOverlookerReq, PatchSessionReq,
+    ProgramView, RunOverlookerReq, ScratchUpload, SendReq, SessionView, TagReq,
 };
+use weaver_core::artifact::{self, Artifact};
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::Branch;
 use weaver_core::issue::Issue;
 use weaver_core::overlooker::{self as ov, Overlooker};
-use weaver_core::{plan, repo_config, tags};
+use weaver_core::tags;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -363,8 +365,11 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/tree", get(tree_session))
         .route("/sessions/{id}/file", get(file_session).put(write_file))
         .route("/sessions/{id}/raw", get(raw_session))
-        .route("/sessions/{id}/plan", get(get_plan))
-        .route("/sessions/{id}/plan/sync", post(sync_plan))
+        .route("/sessions/{id}/artifacts", get(list_artifacts))
+        .route(
+            "/sessions/{id}/artifacts/{name}",
+            get(get_artifact).put(write_artifact),
+        )
         .route(
             "/sessions/{id}/scratch",
             get(list_scratch)
@@ -885,7 +890,6 @@ async fn create_tracking_issue(
                 title: title.to_string(),
                 body: description.to_string(),
                 github_issue: Some(number),
-                plan_task: None,
             },
         )
         .await?;
@@ -1573,167 +1577,179 @@ async fn write_file(
 }
 
 // ---------------------------------------------------------------------------
-// Plan view — a structured project plan rendered with task status PROJECTED
-// from the issue ledger, plus reconcile. The plan FILE owns structure; the
-// `issues` table owns state. See docs/structured-projects.md.
+// Artifacts — named, versioned documents stored in weaver.db. The GET resolves
+// the content's references against the issue ledger (via smartdoc) and returns
+// the projection alongside, so the SPA chips and `weaver artifact show` render
+// the same join. Structure in the doc, state in the DB. See docs/artifacts.md.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct PlanQuery {
-    slug: Option<String>,
+struct RevQuery {
+    rev: Option<i64>,
 }
 
-/// The plan directory, worktree-relative, honoring `.weaver/config.toml`
-/// `[plan].dir` (default `docs/plans`).
-fn plan_dir_rel(work_dir: &std::path::Path, repo_root: &str) -> String {
-    repo_config::plan_dir(&[work_dir.to_path_buf(), PathBuf::from(repo_root)])
+/// The wire metadata for an artifact envelope.
+fn artifact_meta(a: &Artifact) -> ArtifactMeta {
+    ArtifactMeta {
+        id: a.id,
+        name: a.name.clone(),
+        kind: a.kind.clone(),
+        title: a.title.clone(),
+        branch_id: a.branch_id.clone(),
+        rev: a.rev,
+        created_at: a.created_at.clone(),
+        updated_at: a.updated_at.clone(),
+    }
 }
 
-/// Plan slugs (markdown file stems) present under `dir`, sorted.
-fn plan_slugs(dir: &std::path::Path) -> Vec<String> {
-    let mut slugs = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    slugs.push(stem.to_string());
+/// List the artifacts visible from a session: its branch's plus the repo-shared
+/// ones, latest rev each (a branch-scoped name shadows a shared one).
+async fn list_artifacts(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<Vec<ArtifactMeta>>> {
+    let (_, branch) = require_session(&st.db, &key).await?;
+    let artifacts = artifact::list_for_session(&st.db, &branch.repo_root, &branch.id).await?;
+    Ok(Json(artifacts.iter().map(artifact_meta).collect()))
+}
+
+/// Resolve an artifact's content references to their live status, as the wire
+/// [`ArtifactRefs`]. Probes each `#N` against the repo's issue ledger and joins
+/// via [`smartdoc::project`]; an unresolved reference is omitted from the map.
+async fn project_artifact_refs(db: &Db, repo_root: &str, content: &str) -> ArtifactRefs {
+    let doc = smartdoc::parse(content);
+    // Probe each distinct reference against weaver-core. Best-effort: a probe
+    // miss (unknown issue, wrong repo, read error) just leaves that ref absent
+    // from the status map, which `project` renders as a muted, non-existent chip.
+    let mut status: HashMap<smartdoc::Ref, smartdoc::RefStatus> = HashMap::new();
+    for r in smartdoc::refs(&doc) {
+        if let smartdoc::Ref::Issue(n) = &r {
+            if let Ok(Some(issue)) = weaver_core::issue::get(db, *n as i64).await {
+                if issue.repo_root == repo_root {
+                    status.insert(
+                        r.clone(),
+                        smartdoc::RefStatus {
+                            exists: true,
+                            title: issue.title,
+                            status: issue.status,
+                            claimed_branch: issue.claimed_branch,
+                        },
+                    );
                 }
             }
         }
     }
-    slugs.sort();
-    slugs
-}
-
-/// The plan a session is working, derived from its claimed issue's `plan_task`.
-async fn claimed_plan_slug(db: &Db, branch: &Branch) -> Option<String> {
-    let issues = weaver_core::issue::list_for_branch(db, &branch.repo_root, &branch.branch, true)
-        .await
-        .ok()?;
-    issues
-        .iter()
-        .find_map(|i| i.plan_task.as_deref())
-        .and_then(|k| k.split('#').next())
-        .map(str::to_string)
-}
-
-/// A session's plan, parsed, with each task's status joined from the ledger.
-/// `?slug=` selects a specific plan; otherwise the session's claimed-issue plan,
-/// then the first available, is used.
-async fn get_plan(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Query(q): Query<PlanQuery>,
-) -> ApiResult<Json<PlanView>> {
-    let (session, branch) = require_session(&st.db, &key).await?;
-    let work_dir = PathBuf::from(&session.work_dir);
-    let dir_rel = plan_dir_rel(&work_dir, &branch.repo_root);
-    let available = plan_slugs(&work_dir.join(&dir_rel));
-
-    let slug = match q.slug {
-        Some(s) if !s.trim().is_empty() => s,
-        _ => match claimed_plan_slug(&st.db, &branch).await {
-            Some(s) => s,
-            None => match available.first() {
-                Some(s) => s.clone(),
-                None => return Err(AppError::not_found("plan")),
-            },
-        },
-    };
-
-    let rel = format!("{dir_rel}/{slug}.md");
-    let content = match tokio::fs::read_to_string(work_dir.join(&rel)).await {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(AppError::not_found("plan"))
-        }
-        Err(e) => return Err(e.into()),
-    };
-
-    let parsed = plan::parse(&slug, &content);
-    let issues = weaver_core::issue::list_for_plan(&st.db, &branch.repo_root, &slug, true).await?;
-    let tasks = parsed
-        .tasks
-        .iter()
-        .map(|t| {
-            let task_key = t.key(&slug);
-            let issue = issues
-                .iter()
-                .find(|i| i.plan_task.as_deref() == Some(task_key.as_str()));
-            PlanTaskView {
-                id: t.id.clone(),
-                title: t.title.clone(),
-                exec: t.exec.clone(),
-                value: t.value.clone(),
-                deps: t.deps.clone(),
-                issue_id: issue.map(|i| i.id),
-                issue_status: issue.map(|i| i.status.clone()),
-                claimed_branch: issue.and_then(|i| i.claimed_branch.clone()),
+    // Join, then shape the resolved issue refs into the wire map (keyed by id).
+    let mut refs = ArtifactRefs::default();
+    for pr in smartdoc::project(&doc, &status).refs {
+        if let smartdoc::Ref::Issue(n) = pr.reference {
+            if pr.status.exists {
+                refs.issues.insert(
+                    n.to_string(),
+                    IssueRefStatus {
+                        id: n as i64,
+                        title: pr.status.title,
+                        status: pr.status.status,
+                        claimed_branch: pr.status.claimed_branch,
+                    },
+                );
             }
+        }
+    }
+    refs
+}
+
+/// Build the full [`ArtifactView`] for an artifact at a given revision (default
+/// latest): envelope, content, version list, and the projected reference map.
+async fn artifact_view(
+    db: &Db,
+    repo_root: &str,
+    a: &Artifact,
+    rev: Option<i64>,
+) -> ApiResult<ArtifactView> {
+    let version = match rev {
+        Some(r) => artifact::version(db, a.id, r).await?,
+        None => artifact::latest_version(db, a.id).await?,
+    }
+    .ok_or_else(|| AppError::not_found("artifact revision"))?;
+    let versions = artifact::history(db, a.id)
+        .await?
+        .into_iter()
+        .map(|v| weaver_api::ArtifactVersion {
+            rev: v.rev,
+            author: v.author,
+            created_at: v.created_at,
         })
         .collect();
-
-    Ok(Json(PlanView {
-        slug,
-        path: rel,
-        title: parsed.title,
-        status: parsed.status,
-        content,
-        tasks,
-        available,
-    }))
+    let refs = project_artifact_refs(db, repo_root, &version.content).await;
+    Ok(ArtifactView {
+        meta: artifact_meta(a),
+        content: version.content,
+        versions,
+        refs,
+    })
 }
 
-#[derive(Debug, Deserialize)]
-struct SyncReq {
-    slug: String,
-    /// Apply the delta, not just preview it.
-    #[serde(default)]
-    apply: bool,
-}
-
-/// Reconcile a plan against the issue ledger. Returns the delta (and applies it
-/// when `apply`). In-flight tasks are flagged, never rewritten.
-async fn sync_plan(
+/// One artifact, content + projected refs, resolving branch-scoped before
+/// repo-shared. `?rev=N` selects a revision; the default is latest.
+async fn get_artifact(
     State(st): State<AppState>,
-    Path(key): Path<String>,
-    Json(req): Json<SyncReq>,
-) -> ApiResult<Json<Value>> {
-    let (session, branch) = require_session(&st.db, &key).await?;
-    let work_dir = PathBuf::from(&session.work_dir);
-    let dir_rel = plan_dir_rel(&work_dir, &branch.repo_root);
-    let rel = format!("{dir_rel}/{}.md", req.slug);
-    let content = match tokio::fs::read_to_string(work_dir.join(&rel)).await {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(AppError::not_found("plan"))
-        }
-        Err(e) => return Err(e.into()),
-    };
-    let parsed = plan::parse(&req.slug, &content);
-    let issues =
-        weaver_core::issue::list_for_plan(&st.db, &branch.repo_root, &req.slug, true).await?;
-    let delta = plan::diff(&req.slug, &parsed.tasks, &issues);
+    Path((key, name)): Path<(String, String)>,
+    Query(q): Query<RevQuery>,
+) -> ApiResult<Json<ArtifactView>> {
+    let (_, branch) = require_session(&st.db, &key).await?;
+    let a = artifact::get(&st.db, &branch.repo_root, &branch.id, &name)
+        .await?
+        .ok_or_else(|| AppError::not_found("artifact"))?;
+    Ok(Json(
+        artifact_view(&st.db, &branch.repo_root, &a, q.rev).await?,
+    ))
+}
 
-    if req.apply && !delta.is_empty() {
-        plan::apply(&st.db, &branch, &req.slug, &delta).await?;
-        events::record(
-            &st.db,
-            &st.bus,
-            &branch.id,
-            "plan_synced",
-            json!({ "slug": req.slug, "actions": delta.actions.len() }),
-        )
-        .await
-        .ok();
-    }
-
-    Ok(Json(json!({
-        "applied": req.apply,
-        "flags": delta.flags(),
-        "actions": delta.actions,
-    })))
+/// Write a new revision of an artifact (a user edit, `author: user`), returning
+/// the refreshed view at the new latest revision. The artifact must already
+/// exist in the session's view; the write targets the resolved scope (its own
+/// branch-scoped row, else the repo-shared one).
+async fn write_artifact(
+    State(st): State<AppState>,
+    Path((key, name)): Path<(String, String)>,
+    Json(body): Json<ArtifactWriteBody>,
+) -> ApiResult<Json<ArtifactView>> {
+    let (_, branch) = require_session(&st.db, &key).await?;
+    let existing = artifact::get(&st.db, &branch.repo_root, &branch.id, &name)
+        .await?
+        .ok_or_else(|| AppError::not_found("artifact"))?;
+    // Keep the existing kind/title unless the body overrides them.
+    let kind = body.kind.unwrap_or_else(|| existing.kind.clone());
+    let title = body.title.unwrap_or_else(|| existing.title.clone());
+    // Write into the same scope the artifact resolved to (a shared artifact
+    // edited from a session writes a new shared revision, not a branch copy).
+    let scope = existing.branch_id.as_deref();
+    let a = artifact::write(
+        &st.db,
+        &artifact::NewRevision {
+            repo_root: &branch.repo_root,
+            branch_id: scope,
+            name: &name,
+            kind: &kind,
+            title: &title,
+            content: &body.content,
+            author: "user",
+        },
+    )
+    .await?;
+    events::record(
+        &st.db,
+        &st.bus,
+        &branch.id,
+        "artifact_written",
+        json!({ "name": a.name, "rev": a.rev, "title": a.title }),
+    )
+    .await
+    .ok();
+    Ok(Json(
+        artifact_view(&st.db, &branch.repo_root, &a, None).await?,
+    ))
 }
 
 // ---------------------------------------------------------------------------

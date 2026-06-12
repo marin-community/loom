@@ -47,6 +47,16 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "issue_tags",
         include_str!("../migrations/0006_issue_tags.sql"),
     ),
+    (
+        7,
+        "artifacts",
+        include_str!("../migrations/0007_artifacts.sql"),
+    ),
+    (
+        8,
+        "drop_plan_task",
+        include_str!("../migrations/0008_drop_plan_task.sql"),
+    ),
 ];
 
 /// Apply every pending migration, bringing the database up to the latest schema.
@@ -169,7 +179,6 @@ async fn legacy_bootstrap(pool: &Db) -> Result<()> {
     // already present, or when the table doesn't exist yet (the baseline
     // migration creates it with the column).
     add_column_if_missing(pool, "branches", "attention", "TEXT NOT NULL DEFAULT 'ok'").await?;
-    add_column_if_missing(pool, "issues", "plan_task", "TEXT").await?;
     Ok(())
 }
 

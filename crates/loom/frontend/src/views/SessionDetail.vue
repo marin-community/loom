@@ -79,6 +79,12 @@ function openStream() {
       loadIssues().catch(() => {});
     });
   }
+  // An artifact write joins the feed; pushing it to `events` also nudges the
+  // Overview's pinned-plan watcher to re-fetch the `plan` artifact, and the
+  // Artifacts surface refreshes off the same SSE stream itself.
+  source.addEventListener('artifact_written', (e) => {
+    events.value.push(JSON.parse((e as MessageEvent).data) as WeaverEvent);
+  });
 }
 
 function eventLine(ev: WeaverEvent): string {
@@ -95,6 +101,8 @@ function eventLine(ev: WeaverEvent): string {
   if (ev.kind === 'issue_added') return `issue added: ${d.title ?? ''}`;
   if (ev.kind === 'issue_closed') return `issue closed: #${d.id ?? '?'}`;
   if (ev.kind === 'issue_reopened') return `issue reopened: #${d.id ?? '?'}`;
+  if (ev.kind === 'artifact_written')
+    return `artifact written: ${d.name ?? '?'}${d.rev ? ` (v${d.rev})` : ''}`;
   return ev.kind;
 }
 

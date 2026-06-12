@@ -15,6 +15,7 @@ path = "src/bin/loom.rs"
 [dependencies]
 weaver-core = { path = "../weaver-core" }
 weaver-api = { path = "../weaver-api" }
+smartdoc = { path = "../smartdoc" }
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"

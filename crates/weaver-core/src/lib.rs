@@ -3,6 +3,7 @@
 //! tmux, no process spawning beyond `git`.
 
 pub mod agent;
+pub mod artifact;
 pub mod branch;
 pub mod config;
 pub mod db;
@@ -12,8 +13,6 @@ pub mod github;
 pub mod issue;
 pub mod migrations;
 pub mod overlooker;
-pub mod plan;
-pub mod repo_config;
 pub mod tags;
 
 pub use db::Db;

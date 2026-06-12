@@ -28,6 +28,39 @@ pub fn run_dir(id: &str) -> PathBuf {
     weaver_home().join("run").join(id)
 }
 
+/// The `host:port` of a running loom dashboard, for building shareable URLs
+/// (e.g. the `weaver artifact write` write-back link). Resolved the way loom's
+/// own clients resolve it, minus a dependency on the loom crate:
+///
+///   1. `$WEAVER_API` (a URL or bare `host:port`, normalized to `host:port`),
+///   2. the address loom recorded in `<weaver_home>/loom.json` while serving.
+///
+/// `None` when neither is set — typically no loom is running. Callers fall back
+/// to a daemon-less message; an artifact write is a plain DB write either way.
+pub fn dashboard_addr() -> Option<String> {
+    if let Ok(api) = std::env::var("WEAVER_API") {
+        let socket = api
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_string();
+        if !socket.is_empty() {
+            return Some(socket);
+        }
+    }
+    // loom writes `{ "pid", "addr", "started_at" }` to `loom.json` under the
+    // weaver home while it serves (see loom::server::ServerState); read the
+    // `addr` field without taking on the loom dependency.
+    let text = std::fs::read_to_string(weaver_home().join("loom.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("addr")
+        .and_then(|a| a.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// Current UTC time as an ISO-8601 string, matching the SQLite default format.
 pub fn now_iso() -> String {
     chrono::Utc::now()

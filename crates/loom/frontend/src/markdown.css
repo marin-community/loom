@@ -285,6 +285,53 @@
   background: #033a16;
 }
 
+/* smartdoc projection chips/links — `#N` issue refs become live status pills,
+   `artifact:<name>` becomes a deep link. Token-only so they track the theme.
+   The status→color mapping mirrors how issues read elsewhere: open = neutral,
+   claimed = the amber attention hue, closed = the blue accent. These override
+   the generic `.markdown-body a` link styling. */
+.markdown-body a.smartdoc-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 0.25rem;
+  padding: 0 0.3em;
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.markdown-body a.smartdoc-chip:hover {
+  text-decoration: none;
+  filter: brightness(0.97);
+}
+.markdown-body a.smartdoc-chip--open {
+  background: var(--subtle);
+  color: var(--muted);
+}
+.markdown-body a.smartdoc-chip--claimed {
+  background: var(--attn-soft);
+  color: var(--attn);
+  box-shadow: inset 0 0 0 1px var(--attn-line);
+}
+.markdown-body a.smartdoc-chip--closed {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
+  text-decoration: line-through;
+}
+
+.markdown-body a.smartdoc-artifact {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  text-decoration: none;
+}
+.markdown-body a.smartdoc-artifact:hover {
+  text-decoration: underline;
+}
+
 /* Rendered mermaid diagram + the parse-error fallback. */
 .markdown-body .mermaid-diagram {
   display: flex;

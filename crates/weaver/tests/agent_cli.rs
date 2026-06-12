@@ -75,7 +75,7 @@ fn goal_set_and_get() {
     let out = run(&env, &["goal"]);
     assert_eq!(out.trim(), "");
 
-    run(&env, &["goal", "ship", "the", "thing"]);
+    run(&env, &["goal", "set", "ship", "the", "thing"]);
     let out = run(&env, &["goal"]);
     assert_eq!(out.trim(), "ship the thing");
 }
@@ -257,7 +257,7 @@ fn issue_ls_shows_delegated_sub_trees() {
 fn seed_delegated_issue(env: &Env, parent: &str, child: &str, attention: &str, description: &str) {
     let db_path = env.home_path.join("weaver.db");
     // Make sure the parent branch row exists first (a write resolves it).
-    run(env, &["goal", "parent", "goal"]);
+    run(env, &["goal", "set", "parent", "goal"]);
     let repo_root = canonical_repo_root(&env.repo_path);
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -314,7 +314,7 @@ fn canonical_repo_root(repo: &Path) -> String {
 #[test]
 fn summary_orients_an_agent_on_the_branch() {
     let env = setup();
-    run(&env, &["goal", "ship", "the", "feature"]);
+    run(&env, &["goal", "set", "ship", "the", "feature"]);
     run(&env, &["issue", "add", "wire", "up", "routes"]);
     run(&env, &["issue", "add", "add", "tests"]);
     run(&env, &["set-status", "ok", "routes", "wired"]);
@@ -334,7 +334,7 @@ fn summary_orients_an_agent_on_the_branch() {
         "(weaver goal)",
         "(weaver set-status)",
         "(weaver issue ls)",
-        "weaver plan",
+        "weaver artifact",
         "weaver log",
     ] {
         assert!(out.contains(hint), "summary should surface `{hint}`: {out}");
@@ -368,11 +368,72 @@ fn summary_caps_a_long_outstanding_list() {
 #[test]
 fn summary_with_no_open_tasks_suggests_wrapping_up() {
     let env = setup();
-    run(&env, &["goal", "tidy", "up"]);
+    run(&env, &["goal", "set", "tidy", "up"]);
     let out = run(&env, &["summary"]);
     assert!(out.contains("Outstanding: none"), "summary: {out}");
     assert!(out.contains("no open tasks"), "summary: {out}");
     assert!(out.contains("open a PR"), "summary: {out}");
+}
+
+#[test]
+fn artifact_write_show_ls_and_revisions() {
+    let env = setup();
+    // Write from stdin (no file arg). The CLI prints a dashboard URL (the test
+    // env points WEAVER_API at a fixed address) and the new revision.
+    let out = run_with_stdin(
+        &env,
+        &["artifact", "write", "plan"],
+        "# Plan\n\nDesign here.\n",
+    );
+    assert!(
+        out.contains("/artifacts/plan"),
+        "write should print the URL: {out}"
+    );
+    assert!(out.contains("rev 1"), "first write is rev 1: {out}");
+
+    // show prints the content verbatim.
+    let shown = run(&env, &["artifact", "show", "plan"]);
+    assert!(shown.contains("Design here."), "show: {shown}");
+
+    // A second write appends rev 2, and --rev 1 still fetches the original.
+    let out2 = run_with_stdin(&env, &["artifact", "write", "plan"], "# Plan v2\n");
+    assert!(out2.contains("rev 2"), "second write is rev 2: {out2}");
+    let v1 = run(&env, &["artifact", "show", "plan", "--rev", "1"]);
+    assert!(v1.contains("Design here."), "rev 1 is the original: {v1}");
+
+    // --meta prints the envelope, not the content.
+    let meta = run(&env, &["artifact", "show", "plan", "--meta"]);
+    assert!(meta.contains("name:    plan"), "meta: {meta}");
+    assert!(meta.contains("rev:     2"), "meta latest rev: {meta}");
+    assert!(
+        meta.contains("branch"),
+        "meta scope is branch-scoped: {meta}"
+    );
+
+    // ls lists the branch-scoped artifact.
+    let ls = run(&env, &["artifact", "ls"]);
+    assert!(ls.contains("plan"), "ls: {ls}");
+    assert!(ls.contains("rev 2"), "ls shows latest rev: {ls}");
+
+    // A --repo write is repo-shared; --repo ls shows it.
+    run_with_stdin(
+        &env,
+        &["artifact", "write", "shared", "--repo"],
+        "shared body\n",
+    );
+    let repo_ls = run(&env, &["artifact", "ls", "--repo"]);
+    assert!(
+        repo_ls.contains("repo:shared"),
+        "repo ls shows shared scope: {repo_ls}"
+    );
+}
+
+#[test]
+fn goal_set_from_stdin() {
+    let env = setup();
+    run_with_stdin(&env, &["goal", "set", "-"], "ship it from stdin\n");
+    let out = run(&env, &["goal"]);
+    assert_eq!(out.trim(), "ship it from stdin");
 }
 
 #[test]
@@ -464,7 +525,7 @@ fn session_start_hook_injects_the_full_primer() {
 #[test]
 fn session_start_hook_after_compaction_replays_the_concise_summary() {
     let env = setup();
-    run(&env, &["goal", "ship", "the", "feature"]);
+    run(&env, &["goal", "set", "ship", "the", "feature"]);
     run(&env, &["issue", "add", "wire", "up", "routes"]);
     run(&env, &["set-status", "ok", "routes", "wired"]);
 
@@ -514,7 +575,7 @@ fn session_start_hook_after_compaction_replays_the_concise_summary() {
 #[test]
 fn set_status_with_no_id_reports_current_branch() {
     let env = setup();
-    run(&env, &["goal", "do", "the", "thing"]);
+    run(&env, &["goal", "set", "do", "the", "thing"]);
     run(&env, &["issue", "add", "step", "one"]);
     let out = run(&env, &["set-status"]);
     assert!(out.contains("branch:      feature-test"), "status: {out}");
@@ -651,7 +712,7 @@ fn triage_tag_marks_a_session_without_touching_attention() {
 #[test]
 fn tag_set_rejects_invalid_loud_value() {
     let env = setup();
-    run(&env, &["goal", "exist"]); // materialize the branch row first
+    run(&env, &["goal", "set", "exist"]); // materialize the branch row first
     let out = Command::new(weaver_bin())
         .args(["tag", "set", "triage", "bogus", "--session", "feature-test"])
         .current_dir(&env.repo_path)
@@ -672,7 +733,7 @@ fn tag_set_rejects_invalid_loud_value() {
 #[test]
 fn tag_set_ls_rm_roundtrip() {
     let env = setup();
-    run(&env, &["goal", "exist"]); // materialize the branch row first
+    run(&env, &["goal", "set", "exist"]); // materialize the branch row first
 
     // No tags to begin with.
     let out = run(&env, &["tag", "ls"]);
@@ -767,7 +828,7 @@ fn auto_creates_branch_row_on_first_write() {
             || std::fs::metadata(&db).map(|m| m.len()).unwrap_or(0) == 0
             || count_branches(&db) == 0
     );
-    run(&env, &["goal", "first", "write"]);
+    run(&env, &["goal", "set", "first", "write"]);
     assert_eq!(count_branches(&db), 1);
 }
 

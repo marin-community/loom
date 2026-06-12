@@ -49,7 +49,7 @@ export const del = (path: string) => request(path, { method: 'DELETE' });
 
 // --- Issues ----------------------------------------------------------------
 
-import type { Issue } from './types';
+import type { Issue, ArtifactMeta, ArtifactView, ArtifactWriteBody } from './types';
 
 /** Every issue across every repo — the Issues pane's cross-repo board. Pass
  *  `all` to include closed issues. */
@@ -76,17 +76,24 @@ export const setIssueTag = (id: number, key: string, value: string, note = '') =
 export const clearIssueTag = (id: number, key: string) =>
   del(`/issues/${id}/tags/${encodeURIComponent(key)}`) as Promise<Issue>;
 
-// --- Plans -----------------------------------------------------------------
+// --- Artifacts -------------------------------------------------------------
 
-/** A session's plan (parsed, with task status joined from the ledger). Pass a
- *  slug to select a specific plan when the repo has several. */
-export const getPlan = (id: string, slug?: string) =>
-  get(`/sessions/${id}/plan${slug ? `?slug=${encodeURIComponent(slug)}` : ''}`);
+/** A session's artifacts: its branch-scoped documents plus the repo-shared ones
+ *  (a branch-scoped name shadows a shared one). */
+export const getArtifacts = (id: string) =>
+  get(`/sessions/${id}/artifacts`) as Promise<ArtifactMeta[]>;
 
-/** Reconcile a plan against the issue ledger. `apply` writes the delta; omit it
- *  to preview. */
-export const syncPlan = (id: string, slug: string, apply: boolean) =>
-  post(`/sessions/${id}/plan/sync`, { slug, apply });
+/** One artifact — content plus the projected ref map. `rev` selects a revision;
+ *  omit it for the latest. */
+export const getArtifact = (id: string, name: string, rev?: number) =>
+  get(
+    `/sessions/${id}/artifacts/${encodeURIComponent(name)}${rev != null ? `?rev=${rev}` : ''}`,
+  ) as Promise<ArtifactView>;
+
+/** Write a new revision of an artifact (a user edit, `author: user`), returning
+ *  the refreshed view at the new latest revision. */
+export const putArtifact = (id: string, name: string, body: ArtifactWriteBody) =>
+  put(`/sessions/${id}/artifacts/${encodeURIComponent(name)}`, body) as Promise<ArtifactView>;
 
 /** Write a worktree file (the editor save primitive). Path is worktree-relative. */
 export const writeFile = (id: string, path: string, content: string) =>

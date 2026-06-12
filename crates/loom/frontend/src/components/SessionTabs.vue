@@ -1,19 +1,24 @@
 <script setup lang="ts">
 // Work-area sub-nav. Terminal/Overview are component-local tabs (the terminal
-// must never unmount, so the parent flips a ref and v-shows it); Files is a real
-// route to FileBrowser (Monaco is heavy and mustn't load on session-open).
+// must never unmount, so the parent flips a ref and v-shows it); Files and
+// Artifacts are real routes (Monaco is heavy and mustn't load on session-open).
 // Neutral underline indicator — no loud fills; only the active tab gets text-fg
 // + an accent underline.
 //
 // Terminal is the working zone (live agent + scratch drop); Overview is the
 // read-only context (goal, claimed issues, activity) — the issue count rides on
 // the Overview tab as a quiet pill rather than owning a tab of its own.
-type Tab = 'terminal' | 'overview' | 'files';
+// Artifacts is the agent's out-of-repo documents (designs, reports, the plan);
+// Files is the worktree tree.
+type Tab = 'terminal' | 'overview' | 'files' | 'artifacts';
+
+// Routed tabs (Files, Artifacts) are real navigations; the rest are local.
+type LocalTab = Exclude<Tab, 'files' | 'artifacts'>;
 
 defineProps<{ tab: Tab; id: string; issueCount: number }>();
-defineEmits<{ select: [Exclude<Tab, 'files'>] }>();
+defineEmits<{ select: [LocalTab] }>();
 
-const LOCAL_TABS: { key: Exclude<Tab, 'files'>; label: string }[] = [
+const LOCAL_TABS: { key: LocalTab; label: string }[] = [
   { key: 'terminal', label: 'Terminal' },
   { key: 'overview', label: 'Overview' },
 ];
@@ -37,6 +42,16 @@ const LOCAL_TABS: { key: Exclude<Tab, 'files'>; label: string }[] = [
       {{ t.label }}
       <span v-if="t.key === 'overview' && issueCount" class="pill ml-1">{{ issueCount }}</span>
     </button>
+    <router-link
+      :to="`/s/${id}/artifacts`"
+      data-tab="artifacts"
+      class="-mb-px border-b-2 px-2.5 py-1.5"
+      :class="tab === 'artifacts'
+        ? 'border-accent text-fg font-medium'
+        : 'border-transparent text-muted hover:text-fg'"
+    >
+      Artifacts
+    </router-link>
     <router-link
       :to="`/s/${id}/files`"
       data-tab="files"

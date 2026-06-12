@@ -3,10 +3,10 @@ import { computed, ref } from 'vue';
 import type { WeaverEvent } from '../types';
 
 // The Overview activity feed: de-noised to meaningful kinds (status, tag,
-// issue_*), newest first, capped at 6 with an "older →" reveal. `tag` events
-// cover the agent's attention, an overlooker's triage, and any free-form key.
-// High-volume `hook` events are dropped — they never stream in live, but the
-// initial GET /log may include them, so filter defensively.
+// issue_*, artifact_written), newest first, capped at 6 with an "older →"
+// reveal. `tag` events cover the agent's attention, an overlooker's triage, and
+// any free-form key. High-volume `hook` events are dropped — they never stream
+// in live, but the initial GET /log may include them, so filter defensively.
 const props = defineProps<{ events: WeaverEvent[]; format: (ev: WeaverEvent) => string }>();
 
 const MEANINGFUL = new Set([
@@ -15,6 +15,7 @@ const MEANINGFUL = new Set([
   'issue_added',
   'issue_closed',
   'issue_reopened',
+  'artifact_written',
 ]);
 
 const showAll = ref(false);
