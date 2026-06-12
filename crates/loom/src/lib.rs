@@ -6,6 +6,7 @@
 //! purely additive.
 
 pub mod agent;
+pub mod auth;
 pub mod builtins;
 pub mod client;
 pub mod db;

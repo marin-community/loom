@@ -259,6 +259,52 @@ different address. `loom serve --addr <host:port>` overrides `WEAVER_API`.
 The running daemon records the address it bound in `~/.weaver/server.json`,
 so the `loom` CLI finds it with no configuration in the common case.
 
+## Authentication
+
+loom can be exposed off `127.0.0.1` so the dashboard and the API are reachable
+without an SSH tunnel — `loom serve --addr 0.0.0.0:7878`, ideally behind a
+TLS-terminating reverse proxy. Access is then gated three ways:
+
+- **Local use needs nothing.** Requests from the loopback interface are trusted
+  as the machine owner, so the local `loom` CLI, the agent, and overlooker
+  scripts keep working with zero configuration. (Turn this off with
+  `auth.trust_loopback false` behind a *same-host* proxy — see below.)
+- **GitHub or password login** for the web UI. The login screen offers
+  "Continue with GitHub" once an OAuth app is configured, plus username/password.
+  A fresh install approves one user — **`rjpower`** on GitHub by default
+  (override with `LOOM_OWNER_GITHUB` at first run). Add more, set your password,
+  and configure GitHub sign-in under **Settings → Account**.
+- **API tokens** for automation — the `LOOM_TOKEN` a CI job or a remote `loom`
+  CLI presents as a bearer. Mint one under **Settings → Tokens** or:
+
+  ```sh
+  loom token create github-actions     # prints the secret once — store it now
+  ```
+
+  Then, from anywhere (e.g. a GitHub Actions step that kicks off a session in
+  response to a comment):
+
+  ```sh
+  export WEAVER_API=https://loom.example.com
+  export LOOM_TOKEN=loom_xxxxxxxx
+  loom session launch "Investigate the failing test in #123"
+  # or hit the API directly:
+  curl -H "Authorization: Bearer $LOOM_TOKEN" \
+       -H 'content-type: application/json' \
+       "$WEAVER_API/api/sessions" -d '{"cwd":"/srv/repo","goal":"..."}'
+  ```
+
+To configure **GitHub sign-in**: register an OAuth app on GitHub with the
+callback `https://loom.example.com/api/auth/github/callback`, then paste its
+client id and secret into Settings → Account (or set `LOOM_GITHUB_CLIENT_ID` /
+`LOOM_GITHUB_CLIENT_SECRET`).
+
+Behind a **same-host reverse proxy** the proxy's forwarded requests appear to
+come from loopback, so set `auth.trust_loopback false` and `auth.cookie_secure
+true`. Local automation keeps working: loom mints a machine-local token (at
+`~/.weaver/loom-token`, mode 0600) and hands it to its own subprocesses, so only
+genuinely remote callers need to present a token or log in.
+
 ## Configuration
 
 Settings live in the `settings` table of the sqlite database, shared by both
@@ -287,6 +333,12 @@ Notable settings:
   merges (on by default).
 - `terminal.theme` — colour palette for the in-browser terminal: `dark` (the
   classic black background, default) or `light`.
+- `auth.trust_loopback` — trust loopback requests as the machine owner (on by
+  default; turn off behind a same-host proxy). See [Authentication](#authentication).
+- `auth.cookie_secure` — mark the login cookie `Secure` (enable when served over
+  HTTPS).
+- `auth.base_url` — the public URL loom is reached at, used for the GitHub OAuth
+  callback (blank ⇒ derived from the request's Host header).
 
 ## Developing weaver
 
@@ -303,3 +355,6 @@ placeholder page), `cargo test --workspace` runs the backend suites, and `cd e2e
 - `WEAVER_DB` — database path (default `$WEAVER_HOME/weaver.db`)
 - `WEAVER_API` — loom URL the `loom` CLI talks to (default `http://127.0.0.1:7878`)
 - `WEAVER_BRANCH` — override the branch resolver (set by `loom session launch` in the worktree)
+- `LOOM_TOKEN` — bearer token the `loom` CLI / automation sends (see [Authentication](#authentication))
+- `LOOM_OWNER_GITHUB` — GitHub login seeded as the owner on a fresh database (default `rjpower`)
+- `LOOM_GITHUB_CLIENT_ID` / `LOOM_GITHUB_CLIENT_SECRET` — GitHub OAuth app credentials

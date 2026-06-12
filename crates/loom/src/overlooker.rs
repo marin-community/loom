@@ -601,6 +601,11 @@ async fn run_script(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    // The script reaches the daemon over the REST API; hand it the machine-local
+    // token so it authenticates even when loopback trust is off.
+    if let Some(token) = crate::agent::read_local_token() {
+        command.env("LOOM_TOKEN", token);
+    }
     for key in crate::agent::STRIPPED_ENV {
         command.env_remove(key);
     }

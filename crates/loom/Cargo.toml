@@ -17,18 +17,29 @@ weaver-core = { path = "../weaver-core" }
 weaver-api = { path = "../weaver-api" }
 smartdoc = { path = "../smartdoc" }
 anyhow = "1"
+# Password hashing for the user/password login path (the OWASP-recommended KDF).
+argon2 = "0.5"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 futures-util = "0.3"
+# Hex-encode the SHA-256 digests we store for API tokens and session cookies.
+hex = "0.4"
 libc = "0.2"
+percent-encoding = "2"
 portable-pty = "0.9"
 rand = "0.9"
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# `rustls-tls` is needed for the GitHub OAuth token/user calls over HTTPS — the
+# rest of loom's HTTP is loopback to its own daemon, but the OAuth dance reaches
+# github.com directly.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# SHA-256 for hashing API tokens / session ids at rest (high-entropy secrets, so
+# a fast digest is right — the slow KDF above is only for low-entropy passwords).
+sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "derive"] }
 # The overlooker engine materializes embedded builtin scripts to a scratch file
 # before running them; the tests reuse it for fixtures.

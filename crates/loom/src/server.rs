@@ -246,6 +246,13 @@ pub async fn reconcile_managed_sessions(state: &AppState) {
 }
 
 pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
+    // Mint (or reuse) the machine-local token so loom's own same-host
+    // subprocesses authenticate even when loopback trust is off. Best-effort:
+    // a failure here must not stop the server coming up.
+    match crate::auth::ensure_local_token(&state.db).await {
+        Ok(_) => tracing::debug!("machine-local token ready"),
+        Err(e) => tracing::warn!("could not prepare the machine-local token: {e}"),
+    }
     tokio::spawn(monitor::run(state.clone()));
     // The GitHub poller is always spawned; it self-gates on the `github.poll`
     // setting and on `gh` being available, so it idles cheaply when GitHub
@@ -256,9 +263,14 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     // idles cheaply until the operator opts in.
     tokio::spawn(overlooker::run(state.clone()));
     tracing::debug!("background tasks spawned (monitor, github poll, overlooker)");
-    axum::serve(listener, web::router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // `into_make_service_with_connect_info` surfaces the peer `SocketAddr` to the
+    // auth middleware, which uses it to recognise (and optionally trust) loopback.
+    axum::serve(
+        listener,
+        web::router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 

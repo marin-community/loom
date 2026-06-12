@@ -130,10 +130,17 @@ pub async fn launch(spec: &LaunchSpec<'_>, mode: LaunchMode) -> Result<()> {
     }
 
     let api_url = format!("http://{}", spec.server_addr);
-    let env = [
+    // Hand the agent the machine-local token so its in-worktree `loom session …`
+    // calls authenticate even when loopback trust is off. Absent file ⇒ omit it
+    // (loopback trust then covers the local case).
+    let local_token = read_local_token();
+    let mut env = vec![
         ("WEAVER_API", api_url.as_str()),
         ("WEAVER_BRANCH", spec.branch_id),
     ];
+    if let Some(token) = local_token.as_deref() {
+        env.push(("LOOM_TOKEN", token));
+    }
     let script = launch_script(
         spec.agent_kind,
         spec.goal_file,
@@ -160,6 +167,15 @@ pub async fn launch(spec: &LaunchSpec<'_>, mode: LaunchMode) -> Result<()> {
         "agent launched"
     );
     Ok(())
+}
+
+/// The machine-local bearer token (trimmed), if the daemon has minted it. Read
+/// straight off disk so callers needn't thread it through; absent ⇒ `None`.
+pub fn read_local_token() -> Option<String> {
+    std::fs::read_to_string(crate::auth::local_token_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Write (merging into any existing file) `.claude/settings.local.json` so the

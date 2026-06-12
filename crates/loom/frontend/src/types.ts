@@ -365,3 +365,54 @@ export interface SettingView {
   value: string;
   is_default: boolean;
 }
+
+// --- Authentication --------------------------------------------------------
+
+/** Which sign-in methods the login screen should offer. Mirrors weaver-api's
+ *  `AuthMethods`. */
+export interface AuthMethods {
+  password: boolean;
+  github: boolean;
+}
+
+/** Who the caller is + what the login screen needs (`GET /api/auth/me`).
+ *  `authenticated: false` means show the login view. Mirrors `MeView`. */
+export interface Me {
+  authenticated: boolean;
+  username: string | null;
+  github_login: string | null;
+  /** How they authenticated: `loopback` | `token` | `session` | null. */
+  via: string | null;
+  methods: AuthMethods;
+}
+
+/** One API token's non-secret metadata. Mirrors `TokenView`. */
+export interface Token {
+  id: string;
+  name: string;
+  prefix: string;
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string | null;
+}
+
+/** The one-time create reply: the plaintext token plus its metadata (flattened).
+ *  Mirrors `CreatedTokenView`. */
+export interface CreatedToken extends Token {
+  token: string;
+}
+
+/** One approved operator. Mirrors `UserView`. */
+export interface User {
+  username: string;
+  github_login: string | null;
+  has_password: boolean;
+  created_at: string;
+}
+
+/** The GitHub OAuth app config (secret withheld). Mirrors `GithubConfigView`. */
+export interface GithubConfig {
+  configured: boolean;
+  client_id: string;
+  callback_path: string;
+}

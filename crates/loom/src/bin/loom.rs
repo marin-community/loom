@@ -71,6 +71,21 @@ enum Cmd {
         #[command(subcommand)]
         cmd: OverlookerCmd,
     },
+    /// Manage API tokens for automation (the `LOOM_TOKEN` a CI job presents).
+    ///
+    /// Mint a token to drive loom from GitHub Actions or any remote client:
+    ///
+    ///     loom token create github-actions     # prints the secret once — copy it now
+    ///     loom token ls                         # name, prefix, last used
+    ///     loom token rm <id>                    # revoke
+    ///
+    /// Store the printed secret as a CI secret and pass it as `LOOM_TOKEN` (with
+    /// `WEAVER_API` pointing at your server) — every `loom` command then
+    /// authenticates with it.
+    Token {
+        #[command(subcommand)]
+        cmd: TokenCmd,
+    },
     /// Deprecated alias for `loom session launch`.
     #[command(hide = true)]
     Launch(LaunchOpts),
@@ -239,6 +254,25 @@ enum OverlookerCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum TokenCmd {
+    /// Mint a new API token. Prints the secret once — copy it now.
+    Create {
+        /// A label to recognise the token by (e.g. `github-actions`).
+        name: String,
+        /// Optional lifetime in days; omit for a non-expiring token.
+        #[arg(long)]
+        expires_days: Option<i64>,
+    },
+    /// List the API tokens (name, prefix, created, last used).
+    Ls,
+    /// Revoke a token by id.
+    Rm {
+        /// The token id (from `loom token ls`).
+        id: String,
+    },
+}
+
 /// Options for `loom overlooker add` — the flags build the trigger / scope /
 /// program / capability set the REST `CreateOverlookerReq` takes.
 #[derive(Args)]
@@ -356,6 +390,7 @@ async fn run() -> Result<()> {
         Cmd::Restart => cmd_restart().await,
         Cmd::Session { cmd } => run_session(cmd).await,
         Cmd::Overlooker { cmd } => run_overlooker(cmd).await,
+        Cmd::Token { cmd } => run_token(cmd).await,
         Cmd::Launch(opts) => {
             eprintln!("note: `loom launch` is deprecated — use `loom session launch`");
             cmd_launch(opts.into()).await
@@ -414,6 +449,61 @@ async fn run_overlooker(cmd: OverlookerCmd) -> Result<()> {
         OverlookerCmd::Runs { name, limit } => cmd_overlooker_runs(name, limit, false).await,
         OverlookerCmd::Logs { name, limit } => cmd_overlooker_runs(name, limit, true).await,
     }
+}
+
+async fn run_token(cmd: TokenCmd) -> Result<()> {
+    match cmd {
+        TokenCmd::Create { name, expires_days } => cmd_token_create(name, expires_days).await,
+        TokenCmd::Ls => cmd_token_ls().await,
+        TokenCmd::Rm { id } => cmd_token_rm(id).await,
+    }
+}
+
+async fn cmd_token_create(name: String, expires_days: Option<i64>) -> Result<()> {
+    let created = client::default()
+        .create_token(&weaver_api::CreateTokenReq {
+            name,
+            expires_in_days: expires_days,
+        })
+        .await?;
+    // The secret is shown once; lead with it and make the one-shot nature plain.
+    println!("{}", created.token);
+    eprintln!(
+        "\nThis is the only time the token is shown. Store it now, e.g. as a CI \
+         secret, and pass it as LOOM_TOKEN.\nid {}  ·  {}{}",
+        created.info.id,
+        created.info.prefix,
+        match created.info.expires_at {
+            Some(at) => format!("  ·  expires {at}"),
+            None => "  ·  never expires".to_string(),
+        }
+    );
+    Ok(())
+}
+
+async fn cmd_token_ls() -> Result<()> {
+    let tokens = client::default().list_tokens().await?;
+    if tokens.is_empty() {
+        println!("no tokens — create one with `loom token create <name>`");
+        return Ok(());
+    }
+    println!("{:<18}  {:<20}  {:<16}  LAST USED", "ID", "NAME", "PREFIX");
+    for t in tokens {
+        println!(
+            "{:<18}  {:<20}  {:<16}  {}",
+            t.id,
+            truncate(&t.name, 20),
+            t.prefix,
+            t.last_used_at.as_deref().unwrap_or("never"),
+        );
+    }
+    Ok(())
+}
+
+async fn cmd_token_rm(id: String) -> Result<()> {
+    client::default().revoke_token(&id).await?;
+    println!("revoked token {id}");
+    Ok(())
 }
 
 fn init_tracing() {

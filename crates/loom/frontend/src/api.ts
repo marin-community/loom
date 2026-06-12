@@ -1,8 +1,20 @@
+// A 401 on any non-auth route means the session lapsed (or was never there);
+// the app registers a handler that bounces to the login screen. Auth routes
+// (`/auth/...`) are exempt: a bad-password 401 must surface in the form, not
+// redirect.
+let onUnauthorized: (() => void) | null = null;
+export function setUnauthorizedHandler(fn: () => void): void {
+  onUnauthorized = fn;
+}
+
 async function request(path: string, opts: RequestInit = {}): Promise<unknown> {
   const res = await fetch('/api' + path, {
     headers: { 'content-type': 'application/json' },
     ...opts,
   });
+  if (res.status === 401 && !path.startsWith('/auth/')) {
+    onUnauthorized?.();
+  }
   if (!res.ok) {
     let message = res.statusText;
     try {
@@ -98,3 +110,58 @@ export const putArtifact = (id: string, name: string, body: ArtifactWriteBody) =
 /** Write a worktree file (the editor save primitive). Path is worktree-relative. */
 export const writeFile = (id: string, path: string, content: string) =>
   rawBody('PUT', `/sessions/${id}/file?path=${encodeURIComponent(path)}`, content);
+
+// --- Authentication --------------------------------------------------------
+
+import type { Me, Token, CreatedToken, User, GithubConfig } from './types';
+
+/** Who the caller is + which sign-in methods to offer. Never 401s. */
+export const getMe = () => get('/auth/me') as Promise<Me>;
+
+/** Username/password login; sets the session cookie on success. */
+export const login = (username: string, password: string) =>
+  post('/auth/login', { username, password });
+
+/** Drop the session and clear the cookie. */
+export const logout = () => post('/auth/logout');
+
+/** Begin GitHub OAuth — a full-page navigation (the server 302s to GitHub). */
+export const githubLoginUrl = '/api/auth/github/login';
+
+/** The user-managed API tokens. */
+export const listTokens = () => get('/auth/tokens') as Promise<Token[]>;
+
+/** Mint a token; the plaintext is in the reply once and never again. */
+export const createToken = (name: string, expiresInDays?: number | null) =>
+  post('/auth/tokens', { name, expires_in_days: expiresInDays ?? null }) as Promise<CreatedToken>;
+
+/** Revoke a token by id. */
+export const revokeToken = (id: string) => del(`/auth/tokens/${encodeURIComponent(id)}`);
+
+/** Set/change the caller's own password. */
+export const setPassword = (newPassword: string) =>
+  post('/auth/password', { new_password: newPassword });
+
+/** The approved-operator allowlist. */
+export const listUsers = () => get('/auth/users') as Promise<User[]>;
+
+/** Approve a new operator (GitHub login and/or password). */
+export const addUser = (username: string, githubLogin?: string, password?: string) =>
+  post('/auth/users', {
+    username,
+    github_login: githubLogin || null,
+    password: password || null,
+  }) as Promise<User>;
+
+/** Remove an approved operator. */
+export const removeUser = (username: string) => del(`/auth/users/${encodeURIComponent(username)}`);
+
+/** The GitHub OAuth app config (secret withheld). */
+export const getGithubConfig = () => get('/auth/github/config') as Promise<GithubConfig>;
+
+/** Set the OAuth client id, and optionally the secret (omit to leave it). */
+export const setGithubConfig = (clientId: string, clientSecret?: string) =>
+  put('/auth/github/config', {
+    client_id: clientId,
+    ...(clientSecret !== undefined ? { client_secret: clientSecret } : {}),
+  }) as Promise<GithubConfig>;

@@ -63,6 +63,47 @@ CREATE TABLE IF NOT EXISTS branch_github (
     merged_at        TEXT,
     fetched_at       TEXT NOT NULL
 );
+
+-- Authentication (loom-only; the daemon-less `weaver` CLI never serves HTTP, so
+-- it has no notion of users). An *approved* operator: a row here is the
+-- allowlist. `github_login` matches the GitHub OAuth identity; `password_hash`
+-- (argon2) backs username/password login. Either may be NULL — a GitHub-only
+-- user has no password until they set one, and vice versa.
+CREATE TABLE IF NOT EXISTS users (
+    username      TEXT PRIMARY KEY,
+    github_login  TEXT UNIQUE,
+    password_hash TEXT,
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+-- API tokens (personal access tokens) for automation — the `LOOM_TOKEN` a CI
+-- job or the `loom` CLI presents as `Authorization: Bearer`. Only the SHA-256
+-- `token_hash` is stored; the plaintext is shown once at creation. `prefix` is
+-- the leading, non-secret slice kept for display ("loom_AbCd…"). `kind` is
+-- 'pat' for a user token or 'local' for the machine token loom mints for its own
+-- same-host subprocesses (hidden from the token list, not revocable from the UI).
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id           TEXT PRIMARY KEY,
+    username     TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    token_hash   TEXT NOT NULL UNIQUE,
+    prefix       TEXT NOT NULL,
+    kind         TEXT NOT NULL DEFAULT 'pat',
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    last_used_at TEXT,
+    expires_at   TEXT
+);
+
+-- Browser login sessions: the opaque cookie a successful GitHub/password login
+-- sets. Stored hashed like a token; named `auth_sessions` to stay clear of the
+-- agent `sessions` table above. A row is dropped on logout or once `expires_at`
+-- passes.
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    token_hash TEXT PRIMARY KEY,
+    username   TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    expires_at TEXT NOT NULL
+);
 "#;
 
 /// Open the shared database and apply loom's additional tables on top of the
@@ -116,6 +157,28 @@ async fn migrate_loom(pool: &Db) -> Result<()> {
     // ordinary fleet session. Sessions predating the column stay NULL (they are
     // all ordinary fleet sessions, as they were before warm sessions existed).
     add_column_if_missing(pool, "sessions", "managed_by", "TEXT").await?;
+    seed_owner(pool).await?;
+    Ok(())
+}
+
+/// Seed the approved-user allowlist with the deploy owner so a fresh database is
+/// usable immediately: GitHub login works for exactly this one identity until
+/// more users are added. The login defaults to `rjpower` and can be overridden
+/// at first run with `LOOM_OWNER_GITHUB`. `INSERT OR IGNORE` makes this a no-op
+/// once the row (or any same-username row) exists, so it never clobbers later
+/// edits — including a password the owner has set.
+async fn seed_owner(pool: &Db) -> Result<()> {
+    let owner = std::env::var("LOOM_OWNER_GITHUB")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "rjpower".to_string());
+    sqlx::query("INSERT OR IGNORE INTO users (username, github_login) VALUES (?, ?)")
+        .bind(&owner)
+        .bind(&owner)
+        .execute(pool)
+        .await
+        .with_context(|| format!("seeding owner user '{owner}'"))?;
     Ok(())
 }
 

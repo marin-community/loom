@@ -9,6 +9,7 @@
 mod fixtures;
 
 mod archive;
+mod auth;
 mod branches;
 mod files;
 mod overlookers;

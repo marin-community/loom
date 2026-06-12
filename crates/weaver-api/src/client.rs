@@ -11,14 +11,17 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::dto::{
-    CreateOverlookerReq, CreateReq, OverlookerView, PatchOverlookerReq, PatchSessionReq,
-    RunOverlookerReq, SendReq, SessionView, TagReq,
+    CreateOverlookerReq, CreateReq, CreateTokenReq, CreatedTokenView, OverlookerView,
+    PatchOverlookerReq, PatchSessionReq, RunOverlookerReq, SendReq, SessionView, TagReq, TokenView,
 };
 
 /// A client for one loom server, identified by its base URL.
 pub struct Client {
     base: String,
     http: reqwest::Client,
+    /// Optional bearer token sent on every request (the `LOOM_TOKEN` for a
+    /// remote or non-loopback-trusted server). `None` relies on loopback trust.
+    token: Option<String>,
 }
 
 impl Client {
@@ -28,7 +31,16 @@ impl Client {
         Self {
             base: base.into(),
             http: reqwest::Client::new(),
+            token: None,
         }
+    }
+
+    /// Attach a bearer token (sent as `Authorization: Bearer …`). A `None` or
+    /// empty value leaves the client unauthenticated. loom's `client::default`
+    /// wires this from `$LOOM_TOKEN` / the machine token.
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token.filter(|t| !t.trim().is_empty());
+        self
     }
 
     /// Base URL of the server (also the web UI origin).
@@ -41,6 +53,9 @@ impl Client {
     async fn send(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value> {
         let url = format!("{}{}", self.base, path);
         let mut req = self.http.request(method, &url);
+        if let Some(token) = &self.token {
+            req = req.bearer_auth(token);
+        }
         if let Some(body) = body {
             req = req.json(&body);
         }
@@ -280,5 +295,24 @@ impl Client {
         let body = serde_json::to_value(req)?;
         self.post(&format!("/api/overlookers/{key}/run"), body)
             .await
+    }
+
+    // -- API tokens -------------------------------------------------------
+
+    /// List the user-managed API tokens (`GET /api/auth/tokens`).
+    pub async fn list_tokens(&self) -> Result<Vec<TokenView>> {
+        self.get_typed("/api/auth/tokens").await
+    }
+
+    /// Mint a new API token, returning the one-time plaintext
+    /// (`POST /api/auth/tokens`).
+    pub async fn create_token(&self, req: &CreateTokenReq) -> Result<CreatedTokenView> {
+        self.send_typed(Method::POST, "/api/auth/tokens", Some(req))
+            .await
+    }
+
+    /// Revoke an API token by id (`DELETE /api/auth/tokens/{id}`).
+    pub async fn revoke_token(&self, id: &str) -> Result<Value> {
+        self.delete(&format!("/api/auth/tokens/{id}")).await
     }
 }

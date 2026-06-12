@@ -113,6 +113,11 @@ class Client:
         url = self.base + "/api" + path
         data = json.dumps(body).encode() if body is not None else None
         headers = {"Content-Type": "application/json"} if data else {}
+        # The engine injects $LOOM_TOKEN (the machine-local token); present it so
+        # the round authenticates even when loopback trust is off.
+        token = (os.environ.get("LOOM_TOKEN") or "").strip()
+        if token:
+            headers["Authorization"] = "Bearer " + token
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req) as resp:

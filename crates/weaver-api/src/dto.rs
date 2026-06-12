@@ -604,3 +604,117 @@ pub struct RunOverlookerReq {
     #[serde(default)]
     pub dry_run: bool,
 }
+
+// ---------------------------------------------------------------------------
+// Authentication
+// ---------------------------------------------------------------------------
+
+/// Which sign-in methods the server currently offers — what the login screen
+/// renders. `password` is always available (any user can be given one);
+/// `github` is true only once an OAuth app is configured.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthMethods {
+    pub password: bool,
+    pub github: bool,
+}
+
+/// `GET /api/auth/me` — who the caller is and what the login screen needs. The
+/// SPA hits this on load: `authenticated: false` means show the login view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeView {
+    pub authenticated: bool,
+    /// The approved username, when authenticated.
+    pub username: Option<String>,
+    /// The caller's GitHub login, when known.
+    pub github_login: Option<String>,
+    /// How they authenticated: `loopback` | `token` | `session` | null.
+    pub via: Option<String>,
+    /// The sign-in methods on offer (for the login screen).
+    pub methods: AuthMethods,
+}
+
+/// One API token's non-secret metadata (`GET /api/auth/tokens`). The secret
+/// itself is only ever returned once, in [`CreatedTokenView`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenView {
+    pub id: String,
+    pub name: String,
+    /// The non-secret leading slice, e.g. `loom_AbCd…`, to tell tokens apart.
+    pub prefix: String,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    pub expires_at: Option<String>,
+}
+
+/// `POST /api/auth/tokens` reply — the one and only time the plaintext token is
+/// shown. Store it now; the server keeps only a hash.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreatedTokenView {
+    /// The full secret — present once, never retrievable again.
+    pub token: String,
+    #[serde(flatten)]
+    pub info: TokenView,
+}
+
+/// Body for `POST /api/auth/tokens`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreateTokenReq {
+    pub name: String,
+    /// Optional lifetime in days; omitted / non-positive means it never expires.
+    #[serde(default)]
+    pub expires_in_days: Option<i64>,
+}
+
+/// Body for `POST /api/auth/login` (username/password).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LoginReq {
+    pub username: String,
+    pub password: String,
+}
+
+/// Body for `POST /api/auth/password` — set/change the caller's own password.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetPasswordReq {
+    pub new_password: String,
+}
+
+/// One approved operator (`GET /api/auth/users`). The password hash is never
+/// exposed — only whether one is set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserView {
+    pub username: String,
+    pub github_login: Option<String>,
+    pub has_password: bool,
+    pub created_at: String,
+}
+
+/// Body for `POST /api/auth/users` — approve a new operator.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AddUserReq {
+    pub username: String,
+    #[serde(default)]
+    pub github_login: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+/// `GET /api/auth/github/config` — the GitHub sign-in setup, secret withheld.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GithubConfigView {
+    /// Whether both a client id and secret are present (sign-in is live).
+    pub configured: bool,
+    /// The OAuth app's client id (public). Empty when unset.
+    pub client_id: String,
+    /// The callback path to register on the GitHub OAuth app
+    /// (`/api/auth/github/callback`).
+    pub callback_path: String,
+}
+
+/// Body for `PUT /api/auth/github/config`. The secret is write-only — send it to
+/// set it, omit it to leave the stored one untouched.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetGithubConfigReq {
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: Option<String>,
+}

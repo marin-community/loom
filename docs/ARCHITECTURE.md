@@ -46,7 +46,8 @@ needing the daemon to be reachable.
 | `crates/weaver-core/` | lib: `branches`, `issues`, `events`, `db`, `migrations` (ordered SQL + `schema_migrations` indicator), `git`, `config`, `artifacts` (versioned documents), `repo_config` (`.weaver/config.toml`), agent helpers. Pure logic; used by both binaries. |
 | `crates/smartdoc/` | the markdown-convention layer: parse references (`#N`, `artifact:<name>`), project live status into the render. Dependency-free of weaver. See [artifacts.md](artifacts.md). |
 | `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`goal`, `summary`, `readme`, `set-status` [read or set level + message], `tag` [`set`/`rm`/`ls` a branch tag], `issue …`, `where`, `log`, `hook`, `config`) |
-| `crates/loom/src/web.rs` | axum routes, request/response types, SSE — **the API surface** |
+| `crates/loom/src/web.rs` | axum routes, request/response types, SSE — **the API surface** (incl. the auth middleware + login/token/user handlers) |
+| `crates/loom/src/auth.rs` | authentication core: token/password crypto, the `users`/`api_tokens`/`auth_sessions` tables, the machine-local token, and the GitHub OAuth calls. `axum`-free so it unit-tests directly |
 | `crates/loom/src/server.rs` | bind, write `server.json`, spawn bg tasks |
 | `crates/loom/src/monitor.rs` | status detection, orphan marking, hook-event consumer |
 | `crates/loom/src/overlooker.rs` | the overlooker engine: cron timer + event dispatcher + the round executor (the script subprocess executor every program runs on) |
@@ -143,7 +144,10 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
   shared by `weaver` and `loom`. WAL mode handles concurrency.
   - Core tables: `branches`, `issues`, `events`, `settings`.
   - Loom tables (`crates/loom/src/db.rs`): `sessions`, `recent_repos`,
-    `branch_github` (per-branch PR snapshot).
+    `branch_github` (per-branch PR snapshot), and the auth tables `users`
+    (the approved-operator allowlist, seeded with the owner), `api_tokens`
+    (hashed bearer tokens), and `auth_sessions` (hashed login cookies). See
+    [Authentication](#authentication).
   - **Schema migrations** (`weaver-core/src/migrations.rs`): ordered SQL files
     under `crates/weaver-core/migrations/` (`NNNN_name.sql`, embedded with
     `include_str!`), applied at startup and recorded in a `schema_migrations`
@@ -192,6 +196,13 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `GET POST /api/repos/issues?repo_root=…` | repo-wide board (`scope=repo\|backlog`) / create a backlog item |
 | `GET /api/repos/recent` / `GET /api/repos/branches?cwd=…` | recent repos / branches in a repo |
 | `GET PATCH /api/settings` | settings registry |
+| `GET /api/auth/me` | caller identity + sign-in methods (public; never 401s) |
+| `POST /api/auth/login` / `POST /api/auth/logout` | username/password login / drop the session (public) |
+| `GET /api/auth/github/{login,callback}` | the GitHub OAuth dance (public) |
+| `GET POST /api/auth/tokens` / `DELETE /api/auth/tokens/{id}` | list / mint / revoke API tokens |
+| `POST /api/auth/password` | set the caller's own password |
+| `GET POST /api/auth/users` / `DELETE /api/auth/users/{username}` | the approved-operator allowlist |
+| `GET PUT /api/auth/github/config` | the GitHub OAuth app config (secret write-only) |
 | `GET POST /api/overlookers` / `GET PATCH DELETE /api/overlookers/{id}` | overlooker CRUD (see [Overlookers](#overlookers)) |
 | `GET /api/overlookers/programs` | the builtin program registry: titles, suggested defaults, read-only script sources |
 | `POST /api/overlookers/{id}/run` / `GET /api/overlookers/{id}/runs` | fire a round now (`{dry_run}` stubs mutations) / the round-history audit |
@@ -376,6 +387,69 @@ archive, behind both the poller and the refresh endpoint), and `poll` (the
 loop). The merge-archive decision is split into `apply_snapshot` so it is
 testable without invoking `gh`.
 
+## Authentication
+
+Authentication is a **loom-only** concern — the daemon-less `weaver` CLI talks
+straight to sqlite and never authenticates. It lets loom be exposed off the
+loopback interface (so the dashboard and the API are reachable without an SSH
+tunnel) while gating who may drive the fleet. The core (crypto, the tables, the
+GitHub OAuth calls) lives in `crate::auth`, deliberately `axum`-free; the HTTP
+glue (the middleware, cookie handling, route handlers) lives in `crate::web`.
+
+Every `/api` route except the public login surface (`/api/health`,
+`/api/auth/me`, `/api/auth/login`, `/api/auth/logout`, `/api/auth/github/*`) and
+the static SPA passes through the `require_auth` middleware, which resolves the
+request to a `Principal` three ways, in order:
+
+- **API token** — an `Authorization: Bearer loom_…` header. This is the
+  `LOOM_TOKEN` a CI job or a remote `loom` CLI presents. Tokens are random
+  secrets stored only as a SHA-256 hash (`api_tokens.token_hash`); the plaintext
+  is shown once at creation. Managed under Settings → Tokens or `loom token`.
+- **Session cookie** — the opaque `loom_session` cookie set by a successful
+  GitHub or username/password login, stored hashed in `auth_sessions`.
+- **Loopback trust** — a request from `127.0.0.1`/`::1` is taken to be the
+  machine owner (the seeded primary user), gated on the `auth.trust_loopback`
+  setting (on by default). This keeps the local CLI, the agent's in-worktree
+  `loom` calls, and overlooker scripts working with zero configuration. To get
+  the peer address, the server runs `into_make_service_with_connect_info`; the
+  decision uses the real socket peer, **never** a forwarded header.
+
+A request that resolves to none of these gets `401`; the SPA's router guard
+turns that into the login screen.
+
+**The allowlist.** `users` rows are the approved operators. A fresh database is
+seeded with one owner — `github_login = rjpower` by default, overridable at
+first run with `LOOM_OWNER_GITHUB`. GitHub login only succeeds for a login that
+matches a `users` row; an unknown identity is authenticated by GitHub but
+rejected by loom. A user may have a `github_login`, a `password_hash` (argon2),
+or both. All approved users are equal — there is no role hierarchy, matching the
+single-operator scale.
+
+**GitHub OAuth** is configured per-deploy: register an OAuth app and set its id
+and secret via Settings → Account or the `LOOM_GITHUB_CLIENT_ID` /
+`LOOM_GITHUB_CLIENT_SECRET` env vars. The callback is
+`<base>/api/auth/github/callback`, where `<base>` is the `auth.base_url` setting
+or, unset, `{X-Forwarded-Proto|http}://{Host}`. The login route sets a short
+CSRF `state` cookie the callback verifies. Until an app is configured the GitHub
+button is hidden and `GET /api/auth/me` reports `methods.github = false`.
+
+**The machine-local token.** On startup loom mints (and persists, 0600, at
+`$WEAVER_HOME/loom-token`) a `kind = 'local'` `api_tokens` row owned by the
+primary user, and injects it as `LOOM_TOKEN` into the environments of its own
+same-host subprocesses (the agent's tmux, overlooker scripts) — and the `loom`
+CLI reads it. This makes `auth.trust_loopback = false` a fully working mode:
+behind a **same-host reverse proxy** (where forwarded requests look like
+loopback and so trust must be off) local automation still authenticates via this
+token, while remote callers must present their own. The local token is hidden
+from the token list and is not revocable from the UI.
+
+**Cookies** are `HttpOnly; SameSite=Lax; Path=/`; the `Secure` attribute is
+added when `auth.cookie_secure` is on (set it when loom is reached over HTTPS).
+loom terminates no TLS itself — run it behind a TLS-terminating proxy for remote
+use. The `auth.*` settings live in `weaver-core::config::registry()` under the
+**Authentication** group; the GitHub client id/secret are stored outside the
+registry so the secret never rides `GET /api/settings`.
+
 ## Overlookers
 
 An **overlooker** is a periodic / triggered watch program over the fleet: it
@@ -435,6 +509,9 @@ builtins are stdlib-only and need neither).
 | `WEAVER_DB` | sqlite path | `$WEAVER_HOME/weaver.db` |
 | `WEAVER_API` | loom URL (both sides — server binds, CLI talks) | `http://127.0.0.1:7878` |
 | `WEAVER_BRANCH` | override the branch resolver (set by `loom session launch` in the worktree) | — |
+| `LOOM_TOKEN` | bearer token the `loom` CLI / automation sends; falls back to the machine-local token file on the same host | — |
+| `LOOM_OWNER_GITHUB` | GitHub login seeded as the owner on a fresh database | `rjpower` |
+| `LOOM_GITHUB_CLIENT_ID` / `LOOM_GITHUB_CLIENT_SECRET` | GitHub OAuth app credentials (override the settings-stored values) | — |
 | `WEAVER_TMUX_SOCKET` | pin tmux to a dedicated server (`tmux -L <name>`) so ops can't touch real sessions; set by the test harnesses | unset → default socket |
 | `WEAVER_OVERLOOKER_AGENT_CMD` | the one-shot headless agent command behind `POST /api/agent/oneshot` (judgement calls) | `claude -p` |
 | `RUST_LOG` / `EnvFilter` | tracing filter | `loom=info,weaver_core=info,tower_http=warn` |

@@ -3,6 +3,18 @@ import { ref, computed, onMounted } from 'vue';
 import { get, patch } from '../api';
 import type { SettingView } from '../types';
 import ToggleSwitch from '../components/ToggleSwitch.vue';
+import TokensPanel from '../components/TokensPanel.vue';
+import AccountPanel from '../components/AccountPanel.vue';
+
+// In-page tabs: the setting registry (General), API tokens, and the account /
+// access surface (password, approved users, GitHub sign-in config).
+type Tab = 'general' | 'tokens' | 'account';
+const tabs: { id: Tab; label: string }[] = [
+  { id: 'general', label: 'General' },
+  { id: 'tokens', label: 'Tokens' },
+  { id: 'account', label: 'Account' },
+];
+const tab = ref<Tab>('general');
 
 // The server's canonical reply for both GET and PATCH /api/settings.
 interface SettingsEnvelope {
@@ -90,20 +102,43 @@ onMounted(load);
 
 <template>
   <div class="max-w-3xl px-5 py-3">
-    <div class="mb-1 flex min-h-7 items-center gap-2.5">
+    <div class="mb-2 flex min-h-7 items-center gap-2.5">
       <h1 class="text-2xs font-semibold uppercase tracking-wider text-muted">Settings</h1>
     </div>
-    <p class="text-xs text-faint mb-3">
-      Stored in the weaver database and shared by the server and CLI
-      (<code>weaver config</code>).
-    </p>
 
-    <p v-if="error" class="mb-3 text-sm text-block">{{ error }}</p>
-    <p v-if="notice" class="mb-3 text-sm text-accent">{{ notice }}</p>
+    <!-- Tab bar: General (registry), Tokens, Account. -->
+    <div class="mb-4 flex gap-1 border-b border-line">
+      <button
+        v-for="t in tabs"
+        :key="t.id"
+        :data-testid="`settings-tab-${t.id}`"
+        class="-mb-px border-b-2 px-3 py-1.5 text-sm transition-colors"
+        :class="
+          tab === t.id
+            ? 'border-accent text-fg'
+            : 'border-transparent text-muted hover:text-fg'
+        "
+        @click="tab = t.id"
+      >
+        {{ t.label }}
+      </button>
+    </div>
 
-    <!-- One bordered panel per group, hairline-divided rows — the same list
-         anatomy as the fleet/issue boards, instead of free-floating cards. -->
-    <div v-for="g in groups" :key="g.name" class="mb-5">
+    <TokensPanel v-if="tab === 'tokens'" />
+    <AccountPanel v-else-if="tab === 'account'" />
+
+    <div v-else>
+      <p class="text-xs text-faint mb-3">
+        Stored in the weaver database and shared by the server and CLI
+        (<code>weaver config</code>).
+      </p>
+
+      <p v-if="error" class="mb-3 text-sm text-block">{{ error }}</p>
+      <p v-if="notice" class="mb-3 text-sm text-accent">{{ notice }}</p>
+
+      <!-- One bordered panel per group, hairline-divided rows — the same list
+           anatomy as the fleet/issue boards, instead of free-floating cards. -->
+      <div v-for="g in groups" :key="g.name" class="mb-5">
       <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-1.5">
         {{ g.name }}
       </h2>
@@ -170,8 +205,9 @@ onMounted(load);
           </p>
         </section>
       </div>
-    </div>
+      </div>
 
-    <p v-if="!settings.length && !error" class="text-sm text-muted">Loading…</p>
+      <p v-if="!settings.length && !error" class="text-sm text-muted">Loading…</p>
+    </div>
   </div>
 </template>

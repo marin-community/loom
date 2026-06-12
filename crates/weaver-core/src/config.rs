@@ -26,6 +26,16 @@ pub const DEFAULT_GITHUB_ARCHIVE_ON_MERGE: bool = true;
 /// The palette the browser terminal (xterm.js) renders with. `dark` keeps the
 /// classic black background; `light` swaps in a light, readable palette.
 pub const DEFAULT_TERMINAL_THEME: &str = "dark";
+/// Whether requests from the loopback interface are trusted as the machine owner
+/// without a token or login. On by default: it keeps the local CLI, the agent,
+/// and overlooker scripts working with no configuration. Turn it off behind a
+/// same-host reverse proxy, where forwarded requests appear to come from
+/// loopback (the proxy and local automation then authenticate with tokens).
+pub const DEFAULT_TRUST_LOOPBACK: bool = true;
+/// Whether the login cookie carries the `Secure` attribute (HTTPS-only). Off by
+/// default so plain-HTTP and direct-IP access work; turn it on when loom is
+/// reached over HTTPS (e.g. behind a TLS-terminating proxy).
+pub const DEFAULT_COOKIE_SECURE: bool = false;
 
 // ---------------------------------------------------------------------------
 // Setting registry
@@ -129,6 +139,46 @@ pub const REGISTRY: &[SettingSpec] = &[
         kind: SettingKind::Bool,
         default: "true",
         group: "GitHub",
+        options: &[],
+    },
+    SettingSpec {
+        key: "auth.trust_loopback",
+        label: "Trust loopback requests",
+        description: "When enabled, requests from 127.0.0.1/::1 are trusted as \
+            the machine owner with no token or login — keeping the local CLI, \
+            the agent, and overlooker scripts working with zero configuration. \
+            Turn this OFF behind a same-host reverse proxy, where forwarded \
+            requests appear to come from loopback; local automation then uses \
+            the machine token loom injects.",
+        kind: SettingKind::Bool,
+        default: "true",
+        group: "Authentication",
+        options: &[],
+    },
+    SettingSpec {
+        key: "auth.cookie_secure",
+        label: "Secure login cookie",
+        description: "When enabled, the login session cookie is marked `Secure` \
+            so the browser only sends it over HTTPS. Enable this when loom is \
+            served over HTTPS (typically behind a TLS-terminating proxy); leave \
+            it off for plain-HTTP or direct-IP access, where a Secure cookie \
+            would never be sent.",
+        kind: SettingKind::Bool,
+        default: "false",
+        group: "Authentication",
+        options: &[],
+    },
+    SettingSpec {
+        key: "auth.base_url",
+        label: "External base URL",
+        description: "The public URL loom is reached at (e.g. \
+            `https://loom.example.com`), used to build the GitHub OAuth callback. \
+            Leave blank to derive it from each request's Host header (honouring \
+            `X-Forwarded-Proto`); set it when that derivation is wrong behind a \
+            proxy.",
+        kind: SettingKind::String,
+        default: "",
+        group: "Authentication",
         options: &[],
     },
     SettingSpec {
