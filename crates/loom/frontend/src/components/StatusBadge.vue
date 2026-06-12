@@ -4,7 +4,7 @@ import { computed } from 'vue';
 const props = defineProps<{ status: string }>();
 
 // Lifecycle (mechanical) status — deliberately NEUTRAL. Lifecycle is not the
-// loud signal; the attention axis (AttentionBadge) is. `running` keeps a faint
+// loud signal; the attention axis (SignalChip) is. `running` keeps a faint
 // accent tint as the one live state worth a glance; everything else is muted
 // slate so attention stays the only chromatic thing on the page.
 const palette: Record<string, string> = {

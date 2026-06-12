@@ -5,7 +5,7 @@ test.describe('status reflects hook and attention events', () => {
     const s = await weaver.seedSession({ goal: 'Watch my status', name: 'hook-detail' });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
-    // The agent's attention is shown once, on the conversation-state strip.
+    // While calm, the agent's state shows on the quiet conversation-state strip.
     const conv = page.getByTestId('conversation-state');
     await expect(conv).toBeVisible();
 
@@ -14,9 +14,12 @@ test.describe('status reflects hook and attention events', () => {
     await weaver.hook(s, 'working');
     await expect(page.getByTestId('status-badge')).toHaveCount(0);
 
-    // A `waiting` hook (Claude blocked on the user) raises the attention axis.
+    // A `waiting` hook (Claude blocked on the user) raises the attention signal,
+    // which surfaces as a chip.
     await weaver.hook(s, 'waiting');
-    await expect(conv).toHaveText(/needs attention/i);
+    await expect(
+      page.locator('[data-testid="signal-chip"][data-signal-key="attention"]'),
+    ).toHaveAttribute('data-level', 'attention');
   });
 
   test('detail view: weaver set-status sets level + message via SSE', async ({ page, weaver }) => {
@@ -27,7 +30,9 @@ test.describe('status reflects hook and attention events', () => {
     await expect(conv).toBeVisible();
 
     await weaver.setStatus(s, 'blocked', 'tests failing, need help');
-    await expect(conv).toHaveText(/blocked/i);
+    await expect(
+      page.locator('[data-testid="signal-chip"][data-signal-key="attention"]'),
+    ).toHaveAttribute('data-level', 'blocked');
     await expect(page.getByTestId('status-message')).toHaveText(/tests failing, need help/i);
   });
 
@@ -45,9 +50,9 @@ test.describe('status reflects hook and attention events', () => {
     const fineCard = page.locator(`[data-session-id="${fine.id}"]`);
 
     // The list polls every 3s; allow time for the attention to propagate.
-    await expect(stuckCard.getByTestId('attention-badge').first()).toHaveText(/attention/i, {
-      timeout: 10_000,
-    });
+    await expect(
+      stuckCard.locator('[data-testid="signal-chip"][data-signal-key="attention"]'),
+    ).toHaveAttribute('data-level', 'attention', { timeout: 10_000 });
 
     // Filtering to "needs attention" hides the OK session.
     await page.getByTestId('filter-attention').click();

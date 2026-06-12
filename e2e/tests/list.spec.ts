@@ -30,17 +30,18 @@ test.describe('session list view', () => {
     await expect(cardB).toContainText('Fix the login bug');
   });
 
-  test('attention is its own badge, separate from the lifecycle axis', async ({ page, weaver }) => {
+  test('attention is its own chip, separate from the lifecycle axis', async ({ page, weaver }) => {
     const s = await weaver.seedSession({ goal: 'Refactor auth', name: 'auth' });
     await weaver.setStatus(s, 'attention', 'ready for review');
 
     await page.goto(weaver.baseUrl);
     const card = page.locator(`[data-session-id="${s.id}"]`);
-    // The agent's single signal (attention) is its own badge — never merged into
-    // the lifecycle cell. The session is running, so the lifecycle pill is
-    // omitted from the row (declutter), leaving attention to stand alone; the two
-    // axes co-rendering as distinct badges is covered by the archived test below.
-    await expect(card.getByTestId('attention-badge')).toHaveAttribute('data-level', 'attention');
+    // The agent's signal (attention) renders as its own deletable chip — never
+    // merged into the lifecycle cell. The session is running, so the lifecycle
+    // pill is omitted from the row (declutter), leaving the signal chip alone.
+    await expect(
+      card.locator('[data-testid="signal-chip"][data-signal-key="attention"]'),
+    ).toHaveAttribute('data-level', 'attention');
     await expect(card.getByTestId('status-badge')).toHaveCount(0);
     await expect(card).toContainText('ready for review');
   });
@@ -54,8 +55,8 @@ test.describe('session list view', () => {
     await page.goto(weaver.baseUrl);
     const card = page.locator(`[data-session-id="${s.id}"]`);
     await expect(card).toBeVisible();
-    // Attention reads OK; the lifecycle badge shows it's archived.
-    await expect(card.getByTestId('attention-badge')).toHaveAttribute('data-level', 'ok');
+    // No signal chip (an archived agent is gone); the lifecycle badge shows it.
+    await expect(card.getByTestId('signal-chip')).toHaveCount(0);
     await expect(card.getByTestId('status-badge')).toHaveText(/archived/i);
     // The stale "Waiting for input" reason is suppressed…
     await expect(card).not.toContainText('Waiting for input');
@@ -63,22 +64,29 @@ test.describe('session list view', () => {
     await expect(page.getByTestId('filter-attention')).toContainText('0');
   });
 
-  test('an overlooker triage mark surfaces as the one resolved badge, attributed', async ({
+  test('an overlooker triage mark is its own chip, attributed and clearable', async ({
     page,
     weaver,
   }) => {
     const s = await weaver.seedSession({ goal: 'Looks stuck', name: 'watched' });
-    // The agent itself is calm; an overlooker stamps a triage mark. The single
-    // resolved badge raises to its level and attributes it to the overlooker.
+    // The agent itself is calm; an overlooker stamps a triage mark. It renders as
+    // its own chip, attributed to the overlooker (⊙).
     await weaver.mark(s, 'blocked', { note: 'no progress in an hour', by: 'status-check' });
 
     await page.goto(weaver.baseUrl);
     const card = page.locator(`[data-session-id="${s.id}"]`);
-    const badge = card.getByTestId('attention-badge');
-    await expect(badge).toHaveAttribute('data-level', 'blocked');
-    await expect(badge).toHaveAttribute('data-raised-by', 'triage');
+    const chip = card.locator('[data-testid="signal-chip"][data-signal-key="triage"]');
+    await expect(chip).toHaveAttribute('data-level', 'blocked');
+    await expect(chip).toHaveAttribute('data-raised-by', 'triage');
     // It counts toward "needs attention" even though the agent is calm.
     await expect(page.getByTestId('filter-attention')).toContainText('1');
+
+    // The human can resolve it by clearing the chip — no privileged "Mark OK"
+    // path; the × DELETEs the `triage` tag the overlooker set.
+    await chip.getByTestId('signal-chip-clear').click();
+    await expect(chip).toHaveCount(0);
+    const updated = await weaver.getSession(s.id);
+    expect(updated.branch.tags.find((t) => t.key === 'triage')).toBeUndefined();
   });
 
   test('a quiet free-form tag renders as a deletable pill', async ({ page, weaver }) => {
@@ -90,8 +98,8 @@ test.describe('session list view', () => {
     const pill = card.getByTestId('tag-pill');
     await expect(pill).toContainText('priority');
     await expect(pill).toContainText('high');
-    // It's quiet — no loud attention treatment from a free-form key.
-    await expect(card.getByTestId('attention-badge')).toHaveAttribute('data-level', 'ok');
+    // It's quiet — a free-form key never renders as a loud signal chip.
+    await expect(card.getByTestId('signal-chip')).toHaveCount(0);
 
     // The × clears it server-side, and the pill goes away.
     await pill.getByTestId('tag-pill-clear').click();

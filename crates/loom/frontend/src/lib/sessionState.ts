@@ -126,6 +126,63 @@ export function effectiveAttention(s: Session): EffectiveAttention {
   return { level: 'ok', raisedBy: 'none', by: '', note: '', stale: false };
 }
 
+// One loud tag (`attention` or `triage`) surfaced as an individually-dismissable
+// chip. Unlike effectiveAttention (which resolves the single loudest level for
+// filtering, sorting and counts), this surfaces EACH present loud tag so a human
+// can clear them independently: the agent's own `attention` and an overlooker's
+// `triage` are separate rows, and each gets its own × . Clearing a chip DELETEs
+// that tag — the calm state is its absence, so there is no "Mark OK" verb, just
+// the same chip-delete gesture as any quiet tag.
+export interface SignalChip {
+  /** The tag key to DELETE when the chip is cleared: 'attention' | 'triage'. */
+  key: string;
+  level: Exclude<Attention, 'ok'>;
+  /** Who set it: 'agent', or the overlooker's name. */
+  by: string;
+  /** Which axis: 'agent' (its own `attention`) or 'triage' (an overlooker). */
+  raisedBy: 'agent' | 'triage';
+  /** One-line reason from the tag. */
+  note: string;
+  /** A triage mark the session has moved on past — shown faded, still clearable. */
+  stale: boolean;
+}
+
+// The loud signals on a session as dismissable chips, in severity-then-axis
+// order. The agent's `attention` and an overlooker's `triage` each render as
+// their own chip so either can be cleared on its own — which is the whole point:
+// a stale overlooker mark is no longer a thing you "can't resolve", it's just a
+// chip with an × . Archived sessions show none (the agent is gone).
+export function signalChips(s: Session): SignalChip[] {
+  if (s.status === 'archived') return [];
+  const chips: SignalChip[] = [];
+  const agentTag = tagOf(s, ATTENTION_KEY);
+  const agentLevel = normalize(agentTag?.value);
+  if (agentTag && agentLevel !== 'ok') {
+    chips.push({
+      key: ATTENTION_KEY,
+      level: agentLevel,
+      by: agentTag.set_by || 'agent',
+      raisedBy: 'agent',
+      note: agentTag.note || messageOf(s),
+      stale: false,
+    });
+  }
+  const triageTag = tagOf(s, TRIAGE_KEY);
+  const triageLevel = normalize(triageTag?.value);
+  if (triageTag && triageLevel !== 'ok') {
+    chips.push({
+      key: TRIAGE_KEY,
+      level: triageLevel,
+      by: triageTag.set_by || 'overlooker',
+      raisedBy: 'triage',
+      note: triageTag.note,
+      stale: tagStale(triageTag, s.last_activity_at),
+    });
+  }
+  // Blocked before attention, so the louder chip leads.
+  return chips.sort((a, b) => SEVERITY[b.level] - SEVERITY[a.level]);
+}
+
 // The session's quiet tags: every tag whose key is not loud, for the pill row.
 // These are free-form, deletable annotations (priority, needs-rebase, …).
 // Archived sessions show none.
