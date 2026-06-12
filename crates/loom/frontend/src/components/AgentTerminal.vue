@@ -209,9 +209,12 @@ onMounted(async () => {
   if (disposed || !host.value) return; // unmounted while the fetch was in flight
   // Make sure the bundled mono face is ready before xterm measures its cell
   // grid — a fallback-metrics first paint would misalign the whole pane.
-  // fonts.load resolves quickly (and harmlessly) even if the face is missing.
-  await document.fonts.load('13px "IBM Plex Mono"').catch(() => {});
-  if (disposed || !host.value) return;
+  // fonts.load resolves quickly (and harmlessly) even if the face is missing;
+  // skip it where the FontFaceSet API itself is absent.
+  if (document.fonts?.load) {
+    await document.fonts.load('13px "IBM Plex Mono"').catch(() => {});
+    if (disposed || !host.value) return;
+  }
   term = new Terminal({
     convertEol: false,
     fontFamily: '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',

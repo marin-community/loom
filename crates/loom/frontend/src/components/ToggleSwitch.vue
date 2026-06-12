@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // The one boolean control (docs/loom-ui.md): a compact switch used for
-// overlooker enablement and bool settings. The knob carries a hairline ring so
-// it reads against both track states in both palettes.
+// overlooker enablement and bool settings. The knob carries a hairline ring
+// (no shadow — borders, not shadows) so it reads against both track states in
+// both palettes. State is exposed via the switch role's aria-checked.
 defineProps<{
   modelValue: boolean;
   disabled?: boolean;
@@ -25,7 +26,7 @@ defineEmits<{ 'update:modelValue': [boolean] }>();
   >
     <span
       :class="[
-        'inline-block h-4 w-4 transform rounded-full bg-surface shadow-sm ring-1 ring-line transition-transform',
+        'inline-block h-4 w-4 transform rounded-full bg-surface ring-1 ring-line transition-transform',
         modelValue ? 'translate-x-4' : 'translate-x-0.5',
       ]"
     ></span>

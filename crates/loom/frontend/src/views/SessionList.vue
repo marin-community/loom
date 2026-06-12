@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { get, post } from '../api';
 import type { Session, RecentRepo, RepoBranch } from '../types';
 import StatusBadge from '../components/StatusBadge.vue';
@@ -15,9 +15,12 @@ import { del } from '../api';
 const sessions = ref<Session[]>([]);
 
 // Attention filter — the dashboard's "which sessions need me?" control. The
-// status bar's attention segment deep-links it via `/?filter=attention`.
+// URL query is the source of truth (`/?filter=attention`, the status bar's
+// deep-link): the buttons write it via router.replace and the ref follows, so
+// the view is shareable and survives reload/back-forward.
 type AttentionFilter = 'all' | 'attention' | 'ok';
 const route = useRoute();
+const router = useRouter();
 function filterFromQuery(q: unknown): AttentionFilter {
   return q === 'attention' || q === 'ok' ? q : 'all';
 }
@@ -28,6 +31,12 @@ watch(
   () => route.query.filter,
   (q) => (filter.value = filterFromQuery(q)),
 );
+// Button clicks update the query (replace, not push — filter flips shouldn't
+// pollute history); the watcher above folds it back into the ref.
+function setFilter(f: AttentionFilter) {
+  filter.value = f;
+  router.replace({ query: { ...route.query, filter: f === 'all' ? undefined : f } });
+}
 
 // Archived sessions are torn-down workstreams: kept for reference but clutter
 // the live fleet view. Hide them by default; a reveal chip brings them back.
@@ -375,7 +384,7 @@ onUnmounted(() => clearInterval(timer));
               ? 'bg-accent text-accent-fg'
               : 'bg-input text-muted hover:bg-subtle hover:text-fg',
           ]"
-          @click="filter = opt"
+          @click="setFilter(opt)"
         >
           {{ opt === 'all' ? 'All' : opt === 'attention' ? 'Needs attention' : 'OK' }}
           <span

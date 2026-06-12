@@ -461,13 +461,13 @@ onMounted(() => {
 
           <!-- Controls. -->
           <div class="flex shrink-0 items-center gap-2">
-            <!-- Enabled toggle. data-testid rides on the switch button. -->
+            <!-- Enabled toggle. data-testid rides on the switch button; state
+                 is exposed via the switch role's own aria-checked. -->
             <ToggleSwitch
               :model-value="o.enabled"
               :disabled="busy[o.id]"
               :title="o.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'"
               data-testid="overlooker-enabled-toggle"
-              :aria-pressed="o.enabled"
               @update:model-value="toggleEnabled(o)"
             />
             <button

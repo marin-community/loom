@@ -67,9 +67,9 @@ test.describe('overlooker panel', () => {
 
     // Enable it (seeds start disabled). The toggle reflects the new state.
     const toggle = row.getByTestId('overlooker-enabled-toggle');
-    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    await expect(toggle).toHaveAttribute('aria-checked', 'false');
     await toggle.click();
-    await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    await expect(toggle).toHaveAttribute('aria-checked', 'true');
 
     // Dry-run: with no sessions in scope the stock program reports a no-op, and
     // the summary surfaces inline on the row.

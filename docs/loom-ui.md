@@ -102,8 +102,8 @@ Modern–derived), not blue-tinted slate:
 
 ## Follow-ups (not yet done)
 
-- Quiet the tmux status line loom's sessions ship (the default green bar
-  fights the whole palette) — backend, `tmux.rs`.
+- Quiet the tmux status line that loom sessions ship with (the default green
+  bar fights the whole palette) — backend, `tmux.rs`.
 - A `data-density="compact"` toggle (32→28px rows) persisted in settings.
 - A `⌘K` command palette over sessions/issues.
 - Middle-ellipsis truncation for long ids/refs.

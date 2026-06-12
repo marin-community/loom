@@ -218,7 +218,6 @@ onMounted(() => {
               :model-value="ov.enabled"
               :disabled="busy"
               data-testid="overlooker-enabled-toggle"
-              :aria-pressed="ov.enabled"
               @update:model-value="toggleEnabled"
             />
             {{ ov.enabled ? 'Enabled' : 'Disabled' }}
