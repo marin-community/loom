@@ -5,16 +5,12 @@ description: Commit cleanly, run the gate, hand off to the agent lint review, op
 
 # Skill: Pull Request
 
-Clean the branch, commit, run the lint review over the committed diff, open or
-update the PR, then stay with it until it merges.
+Clean the branch, commit, run the lint review, open or update the PR, then stay
+with it until it merges. Commit before the review — it reads the committed branch
+diff and only reports.
 
-Order is fixed: cleanups and mechanical fixes first, then commit, then review.
-The commit is the checkpoint the review reads (whole branch vs merge-base) and
-where follow-up fixes land. The review never edits, commits, or pushes.
-
-Weaver is solo — skip team ceremony (no sign-off to chase, no PR labels, no
-inline-comment etiquette on your own PR). The gate, the lint review, and driving
-CI green are not optional.
+Weaver is solo: skip team ceremony, but the gate, the lint review, and driving CI
+green are not optional.
 
 ## Checklist
 
@@ -38,13 +34,11 @@ names. The review in step 6 reports — it won't clean up for you.
 ## 2. Gate
 
 ```bash
-./scripts/pre-commit.sh        # cargo fmt --check + clippy -D warnings, then staged agent lint
+./scripts/pre-commit.sh        # must pass
 ```
 
-Single source of truth for a clean tree, shared with CI's `lint` job. fmt fails →
-`cargo fmt --all`. Fix clippy by hand; never `#[allow]` a lint away to pass. The
-git hook runs this when wired (`git config core.hooksPath .githooks`);
-`--no-verify` bypasses once, only with a reason.
+fmt fails → `cargo fmt --all`. Fix clippy by hand — never `#[allow]` past it.
+Don't `--no-verify` without a reason.
 
 ## 3. Tests (when relevant)
 
@@ -68,36 +62,29 @@ Imperative, lower-case, ≤72 chars. The `(#NN)` suffix lands on merge, not from
 - Project voice — no `Co-Authored-By: <tool>`, no "Generated with…" trailer, even
   if a harness default suggests one.
 
-Hook fails → fix and make a **new** commit. Don't amend (unless asked), don't
-force-push.
+Hook fails → fix and commit again.
 
 ## 6. Lint review
 
 ```bash
-scripts/lint-review.py         # docs/lint.md catalog over the whole branch diff (vs merge-base with main)
+scripts/lint-review.py         # the agent lint over the branch diff
 ```
 
-Run after the commit, before the PR. Weaver's stripped-down marin linter: one
-headless `claude -p` applies the [docs/lint.md](../../docs/lint.md) catalog to the
-branch diff (committed + uncommitted) and reports the slop fmt/clippy can't catch
-— naming, shape, dead code, duplication, comment/test quality. Read-only.
+Run after the commit, before the PR. Findings print as `path:line: wl-code
+(confidence) message`; ≥0.9 blocks. Fix or answer each, landing fixes in a new
+commit. False positive → `// wl-allow: <code>` on the line. Apply findings when
+they make the code better, not blindly.
 
-Self-skips (never blocks) when `claude` is absent, nothing's in scope, or the
-agent errors/times out — so it never wedges you, and CI runs only fmt+clippy.
-Findings: `path:line: wl-code (confidence) message`; ≥0.9 blocks. Fix or answer
-each, landing fixes as a **new** commit. False positive → `// wl-allow: <code>` on
-the line (docs/lint.md). Apply findings when they make the code better, not blindly.
-
-Deeper pass on a big change: hand off to `/code-review` (`ultra` = multi-agent
-cloud). On a solo PR, read its findings and fix — don't post them to your own PR.
+Deeper pass on a big change: `/code-review` (`ultra` = multi-agent cloud). On a
+solo PR, read its findings and fix — don't post them to your own PR.
 
 ## 7. Push
 
 ```bash
-git push -u origin HEAD        # if no upstream
+git push        # -u origin HEAD if no upstream
 ```
 
-Rejected for diverged history → resync with `main`. Never force-push.
+Rebased, or rejected for diverged history → force-push with `--force-with-lease`.
 
 ## 8. Open or update the PR
 
@@ -158,7 +145,7 @@ done — not before.
 
 - `./scripts/pre-commit.sh` is the gate; commit before `lint-review.py`.
 - Never merge or push to `main`; open a PR.
-- Never amend or force-push unless the user asks.
+- Force-push with `--force-with-lease`, e.g. after a rebase.
 - No self-attribution in commits or PR bodies.
 - Nothing to commit → say so, stop.
 - AGENTS.md — the rest of the hacking guide (build/test internals, live-loom
