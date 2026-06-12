@@ -4,12 +4,12 @@ import { useRoute, useRouter } from 'vue-router';
 import { get, post } from '../api';
 import type { Session, RecentRepo, RepoBranch } from '../types';
 import StatusBadge from '../components/StatusBadge.vue';
-import AttentionBadge from '../components/AttentionBadge.vue';
+import SignalChip from '../components/SignalChip.vue';
 import TagPill from '../components/TagPill.vue';
 import GithubStatus from '../components/GithubStatus.vue';
 import ScratchPicker from '../components/ScratchPicker.vue';
 import { timeAgo } from '../lib/time';
-import { effectiveAttention, messageOf, quietTags } from '../lib/sessionState';
+import { effectiveAttention, messageOf, quietTags, signalChips } from '../lib/sessionState';
 import { del } from '../api';
 
 const sessions = ref<Session[]>([]);
@@ -53,8 +53,8 @@ const archivedCount = computed(
 // them back, and they always show when there's nothing else, so the list never
 // reads empty while archived rows exist. Individual attention rows aren't pinned
 // to the top — threading keeps related work grouped — but a whole thread that
-// contains attention floats up (see treeRows), and attention rows still get
-// their loud row wash + pulse, so they stay easy to spot.
+// contains attention floats up (see treeRows), and attention rows carry their
+// loud signal chip, so they stay easy to spot.
 const visibleSessions = computed<Session[]>(() => {
   const all = sessions.value;
   const live = all.filter((s) => s.status !== 'archived');
@@ -691,13 +691,15 @@ onUnmounted(() => clearInterval(timer));
     </div>
 
     <!--
-      One signal row per session. Left→right: an optional tree gutter threading
-      child sessions under their launcher, the agent's single attention signal,
-      the dominant title, its muted current-state line, a neutral lifecycle pill
-      (shown only for off-nominal states — running is the silent default), and
-      the mono branch ref pushed far-right. Rows are grouped into threads (built
-      in script), with attention-carrying threads floated up; attention rows also
-      get a left accent-border + slow pulse so they stand out. Stagger via --i.
+      One row per session. Left→right: an optional tree gutter threading child
+      sessions under their launcher, the dominant title with its loud signal
+      chips (attention/triage, each deletable) and quiet tag pills alongside, a
+      muted current-state line, a neutral lifecycle pill (shown only for
+      off-nominal states — running is the silent default), and the mono branch
+      ref pushed far-right. Rows are grouped into threads (built in script), with
+      attention-carrying threads floated up so the loud chips surface near the
+      top. The row itself stays neutral — no full-tile wash — so threading reads
+      cleanly; the chip carries the signal. Stagger via --i.
     -->
     <ul v-if="sessions.length" data-testid="session-list" class="overflow-hidden rounded-md border border-line bg-surface">
       <li
@@ -710,11 +712,6 @@ onUnmounted(() => clearInterval(timer));
         :class="[
           'stagger-in group flex cursor-pointer items-start gap-2.5 border-b border-line px-3 py-2 last:border-0',
           'min-h-11 transition-colors hover:bg-subtle',
-          effectiveAttention(s).level === 'blocked'
-            ? 'border-l-2 border-l-block-line bg-block-soft pulse-attention'
-            : effectiveAttention(s).level === 'attention'
-              ? 'border-l-2 border-l-attn-line bg-attn-soft pulse-attention'
-              : '',
         ]"
         @click="$router.push(`/s/${s.id}`)"
       >
@@ -730,18 +727,6 @@ onUnmounted(() => clearInterval(timer));
           <span class="tree-col" :class="isLast ? 'tree-col--elbow' : 'tree-col--tee'"></span>
         </div>
 
-        <!-- Signal: the single resolved attention badge (the louder of the
-             agent's own report and a non-stale overlooker mark, attributed). -->
-        <div class="flex shrink-0 flex-col items-start gap-1 pt-0.5">
-          <AttentionBadge
-            :level="effectiveAttention(s).level"
-            :raised-by="effectiveAttention(s).raisedBy"
-            :by="effectiveAttention(s).by"
-            :note="effectiveAttention(s).note"
-            :stale="effectiveAttention(s).stale"
-          />
-        </div>
-
         <!-- Title + current-state (the work, in prose). -->
         <div class="min-w-0 flex-1">
           <div class="flex flex-wrap items-center gap-2">
@@ -752,6 +737,16 @@ onUnmounted(() => clearInterval(timer));
             >
               {{ s.branch.title || s.branch.name }}
             </router-link>
+            <!-- Loud signals: the agent's `attention` and an overlooker's
+                 `triage`, each a deletable chip. The × clears that tag (calm is
+                 its absence) — there is no separate "Mark OK" verb. -->
+            <SignalChip
+              v-for="chip in signalChips(s)"
+              :key="chip.key"
+              :chip="chip"
+              :busy="clearingTag === `${s.id}:${chip.key}`"
+              @clear="(key) => clearTag(s.id, key)"
+            />
             <!-- Lifecycle: demoted, neutral, mono pill (StatusBadge). Hidden for
                  the running state — nearly every live row is running, so the pill
                  would just be repeated noise; only off-nominal states show one. -->
@@ -767,8 +762,8 @@ onUnmounted(() => clearInterval(timer));
           </div>
 
           <!-- Current-state headline (agent's set-status message), else the goal.
-               On a washed (attention) row, faint text loses too much contrast —
-               metadata steps up to muted there. -->
+               On an attention row the goal steps up from faint to muted so the
+               metadata doesn't recede next to the loud chip. -->
           <p
             v-if="messageOf(s)"
             class="mt-0.5 truncate text-xs text-muted"

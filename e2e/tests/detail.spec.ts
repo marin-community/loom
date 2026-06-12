@@ -28,25 +28,24 @@ test.describe('session detail view', () => {
     await expect(details.getByText(`base ${s.branch.base_branch}`)).toBeVisible();
   });
 
-  test('Mark OK acknowledges the agent’s attention', async ({ page, weaver }) => {
+  test('clearing the attention chip marks the agent’s attention calm', async ({ page, weaver }) => {
     const s = await weaver.seedSession({ goal: 'Acknowledge me', name: 'ack-task' });
     // The agent raises its attention; the human's only write here is to clear it.
     await weaver.setStatus(s, 'attention', 'waiting on review');
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
 
-    // Attention is shown once, on the conversation-state strip, with the one
-    // human control beside it.
-    const conv = page.getByTestId('conversation-state');
-    await expect(conv).toHaveText(/needs attention/i);
+    // Attention shows as a deletable signal chip — there is no separate "Mark OK"
+    // control; the chip's × is the calm gesture.
+    const chip = page.locator('[data-testid="signal-chip"][data-signal-key="attention"]');
+    await expect(chip).toHaveAttribute('data-level', 'attention');
 
-    await page.getByTestId('acknowledge').click();
+    await chip.getByTestId('signal-chip-clear').click();
 
-    // The strip clears (and the acknowledge control goes away)…
-    await expect(conv).not.toHaveText(/needs attention/i);
-    await expect(page.getByTestId('acknowledge')).toHaveCount(0);
-    // …and it's cleared server-side: acknowledge DELETEs the `attention` tag,
-    // so the calm state is its absence (there is no stored `ok`).
+    // The chip goes away…
+    await expect(chip).toHaveCount(0);
+    // …and it's cleared server-side: the × DELETEs the `attention` tag, so the
+    // calm state is its absence (there is no stored `ok`).
     const updated = await weaver.getSession(s.id);
     expect(updated.branch.tags.find((t) => t.key === 'attention')).toBeUndefined();
   });

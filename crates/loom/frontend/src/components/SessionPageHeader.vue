@@ -4,14 +4,14 @@ import type { Session } from '../types';
 import {
   messageOf,
   conversationState,
-  levelOf,
-  effectiveAttention,
+  signalChips,
   quietTags,
   TONE_TEXT,
 } from '../lib/sessionState';
 import { timeAgo } from '../lib/time';
 import { useSessionActions } from '../lib/sessionActions';
 import StatusBadge from './StatusBadge.vue';
+import SignalChip from './SignalChip.vue';
 import TagPill from './TagPill.vue';
 import SessionDetailsPopover from './SessionDetailsPopover.vue';
 import GithubStatus from './GithubStatus.vue';
@@ -20,15 +20,16 @@ import GithubStatus from './GithubStatus.vue';
 // view and the file browser, so the "where am I / what is this" context never
 // vanishes when you cross into Files.
 //
-//   row 1  ← all · title (inline rename) · [attention chip + Mark OK]ⁱ
+//   row 1  ← all · title (inline rename) · [signal chips]ⁱ
 //           · lifecycle badge · ⌄ details menu
 //   row 2  the agent's current-state message as prose (the point of the page)
 //   row 3  repo/branch · agent · PR link · the quiet conversation-state + freshness
 //
-// The old full-width "▶ Working … last activity" strip is gone: when the agent
-// is calm, its state is a quiet note on row 3; when it raises attention, the
-// whole header takes the amber/red wash + a Mark OK control — one signal, in the
-// one place you already look. ⁱ shown only when attention is actually raised.
+// The old full-width "▶ Working … last activity" strip is gone: when the session
+// is calm, its state is a quiet note on row 3; when a loud signal is raised it
+// shows up on row 1 as a deletable chip (the agent's `attention` and/or an
+// overlooker's `triage`), and the human clears it with the chip's × — there is
+// no separate "Mark OK" control. ⁱ shown only when a signal is actually raised.
 const props = defineProps<{ ws: Session }>();
 const emit = defineEmits<{ reload: [] }>();
 
@@ -36,7 +37,7 @@ const actions = useSessionActions(
   () => props.ws.id,
   () => emit('reload'),
 );
-const { busy, notice, error, rename, acknowledge, clearTag, adopt, archive, remove } = actions;
+const { busy, notice, error, rename, clearTag, adopt, archive, remove } = actions;
 
 const showDetails = ref(false);
 
@@ -75,41 +76,21 @@ function repoName(p: string): string {
   return p.replace(/\/+$/, '').split('/').pop() || p;
 }
 
-// Derived conversation state (glyph + label + tone) and the attention wash. The
-// wash follows the resolved signal (`effectiveAttention`), so an overlooker mark
-// washes the header loud just as the agent's own does.
+// Derived conversation state (glyph + label + tone) for the quiet meta line on
+// row 3 — only shown when the session is calm; a loud state lives up on row 1 as
+// a chip instead.
 const conv = computed(() => conversationState(props.ws));
-const eff = computed(() => effectiveAttention(props.ws));
 const toneClass = computed(() => TONE_TEXT[conv.value.tone]);
 const lastActivity = computed(() => timeAgo(props.ws.last_activity_at));
-// "Mark OK" clears the agent's own `attention` tag, so it's offered only when the
-// agent itself raised attention (not when an overlooker did).
-const ackable = computed(() => levelOf(props.ws) !== 'ok');
-// One-line attribution when the loud signal came from an overlooker rather than
-// the agent — shown beside the loud chip.
-const raisedByOverlooker = computed(() => eff.value.raisedBy === 'triage');
-const attribution = computed(() => {
-  if (!raisedByOverlooker.value) return '';
-  const who = eff.value.by && eff.value.by !== 'manual' ? eff.value.by : 'overlooker';
-  return eff.value.stale ? `⊙ ${who} (stale)` : `⊙ ${who}`;
-});
+// The loud signal chips: the agent's own `attention` and an overlooker's
+// `triage`, each individually deletable. Their presence is what "needs a human"
+// means here; clearing a chip DELETEs that tag (there is no "Mark OK" verb).
+const signals = computed(() => signalChips(props.ws));
 const quiet = computed(() => quietTags(props.ws));
-// Only true attention/blocked elevates to the loud header treatment.
-const loud = computed(() => conv.value.tone === 'block' || conv.value.tone === 'attn');
-const washClass = computed(() =>
-  conv.value.tone === 'block'
-    ? 'border-block-line bg-block-soft'
-    : conv.value.tone === 'attn'
-      ? 'border-attn-line bg-attn-soft'
-      : 'border-transparent',
-);
 </script>
 
 <template>
-  <header
-    class="mb-2 rounded-r border-l-2 pl-3 pr-1 py-1.5 transition-colors"
-    :class="[washClass, loud ? 'pulse-attention' : '']"
-  >
+  <header class="mb-2 rounded-r border-l-2 border-transparent pl-3 pr-1 py-1.5">
     <!-- Row 1 — nav, title (inline rename), attention + lifecycle controls -->
     <div class="flex items-center gap-3">
       <router-link to="/" class="shrink-0 text-sm text-muted hover:text-fg">← all</router-link>
@@ -137,37 +118,17 @@ const washClass = computed(() =>
       </div>
 
       <div class="ml-auto flex shrink-0 items-center gap-2">
-        <!-- The loud attention signal, inline: chip + the one human control.
-             Only present when the agent has actually raised attention. -->
-        <template v-if="loud">
-          <span
-            data-testid="conversation-state"
-            :class="conv.tone === 'block' ? 'bg-block text-block-fg' : 'bg-attn text-attn-fg'"
-            class="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-semibold"
-          >
-            {{ conv.glyph }} {{ conv.label }}
-          </span>
-          <!-- When an overlooker raised it (not the agent), attribute the mark. -->
-          <span
-            v-if="raisedByOverlooker"
-            data-testid="attention-attribution"
-            :class="eff.stale ? 'opacity-60' : ''"
-            class="text-xs text-muted"
-            :title="eff.note || 'Raised by an overlooker'"
-          >
-            {{ attribution }}
-          </span>
-          <button
-            v-if="ackable"
-            type="button"
-            data-testid="acknowledge"
-            class="rounded bg-surface px-2.5 py-1 text-xs font-semibold text-fg shadow-sm ring-1 ring-inset ring-line hover:bg-subtle"
-            :disabled="busy === 'acknowledge'"
-            @click="acknowledge"
-          >
-            Mark OK ✓
-          </button>
-        </template>
+        <!-- The loud signals, inline: the agent's `attention` and an overlooker's
+             `triage`, each a deletable chip. The × clears that tag (calm is its
+             absence) — there is no separate "Mark OK". An overlooker chip carries
+             the ⊙ glyph and fades when stale. -->
+        <SignalChip
+          v-for="chip in signals"
+          :key="chip.key"
+          :chip="chip"
+          :busy="busy === `tag:${chip.key}`"
+          @clear="clearTag"
+        />
 
         <!-- Lifecycle pill only for off-nominal states — running is the silent
              default here just as on the fleet list. -->
@@ -259,15 +220,15 @@ const washClass = computed(() =>
         <GithubStatus :gh="ws.branch.github" compact class="min-w-0" />
       </template>
       <div class="ml-auto flex shrink-0 items-center gap-1.5">
-        <span v-if="!loud" data-testid="conversation-state" :class="toneClass">
+        <span v-if="!signals.length" data-testid="conversation-state" :class="toneClass">
           {{ conv.glyph }} {{ conv.label }}
         </span>
-        <span v-if="!loud && lastActivity" class="text-faint">·</span>
+        <span v-if="!signals.length && lastActivity" class="text-faint">·</span>
         <span v-if="lastActivity" class="font-mono text-faint">{{ lastActivity }}</span>
       </div>
     </div>
 
-    <!-- Write feedback (rename / acknowledge / archive). Inline so it travels
+    <!-- Write feedback (rename / clear tag / archive). Inline so it travels
          with the header on every surface. -->
     <p v-if="error" class="mt-1.5 text-xs text-block">{{ error }}</p>
     <p v-else-if="notice" class="mt-1.5 text-xs text-accent">{{ notice }}</p>
