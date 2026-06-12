@@ -102,6 +102,11 @@ impl TestServer {
         tokio::spawn(server::serve(state, listener));
 
         std::env::set_var("WEAVER_API", format!("http://{addr}"));
+        // Pin the one-shot agent to a fast no-op: `true` exits 0 with empty
+        // output, so a judgement degrades to the deterministic fallback
+        // rather than spawning a real (slow, environment-dependent) claude.
+        // A test exercising the agent path overrides this itself.
+        std::env::set_var("WEAVER_OVERLOOKER_AGENT_CMD", "true");
         let client = client::default();
         for _ in 0..60 {
             if client.get("/api/health").await.is_ok() {

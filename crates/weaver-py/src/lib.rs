@@ -214,11 +214,22 @@ impl Client {
     }
 
     /// Clear a tag on a session (needs `mark`) — how a loud axis returns to
-    /// calm. Returns the updated session.
-    fn clear_tag(&self, py: Python<'_>, key: &str, tag_key: &str) -> PyResult<Py<PyAny>> {
+    /// calm. `by` attributes the clear on the audit event. Returns the
+    /// updated session.
+    #[pyo3(signature = (key, tag_key, by=None))]
+    fn clear_tag(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        tag_key: &str,
+        by: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
         self.gate("mark")?;
         let view = py
-            .detach(|| self.rt.block_on(self.inner.clear_tag(key, tag_key)))
+            .detach(|| {
+                self.rt
+                    .block_on(self.inner.clear_tag(key, tag_key, by.as_deref()))
+            })
             .map_err(api_err)?;
         to_py(py, &view)
     }
@@ -248,13 +259,22 @@ impl Client {
 
     /// Type a message into a session's agent pane (needs `nudge`). `submit`
     /// presses Enter to start a turn; pass `False` to stage input unsubmitted.
-    /// Returns the raw `{sent, submitted}` reply.
-    #[pyo3(signature = (key, text, submit=true))]
-    fn nudge(&self, py: Python<'_>, key: &str, text: &str, submit: bool) -> PyResult<Py<PyAny>> {
+    /// `by` attributes the recorded `nudge` audit event. Returns the raw
+    /// `{sent, submitted}` reply.
+    #[pyo3(signature = (key, text, submit=true, by=None))]
+    fn nudge(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        text: &str,
+        submit: bool,
+        by: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
         self.gate("nudge")?;
         let req = SendReq {
             text: text.to_string(),
             submit,
+            by,
         };
         let value = py
             .detach(|| self.rt.block_on(self.inner.nudge(key, &req)))

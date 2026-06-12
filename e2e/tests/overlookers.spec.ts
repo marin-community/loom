@@ -143,15 +143,17 @@ test.describe('overlooker panel', () => {
       await expect(section).toContainText(name);
     }
 
-    // A script program's source is viewable read-only; the native status
-    // program has no source to show.
+    // Every builtin is a script whose source is viewable read-only.
     const archive = rows.filter({ hasText: 'builtin:archive-merged' });
     await archive.getByTestId('program-source-toggle').click();
     await expect(archive.getByTestId('program-source')).toContainText(
       'flag sessions whose pull request has merged',
     );
     const status = rows.filter({ hasText: 'builtin:status' });
-    await expect(status.getByTestId('program-source-toggle')).toHaveCount(0);
+    await status.getByTestId('program-source-toggle').click();
+    await expect(status.getByTestId('program-source')).toContainText(
+      'stamp a triage mark',
+    );
 
     // "Use" opens the create form prefilled with the program and a name.
     await archive.getByTestId('program-use').click();

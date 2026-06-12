@@ -1239,18 +1239,14 @@ async fn cmd_overlooker_programs(source: Option<String>) -> Result<()> {
         let Some(row) = row else {
             bail!("no builtin program '{want}' — `loom overlooker programs` lists them");
         };
-        match row.get("source").and_then(Value::as_str) {
-            Some(src) => print!("{src}"),
-            None => bail!("'{want}' is a native (in-Rust) program with no script source"),
-        }
+        print!("{}", str_field(row, "source"));
         return Ok(());
     }
-    println!("{:<26}  {:<8}  TITLE", "PROGRAM", "KIND");
+    println!("{:<26}  TITLE", "PROGRAM");
     for p in rows {
         println!(
-            "{:<26}  {:<8}  {}",
+            "{:<26}  {}",
             str_field(&p, "program"),
-            str_field(&p, "kind"),
             str_field(&p, "title"),
         );
     }

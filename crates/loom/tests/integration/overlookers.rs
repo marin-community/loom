@@ -65,6 +65,10 @@ async fn enabled_overlooker(state: &AppState, new: ov::NewOverlooker) -> ov::Ove
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
     let ts = TestServer::start().await;
     let state = engine_state(&ts).await;
     let (session_id, branch_id, repo_root) = make_session(&ts, "watch me").await;
@@ -174,6 +178,10 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_session_emits_one_event_and_wakes_a_reactive_overlooker() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
     let ts = TestServer::start().await;
     let state = engine_state(&ts).await;
     let (session_id, _branch_id, _repo_root) = make_session(&ts, "go stale").await;
@@ -290,6 +298,10 @@ async fn stale_session_emits_one_event_and_wakes_a_reactive_overlooker() {
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn builtin_status_marks_a_session_and_dry_run_is_safe() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
     let ts = TestServer::start().await;
     let state = engine_state(&ts).await;
     let (session_id, _branch_id, _repo_root) = make_session(&ts, "status me").await;
@@ -395,6 +407,10 @@ async fn builtin_status_marks_a_session_and_dry_run_is_safe() {
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn timer_emits_cron_tick_for_a_due_overlooker_and_dispatches_it() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
     let ts = TestServer::start().await;
     let state = engine_state(&ts).await;
     let (session_id, _branch_id, _repo_root) = make_session(&ts, "tick me").await;
@@ -479,6 +495,10 @@ async fn timer_emits_cron_tick_for_a_due_overlooker_and_dispatches_it() {
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cooldown_and_overlap_refire_are_refused() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
     let ts = TestServer::start().await;
     let state = engine_state(&ts).await;
     let (session_id, branch_id, repo_root) = make_session(&ts, "cool down").await;
@@ -558,6 +578,10 @@ async fn cooldown_and_overlap_refire_are_refused() {
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rest_overlooker_lifecycle_and_validation() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
     let ts = TestServer::start().await;
     // A non-ok session so the dry-run round has something in scope to "would-mark".
     let (session_id, _branch_id, _repo_root) = make_session(&ts, "rest me").await;
@@ -738,12 +762,11 @@ async fn rest_lists_builtin_programs_and_validates_program_refs() {
         assert!(names.contains(&expected), "{expected} missing: {names:?}");
     }
 
-    // A script program ships its source and suggested defaults…
+    // Every builtin is a script: it ships its source and suggested defaults.
     let archive = arr
         .iter()
         .find(|p| p["program"] == "builtin:archive-merged")
         .unwrap();
-    assert_eq!(archive["kind"], "script");
     assert!(
         archive["source"]
             .as_str()
@@ -753,13 +776,14 @@ async fn rest_lists_builtin_programs_and_validates_program_refs() {
     );
     assert!(archive["defaults"]["trigger"]["every"].is_string());
     assert_eq!(archive["defaults"]["capabilities"][0], "observe");
-    // …a native program has no source to show.
     let status = arr
         .iter()
         .find(|p| p["program"] == "builtin:status")
         .unwrap();
-    assert_eq!(status["kind"], "native");
-    assert!(status["source"].is_null());
+    assert!(
+        status["source"].as_str().unwrap().contains("triage"),
+        "the status program is a script like every other builtin"
+    );
 
     // An unknown builtin is rejected at create time; a known script accepted.
     let bad = ts
@@ -889,6 +913,84 @@ async fn builtin_scripts_report_merged_and_unlabelled_prs() {
     }
 }
 
+/// The LLM judgement path end to end: with a prompt configured and the
+/// one-shot agent stubbed (`WEAVER_OVERLOOKER_AGENT_CMD=cat` echoes the
+/// prompt back), the status script calls the daemon's `POST /api/agent/oneshot`
+/// and parses the level + note out of the reply — the mark carries the
+/// agent's judgement, not the attention mirror. Also drives the endpoint
+/// directly: a stubbed agent echoes, and an empty prompt is rejected.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_judgement_uses_the_oneshot_agent_when_prompted() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
+    let ts = TestServer::start().await;
+    // `cat` echoes the composed prompt (prompt + screen) straight back, so the
+    // judgement parser sees the prompt's own first line.
+    std::env::set_var("WEAVER_OVERLOOKER_AGENT_CMD", "cat");
+
+    // The endpoint itself: output echoes the prompt; an empty prompt 400s.
+    let reply = ts
+        .client
+        .post("/api/agent/oneshot", json!({ "prompt": "ping" }))
+        .await
+        .unwrap();
+    assert_eq!(reply["output"], "ping", "the stub agent echoes the prompt");
+    assert!(
+        ts.client
+            .post("/api/agent/oneshot", json!({ "prompt": "" }))
+            .await
+            .is_err(),
+        "an empty prompt is rejected"
+    );
+
+    // A calm session (no attention tag): the fallback rule would clear, so a
+    // `blocked` mark proves the agent judgement was used.
+    let state = engine_state(&ts).await;
+    let (session_id, _branch_id, _repo_root) = make_session(&ts, "judge me").await;
+    let o = enabled_overlooker(
+        &state,
+        ov::NewOverlooker {
+            name: "judge-watch".to_string(),
+            trigger_spec: json!({ "cron": "0 * * * *" }).to_string(),
+            program: "builtin:status".to_string(),
+            params: json!({ "prompt": "blocked - the judge says so" }).to_string(),
+            capabilities: vec!["observe".to_string(), "mark".to_string()],
+            ..Default::default()
+        },
+    )
+    .await;
+    overlooker::fire_now(&state, &o.name, false, "manual")
+        .await
+        .unwrap();
+
+    let view = ts
+        .client
+        .get(&format!("/api/sessions/{session_id}"))
+        .await
+        .unwrap();
+    assert_eq!(
+        branch_tag_value(&view, "triage"),
+        "blocked",
+        "the agent judgement (not the calm attention mirror) lands as the mark"
+    );
+    let tag = branch_tag(&view, "triage").unwrap();
+    assert_eq!(tag["set_by"], "judge-watch");
+    assert_eq!(
+        tag["note"], "the judge says so",
+        "the note is the judgement line after its separator"
+    );
+
+    // Restore the fixture's no-op agent for the tests that follow.
+    std::env::set_var("WEAVER_OVERLOOKER_AGENT_CMD", "true");
+    ts.client
+        .delete(&format!("/api/sessions/{session_id}"))
+        .await
+        .unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // T12 — Warm-session lifecycle
 // ---------------------------------------------------------------------------
@@ -943,6 +1045,10 @@ async fn insert_managed_session(
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn warm_session_is_hidden_from_fleet_and_survey() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
     let ts = TestServer::start().await;
     let state = engine_state(&ts).await;
 

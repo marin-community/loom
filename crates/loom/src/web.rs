@@ -88,10 +88,10 @@ use crate::events::{Event, EventBus};
 use crate::session::{self as session_mod, NewSession, Session};
 use crate::{agent, config, db, events, git, github, overlooker as ov_engine, repo, tmux};
 use weaver_api::{
-    BranchView, CreateIssueReq, CreateOverlookerReq, CreateRepoIssueReq, CreateReq, IssueView,
-    OverlookerRunView, OverlookerView, PatchIssueReq, PatchOverlookerReq, PatchSessionReq,
-    PlanTaskView, PlanView, ProgramView, RunOverlookerReq, ScratchUpload, SendReq, SessionView,
-    TagReq,
+    AgentOneshotReq, BranchView, CreateIssueReq, CreateOverlookerReq, CreateRepoIssueReq,
+    CreateReq, IssueView, OverlookerRunView, OverlookerView, PatchIssueReq, PatchOverlookerReq,
+    PatchSessionReq, PlanTaskView, PlanView, ProgramView, RunOverlookerReq, ScratchUpload, SendReq,
+    SessionView, TagReq,
 };
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::Branch;
@@ -330,6 +330,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/overlookers/{id}/run", post(run_overlooker))
         .route("/overlookers/{id}/runs", get(overlooker_runs))
+        // The one-shot headless agent — the judgement primitive overlooker
+        // programs (and any script) call through the daemon.
+        .route("/agent/oneshot", post(agent_oneshot))
         // Scratch uploads can carry images / logs; lift the default 2 MB cap.
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(state);
@@ -347,11 +350,23 @@ pub fn router(state: AppState) -> Router {
 
 async fn list_sessions(State(st): State<AppState>) -> ApiResult<Json<Vec<SessionView>>> {
     // The fleet listing shows work, not infrastructure: engine-managed (warm)
-    // sessions are excluded here, so the dashboard never renders a watcher's own
-    // session. Internal liveness/adopt paths use `session::list` instead.
+    // sessions are excluded here, so neither the dashboard nor an overlooker
+    // round's survey (scripts read this route) ever sees a watcher's own
+    // session — the no-recursion guarantee. `list_visible` drops `managed_by`
+    // rows; the `warm_session_id` check below is belt-and-braces for a warm
+    // session not yet stamped. Internal liveness/adopt paths use
+    // `session::list` instead.
+    let warm: std::collections::HashSet<String> = ov::list(&st.db)
+        .await?
+        .into_iter()
+        .filter_map(|o| o.warm_session_id)
+        .collect();
     let sessions = session_mod::list_visible(&st.db).await?;
     let mut views: Vec<SessionView> = Vec::with_capacity(sessions.len());
     for s in sessions {
+        if warm.contains(&s.id) {
+            continue;
+        }
         if let Some(branch) = branch_mod::get(&st.db, &s.branch_id).await? {
             views.push(session_view(&st.db, &s, &branch).await?);
         }
@@ -858,19 +873,29 @@ async fn set_session_tag(
 
 /// Clear a tag on a session's branch — delete the row and broadcast a `tag`
 /// event with an empty value (the cleared signal). How a loud axis returns to
-/// calm (`ok`). A no-op when the tag is already absent. DELETE carries no body,
-/// so the author is recorded as `manual`.
+/// calm (`ok`). A no-op when the tag is already absent. DELETE carries no
+/// body, so the author rides the `by` query parameter (an overlooker name),
+/// defaulting to `manual`.
 async fn clear_session_tag(
     State(st): State<AppState>,
     Path((key, tag_key)): Path<(String, String)>,
+    Query(q): Query<ByQuery>,
 ) -> ApiResult<Json<SessionView>> {
     let (session, branch) = require_session(&st.db, &key).await?;
+    let by = q.by.as_deref().unwrap_or("manual").trim().to_string();
     tags::clear(&st.db, &branch.id, &tag_key).await?;
-    events::record_tag(&st.db, &st.bus, &branch.id, &tag_key, "", "", "manual")
+    events::record_tag(&st.db, &st.bus, &branch.id, &tag_key, "", "", &by)
         .await
         .ok();
     let (session, branch) = require_session(&st.db, &session.id).await?;
     Ok(Json(session_view(&st.db, &session, &branch).await?))
+}
+
+/// Query string carrying the author of a body-less mutation (a tag DELETE).
+#[derive(Debug, Deserialize)]
+struct ByQuery {
+    #[serde(default)]
+    by: Option<String>,
 }
 
 async fn patch_session(
@@ -1814,13 +1839,15 @@ async fn require_live_tmux(session: &Session) -> ApiResult<()> {
 }
 
 /// Type a message into a session's agent pane and, by default, submit it with
-/// Enter to trigger an agent round.
+/// Enter to trigger an agent round. Every send is also a `nudge` events row
+/// (the audit rule — every mutating action is an events row), attributed to
+/// `by` (an overlooker name, or `manual` when absent).
 async fn send_session(
     State(st): State<AppState>,
     Path(key): Path<String>,
     Json(req): Json<SendReq>,
 ) -> ApiResult<Json<Value>> {
-    let (session, _) = require_session(&st.db, &key).await?;
+    let (session, branch) = require_session(&st.db, &key).await?;
     require_live_tmux(&session).await?;
     tmux::send_literal(&session.tmux_session, &req.text)
         .await
@@ -1830,6 +1857,16 @@ async fn send_session(
             .await
             .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
+    let by = req.by.as_deref().unwrap_or("manual").trim().to_string();
+    events::record(
+        &st.db,
+        &st.bus,
+        &branch.id,
+        "nudge",
+        json!({ "by": by, "text": req.text }),
+    )
+    .await
+    .ok();
     Ok(Json(json!({ "sent": true, "submitted": req.submit })))
 }
 
@@ -2547,6 +2584,32 @@ async fn run_overlooker(
         "outcome": outcome,
         "summary": summary,
     })))
+}
+
+/// Run a one-shot headless agent and return `{output}` — the judgement
+/// primitive overlooker programs call. The daemon owns the agent command
+/// (`WEAVER_OVERLOOKER_AGENT_CMD`, default `claude -p`) and the timeout
+/// budget. Best-effort by contract: an absent or failing agent returns
+/// `{output: null}` rather than an error, so callers degrade to their
+/// deterministic fallback.
+async fn agent_oneshot(
+    State(st): State<AppState>,
+    Json(req): Json<AgentOneshotReq>,
+) -> ApiResult<Json<Value>> {
+    if req.prompt.trim().is_empty() {
+        return Err(AppError::bad_request("prompt must be non-empty"));
+    }
+    let budget = ov_engine::get_int(&st.db, "overlooker.default_timeout_secs", 600)
+        .await
+        .max(1) as u64;
+    let output = agent::run_oneshot(
+        &req.prompt,
+        &req.model,
+        &req.effort,
+        std::time::Duration::from_secs(budget),
+    )
+    .await;
+    Ok(Json(json!({ "output": output })))
 }
 
 async fn overlooker_runs(

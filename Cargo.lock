@@ -2320,6 +2320,7 @@ name = "weaver-api"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",

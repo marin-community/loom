@@ -1,4 +1,6 @@
-//! Launching coding agents into tmux panes and installing status hooks.
+//! Launching coding agents into tmux panes and installing status hooks, plus
+//! the **one-shot headless agent** (`POST /api/agent/oneshot`) — a fresh,
+//! env-stripped `claude -p` run for a judgement call.
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -175,6 +177,78 @@ pub async fn install_hooks(work_dir: &Path, weaver_bin: &str) -> Result<()> {
     tokio::fs::write(&path, serde_json::to_string_pretty(&root)?).await?;
     tracing::debug!(path = %path.display(), "claude hooks installed");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The one-shot headless agent
+// ---------------------------------------------------------------------------
+
+/// Markers of a *calling* Claude Code session, stripped before spawning a
+/// subprocess so it runs fresh and isolated (the lint-review precedent).
+/// Mirrors `scripts/lint-review.py`'s `STRIPPED_ENV`. Shared by the one-shot
+/// agent here and the overlooker script executor.
+pub const STRIPPED_ENV: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SSE_PORT",
+];
+
+/// Spawn a one-shot headless agent: write `prompt` to its stdin, capture
+/// stdout, strip the calling session's env markers. Best-effort: returns
+/// `None` when the agent is absent, errors, or exceeds `timeout` — callers
+/// must degrade gracefully, so a missing `claude` never breaks them.
+///
+/// The command is `WEAVER_OVERLOOKER_AGENT_CMD` (default `claude -p`); a
+/// non-empty `model`/`effort` is appended as `--model`/`--effort`.
+pub async fn run_oneshot(
+    prompt: &str,
+    model: &str,
+    effort: &str,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let cmd_str =
+        std::env::var("WEAVER_OVERLOOKER_AGENT_CMD").unwrap_or_else(|_| "claude -p".to_string());
+    let mut parts = cmd_str.split_whitespace();
+    let program = parts.next()?;
+    let mut args: Vec<String> = parts.map(str::to_string).collect();
+    if !model.trim().is_empty() {
+        args.push("--model".to_string());
+        args.push(model.trim().to_string());
+    }
+    if !effort.trim().is_empty() {
+        args.push("--effort".to_string());
+        args.push(effort.trim().to_string());
+    }
+
+    let mut command = tokio::process::Command::new(program);
+    command
+        .args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    for key in STRIPPED_ENV {
+        command.env_remove(key);
+    }
+
+    let mut child = command.spawn().ok()?; // agent not on PATH → None, caller degrades.
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = stdin.write_all(prompt.as_bytes()).await;
+        // Drop stdin so the agent sees EOF and proceeds.
+        drop(stdin);
+    }
+
+    let out = tokio::time::timeout(timeout, child.wait_with_output()).await;
+    match out {
+        Ok(Ok(output)) if output.status.success() => {
+            Some(String::from_utf8_lossy(&output.stdout).to_string())
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

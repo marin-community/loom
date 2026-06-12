@@ -315,9 +315,8 @@ impl From<OverlookerRun> for OverlookerRunView {
 }
 
 /// One **program** an overlooker can run, as `GET /api/overlookers/programs`
-/// exposes it. Builtin programs ship inside the loom binary: a `native` one is
-/// implemented in Rust, a `script` one is an embedded Python file whose source
-/// is returned for a read-only view in the panel.
+/// exposes it. Builtin programs are Python scripts that ship inside the loom
+/// binary; the embedded source is returned for a read-only view in the panel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgramView {
     /// The reference an overlooker's `program` field names it by, e.g.
@@ -325,11 +324,9 @@ pub struct ProgramView {
     pub program: String,
     pub title: String,
     pub description: String,
-    /// `native` (in-Rust) or `script` (an embedded Python program).
-    pub kind: String,
-    /// A `script` program's source. Read-only — it ships with the binary;
-    /// `null` for a native program.
-    pub source: Option<String>,
+    /// The program's embedded Python source. Read-only — it ships with the
+    /// binary.
+    pub source: String,
     /// Suggested starting config for a new overlooker running this program:
     /// `{trigger, scope, params, capabilities}` — what a create form prefills.
     pub defaults: Value,
@@ -432,6 +429,10 @@ pub struct SendReq {
     /// agent round). Defaults to true; pass false to stage input unsubmitted.
     #[serde(default = "default_submit")]
     pub submit: bool,
+    /// Who is sending (an overlooker name or `manual`) — recorded on the
+    /// `nudge` audit event; the server defaults a missing author.
+    #[serde(default)]
+    pub by: Option<String>,
 }
 
 fn default_submit() -> bool {
@@ -444,8 +445,26 @@ impl SendReq {
         Self {
             text: text.into(),
             submit: true,
+            by: None,
         }
     }
+}
+
+/// Body for `POST /api/agent/oneshot`: run a fresh, env-stripped one-shot
+/// headless agent (`claude -p`) with `prompt` on stdin and return its stdout
+/// as `{output}` (`null` when the agent is absent or fails — callers degrade
+/// gracefully). The judgement primitive overlooker programs reach through the
+/// daemon, which owns the agent command and timeout configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentOneshotReq {
+    pub prompt: String,
+    /// Model tier override (`haiku` | `sonnet` | `opus` | `fable`); empty
+    /// inherits the agent's default.
+    #[serde(default)]
+    pub model: String,
+    /// Reasoning effort override; empty inherits.
+    #[serde(default)]
+    pub effort: String,
 }
 
 /// Body for `POST /api/branches/{id}/issues`: create an issue claimed by a
