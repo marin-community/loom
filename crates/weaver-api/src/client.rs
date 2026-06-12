@@ -165,10 +165,24 @@ impl Client {
     }
 
     /// Clear a tag on a session (`DELETE /api/sessions/{key}/tags/{tag_key}`) —
-    /// how a loud axis returns to calm (`ok`).
-    pub async fn clear_tag(&self, key: &str, tag_key: &str) -> Result<SessionView> {
+    /// how a loud axis returns to calm (`ok`). `by` attributes the clear on
+    /// the audit event (an overlooker name); the server defaults `manual`.
+    pub async fn clear_tag(
+        &self,
+        key: &str,
+        tag_key: &str,
+        by: Option<&str>,
+    ) -> Result<SessionView> {
+        let query = by
+            .map(|b| {
+                format!(
+                    "?by={}",
+                    percent_encoding::utf8_percent_encode(b, percent_encoding::NON_ALPHANUMERIC)
+                )
+            })
+            .unwrap_or_default();
         let value = self
-            .delete(&format!("/api/sessions/{key}/tags/{tag_key}"))
+            .delete(&format!("/api/sessions/{key}/tags/{tag_key}{query}"))
             .await?;
         serde_json::from_value(value)
             .map_err(|e| anyhow!("decoding response from /api/sessions/{key}/tags/{tag_key}: {e}"))
@@ -186,7 +200,7 @@ impl Client {
         by: Option<&str>,
     ) -> Result<SessionView> {
         if level.is_empty() || level == "ok" {
-            self.clear_tag(key, weaver_core::tags::TRIAGE_KEY).await
+            self.clear_tag(key, weaver_core::tags::TRIAGE_KEY, by).await
         } else {
             self.set_tag(key, weaver_core::tags::TRIAGE_KEY, level, note, by)
                 .await

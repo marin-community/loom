@@ -527,11 +527,9 @@ onMounted(() => {
         >
           <div class="flex items-center gap-2 flex-wrap">
             <span class="font-mono text-sm font-semibold">{{ p.program }}</span>
-            <span class="meta-chip">{{ p.kind }}</span>
             <span class="text-sm text-muted">{{ p.title }}</span>
             <div class="ml-auto flex shrink-0 items-center gap-2">
               <button
-                v-if="p.source"
                 type="button"
                 data-testid="program-source-toggle"
                 class="btn-secondary px-2.5 py-1 text-xs font-medium"
@@ -551,7 +549,7 @@ onMounted(() => {
           </div>
           <p class="mt-1 text-xs text-faint">{{ p.description }}</p>
           <pre
-            v-if="expandedSource === p.program && p.source"
+            v-if="expandedSource === p.program"
             data-testid="program-source"
             class="mt-2 max-h-80 overflow-auto rounded bg-input p-3 text-xs font-mono"
           >{{ p.source }}</pre>

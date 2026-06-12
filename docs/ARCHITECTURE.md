@@ -49,10 +49,10 @@ needing the daemon to be reachable.
 | `crates/loom/src/web.rs` | axum routes, request/response types, SSE — **the API surface** |
 | `crates/loom/src/server.rs` | bind, write `server.json`, spawn bg tasks |
 | `crates/loom/src/monitor.rs` | status detection, orphan marking, hook-event consumer |
-| `crates/loom/src/overlooker.rs` | the overlooker engine: cron timer + event dispatcher + the round executor (the native `builtin:status` program and the script subprocess executor) |
+| `crates/loom/src/overlooker.rs` | the overlooker engine: cron timer + event dispatcher + the round executor (the script subprocess executor every program runs on) |
 | `crates/loom/src/builtins.rs` | the builtin overlooker program registry; the script programs are real Python files in `crates/loom/overlookers/`, embedded into the binary |
-| `python/weaver-loom/` | the pure-Python layer over the loom REST API (`weaver_loom`: client + overlooker round context); stdlib-only, uv-buildable, vendored onto every script's `PYTHONPATH` by the engine |
-| `crates/loom/src/agent.rs` | launching agents into tmux + installing `.claude/settings.local.json` hooks |
+| `python/weaver-loom/` | the pure-Python layer over the loom REST API (`weaver_loom`: client + overlooker round context); stdlib-only, uv-buildable, vendored onto every script's `PYTHONPATH` by the engine; server-free contract tests in `tests/` (`uv run pytest`, CI's `python-binding` job) |
+| `crates/loom/src/agent.rs` | launching agents into tmux + installing `.claude/settings.local.json` hooks + the one-shot headless agent behind `POST /api/agent/oneshot` |
 | `crates/loom/src/session.rs` | `Session` row + sqlx queries |
 | `crates/loom/src/tmux.rs` | `tmux new-session / capture-pane / kill-session / attach` (exact-match `=name:` targets) |
 | `crates/loom/src/terminal.rs` | WebSocket ⇄ PTY bridge: xterm.js ⇄ `tmux attach` (the live terminal) |
@@ -389,27 +389,29 @@ scope, and acts within an explicit capability set. The design of record is
 
 A round runs the **program** the overlooker names:
 
-- **`builtin:status`** — the native (in-Rust) stock program: stamps a `triage`
-  mark on each in-scope session, judging via the configured `prompt` (a
-  one-shot env-stripped `claude -p` when available) or mirroring the agent's
-  own `attention` tag.
 - **Builtin scripts** — real Python files in `crates/loom/overlookers/`,
   embedded into the binary and registered in `loom::builtins`:
+  `builtin:status` (stamp a `triage` mark on each in-scope session, judging
+  via the configured `prompt` through the daemon's one-shot agent when
+  available, else mirroring the agent's own `attention` tag),
   `builtin:pr-label` (flag sessions whose open PR lacks the loom label) and
-  `builtin:archive-merged` (flag live sessions whose PR has merged). Both are
-  **read-only**: they record `would:` actions and mutate nothing — the actual
-  archive is still `github.archive_on_merge`, above. The Overlooker panel and
-  `loom overlooker programs` list the registry; script sources render
-  read-only (they ship with the binary).
+  `builtin:archive-merged` (flag live sessions whose PR has merged). The last
+  two are **read-only**: they record `would:` actions and mutate nothing — the
+  actual archive is still `github.archive_on_merge`, above. The Overlooker
+  panel and `loom overlooker programs` list the registry; script sources
+  render read-only (they ship with the binary).
 - **A custom program file** — an absolute path, conventionally
   `~/.weaver/overlookers/<name>.py` (`loom overlooker new` scaffolds one).
 
 Builtin scripts and custom files run on one executor: an env-stripped
 subprocess that reaches the fleet only through the loom REST API — everything
-loom can do is an HTTP route, and Python is purely a convenience layer on top.
+loom can do is an HTTP route (including one-shot agent judgement, at
+`POST /api/agent/oneshot`), and Python is purely a convenience layer on top.
+There is deliberately no privileged in-Rust program shape: a builtin sees
+exactly the API a custom program sees.
 The contract: `$WEAVER_API` carries the daemon's base URL, `$WEAVER_OVERLOOKER`
-the round's config (`{id, name, program, params, scope, capabilities,
-dry_run}`), and the script prints one JSON object — `{outcome, summary,
+the round's config (`{id, name, program, params, scope, capabilities, model,
+effort, dry_run}`), and the script prints one JSON object — `{outcome, summary,
 actions}` — as its final stdout line. A non-zero exit, no result object, or a
 blown round budget records the round as an `error`. A mutating program must
 honor `dry_run` (record `{would: …}` actions instead of acting) and stay inside
@@ -434,4 +436,5 @@ builtins are stdlib-only and need neither).
 | `WEAVER_API` | loom URL (both sides — server binds, CLI talks) | `http://127.0.0.1:7878` |
 | `WEAVER_BRANCH` | override the branch resolver (set by `loom session launch` in the worktree) | — |
 | `WEAVER_TMUX_SOCKET` | pin tmux to a dedicated server (`tmux -L <name>`) so ops can't touch real sessions; set by the test harnesses | unset → default socket |
+| `WEAVER_OVERLOOKER_AGENT_CMD` | the one-shot headless agent command behind `POST /api/agent/oneshot` (judgement calls) | `claude -p` |
 | `RUST_LOG` / `EnvFilter` | tracing filter | `loom=info,weaver_core=info,tower_http=warn` |

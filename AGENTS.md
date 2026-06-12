@@ -24,7 +24,12 @@ Diagram and module-by-module map: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 cargo build              # backend + Vue SPA (build.rs drives npm/rspack)
 cargo test --workspace   # backend unit + integration (needs git, tmux)
 cd e2e && npm test       # Playwright UI suite against a real loom
+cd python/weaver-loom && uv run pytest   # weaver_loom + builtin overlooker program logic (server-free)
 ```
+
+Test placement: pure program/module logic lives in pytest
+(`python/weaver-loom/tests/`, `crates/weaver-py/tests/`); Rust integration
+tests prove wiring against a live server — don't duplicate logic across them.
 
 Run `./scripts/pre-commit.sh` before committing — the fmt + clippy gate CI
 enforces, plus an [agent lint review](docs/lint.md): a headless `claude`

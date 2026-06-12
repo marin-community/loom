@@ -35,6 +35,7 @@ from the weaver repo with ``uv pip install -e python/weaver-loom``.
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 
 DEFAULT_BASE = "http://127.0.0.1:7878"
@@ -44,6 +45,29 @@ CAPABILITIES = ["observe", "mark", "escalate", "nudge", "interrupt", "launch"]
 
 #: Lifecycle states with no live session behind them.
 TERMINAL_STATUSES = {"done", "error", "archived"}
+
+#: The levels an agent judgement may name: the two storable triage values plus
+#: the calm ``ok`` — recognising ``ok`` lets a judgement explicitly return the
+#: axis to calm (the caller then clears the tag rather than marking).
+JUDGED_LEVELS = ("ok", "attention", "blocked")
+
+
+def parse_judgement(text):
+    """Parse an agent judgement into ``(level, note)``, or ``None``.
+
+    Lenient by design: the first line containing a recognised triage word
+    yields the level; the rest of that line (after a ``:`` or ``-``) is the
+    note. ``None`` means no level was found — the caller falls back to its
+    deterministic rule.
+    """
+    for line in (text or "").splitlines():
+        words = "".join(c if c.isalpha() else " " for c in line.lower()).split()
+        for level in JUDGED_LEVELS:
+            if level in words:
+                cuts = [i for i in (line.find(":"), line.find("-")) if i >= 0]
+                note = line[min(cuts) + 1 :].strip() if cuts else ""
+                return level, note or line.strip()
+    return None
 
 
 class WeaverError(RuntimeError):
@@ -123,6 +147,18 @@ class Client:
         """The builtin overlooker program registry."""
         return self._request("GET", "/overlookers/programs")
 
+    def agent(self, prompt, model="", effort=""):
+        """Run a one-shot headless agent in the daemon and return its stdout,
+        or ``None`` when the agent is absent or failed (degrade gracefully —
+        the daemon never errors a missing agent). A judgement primitive: pair
+        with :func:`parse_judgement`."""
+        reply = self._request(
+            "POST",
+            "/agent/oneshot",
+            {"prompt": prompt, "model": model or "", "effort": effort or ""},
+        )
+        return (reply or {}).get("output")
+
     # -- Writes (capability-gated) --------------------------------------------
 
     def set_tag(self, key, tag_key, value, note="", by=None):
@@ -133,24 +169,28 @@ class Client:
             body["by"] = by
         return self._request("PUT", f"/sessions/{key}/tags/{tag_key}", body)
 
-    def clear_tag(self, key, tag_key):
-        """Clear a tag — how a loud axis returns to calm; needs ``mark``."""
+    def clear_tag(self, key, tag_key, by=None):
+        """Clear a tag — how a loud axis returns to calm; needs ``mark``.
+        ``by`` attributes the clear (an overlooker name)."""
         self._gate("mark")
-        return self._request("DELETE", f"/sessions/{key}/tags/{tag_key}")
+        query = f"?by={urllib.parse.quote(by, safe='')}" if by else ""
+        return self._request("DELETE", f"/sessions/{key}/tags/{tag_key}{query}")
 
     def mark(self, key, level, note="", by=None):
         """Stamp the overlooker's ``triage`` mark; needs ``mark``. A ``level``
         of ``attention``/``blocked`` sets it; empty or ``ok`` clears it."""
         if not level or level == "ok":
-            return self.clear_tag(key, "triage")
+            return self.clear_tag(key, "triage", by)
         return self.set_tag(key, "triage", level, note, by)
 
-    def nudge(self, key, text, submit=True):
-        """Type a message into the session's agent pane; needs ``nudge``."""
+    def nudge(self, key, text, submit=True, by=None):
+        """Type a message into the session's agent pane; needs ``nudge``.
+        ``by`` attributes the recorded ``nudge`` audit event."""
         self._gate("nudge")
-        return self._request(
-            "POST", f"/sessions/{key}/send", {"text": text, "submit": submit}
-        )
+        body = {"text": text, "submit": submit}
+        if by is not None:
+            body["by"] = by
+        return self._request("POST", f"/sessions/{key}/send", body)
 
     def interrupt(self, key):
         """Send a break (Escape) to stop the current turn; needs ``interrupt``."""
@@ -162,10 +202,10 @@ class Round:
     """One overlooker round, as the engine runs it.
 
     Reads the round config from ``$WEAVER_OVERLOOKER`` (``{id, name, program,
-    params, scope, capabilities, dry_run}``), builds a :class:`Client` granted
-    that round's capabilities, accumulates the action log, and prints the
-    result the engine parses. A mutating program must check :attr:`dry_run`
-    (record a :meth:`would` action instead of acting).
+    params, scope, capabilities, model, effort, dry_run}``), builds a
+    :class:`Client` granted that round's capabilities, accumulates the action
+    log, and prints the result the engine parses. A mutating program must
+    check :attr:`dry_run` (record a :meth:`would` action instead of acting).
     """
 
     def __init__(self, config=None, client=None):
@@ -175,6 +215,10 @@ class Round:
         self.name = config.get("name", "")
         self.params = config.get("params") or {}
         self.scope = config.get("scope") or {}
+        #: The overlooker's configured agent model / reasoning effort — pass
+        #: these to :meth:`Client.agent` so judgement honours the config.
+        self.model = config.get("model", "")
+        self.effort = config.get("effort", "")
         self.dry_run = bool(config.get("dry_run"))
         self.client = client or Client(capabilities=config.get("capabilities") or [])
         self.actions = []

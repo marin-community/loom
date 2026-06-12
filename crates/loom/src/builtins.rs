@@ -2,15 +2,14 @@
 //! the loom binary and that an overlooker's `program` field names as
 //! `builtin:<name>`.
 //!
-//! Two kinds share the registry:
-//!
-//! * **native** — implemented in Rust inside the engine (`builtin:status`).
-//! * **script** — a real Python file under `crates/loom/overlookers/`,
-//!   embedded here with `include_str!` and run by the engine's script
-//!   executor ([`crate::overlooker`]) exactly like a user's custom program
-//!   file. Living in the repo makes each one diffable, reviewable, and the
-//!   working example of the program contract; the panel shows the source
-//!   read-only.
+//! Every builtin is a **script**: a real Python file under
+//! `crates/loom/overlookers/`, embedded here with `include_str!` and run by
+//! the engine's script executor ([`crate::overlooker`]) exactly like a user's
+//! custom program file. Living in the repo makes each one diffable,
+//! reviewable, and the working example of the program contract; the panel
+//! shows the source read-only. There is deliberately no privileged in-Rust
+//! program shape — everything a builtin does, it does through the loom REST
+//! API a custom program also sees.
 //!
 //! `GET /api/overlookers/programs` serves this table (as [`ProgramView`]s) so
 //! the panel and the `loom overlooker programs` CLI list one source of truth.
@@ -25,16 +24,16 @@ use weaver_api::ProgramView;
 pub const PYTHON_MODULE: &str =
     include_str!("../../../python/weaver-loom/src/weaver_loom/__init__.py");
 
-/// One stock program: its identity, its embedded source (for a script), and
-/// the suggested starting config a create form prefills. The JSON-bearing
-/// defaults are stored as text so the table stays a flat `const`.
+/// One stock program: its identity, its embedded source, and the suggested
+/// starting config a create form prefills. The JSON-bearing defaults are
+/// stored as text so the table stays a flat `const`.
 pub struct BuiltinProgram {
     /// The short name; the program reference is `builtin:<name>`.
     pub name: &'static str,
     pub title: &'static str,
     pub description: &'static str,
-    /// The embedded Python source, or `None` for a native (in-Rust) program.
-    pub source: Option<&'static str>,
+    /// The embedded Python source.
+    pub source: &'static str,
     pub default_trigger: &'static str,
     pub default_scope: &'static str,
     pub default_params: &'static str,
@@ -47,10 +46,10 @@ pub const BUILTINS: &[BuiltinProgram] = &[
         name: "status",
         title: "Status check",
         description: "Survey the scoped fleet and stamp a triage mark on each \
-                      session — judgement via the configured prompt (a one-shot \
-                      agent when available), else mirroring the agent's own \
-                      attention tag.",
-        source: None,
+                      session — judgement via the configured prompt (the \
+                      daemon's one-shot agent when available), else mirroring \
+                      the agent's own attention tag.",
+        source: include_str!("../overlookers/status.py"),
         default_trigger: r#"{"cron":"0 * * * *"}"#,
         default_scope: r#"{"attention":"!ok"}"#,
         default_params: "{}",
@@ -63,7 +62,7 @@ pub const BUILTINS: &[BuiltinProgram] = &[
                       label (params.label, default 'weaver'), so PRs born from \
                       sessions are identifiable on GitHub. Read-only: it \
                       reports would-label actions.",
-        source: Some(include_str!("../overlookers/pr_label.py")),
+        source: include_str!("../overlookers/pr_label.py"),
         default_trigger: r#"{"every":"15m"}"#,
         default_scope: "{}",
         default_params: r#"{"label":"weaver"}"#,
@@ -77,7 +76,7 @@ pub const BUILTINS: &[BuiltinProgram] = &[
                       Read-only: it reports would-archive actions (the \
                       github.archive_on_merge setting still performs the \
                       archive).",
-        source: Some(include_str!("../overlookers/archive_merged.py")),
+        source: include_str!("../overlookers/archive_merged.py"),
         default_trigger: r#"{"every":"5m"}"#,
         default_scope: "{}",
         default_params: "{}",
@@ -98,13 +97,7 @@ impl BuiltinProgram {
             program: self.program(),
             title: self.title.to_string(),
             description: self.description.to_string(),
-            kind: if self.source.is_some() {
-                "script"
-            } else {
-                "native"
-            }
-            .to_string(),
-            source: self.source.map(str::to_string),
+            source: self.source.to_string(),
             defaults: json!({
                 "trigger": parse(self.default_trigger),
                 "scope": parse(self.default_scope),
@@ -169,10 +162,10 @@ mod tests {
                     b.name
                 );
             }
-            // The wire view: kind tracks the presence of source.
+            // The wire view: every builtin serves its embedded source.
             let v = b.view();
             assert!(v.program.starts_with("builtin:"));
-            assert_eq!(v.kind == "script", v.source.is_some());
+            assert!(!v.source.is_empty(), "{}: source is embedded", b.name);
         }
     }
 
@@ -187,7 +180,7 @@ mod tests {
         }
         let scripts = BUILTINS
             .iter()
-            .filter_map(|b| Some((b.name, b.source?)))
+            .map(|b| (b.name, b.source))
             .chain([("weaver_loom", PYTHON_MODULE)]);
         for (name, source) in scripts {
             let dir = tempfile::tempdir().unwrap();

@@ -61,14 +61,17 @@
 //! through `PUT /api/sessions/{id}/tags/{key}` and cleared through `DELETE`.
 //! Absence is the calm state; there is no stored `ok` tag.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::hash::{Hash, Hasher};
 use std::path::{Component, PathBuf};
 
 use axum::{
     body::Bytes,
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{header, StatusCode},
+    http::{header, Request, StatusCode},
+    middleware::Next,
     response::{
         sse::{self, KeepAlive, Sse},
         IntoResponse, Response,
@@ -81,6 +84,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -89,8 +93,8 @@ use crate::events::{Event, EventBus};
 use crate::session::{self as session_mod, NewSession, Session};
 use crate::{agent, config, db, events, git, github, overlooker as ov_engine, repo, tmux};
 use weaver_api::{
-    ArtifactMeta, ArtifactRefs, ArtifactView, ArtifactWriteBody, BranchView, CreateIssueReq,
-    CreateOverlookerReq, CreateRepoIssueReq, CreateReq, IssueRefStatus, IssueView,
+    AgentOneshotReq, ArtifactMeta, ArtifactRefs, ArtifactView, ArtifactWriteBody, BranchView,
+    CreateIssueReq, CreateOverlookerReq, CreateRepoIssueReq, CreateReq, IssueRefStatus, IssueView,
     OverlookerRunView, OverlookerView, PatchIssueReq, PatchOverlookerReq, PatchSessionReq,
     ProgramView, RunOverlookerReq, ScratchUpload, SendReq, SessionView, TagReq,
 };
@@ -245,6 +249,95 @@ async fn require_branch(db: &Db, key: &str) -> ApiResult<Branch> {
 }
 
 // ---------------------------------------------------------------------------
+// Caching middleware
+// ---------------------------------------------------------------------------
+
+/// Add `ETag` + `Cache-Control: no-cache` to JSON API GET responses and serve
+/// `304 Not Modified` when the client's `If-None-Match` matches.
+///
+/// Skips non-200 responses, SSE streams, and WebSocket upgrades so they pass
+/// through untouched.
+pub async fn api_etag_middleware(request: Request<axum::body::Body>, next: Next) -> Response {
+    let if_none_match = request.headers().get(header::IF_NONE_MATCH).cloned();
+    let response = next.run(request).await;
+
+    if response.status() != StatusCode::OK {
+        return response;
+    }
+    // Skip streaming responses (SSE, WebSocket upgrades).
+    if let Some(ct) = response.headers().get(header::CONTENT_TYPE) {
+        if ct.as_bytes().starts_with(b"text/event-stream") {
+            return response;
+        }
+    }
+    if response.headers().contains_key(header::UPGRADE) {
+        return response;
+    }
+
+    let (mut parts, body) = response.into_parts();
+    let bytes = match axum::body::to_bytes(body, 16 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return Response::from_parts(parts, axum::body::Body::empty()),
+    };
+
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    let etag = format!("\"loom-{:016x}\"", hasher.finish());
+    let etag_val: axum::http::HeaderValue = etag.parse().unwrap();
+
+    parts.headers.insert(header::ETAG, etag_val.clone());
+    parts
+        .headers
+        .entry(header::CACHE_CONTROL)
+        .or_insert_with(|| "no-cache".parse().unwrap());
+
+    if if_none_match.is_some_and(|v| v == etag_val) {
+        parts.status = StatusCode::NOT_MODIFIED;
+        return Response::from_parts(parts, axum::body::Body::empty());
+    }
+
+    Response::from_parts(parts, axum::body::Body::from(bytes))
+}
+
+/// Set `Cache-Control` on static asset responses:
+/// - Content-hashed assets (filename contains an 8-hex-char segment, e.g.
+///   `app.a1b2c3d4.js`) get `max-age=31536000, immutable` — the hash guarantees
+///   the content never changes for that URL.
+/// - Everything else (`index.html`, fonts, etc.) gets `no-cache` so browsers
+///   always revalidate; `ServeDir` provides `ETag`/`Last-Modified` for fast 304s.
+pub async fn static_cache_middleware(request: Request<axum::body::Body>, next: Next) -> Response {
+    let path = request.uri().path().to_owned();
+    let response = next.run(request).await;
+
+    if response.status() != StatusCode::OK {
+        return response;
+    }
+
+    let cache_control = if is_immutable_asset(&path) {
+        "max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+
+    let (mut parts, body) = response.into_parts();
+    parts
+        .headers
+        .entry(header::CACHE_CONTROL)
+        .or_insert_with(|| cache_control.parse().unwrap());
+    Response::from_parts(parts, body)
+}
+
+/// True for content-hashed static assets produced by rspack.
+/// Matches filenames like `app.a1b2c3d4.js` — any path component that is
+/// exactly 8 lowercase hex characters surrounded by dots.
+fn is_immutable_asset(path: &str) -> bool {
+    let filename = path.rsplit('/').next().unwrap_or("");
+    filename
+        .split('.')
+        .any(|seg| seg.len() == 8 && seg.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -335,14 +428,20 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/overlookers/{id}/run", post(run_overlooker))
         .route("/overlookers/{id}/runs", get(overlooker_runs))
+        // The one-shot headless agent — the judgement primitive overlooker
+        // programs (and any script) call through the daemon.
+        .route("/agent/oneshot", post(agent_oneshot))
         // Scratch uploads can carry images / logs; lift the default 2 MB cap.
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
+        .layer(axum::middleware::from_fn(api_etag_middleware))
         .with_state(state);
 
     let index = static_dir().join("index.html");
     Router::new()
         .nest("/api", api)
         .fallback_service(ServeDir::new(static_dir()).fallback(ServeFile::new(index)))
+        .layer(axum::middleware::from_fn(static_cache_middleware))
+        .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
 }
 
@@ -352,11 +451,23 @@ pub fn router(state: AppState) -> Router {
 
 async fn list_sessions(State(st): State<AppState>) -> ApiResult<Json<Vec<SessionView>>> {
     // The fleet listing shows work, not infrastructure: engine-managed (warm)
-    // sessions are excluded here, so the dashboard never renders a watcher's own
-    // session. Internal liveness/adopt paths use `session::list` instead.
+    // sessions are excluded here, so neither the dashboard nor an overlooker
+    // round's survey (scripts read this route) ever sees a watcher's own
+    // session — the no-recursion guarantee. `list_visible` drops `managed_by`
+    // rows; the `warm_session_id` check below is belt-and-braces for a warm
+    // session not yet stamped. Internal liveness/adopt paths use
+    // `session::list` instead.
+    let warm: std::collections::HashSet<String> = ov::list(&st.db)
+        .await?
+        .into_iter()
+        .filter_map(|o| o.warm_session_id)
+        .collect();
     let sessions = session_mod::list_visible(&st.db).await?;
     let mut views: Vec<SessionView> = Vec::with_capacity(sessions.len());
     for s in sessions {
+        if warm.contains(&s.id) {
+            continue;
+        }
         if let Some(branch) = branch_mod::get(&st.db, &s.branch_id).await? {
             views.push(session_view(&st.db, &s, &branch).await?);
         }
@@ -828,6 +939,15 @@ async fn create_tracking_issue(
     Ok(Some(issue.id))
 }
 
+/// The author of a mutation: the trimmed `by`, or `manual` when absent or
+/// all-whitespace (an empty author never reaches the audit trail).
+fn author_or_manual(by: Option<&str>) -> String {
+    by.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("manual")
+        .to_string()
+}
+
 /// Set (upsert) a tag on a session's branch: validate `value` against the key's
 /// ladder, write the tag, and broadcast a `tag` event. The well-known keys are
 /// `attention` (the agent's self-report) and `triage` (an overlooker's, or a
@@ -850,7 +970,7 @@ async fn set_session_tag(
             format!("invalid value '{value}' for '{tag_key}' — must be non-empty")
         }));
     }
-    let by = req.by.as_deref().unwrap_or("manual").trim().to_string();
+    let by = author_or_manual(req.by.as_deref());
     let note = req.note.trim();
     tags::set(&st.db, &branch.id, &tag_key, value, note, &by).await?;
     events::record_tag(&st.db, &st.bus, &branch.id, &tag_key, value, note, &by)
@@ -862,19 +982,29 @@ async fn set_session_tag(
 
 /// Clear a tag on a session's branch — delete the row and broadcast a `tag`
 /// event with an empty value (the cleared signal). How a loud axis returns to
-/// calm (`ok`). A no-op when the tag is already absent. DELETE carries no body,
-/// so the author is recorded as `manual`.
+/// calm (`ok`). A no-op when the tag is already absent. DELETE carries no
+/// body, so the author rides the `by` query parameter (an overlooker name),
+/// defaulting to `manual`.
 async fn clear_session_tag(
     State(st): State<AppState>,
     Path((key, tag_key)): Path<(String, String)>,
+    Query(q): Query<ByQuery>,
 ) -> ApiResult<Json<SessionView>> {
     let (session, branch) = require_session(&st.db, &key).await?;
+    let by = author_or_manual(q.by.as_deref());
     tags::clear(&st.db, &branch.id, &tag_key).await?;
-    events::record_tag(&st.db, &st.bus, &branch.id, &tag_key, "", "", "manual")
+    events::record_tag(&st.db, &st.bus, &branch.id, &tag_key, "", "", &by)
         .await
         .ok();
     let (session, branch) = require_session(&st.db, &session.id).await?;
     Ok(Json(session_view(&st.db, &session, &branch).await?))
+}
+
+/// Query string carrying the author of a body-less mutation (a tag DELETE).
+#[derive(Debug, Deserialize)]
+struct ByQuery {
+    #[serde(default)]
+    by: Option<String>,
 }
 
 async fn patch_session(
@@ -1830,13 +1960,15 @@ async fn require_live_tmux(session: &Session) -> ApiResult<()> {
 }
 
 /// Type a message into a session's agent pane and, by default, submit it with
-/// Enter to trigger an agent round.
+/// Enter to trigger an agent round. Every send is also a `nudge` events row
+/// (the audit rule — every mutating action is an events row), attributed to
+/// `by` (an overlooker name, or `manual` when absent).
 async fn send_session(
     State(st): State<AppState>,
     Path(key): Path<String>,
     Json(req): Json<SendReq>,
 ) -> ApiResult<Json<Value>> {
-    let (session, _) = require_session(&st.db, &key).await?;
+    let (session, branch) = require_session(&st.db, &key).await?;
     require_live_tmux(&session).await?;
     tmux::send_literal(&session.tmux_session, &req.text)
         .await
@@ -1846,6 +1978,16 @@ async fn send_session(
             .await
             .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
+    let by = author_or_manual(req.by.as_deref());
+    events::record(
+        &st.db,
+        &st.bus,
+        &branch.id,
+        "nudge",
+        json!({ "by": by, "text": req.text }),
+    )
+    .await
+    .ok();
     Ok(Json(json!({ "sent": true, "submitted": req.submit })))
 }
 
@@ -2108,14 +2250,7 @@ async fn set_issue_tag(
             "invalid value for '{key}' — must be non-empty (clear the tag to remove it)"
         )));
     }
-    // An all-whitespace author is treated the same as a missing one.
-    let by = req
-        .by
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("manual")
-        .to_string();
+    let by = author_or_manual(req.by.as_deref());
     let note = req.note.trim();
     weaver_core::issue::set_tag(&st.db, id, key, value, note, &by).await?;
     if let Some(branch_id) = issue_event_branch(&st.db, &issue).await {
@@ -2565,6 +2700,32 @@ async fn run_overlooker(
     })))
 }
 
+/// Run a one-shot headless agent and return `{output}` — the judgement
+/// primitive overlooker programs call. The daemon owns the agent command
+/// (`WEAVER_OVERLOOKER_AGENT_CMD`, default `claude -p`) and the timeout
+/// budget. Best-effort by contract: an absent or failing agent returns
+/// `{output: null}` rather than an error, so callers degrade to their
+/// deterministic fallback.
+async fn agent_oneshot(
+    State(st): State<AppState>,
+    Json(req): Json<AgentOneshotReq>,
+) -> ApiResult<Json<Value>> {
+    if req.prompt.trim().is_empty() {
+        return Err(AppError::bad_request("prompt must be non-empty"));
+    }
+    let budget = ov_engine::get_int(&st.db, "overlooker.default_timeout_secs", 600)
+        .await
+        .max(1) as u64;
+    let output = agent::run_oneshot(
+        &req.prompt,
+        &req.model,
+        &req.effort,
+        std::time::Duration::from_secs(budget),
+    )
+    .await;
+    Ok(Json(json!({ "output": output })))
+}
+
 async fn overlooker_runs(
     State(st): State<AppState>,
     Path(key): Path<String>,
@@ -2751,5 +2912,22 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn is_immutable_asset_matches_rspack_content_hashed_files() {
+        assert!(is_immutable_asset("/app.a1b2c3d4.js"));
+        assert!(is_immutable_asset("/chunk.00ff1234.js"));
+        assert!(is_immutable_asset("/styles.deadbeef.css"));
+    }
+
+    #[test]
+    fn is_immutable_asset_rejects_non_hashed_paths() {
+        assert!(!is_immutable_asset("/index.html"));
+        assert!(!is_immutable_asset("/app.js"));
+        assert!(!is_immutable_asset("/favicon.ico"));
+        // Hash segment must be exactly 8 hex chars.
+        assert!(!is_immutable_asset("/app.abc.js"));
+        assert!(!is_immutable_asset("/app.abc123def.js")); // 9 chars
     }
 }

@@ -28,11 +28,11 @@
 //! never "handles" the specific event, so firing twice is idempotent. The round
 //! runs a **program** under the non-optional guardrails — no-overlap, cooldown,
 //! timeout, no-recursion — and records every mutating action as both an
-//! `overlooker_runs` action entry and an `events` row (the audit rule). Three
-//! program shapes share that one substrate ([`run_program`]): the native
-//! `builtin:status` stock program (in-process Rust), the builtin **scripts**
-//! embedded from [`crate::builtins`], and custom program files — the last two
-//! run by the same subprocess executor ([`run_script`]).
+//! `overlooker_runs` action entry and an `events` row (the audit rule). Two
+//! program shapes share that one substrate ([`run_program`]): the builtin
+//! **scripts** embedded from [`crate::builtins`] and custom program files —
+//! both run by the same subprocess executor ([`run_script`]), reaching the
+//! fleet only through the loom REST API.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -42,13 +42,12 @@ use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-use crate::session::{self as session_mod, Session};
+use crate::events;
+use crate::session as session_mod;
 use crate::web::AppState;
-use crate::{events, tmux};
-use weaver_core::branch::{self as branch_mod, Branch};
+use weaver_core::branch as branch_mod;
 use weaver_core::config as core_config;
 use weaver_core::overlooker::{self as ov, Overlooker};
-use weaver_core::tags::{self, TRIAGE_KEY};
 
 /// How often the engine wakes to drain new events and check the timer. Matches
 /// the monitor's cadence closely enough that a reactive event is acted on
@@ -58,7 +57,7 @@ const TICK: Duration = Duration::from_millis(1500);
 /// Read an integer setting, falling back to `default` on absence or parse
 /// failure. `weaver_core::config` has bool/string getters but no int getter, so
 /// the engine parses the raw value itself.
-async fn get_int(db: &crate::Db, key: &str, default: i64) -> i64 {
+pub(crate) async fn get_int(db: &crate::Db, key: &str, default: i64) -> i64 {
     core_config::get(db, key)
         .await
         .and_then(|v| v.trim().parse::<i64>().ok())
@@ -438,7 +437,7 @@ async fn record_skipped(
 }
 
 // ---------------------------------------------------------------------------
-// The program substrate (T5) + the stock `builtin:status` program (T11)
+// The program substrate — the subprocess script executor
 // ---------------------------------------------------------------------------
 
 /// The result of running a program: an outcome, a one-line human summary, and the
@@ -449,19 +448,16 @@ struct RoundResult {
     actions: Value,
 }
 
-/// Dispatch to the program the overlooker names: the native `builtin:status`
-/// stock program, a builtin **script** embedded from [`crate::builtins`], or a
-/// custom program file (an absolute path, conventionally under
-/// `~/.weaver/overlookers/`) — the scripts both run on [`run_script`].
+/// Dispatch to the program the overlooker names: a builtin **script**
+/// embedded from [`crate::builtins`], or a custom program file (an absolute
+/// path, conventionally under `~/.weaver/overlookers/`) — both run on
+/// [`run_script`].
 async fn run_program(
     state: &AppState,
     o: &Overlooker,
     dry_run: bool,
 ) -> anyhow::Result<RoundResult> {
-    if o.program == "builtin:status" {
-        return builtin_status(state, o, dry_run).await;
-    }
-    if let Some(source) = crate::builtins::find(&o.program).and_then(|b| b.source) {
+    if let Some(source) = crate::builtins::find(&o.program).map(|b| b.source) {
         let file_name = program_file_name(&o.program);
         return run_script(
             state,
@@ -523,10 +519,11 @@ async fn uv_available() -> bool {
 }
 
 /// Run a **script program**: an env-stripped subprocess (the lint-review
-/// precedent, like [`run_agent`]) that reaches the fleet only through the loom
-/// REST API. `$WEAVER_API` carries the daemon's own address and
-/// `$WEAVER_OVERLOOKER` the round config (`{id, name, program, params, scope,
-/// capabilities, dry_run}`); the vendored `weaver_loom` module rides
+/// precedent, like [`crate::agent::run_oneshot`]) that reaches the fleet only
+/// through the loom REST API. `$WEAVER_API` carries the daemon's own address
+/// and `$WEAVER_OVERLOOKER` the round config (`{id, name, program, params,
+/// scope, capabilities, model, effort, dry_run}`); the vendored `weaver_loom`
+/// module rides
 /// `PYTHONPATH` so every program can import the API layer with no install
 /// step. The contract is to print one JSON object — `{outcome, summary,
 /// actions}` — as the final stdout line; a non-zero exit or unparseable
@@ -581,6 +578,8 @@ async fn run_script(
         "params": o.params(),
         "scope": serde_json::to_value(o.scope()).unwrap_or(Value::Null),
         "capabilities": o.capabilities(),
+        "model": o.model,
+        "effort": o.effort,
         "dry_run": dry_run,
     });
 
@@ -602,7 +601,7 @@ async fn run_script(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    for key in STRIPPED_ENV {
+    for key in crate::agent::STRIPPED_ENV {
         command.env_remove(key);
     }
 
@@ -691,332 +690,6 @@ fn tail(s: &str, n: usize) -> String {
         .map(|(i, _)| i)
         .unwrap_or(0);
     format!("…{}", &s[start..])
-}
-
-/// The set of every overlooker's warm session id — the sessions a round must
-/// never survey or act on (no-recursion: watchers don't watch watchers). The
-/// survey already reads the *visible* fleet (managed sessions excluded), so this
-/// is the secondary guard for a warm session referenced by `warm_session_id`
-/// that is not yet marked `managed_by`.
-async fn warm_session_ids(state: &AppState) -> HashSet<String> {
-    ov::list(&state.db)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|o| o.warm_session_id)
-        .collect()
-}
-
-/// The declarative stock program: survey the scoped, non-terminal fleet and
-/// stamp a triage mark on each in-scope session.
-///
-/// The judgement is best-effort-LLM with a deterministic fallback, so the engine
-/// works fully without a real `claude`:
-/// * when a prompt is configured *and* `claude` is on PATH, ask it for a level +
-///   note from the session's screen preview (parsed leniently);
-/// * otherwise — or on any parse/skip — fall back to a **rule** that mirrors the
-///   session's own `attention` as the mark, with a derived note.
-///
-/// `dry_run` performs no mutation: each would-be mark is logged as a
-/// `{would:"mark", …}` action instead, so an operator can repeat a dry round
-/// safely.
-async fn builtin_status(
-    state: &AppState,
-    o: &Overlooker,
-    dry_run: bool,
-) -> anyhow::Result<RoundResult> {
-    let scope = o.scope();
-    let warm = warm_session_ids(state).await;
-    let can_mark = o.has_capability("mark");
-    let can_nudge = o.has_capability("nudge");
-
-    // The survey scope is the *visible* fleet: engine-managed (warm) sessions
-    // are excluded at the source, so no round ever surveys a watcher's own
-    // session (the no-recursion guarantee, enforced for every overlooker, not
-    // just the one that owns the session). `warm_session_ids` below is a belt-
-    // and-braces check for any warm session not yet marked `managed_by`.
-    let sessions = session_mod::list_visible(&state.db).await?;
-    let mut actions: Vec<Value> = Vec::new();
-    let mut surveyed = 0usize;
-    let mut marked = 0usize;
-    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-
-    for session in sessions {
-        // no-recursion: never survey an overlooker's own warm session.
-        if warm.contains(&session.id) {
-            continue;
-        }
-        if session_mod::is_terminal(&session.status) {
-            continue;
-        }
-        let Some(branch) = branch_mod::get(&state.db, &session.branch_id).await? else {
-            continue;
-        };
-        // The scope's attention filter matches the resolved `attention` tag
-        // value; an absent tag is the calm `ok` state.
-        let attention = attention_value(state, &branch).await;
-        if !scope.admits(&attention, &branch.repo_root) {
-            continue;
-        }
-        surveyed += 1;
-
-        let (level, note) = judge(state, o, &session, &branch).await;
-        // A non-storable level (an `ok`/clear decision) returns the triage axis to
-        // calm rather than marking: clear the tag and log a `tag` event with an
-        // empty value (the audit rule — every mutating action is also an events
-        // row). The dry-run path mutates nothing.
-        if !tags::is_valid_value(TRIAGE_KEY, &level) {
-            if can_mark && !dry_run {
-                tags::clear(&state.db, &branch.id, TRIAGE_KEY).await?;
-                events::record_tag(
-                    &state.db, &state.bus, &branch.id, TRIAGE_KEY, "", "", &o.name,
-                )
-                .await
-                .ok();
-            }
-            continue;
-        }
-
-        if !can_mark {
-            actions.push(json!({
-                "session": session.id,
-                "action": "observe",
-                "level": level,
-                "note": note,
-            }));
-            continue;
-        }
-
-        if dry_run {
-            actions.push(json!({
-                "session": session.id,
-                "would": "mark",
-                "level": level,
-                "note": note,
-            }));
-            marked += 1;
-            *counts.entry(level.clone()).or_default() += 1;
-            continue;
-        }
-
-        // Apply the mark: write the `triage` tag and record the `tag` event so
-        // the fleet badge updates and the monitor re-broadcasts it (the audit
-        // rule — every mutating action is also an events row).
-        tags::set(&state.db, &branch.id, TRIAGE_KEY, &level, &note, &o.name).await?;
-        events::record_tag(
-            &state.db, &state.bus, &branch.id, TRIAGE_KEY, &level, &note, &o.name,
-        )
-        .await
-        .ok();
-        actions.push(json!({
-            "session": session.id,
-            "action": "mark",
-            "level": level,
-            "note": note,
-        }));
-        marked += 1;
-        *counts.entry(level.clone()).or_default() += 1;
-
-        // The nudge rung of the intervention ladder: only when capability-granted
-        // and the mark is not `ok`. Best-effort; a missing tmux just no-ops.
-        if can_nudge && level != "ok" && tmux::has_session(&session.tmux_session).await {
-            let text = format!("[overlooker {}] {note}", o.name);
-            if dry_run {
-                actions.push(json!({ "session": session.id, "would": "nudge", "text": text }));
-            } else {
-                let _ = tmux::send_literal(&session.tmux_session, &text).await;
-                let _ = tmux::send_enter(&session.tmux_session).await;
-                events::record(
-                    &state.db,
-                    &state.bus,
-                    &branch.id,
-                    "nudge",
-                    json!({ "by": o.name, "text": text }),
-                )
-                .await
-                .ok();
-                actions.push(json!({ "session": session.id, "action": "nudge", "text": text }));
-            }
-        }
-    }
-
-    if surveyed == 0 {
-        return Ok(RoundResult {
-            outcome: "noop".to_string(),
-            summary: "surveyed 0 sessions in scope".to_string(),
-            actions: Value::Array(actions),
-        });
-    }
-
-    let breakdown = counts
-        .iter()
-        .map(|(level, n)| format!("{n} {level}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let dry = if dry_run {
-        " (dry run, no marks applied)"
-    } else {
-        ""
-    };
-    let verb = if dry_run { "would mark" } else { "marked" };
-    let summary = if breakdown.is_empty() {
-        format!("surveyed {surveyed}, {verb} 0{dry}")
-    } else {
-        format!("surveyed {surveyed}, {verb} {marked} ({breakdown}){dry}")
-    };
-
-    Ok(RoundResult {
-        outcome: "ok".to_string(),
-        summary,
-        actions: Value::Array(actions),
-    })
-}
-
-/// Decide a `(level, note)` for one session. Best-effort LLM judgement when a
-/// prompt is configured and `claude` is reachable; otherwise the deterministic
-/// rule — mirror the agent's own `attention` as the mark with a derived note —
-/// so a round always produces a testable result without a real agent.
-async fn judge(
-    state: &AppState,
-    o: &Overlooker,
-    session: &Session,
-    branch: &Branch,
-) -> (String, String) {
-    let prompt = o
-        .params()
-        .get("prompt")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_default();
-
-    if !prompt.is_empty() {
-        let screen = tmux::capture(&session.tmux_session, 200)
-            .await
-            .unwrap_or_default();
-        let full = format!("{prompt}\n\nSession screen:\n{screen}\n");
-        if let Some(out) = run_agent(state, o, &full).await {
-            if let Some(judged) = parse_judgement(&out) {
-                return judged;
-            }
-        }
-    }
-
-    // Rule fallback: mirror the agent's self-reported attention as the mark. The
-    // agent's `attention` tag value (absent ⇒ calm `ok`) is the candidate level;
-    // a non-storable value (`ok`) makes the caller clear the triage tag instead.
-    let attention = attention_value(state, branch).await;
-    let level = if tags::is_valid_value(TRIAGE_KEY, &attention) {
-        attention.clone()
-    } else {
-        "ok".to_string()
-    };
-    let note = format!("attention is {attention}");
-    (level, note)
-}
-
-/// The resolved value of a branch's `attention` tag — the agent's self-report —
-/// or `ok` when the tag is absent (absence is the calm state).
-async fn attention_value(state: &AppState, branch: &Branch) -> String {
-    tags::get(&state.db, &branch.id, tags::ATTENTION_KEY)
-        .await
-        .ok()
-        .flatten()
-        .map(|t| t.value)
-        .unwrap_or_else(|| "ok".to_string())
-}
-
-/// The levels an agent judgement may name. The two storable triage values plus
-/// the calm `ok` — recognising `ok` lets a judgement explicitly return the axis
-/// to calm (the caller then clears the tag rather than marking).
-const JUDGED_LEVELS: &[&str] = &["ok", "attention", "blocked"];
-
-/// Parse an agent judgement into `(level, note)`. Lenient by design: the first
-/// recognised triage word is the level; the rest of that line (or the next
-/// non-empty line) is the note. Returns `None` when no level is found, so the
-/// caller falls back to the rule.
-fn parse_judgement(out: &str) -> Option<(String, String)> {
-    for line in out.lines() {
-        let lower = line.to_ascii_lowercase();
-        for level in JUDGED_LEVELS {
-            if lower
-                .split(|c: char| !c.is_ascii_alphabetic())
-                .any(|w| w == *level)
-            {
-                let note = line
-                    .split_once([':', '-'])
-                    .map(|x| x.1.trim())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(line.trim())
-                    .to_string();
-                return Some((level.to_string(), note));
-            }
-        }
-    }
-    None
-}
-
-// ---------------------------------------------------------------------------
-// run_agent — a fresh, env-stripped headless `claude -p` for judgement
-// ---------------------------------------------------------------------------
-
-/// Markers of the *calling* Claude Code session, stripped before spawning the
-/// sub-agent so it runs fresh and isolated (the lint-review precedent). Mirrors
-/// `scripts/lint-review.py`'s `STRIPPED_ENV`.
-const STRIPPED_ENV: &[&str] = &[
-    "ANTHROPIC_API_KEY",
-    "CLAUDECODE",
-    "CLAUDE_CODE_ENTRYPOINT",
-    "CLAUDE_CODE_EXECPATH",
-    "CLAUDE_CODE_SESSION_ID",
-    "CLAUDE_CODE_SSE_PORT",
-];
-
-/// Spawn a one-shot headless agent for a judgement call: write `prompt` to its
-/// stdin, capture stdout, strip the calling session's env markers. Best-effort:
-/// returns `None` when the agent is absent, errors, or times out — the round
-/// must work fully without it, so a missing `claude` never breaks a round.
-///
-/// The command is `WEAVER_OVERLOOKER_AGENT_CMD` (default `claude -p`); a model
-/// configured on the overlooker is appended as `--model`.
-async fn run_agent(state: &AppState, o: &Overlooker, prompt: &str) -> Option<String> {
-    let cmd_str =
-        std::env::var("WEAVER_OVERLOOKER_AGENT_CMD").unwrap_or_else(|_| "claude -p".to_string());
-    let mut parts = cmd_str.split_whitespace();
-    let program = parts.next()?;
-    let mut args: Vec<String> = parts.map(str::to_string).collect();
-    if !o.model.is_empty() {
-        args.push("--model".to_string());
-        args.push(o.model.clone());
-    }
-
-    let mut command = tokio::process::Command::new(program);
-    command
-        .args(&args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    for key in STRIPPED_ENV {
-        command.env_remove(key);
-    }
-
-    let mut child = command.spawn().ok()?; // claude not on PATH → None, round falls back.
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        let _ = stdin.write_all(prompt.as_bytes()).await;
-        // Drop stdin so the agent sees EOF and proceeds.
-        drop(stdin);
-    }
-
-    let budget = get_int(&state.db, "overlooker.default_timeout_secs", 600)
-        .await
-        .max(1) as u64;
-    let out = tokio::time::timeout(Duration::from_secs(budget), child.wait_with_output()).await;
-    match out {
-        Ok(Ok(output)) if output.status.success() => {
-            Some(String::from_utf8_lossy(&output.stdout).to_string())
-        }
-        _ => None,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1340,17 +1013,5 @@ rnd.finish("name=%s label=%s dry=%s api=%s" % (
             "the stderr tail names the failure: {}",
             run.summary
         );
-    }
-
-    #[test]
-    fn parse_judgement_finds_level_and_note() {
-        let (level, note) = parse_judgement("blocked: stuck retrying the same test").unwrap();
-        assert_eq!(level, "blocked");
-        assert_eq!(note, "stuck retrying the same test");
-        // No recognised level → None (caller falls back to the rule).
-        assert!(parse_judgement("looks fine to me, carry on").is_none());
-        // 'ok' is recognised even without a separator.
-        let (level, _) = parse_judgement("ok").unwrap();
-        assert_eq!(level, "ok");
     }
 }

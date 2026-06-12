@@ -323,8 +323,8 @@ onMounted(() => {
               {{ showSource ? 'hide source' : 'view source' }}
             </button>
             <p v-if="programInfo" class="mt-0.5 text-xs text-faint">
-              {{ programInfo.title }} — a builtin {{ programInfo.kind }} shipped
-              with loom<span v-if="programInfo.source">; the source is read-only</span>.
+              {{ programInfo.title }} — a builtin script shipped with loom;
+              the source is read-only.
             </p>
             <pre
               v-if="showSource && programInfo?.source"

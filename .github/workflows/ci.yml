@@ -89,6 +89,10 @@ jobs:
     # build/lint/test jobs, so it can't affect them. The live round-trip test is
     # opt-in (WEAVER_PY_LIVE) and stays out of CI; the server-free gating suite —
     # the capability enforcement contract — is the coverage here.
+    #
+    # The pure-Python weaver_loom suite (stdlib-only, no build step) rides the
+    # same job: its conftest puts the source tree on sys.path, so a bare pytest
+    # over python/weaver-loom/tests is the whole invocation.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -101,4 +105,4 @@ jobs:
       - run: pip install maturin pytest
       - run: maturin build --release --manifest-path crates/weaver-py/Cargo.toml --out dist
       - run: pip install --find-links dist weaver-py
-      - run: pytest crates/weaver-py/tests -v
+      - run: pytest crates/weaver-py/tests python/weaver-loom/tests -v

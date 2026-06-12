@@ -1,0 +1,235 @@
+"""The weaver_loom contract, with no server required.
+
+These run in CI (the `python-binding` job). They cover the pure logic every
+overlooker program leans on — judgement parsing, the survey's scope filter,
+capability gating, mark routing, and the round-result stdout contract — by
+stubbing the HTTP layer; the live end-to-end coverage is the Rust integration
+suite (`crates/loom/tests/integration/overlookers.rs`), which runs the real
+builtin scripts against a real loom.
+"""
+
+import json
+
+import pytest
+from weaver_loom import (
+    CAPABILITIES,
+    CapabilityDenied,
+    Client,
+    Round,
+    parse_judgement,
+)
+
+
+class StubClient(Client):
+    """A Client whose requests are recorded instead of sent."""
+
+    def __init__(self, capabilities=None, replies=None):
+        super().__init__(base="http://stub", capabilities=capabilities)
+        self.requests = []
+        self.replies = replies or {}
+
+    def _request(self, method, path, body=None):
+        self.requests.append((method, path, body))
+        return self.replies.get(path)
+
+
+def session(id, status="running", tags=None, repo_root="/repo"):
+    return {
+        "id": id,
+        "status": status,
+        "branch": {"tags": tags or [], "repo_root": repo_root},
+    }
+
+
+def attention(value):
+    return [{"key": "attention", "value": value}]
+
+
+# -- parse_judgement ---------------------------------------------------------
+
+
+def test_parse_judgement_finds_level_and_note():
+    assert parse_judgement("blocked: stuck retrying the same test") == (
+        "blocked",
+        "stuck retrying the same test",
+    )
+    # The earliest separator wins, mirroring the engine's old parser.
+    assert parse_judgement("attention - waiting: on review") == (
+        "attention",
+        "waiting: on review",
+    )
+    # 'ok' is recognised even without a separator; the whole line is the note.
+    assert parse_judgement("ok") == ("ok", "ok")
+    # The level word is matched on word boundaries, not substrings.
+    assert parse_judgement("blockedness everywhere") is None
+
+
+def test_parse_judgement_scans_lines_and_degrades_to_none():
+    assert parse_judgement("preamble\nBlocked - cannot push") == (
+        "blocked",
+        "cannot push",
+    )
+    assert parse_judgement("looks fine to me, carry on") is None
+    assert parse_judgement("") is None
+    assert parse_judgement(None) is None
+
+
+# -- the survey's scope filter -------------------------------------------------
+
+
+def make_round(scope=None, sessions=None, capabilities=None, **config):
+    client = StubClient(
+        capabilities=capabilities or [], replies={"/sessions": sessions or []}
+    )
+    return Round(
+        config={"name": "t", "scope": scope or {}, **config},
+        client=client,
+    )
+
+
+def test_sessions_skips_terminal_and_counts_surveyed():
+    rnd = make_round(
+        sessions=[
+            session("live"),
+            session("done", status="done"),
+            session("archived", status="archived"),
+        ]
+    )
+    assert [s["id"] for s in rnd.sessions()] == ["live"]
+    assert rnd.surveyed == 1
+
+
+def test_scope_attention_filter_matches_exact_and_negated():
+    fleet = [
+        session("calm"),
+        session("loud", tags=attention("attention")),
+        session("stuck", tags=attention("blocked")),
+    ]
+    not_ok = make_round(scope={"attention": "!ok"}, sessions=fleet)
+    assert [s["id"] for s in not_ok.sessions()] == ["loud", "stuck"]
+    only_blocked = make_round(scope={"attention": "blocked"}, sessions=fleet)
+    assert [s["id"] for s in only_blocked.sessions()] == ["stuck"]
+    # An absent tag is the calm `ok` state.
+    only_ok = make_round(scope={"attention": "ok"}, sessions=fleet)
+    assert [s["id"] for s in only_ok.sessions()] == ["calm"]
+
+
+def test_scope_repo_pin_excludes_other_repos():
+    fleet = [session("here"), session("there", repo_root="/elsewhere")]
+    rnd = make_round(scope={"repo": "/repo"}, sessions=fleet)
+    assert [s["id"] for s in rnd.sessions()] == ["here"]
+
+
+# -- capability gating ---------------------------------------------------------
+
+
+def test_observe_is_implicit_and_writes_are_gated():
+    c = StubClient()
+    assert c.can("observe")
+    c.sessions()  # a read never gates
+    for call in (
+        lambda: c.set_tag("s", "triage", "blocked"),
+        lambda: c.clear_tag("s", "triage"),
+        lambda: c.mark("s", "blocked"),
+        lambda: c.nudge("s", "hello"),
+        lambda: c.interrupt("s"),
+    ):
+        with pytest.raises(CapabilityDenied):
+            call()
+    # The gate fires before any request leaves the process.
+    assert c.requests == [("GET", "/sessions", None)]
+
+
+def test_capabilities_constant_matches_the_ladder():
+    assert CAPABILITIES == [
+        "observe",
+        "mark",
+        "escalate",
+        "nudge",
+        "interrupt",
+        "launch",
+    ]
+
+
+# -- mark routing & attribution -------------------------------------------------
+
+
+def test_mark_sets_a_loud_level_with_attribution():
+    c = StubClient(capabilities=["mark"])
+    c.mark("s1", "blocked", "stuck", by="watch")
+    assert c.requests == [
+        (
+            "PUT",
+            "/sessions/s1/tags/triage",
+            {"value": "blocked", "note": "stuck", "by": "watch"},
+        )
+    ]
+
+
+def test_mark_ok_clears_via_delete_with_by_query():
+    c = StubClient(capabilities=["mark"])
+    c.mark("s1", "ok", by="watch")
+    c.mark("s1", "")
+    assert c.requests == [
+        ("DELETE", "/sessions/s1/tags/triage?by=watch", None),
+        ("DELETE", "/sessions/s1/tags/triage", None),
+    ]
+
+
+def test_nudge_carries_by_for_the_audit_event():
+    c = StubClient(capabilities=["nudge"])
+    c.nudge("s1", "hello", by="watch")
+    c.nudge("s1", "staged", submit=False)
+    assert c.requests == [
+        ("POST", "/sessions/s1/send", {"text": "hello", "submit": True, "by": "watch"}),
+        ("POST", "/sessions/s1/send", {"text": "staged", "submit": False}),
+    ]
+
+
+def test_agent_returns_output_or_none():
+    c = StubClient(replies={"/agent/oneshot": {"output": "blocked: judged"}})
+    assert c.agent("look", model="haiku", effort="low") == "blocked: judged"
+    assert c.requests[-1] == (
+        "POST",
+        "/agent/oneshot",
+        {"prompt": "look", "model": "haiku", "effort": "low"},
+    )
+    # A degraded daemon reply ({output: null}) reads as None, not an error.
+    absent = StubClient(replies={"/agent/oneshot": {"output": None}})
+    assert absent.agent("look") is None
+
+
+# -- the round-result contract ---------------------------------------------------
+
+
+def test_round_reads_config_and_finish_prints_the_contract(capsys):
+    rnd = make_round(
+        params={"prompt": "stuck?"},
+        model="haiku",
+        effort="low",
+        dry_run=True,
+        capabilities=["mark"],
+    )
+    assert rnd.params == {"prompt": "stuck?"}
+    assert (rnd.model, rnd.effort, rnd.dry_run) == ("haiku", "low", True)
+    assert rnd.can("mark") and not rnd.can("nudge")
+
+    rnd.would("mark", session="s1", level="blocked")
+    rnd.did("observe", session="s2")
+    rnd.finish("surveyed 2")
+    result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert result == {
+        "outcome": "ok",
+        "summary": "surveyed 2",
+        "actions": [
+            {"would": "mark", "session": "s1", "level": "blocked"},
+            {"action": "observe", "session": "s2"},
+        ],
+    }
+
+
+def test_finish_defaults_to_noop_without_actions(capsys):
+    make_round().finish("nothing in scope")
+    result = json.loads(capsys.readouterr().out.strip())
+    assert result["outcome"] == "noop"
+    assert result["actions"] == []

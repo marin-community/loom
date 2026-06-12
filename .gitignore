@@ -14,3 +14,5 @@ e2e/test-results/
 *.pyc
 python/weaver-loom/dist/
 __pycache__/
+python/weaver-loom/.venv/
+python/weaver-loom/uv.lock

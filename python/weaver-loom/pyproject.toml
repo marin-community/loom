@@ -11,3 +11,8 @@ dependencies = []
 [build-system]
 requires = ["uv_build>=0.6,<0.9"]
 build-backend = "uv_build"
+
+[dependency-groups]
+# `uv run pytest` from this directory runs the server-free contract suite in
+# tests/; CI runs the same suite in the python-binding job.
+dev = ["pytest"]
