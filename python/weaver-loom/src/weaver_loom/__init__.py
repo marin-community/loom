@@ -173,7 +173,7 @@ class Client:
         """Clear a tag — how a loud axis returns to calm; needs ``mark``.
         ``by`` attributes the clear (an overlooker name)."""
         self._gate("mark")
-        query = f"?by={urllib.parse.quote(by)}" if by else ""
+        query = f"?by={urllib.parse.quote(by, safe='')}" if by else ""
         return self._request("DELETE", f"/sessions/{key}/tags/{tag_key}{query}")
 
     def mark(self, key, level, note="", by=None):

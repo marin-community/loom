@@ -839,6 +839,15 @@ async fn create_tracking_issue(
     Ok(Some(issue.id))
 }
 
+/// The author of a mutation: the trimmed `by`, or `manual` when absent or
+/// all-whitespace (an empty author never reaches the audit trail).
+fn author_or_manual(by: Option<&str>) -> String {
+    by.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("manual")
+        .to_string()
+}
+
 /// Set (upsert) a tag on a session's branch: validate `value` against the key's
 /// ladder, write the tag, and broadcast a `tag` event. The well-known keys are
 /// `attention` (the agent's self-report) and `triage` (an overlooker's, or a
@@ -861,7 +870,7 @@ async fn set_session_tag(
             format!("invalid value '{value}' for '{tag_key}' — must be non-empty")
         }));
     }
-    let by = req.by.as_deref().unwrap_or("manual").trim().to_string();
+    let by = author_or_manual(req.by.as_deref());
     let note = req.note.trim();
     tags::set(&st.db, &branch.id, &tag_key, value, note, &by).await?;
     events::record_tag(&st.db, &st.bus, &branch.id, &tag_key, value, note, &by)
@@ -882,7 +891,7 @@ async fn clear_session_tag(
     Query(q): Query<ByQuery>,
 ) -> ApiResult<Json<SessionView>> {
     let (session, branch) = require_session(&st.db, &key).await?;
-    let by = q.by.as_deref().unwrap_or("manual").trim().to_string();
+    let by = author_or_manual(q.by.as_deref());
     tags::clear(&st.db, &branch.id, &tag_key).await?;
     events::record_tag(&st.db, &st.bus, &branch.id, &tag_key, "", "", &by)
         .await
@@ -1857,7 +1866,7 @@ async fn send_session(
             .await
             .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
-    let by = req.by.as_deref().unwrap_or("manual").trim().to_string();
+    let by = author_or_manual(req.by.as_deref());
     events::record(
         &st.db,
         &st.bus,
@@ -2129,14 +2138,7 @@ async fn set_issue_tag(
             "invalid value for '{key}' — must be non-empty (clear the tag to remove it)"
         )));
     }
-    // An all-whitespace author is treated the same as a missing one.
-    let by = req
-        .by
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("manual")
-        .to_string();
+    let by = author_or_manual(req.by.as_deref());
     let note = req.note.trim();
     weaver_core::issue::set_tag(&st.db, id, key, value, note, &by).await?;
     if let Some(branch_id) = issue_event_branch(&st.db, &issue).await {
