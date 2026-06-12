@@ -64,9 +64,35 @@ async fn enabled_overlooker(state: &AppState, new: ov::NewOverlooker) -> ov::Ove
     ov::get(&state.db, &o.id).await.unwrap().unwrap()
 }
 
+/// The test-owned **survey fixture program** (`programs/survey.py`): records
+/// one `survey` action per surveyed session and mutates nothing. Engine-
+/// mechanics tests run it so they can assert "a round ran over exactly these
+/// sessions" from the run row alone, with no dependency on any builtin
+/// program's behavior (that logic is pytest-owned).
+fn survey_program() -> String {
+    concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/integration/programs/survey.py"
+    )
+    .to_string()
+}
+
+/// The session ids a run's recorded `survey` actions name.
+fn surveyed_ids(run: &ov::OverlookerRun) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(&run.actions)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter(|a| a["action"] == "survey")
+        .filter_map(|a| a["session"].as_str().map(str::to_string))
+        .collect()
+}
+
 /// T4: a reactive event whose trigger matches fires the right overlooker exactly
 /// once and lands a run row; a repo filter excludes another repo's event; and
-/// re-firing the same event is idempotent (the mark converges, no contradiction).
+/// re-firing the same event is idempotent (a fresh re-survey, never a second
+/// "handling" of the event).
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
@@ -88,16 +114,16 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
         .await
         .unwrap();
 
-    // An overlooker reacting to `attention` events in *this* repo, marking the
-    // scoped (non-ok) fleet.
+    // An overlooker reacting to `attention` events in *this* repo, surveying
+    // the scoped (non-ok) fleet via the test-owned fixture program.
     let o = enabled_overlooker(
         &state,
         ov::NewOverlooker {
             name: "blocked-watch".to_string(),
             trigger_spec: json!({ "event": "attention", "repo": repo_root }).to_string(),
             scope: json!({ "attention": "!ok" }).to_string(),
-            program: "builtin:status".to_string(),
-            capabilities: vec!["observe".to_string(), "mark".to_string()],
+            program: survey_program(),
+            capabilities: vec!["observe".to_string()],
             ..Default::default()
         },
     )
@@ -117,38 +143,26 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
     };
     overlooker::dispatch(&state, &in_flight, &ev).await;
 
-    // Exactly one run, and it marked the session.
+    // Exactly one run, and its run row records the survey of the in-scope
+    // session — the engine-observable proof the round ran.
     let runs = ov::recent_runs(&state.db, &o.id, 10).await.unwrap();
     assert_eq!(runs.len(), 1, "one matching event fires exactly one round");
     assert_eq!(runs[0].outcome, "ok");
-    let view = ts
-        .client
-        .get(&format!("/api/sessions/{session_id}"))
-        .await
-        .unwrap();
     assert_eq!(
-        branch_tag_value(&view, "triage"),
-        "blocked",
-        "the rule mirrors the agent's attention onto the mark"
-    );
-    assert_eq!(
-        branch_tag(&view, "triage").unwrap()["set_by"],
-        "blocked-watch"
+        surveyed_ids(&runs[0]),
+        vec![session_id.clone()],
+        "the round surveyed exactly the in-scope session"
     );
 
-    // Re-firing the identical event is idempotent: it converges on the same mark
-    // (a fresh run, but no contradictory state). Level-triggered: the round
-    // re-surveys rather than "handling" the event again.
+    // Re-firing the identical event is idempotent: level-triggered, the round
+    // just re-surveys the current fleet — a fresh run row, same survey.
     overlooker::dispatch(&state, &in_flight, &ev).await;
-    let view2 = ts
-        .client
-        .get(&format!("/api/sessions/{session_id}"))
-        .await
-        .unwrap();
+    let runs = ov::recent_runs(&state.db, &o.id, 10).await.unwrap();
+    assert_eq!(runs.len(), 2, "a re-fire is a fresh round");
     assert_eq!(
-        branch_tag_value(&view2, "triage"),
-        "blocked",
-        "re-firing converges on the same mark, not a contradiction"
+        surveyed_ids(&runs[0]),
+        vec![session_id.clone()],
+        "the re-fired round re-surveys, it does not 'handle' the event again"
     );
 
     // The repo filter excludes an event from another repo: same kind/level but a
@@ -191,8 +205,8 @@ async fn stale_session_emits_one_event_and_wakes_a_reactive_overlooker() {
     let state = engine_state(&ts).await;
     let (session_id, _branch_id, _repo_root) = make_session(&ts, "go stale").await;
 
-    // The session reports `attention` about itself so the stock round's rule
-    // produces a non-ok mark when the overlooker fires (proving it ran).
+    // The session reports `attention` about itself so it falls inside the
+    // overlooker's `!ok` scope (the survey will name it, proving it ran).
     ts.client
         .put(
             &format!("/api/sessions/{session_id}/tags/attention"),
@@ -208,8 +222,8 @@ async fn stale_session_emits_one_event_and_wakes_a_reactive_overlooker() {
             name: "stale-watch".to_string(),
             trigger_spec: json!({ "event": "stale" }).to_string(),
             scope: json!({ "attention": "!ok" }).to_string(),
-            program: "builtin:status".to_string(),
-            capabilities: vec!["observe".to_string(), "mark".to_string()],
+            program: survey_program(),
+            capabilities: vec!["observe".to_string()],
             ..Default::default()
         },
     )
@@ -252,24 +266,16 @@ async fn stale_session_emits_one_event_and_wakes_a_reactive_overlooker() {
         "a stale event is branch-scoped so its repo resolves for repo-filtering"
     );
 
-    // The dispatcher consumes the stale tick and fires the reactive round.
+    // The dispatcher consumes the stale tick and fires the reactive round; the
+    // run row records the survey of the in-scope stale session.
     let in_flight = overlooker::new_in_flight();
     overlooker::dispatch(&state, &in_flight, stale_ev).await;
     let runs = ov::recent_runs(&state.db, &o.id, 10).await.unwrap();
     assert_eq!(runs.len(), 1, "the stale event fires exactly one round");
-    let view = ts
-        .client
-        .get(&format!("/api/sessions/{session_id}"))
-        .await
-        .unwrap();
     assert_eq!(
-        branch_tag_value(&view, "triage"),
-        "attention",
-        "the woken round marked the in-scope stale session"
-    );
-    assert_eq!(
-        branch_tag(&view, "triage").unwrap()["set_by"],
-        "stale-watch"
+        surveyed_ids(&runs[0]),
+        vec![session_id.clone()],
+        "the woken round surveyed the in-scope stale session"
     );
 
     // Once activity resumes (a non-stale pass clears the session from `seen`),
@@ -404,8 +410,8 @@ async fn timer_emits_cron_tick_for_a_due_overlooker_and_dispatches_it() {
             trigger_spec: json!({ "every": "30m" }).to_string(),
             name: "hourly".to_string(),
             scope: json!({ "attention": "!ok" }).to_string(),
-            program: "builtin:status".to_string(),
-            capabilities: vec!["observe".to_string(), "mark".to_string()],
+            program: survey_program(),
+            capabilities: vec!["observe".to_string()],
             ..Default::default()
         },
     )
@@ -442,20 +448,16 @@ async fn timer_emits_cron_tick_for_a_due_overlooker_and_dispatches_it() {
         "next_run_at moved forward off the past due time"
     );
 
-    // The dispatcher consumes that cron tick and runs the scheduled round.
+    // The dispatcher consumes that cron tick and runs the scheduled round; the
+    // run row records the survey of the in-scope session.
     let in_flight = overlooker::new_in_flight();
     overlooker::dispatch(&state, &in_flight, cron).await;
     let runs = ov::recent_runs(&state.db, &o.id, 10).await.unwrap();
     assert_eq!(runs.len(), 1, "the cron tick fires exactly one round");
-    let view = ts
-        .client
-        .get(&format!("/api/sessions/{session_id}"))
-        .await
-        .unwrap();
     assert_eq!(
-        branch_tag_value(&view, "triage"),
-        "attention",
-        "the scheduled round marked the in-scope session"
+        surveyed_ids(&runs[0]),
+        vec![session_id.clone()],
+        "the scheduled round surveyed the in-scope session"
     );
 
     ts.client
@@ -494,8 +496,8 @@ async fn cooldown_and_overlap_refire_are_refused() {
             name: "cooldown-watch".to_string(),
             trigger_spec: json!({ "event": "attention", "repo": repo_root }).to_string(),
             scope: json!({ "attention": "!ok" }).to_string(),
-            program: "builtin:status".to_string(),
-            capabilities: vec!["observe".to_string(), "mark".to_string()],
+            program: survey_program(),
+            capabilities: vec!["observe".to_string()],
             cooldown_secs: 3600,
             ..Default::default()
         },
@@ -1044,8 +1046,8 @@ async fn warm_session_is_hidden_from_fleet_and_survey() {
             name: "warm-watch".to_string(),
             trigger_spec: json!({ "cron": "0 * * * *" }).to_string(),
             scope: json!({ "attention": "!ok" }).to_string(),
-            program: "builtin:status".to_string(),
-            capabilities: vec!["observe".to_string(), "mark".to_string()],
+            program: survey_program(),
+            capabilities: vec!["observe".to_string()],
             ..Default::default()
         },
     )
@@ -1058,8 +1060,8 @@ async fn warm_session_is_hidden_from_fleet_and_survey() {
         "/tmp/warm-hidden",
     )
     .await;
-    // The warm session reports non-ok too, so the only thing keeping it out of a
-    // mark is the visibility filter, not the scope predicate.
+    // The warm session reports non-ok too, so the only thing keeping it out of
+    // the survey is the visibility filter, not the scope predicate.
     let warm = session_mod::get(&state.db, &warm_id)
         .await
         .unwrap()
@@ -1092,30 +1094,21 @@ async fn warm_session_is_hidden_from_fleet_and_survey() {
         "fleet hides the warm session: {ids:?}"
     );
 
-    // A round surveys the ordinary session (marks it) but never the warm one.
-    overlooker::fire_now(&state, &o.name, false, "manual")
+    // A round surveys the ordinary session but never the warm one — asserted
+    // on the run row the engine records, not on any program side-effect.
+    let run_id = overlooker::fire_now(&state, &o.name, false, "manual")
         .await
         .unwrap();
-    let visible_view = ts
-        .client
-        .get(&format!("/api/sessions/{visible_id}"))
-        .await
-        .unwrap();
-    assert_eq!(
-        branch_tag_value(&visible_view, "triage"),
-        "attention",
-        "the round marked the in-scope ordinary session"
-    );
-    let warm_after = session_mod::with_branch(&state.db, &warm_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let runs = ov::recent_runs(&state.db, &o.id, 10).await.unwrap();
+    let run = runs.iter().find(|r| r.id == run_id).unwrap();
+    let surveyed = surveyed_ids(run);
     assert!(
-        weaver_core::tags::get(&state.db, &warm_after.1.id, weaver_core::tags::TRIAGE_KEY)
-            .await
-            .unwrap()
-            .is_none(),
-        "the round never surveyed (or marked) the warm session"
+        surveyed.contains(&visible_id),
+        "the round surveyed the ordinary session: {surveyed:?}"
+    );
+    assert!(
+        !surveyed.contains(&warm_id),
+        "the round never surveyed the warm session: {surveyed:?}"
     );
 
     ts.client
@@ -1152,7 +1145,7 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
             trigger_spec: json!({ "cron": "0 * * * *" }).to_string(),
             scope: json!({ "repo": repo_root }).to_string(),
             params: json!({ "warm": true }).to_string(),
-            program: "builtin:status".to_string(),
+            program: survey_program(),
             ..Default::default()
         },
     )
@@ -1264,7 +1257,7 @@ async fn ensure_warm_session_reuses_the_same_session() {
             trigger_spec: json!({ "cron": "0 * * * *" }).to_string(),
             scope: json!({ "repo": repo_root }).to_string(),
             params: json!({ "warm": true }).to_string(),
-            program: "builtin:status".to_string(),
+            program: survey_program(),
             ..Default::default()
         },
     )
