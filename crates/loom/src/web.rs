@@ -61,13 +61,16 @@
 //! through `PUT /api/sessions/{id}/tags/{key}` and cleared through `DELETE`.
 //! Absence is the calm state; there is no stored `ok` tag.
 
+use std::collections::hash_map::DefaultHasher;
 use std::convert::Infallible;
+use std::hash::{Hash, Hasher};
 use std::path::{Component, PathBuf};
 
 use axum::{
     body::Bytes,
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{header, StatusCode},
+    http::{header, Request, StatusCode},
+    middleware::Next,
     response::{
         sse::{self, KeepAlive, Sse},
         IntoResponse, Response,
@@ -80,6 +83,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -243,6 +247,95 @@ async fn require_branch(db: &Db, key: &str) -> ApiResult<Branch> {
 }
 
 // ---------------------------------------------------------------------------
+// Caching middleware
+// ---------------------------------------------------------------------------
+
+/// Add `ETag` + `Cache-Control: no-cache` to JSON API GET responses and serve
+/// `304 Not Modified` when the client's `If-None-Match` matches.
+///
+/// Skips non-200 responses, SSE streams, and WebSocket upgrades so they pass
+/// through untouched.
+pub async fn api_etag_middleware(request: Request<axum::body::Body>, next: Next) -> Response {
+    let if_none_match = request.headers().get(header::IF_NONE_MATCH).cloned();
+    let response = next.run(request).await;
+
+    if response.status() != StatusCode::OK {
+        return response;
+    }
+    // Skip streaming responses (SSE, WebSocket upgrades).
+    if let Some(ct) = response.headers().get(header::CONTENT_TYPE) {
+        if ct.as_bytes().starts_with(b"text/event-stream") {
+            return response;
+        }
+    }
+    if response.headers().contains_key(header::UPGRADE) {
+        return response;
+    }
+
+    let (mut parts, body) = response.into_parts();
+    let bytes = match axum::body::to_bytes(body, 16 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return Response::from_parts(parts, axum::body::Body::empty()),
+    };
+
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    let etag = format!("\"loom-{:016x}\"", hasher.finish());
+    let etag_val: axum::http::HeaderValue = etag.parse().unwrap();
+
+    parts.headers.insert(header::ETAG, etag_val.clone());
+    parts
+        .headers
+        .entry(header::CACHE_CONTROL)
+        .or_insert_with(|| "no-cache".parse().unwrap());
+
+    if if_none_match.is_some_and(|v| v == etag_val) {
+        parts.status = StatusCode::NOT_MODIFIED;
+        return Response::from_parts(parts, axum::body::Body::empty());
+    }
+
+    Response::from_parts(parts, axum::body::Body::from(bytes))
+}
+
+/// Set `Cache-Control` on static asset responses:
+/// - Content-hashed assets (filename contains an 8-hex-char segment, e.g.
+///   `app.a1b2c3d4.js`) get `max-age=31536000, immutable` — the hash guarantees
+///   the content never changes for that URL.
+/// - Everything else (`index.html`, fonts, etc.) gets `no-cache` so browsers
+///   always revalidate; `ServeDir` provides `ETag`/`Last-Modified` for fast 304s.
+pub async fn static_cache_middleware(request: Request<axum::body::Body>, next: Next) -> Response {
+    let path = request.uri().path().to_owned();
+    let response = next.run(request).await;
+
+    if response.status() != StatusCode::OK {
+        return response;
+    }
+
+    let cache_control = if is_immutable_asset(&path) {
+        "max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+
+    let (mut parts, body) = response.into_parts();
+    parts
+        .headers
+        .entry(header::CACHE_CONTROL)
+        .or_insert_with(|| cache_control.parse().unwrap());
+    Response::from_parts(parts, body)
+}
+
+/// True for content-hashed static assets produced by rspack.
+/// Matches filenames like `app.a1b2c3d4.js` — any path component that is
+/// exactly 8 lowercase hex characters surrounded by dots.
+fn is_immutable_asset(path: &str) -> bool {
+    let filename = path.rsplit('/').next().unwrap_or("");
+    filename
+        .split('.')
+        .any(|seg| seg.len() == 8 && seg.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -335,12 +428,15 @@ pub fn router(state: AppState) -> Router {
         .route("/agent/oneshot", post(agent_oneshot))
         // Scratch uploads can carry images / logs; lift the default 2 MB cap.
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
+        .layer(axum::middleware::from_fn(api_etag_middleware))
         .with_state(state);
 
     let index = static_dir().join("index.html");
     Router::new()
         .nest("/api", api)
         .fallback_service(ServeDir::new(static_dir()).fallback(ServeFile::new(index)))
+        .layer(axum::middleware::from_fn(static_cache_middleware))
+        .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
 }
 
@@ -2800,5 +2896,22 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn is_immutable_asset_matches_rspack_content_hashed_files() {
+        assert!(is_immutable_asset("/app.a1b2c3d4.js"));
+        assert!(is_immutable_asset("/chunk.00ff1234.js"));
+        assert!(is_immutable_asset("/styles.deadbeef.css"));
+    }
+
+    #[test]
+    fn is_immutable_asset_rejects_non_hashed_paths() {
+        assert!(!is_immutable_asset("/index.html"));
+        assert!(!is_immutable_asset("/app.js"));
+        assert!(!is_immutable_asset("/favicon.ico"));
+        // Hash segment must be exactly 8 hex chars.
+        assert!(!is_immutable_asset("/app.abc.js"));
+        assert!(!is_immutable_asset("/app.abc123def.js")); // 9 chars
     }
 }
