@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import { get, upload, del } from '../api';
 import type { ScratchFile } from '../types';
 
-// Scratch attachments for a session, as a slim strip that sits in the working
-// zone right under the terminal — drop a file here and reference it from the
-// agent as `scratch/<name>`. Deliberately one quiet row (not a tall card): the
-// terminal is the surface, this is just the side door for handing the agent a
-// file. Files show as removable chips inline.
+// Scratch attachments for a session — drop a file anywhere on the page (or
+// click the paperclip) and reference it from the agent as `scratch/<name>`.
+// Renders as a compact strip in the tab row's spare right side rather than its
+// own row, so the terminal keeps the vertical space; the drop target is the
+// whole window, announced by a full-page overlay while a file drag is over it.
 const props = defineProps<{ id: string }>();
 
 const files = ref<ScratchFile[]>([]);
@@ -44,8 +44,41 @@ async function uploadFiles(list: FileList | File[]) {
   }
 }
 
+// Window-level drag tracking. dragenter/dragleave fire for every element the
+// drag crosses, so a depth counter (not a boolean) tells "still over the
+// window" from "left it". Only file drags count — text selections dragged
+// within the terminal carry no Files type and must not trigger the overlay.
+let depth = 0;
+
+function hasFiles(e: DragEvent): boolean {
+  return Array.from(e.dataTransfer?.types ?? []).includes('Files');
+}
+
+function onDragEnter(e: DragEvent) {
+  if (!hasFiles(e)) return;
+  depth += 1;
+  dragging.value = true;
+}
+
+function onDragLeave() {
+  // Unlike dragenter, don't gate on hasFiles: some browsers report empty types
+  // on dragleave, and bailing then would leave the overlay stuck on. Tracking
+  // depth > 0 already implies the drag we're unwinding was a file drag.
+  if (depth === 0) return;
+  depth -= 1;
+  if (depth === 0) dragging.value = false;
+}
+
+function onDragOver(e: DragEvent) {
+  // preventDefault marks the window as a valid drop target.
+  if (hasFiles(e)) e.preventDefault();
+}
+
 function onDrop(e: DragEvent) {
+  depth = 0;
   dragging.value = false;
+  if (!hasFiles(e)) return;
+  e.preventDefault();
   const dropped = e.dataTransfer?.files;
   if (dropped && dropped.length) uploadFiles(dropped);
 }
@@ -66,56 +99,72 @@ async function remove(name: string) {
   }
 }
 
-onMounted(refresh);
+onMounted(() => {
+  refresh();
+  window.addEventListener('dragenter', onDragEnter);
+  window.addEventListener('dragleave', onDragLeave);
+  window.addEventListener('dragover', onDragOver);
+  window.addEventListener('drop', onDrop);
+});
+onUnmounted(() => {
+  window.removeEventListener('dragenter', onDragEnter);
+  window.removeEventListener('dragleave', onDragLeave);
+  window.removeEventListener('dragover', onDragOver);
+  window.removeEventListener('drop', onDrop);
+});
 </script>
 
 <template>
-  <section data-testid="scratch-panel">
-    <!-- The whole strip is a drop target; the labelled affordance is a real
-         <button> so click AND keyboard (Enter/Space) both open the file picker.
-         The chips' remove buttons sit as siblings, never nested in another
-         control. -->
-    <div
-      class="flex flex-wrap items-center gap-x-2 gap-y-1 rounded border border-dashed px-2.5 py-1 text-xs transition-colors"
-      :class="dragging ? 'border-accent bg-accent/10' : 'border-line'"
-      data-testid="scratch-dropzone"
-      @dragover.prevent="dragging = true"
-      @dragleave.prevent="dragging = false"
-      @drop.prevent="onDrop"
+  <div class="flex min-w-0 items-center gap-1.5 text-xs" data-testid="scratch-panel">
+    <ul v-if="files.length" class="flex min-w-0 flex-wrap items-center gap-1.5">
+      <li v-for="f in files" :key="f.name" class="meta-chip text-fg">
+        <span class="truncate">{{ f.name }}</span>
+        <span class="text-faint">{{ fmtBytes(f.bytes) }}</span>
+        <button
+          type="button"
+          class="text-faint hover:text-block"
+          :title="`Remove ${f.name}`"
+          :aria-label="`Remove ${f.name}`"
+          @click="remove(f.name)"
+        >
+          ✕
+        </button>
+      </li>
+    </ul>
+
+    <p v-if="error" class="truncate text-block" :title="error">{{ error }}</p>
+
+    <!-- The labelled affordance is a real <button> so click AND keyboard
+         (Enter/Space) both open the file picker. -->
+    <button
+      type="button"
+      class="flex shrink-0 cursor-pointer items-center gap-1 rounded px-1.5 py-1 text-faint hover:bg-subtle hover:text-fg focus:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+      title="Attach a file — the agent sees it as scratch/<name> (or drop one anywhere on the page)"
+      @click="fileInput?.click()"
     >
-      <button
-        type="button"
-        class="flex cursor-pointer items-center gap-1.5 rounded text-left hover:text-fg focus:outline-none focus-visible:ring-1 focus-visible:ring-accent"
-        :class="dragging ? 'text-fg' : 'text-faint'"
-        @click="fileInput?.click()"
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+      </svg>
+      <span>{{ busy ? 'Uploading…' : 'Attach' }}</span>
+    </button>
+    <input ref="fileInput" type="file" multiple class="hidden" @change="onPick" />
+
+    <!-- Full-page drop announcement while a file drag is over the window. The
+         window listeners above own the actual drop; this layer is the cue. -->
+    <Teleport to="body">
+      <div
+        v-if="dragging"
+        data-testid="scratch-dropzone"
+        class="fixed inset-0 z-40 flex items-center justify-center bg-canvas/70"
       >
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-          stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-        </svg>
-        <span>{{ busy ? 'Uploading…' : 'Drop a file or click to attach' }}</span>
-      </button>
-      <span class="font-mono text-2xs text-faint">— reference as <code>scratch/&lt;name&gt;</code></span>
-
-      <ul v-if="files.length" class="ml-auto flex flex-wrap items-center gap-1.5">
-        <li v-for="f in files" :key="f.name" class="meta-chip text-fg">
-          <span class="truncate">{{ f.name }}</span>
-          <span class="text-faint">{{ fmtBytes(f.bytes) }}</span>
-          <button
-            type="button"
-            class="text-faint hover:text-block"
-            :title="`Remove ${f.name}`"
-            :aria-label="`Remove ${f.name}`"
-            @click="remove(f.name)"
-          >
-            ✕
-          </button>
-        </li>
-      </ul>
-
-      <input ref="fileInput" type="file" multiple class="hidden" @change="onPick" />
-    </div>
-
-    <p v-if="error" class="mt-1 text-xs text-block">{{ error }}</p>
-  </section>
+        <div
+          class="rounded-md border-2 border-dashed border-accent bg-surface px-6 py-4 text-sm text-fg shadow-lg"
+        >
+          Drop to attach — the agent sees it as
+          <code class="font-mono">scratch/&lt;name&gt;</code>
+        </div>
+      </div>
+    </Teleport>
+  </div>
 </template>

@@ -5,9 +5,9 @@
 // Neutral underline indicator — no loud fills; only the active tab gets text-fg
 // + an accent underline.
 //
-// Terminal is the working zone (live agent + scratch drop); Overview is the
-// read-only context (goal, claimed issues, activity) — the issue count rides on
-// the Overview tab as a quiet pill rather than owning a tab of its own.
+// Terminal is the working zone (the live agent); Overview is the read-only
+// context (goal, claimed issues, activity) — the issue count rides on the
+// Overview tab as a quiet pill rather than owning a tab of its own.
 // Artifacts is the agent's out-of-repo documents (designs, reports, the plan);
 // Files is the worktree tree.
 type Tab = 'terminal' | 'overview' | 'files' | 'artifacts';
@@ -62,5 +62,10 @@ const LOCAL_TABS: { key: LocalTab; label: string }[] = [
     >
       Files
     </router-link>
+    <!-- The tab row's right side is otherwise dead space — hosts compact,
+         always-relevant extras (the scratch attach strip on the detail page). -->
+    <div class="ml-auto flex min-w-0 items-center">
+      <slot name="right" />
+    </div>
   </nav>
 </template>

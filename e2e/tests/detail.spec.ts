@@ -50,6 +50,50 @@ test.describe('session detail view', () => {
     expect(updated.branch.tags.find((t) => t.key === 'attention')).toBeUndefined();
   });
 
+  test('scratch attachments ride the tab row and drop anywhere on the page', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({ goal: 'Hold my files', name: 'scratch-task' });
+
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    const panel = page.getByTestId('scratch-panel');
+    await expect(panel.getByRole('button', { name: 'Attach' })).toBeVisible();
+
+    // The Attach affordance drives a hidden file input.
+    await panel.locator('input[type=file]').setInputFiles({
+      name: 'notes.txt',
+      mimeType: 'text/plain',
+      buffer: Buffer.from('hello'),
+    });
+    await expect(panel.getByText('notes.txt')).toBeVisible();
+
+    // Dragging a file over the window raises the full-page drop cue; dropping
+    // uploads it. Synthesized events (Playwright can't drive native OS drag)
+    // dispatched on body, bubbling up to the panel's window listeners — the
+    // same path a real drag takes (its target is the element under the
+    // cursor); the overlay assertions prove the listeners fired.
+    const dataTransfer = await page.evaluateHandle(() => {
+      const dt = new DataTransfer();
+      dt.items.add(new File(['drop'], 'dropped.txt', { type: 'text/plain' }));
+      return dt;
+    });
+    await page.dispatchEvent('body', 'dragenter', { dataTransfer });
+    await expect(page.getByTestId('scratch-dropzone')).toBeVisible();
+    await page.dispatchEvent('body', 'drop', { dataTransfer });
+    await expect(page.getByTestId('scratch-dropzone')).toHaveCount(0);
+    await expect(panel.getByText('dropped.txt')).toBeVisible();
+
+    // Both landed server-side in the worktree's scratch/.
+    const res = await fetch(`${weaver.baseUrl}/api/sessions/${s.id}/scratch`);
+    const listed = ((await res.json()) as { name: string }[]).map((f) => f.name).sort();
+    expect(listed).toEqual(['dropped.txt', 'notes.txt']);
+
+    // A chip's ✕ removes that file.
+    await panel.getByRole('button', { name: 'Remove notes.txt' }).click();
+    await expect(panel.getByText('notes.txt')).toHaveCount(0);
+  });
+
   test('renders an interactive terminal that connects to the agent', async ({
     page,
     weaver,

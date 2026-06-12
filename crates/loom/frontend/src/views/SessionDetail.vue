@@ -120,20 +120,24 @@ onUnmounted(() => source?.close());
        grow to fill instead of a fixed 70vh. -->
   <div v-if="ws" class="flex min-h-[28rem] flex-1 flex-col px-5 py-3">
     <SessionPageHeader :ws="ws" @reload="loadAll" />
-    <SessionTabs :tab="tab" :id="props.id" :issue-count="issueCount" @select="tab = $event" />
+    <SessionTabs :tab="tab" :id="props.id" :issue-count="issueCount" @select="tab = $event">
+      <!-- Scratch attachments ride the tab row's spare right side (drop a file
+           anywhere on the page) so the terminal keeps the vertical space the
+           old below-the-terminal strip used to take. -->
+      <template #right>
+        <ScratchPanel :id="props.id" />
+      </template>
+    </SessionTabs>
 
     <p v-if="error" class="mb-3 text-sm text-block">{{ error }}</p>
 
     <div class="min-h-0 flex-1">
-      <!-- Terminal (default) — the working zone: the live agent fills the space,
-           with the scratch drop docked beneath it. v-show, NEVER v-if: keeping
-           the host in the DOM means AgentTerminal's zero-size guard skips the
-           bogus resize while hidden, and its ResizeObserver re-fits on return. -->
-      <section v-show="tab === 'terminal'" class="flex h-full flex-col gap-2">
-        <div class="min-h-0 flex-1">
-          <AgentTerminal :id="props.id" />
-        </div>
-        <ScratchPanel :id="props.id" />
+      <!-- Terminal (default) — the working zone: the live agent fills the space.
+           v-show, NEVER v-if: keeping the host in the DOM means AgentTerminal's
+           zero-size guard skips the bogus resize while hidden, and its
+           ResizeObserver re-fits on return. -->
+      <section v-show="tab === 'terminal'" class="h-full">
+        <AgentTerminal :id="props.id" />
       </section>
 
       <!-- Overview — read-only context (goal, issues, activity). Scrolls
