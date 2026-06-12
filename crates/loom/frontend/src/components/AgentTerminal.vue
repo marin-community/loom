@@ -1,9 +1,13 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, onMounted, onUnmounted, nextTick } from 'vue';
 import { Terminal, type ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebglAddon } from '@xterm/addon-webgl';
+import { WebLinksAddon } from '@xterm/addon-web-links';
+import { ClipboardAddon } from '@xterm/addon-clipboard';
+import { SearchAddon, type ISearchOptions } from '@xterm/addon-search';
+import { SerializeAddon } from '@xterm/addon-serialize';
 import '@xterm/xterm/css/xterm.css';
 import { get } from '../api';
 import type { SettingView } from '../types';
@@ -26,7 +30,29 @@ const errorReason = ref('');
 let term: Terminal | null = null;
 let fit: FitAddon | null = null;
 let webgl: WebglAddon | null = null;
+let search: SearchAddon | null = null;
+let serialize: SerializeAddon | null = null;
 let ws: WebSocket | null = null;
+
+// Find bar state. The bar is an overlay on the terminal; the SearchAddon does
+// the buffer scanning and reports match position via onDidChangeResults.
+const searchOpen = ref(false);
+const searchQuery = ref('');
+const searchInput = ref<HTMLInputElement | null>(null);
+const matchIndex = ref(0); // 1-based index of the active match, 0 when none
+const matchCount = ref(0);
+const copied = ref(false);
+
+// Highlight colours for find matches (Solarized yellow / orange). xterm only
+// paints match decorations when these are supplied.
+const SEARCH_OPTS: ISearchOptions = {
+  decorations: {
+    matchBackground: '#b58900',
+    activeMatchBackground: '#cb4b16',
+    matchOverviewRuler: '#b58900',
+    activeMatchColorOverviewRuler: '#cb4b16',
+  },
+};
 let observer: ResizeObserver | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let rafHandle = 0;
@@ -73,6 +99,66 @@ const LIGHT_THEME: ITheme = {
 
 function themeFor(name: string | undefined): ITheme {
   return name === 'light' ? LIGHT_THEME : DARK_THEME;
+}
+
+// Open a URL only if it is http(s); reject javascript:/data:/file: which an
+// untrusted agent could otherwise emit. Shared by the OSC 8 linkHandler (for
+// explicit hyperlinks) and the web-links addon (which linkifies bare URLs that
+// appear in plain output).
+function openSafeUrl(uri: string) {
+  try {
+    const u = new URL(uri);
+    if (u.protocol === 'http:' || u.protocol === 'https:') {
+      window.open(uri, '_blank', 'noopener,noreferrer');
+    }
+  } catch {
+    /* ignore unparseable URIs */
+  }
+}
+
+function openSearch() {
+  searchOpen.value = true;
+  nextTick(() => searchInput.value?.select());
+}
+
+function closeSearch() {
+  searchOpen.value = false;
+  searchQuery.value = '';
+  matchIndex.value = 0;
+  matchCount.value = 0;
+  search?.clearDecorations();
+  term?.focus();
+}
+
+// Search-as-you-type and Enter/Shift+Enter both route here. An empty query
+// clears the highlights rather than scanning for "".
+function findNext() {
+  if (!search) return;
+  if (!searchQuery.value) {
+    search.clearDecorations();
+    matchIndex.value = 0;
+    matchCount.value = 0;
+    return;
+  }
+  search.findNext(searchQuery.value, SEARCH_OPTS);
+}
+
+function findPrev() {
+  if (search && searchQuery.value) search.findPrevious(searchQuery.value, SEARCH_OPTS);
+}
+
+// Copy the whole terminal buffer (scrollback included) to the clipboard via the
+// serialize addon. Clipboard access can be blocked (insecure origin, denied
+// permission); fail silently in that case.
+async function copyOutput() {
+  if (!serialize) return;
+  try {
+    await navigator.clipboard.writeText(serialize.serialize());
+    copied.value = true;
+    setTimeout(() => (copied.value = false), 1500);
+  } catch {
+    /* clipboard unavailable */
+  }
 }
 
 // How long to wait for the theme fetch before opening the terminal with the
@@ -226,14 +312,7 @@ onMounted(async () => {
     // javascript:/data:/file: which an untrusted agent could otherwise emit.
     linkHandler: {
       activate(_event, uri) {
-        try {
-          const u = new URL(uri);
-          if (u.protocol === 'http:' || u.protocol === 'https:') {
-            window.open(uri, '_blank', 'noopener,noreferrer');
-          }
-        } catch {
-          /* ignore unparseable URIs */
-        }
+        openSafeUrl(uri);
       },
     },
   });
@@ -266,6 +345,31 @@ onMounted(async () => {
   } catch {
     webgl = null;
   }
+
+  // OSC 52 clipboard (program-initiated copy), and linkification of bare URLs
+  // in plain output — both gated through the same http(s) guard as OSC 8 links.
+  term.loadAddon(new ClipboardAddon());
+  term.loadAddon(new WebLinksAddon((_event, uri) => openSafeUrl(uri)));
+
+  search = new SearchAddon();
+  term.loadAddon(search);
+  search.onDidChangeResults(({ resultIndex, resultCount }) => {
+    matchCount.value = resultCount;
+    matchIndex.value = resultCount > 0 ? resultIndex + 1 : 0;
+  });
+
+  serialize = new SerializeAddon();
+  term.loadAddon(serialize);
+
+  // Ctrl/Cmd+F opens the find bar instead of going to the PTY. Returning false
+  // tells xterm not to forward the key. All other keys pass through untouched.
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && !e.altKey && e.key === 'f') {
+      openSearch();
+      return false;
+    }
+    return true;
+  });
 
   // Keystrokes → PTY. Dropped if the socket isn't open (don't queue stale input
   // into tmux during the connect / reconnect window).
@@ -300,10 +404,54 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="relative h-full min-h-0">
+  <div class="group relative h-full min-h-0">
     <!-- FitAddon subtracts the host's padding when sizing, so the p-2 gives the
          grid breathing room inside the framed panel. -->
     <div ref="host" class="h-full w-full overflow-hidden rounded bg-code p-2 text-code-fg ring-1 ring-line"></div>
+
+    <!-- Find bar (Ctrl/Cmd+F). Top-left so it never collides with the
+         connection-status badge in the top-right corner. -->
+    <div
+      v-if="searchOpen"
+      class="absolute left-2 top-2 z-10 flex items-center gap-1 rounded bg-surface/95 p-1 ring-1 ring-line"
+    >
+      <input
+        ref="searchInput"
+        v-model="searchQuery"
+        type="text"
+        placeholder="Find…"
+        class="w-44 rounded bg-input px-2 py-1 text-xs text-fg outline-none ring-accent placeholder:text-faint focus:ring-1"
+        @input="findNext"
+        @keydown.enter.prevent="(e: KeyboardEvent) => (e.shiftKey ? findPrev() : findNext())"
+        @keydown.esc.prevent="closeSearch"
+      />
+      <span class="min-w-[2.75rem] text-center text-xs tabular-nums text-muted">{{ matchCount ? `${matchIndex}/${matchCount}` : '0/0' }}</span>
+      <button class="rounded px-1.5 py-1 text-xs text-muted hover:bg-block-soft hover:text-fg" title="Previous (Shift+Enter)" @click="findPrev">↑</button>
+      <button class="rounded px-1.5 py-1 text-xs text-muted hover:bg-block-soft hover:text-fg" title="Next (Enter)" @click="findNext">↓</button>
+      <button class="rounded px-1.5 py-1 text-xs text-muted hover:bg-block-soft hover:text-fg" title="Close (Esc)" @click="closeSearch">✕</button>
+    </div>
+
+    <!-- Hover-revealed actions. Bottom-right keeps them out of the way of the
+         live terminal until the pointer is over the pane. -->
+    <div
+      class="absolute bottom-2 right-2 z-10 flex gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100"
+    >
+      <button
+        class="rounded bg-surface/90 px-2 py-1 text-xs text-muted ring-1 ring-line hover:text-fg"
+        title="Copy terminal output"
+        @click="copyOutput"
+      >
+        {{ copied ? 'Copied' : 'Copy' }}
+      </button>
+      <button
+        class="rounded bg-surface/90 px-2 py-1 text-xs text-muted ring-1 ring-line hover:text-fg"
+        title="Find (Ctrl/Cmd+F)"
+        @click="openSearch"
+      >
+        Find
+      </button>
+    </div>
+
     <div
       v-if="state !== 'open'"
       data-testid="term-status"
