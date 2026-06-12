@@ -107,7 +107,7 @@ const washClass = computed(() =>
 
 <template>
   <header
-    class="mb-3 rounded-r border-l-2 pl-3 pr-1 py-1.5 transition-colors"
+    class="mb-2 rounded-r border-l-2 pl-3 pr-1 py-1.5 transition-colors"
     :class="[washClass, loud ? 'pulse-attention' : '']"
   >
     <!-- Row 1 — nav, title (inline rename), attention + lifecycle controls -->
@@ -123,7 +123,7 @@ const washClass = computed(() =>
         @blur="commit"
       />
       <div v-else class="group flex min-w-0 items-center gap-1.5">
-        <h1 class="min-w-0 truncate text-lg font-semibold tracking-tight">
+        <h1 class="min-w-0 truncate text-base font-semibold tracking-tight">
           {{ ws.branch.title || ws.branch.name }}
         </h1>
         <button
@@ -169,7 +169,9 @@ const washClass = computed(() =>
           </button>
         </template>
 
-        <StatusBadge :status="ws.status" />
+        <!-- Lifecycle pill only for off-nominal states — running is the silent
+             default here just as on the fleet list. -->
+        <StatusBadge v-if="ws.status !== 'running'" :status="ws.status" />
 
         <!-- ⌄ details — identity metadata + the lifecycle actions. -->
         <div class="relative">

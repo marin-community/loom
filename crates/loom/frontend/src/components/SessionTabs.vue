@@ -20,13 +20,15 @@ const LOCAL_TABS: { key: Exclude<Tab, 'files'>; label: string }[] = [
 </script>
 
 <template>
-  <nav class="mb-3 flex items-center gap-1 border-b border-line text-sm">
+  <!-- pl-0.5 mirrors the header's 2px left wash border so tab labels align
+       with the title above. -->
+  <nav class="mb-2 flex items-center gap-1 border-b border-line pl-0.5 text-sm">
     <button
       v-for="t in LOCAL_TABS"
       :key="t.key"
       type="button"
       :data-tab="t.key"
-      class="-mb-px border-b-2 px-3 py-2"
+      class="-mb-px border-b-2 px-2.5 py-1.5"
       :class="tab === t.key
         ? 'border-accent text-fg font-medium'
         : 'border-transparent text-muted hover:text-fg'"
@@ -38,7 +40,7 @@ const LOCAL_TABS: { key: Exclude<Tab, 'files'>; label: string }[] = [
     <router-link
       :to="`/s/${id}/files`"
       data-tab="files"
-      class="-mb-px border-b-2 px-3 py-2"
+      class="-mb-px border-b-2 px-2.5 py-1.5"
       :class="tab === 'files'
         ? 'border-accent text-fg font-medium'
         : 'border-transparent text-muted hover:text-fg'"

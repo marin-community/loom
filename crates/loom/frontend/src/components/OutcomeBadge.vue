@@ -32,7 +32,7 @@ const style = computed<Style>(() => {
     :class="style.cls"
     data-testid="outcome-badge"
     :data-outcome="outcome ?? 'none'"
-    class="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium uppercase tracking-wide font-mono"
+    class="inline-flex items-center rounded px-1.5 py-0.5 text-2xs font-medium uppercase tracking-wide font-mono"
   >
     {{ style.label }}
   </span>

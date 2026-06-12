@@ -7,8 +7,9 @@ test.describe('session detail view', () => {
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
 
     await expect(page.getByRole('heading', { name: 'detail-task' })).toBeVisible();
-    // Status (lifecycle) badge is present in the header.
-    await expect(page.getByTestId('status-badge').first()).toBeVisible();
+    // Running is the silent lifecycle default — the header shows no lifecycle
+    // badge for it (only off-nominal states get one, as on the fleet list).
+    await expect(page.getByTestId('status-badge')).toHaveCount(0);
 
     // The goal is the agent's launch prompt — read-only prose on the Overview
     // tab, not an editable field.

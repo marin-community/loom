@@ -16,9 +16,9 @@ defineProps<{ issues: Issue[]; backlog: Issue[] }>();
       data-testid="issues-panel"
     >
       <div class="mb-2 flex items-center justify-between">
-        <span class="text-xs text-muted">
+        <span class="text-2xs font-semibold uppercase tracking-wider text-muted">
           Open issues
-          <span class="text-faint">({{ issues.length }})</span>
+          <span class="font-normal normal-case text-faint">({{ issues.length }})</span>
         </span>
         <span class="text-xs text-faint">read-only · manage with <code>weaver issue</code></span>
       </div>
@@ -42,9 +42,9 @@ defineProps<{ issues: Issue[]; backlog: Issue[] }>();
       data-testid="backlog-panel"
     >
       <div class="mb-2 flex items-center justify-between">
-        <span class="text-xs text-muted">
+        <span class="text-2xs font-semibold uppercase tracking-wider text-muted">
           Repo backlog
-          <span class="text-faint">({{ backlog.length }})</span>
+          <span class="font-normal normal-case text-faint">({{ backlog.length }})</span>
         </span>
         <span class="text-xs text-faint">unclaimed · whole repo</span>
       </div>

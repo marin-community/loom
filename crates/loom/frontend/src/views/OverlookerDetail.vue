@@ -5,6 +5,7 @@ import { get, post, patch, del } from '../api';
 import type { Overlooker, OverlookerRun, OverlookerRunResult, ProgramView } from '../types';
 import OutcomeBadge from '../components/OutcomeBadge.vue';
 import AgentTerminal from '../components/AgentTerminal.vue';
+import ToggleSwitch from '../components/ToggleSwitch.vue';
 import { timeAgo } from '../lib/time';
 import {
   triggerSummary,
@@ -187,9 +188,9 @@ onMounted(() => {
 </script>
 
 <template>
-  <div>
+  <div class="px-5 py-3">
     <div class="flex items-center gap-3 mb-1">
-      <router-link to="/overlookers" class="text-muted hover:text-fg text-sm">← overlookers</router-link>
+      <router-link to="/overlookers" class="text-xs text-muted hover:text-fg">← overlookers</router-link>
     </div>
 
     <p v-if="error" class="mb-3 text-sm text-block">{{ error }}</p>
@@ -202,7 +203,7 @@ onMounted(() => {
       <div class="flex items-start gap-3 mb-4 flex-wrap">
         <div class="min-w-0">
           <div class="flex items-center gap-2 flex-wrap">
-            <h1 class="text-xl font-semibold truncate" data-testid="overlooker-title">{{ ov.name }}</h1>
+            <h1 class="text-base font-semibold truncate" data-testid="overlooker-title">{{ ov.name }}</h1>
             <OutcomeBadge :outcome="ov.last_outcome" />
           </div>
           <p class="mt-1 text-xs text-faint">
@@ -212,32 +213,21 @@ onMounted(() => {
           </p>
         </div>
         <div class="ml-auto flex items-center gap-2">
-          <label class="flex items-center gap-2 text-sm text-muted mr-1">
-            <button
-              type="button"
+          <label class="flex items-center gap-2 text-xs text-muted mr-1">
+            <ToggleSwitch
+              :model-value="ov.enabled"
+              :disabled="busy"
               data-testid="overlooker-enabled-toggle"
               :aria-pressed="ov.enabled"
-              :disabled="busy"
-              :class="[
-                'relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:opacity-50',
-                ov.enabled ? 'bg-accent' : 'bg-subtle',
-              ]"
-              @click="toggleEnabled"
-            >
-              <span
-                :class="[
-                  'inline-block h-4 w-4 transform rounded-full bg-surface transition-transform',
-                  ov.enabled ? 'translate-x-4' : 'translate-x-0.5',
-                ]"
-              ></span>
-            </button>
+              @update:model-value="toggleEnabled"
+            />
             {{ ov.enabled ? 'Enabled' : 'Disabled' }}
           </label>
           <button
             type="button"
             data-testid="overlooker-run"
             :disabled="busy"
-            class="rounded bg-accent hover:bg-accent-hover px-3 py-1.5 text-sm font-medium text-accent-fg disabled:opacity-50"
+            class="btn-primary px-2.5 py-1 text-xs font-medium"
             @click="run(false)"
           >
             Run now
@@ -246,7 +236,7 @@ onMounted(() => {
             type="button"
             data-testid="overlooker-dryrun"
             :disabled="busy"
-            class="rounded bg-subtle hover:bg-subtle-hover px-3 py-1.5 text-sm font-medium disabled:opacity-50"
+            class="btn-secondary px-2.5 py-1 text-xs font-medium"
             @click="run(true)"
           >
             Dry-run
@@ -255,7 +245,7 @@ onMounted(() => {
             type="button"
             data-testid="overlooker-delete"
             :disabled="busy"
-            class="rounded px-3 py-1.5 text-sm font-medium text-block ring-1 ring-inset ring-block-line hover:bg-block-soft disabled:opacity-50"
+            class="btn-danger px-2.5 py-1 text-xs font-medium"
             @click="remove"
           >
             Delete
@@ -279,12 +269,12 @@ onMounted(() => {
       <!-- Config. -->
       <section class="mb-6 rounded border border-line bg-surface p-4">
         <div class="flex items-center justify-between mb-3">
-          <h2 class="text-sm font-semibold text-muted uppercase tracking-wide">Config</h2>
+          <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted">Config</h2>
           <button
             v-if="!editing"
             type="button"
             data-testid="overlooker-edit"
-            class="rounded bg-subtle hover:bg-subtle-hover px-2.5 py-1 text-xs font-medium"
+            class="btn-secondary px-2.5 py-1 text-xs font-medium"
             @click="startEdit"
           >
             Edit
@@ -294,7 +284,7 @@ onMounted(() => {
               type="button"
               data-testid="overlooker-save"
               :disabled="busy"
-              class="rounded bg-accent hover:bg-accent-hover px-2.5 py-1 text-xs font-medium text-accent-fg disabled:opacity-50"
+              class="btn-primary px-2.5 py-1 text-xs font-medium"
               @click="saveConfig"
             >
               Save
@@ -302,7 +292,7 @@ onMounted(() => {
             <button
               type="button"
               :disabled="busy"
-              class="rounded bg-subtle hover:bg-subtle-hover px-2.5 py-1 text-xs font-medium disabled:opacity-50"
+              class="btn-secondary px-2.5 py-1 text-xs font-medium"
               @click="cancelEdit"
             >
               Cancel
@@ -423,11 +413,11 @@ onMounted(() => {
         class="mb-6"
         data-testid="overlooker-warm-terminal"
       >
-        <h2 class="text-sm font-semibold text-muted uppercase tracking-wide mb-2">Warm session</h2>
+        <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-2">Warm session</h2>
         <AgentTerminal :id="ov.warm_session_id" />
       </section>
       <section v-else class="mb-6 rounded border border-dashed border-line bg-surface p-4">
-        <h2 class="text-sm font-semibold text-muted uppercase tracking-wide mb-1">Warm session</h2>
+        <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-1">Warm session</h2>
         <p v-if="ov.warm" class="text-xs text-faint" data-testid="overlooker-warm-pending">
           Warm mode is on. The engine brings up a persistent session on the next
           round; its live terminal appears here, and it carries memory from one
@@ -442,7 +432,7 @@ onMounted(() => {
 
       <!-- Round history — the audit trail. -->
       <section>
-        <h2 class="text-sm font-semibold text-muted uppercase tracking-wide mb-2">
+        <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-2">
           Round history
           <span class="text-faint font-normal normal-case">({{ runs.length }})</span>
         </h2>

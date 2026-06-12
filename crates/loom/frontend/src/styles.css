@@ -15,6 +15,7 @@
    blue accent, no neon. */
 @theme {
   --color-canvas: var(--canvas);
+  --color-rail: var(--rail);
   --color-surface: var(--surface);
   --color-input: var(--input);
   --color-line: var(--line);
@@ -29,6 +30,10 @@
   --color-code: var(--code);
   --color-code-fg: var(--code-fg);
 
+  /* 11px micro-size — uppercase eyebrow labels, badges, status-bar text. */
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+
   /* Attention axis — the ONE reserved "needs a human" signal. Amber = wants
      attention, red = blocked. These are the only loud hues in the UI; every
      lifecycle/status surface stays neutral so this truly pops. */
@@ -41,34 +46,39 @@
   --color-block-soft: var(--block-soft);
   --color-block-line: var(--block-line);
 
-  /* Type. Dependency-free system stacks (no CDN/@fontsource — must work
-     offline). Sans for prose; a characterful mono for identifiers, refs,
-     ids, branch names, timestamps and all metadata. */
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, "Noto Sans", sans-serif;
-  --font-mono: ui-monospace, "Cascadia Code", "Cascadia Mono", "SF Mono",
-    "JetBrains Mono", "Fira Code", "Roboto Mono", Menlo, Consolas,
-    "DejaVu Sans Mono", monospace;
+  /* Type. IBM Plex, bundled with the app via @fontsource (imported in
+     main.ts) — self-hosted woff2, no CDN, so offline still works; the system
+     stacks are the fallback while the faces stream in. Sans for prose; the
+     matching mono for identifiers, refs, ids, branch names, timestamps and
+     all metadata. */
+  --font-sans: "IBM Plex Sans Variable", ui-sans-serif, system-ui,
+    -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans",
+    sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Code", "SF Mono",
+    "JetBrains Mono", "Fira Code", Menlo, Consolas, "DejaVu Sans Mono",
+    monospace;
 }
 
-/* Light palette (default). */
+/* Light palette (default). Neutral grays (VS Code Modern–derived), not
+   blue-tinted slate: the chrome recedes, the one blue accent advances. */
 :root {
-  --canvas: #f8fafc;        /* slate-50  — page background */
+  --canvas: #f5f5f5;        /* page background */
+  --rail: #ebebeb;          /* nav rail + status bar — the recessed chrome */
   --surface: #ffffff;       /* cards / panels */
-  --input: #f1f5f9;         /* slate-100 — form fields */
-  --line: #e2e8f0;          /* slate-200 — borders */
-  --fg: #0f172a;            /* slate-900 — primary text */
-  --muted: #64748b;         /* slate-500 — secondary text */
-  --faint: #94a3b8;         /* slate-400 — tertiary text */
-  --subtle: #e2e8f0;        /* slate-200 — secondary buttons */
-  --subtle-hover: #cbd5e1;  /* slate-300 */
-  --tree-line: #94a3b8;     /* slate-400 — session-tree guides; well above --line
+  --input: #efefef;         /* form fields */
+  --line: #e0e0e0;          /* hairline borders */
+  --fg: #1f1f1f;            /* primary text */
+  --muted: #5a5a5a;         /* secondary text */
+  --faint: #8c8c8c;         /* tertiary text */
+  --subtle: #e8e8e8;        /* secondary buttons / hover fills */
+  --subtle-hover: #dcdcdc;
+  --tree-line: #a3a3a3;     /* session-tree guides; well above --line
                                so the threading connectors read clearly on white */
-  --accent: #2563eb;        /* blue-600  — primary action */
-  --accent-hover: #1d4ed8;  /* blue-700 */
+  --accent: #005fb8;        /* primary action (VS Code light button blue) */
+  --accent-hover: #004c95;
   --accent-fg: #ffffff;
-  --code: #f1f5f9;          /* preformatted blocks (diffs, prompts) */
-  --code-fg: #334155;       /* slate-700 */
+  --code: #f3f3f3;          /* preformatted blocks (diffs, prompts) */
+  --code-fg: #383838;
 
   /* Attention (amber) + Blocked (red) — the reserved loud signal. */
   --attn: #b45309;          /* amber-700 — loud fill */
@@ -81,26 +91,28 @@
   --block-line: #ef4444;    /* red-500 */
 }
 
-/* Dark palette — soft slate, not pure black. */
+/* Dark palette — near-black neutral (VS Code Modern), not slate; surfaces
+   step up in small increments and the rail recedes below the canvas. */
 .dark {
-  --canvas: #0f172a;        /* slate-900 */
-  --surface: #1e293b;       /* slate-800 */
-  --input: #334155;         /* slate-700 */
-  --line: #334155;          /* slate-700 */
-  --fg: #f1f5f9;            /* slate-100 */
-  --muted: #94a3b8;         /* slate-400 */
-  --faint: #64748b;         /* slate-500 */
-  --subtle: #334155;        /* slate-700 */
-  --subtle-hover: #475569;  /* slate-600 */
-  --tree-line: #64748b;     /* slate-500 — session-tree guides; lifted off the
+  --canvas: #1f1f1f;        /* editor background */
+  --rail: #161616;          /* nav rail + status bar — deepest chrome */
+  --surface: #252526;       /* cards / panels, one step up */
+  --input: #2d2d2e;         /* form fields */
+  --line: #2f2f2f;          /* hairline borders */
+  --fg: #e4e4e4;            /* primary text — just under pure white */
+  --muted: #9d9d9d;         /* secondary text */
+  --faint: #6e6e6e;         /* tertiary text */
+  --subtle: #2f2f30;        /* secondary buttons / hover fills */
+  --subtle-hover: #3a3a3c;
+  --tree-line: #6e6e6e;     /* session-tree guides; lifted off the
                                dark canvas so the connectors read clearly */
   --accent: #3b82f6;        /* blue-500 */
   --accent-hover: #2563eb;  /* blue-600 */
   --accent-fg: #ffffff;
-  --code: #0f172a;          /* slate-900 */
-  --code-fg: #cbd5e1;       /* slate-300 */
+  --code: #181818;          /* terminal / preformatted — a recessed panel */
+  --code-fg: #c8c8c8;
 
-  /* Attention (amber) + Blocked (red) — tuned for the slate-900 canvas. */
+  /* Attention (amber) + Blocked (red) — tuned for the near-black canvas. */
   --attn: #d97706;          /* amber-600 */
   --attn-fg: #fffbeb;       /* amber-50 */
   --attn-soft: #78350f33;   /* amber-900 @ 20% — subtle row wash on dark */
@@ -116,6 +128,20 @@ body {
   margin: 0;
   background: var(--canvas);
   font-family: var(--font-sans);
+  /* Live counts/timestamps everywhere — keep digits from jumping on update. */
+  font-variant-numeric: tabular-nums;
+}
+
+/* Crisp 1px accent focus ring — the IDE idiom: no glow, never removed. */
+:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Thin neutral scrollbars to match the recessed chrome. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--subtle-hover) transparent;
 }
 
 /* ── Motion ─────────────────────────────────────────────────────────────────
@@ -217,11 +243,13 @@ body {
    child's without a gap. */
 .tree-gutter {
   /* `--tree-tick`: connector height — where the elbow turns and the stub crosses
-     to the badge, centered on the attention badge / title line. */
-  --tree-tick: 1.5rem;
+     to the badge, centered on the attention badge / title line. Tuned to the
+     row's `py-2` (the negative margins must mirror it exactly so a parent's
+     line meets its child's without a gap). */
+  --tree-tick: 1.125rem;
   align-self: stretch;
-  margin-top: -0.75rem;
-  margin-bottom: -0.75rem;
+  margin-top: -0.5rem;
+  margin-bottom: -0.5rem;
   display: flex;
   flex: none;
 }

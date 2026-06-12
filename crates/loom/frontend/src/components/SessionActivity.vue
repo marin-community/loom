@@ -28,7 +28,7 @@ const visibleEvents = computed(() =>
 
 <template>
   <div>
-    <div class="mb-2 text-xs font-medium uppercase tracking-wide text-faint">Recent activity</div>
+    <div class="mb-2 text-2xs font-semibold uppercase tracking-wider text-muted">Recent activity</div>
     <ul class="space-y-1 text-sm">
       <li
         v-for="(ev, i) in visibleEvents"

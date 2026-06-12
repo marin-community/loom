@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { get, patch } from '../api';
 import type { SettingView } from '../types';
+import ToggleSwitch from '../components/ToggleSwitch.vue';
 
 // The server's canonical reply for both GET and PATCH /api/settings.
 interface SettingsEnvelope {
@@ -88,14 +89,11 @@ onMounted(load);
 </script>
 
 <template>
-  <div>
-    <div class="flex items-center gap-3 mb-1">
-      <router-link to="/" class="text-muted hover:text-muted text-sm"
-        >← all</router-link
-      >
-      <h1 class="text-xl font-semibold">Settings</h1>
+  <div class="max-w-3xl px-5 py-3">
+    <div class="mb-1 flex min-h-7 items-center gap-2.5">
+      <h1 class="text-2xs font-semibold uppercase tracking-wider text-muted">Settings</h1>
     </div>
-    <p class="text-xs text-faint mb-4">
+    <p class="text-xs text-faint mb-3">
       Stored in the weaver database and shared by the server and CLI
       (<code>weaver config</code>).
     </p>
@@ -103,44 +101,40 @@ onMounted(load);
     <p v-if="error" class="mb-3 text-sm text-block">{{ error }}</p>
     <p v-if="notice" class="mb-3 text-sm text-accent">{{ notice }}</p>
 
-    <div v-for="g in groups" :key="g.name" class="mb-6">
-      <h2 class="text-sm font-semibold text-muted uppercase tracking-wide mb-2">
+    <!-- One bordered panel per group, hairline-divided rows — the same list
+         anatomy as the fleet/issue boards, instead of free-floating cards. -->
+    <div v-for="g in groups" :key="g.name" class="mb-5">
+      <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-1.5">
         {{ g.name }}
       </h2>
-      <div class="space-y-3">
+      <div class="overflow-hidden rounded-md border border-line bg-surface">
         <section
           v-for="s in g.items"
           :key="s.key"
-          class="rounded border border-line bg-surface p-4"
+          class="border-b border-line px-3 py-2.5 last:border-0"
         >
-          <div class="flex items-center justify-between gap-2 mb-1">
+          <div class="flex items-center justify-between gap-2">
             <label :for="s.key" class="text-sm font-medium">{{ s.label }}</label>
-            <span class="font-mono text-xs text-faint">{{ s.key }}</span>
+            <span class="font-mono text-2xs text-faint">{{ s.key }}</span>
           </div>
-          <p class="text-xs text-muted mb-2">{{ s.description }}</p>
+          <p class="text-xs text-muted mt-0.5 mb-2">{{ s.description }}</p>
 
           <div class="flex items-center gap-2">
-            <label v-if="s.kind === 'bool'" class="flex items-center gap-2 text-sm">
-              <input
+            <div v-if="s.kind === 'bool'" class="flex flex-1 items-center gap-2 text-sm">
+              <ToggleSwitch
                 :id="s.key"
-                type="checkbox"
-                :checked="drafts[s.key] === 'true'"
-                class="accent-accent"
-                @change="
-                  drafts[s.key] = ($event.target as HTMLInputElement).checked
-                    ? 'true'
-                    : 'false'
-                "
+                :model-value="drafts[s.key] === 'true'"
+                @update:model-value="drafts[s.key] = $event ? 'true' : 'false'"
               />
-              <span class="text-muted">{{
+              <span class="text-xs text-muted">{{
                 drafts[s.key] === 'true' ? 'Enabled' : 'Disabled'
               }}</span>
-            </label>
+            </div>
             <select
               v-else-if="s.kind === 'enum'"
               :id="s.key"
               v-model="drafts[s.key]"
-              class="flex-1 rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent"
+              class="flex-1 rounded bg-input px-2 py-1 text-sm outline-none focus:ring-1 ring-accent"
             >
               <option v-for="opt in s.options" :key="opt" :value="opt">{{ opt }}</option>
             </select>
@@ -150,18 +144,18 @@ onMounted(load);
               v-model="drafts[s.key]"
               :type="s.kind === 'int' ? 'number' : 'text'"
               :placeholder="s.default || '(empty)'"
-              class="flex-1 rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent"
+              class="flex-1 rounded bg-input px-2 py-1 text-sm outline-none focus:ring-1 ring-accent"
               :class="{ 'font-mono': s.kind === 'string' }"
             />
             <button
-              class="btn-primary px-3 py-1.5 text-sm"
+              class="btn-primary px-2.5 py-1 text-xs"
               :disabled="busy === s.key || !dirty(s)"
               @click="save(s)"
             >
               Save
             </button>
             <button
-              class="btn-secondary px-3 py-1.5 text-sm"
+              class="btn-secondary px-2.5 py-1 text-xs"
               :disabled="busy === s.key || s.is_default"
               :title="`Reset to default: ${s.default || '(empty)'}`"
               @click="reset(s)"
@@ -169,15 +163,15 @@ onMounted(load);
               Reset
             </button>
           </div>
-          <p class="mt-1.5 text-xs text-faint">
+          <p class="mt-1.5 text-2xs text-faint">
             <span v-if="s.is_default">Using the default:</span>
             <span v-else>Customized · default is</span>
-            <code class="ml-1">{{ s.default || '(empty)' }}</code>
+            <code class="ml-1 font-mono">{{ s.default || '(empty)' }}</code>
           </p>
         </section>
       </div>
     </div>
 
-    <p v-if="!settings.length && !error" class="text-muted text-sm">Loading…</p>
+    <p v-if="!settings.length && !error" class="text-sm text-muted">Loading…</p>
   </div>
 </template>

@@ -106,10 +106,11 @@ onUnmounted(() => source?.close());
 </script>
 
 <template>
-  <!-- The page fills the viewport below the app bar: header + tabs stay put
-       while the work area (terminal, or the scrolling Overview) takes the rest.
-       This is what lets the terminal grow to fill instead of a fixed 70vh. -->
-  <div v-if="ws" class="flex h-[calc(100vh-5.5rem)] min-h-[30rem] flex-col">
+  <!-- The page fills the workbench main area exactly (App.vue's main is a
+       flex column): header + tabs stay put while the work area (terminal, or
+       the scrolling Overview) takes the rest. This is what lets the terminal
+       grow to fill instead of a fixed 70vh. -->
+  <div v-if="ws" class="flex min-h-[28rem] flex-1 flex-col px-5 py-3">
     <SessionPageHeader :ws="ws" @reload="loadAll" />
     <SessionTabs :tab="tab" :id="props.id" :issue-count="issueCount" @select="tab = $event" />
 
@@ -140,5 +141,5 @@ onUnmounted(() => source?.close());
       </div>
     </div>
   </div>
-  <p v-else class="text-muted">Loading…</p>
+  <p v-else class="px-5 py-3 text-sm text-muted">Loading…</p>
 </template>

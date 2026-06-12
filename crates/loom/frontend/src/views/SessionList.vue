@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { useRoute } from 'vue-router';
 import { get, post } from '../api';
 import type { Session, RecentRepo, RepoBranch } from '../types';
 import StatusBadge from '../components/StatusBadge.vue';
@@ -13,9 +14,20 @@ import { del } from '../api';
 
 const sessions = ref<Session[]>([]);
 
-// Attention filter — the dashboard's "which sessions need me?" control.
+// Attention filter — the dashboard's "which sessions need me?" control. The
+// status bar's attention segment deep-links it via `/?filter=attention`.
 type AttentionFilter = 'all' | 'attention' | 'ok';
-const filter = ref<AttentionFilter>('all');
+const route = useRoute();
+function filterFromQuery(q: unknown): AttentionFilter {
+  return q === 'attention' || q === 'ok' ? q : 'all';
+}
+const filter = ref<AttentionFilter>(filterFromQuery(route.query.filter));
+// The component is reused when only the query changes (status-bar click while
+// already on the fleet list), so track it.
+watch(
+  () => route.query.filter,
+  (q) => (filter.value = filterFromQuery(q)),
+);
 
 // Archived sessions are torn-down workstreams: kept for reference but clutter
 // the live fleet view. Hide them by default; a reveal chip brings them back.
@@ -341,15 +353,60 @@ onUnmounted(() => clearInterval(timer));
 </script>
 
 <template>
-  <div>
-    <div class="flex items-center justify-between mb-4">
-      <h1 class="text-xl font-semibold">Sessions</h1>
+  <div class="px-5 py-3">
+    <!-- One toolbar line: the view label, the attention filter, the archived
+         reveal, and the primary action — no page-hero heading (the rail
+         already says where you are; the h1 stays for a11y + tests). -->
+    <div class="mb-3 flex min-h-7 flex-wrap items-center gap-2.5">
+      <h1 class="text-2xs font-semibold uppercase tracking-wider text-muted">Sessions</h1>
+
+      <!-- Attention filter: jump straight to the sessions that need a human.
+           Each segment pairs a label with its count in a small pill so the
+           number reads as a count, not a suffix glued to the word. -->
+      <div v-if="sessions.length" class="inline-flex overflow-hidden rounded border border-line text-xs">
+        <button
+          v-for="opt in (['all', 'attention', 'ok'] as const)"
+          :key="opt"
+          type="button"
+          :data-testid="`filter-${opt}`"
+          :class="[
+            'flex items-center gap-1.5 border-l border-line px-2.5 py-1 font-medium transition-colors first:border-l-0',
+            filter === opt
+              ? 'bg-accent text-accent-fg'
+              : 'bg-input text-muted hover:bg-subtle hover:text-fg',
+          ]"
+          @click="filter = opt"
+        >
+          {{ opt === 'all' ? 'All' : opt === 'attention' ? 'Needs attention' : 'OK' }}
+          <span
+            :class="[
+              'rounded-full px-1.5 text-2xs leading-4',
+              filter === opt ? 'bg-accent-fg/20 text-accent-fg' : 'bg-subtle text-faint',
+            ]"
+          >{{ counts[opt] }}</span>
+        </button>
+      </div>
+
+      <!-- Archived live below the fold: a quiet chip reveals/hides them. -->
+      <button
+        v-if="archivedCount"
+        type="button"
+        :aria-pressed="showArchived"
+        :class="[
+          'rounded border border-line px-2.5 py-1 text-xs text-muted transition-colors',
+          showArchived ? 'bg-subtle text-fg' : 'bg-input hover:bg-subtle',
+        ]"
+        @click="showArchived = !showArchived"
+      >
+        {{ showArchived ? 'Hide' : 'Show' }} {{ archivedCount }} archived
+      </button>
+
       <!-- Toggles the create form. Closed → primary (accent) call-to-action;
            open → a neutral "Cancel" so it never reads as a second primary
            action competing with the form's own Create button. -->
       <button
         :class="[
-          'px-3 py-1.5 text-sm font-medium',
+          'ml-auto px-2.5 py-1 text-xs font-medium',
           showForm ? 'btn-secondary' : 'btn-primary',
         ]"
         @click="showForm = !showForm"
@@ -367,13 +424,13 @@ onUnmounted(() => clearInterval(timer));
     -->
     <form
       v-if="showForm"
-      class="mb-5 rounded border border-line bg-surface p-4 space-y-5"
+      class="mb-4 max-w-3xl rounded-md border border-line bg-surface p-4 space-y-5"
       autocomplete="off"
       @submit.prevent="create"
     >
       <!-- Repository: where the work lives, with a recent-repos shortcut. -->
       <section class="space-y-3">
-        <h2 class="text-xs font-medium uppercase tracking-wide text-faint">Repository</h2>
+        <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted">Repository</h2>
         <div class="relative">
           <label class="block text-xs text-muted mb-1">
             Repository path (on the server)
@@ -420,7 +477,7 @@ onUnmounted(() => clearInterval(timer));
 
       <!-- What to build: the human-facing intent — a short title and the goal. -->
       <section class="space-y-3 border-t border-line pt-3">
-        <h2 class="text-xs font-medium uppercase tracking-wide text-faint">What to build</h2>
+        <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted">What to build</h2>
         <div>
           <label class="block text-xs text-muted mb-1">Title</label>
           <input
@@ -446,7 +503,7 @@ onUnmounted(() => clearInterval(timer));
 
       <!-- Agent: which Claude tier and how hard it reasons. -->
       <section class="space-y-3 border-t border-line pt-3">
-        <h2 class="text-xs font-medium uppercase tracking-wide text-faint">Agent</h2>
+        <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted">Agent</h2>
         <div class="grid grid-cols-2 gap-3">
           <div>
             <label class="block text-xs text-muted mb-1">Model</label>
@@ -486,7 +543,7 @@ onUnmounted(() => clearInterval(timer));
 
       <!-- Branch: fork a fresh branch or reuse an existing one. -->
       <section class="space-y-3 border-t border-line pt-3">
-        <h2 class="text-xs font-medium uppercase tracking-wide text-faint">Branch</h2>
+        <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted">Branch</h2>
         <div>
           <div class="inline-flex rounded border border-line text-xs overflow-hidden mb-2">
             <button
@@ -588,7 +645,7 @@ onUnmounted(() => clearInterval(timer));
 
       <!-- Scratch files: reference material staged into the new worktree. -->
       <section class="space-y-3 border-t border-line pt-3">
-        <h2 class="text-xs font-medium uppercase tracking-wide text-faint">Scratch files</h2>
+        <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted">Scratch files</h2>
         <ScratchPicker v-model="scratchFiles" />
       </section>
 
@@ -613,51 +670,15 @@ onUnmounted(() => clearInterval(timer));
 
     <p v-if="error" class="mb-4 text-sm text-block">{{ error }}</p>
 
-    <p v-if="!sessions.length" class="text-muted text-sm">
-      No sessions yet.
-    </p>
-
-    <div v-if="sessions.length" class="mb-3 flex items-center gap-3">
-      <!-- Attention filter: jump straight to the sessions that need a human.
-           Each segment pairs a label with its count in a small pill so the
-           number reads as a count, not a suffix glued to the word. -->
-      <div class="inline-flex rounded-md border border-line text-xs overflow-hidden">
-        <button
-          v-for="opt in (['all', 'attention', 'ok'] as const)"
-          :key="opt"
-          type="button"
-          :data-testid="`filter-${opt}`"
-          :class="[
-            'flex items-center gap-1.5 px-3 py-1.5 font-medium border-l border-line first:border-l-0 transition-colors',
-            filter === opt
-              ? 'bg-accent text-accent-fg'
-              : 'bg-input text-muted hover:bg-subtle hover:text-fg',
-          ]"
-          @click="filter = opt"
-        >
-          {{ opt === 'all' ? 'All' : opt === 'attention' ? 'Needs attention' : 'OK' }}
-          <span
-            :class="[
-              'rounded-full px-1.5 text-[0.7rem] leading-5 tabular-nums',
-              filter === opt ? 'bg-accent-fg/20 text-accent-fg' : 'bg-subtle text-faint',
-            ]"
-          >{{ counts[opt] }}</span>
-        </button>
-      </div>
-
-      <!-- Archived live below the fold: a quiet chip reveals/hides them. -->
-      <button
-        v-if="archivedCount"
-        type="button"
-        :aria-pressed="showArchived"
-        :class="[
-          'pill transition-colors',
-          showArchived ? 'ring-1 ring-inset ring-line text-fg' : 'hover:bg-subtle-hover',
-        ]"
-        @click="showArchived = !showArchived"
-      >
-        {{ showArchived ? 'Hide' : 'Show' }} {{ archivedCount }} archived
-      </button>
+    <div
+      v-if="!sessions.length"
+      class="rounded-md border border-dashed border-line p-6 text-center"
+    >
+      <p class="text-sm text-muted">No sessions yet.</p>
+      <p class="mt-1 text-xs text-faint">
+        Launch one with <strong>New session</strong>, or
+        <code>loom session launch "&lt;goal&gt;"</code>.
+      </p>
     </div>
 
     <!--
@@ -669,7 +690,7 @@ onUnmounted(() => clearInterval(timer));
       in script), with attention-carrying threads floated up; attention rows also
       get a left accent-border + slow pulse so they stand out. Stagger via --i.
     -->
-    <ul v-if="sessions.length" data-testid="session-list" class="overflow-hidden rounded border border-line bg-surface">
+    <ul v-if="sessions.length" data-testid="session-list" class="overflow-hidden rounded-md border border-line bg-surface">
       <li
         v-for="({ session: s, depth, verticals, isLast }, i) in treeRows"
         :key="s.id"
@@ -678,8 +699,8 @@ onUnmounted(() => clearInterval(timer));
         :data-depth="depth"
         :style="{ '--i': i }"
         :class="[
-          'stagger-in group flex cursor-pointer items-start gap-3 border-b border-line px-3 py-3 last:border-0',
-          'min-h-[3.25rem] transition-colors hover:bg-subtle',
+          'stagger-in group flex cursor-pointer items-start gap-2.5 border-b border-line px-3 py-2 last:border-0',
+          'min-h-11 transition-colors hover:bg-subtle',
           effectiveAttention(s).level === 'blocked'
             ? 'border-l-2 border-l-block-line bg-block-soft pulse-attention'
             : effectiveAttention(s).level === 'attention'
@@ -717,7 +738,7 @@ onUnmounted(() => clearInterval(timer));
           <div class="flex flex-wrap items-center gap-2">
             <router-link
               :to="`/s/${s.id}`"
-              class="truncate text-base font-semibold text-fg hover:text-accent"
+              class="truncate text-sm font-semibold text-fg hover:text-accent"
               @click.stop
             >
               {{ s.branch.title || s.branch.name }}
@@ -736,16 +757,19 @@ onUnmounted(() => clearInterval(timer));
             />
           </div>
 
-          <!-- Current-state headline (agent's set-status message), else the goal. -->
+          <!-- Current-state headline (agent's set-status message), else the goal.
+               On a washed (attention) row, faint text loses too much contrast —
+               metadata steps up to muted there. -->
           <p
             v-if="messageOf(s)"
-            class="mt-0.5 truncate text-sm text-muted"
+            class="mt-0.5 truncate text-xs text-muted"
           >
             {{ messageOf(s) }}
           </p>
           <p
             v-if="s.branch.goal"
-            class="mt-0.5 truncate text-xs text-faint"
+            class="mt-0.5 truncate text-xs"
+            :class="effectiveAttention(s).level === 'ok' ? 'text-faint' : 'text-muted'"
           >
             {{ s.branch.goal }}
           </p>
@@ -753,18 +777,18 @@ onUnmounted(() => clearInterval(timer));
 
         <!-- Ref: machine identity, mono, pushed far-right and receding. -->
         <div class="shrink-0 text-right">
-          <span class="block truncate font-mono text-xs text-faint">{{ s.branch.branch }}</span>
+          <span class="block truncate font-mono text-2xs text-faint">{{ s.branch.branch }}</span>
           <!-- PR snapshot (if any) — a quiet link straight to the GitHub PR. -->
           <GithubStatus v-if="s.branch.github" :gh="s.branch.github" compact class="mt-0.5 justify-end" />
           <router-link
             v-if="s.branch.open_issue_count"
             :to="`/s/${s.id}?tab=overview`"
-            class="block font-mono text-xs text-muted hover:text-accent"
+            class="block font-mono text-2xs text-muted hover:text-accent"
             @click.stop
           >
             {{ s.branch.open_issue_count }} open issue{{ s.branch.open_issue_count === 1 ? '' : 's' }}
           </router-link>
-          <span v-if="s.last_activity_at" class="mt-0.5 block text-xs text-faint">
+          <span v-if="s.last_activity_at" class="mt-0.5 block font-mono text-2xs text-faint">
             {{ timeAgo(s.last_activity_at) }}
           </span>
         </div>

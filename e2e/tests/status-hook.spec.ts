@@ -5,14 +5,14 @@ test.describe('status reflects hook and attention events', () => {
     const s = await weaver.seedSession({ goal: 'Watch my status', name: 'hook-detail' });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
-    const status = page.getByTestId('status-badge').first();
     // The agent's attention is shown once, on the conversation-state strip.
     const conv = page.getByTestId('conversation-state');
-    await expect(status).toBeVisible();
+    await expect(conv).toBeVisible();
 
-    // Any hook means the agent process is alive → lifecycle `running`.
+    // Any hook means the agent process is alive → lifecycle `running`, the
+    // silent default: the header shows no lifecycle badge for it.
     await weaver.hook(s, 'working');
-    await expect(status).toHaveText(/running/i);
+    await expect(page.getByTestId('status-badge')).toHaveCount(0);
 
     // A `waiting` hook (Claude blocked on the user) raises the attention axis.
     await weaver.hook(s, 'waiting');

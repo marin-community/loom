@@ -24,7 +24,7 @@ const cls = computed(() => palette[props.status] ?? 'bg-subtle text-muted');
   <span
     :class="cls"
     data-testid="status-badge"
-    class="inline-block rounded px-2 py-0.5 text-[0.7rem] font-medium uppercase tracking-wide font-mono"
+    class="inline-block rounded px-1.5 py-0.5 text-2xs font-medium uppercase tracking-wide font-mono"
   >
     {{ status }}
   </span>

@@ -40,12 +40,13 @@ const OP_INPUT = 0x00;
 const OP_RESIZE = 0x01;
 
 // Terminal palettes, selected by the `terminal.theme` server setting. The dark
-// palette is the long-standing default — a black background with xterm's own
-// ANSI colours, which already assume a dark terminal — so it stays minimal to
-// preserve the exact prior appearance. The light palette (Solarized Light) must
-// supply its own foreground, cursor, and full 16-colour set, because xterm's
-// defaults are unreadable on a light background.
-const DARK_THEME: ITheme = { background: '#000000' };
+// palette keeps xterm's own ANSI colours (they already assume a dark terminal)
+// but sits on the UI's recessed-panel tone (--code dark) rather than pure
+// black, so the pane reads as part of the workbench instead of a hole in it.
+// The light palette (Solarized Light) must supply its own foreground, cursor,
+// and full 16-colour set, because xterm's defaults are unreadable on a light
+// background.
+const DARK_THEME: ITheme = { background: '#181818' };
 const LIGHT_THEME: ITheme = {
   background: '#fdf6e3',
   foreground: '#586e75',
@@ -206,9 +207,14 @@ onMounted(async () => {
     new Promise<ITheme>((resolve) => setTimeout(() => resolve(DARK_THEME), THEME_FETCH_TIMEOUT_MS)),
   ]);
   if (disposed || !host.value) return; // unmounted while the fetch was in flight
+  // Make sure the bundled mono face is ready before xterm measures its cell
+  // grid — a fallback-metrics first paint would misalign the whole pane.
+  // fonts.load resolves quickly (and harmlessly) even if the face is missing.
+  await document.fonts.load('13px "IBM Plex Mono"').catch(() => {});
+  if (disposed || !host.value) return;
   term = new Terminal({
     convertEol: false,
-    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    fontFamily: '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
     fontSize: 13,
     scrollback: 5000,
     allowProposedApi: true, // required to activate the unicode11 addon
@@ -292,7 +298,9 @@ onUnmounted(() => {
 
 <template>
   <div class="relative h-full min-h-0">
-    <div ref="host" class="h-full w-full overflow-hidden rounded bg-code text-code-fg"></div>
+    <!-- FitAddon subtracts the host's padding when sizing, so the p-2 gives the
+         grid breathing room inside the framed panel. -->
+    <div ref="host" class="h-full w-full overflow-hidden rounded bg-code p-2 text-code-fg ring-1 ring-line"></div>
     <div
       v-if="state !== 'open'"
       data-testid="term-status"

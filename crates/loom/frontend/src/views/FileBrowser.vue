@@ -460,10 +460,10 @@ onUnmounted(teardownEditors);
 </script>
 
 <template>
-  <!-- Fills the viewport below the app bar: the shared header + sub-nav stay put
-       (so the session's context no longer vanishes on the Files surface) while
-       the two-pane browser takes the remaining height. -->
-  <div class="flex h-[calc(100vh-5.5rem)] min-h-[30rem] flex-col">
+  <!-- Fills the workbench main area exactly: the shared header + sub-nav stay
+       put (so the session's context no longer vanishes on the Files surface)
+       while the two-pane browser takes the remaining height. -->
+  <div class="flex min-h-[28rem] flex-1 flex-col px-5 py-3">
     <SessionPageHeader v-if="session" :ws="session" @reload="reloadSession" />
     <SessionTabs :tab="'files'" :id="props.id" :issue-count="0" @select="selectTab" />
     <!-- Diff baseline selector — branch-since-fork (default) vs uncommitted-only.
@@ -641,9 +641,15 @@ onUnmounted(teardownEditors);
 
           <div
             v-else-if="kind === 'none'"
-            class="flex h-full w-full items-center justify-center text-sm text-faint"
+            class="flex h-full w-full flex-col items-center justify-center gap-2 text-sm text-faint"
           >
-            Select a file to view it.
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
+              class="opacity-60">
+              <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+              <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+            </svg>
+            <p>Pick a file from the tree<span v-if="changedList.length"> — or review the changed files under <strong>Changes</strong></span>.</p>
           </div>
 
           <div

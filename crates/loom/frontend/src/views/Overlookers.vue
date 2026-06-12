@@ -3,6 +3,7 @@ import { ref, reactive, onMounted } from 'vue';
 import { get, post, patch } from '../api';
 import type { Overlooker, OverlookerRunResult, ProgramView } from '../types';
 import OutcomeBadge from '../components/OutcomeBadge.vue';
+import ToggleSwitch from '../components/ToggleSwitch.vue';
 import { timeAgo } from '../lib/time';
 import {
   triggerSummary,
@@ -204,20 +205,22 @@ onMounted(() => {
 </script>
 
 <template>
-  <div>
-    <div class="flex items-center gap-3 mb-1">
-      <router-link to="/" class="text-muted hover:text-fg text-sm">← all</router-link>
-      <h1 class="text-xl font-semibold">Overlookers</h1>
+  <div class="px-5 py-3">
+    <div class="mb-1 flex min-h-7 flex-wrap items-center gap-2.5">
+      <h1 class="text-2xs font-semibold uppercase tracking-wider text-muted">Overlookers</h1>
       <button
         type="button"
         data-testid="overlooker-new"
-        class="ml-auto rounded bg-accent hover:bg-accent-hover px-3 py-1.5 text-sm font-medium text-accent-fg"
+        :class="[
+          'ml-auto px-2.5 py-1 text-xs font-medium',
+          showForm ? 'btn-secondary' : 'btn-primary',
+        ]"
         @click="showForm = !showForm"
       >
         {{ showForm ? 'Cancel' : 'New overlooker' }}
       </button>
     </div>
-    <p class="text-xs text-faint mb-4">
+    <p class="text-xs text-faint mb-3">
       Periodic, triggered watch agents over the fleet. Each wakes on a trigger,
       surveys the sessions in scope, and marks / nudges / escalates — a bounded,
       audited intervention ladder. Also driveable from
@@ -389,7 +392,7 @@ onMounted(() => {
         type="submit"
         data-testid="overlooker-create"
         :disabled="creating || !form.name.trim()"
-        class="rounded bg-accent hover:bg-accent-hover px-3 py-1.5 text-sm font-medium text-accent-fg disabled:opacity-50"
+        class="btn-primary px-3 py-1.5 text-sm font-medium"
       >
         {{ creating ? 'Creating…' : 'Create' }}
       </button>
@@ -415,7 +418,7 @@ onMounted(() => {
     <ul
       v-if="overlookers.length"
       data-testid="overlooker-list"
-      class="overflow-hidden rounded border border-line bg-surface"
+      class="overflow-hidden rounded-md border border-line bg-surface"
     >
       <li
         v-for="(o, i) in overlookers"
@@ -423,7 +426,7 @@ onMounted(() => {
         data-testid="overlooker-row"
         :data-overlooker-id="o.id"
         :style="{ '--i': i }"
-        class="stagger-in border-b border-line px-4 py-3 last:border-0"
+        class="stagger-in border-b border-line px-3 py-2.5 last:border-0"
       >
         <div class="flex items-start gap-3">
           <!-- Identity + at-a-glance state. -->
@@ -431,7 +434,7 @@ onMounted(() => {
             <div class="flex items-center gap-2 flex-wrap">
               <router-link
                 :to="`/overlookers/${o.id}`"
-                class="truncate text-base font-semibold text-fg hover:text-accent"
+                class="truncate text-sm font-semibold text-fg hover:text-accent"
                 data-testid="overlooker-name-link"
               >
                 {{ o.name }}
@@ -458,31 +461,20 @@ onMounted(() => {
 
           <!-- Controls. -->
           <div class="flex shrink-0 items-center gap-2">
-            <!-- Enabled toggle. -->
-            <button
-              type="button"
+            <!-- Enabled toggle. data-testid rides on the switch button. -->
+            <ToggleSwitch
+              :model-value="o.enabled"
+              :disabled="busy[o.id]"
+              :title="o.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'"
               data-testid="overlooker-enabled-toggle"
               :aria-pressed="o.enabled"
-              :disabled="busy[o.id]"
-              :class="[
-                'relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:opacity-50',
-                o.enabled ? 'bg-accent' : 'bg-subtle',
-              ]"
-              :title="o.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'"
-              @click="toggleEnabled(o)"
-            >
-              <span
-                :class="[
-                  'inline-block h-4 w-4 transform rounded-full bg-surface transition-transform',
-                  o.enabled ? 'translate-x-4' : 'translate-x-0.5',
-                ]"
-              ></span>
-            </button>
+              @update:model-value="toggleEnabled(o)"
+            />
             <button
               type="button"
               data-testid="overlooker-run"
               :disabled="busy[o.id]"
-              class="rounded bg-accent hover:bg-accent-hover px-2.5 py-1 text-xs font-medium text-accent-fg disabled:opacity-50"
+              class="btn-primary px-2.5 py-1 text-xs font-medium"
               @click="run(o, false)"
             >
               Run now
@@ -491,7 +483,7 @@ onMounted(() => {
               type="button"
               data-testid="overlooker-dryrun"
               :disabled="busy[o.id]"
-              class="rounded bg-subtle hover:bg-subtle-hover px-2.5 py-1 text-xs font-medium disabled:opacity-50"
+              class="btn-secondary px-2.5 py-1 text-xs font-medium"
               @click="run(o, true)"
             >
               Dry-run
@@ -517,8 +509,8 @@ onMounted(() => {
     <!-- Builtin programs — the stock programs that ship with loom. Script
          sources are read-only (they live in the weaver repo); "Use" opens the
          create form prefilled with the program's suggested defaults. -->
-    <section v-if="programs.length" class="mt-8" data-testid="builtin-programs">
-      <h2 class="text-sm font-semibold text-muted uppercase tracking-wide mb-1">
+    <section v-if="programs.length" class="mt-6" data-testid="builtin-programs">
+      <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-1">
         Builtin programs
       </h2>
       <p class="text-xs text-faint mb-2">
@@ -526,12 +518,12 @@ onMounted(() => {
         program. Sources are read-only; start a custom one from a copy with
         <code>loom overlooker new &lt;name&gt;</code>.
       </p>
-      <ul class="overflow-hidden rounded border border-line bg-surface">
+      <ul class="overflow-hidden rounded-md border border-line bg-surface">
         <li
           v-for="p in programs"
           :key="p.program"
           data-testid="program-row"
-          class="border-b border-line px-4 py-3 last:border-0"
+          class="border-b border-line px-3 py-2.5 last:border-0"
         >
           <div class="flex items-center gap-2 flex-wrap">
             <span class="font-mono text-sm font-semibold">{{ p.program }}</span>
@@ -542,7 +534,7 @@ onMounted(() => {
                 v-if="p.source"
                 type="button"
                 data-testid="program-source-toggle"
-                class="rounded bg-subtle hover:bg-subtle-hover px-2.5 py-1 text-xs font-medium"
+                class="btn-secondary px-2.5 py-1 text-xs font-medium"
                 @click="expandedSource = expandedSource === p.program ? '' : p.program"
               >
                 {{ expandedSource === p.program ? 'Hide source' : 'View source' }}
@@ -550,7 +542,7 @@ onMounted(() => {
               <button
                 type="button"
                 data-testid="program-use"
-                class="rounded bg-accent hover:bg-accent-hover px-2.5 py-1 text-xs font-medium text-accent-fg"
+                class="btn-primary px-2.5 py-1 text-xs font-medium"
                 @click="useProgram(p)"
               >
                 Use

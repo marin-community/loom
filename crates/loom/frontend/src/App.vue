@@ -1,43 +1,22 @@
 <script setup lang="ts">
-import { theme, toggleTheme } from './theme';
+import AppRail from './components/AppRail.vue';
+import StatusBar from './components/StatusBar.vue';
+
+// The workbench shell (docs/loom-ui.md): nav rail on the left, a thin status
+// bar pinned to the bottom, and the view filling everything between — no top
+// app bar. `main` is a flex column so a full-height view (session detail,
+// file browser) can `flex-1 min-h-0` to fill it exactly, while list views
+// simply grow and let `main` scroll.
 </script>
 
 <template>
-  <div class="min-h-screen bg-canvas text-fg font-sans">
-    <header class="border-b border-line px-6 py-3 flex items-center gap-3">
-      <router-link to="/" class="text-lg font-semibold tracking-tight">loom</router-link>
-      <span class="text-muted text-sm">agent sessions</span>
-      <button
-        type="button"
-        class="ml-auto rounded p-1.5 text-muted hover:text-fg hover:bg-subtle"
-        :title="theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'"
-        aria-label="Toggle color theme"
-        @click="toggleTheme"
-      >
-        <span v-if="theme === 'dark'">☀</span>
-        <span v-else>☾</span>
-      </button>
-      <router-link
-        to="/issues"
-        class="text-sm text-muted hover:text-fg"
-      >
-        Issues
-      </router-link>
-      <router-link
-        to="/overlookers"
-        class="text-sm text-muted hover:text-fg"
-      >
-        Overlookers
-      </router-link>
-      <router-link
-        to="/settings"
-        class="text-sm text-muted hover:text-fg"
-      >
-        Settings
-      </router-link>
-    </header>
-    <main class="px-6 py-5 max-w-6xl mx-auto">
-      <router-view />
-    </main>
+  <div class="flex h-screen overflow-hidden bg-canvas font-sans text-fg">
+    <AppRail />
+    <div class="flex min-w-0 flex-1 flex-col">
+      <main class="flex min-h-0 flex-1 flex-col overflow-auto">
+        <router-view />
+      </main>
+      <StatusBar />
+    </div>
   </div>
 </template>

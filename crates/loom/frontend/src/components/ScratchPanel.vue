@@ -76,7 +76,7 @@ onMounted(refresh);
          The chips' remove buttons sit as siblings, never nested in another
          control. -->
     <div
-      class="flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded border border-dashed px-3 py-2 text-xs transition-colors"
+      class="flex flex-wrap items-center gap-x-2 gap-y-1 rounded border border-dashed px-2.5 py-1 text-xs transition-colors"
       :class="dragging ? 'border-accent bg-accent/10' : 'border-line'"
       data-testid="scratch-dropzone"
       @dragover.prevent="dragging = true"
@@ -85,15 +85,17 @@ onMounted(refresh);
     >
       <button
         type="button"
-        class="flex cursor-pointer items-center gap-2 rounded text-left hover:text-fg focus:outline-none focus-visible:ring-1 focus-visible:ring-accent"
-        :class="dragging ? 'text-fg' : 'text-muted'"
+        class="flex cursor-pointer items-center gap-1.5 rounded text-left hover:text-fg focus:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+        :class="dragging ? 'text-fg' : 'text-faint'"
         @click="fileInput?.click()"
       >
-        <span class="text-faint">📎</span>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+        </svg>
         <span>{{ busy ? 'Uploading…' : 'Drop a file or click to attach' }}</span>
       </button>
-      <span class="text-faint">·</span>
-      <span class="font-mono text-faint">reference as <code>scratch/&lt;name&gt;</code></span>
+      <span class="font-mono text-2xs text-faint">— reference as <code>scratch/&lt;name&gt;</code></span>
 
       <ul v-if="files.length" class="ml-auto flex flex-wrap items-center gap-1.5">
         <li v-for="f in files" :key="f.name" class="meta-chip text-fg">

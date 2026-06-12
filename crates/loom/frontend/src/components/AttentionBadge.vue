@@ -73,7 +73,7 @@ const tooltip = computed(() => {
     :data-raised-by="raisedBy ?? 'agent'"
     :data-stale="stale ? 'true' : 'false'"
     :title="tooltip"
-    class="inline-flex items-center gap-1.5 rounded px-2 py-0.5 text-xs font-medium uppercase tracking-wide"
+    class="inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 text-2xs font-medium uppercase tracking-wide"
   >
     <span v-if="fromOverlooker" aria-hidden="true">⊙</span>
     <span v-else :class="style.dot" class="h-1.5 w-1.5 rounded-full"></span>

@@ -232,7 +232,7 @@ onUnmounted(teardownEditor);
 <template>
   <section class="rounded border border-line bg-surface" data-testid="session-plan">
     <header class="flex flex-wrap items-center gap-2 border-b border-line px-4 py-2.5">
-      <div class="text-xs font-medium uppercase tracking-wide text-faint">Plan</div>
+      <div class="text-2xs font-semibold uppercase tracking-wider text-muted">Plan</div>
       <template v-if="plan">
         <span class="text-sm font-medium text-fg">{{ plan.title }}</span>
         <span class="pill">{{ plan.status }}</span>
