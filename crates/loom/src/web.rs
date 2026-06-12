@@ -2092,7 +2092,14 @@ async fn set_issue_tag(
             "invalid value for '{key}' — must be non-empty (clear the tag to remove it)"
         )));
     }
-    let by = req.by.as_deref().unwrap_or("manual").trim().to_string();
+    // An all-whitespace author is treated the same as a missing one.
+    let by = req
+        .by
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("manual")
+        .to_string();
     let note = req.note.trim();
     weaver_core::issue::set_tag(&st.db, id, key, value, note, &by).await?;
     if let Some(branch_id) = issue_event_branch(&st.db, &issue).await {
