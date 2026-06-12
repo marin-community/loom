@@ -55,12 +55,12 @@ written for it to run; do them yourself if you'd rather.
 Then start the orchestrator and open the dashboard:
 
 ```sh
-loom serve     # REST + SSE server, terminal launcher, background monitor
+loom server run     # REST + SSE server, terminal launcher, background monitor
 loom open      # open the web UI (http://127.0.0.1:7878)
 ```
 
 `weaver` needs no running daemon — it talks straight to the sqlite db — so the
-agent inside a worktree works the moment it's on your PATH. `loom serve` is only
+agent inside a worktree works the moment it's on your PATH. `loom server run` is only
 for the dashboard, terminal sessions, and summaries. See [Usage](#usage) for the
 full command surface, and [AGENTS.md](AGENTS.md) for the build/test loop and how
 to work on weaver itself.
@@ -70,7 +70,7 @@ to work on weaver itself.
 ```
 weaver CLI ──sqlite──┐
                      ├─ ~/.weaver/weaver.db   (shared, WAL mode)
-loom serve  ─────────┘
+loom server run ────┘
   │
   ├─ axum REST + SSE (127.0.0.1:7878)
   ├─ terminal supervisors + git worktree wrappers
@@ -88,7 +88,7 @@ key decoupling — the agent CLI never speaks HTTP.
 
 ```sh
 # Orchestrator (optional)
-loom serve                            # run the daemon (REST + UI + terminals + monitor)
+loom server run                            # run the daemon (REST + UI + terminals + monitor)
 loom session launch "Add a /health endpoint"               # new worktree + terminal + agent, seeded with the task
 loom session launch "Refactor the parser" --name parser-refactor   # override the branch slug
 loom session launch "Big refactor" --model opus --effort high      # pick model tier + reasoning effort
@@ -98,18 +98,18 @@ loom session send <session> "try the curl again"   # type a message + Enter (tri
 loom session break <session>          # send Escape — interrupt the current turn
 loom session preview <session>        # print the recent terminal screen
 loom ps                               # list active sessions
-loom show <branch>                    # session detail
+loom session show <branch>                    # session detail
 loom attach <branch>                  # attach your terminal to the session (or use the browser terminal)
-loom archive <branch>                 # tear down terminal + worktree, keep branch + history
-loom adopt <branch>                   # recreate the terminal for an orphaned session
-loom rm <branch>                      # remove worktree + terminal + db row
+loom session archive <branch>                 # tear down terminal + worktree, keep branch + history
+loom session adopt <branch>                   # recreate the terminal for an orphaned session
+loom session rm <branch>                      # remove worktree + terminal + db row
 loom open                             # open the web UI
 
 # Agent-facing (run from inside the worktree, no daemon required)
 weaver goal "ship the feature"
 weaver goal                           # print the current goal
 weaver summary                        # goal + outstanding tasks + next-step hints
-weaver set-status attention "ready for review"   # level (ok|attention|blocked) + current-state message
+weaver status attention "ready for review"   # level (ok|attention|blocked) + current-state message
 weaver issue add "Backfill old rows" --body "ETA after the schema change"
 weaver issue add "Audit the logger" --repo   # unclaimed repo backlog item
 weaver issue ls                       # this branch's work + the repo backlog
@@ -118,7 +118,7 @@ weaver issue ls --repo                # the whole repo, grouped by branch
 weaver issue close 7
 weaver issue show 7                   # an issue + the live status of the branch working it
 weaver issue wait 7                   # block until a sub-session finishes or needs you
-weaver set-status                     # read: goal + status + open-issue count
+weaver status                     # read: goal + status + open-issue count
 weaver where                          # debug: print resolved repo / branch / branch-id
 weaver log --limit 50                 # recent events for the current branch
 ```
@@ -144,12 +144,12 @@ Three flags seed the task from existing work instead of a fresh description:
 `loom session launch --issue 123` takes the branch's title / goal / description
 from a GitHub issue (via the `gh` CLI), `--claim 7` takes them from an existing
 weaver issue and moves it out of the repo backlog, and `--branch <name>` resumes
-an existing branch. `loom issues` prints the repo's board across branches.
+an existing branch. `loom issue ls` prints the repo's board across branches.
 
 Every launch opens a **tracking issue** claimed by the new branch — the task as
 a weaver issue — and the launch prints its number. That number is the handle
 for following the session: `weaver issue show <n>` reports the issue plus the
-live `set-status` of the branch working it, and `weaver issue wait <n>` blocks
+live `status` of the branch working it, and `weaver issue wait <n>` blocks
 until the issue closes or that branch raises its attention. The launched agent
 is told to keep its status current and close the issue when the work is done.
 When an agent already inside a weaver session runs `loom session launch`, the
@@ -182,9 +182,9 @@ prompt itself is read straight from the terminal, one tab away.
 The **attention** axis is the agent's own signal of whether it needs you:
 `ok` (going fine, or blocked on something external like a CI run or PR review),
 `attention` (a question, a decision, "ready for review"), or `blocked` (stuck,
-needs help). Agents set it with `weaver set-status <level> "<message>"`, which
+needs help). Agents set it with `weaver status <level> "<message>"`, which
 records both the level and a one-line current-state message; a bare
-`weaver set-status <level>` changes the level and keeps the last message. The
+`weaver status <level>` changes the level and keeps the last message. The
 dashboard shows both and lets you filter for sessions that need a human. It
 replaces the old guessed working/waiting/idle indicator, which was often wrong —
 e.g. it read "idle" while the agent was actually waiting on a background
@@ -201,7 +201,7 @@ An orphaned session can be adopted — its terminal recreated and its
 agent resumed (`claude --continue`):
 
 ```sh
-loom adopt <branch>                   # or the "Adopt" button in the web UI
+loom session adopt <branch>                   # or the "Adopt" button in the web UI
 ```
 
 Set `server.auto_adopt` to have loom adopt every recoverable session
@@ -254,16 +254,16 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the shape of `SessionView`.
 
 ## Server address
 
-`loom serve` binds `127.0.0.1:7878` by default. Set `WEAVER_API` (e.g.
+`loom server run` binds `127.0.0.1:7878` by default. Set `WEAVER_API` (e.g.
 `WEAVER_API=http://127.0.0.1:9000`) to point loom *and* the `loom` CLI at a
-different address. `loom serve --addr <host:port>` overrides `WEAVER_API`.
+different address. `loom server run --addr <host:port>` overrides `WEAVER_API`.
 The running daemon records the address it bound in `~/.weaver/server.json`,
 so the `loom` CLI finds it with no configuration in the common case.
 
 ## Authentication
 
 loom can be exposed off `127.0.0.1` so the dashboard and the API are reachable
-without an SSH tunnel — `loom serve --addr 0.0.0.0:7878`, ideally behind a
+without an SSH tunnel — `loom server run --addr 0.0.0.0:7878`, ideally behind a
 TLS-terminating reverse proxy. Access is then gated three ways:
 
 - **Local use needs nothing.** Requests from the loopback interface are trusted
@@ -279,7 +279,7 @@ TLS-terminating reverse proxy. Access is then gated three ways:
   CLI presents as a bearer. Mint one under **Settings → Tokens** or:
 
   ```sh
-  loom token create github-actions     # prints the secret once — store it now
+  loom token add github-actions     # prints the secret once — store it now
   ```
 
   Then, from anywhere (e.g. a GitHub Actions step that kicks off a session in
@@ -315,10 +315,10 @@ label, help text, type, and default.
 Edit them in the **Settings** pane of the web UI, or from the CLI:
 
 ```sh
-weaver config list
+weaver config ls
 weaver config get agent.default
 weaver config set agent.claude_args "--model claude-opus-4-7"
-weaver config unset agent.claude_args
+weaver config rm agent.claude_args
 ```
 
 Notable settings:

@@ -8,7 +8,7 @@
 //!
 //! Every session is a [`tapestry`] supervisor: a per-session detached PTY process
 //! that streams raw PTY bytes, so an attached xterm owns its own scrollback,
-//! selection, and search. Its lifetime is independent of `loom serve`, so a loom
+//! selection, and search. Its lifetime is independent of `loom server run`, so a loom
 //! restart leaves running terminals untouched — the recovery property that keeps
 //! agents alive across restarts.
 

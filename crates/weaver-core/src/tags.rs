@@ -43,7 +43,7 @@ pub struct Tag {
 // ---------------------------------------------------------------------------
 
 /// The agent's self-reported attention level — "does this need me?". Authored by
-/// the agent via `weaver set-status`. Loud (raises a badge).
+/// the agent via `weaver status`. Loud (raises a badge).
 pub const ATTENTION_KEY: &str = "attention";
 
 /// An overlooker's (or `manual`) outside assessment of a branch — a second axis

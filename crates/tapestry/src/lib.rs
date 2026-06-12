@@ -3,7 +3,7 @@
 //!
 //! Each session is one tiny **detached supervisor process** that owns the
 //! agent's PTY, runs a vt100 screen emulator, and serves a unix control socket.
-//! Because the supervisor's lifetime is independent of `loom serve`, restarting
+//! Because the supervisor's lifetime is independent of `loom server run`, restarting
 //! loom leaves a live agent untouched (the recovery property loom relies on),
 //! while the interactive surface streams *raw PTY bytes*, so an attached xterm
 //! owns its own scrollback, selection, and search rather than a server-rendered

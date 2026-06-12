@@ -40,13 +40,13 @@ core.hooksPath .githooks`. Build/test internals and the Playwright setup live in
 
 ## Don't disturb the user's live loom
 
-A real `loom serve` is **machine-global**: one shared `~/.weaver/weaver.db` and a
+A real `loom server run` is **machine-global**: one shared `~/.weaver/weaver.db` and a
 set of detached `tapestry` terminal supervisors (under `~/.weaver/sock`),
 normally running the user's agents — including the one running *you*. The
-supervisors are detached, so they outlive `loom serve` and a broad kill is what
+supervisors are detached, so they outlive `loom server run` and a broad kill is what
 wipes them. So unless the user explicitly asks:
 
-- **Don't** start your own `loom serve` / `loom launch` against the default
+- **Don't** start your own `loom server run` or `loom session launch` against the default
   `~/.weaver`, kill the user's terminal supervisors, or run broad process cleanup
   (`pkill -f tapestry`, `pkill -f weaver`). Each wipes the user's agents at a
   stroke.
@@ -57,7 +57,7 @@ To exercise loom behaviour, extend the test suites — they isolate via a temp
 loom by hand, isolate it the same way:
 
 ```sh
-WEAVER_HOME=$(mktemp -d) loom serve --addr 127.0.0.1:0
+WEAVER_HOME=$(mktemp -d) loom server run --addr 127.0.0.1:0
 ```
 
 ## Landing changes
@@ -77,7 +77,7 @@ when you're ready to land. The rules it enforces:
   more than the local gate (Playwright `e2e/`, CodeQL, a clean-checkout SPA
   build). After pushing, block on `gh pr checks <n> --watch --fail-fast`, answer
   comments in-thread, and fix failures until green. Only **then** raise `weaver
-  set-status attention "ready for review"`; while CI runs you are `ok`, not done.
+  status attention "ready for review"`; while CI runs you are `ok`, not done.
 
 ## Conventions
 

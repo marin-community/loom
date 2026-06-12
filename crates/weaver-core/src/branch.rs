@@ -16,7 +16,7 @@ pub struct Branch {
     pub base_branch: String,
     pub goal: String,
     pub title: String,
-    /// The agent's current-state message, set via `weaver set-status`. Free-form
+    /// The agent's current-state message, set via `weaver status`. Free-form
     /// ("Wired up routes; tests pass"), shown even when the branch is calm. The
     /// attention *level* is a separate [`crate::tags`] tag.
     pub description: String,

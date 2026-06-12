@@ -17,7 +17,7 @@ It is on your `PATH`. From anywhere in the worktree you can run:
 - `weaver readme` — print this guide (the full weaver workflow). Re-read it when
   you need the rules back — e.g. after a compaction, when only the concise
   catch-up was replayed.
-- `weaver set-status <level> "<message>"` — tell the dashboard how you are
+- `weaver status <level> "<message>"` — tell the dashboard how you are
   doing. `level` is one of `ok`, `attention`, or `blocked`; the message is a
   short current-state note ("Wired up routes; tests pass"). This is your single
   channel for reporting status — both the level and the message in one call —
@@ -47,7 +47,7 @@ It is on your `PATH`. From anywhere in the worktree you can run:
   the reconciler.** File the issues with `weaver issue add`, reference them in
   the doc, and keep the two aligned as work moves. See the smartdoc skill
   (`.agents/skills/smartdoc.md`).
-- `weaver set-status` — with no argument, show the goal, status, and open-issue
+- `weaver status` — with no argument, show the goal, status, and open-issue
   count.
 
 These talk directly to the weaver database — no daemon required.
@@ -59,7 +59,7 @@ that represents the task you were launched for. `weaver issue ls --mine` shows
 it. It is how the agent (or human) that launched you watches your progress
 without reading this terminal:
 
-- Keep your status honest with `weaver set-status` as you work — that is the
+- Keep your status honest with `weaver status` as you work — that is the
   live signal whoever launched you polls.
 - When the task is genuinely complete (the PR is open, the work is done), run
   `weaver issue close <id>` on the tracking issue. Closing it is the
@@ -76,7 +76,7 @@ own branch and worktree — and track it the same way someone tracks you:
   issue is your handle on the sub-tree. The new branch forks from a
   freshly-fetched `origin/<default branch>` unless you pass `--base <branch>`.
 - `weaver issue show <id>` — poll the sub-tree: its tracking issue's
-  open/closed state plus the sub-agent's live `set-status` (attention +
+  open/closed state plus the sub-agent's live `weaver status` (attention +
   current-state message).
 - `weaver issue wait <id>` — block until the sub-tree finishes (its tracking
   issue closes) or needs you (the sub-agent raises its attention to
@@ -105,20 +105,20 @@ history, and you can hand it off or revisit it later.
 ## Signalling your status
 
 The user scans the dashboard for sessions that need them. Keep your status
-honest with `weaver set-status <level> "<message>"`. The level is the
+honest with `weaver status <level> "<message>"`. The level is the
 "does this need me?" signal; the message says what's going on:
 
 - `ok` — progressing normally, **or** blocked on something external that is not
   the user (a CI run, a PR review, a long workflow). No action needed.
-  Example: `weaver set-status ok "waiting on PR review feedback"`.
+  Example: `weaver status ok "waiting on PR review feedback"`.
 - `attention` — you want the user to look: a question, a decision to confirm, or
-  "done — ready for review". Example: `weaver set-status attention "ready for review"`.
+  "done — ready for review". Example: `weaver status attention "ready for review"`.
 - `blocked` — you are stuck or hit an error and need help to proceed.
-  Example: `weaver set-status blocked "build broken, can't reproduce locally"`.
+  Example: `weaver status blocked "build broken, can't reproduce locally"`.
 
 Set it as your situation changes — especially raise it to `attention` before you
 finish a turn expecting the user, and drop back to `ok` once you are moving
-again. A bare `weaver set-status ok` lowers the level and keeps your last
+again. A bare `weaver status ok` lowers the level and keeps your last
 message. This replaces the old guessed working/waiting/idle indicator, which was
 often wrong (e.g. it read "idle" while you were really waiting on a workflow).
 
@@ -127,8 +127,8 @@ Under the hood, status is stored as **tags** on your branch. A tag is a single
 well known:
 
 - `attention` — your self-report, the value being `attention` or `blocked`. This
-  is what `weaver set-status` writes; `ok` is the absence of the tag, so
-  `set-status ok` clears it. Absence is the calm state — a calm branch carries no
+  is what `weaver status` writes; `ok` is the absence of the tag, so
+  `weaver status ok` clears it. Absence is the calm state — a calm branch carries no
   attention tag, only its `description` message.
 - `triage` — an overlooker's outside assessment of your branch, the same
   `attention`/`blocked` ladder but authored by an overlooker (or `manual`), never
@@ -141,13 +141,13 @@ has moved on since it was set (its timestamp predates your last activity).
 
 ## How to work here
 
-- Prefer to make a well-reasoned decision, record it with `weaver set-status`,
+- Prefer to make a well-reasoned decision, record it with `weaver status`,
   and keep going. Default to recording and continuing rather than stopping.
 - You may still ask the user for feedback in plain prose when a choice genuinely
   matters. But **never block on an interactive TUI prompt** — multiple-choice
   menus, plan-approval dialogs, and the like cannot be answered from the
   dashboard. State the question as plain text and
-  set `weaver set-status attention "<the question>"`, then continue with your
+  set `weaver status attention "<the question>"`, then continue with your
   best assumption.
 
 ## Finishing work
@@ -164,7 +164,7 @@ the work is ready:
   unless the user has told you otherwise. Most teams gate integration on review
   and CI; respect that. Use the project's normal PR workflow (e.g. `gh pr
   create`).
-- Raise `weaver set-status attention "ready for review"` (the message doubles as
+- Raise `weaver status attention "ready for review"` (the message doubles as
   your concise summary, and file any follow-ups as issues with `weaver issue
   add`) so the user knows to look.
 
