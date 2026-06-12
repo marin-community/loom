@@ -115,6 +115,15 @@ export interface WeaverFixture {
   /** Create an issue claimed by a seeded session's branch (so it shares the
    *  session's canonical repo_root and resolves back to it in the Issues pane). */
   seedIssue(session: Session, title: string, body?: string): Promise<Issue>;
+  /** Write an artifact via `weaver artifact write` — creates it on first call,
+   *  appends an immutable revision after. Content is piped on stdin; `--repo`
+   *  publishes it repo-shared instead of scoping it to the branch. */
+  writeArtifact(
+    session: Session,
+    name: string,
+    content: string,
+    opts?: { title?: string; repo?: boolean },
+  ): Promise<void>;
   /** Set (upsert) a free-form label on an issue via `PUT …/issues/{id}/tags/{key}`. */
   tagIssue(id: number, key: string, value: string): Promise<Issue>;
   /** GET /api/issues (cross-repo board). */
@@ -451,6 +460,20 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
           method: 'POST',
           body: JSON.stringify({ title, body: body ?? '' }),
         })) as Issue;
+      },
+
+      async writeArtifact(session, name, content, opts) {
+        // `weaver artifact write <name> -` reads content from stdin and appends
+        // a revision to the branch resolved from $WEAVER_BRANCH (`--repo` makes
+        // it repo-shared). The first write creates the envelope.
+        const args = ['artifact', 'write', name, '-'];
+        if (opts?.title) args.push('--title', opts.title);
+        if (opts?.repo) args.push('--repo');
+        execFileSync(WEAVER_BINARY, args, {
+          env: { ...childEnv, WEAVER_BRANCH: session.branch.id },
+          input: content,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
       },
 
       async tagIssue(id, key, value) {
