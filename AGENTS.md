@@ -55,23 +55,22 @@ WEAVER_TMUX_SOCKET=loom-dev-$$ WEAVER_HOME=$(mktemp -d) loom serve --addr 127.0.
 
 ## Landing changes
 
+The full commit → lint review → PR → monitor flow is the **`pull-request` skill**
+([.agents/skills/pull-request.md](.agents/skills/pull-request.md)) — invoke it
+when you're ready to land. The rules it enforces:
+
 - **Open a PR; never push to or merge `main`.** Branch → `./scripts/pre-commit.sh`
-  + `cargo test --workspace` pass → `gh pr create`. A weaver worktree is already
-  on its own branch; finishing means opening the PR, not integrating it yourself.
-  Holds for every change unless the user says otherwise.
+  + `cargo test --workspace` → `scripts/lint-review.py` → `gh pr create`. A weaver
+  worktree is already on its own branch; finishing means opening the PR, not
+  integrating it yourself.
 - **Write in the project's voice** — no self-attribution in commits or PRs
   ("Generated with…", "Co-Authored-By: <tool>", and the like).
 - **Keep the branch synced with `main`** when it falls behind or conflicts.
-- **Drive the PR to green, then hand off — local green is not CI green.** Opening
-  the PR starts this step; it doesn't end it. CI runs more than the local gate
-  (the Playwright `e2e/` suite, CodeQL, a clean-checkout SPA build), so passing
-  locally proves nothing about CI. After pushing: block on
-  `gh pr checks <n> --watch --fail-fast`, read feedback (`gh pr view <n> --json
-  reviews,comments` and `gh api repos/<owner>/<repo>/pulls/<n>/comments`), then
-  fix failures and address comments — replying in-thread — until it's green.
-  Only **then** raise `weaver set-status attention "ready for review"`; while CI
-  is running you are `ok`, not done. When a review call is genuinely unclear, ask
-  via `weaver set-status attention "<question>"` rather than guessing.
+- **Drive the PR to green, then hand off — local green is not CI green.** CI runs
+  more than the local gate (Playwright `e2e/`, CodeQL, a clean-checkout SPA
+  build). After pushing, block on `gh pr checks <n> --watch --fail-fast`, answer
+  comments in-thread, and fix failures until green. Only **then** raise `weaver
+  set-status attention "ready for review"`; while CI runs you are `ok`, not done.
 
 ## Conventions
 
@@ -82,5 +81,9 @@ WEAVER_TMUX_SOCKET=loom-dev-$$ WEAVER_HOME=$(mktemp -d) loom serve --addr 127.0.
   `frontend/src/types.ts` mirrors the serde structs in `web.rs` by hand (no
   codegen — keep them in sync). Don't invent browser-local features the `loom`
   CLI can't observe.
+- **Small SQLite app — don't flag scale.** `~/.weaver/weaver.db` holds ~hundreds
+  of rows. Never raise N+1 queries, missing indexes, denormalization, join cost,
+  or other scale/perf concerns — they don't apply here. Favor the clean general
+  model ([[scale-appropriate-design]]).
 - Errors, async, the event bus, orphan recovery, and the rest of the runtime
   model: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
