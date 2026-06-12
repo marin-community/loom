@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
 use crate::db::{now_iso, Db};
+use crate::tags::Tag;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Issue {
@@ -179,6 +180,17 @@ pub async fn list_for_repo(db: &Db, repo_root: &str, include_closed: bool) -> Re
     Ok(rows)
 }
 
+/// Every issue across every repo — the loom dashboard's cross-repo issue board.
+/// Ordered by repo then id so a multi-repo listing groups naturally.
+pub async fn list_all(db: &Db, include_closed: bool) -> Result<Vec<Issue>> {
+    let sql = format!(
+        "SELECT * FROM issues WHERE 1=1{} ORDER BY repo_root ASC, id ASC",
+        status_clause(include_closed)
+    );
+    let rows = sqlx::query_as::<_, Issue>(&sql).fetch_all(db).await?;
+    Ok(rows)
+}
+
 /// Count of open issues claimed by `branch` — the per-session badge.
 pub async fn open_count_for_branch(db: &Db, repo_root: &str, branch: &str) -> Result<i64> {
     let (n,): (i64,) = sqlx::query_as(
@@ -281,8 +293,77 @@ pub async fn reopen(db: &Db, id: i64) -> Result<()> {
 }
 
 pub async fn delete(db: &Db, id: i64) -> Result<()> {
+    // Foreign keys aren't enabled on the pool, so the `issue_tags` cascade won't
+    // fire — clear an issue's tags explicitly before removing the row.
+    sqlx::query("DELETE FROM issue_tags WHERE issue_id = ?")
+        .bind(id)
+        .execute(db)
+        .await?;
     sqlx::query("DELETE FROM issues WHERE id = ?")
         .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Issue tags
+// ---------------------------------------------------------------------------
+//
+// A free-form `(key, value)` label on an issue, stored in `issue_tags` and
+// shaped like a branch [`Tag`]. Unlike branch tags there is no loud
+// `attention`/`triage` ladder — every issue tag is a quiet annotation
+// (priority, area, kind, …). The value must be non-empty; clearing a label is
+// [`clear_tag`], which deletes the row.
+
+/// Every tag on an issue, ordered by key for a stable presentation.
+pub async fn list_tags(db: &Db, issue_id: i64) -> Result<Vec<Tag>> {
+    let rows = sqlx::query_as::<_, Tag>(
+        "SELECT key, value, note, set_by, set_at FROM issue_tags
+         WHERE issue_id = ? ORDER BY key",
+    )
+    .bind(issue_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows)
+}
+
+/// Set (insert or replace) a tag on an issue. Single-valued per `(issue_id,
+/// key)`: a second set for the same key overwrites the value, note, and
+/// attribution and re-stamps `set_at`. The caller is expected to have validated
+/// that `value` is non-empty; clearing is [`clear_tag`].
+pub async fn set_tag(
+    db: &Db,
+    issue_id: i64,
+    key: &str,
+    value: &str,
+    note: &str,
+    set_by: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO issue_tags (issue_id, key, value, note, set_by, set_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(issue_id, key) DO UPDATE SET
+           value = excluded.value, note = excluded.note,
+           set_by = excluded.set_by, set_at = excluded.set_at",
+    )
+    .bind(issue_id)
+    .bind(key)
+    .bind(value)
+    .bind(note)
+    .bind(set_by)
+    .bind(now_iso())
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Clear a tag — delete the `(issue_id, key)` row. A no-op when the tag is
+/// absent.
+pub async fn clear_tag(db: &Db, issue_id: i64, key: &str) -> Result<()> {
+    sqlx::query("DELETE FROM issue_tags WHERE issue_id = ? AND key = ?")
+        .bind(issue_id)
+        .bind(key)
         .execute(db)
         .await?;
     Ok(())
@@ -440,6 +521,67 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn list_all_spans_repos() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        add(&db, &claimed("/a", "feature", "in a")).await.unwrap();
+        add(&db, &claimed("/b", "feature", "in b")).await.unwrap();
+        let closed = add(&db, &claimed("/a", "feature", "done a")).await.unwrap();
+        close(&db, closed.id).await.unwrap();
+
+        // Open-only by default, every repo, ordered repo then id.
+        let open = list_all(&db, false).await.unwrap();
+        assert_eq!(open.len(), 2);
+        assert_eq!(open[0].repo_root, "/a");
+        assert_eq!(open[1].repo_root, "/b");
+        // Including closed picks up the closed `/a` issue too.
+        assert_eq!(list_all(&db, true).await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn tags_roundtrip_and_clear_on_delete() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let i = add(&db, &claimed("/r", "feature", "tag me")).await.unwrap();
+        assert!(list_tags(&db, i.id).await.unwrap().is_empty());
+
+        set_tag(&db, i.id, "priority", "high", "ship first", "agent")
+            .await
+            .unwrap();
+        set_tag(&db, i.id, "area", "ui", "", "manual")
+            .await
+            .unwrap();
+        let tags = list_tags(&db, i.id).await.unwrap();
+        // Ordered by key: area, priority.
+        let keys: Vec<&str> = tags.iter().map(|t| t.key.as_str()).collect();
+        assert_eq!(keys, vec!["area", "priority"]);
+        let prio = tags.iter().find(|t| t.key == "priority").unwrap();
+        assert_eq!(prio.value, "high");
+        assert_eq!(prio.note, "ship first");
+        assert_eq!(prio.set_by, "agent");
+        assert!(!prio.set_at.is_empty());
+
+        // A second set for the same key overwrites in place.
+        set_tag(&db, i.id, "priority", "low", "", "manual")
+            .await
+            .unwrap();
+        let tags = list_tags(&db, i.id).await.unwrap();
+        assert_eq!(tags.len(), 2);
+        assert_eq!(
+            tags.iter().find(|t| t.key == "priority").unwrap().value,
+            "low"
+        );
+
+        // Clearing one leaves the other.
+        clear_tag(&db, i.id, "priority").await.unwrap();
+        let tags = list_tags(&db, i.id).await.unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].key, "area");
+
+        // Deleting the issue clears its remaining tags.
+        delete(&db, i.id).await.unwrap();
+        assert!(list_tags(&db, i.id).await.unwrap().is_empty());
     }
 
     #[tokio::test]

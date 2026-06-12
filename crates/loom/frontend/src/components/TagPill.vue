@@ -6,7 +6,9 @@ import type { Tag } from '../types';
 // value when it carries the meaning), with a × that clears it. Quiet styling
 // only — never the reserved loud amber/red fill, which belongs to the single
 // resolved attention signal. Tokens (subtle/muted/faint) auto-swap light/dark.
-const props = defineProps<{ tag: Tag; busy?: boolean }>();
+// `readonly` drops the × so the same pill renders in contexts where tags are
+// shown but not edited (e.g. a session's read-only issue list).
+const props = defineProps<{ tag: Tag; busy?: boolean; readonly?: boolean }>();
 const emit = defineEmits<{ clear: [key: string] }>();
 
 const label = computed(() =>
@@ -28,6 +30,7 @@ const tooltip = computed(() => {
   >
     <span class="truncate">{{ label }}</span>
     <button
+      v-if="!readonly"
       type="button"
       data-testid="tag-pill-clear"
       class="-mr-1 shrink-0 rounded px-1 text-faint hover:text-fg disabled:opacity-50"

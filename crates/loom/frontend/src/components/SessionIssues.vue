@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import type { Issue } from '../types';
+import TagPill from './TagPill.vue';
 
 // The Issues tab: the session's own claimed work plus the repo's unclaimed
-// backlog. Read-only here — both are managed with `weaver issue`.
+// backlog. Read-only here — both are managed with `weaver issue` or the
+// top-level Issues pane; tags render as quiet, non-deletable pills.
 defineProps<{ issues: Issue[]; backlog: Issue[] }>();
 </script>
 
@@ -27,6 +29,9 @@ defineProps<{ issues: Issue[]; backlog: Issue[] }>();
             <span class="text-fg">{{ i.title }}</span>
           </div>
           <pre v-if="i.body" class="mt-1 whitespace-pre-wrap text-xs text-muted">{{ i.body }}</pre>
+          <div v-if="i.tags.length" class="mt-1.5 flex flex-wrap items-center gap-1.5">
+            <TagPill v-for="t in i.tags" :key="t.key" :tag="t" readonly />
+          </div>
         </li>
       </ul>
     </section>

@@ -152,10 +152,15 @@ pub struct IssueView {
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,
+    /// Free-form `(key, value)` labels on the issue, rendered as quiet pills.
+    /// Empty when the issue carries none. Unlike branch tags these never carry
+    /// the loud `attention`/`triage` ladder.
+    pub tags: Vec<TagView>,
 }
 
-impl From<Issue> for IssueView {
-    fn from(i: Issue) -> Self {
+impl IssueView {
+    /// Build the wire view from an [`Issue`] and the tags gathered for it.
+    pub fn from_parts(i: Issue, tags: &[Tag]) -> Self {
         IssueView {
             id: i.id,
             repo_root: i.repo_root,
@@ -170,7 +175,16 @@ impl From<Issue> for IssueView {
             created_at: i.created_at,
             updated_at: i.updated_at,
             closed_at: i.closed_at,
+            tags: tags.iter().map(TagView::from).collect(),
         }
+    }
+}
+
+impl From<Issue> for IssueView {
+    /// Convenience for call sites that don't surface tags (the tag list is left
+    /// empty). Tag-aware endpoints use [`IssueView::from_parts`].
+    fn from(i: Issue) -> Self {
+        IssueView::from_parts(i, &[])
     }
 }
 

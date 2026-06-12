@@ -164,6 +164,26 @@ enum IssueCmd {
     Reopen { id: i64 },
     /// Delete an issue.
     Rm { id: i64 },
+    /// Label an issue: set (insert or replace) a free-form `(key, value)` tag.
+    ///
+    /// Issue tags are quiet annotations (priority, area, kind, …) rendered as
+    /// pills in the loom Issues pane — there is no loud `attention`/`triage`
+    /// ladder. The value must be non-empty; clear a label with `issue untag`.
+    Tag {
+        id: i64,
+        /// The tag key, e.g. `priority` or `area`.
+        key: String,
+        /// The value to store, e.g. `high`.
+        value: String,
+        /// One-line reason accompanying the tag.
+        #[arg(long, default_value = "")]
+        note: String,
+        /// Who is setting it (attribution); defaults to `agent`.
+        #[arg(long, default_value = "agent")]
+        by: String,
+    },
+    /// Clear an issue label — delete the `(key)` tag.
+    Untag { id: i64, key: String },
 }
 
 #[derive(Subcommand)]
@@ -729,6 +749,15 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
             if let Some(n) = i.github_issue {
                 println!("  github:  #{n}");
             }
+            let tags = issue::list_tags(&db, i.id).await?;
+            if !tags.is_empty() {
+                let rendered = tags
+                    .iter()
+                    .map(|t| format!("{}={}", t.key, t.value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("  tags:    {rendered}");
+            }
             println!("  created: {}", i.created_at);
             if let Some(c) = &i.closed_at {
                 println!("  closed:  {c}");
@@ -762,6 +791,38 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
             ensure_issue_in_repo(&db, id, &b.repo_root).await?;
             issue::delete(&db, id).await?;
             println!("removed #{id}");
+        }
+        IssueCmd::Tag {
+            id,
+            key,
+            value,
+            note,
+            by,
+        } => {
+            ensure_issue_in_repo(&db, id, &b.repo_root).await?;
+            let key = key.trim();
+            let value = value.trim();
+            let note = note.trim();
+            let by = by.trim();
+            if key.is_empty() {
+                bail!("a tag key is required");
+            }
+            if value.is_empty() {
+                bail!(
+                    "a tag value cannot be empty — use `weaver issue untag {id} {key}` to clear it"
+                );
+            }
+            issue::set_tag(&db, id, key, value, note, by).await?;
+            if note.is_empty() {
+                println!("tag: #{id} → {key} = {value} (by {by})");
+            } else {
+                println!("tag: #{id} → {key} = {value} (by {by}) — {note}");
+            }
+        }
+        IssueCmd::Untag { id, key } => {
+            ensure_issue_in_repo(&db, id, &b.repo_root).await?;
+            issue::clear_tag(&db, id, key.trim()).await?;
+            println!("tag: #{id} → cleared {}", key.trim());
         }
     }
     Ok(())

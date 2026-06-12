@@ -80,6 +80,18 @@ export interface Overlooker {
   last_outcome: string | null;
 }
 
+/** An issue as returned by `/api/issues` (the fields the e2e tests read). */
+export interface Issue {
+  id: number;
+  repo_root: string;
+  source_branch: string | null;
+  claimed_branch: string | null;
+  title: string;
+  body: string;
+  status: string;
+  tags: TagView[];
+}
+
 export interface SeedOverlookerOpts {
   name: string;
   /** Trigger predicate; defaults to a manual `{}` (only fires on Run now). */
@@ -100,6 +112,13 @@ export interface WeaverFixture {
   seedSession(opts: SeedOpts): Promise<Session>;
   /** Register an overlooker directly via the API. */
   seedOverlooker(opts: SeedOverlookerOpts): Promise<Overlooker>;
+  /** Create an issue claimed by a seeded session's branch (so it shares the
+   *  session's canonical repo_root and resolves back to it in the Issues pane). */
+  seedIssue(session: Session, title: string, body?: string): Promise<Issue>;
+  /** Set (upsert) a free-form label on an issue via `PUT …/issues/{id}/tags/{key}`. */
+  tagIssue(id: number, key: string, value: string): Promise<Issue>;
+  /** GET /api/issues (cross-repo board). */
+  listIssues(all?: boolean): Promise<Issue[]>;
   /** GET /api/sessions/{id}. */
   getSession(id: string): Promise<Session>;
   /** GET /api/sessions. */
@@ -214,6 +233,25 @@ async function deleteAllOverlookers(baseUrl: string) {
     for (const o of all) {
       try {
         await fetch(`${baseUrl}/api/overlookers/${o.id}`, { method: 'DELETE' });
+      } catch {
+        /* best effort */
+      }
+    }
+  } catch {
+    /* server may already be gone */
+  }
+}
+
+/** Delete every issue on a server, best-effort. Issues are repo-owned and
+ *  survive session teardown (claims are released to the backlog), and a launch
+ *  opens a tracking issue — so the per-test wipe clears them explicitly to keep
+ *  count-based assertions ("0 issues") order-independent. */
+async function deleteAllIssues(baseUrl: string) {
+  try {
+    const all = (await fetchJson(`${baseUrl}/api/issues?all=true`)) as { id: number }[];
+    for (const i of all) {
+      try {
+        await fetch(`${baseUrl}/api/issues/${i.id}`, { method: 'DELETE' });
       } catch {
         /* best effort */
       }
@@ -408,6 +446,26 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
         })) as Overlooker;
       },
 
+      async seedIssue(session, title, body) {
+        return (await fetchJson(`${baseUrl}/api/branches/${session.branch.id}/issues`, {
+          method: 'POST',
+          body: JSON.stringify({ title, body: body ?? '' }),
+        })) as Issue;
+      },
+
+      async tagIssue(id, key, value) {
+        return (await fetchJson(`${baseUrl}/api/issues/${id}/tags/${encodeURIComponent(key)}`, {
+          method: 'PUT',
+          body: JSON.stringify({ value }),
+        })) as Issue;
+      },
+
+      async listIssues(all = false) {
+        return (await fetchJson(
+          `${baseUrl}/api/issues${all ? '?all=true' : ''}`,
+        )) as Issue[];
+      },
+
       async getSession(id) {
         return (await fetchJson(`${baseUrl}/api/sessions/${id}`)) as Session;
       },
@@ -462,6 +520,7 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
     // Reset for the next test in this worker.
     await deleteAllSessions(baseUrl);
     await deleteAllOverlookers(baseUrl);
+    await deleteAllIssues(baseUrl);
   },
 });
 

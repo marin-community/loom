@@ -185,7 +185,9 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `GET /api/sessions/{id}/preview?lines=N` | capture the pane as `{screen}`; `lines` adds scrollback above the visible screen |
 | `GET /api/branches` / `GET PATCH /api/branches/{id}` | list / inspect / edit tracked branches |
 | `GET POST /api/branches/{id}/issues` | issues claimed by the branch / create one |
+| `GET /api/issues?all=…` | the cross-repo issue board (every repo's issues; `all=true` includes closed) — what the loom Issues pane reads |
 | `GET PATCH DELETE /api/issues/{id}` | per-issue CRUD |
+| `PUT DELETE /api/issues/{id}/tags/{key}` | set (upsert) / clear a free-form issue label — quiet `(key, value)` pills, no loud `attention`/`triage` ladder |
 | `GET POST /api/repos/issues?repo_root=…` | repo-wide board (`scope=repo\|backlog`) / create a backlog item |
 | `GET /api/repos/recent` / `GET /api/repos/branches?cwd=…` | recent repos / branches in a repo |
 | `GET PATCH /api/settings` | settings registry |

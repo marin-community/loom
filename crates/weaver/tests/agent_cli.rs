@@ -125,6 +125,28 @@ fn issue_lifecycle() {
     assert!(!out.contains("fix the thing"));
 }
 
+/// `issue tag` sets a free-form label, `issue show` surfaces it, and `issue
+/// untag` clears it.
+#[test]
+fn issue_tag_set_show_clear() {
+    let env = setup();
+    run(&env, &["issue", "add", "label", "me"]);
+
+    run(&env, &["issue", "tag", "1", "priority", "high"]);
+    let out = run(&env, &["issue", "show", "1"]);
+    assert!(out.contains("priority=high"), "show output: {out}");
+
+    // A second set overwrites the value in place (single-valued per key).
+    run(&env, &["issue", "tag", "1", "priority", "low"]);
+    let out = run(&env, &["issue", "show", "1"]);
+    assert!(out.contains("priority=low"), "show output: {out}");
+    assert!(!out.contains("priority=high"));
+
+    run(&env, &["issue", "untag", "1", "priority"]);
+    let out = run(&env, &["issue", "show", "1"]);
+    assert!(!out.contains("priority="), "tag should be cleared: {out}");
+}
+
 #[test]
 fn issue_ls_separates_branch_work_from_repo_backlog() {
     let env = setup();

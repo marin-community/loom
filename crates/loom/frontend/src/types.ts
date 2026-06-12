@@ -111,6 +111,10 @@ export interface Issue {
   created_at: string;
   updated_at: string;
   closed_at: string | null;
+  /** Free-form `(key, value)` labels on the issue, rendered as quiet pills.
+   *  Empty when the issue carries none. Unlike branch tags these never carry the
+   *  loud `attention`/`triage` ladder. */
+  tags: Tag[];
 }
 
 /** One task in a plan. The structure (id, title, exec, value, deps) comes from

@@ -296,9 +296,15 @@ pub fn router(state: AppState) -> Router {
             "/branches/{id}/issues",
             get(list_branch_issues).post(create_branch_issue),
         )
+        // The cross-repo issue board (the loom Issues pane consumes this).
+        .route("/issues", get(list_all_issues))
         .route(
             "/issues/{id}",
             get(get_issue).patch(patch_issue).delete(delete_issue),
+        )
+        .route(
+            "/issues/{id}/tags/{key}",
+            axum::routing::put(set_issue_tag).delete(clear_issue_tag),
         )
         // Misc
         .route("/repos/recent", get(recent_repos))
@@ -1923,6 +1929,30 @@ struct IssueListQuery {
     all: bool,
 }
 
+/// Build an [`IssueView`] for an issue, gathering its tags (a separate query).
+async fn issue_view(db: &Db, issue: Issue) -> ApiResult<IssueView> {
+    let tags = weaver_core::issue::list_tags(db, issue.id).await?;
+    Ok(IssueView::from_parts(issue, &tags))
+}
+
+/// Build views for a batch of issues, each with its tags joined.
+async fn issue_views(db: &Db, issues: Vec<Issue>) -> ApiResult<Vec<IssueView>> {
+    let mut out = Vec::with_capacity(issues.len());
+    for i in issues {
+        out.push(issue_view(db, i).await?);
+    }
+    Ok(out)
+}
+
+/// Every issue across every repo — the loom dashboard's cross-repo issue board.
+async fn list_all_issues(
+    State(st): State<AppState>,
+    Query(q): Query<IssueListQuery>,
+) -> ApiResult<Json<Vec<IssueView>>> {
+    let issues = weaver_core::issue::list_all(&st.db, q.all).await?;
+    Ok(Json(issue_views(&st.db, issues).await?))
+}
+
 /// Issues claimed by this branch — the session's working set.
 async fn list_branch_issues(
     State(st): State<AppState>,
@@ -1933,7 +1963,7 @@ async fn list_branch_issues(
     let issues =
         weaver_core::issue::list_for_branch(&st.db, &branch.repo_root, &branch.branch, q.all)
             .await?;
-    Ok(Json(issues.into_iter().map(IssueView::from).collect()))
+    Ok(Json(issue_views(&st.db, issues).await?))
 }
 
 /// Create an issue claimed by this branch.
@@ -1968,7 +1998,7 @@ async fn create_branch_issue(
     )
     .await
     .ok();
-    Ok(Json(IssueView::from(issue)))
+    Ok(Json(issue_view(&st.db, issue).await?))
 }
 
 /// Resolve the branch row an issue event should be attributed to: the branch
@@ -1990,7 +2020,7 @@ async fn get_issue(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult
     let issue = weaver_core::issue::get(&st.db, id)
         .await?
         .ok_or_else(|| AppError::not_found("issue"))?;
-    Ok(Json(IssueView::from(issue)))
+    Ok(Json(issue_view(&st.db, issue).await?))
 }
 
 async fn patch_issue(
@@ -2036,7 +2066,77 @@ async fn patch_issue(
     let issue = weaver_core::issue::get(&st.db, id)
         .await?
         .ok_or_else(|| AppError::not_found("issue"))?;
-    Ok(Json(IssueView::from(issue)))
+    Ok(Json(issue_view(&st.db, issue).await?))
+}
+
+/// Set (upsert) a free-form label on an issue. Issue tags carry no loud
+/// `attention`/`triage` ladder — every key is a quiet annotation, so the only
+/// rule is a non-empty value (clear the tag with `DELETE` to remove a label). A
+/// `tag` event is recorded on the branch working the issue, when there is one,
+/// so its session feed refreshes.
+async fn set_issue_tag(
+    State(st): State<AppState>,
+    Path((id, tag_key)): Path<(i64, String)>,
+    Json(req): Json<TagReq>,
+) -> ApiResult<Json<IssueView>> {
+    let issue = weaver_core::issue::get(&st.db, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("issue"))?;
+    let key = tag_key.trim();
+    let value = req.value.trim();
+    if key.is_empty() {
+        return Err(AppError::bad_request("tag key is required"));
+    }
+    if value.is_empty() {
+        return Err(AppError::bad_request(format!(
+            "invalid value for '{key}' — must be non-empty (clear the tag to remove it)"
+        )));
+    }
+    let by = req.by.as_deref().unwrap_or("manual").trim().to_string();
+    let note = req.note.trim();
+    weaver_core::issue::set_tag(&st.db, id, key, value, note, &by).await?;
+    if let Some(branch_id) = issue_event_branch(&st.db, &issue).await {
+        events::record(
+            &st.db,
+            &st.bus,
+            &branch_id,
+            "issue_tagged",
+            json!({ "id": id, "key": key, "value": value }),
+        )
+        .await
+        .ok();
+    }
+    let issue = weaver_core::issue::get(&st.db, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("issue"))?;
+    Ok(Json(issue_view(&st.db, issue).await?))
+}
+
+/// Clear a label on an issue — delete the `(issue_id, key)` row. A no-op when
+/// the tag is already absent.
+async fn clear_issue_tag(
+    State(st): State<AppState>,
+    Path((id, tag_key)): Path<(i64, String)>,
+) -> ApiResult<Json<IssueView>> {
+    let issue = weaver_core::issue::get(&st.db, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("issue"))?;
+    weaver_core::issue::clear_tag(&st.db, id, tag_key.trim()).await?;
+    if let Some(branch_id) = issue_event_branch(&st.db, &issue).await {
+        events::record(
+            &st.db,
+            &st.bus,
+            &branch_id,
+            "issue_tagged",
+            json!({ "id": id, "key": tag_key.trim(), "value": "" }),
+        )
+        .await
+        .ok();
+    }
+    let issue = weaver_core::issue::get(&st.db, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("issue"))?;
+    Ok(Json(issue_view(&st.db, issue).await?))
 }
 
 async fn delete_issue(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
@@ -2098,7 +2198,7 @@ async fn list_repo_issues(
             )))
         }
     };
-    Ok(Json(issues.into_iter().map(IssueView::from).collect()))
+    Ok(Json(issue_views(&st.db, issues).await?))
 }
 
 /// Create an unclaimed repo-level backlog item.
@@ -2123,7 +2223,7 @@ async fn create_repo_issue(
         },
     )
     .await?;
-    Ok(Json(IssueView::from(issue)))
+    Ok(Json(issue_view(&st.db, issue).await?))
 }
 
 // ---------------------------------------------------------------------------

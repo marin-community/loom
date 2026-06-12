@@ -124,6 +124,111 @@ async fn branch_issues_and_repo_board() {
     );
 }
 
+/// The cross-repo issue board (`GET /api/issues`) and issue tags: a label set
+/// via `PUT /api/issues/{id}/tags/{key}` surfaces on the issue's `tags`, and
+/// `DELETE` clears it. Closed issues only appear with `?all=true`.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cross_repo_board_and_issue_tags() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+    let repo_root = ts.cwd();
+
+    let ws = client
+        .post(
+            "/api/sessions",
+            json!({ "goal": "board me", "cwd": repo_root, "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let id = ws["id"].as_str().unwrap().to_string();
+    let branch_id = ws["branch"]["id"].as_str().unwrap().to_string();
+
+    let created = client
+        .post(
+            &format!("/api/branches/{branch_id}/issues"),
+            json!({ "title": "label me" }),
+        )
+        .await
+        .unwrap();
+    let issue_id = created["id"].as_i64().unwrap();
+    assert!(
+        created["tags"].as_array().unwrap().is_empty(),
+        "a fresh issue carries no tags"
+    );
+
+    // The cross-repo board lists the open issues (tracking + the new one).
+    let board = client.get("/api/issues").await.unwrap();
+    let board = board.as_array().unwrap();
+    assert!(
+        board.iter().any(|i| i["id"].as_i64() == Some(issue_id)),
+        "the new issue shows on the cross-repo board"
+    );
+
+    // Set a free-form label; it surfaces on the issue's tags with attribution.
+    let tagged = client
+        .put(
+            &format!("/api/issues/{issue_id}/tags/priority"),
+            json!({ "value": "high", "note": "ship first", "by": "agent" }),
+        )
+        .await
+        .unwrap();
+    let tags = tagged["tags"].as_array().unwrap();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0]["key"], "priority");
+    assert_eq!(tags[0]["value"], "high");
+    assert_eq!(tags[0]["note"], "ship first");
+    assert_eq!(tags[0]["set_by"], "agent");
+
+    // An empty value is rejected (clear the tag instead).
+    let bad = client
+        .put(
+            &format!("/api/issues/{issue_id}/tags/priority"),
+            json!({ "value": "" }),
+        )
+        .await;
+    assert!(bad.is_err(), "an empty issue-tag value is rejected");
+
+    // Clearing removes the label.
+    let cleared = client
+        .delete(&format!("/api/issues/{issue_id}/tags/priority"))
+        .await
+        .unwrap();
+    assert!(
+        cleared["tags"].as_array().unwrap().is_empty(),
+        "clearing removes the label"
+    );
+
+    // Close the issue: it leaves the default board but returns with ?all=true.
+    client
+        .patch(
+            &format!("/api/issues/{issue_id}"),
+            json!({ "status": "closed" }),
+        )
+        .await
+        .unwrap();
+    let open_board = client.get("/api/issues").await.unwrap();
+    assert!(
+        !open_board
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"].as_i64() == Some(issue_id)),
+        "a closed issue is off the default board"
+    );
+    let all_board = client.get("/api/issues?all=true").await.unwrap();
+    assert!(
+        all_board
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"].as_i64() == Some(issue_id)),
+        "?all=true includes the closed issue"
+    );
+
+    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+}
+
 /// The triage axis: `PUT /api/sessions/{id}/tags/triage` stamps the overlooker's
 /// mark on the session's branch, surfaces it on the SessionView's `branch.tags`,
 /// and never disturbs the agent's own `attention` tag. An invalid value is
