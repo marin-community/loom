@@ -191,6 +191,28 @@ def test_register_mode_neuters_the_round(monkeypatch):
         rnd.client.mark("live", "blocked")
 
 
+def test_register_mode_triggered_sessions_is_empty(monkeypatch):
+    # triggered_sessions() honours the same register-mode guard as sessions():
+    # even when the trigger names a concrete session, a legacy script that calls
+    # it while merely being asked what wakes it must not touch the fleet. The
+    # round is given a client that explodes on any survey to prove it isn't hit.
+    monkeypatch.setenv("WEAVER_OVERLOOKER_MODE", "register")
+
+    class Exploding:
+        def can(self, _cap):
+            return False
+
+        def sessions(self):
+            raise AssertionError("register mode must not survey the fleet")
+
+    rnd = Round(
+        config={"trigger": {"event": "pr.opened", "session": "s1"}},
+        client=Exploding(),
+    )
+    assert rnd.triggered_sessions() == []
+    assert rnd.surveyed == 0
+
+
 # -- capability gating ---------------------------------------------------------
 
 

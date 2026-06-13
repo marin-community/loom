@@ -305,8 +305,12 @@ class Round:
         that changed instead of re-surveying the whole fleet — the difference
         between one GitHub call and one per session. When it names none (a
         ``cron``/``manual`` tick) it falls back to the full :meth:`sessions`
-        survey. Sets :attr:`surveyed`.
+        survey. Empty in register mode, like :meth:`sessions` — a script asked
+        only what wakes it must not touch the fleet. Sets :attr:`surveyed`.
         """
+        if self.mode == "register":
+            self.surveyed = 0
+            return []
         sid = (self.trigger or {}).get("session")
         bid = (self.trigger or {}).get("branch")
         if not sid and not bid:

@@ -165,7 +165,12 @@ async function create() {
           .filter(Boolean);
       }
       if (form.repo.trim()) t.repo = form.repo.trim();
-      trigger = t;
+      // Only override the manifest when the user actually gave a firing
+      // condition. A blank explicit kind (e.g. "Cron" selected, expression left
+      // empty) would otherwise ship a triggerless `{}` and create a dead,
+      // manual-only watch — fall back to `auto` (server reconciles) instead. A
+      // bare repo pin isn't a firing condition; it already rides on `scope`.
+      if (t.cron || t.every || (Array.isArray(t.on) && t.on.length)) trigger = t;
     }
 
     const scope: Record<string, string> = {};

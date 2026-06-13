@@ -99,30 +99,35 @@ impl Trigger {
         self.cron.is_some() || self.every.is_some()
     }
 
-    /// The effective event subscriptions as `(event_name, optional_level)`
+    /// The effective event subscriptions as borrowed `(event_name, opt_level)`
     /// pairs: the `on` list (each entry an event name or `name=level`) plus the
-    /// legacy single `event`/`level`. Names are normalized so a legacy raw kind
-    /// matches the dispatcher's normalized vocabulary.
+    /// legacy single `event`/`level`, with names normalized to the dispatcher's
+    /// vocabulary. Borrowed, not collected, so matching an event needs no
+    /// allocation.
+    fn subscription_pairs(&self) -> impl Iterator<Item = (&str, Option<&str>)> {
+        let on = self.on.iter().filter_map(|entry| {
+            let (name, level) = match entry.split_once('=') {
+                Some((name, level)) => (name.trim(), Some(level.trim())),
+                None => (entry.trim(), None),
+            };
+            let name = normalize_event_name(name);
+            (!name.is_empty()).then_some((name, level))
+        });
+        let legacy = self.event.as_deref().filter(|e| !e.is_empty()).map(|e| {
+            (
+                normalize_event_name(e),
+                self.level.as_deref().filter(|l| !l.is_empty()),
+            )
+        });
+        on.chain(legacy)
+    }
+
+    /// The effective subscriptions as owned `(event_name, optional_level)` pairs
+    /// — the [`subscription_pairs`](Self::subscription_pairs) view, collected.
     pub fn subscriptions(&self) -> Vec<(String, Option<String>)> {
-        let mut subs: Vec<(String, Option<String>)> = self
-            .on
-            .iter()
-            .map(|entry| match entry.split_once('=') {
-                Some((name, level)) => (
-                    normalize_event_name(name.trim()).to_string(),
-                    Some(level.trim().to_string()),
-                ),
-                None => (normalize_event_name(entry.trim()).to_string(), None),
-            })
-            .filter(|(name, _)| !name.is_empty())
-            .collect();
-        if let Some(event) = self.event.as_deref().filter(|e| !e.is_empty()) {
-            subs.push((
-                normalize_event_name(event).to_string(),
-                self.level.clone().filter(|l| !l.is_empty()),
-            ));
-        }
-        subs
+        self.subscription_pairs()
+            .map(|(name, level)| (name.to_string(), level.map(str::to_string)))
+            .collect()
     }
 
     /// Whether this trigger matches a normalized trigger `event` whose payload
@@ -134,8 +139,8 @@ impl Trigger {
         if !self.repo_matches(repo) {
             return false;
         }
-        self.subscriptions().iter().any(|(name, want_level)| {
-            name == event && want_level.as_deref().is_none_or(|wl| level == Some(wl))
+        self.subscription_pairs().any(|(name, want_level)| {
+            name == event && want_level.is_none_or(|wl| level == Some(wl))
         })
     }
 
@@ -618,6 +623,38 @@ mod tests {
         assert!(s.admits("blocked", "/r"));
         assert!(!s.admits("ok", "/r")); // !ok excludes ok
         assert!(!s.admits("blocked", "/other")); // repo filter
+    }
+
+    #[test]
+    fn on_list_subscriptions_match_per_event_and_level() {
+        // A manifest `on` list with a bare event and a `name=level` filter, plus
+        // a legacy `event`. `matches_event` and the collected `subscriptions()`
+        // must agree on every entry — they share one parse path.
+        let t: Trigger = serde_json::from_str(
+            r#"{"on":["pr.merged","session.exited=error"],"event":"attention"}"#,
+        )
+        .unwrap();
+
+        // Bare `on` entry: matches regardless of payload level.
+        assert!(t.matches_event("pr.merged", None, None));
+        assert!(t.matches_event("pr.merged", Some("whatever"), None));
+        // `name=level` entry: matches only the named level.
+        assert!(t.matches_event("session.exited", Some("error"), None));
+        assert!(!t.matches_event("session.exited", Some("ok"), None));
+        assert!(!t.matches_event("session.exited", None, None));
+        // Legacy `event` folds in, normalized.
+        assert!(t.matches_event("session.attention", Some("blocked"), None));
+        // An unsubscribed event never matches.
+        assert!(!t.matches_event("pr.opened", None, None));
+
+        assert_eq!(
+            t.subscriptions(),
+            vec![
+                ("pr.merged".to_string(), None),
+                ("session.exited".to_string(), Some("error".to_string())),
+                ("session.attention".to_string(), None),
+            ]
+        );
     }
 
     #[tokio::test]
