@@ -642,14 +642,45 @@ pub fn authorize_url(cfg: &GithubOAuth, state: &str, redirect_uri: &str) -> Stri
     )
 }
 
+/// Mask GitHub token-shaped secrets in a response body before it goes into a log
+/// line or error. GitHub's token endpoint can echo the access token in its body
+/// (JSON `"access_token":"…"`, or form-encoded `access_token=…` if it ignores our
+/// JSON `Accept`); every GitHub token carries a recognisable prefix, so blanking
+/// the run after one keeps the body diagnostic without exposing a usable
+/// credential.
+fn redact_secrets(body: &str) -> String {
+    const PREFIXES: [&str; 6] = ["gho_", "ghu_", "ghs_", "ghr_", "ghp_", "github_pat_"];
+    let mut out = body.to_string();
+    for prefix in PREFIXES {
+        let mut from = 0;
+        while let Some(rel) = out[from..].find(prefix) {
+            let start = from + rel;
+            let secret_start = start + prefix.len();
+            let secret_len = out[secret_start..]
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .unwrap_or(out.len() - secret_start);
+            out.replace_range(start..secret_start + secret_len, "<redacted-token>");
+            from = start + "<redacted-token>".len();
+        }
+    }
+    out
+}
+
+/// A response body trimmed for a log/error line: secrets masked, length capped.
+fn redacted_snippet(body: &str) -> String {
+    redact_secrets(body).chars().take(500).collect()
+}
+
 /// Exchange an OAuth `code` for a GitHub access token.
 pub async fn exchange_code(cfg: &GithubOAuth, code: &str, redirect_uri: &str) -> Result<String> {
     #[derive(serde::Deserialize)]
     struct TokenResp {
         access_token: Option<String>,
+        scope: Option<String>,
+        error: Option<String>,
         error_description: Option<String>,
     }
-    let resp: TokenResp = reqwest::Client::new()
+    let http = reqwest::Client::new()
         .post("https://github.com/login/oauth/access_token")
         .header(reqwest::header::ACCEPT, "application/json")
         .header(reqwest::header::USER_AGENT, "loom")
@@ -661,16 +692,38 @@ pub async fn exchange_code(cfg: &GithubOAuth, code: &str, redirect_uri: &str) ->
         }))
         .send()
         .await
-        .context("requesting GitHub access token")?
-        .json()
-        .await
-        .context("decoding GitHub token response")?;
-    resp.access_token.ok_or_else(|| {
-        anyhow!(
-            "GitHub did not return an access token: {}",
-            resp.error_description.unwrap_or_default()
+        .context("requesting GitHub access token")?;
+    // GitHub returns HTTP 200 even for OAuth errors (the failure is in the body),
+    // so read the raw body and report the status + payload on any problem rather
+    // than discarding them — these are the only clues when sign-in breaks.
+    let status = http.status();
+    let body = http.text().await.context("reading GitHub token response")?;
+    let resp: TokenResp = serde_json::from_str(&body).with_context(|| {
+        format!(
+            "decoding GitHub token response (HTTP {status}): {}",
+            redacted_snippet(&body)
         )
-    })
+    })?;
+    match resp.access_token {
+        Some(token) if !token.is_empty() => {
+            tracing::debug!(
+                token_prefix = %token.chars().take(4).collect::<String>(),
+                scope = resp.scope.as_deref().unwrap_or(""),
+                "exchanged GitHub OAuth code for an access token"
+            );
+            Ok(token)
+        }
+        _ => {
+            let detail = resp
+                .error_description
+                .or(resp.error)
+                .unwrap_or_else(|| redacted_snippet(&body));
+            tracing::warn!(%status, redirect_uri, "GitHub token exchange returned no access token: {detail}");
+            Err(anyhow!(
+                "GitHub did not return an access token (HTTP {status}): {detail}"
+            ))
+        }
+    }
 }
 
 /// Fetch the authenticated user's GitHub login for `access_token`.
@@ -679,19 +732,28 @@ pub async fn fetch_github_login(access_token: &str) -> Result<String> {
     struct GhUser {
         login: String,
     }
-    let user: GhUser = reqwest::Client::new()
+    let resp = reqwest::Client::new()
         .get("https://api.github.com/user")
         .header(reqwest::header::USER_AGENT, "loom")
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .bearer_auth(access_token)
         .send()
         .await
-        .context("fetching GitHub user")?
-        .error_for_status()
-        .context("GitHub user request failed")?
-        .json()
-        .await
-        .context("decoding GitHub user")?;
+        .context("fetching GitHub user")?;
+    // Surface GitHub's status + body instead of a bare "request failed" — a 401
+    // here means the token was rejected, which is otherwise invisible.
+    let status = resp.status();
+    if !status.is_success() {
+        let detail = match resp.text().await {
+            Ok(body) => redacted_snippet(&body),
+            Err(e) => format!("<failed to read response body: {e}>"),
+        };
+        tracing::warn!(%status, "GitHub /user request failed: {detail}");
+        return Err(anyhow!(
+            "GitHub user request failed (HTTP {status}): {detail}"
+        ));
+    }
+    let user: GhUser = resp.json().await.context("decoding GitHub user")?;
     Ok(user.login)
 }
 
@@ -699,6 +761,27 @@ pub async fn fetch_github_login(access_token: &str) -> Result<String> {
 mod tests {
     use super::*;
     use crate::db;
+
+    #[test]
+    fn redact_secrets_masks_github_tokens_anywhere() {
+        // JSON and form bodies that echo a token are both scrubbed...
+        let json = r#"{"access_token":"gho_AbC123def456","scope":"read:user"}"#;
+        let form = "access_token=ghu_xyz789&token_type=bearer";
+        for body in [json, form] {
+            let red = redact_secrets(body);
+            assert!(
+                !red.contains("gho_AbC123def456"),
+                "json token leaked: {red}"
+            );
+            assert!(!red.contains("ghu_xyz789"), "form token leaked: {red}");
+            assert!(red.contains("<redacted-token>"));
+        }
+        // ...while the surrounding, non-secret structure is preserved.
+        assert!(redact_secrets(json).contains("\"scope\":\"read:user\""));
+        // A benign body with no token is returned unchanged (and terminates).
+        let benign = r#"{"message":"Bad credentials"}"#;
+        assert_eq!(redact_secrets(benign), benign);
+    }
 
     #[test]
     fn minted_tokens_are_prefixed_unique_and_hash_consistently() {
