@@ -31,7 +31,9 @@ RUN set -eux; \
 # in-container name/home stay generic — only the numeric ids affect ownership.
 ARG HOST_UID=1000
 ARG HOST_GID=1000
-RUN groupadd -g "${HOST_GID}" app 2>/dev/null || true; \
+# Create the group only if that gid is free; a real groupadd failure (bad gid)
+# still aborts the build instead of being masked by `|| true`.
+RUN if ! getent group "${HOST_GID}" >/dev/null; then groupadd -g "${HOST_GID}" app; fi; \
     useradd -m -u "${HOST_UID}" -g "${HOST_GID}" -d /home/app -s /bin/bash app
 
 # Let agents `git push` over HTTPS with the injected GH_TOKEN — no mounted SSH
@@ -39,7 +41,10 @@ RUN groupadd -g "${HOST_GID}" app 2>/dev/null || true; \
 RUN <<'EOF'
 cat > /usr/local/bin/git-credential-ghtoken <<'SH'
 #!/bin/sh
-[ "$1" = get ] && printf 'username=x-access-token\npassword=%s\n' "$GH_TOKEN"
+# git invokes the helper for get/store/erase; only `get` returns a credential,
+# and store/erase must exit 0 or git warns about a failing helper.
+[ "$1" = get ] || exit 0
+printf 'username=x-access-token\npassword=%s\n' "$GH_TOKEN"
 SH
 chmod +x /usr/local/bin/git-credential-ghtoken
 git config --system credential.https://github.com.helper ghtoken
@@ -62,5 +67,6 @@ ENV WEAVER_STATIC_DIR=/app/static/dist
 
 USER app
 EXPOSE 7878
-# Bind off loopback so the Caddy container can reach it over the `web` network.
-CMD ["loom", "serve", "--addr", "0.0.0.0:7878"]
+# `server run` is the foreground daemon (REST API + Vue UI + monitor loop); bind
+# off loopback so the Caddy container can reach it over the `web` network.
+CMD ["loom", "server", "run", "--addr", "0.0.0.0:7878"]
