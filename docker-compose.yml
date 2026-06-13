@@ -1,0 +1,42 @@
+# loom front-end for a halcyon-style deploy: Caddy terminates TLS and routes
+# weaver.<domain> -> this container over the shared external `web` network.
+#
+# loom drives the repos you already have on the host: HOST_CODE is bind-mounted
+# at the same path, so the worktrees it creates appear on the host unchanged, and
+# it runs as HOST_UID:HOST_GID so those files aren't root-owned. All three knobs
+# (plus credentials) come from secrets/weaver.env — nothing host-specific is
+# baked into this file or the image.
+#
+# Deliberately NO `ports:` — loom stays internal to `web`, reachable only through
+# the front-door proxy, never published to the host or the internet.
+name: weaver
+
+services:
+  weaver:
+    container_name: weaver        # Caddy routes by this name: reverse_proxy weaver:7878
+    build:
+      context: .
+      args:
+        HOST_UID: ${HOST_UID:-1000}
+        HOST_GID: ${HOST_GID:-1000}
+    restart: unless-stopped
+    env_file: .env                # halcyon symlinks secrets/weaver.env -> ./.env
+    volumes:
+      # Persistent HOME for the container user: the weaver sqlite db, the 0600
+      # loom-token, and ~/.claude.json live here and survive a recreate.
+      - weaver_home:/home/app
+      # The repos + the worktrees loom creates, shared with the host at the SAME
+      # path. HOST_CODE is your repo dir (e.g. /home/you/code); set it in the env.
+      - ${HOST_CODE:?set HOST_CODE (host repo dir) in secrets/weaver.env}:${HOST_CODE}
+      # Repos with git@github.com SSH remotes need your key — uncomment & set the
+      # host path (target is the container user's home):
+      # - /home/you/.ssh:/home/app/.ssh:ro
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+
+volumes:
+  weaver_home:
