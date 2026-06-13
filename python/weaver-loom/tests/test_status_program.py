@@ -76,14 +76,9 @@ def make_round(client, **config):
 
 
 def run_main(client, capsys, **config):
-    """Drive main() with a stubbed round; return the parsed result line."""
+    """Drive main(rnd) with a stubbed round; return the parsed result line."""
     rnd = make_round(client, capabilities=client.capabilities, **config)
-    orig = status.Round
-    status.Round = lambda: rnd
-    try:
-        status.main()
-    finally:
-        status.Round = orig
+    status.main(rnd)
     return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
 
 

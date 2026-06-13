@@ -324,17 +324,30 @@ impl OverlookerView {
 }
 
 /// One round in an overlooker's history (the audit trail), with `actions`
-/// parsed back into JSON for a UI to render.
+/// parsed back into JSON for a UI to render. The `stdout`/`stderr`/`exit_code`/
+/// `duration_ms` fields are the captured execution log — what the script printed
+/// and returned — surfaced so a run page shows exactly what happened.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverlookerRunView {
     pub id: i64,
     pub trigger_reason: String,
+    /// The normalized event that woke the round (`cron` / `manual` / e.g.
+    /// `pr.merged`).
+    pub trigger_event: String,
     pub started_at: String,
     pub finished_at: Option<String>,
     pub outcome: String,
     pub summary: String,
     /// The JSON array of marks / nudges / would-dos the round recorded.
     pub actions: Value,
+    /// A tail of the script's standard output.
+    pub stdout: String,
+    /// A tail of the script's standard error.
+    pub stderr: String,
+    /// The interpreter's exit status, or `null` when it never spawned / timed out.
+    pub exit_code: Option<i64>,
+    /// Wall-clock the program ran, in milliseconds.
+    pub duration_ms: Option<i64>,
 }
 
 impl From<OverlookerRun> for OverlookerRunView {
@@ -342,11 +355,16 @@ impl From<OverlookerRun> for OverlookerRunView {
         Self {
             id: r.id,
             trigger_reason: r.trigger_reason,
+            trigger_event: r.trigger_event,
             started_at: r.started_at,
             finished_at: r.finished_at,
             outcome: r.outcome,
             summary: r.summary,
             actions: serde_json::from_str(&r.actions).unwrap_or(Value::Null),
+            stdout: r.stdout,
+            stderr: r.stderr,
+            exit_code: r.exit_code,
+            duration_ms: r.duration_ms,
         }
     }
 }

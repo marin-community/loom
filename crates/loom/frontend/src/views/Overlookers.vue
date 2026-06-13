@@ -87,14 +87,15 @@ async function run(o: Overlooker, dry: boolean) {
 // an optional repo pin. Everything else takes the server's defaults.
 const showForm = ref(false);
 const creating = ref(false);
-type TriggerKind = 'cron' | 'every' | 'event';
+// `auto` honours the script's declared subscription manifest (the recommended
+// default — the script decides what wakes it); the rest are explicit overrides.
+type TriggerKind = 'auto' | 'cron' | 'every' | 'on';
 const form = reactive({
   name: '',
-  triggerKind: 'cron' as TriggerKind,
+  triggerKind: 'auto' as TriggerKind,
   cron: '0 * * * *',
   every: '30m',
-  event: 'attention',
-  level: 'blocked',
+  on: 'pr.opened',
   // A builtin reference from the registry, or the literal 'custom' to free-type
   // a program file path into `customProgram`.
   program: 'builtin:status',
@@ -107,11 +108,10 @@ const form = reactive({
 
 function resetForm() {
   form.name = '';
-  form.triggerKind = 'cron';
+  form.triggerKind = 'auto';
   form.cron = '0 * * * *';
   form.every = '30m';
-  form.event = 'attention';
-  form.level = 'blocked';
+  form.on = 'pr.opened';
   form.program = 'builtin:status';
   form.customProgram = '';
   form.prompt = '';
@@ -120,23 +120,18 @@ function resetForm() {
   form.capabilities = { mark: true, escalate: true, nudge: false, interrupt: false, launch: false };
 }
 
-// Prefill the form from a builtin's suggested defaults (trigger cadence, scope,
-// capability grants) — the registry's starting point, freely editable after.
+// Prefill the form from a builtin's suggested defaults. The script declares its
+// own subscriptions, so default to honouring them (`auto`); the cron/every/on
+// fields are prefilled too, so switching to an explicit override is one click.
 function applyProgramDefaults(programRef: string) {
   const p = programs.value.find((x) => x.program === programRef);
   if (!p) return;
   const t = p.defaults?.trigger ?? {};
-  if (t.cron) {
-    form.triggerKind = 'cron';
-    form.cron = t.cron;
-  } else if (t.every) {
-    form.triggerKind = 'every';
-    form.every = t.every;
-  } else if (t.event) {
-    form.triggerKind = 'event';
-    form.event = t.event;
-    form.level = t.level ?? '';
-  }
+  form.triggerKind = 'auto';
+  if (t.cron) form.cron = t.cron;
+  if (t.every) form.every = t.every;
+  if (Array.isArray(t.on) && t.on.length) form.on = t.on.join(', ');
+  else if (t.event) form.on = t.level ? `${t.event}=${t.level}` : t.event;
   form.scopeAttention = p.defaults?.scope?.attention ?? '';
   const granted = p.defaults?.capabilities ?? [];
   for (const c of GRANTABLE_CAPABILITIES) form.capabilities[c] = granted.includes(c);
@@ -155,14 +150,23 @@ async function create() {
   creating.value = true;
   error.value = '';
   try {
-    const trigger: Record<string, string> = {};
-    if (form.triggerKind === 'cron' && form.cron.trim()) trigger.cron = form.cron.trim();
-    else if (form.triggerKind === 'every' && form.every.trim()) trigger.every = form.every.trim();
-    else if (form.triggerKind === 'event' && form.event.trim()) {
-      trigger.event = form.event.trim();
-      if (form.level.trim()) trigger.level = form.level.trim();
+    // `auto` omits the trigger entirely so the server reconciles it from the
+    // script's manifest; the explicit kinds build the trigger here. (A repo pin
+    // rides on `scope` below either way, so `auto` keeps repo scoping.)
+    let trigger: Record<string, unknown> | undefined;
+    if (form.triggerKind !== 'auto') {
+      const t: Record<string, unknown> = {};
+      if (form.triggerKind === 'cron' && form.cron.trim()) t.cron = form.cron.trim();
+      else if (form.triggerKind === 'every' && form.every.trim()) t.every = form.every.trim();
+      else if (form.triggerKind === 'on' && form.on.trim()) {
+        t.on = form.on
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+      if (form.repo.trim()) t.repo = form.repo.trim();
+      trigger = t;
     }
-    if (form.repo.trim()) trigger.repo = form.repo.trim();
 
     const scope: Record<string, string> = {};
     if (form.scopeAttention.trim()) scope.attention = form.scopeAttention.trim();
@@ -181,12 +185,13 @@ async function create() {
 
     const body: Record<string, unknown> = {
       name: form.name.trim(),
-      trigger,
       scope,
       program: programRef || 'builtin:status',
       params,
       capabilities,
     };
+    // Omit `trigger` for `auto` so the server reconciles from the manifest.
+    if (trigger !== undefined) body.trigger = trigger;
     await post('/overlookers', body);
     resetForm();
     showForm.value = false;
@@ -253,7 +258,7 @@ onMounted(() => {
         <label class="block text-xs text-muted mb-1">Trigger — what wakes a round</label>
         <div class="inline-flex rounded border border-line text-xs overflow-hidden mb-2">
           <button
-            v-for="k in (['cron', 'every', 'event'] as const)"
+            v-for="k in (['auto', 'cron', 'every', 'on'] as const)"
             :key="k"
             type="button"
             :class="[
@@ -262,11 +267,15 @@ onMounted(() => {
             ]"
             @click="form.triggerKind = k"
           >
-            {{ k === 'cron' ? 'Cron' : k === 'every' ? 'Every' : 'On event' }}
+            {{ k === 'auto' ? 'From script' : k === 'cron' ? 'Cron' : k === 'every' ? 'Every' : 'On events' }}
           </button>
         </div>
+        <p v-if="form.triggerKind === 'auto'" class="text-xs text-faint">
+          Wakes on the events the script subscribes to (its manifest) — the
+          recommended default, so the script decides what it reacts to.
+        </p>
         <input
-          v-if="form.triggerKind === 'cron'"
+          v-else-if="form.triggerKind === 'cron'"
           v-model="form.cron"
           placeholder="0 * * * *"
           autocomplete="off"
@@ -281,27 +290,21 @@ onMounted(() => {
           spellcheck="false"
           class="w-full rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent font-mono"
         />
-        <div v-else class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="block text-xs text-faint mb-1">Event kind</label>
-            <input
-              v-model="form.event"
-              placeholder="attention"
-              autocomplete="off"
-              spellcheck="false"
-              class="w-full rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent font-mono"
-            />
-          </div>
-          <div>
-            <label class="block text-xs text-faint mb-1">Level (optional)</label>
-            <input
-              v-model="form.level"
-              placeholder="blocked"
-              autocomplete="off"
-              spellcheck="false"
-              class="w-full rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent font-mono"
-            />
-          </div>
+        <div v-else>
+          <input
+            v-model="form.on"
+            placeholder="pr.merged, session.exited=error"
+            autocomplete="off"
+            spellcheck="false"
+            class="w-full rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent font-mono"
+          />
+          <p class="mt-1 text-xs text-faint">
+            Comma-separated trigger events:
+            <code>session.started/idle/exited/attention/stale</code>,
+            <code>triage.changed</code>,
+            <code>pr.opened/checks_red/checks_green/merged/review_changed</code>.
+            Append <code>=level</code> to filter (e.g. <code>session.attention=blocked</code>).
+          </p>
         </div>
       </div>
 

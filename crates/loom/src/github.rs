@@ -223,6 +223,32 @@ fn checks_went_red(prev_checks: Option<&str>, next: &GithubStatus) -> bool {
     next.checks.as_deref() == Some("failing") && prev_checks != Some("failing")
 }
 
+/// The mirror of [`checks_went_red`]: the rollup just transitioned **into**
+/// passing. The first sighting of an already-green PR counts as a transition.
+fn checks_went_green(prev_checks: Option<&str>, next: &GithubStatus) -> bool {
+    next.checks.as_deref() == Some("passing") && prev_checks != Some("passing")
+}
+
+/// Whether the PR just became visible as **open**: now `OPEN` and previously
+/// not (unseen, or reopened from `CLOSED`). Lets a watch act once when a
+/// session's PR first appears, rather than re-checking every poll.
+fn pr_just_opened(prev_state: Option<&str>, next: &GithubStatus) -> bool {
+    next.pr_state == "OPEN" && prev_state != Some("OPEN")
+}
+
+/// Whether the PR just **merged**: now `MERGED` and previously not.
+fn pr_just_merged(prev_state: Option<&str>, next: &GithubStatus) -> bool {
+    next.pr_state == "MERGED" && prev_state != Some("MERGED")
+}
+
+/// Whether the review decision changed to a new non-null value (an approval, a
+/// changes-requested, …). A decision dropping back to null (review no longer
+/// required) is not announced — there is nothing to react to.
+fn review_decision_changed(prev: Option<&GithubStatus>, next: &GithubStatus) -> bool {
+    next.review_decision.is_some()
+        && prev.map(|p| &p.review_decision) != Some(&next.review_decision)
+}
+
 /// Whether the `gh` CLI is usable on this machine. Probed once and cached — a
 /// missing `gh` is the common "GitHub integration off" case and shouldn't cost a
 /// process spawn on every poll.
@@ -359,19 +385,46 @@ async fn apply_snapshot(
         .ok();
     }
 
-    // Edge-detect the checks → failing transition and emit a one-shot `pr_red`
-    // event a reactive overlooker can match. Compared against the *prior* stored
-    // value so it fires once per transition, not every poll while it stays red.
-    if checks_went_red(prev.as_ref().and_then(|p| p.checks.as_deref()), snap) {
-        events::record(
-            &state.db,
-            &state.bus,
-            &branch.id,
+    // Edge-detect meaningful PR transitions and emit a one-shot event per
+    // transition (compared against the *prior* stored snapshot, so each fires
+    // once and not every poll while the condition persists). These are the
+    // surfaces watches subscribe to via `pr.*` triggers — so a PR labeller wakes
+    // on `pr.opened`, an archiver on `pr.merged`, a CI watcher on the check
+    // edges — instead of polling the fleet on a timer.
+    let prev_checks = prev.as_ref().and_then(|p| p.checks.as_deref());
+    let prev_state = prev.as_ref().map(|p| p.pr_state.as_str());
+    for (fire, kind, data) in [
+        (
+            pr_just_opened(prev_state, snap),
+            "pr_opened",
+            json!({ "pr": snap.pr_number }),
+        ),
+        (
+            pr_just_merged(prev_state, snap),
+            "pr_merged",
+            json!({ "pr": snap.pr_number }),
+        ),
+        (
+            checks_went_red(prev_checks, snap),
             "pr_red",
             json!({ "pr": snap.pr_number, "checks": "failing" }),
-        )
-        .await
-        .ok();
+        ),
+        (
+            checks_went_green(prev_checks, snap),
+            "pr_green",
+            json!({ "pr": snap.pr_number, "checks": "passing" }),
+        ),
+        (
+            review_decision_changed(prev.as_ref(), snap),
+            "pr_review",
+            json!({ "pr": snap.pr_number, "decision": snap.review_decision }),
+        ),
+    ] {
+        if fire {
+            events::record(&state.db, &state.bus, &branch.id, kind, data)
+                .await
+                .ok();
+        }
     }
 
     if archive_on_merge && snap.pr_state == "MERGED" && !session_mod::is_terminal(&session.status) {
@@ -502,6 +555,57 @@ mod tests {
             checks: checks.map(str::to_string),
             ..snapshot("OPEN")
         }
+    }
+
+    #[test]
+    fn checks_went_green_mirrors_red() {
+        let green = snapshot_with_checks(Some("passing"));
+        // not-passing → passing is the edge (including first-ever sighting).
+        assert!(checks_went_green(None, &green));
+        assert!(checks_went_green(Some("failing"), &green));
+        assert!(checks_went_green(Some("pending"), &green));
+        // Staying green does not re-fire; a non-passing new state never fires.
+        assert!(!checks_went_green(Some("passing"), &green));
+        assert!(!checks_went_green(
+            None,
+            &snapshot_with_checks(Some("failing"))
+        ));
+    }
+
+    #[test]
+    fn pr_open_and_merge_edges_fire_once() {
+        let open = snapshot("OPEN");
+        let merged = snapshot("MERGED");
+        // Opened: unseen → OPEN, or reopened from CLOSED.
+        assert!(pr_just_opened(None, &open));
+        assert!(pr_just_opened(Some("CLOSED"), &open));
+        assert!(!pr_just_opened(Some("OPEN"), &open));
+        // Merged: any prior non-merged state → MERGED, once.
+        assert!(pr_just_merged(Some("OPEN"), &merged));
+        assert!(pr_just_merged(None, &merged));
+        assert!(!pr_just_merged(Some("MERGED"), &merged));
+    }
+
+    #[test]
+    fn review_decision_change_fires_on_new_non_null_decision() {
+        let approved = GithubStatus {
+            review_decision: Some("APPROVED".to_string()),
+            ..snapshot("OPEN")
+        };
+        let changes = GithubStatus {
+            review_decision: Some("CHANGES_REQUESTED".to_string()),
+            ..snapshot("OPEN")
+        };
+        let dropped = GithubStatus {
+            review_decision: None,
+            ..snapshot("OPEN")
+        };
+        // A first decision and a decision that changes both fire.
+        assert!(review_decision_changed(None, &approved));
+        assert!(review_decision_changed(Some(&approved), &changes));
+        // The same decision does not re-fire; dropping back to null is silent.
+        assert!(!review_decision_changed(Some(&approved), &approved));
+        assert!(!review_decision_changed(Some(&approved), &dropped));
     }
 
     #[test]

@@ -2,6 +2,9 @@
 
 Read-only: records a would-label action per open PR missing the label
 (params.label, default 'weaver'). Labels are read via the gh CLI.
+
+Subscribes to `pr.opened` — it wakes when a session's PR first appears, on that
+one branch, instead of re-reading every session's labels on a timer.
 """
 
 import json
@@ -10,6 +13,9 @@ import subprocess
 from weaver_loom import Round
 
 DEFAULT_LABEL = "weaver"
+
+#: Wake when a PR opens — the engine reads this in register mode.
+TRIGGERS = {"on": ["pr.opened"]}
 
 
 def pr_labels(repo_root, pr_number):
@@ -30,10 +36,9 @@ def pr_labels(repo_root, pr_number):
     return [label.get("name", "") for label in reply.get("labels") or []]
 
 
-def main():
-    rnd = Round()
+def main(rnd):
     label = rnd.params.get("label") or DEFAULT_LABEL
-    for session in rnd.sessions():
+    for session in rnd.triggered_sessions():
         branch = session.get("branch") or {}
         github = branch.get("github") or {}
         if github.get("pr_state") != "OPEN":
@@ -52,4 +57,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    Round.main(main, TRIGGERS)

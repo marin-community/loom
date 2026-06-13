@@ -119,35 +119,57 @@ weaver already has a single event spine — the append-only `events` table that
 `weaver hook` writes and the monitor consumes on a watermark. The overlooker
 engine joins it as **another consumer**, and the trigger model collapses to:
 
-> A **trigger** is an event-match predicate. The engine consumes new events and,
-> for each, fires every overlooker whose trigger matches. **Cron is not a
-> separate mechanism — it is an event source.**
+> A **trigger** is a **subscription manifest** — a set of named events (plus an
+> optional schedule) the *script declares*. The engine consumes new events and,
+> for each, fires every overlooker subscribed to it. **Cron is not a separate
+> mechanism — it is an event source.**
+
+The manifest (stored in `trigger_spec`) carries `cron`/`every` (a schedule) and
+`on: [...]` (the normalized trigger events to subscribe to, each `name` or
+`name=level`), plus an optional `repo` filter. The script owns it: a watch runs
+in **register mode** (`WEAVER_OVERLOOKER_MODE=register`) and prints its
+manifest, which the engine reconciles onto the row whenever the watch is created
+or its program changes. So the script — not whoever wired it up — decides which
+events wake it (`Round.main(main, TRIGGERS)` in `weaver_loom`).
 
 Concretely the engine has two halves:
 
 - **The timer (a producer).** It keeps each scheduled overlooker's next-fire time
   (parsed with the [`croner`](https://github.com/Hexagon/croner-rust) crate) and,
   at fire time, writes a `cron` event into the stream — nothing more. A cron tick
-  is now a first-class, logged, SSE-broadcast event (`{kind: "cron", overlooker}`)
+  is a first-class, logged, SSE-broadcast event (`{kind: "cron", overlooker}`)
   you can see in the history, exactly like a hook.
 - **The dispatcher (a consumer).** It reads `events::since(watermark)` like the
-  monitor (its own independent watermark), and for each new event fires the
-  overlookers whose trigger matches: a scheduled overlooker matches its own `cron`
-  tick; a reactive one matches `attention=blocked`, a staleness signal, a PR
-  going red. `loom overlooker run` injects a `manual` trigger event. One dispatch
-  path, whatever woke it. A trigger may also carry a **`repo`** filter; when set,
-  the dispatcher only fires for events whose branch lives in that repo (and a
-  `cron` round scopes its survey to that repo), so an overlooker can be pinned to
-  a single project.
+  monitor (its own independent watermark). For each new raw event it **normalizes**
+  it into the watch-facing trigger vocabulary (`trigger_event_of`): a `tag` write
+  of the `attention` key → `session.attention`, a `status` transition →
+  `session.started`/`session.exited`, a `pr_merged` → `pr.merged`, and so on —
+  one place maps the internal stream to the stable names scripts subscribe to.
+  It then fires every overlooker whose manifest names that event. `loom
+  overlooker run` injects a `manual` event. One dispatch path, whatever woke it.
+  A trigger may also carry a **`repo`** filter; when set, the dispatcher only
+  fires for events whose branch lives in that repo, so an overlooker can be
+  pinned to a single project.
+
+The normalized vocabulary: **schedule** (`cron`); **session lifecycle**
+(`session.started`, `session.idle` — a finished turn —, `session.exited`,
+`session.attention`, `session.stale`); **triage** (`triage.changed`); and **PR**
+edges (`pr.opened`, `pr.checks_red`, `pr.checks_green`, `pr.merged`,
+`pr.review_changed`). The PR edges are emitted once per real transition by the
+GitHub poller's snapshot diff, so a watch wakes on the change, not on a poll.
 
 This is why **level-triggered** (the K8s lesson) matters and is now structural:
-the matched event is only a *nudge to look*. The round always observes the
-*current* scoped fleet and reconciles — it never "handles" the specific event.
-So firing twice is idempotent, a restart that misses events self-heals on the
-next tick, and a session legitimately waiting isn't hammered by an edge-triggered
-nag. The one accommodation the events table needs: a **system scope** for
-fleet-global rows (a reserved branch id, or a nullable `branch_id`) so a `cron`
-tick — which belongs to no branch — lives in the same stream.
+the matched event is only a *nudge to look*. The round reconciles the *current*
+scoped fleet — it never "handles" the specific event, so firing twice is
+idempotent and a restart that misses events self-heals on the next tick. But the
+round is also handed the **triggering session** (the branch the event named) as
+its `trigger` context, so a reactive program can survey just that one session
+(`rnd.triggered_sessions()`) instead of the whole fleet — the difference between
+one GitHub call and one per session every tick. A `cron`/`manual` tick names no
+session, so `triggered_sessions()` falls back to the full survey. The one
+accommodation the events table needs: a **system scope** for fleet-global rows
+(a reserved branch id) so a `cron` tick — which belongs to no branch — lives in
+the same stream.
 
 ### The mark: a separate tag
 
@@ -245,24 +267,31 @@ Two authoring languages sit on that one substrate:
   audit trail, and capability gate as a custom one.
 
 ```python
-import weaver
+from weaver_loom import Round
 
-@weaver.on_cron("0 * * * *")               # the trigger — a cron event source
-def hourly_status(ov):
-    for s in ov.sessions(attention="!ok"): # the scope, queried over the fleet
-        if s.idle_minutes() > 30 and s.pr_checks() == "failing":
-            s.mark("attention", "idle 30m with red CI")        # a pure rule
-        else:
-            verdict = ov.run_agent(           # …or a fresh agent for judgement
-                f"Is this session stuck? Screen:\n{s.preview(200)}")
-            s.mark(verdict.level, verdict.note)
-            if verdict.level != "ok" and ov.can("nudge"):
-                s.nudge(verdict.suggestion)
+TRIGGERS = {"cron": "0 * * * *"}           # the manifest — what wakes a round
+
+def hourly_status(rnd):
+    for s in rnd.triggered_sessions():     # the triggering session, else the fleet
+        gh = (s.get("branch") or {}).get("github") or {}
+        if gh.get("checks") == "failing":
+            rnd.client.mark(s["id"], "attention", "red CI", by=rnd.name)  # a rule
+        elif rnd.params.get("prompt"):
+            out = rnd.client.agent(          # …or a fresh agent for judgement
+                f"Is this session stuck? Screen:\n{rnd.client.preview(s['id'], 200)}")
+            # parse_judgement(out) → (level, note); mark accordingly
+    rnd.finish(f"surveyed {rnd.surveyed}")
+
+if __name__ == "__main__":
+    Round.main(hourly_status, TRIGGERS)
 ```
 
-`@weaver.on_cron(...)` / `@weaver.on_event(...)` declare the trigger the engine
-registers; the body is the round. The binding enforces capabilities — a program
-without `nudge` can't call `s.nudge` — and the per-round budget kills a runaway.
+The module-level `TRIGGERS` is the subscription manifest; `Round.main` handles
+both engine modes — in **register mode** it prints `TRIGGERS` (the engine stores
+it), and in run mode it constructs the `Round` and calls the function. The
+binding enforces capabilities — a program without `nudge` can't call
+`client.nudge` — and the per-round budget kills a runaway. A reactive watch
+subscribes to events instead of a clock, e.g. `TRIGGERS = {"on": ["pr.merged"]}`.
 
 ## Authoring & iteration (agent-friendly)
 
@@ -367,9 +396,12 @@ through the same `weaver-api` the out-of-process programs use.
   `params` (JSON for a stock program / the prompt), `capabilities` (JSON set),
   `model`, `effort`, `cooldown_secs`, `last_run_at`, `next_run_at`,
   `warm_session_id` (nullable), `created_at`, `updated_at`.
-- `overlooker_runs` — `id`, `overlooker_id`, `trigger_reason`, `started_at`,
-  `finished_at`, `outcome` (`ok|noop|skipped|error`), `summary`, `actions`
-  (JSON), `created_at`. The audit trail + the panel's history.
+- `overlooker_runs` — `id`, `overlooker_id`, `trigger_reason`, `trigger_event`
+  (the normalized event that woke it), `started_at`, `finished_at`, `outcome`
+  (`ok|noop|skipped|error`), `summary`, `actions` (JSON), plus the captured
+  **execution log** — `stdout`, `stderr`, `exit_code`, `duration_ms` — so the
+  panel shows exactly what each run printed and returned, and `created_at`. The
+  audit trail + the panel's history.
 - **`tags` table** — one row per `(branch_id, key)` (`value/note/set_by/set_at`)
   with a registry of well-known keys (`attention`, `triage`); a `tag` event kind
   carries `{key, value, note, by}`. The overlooker's mark is the `triage` key.
@@ -409,7 +441,8 @@ the "separate panel & system" the problem asks for, API-first
 - **List** — each overlooker: trigger (next fire / last run), enabled toggle,
   last outcome, a **Run now** (and **Dry-run**) button.
 - **Detail** — the program (the file, or the declarative config editor), the
-  **round history** (`overlooker_runs` with summaries and the marks made), and,
+  **round history** (`overlooker_runs`: click a run to see its marks plus the
+  captured stdout/stderr, exit code, and duration — the execution log), and,
   for an overlooker that keeps a warm session, its **live terminal** via the
   existing `AgentTerminal` component.
 - **On the fleet** — every session's resolved attention signal carries the

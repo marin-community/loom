@@ -81,6 +81,13 @@ async function loadRuns() {
   }
 }
 
+// A round's wall-clock as a compact label (e.g. "42ms", "1.3s", "12s").
+function formatMs(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const s = ms / 1000;
+  return `${s.toFixed(s < 10 ? 1 : 0)}s`;
+}
+
 async function adopt(o: Overlooker) {
   ov.value = o;
 }
@@ -448,47 +455,79 @@ onMounted(() => {
             v-for="r in runs"
             :key="r.id"
             data-testid="overlooker-run-row"
-            class="rounded border border-line bg-surface p-3"
+            class="rounded border border-line bg-surface"
           >
-            <div class="flex items-center gap-2 flex-wrap">
-              <OutcomeBadge :outcome="r.outcome" />
-              <span class="text-sm text-muted">{{ r.summary || 'No summary.' }}</span>
-              <span class="ml-auto text-xs text-faint">{{ timeAgo(r.started_at) }}</span>
-            </div>
-            <div class="mt-1 flex items-center gap-2 text-xs text-faint">
-              <span class="meta-chip">{{ r.trigger_reason }}</span>
-              <button
-                v-if="r.actions && r.actions.length"
-                type="button"
-                data-testid="overlooker-run-actions-toggle"
-                class="text-accent hover:underline"
-                @click="expanded[r.id] = !expanded[r.id]"
-              >
-                {{ expanded[r.id] ? 'Hide' : 'Show' }} {{ r.actions.length }}
-                action{{ r.actions.length === 1 ? '' : 's' }}
-              </button>
-              <span v-else>no actions</span>
-            </div>
-
-            <!-- Expanded action detail: the marks / nudges / would-dos. -->
-            <ul
-              v-if="expanded[r.id] && r.actions && r.actions.length"
-              data-testid="overlooker-run-actions"
-              class="mt-2 space-y-1 border-t border-line pt-2"
+            <!-- The row: click anywhere to expand the run's execution log. -->
+            <button
+              type="button"
+              data-testid="overlooker-run-toggle"
+              class="w-full p-3 text-left"
+              @click="expanded[r.id] = !expanded[r.id]"
             >
-              <li
-                v-for="(a, j) in r.actions"
-                :key="j"
-                class="flex items-start gap-2 text-xs"
-              >
-                <span class="meta-chip shrink-0">
-                  <span v-if="a.would" class="text-faint">would </span>{{ a.action || a.would || 'action' }}
-                  <span v-if="a.level" class="text-faint">={{ a.level }}</span>
+              <div class="flex items-center gap-2 flex-wrap">
+                <OutcomeBadge :outcome="r.outcome" />
+                <span class="text-sm text-muted">{{ r.summary || 'No summary.' }}</span>
+                <span class="ml-auto text-xs text-faint">{{ timeAgo(r.started_at) }}</span>
+              </div>
+              <div class="mt-1 flex items-center gap-2 text-xs text-faint flex-wrap">
+                <span class="meta-chip">{{ r.trigger_reason || r.trigger_event || 'manual' }}</span>
+                <span v-if="r.duration_ms != null" class="meta-chip">{{ formatMs(r.duration_ms) }}</span>
+                <span v-if="r.exit_code != null" class="meta-chip">exit {{ r.exit_code }}</span>
+                <span v-if="r.actions && r.actions.length">
+                  {{ r.actions.length }} action{{ r.actions.length === 1 ? '' : 's' }}
                 </span>
-                <span v-if="a.session" class="font-mono text-faint shrink-0">{{ a.session }}</span>
-                <span class="text-muted min-w-0">{{ a.note || a.text || '' }}</span>
-              </li>
-            </ul>
+                <span class="ml-auto text-accent">{{ expanded[r.id] ? 'Hide' : 'Details' }}</span>
+              </div>
+            </button>
+
+            <!-- Expanded: the actions taken, then the captured stdout/stderr —
+                 the execution log of exactly what the script printed. -->
+            <div
+              v-if="expanded[r.id]"
+              data-testid="overlooker-run-detail"
+              class="border-t border-line p-3 space-y-3"
+            >
+              <ul
+                v-if="r.actions && r.actions.length"
+                data-testid="overlooker-run-actions"
+                class="space-y-1"
+              >
+                <li
+                  v-for="(a, j) in r.actions"
+                  :key="j"
+                  class="flex items-start gap-2 text-xs"
+                >
+                  <span class="meta-chip shrink-0">
+                    <span v-if="a.would" class="text-faint">would </span>{{ a.action || a.would || 'action' }}
+                    <span v-if="a.level" class="text-faint">={{ a.level }}</span>
+                  </span>
+                  <span v-if="a.session" class="font-mono text-faint shrink-0">{{ a.session }}</span>
+                  <span class="text-muted min-w-0">{{ a.note || a.text || '' }}</span>
+                </li>
+              </ul>
+
+              <div v-if="r.stdout">
+                <h3 class="text-2xs font-semibold uppercase tracking-wider text-faint mb-1">stdout</h3>
+                <pre
+                  data-testid="overlooker-run-stdout"
+                  class="max-h-64 overflow-auto rounded bg-input p-2 text-xs font-mono whitespace-pre-wrap"
+                >{{ r.stdout }}</pre>
+              </div>
+              <div v-if="r.stderr">
+                <h3 class="text-2xs font-semibold uppercase tracking-wider text-faint mb-1">stderr</h3>
+                <pre
+                  data-testid="overlooker-run-stderr"
+                  class="max-h-64 overflow-auto rounded bg-input p-2 text-xs font-mono whitespace-pre-wrap text-block"
+                >{{ r.stderr }}</pre>
+              </div>
+
+              <p
+                v-if="!(r.actions && r.actions.length) && !r.stdout && !r.stderr"
+                class="text-xs text-faint"
+              >
+                No actions or output recorded.
+              </p>
+            </div>
           </li>
         </ul>
       </section>

@@ -201,13 +201,63 @@ pub async fn tick_timer(state: &AppState) {
     }
 }
 
+/// The triggering context handed to a round: the normalized event that woke it,
+/// its level, and the one session/branch/repo it concerns (a reactive event
+/// names one branch; a `cron`/`manual` tick names none). It rides in the round
+/// config as `trigger`, so a reactive program can act on just the session that
+/// changed — `rnd.triggered_sessions()` — instead of re-surveying the whole
+/// fleet, which is what keeps a watch like the PR labeller from hitting the
+/// GitHub API once per session every tick.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct TriggerCtx {
+    event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
+}
+
+impl TriggerCtx {
+    /// The context for a scheduled (`cron`/`every`) round — no single session.
+    fn scheduled() -> Self {
+        Self {
+            event: "cron".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// The context for an operator "run now" — no single session.
+    pub fn manual() -> Self {
+        Self {
+            event: "manual".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// The context for a reactive round woken by `event` — public so a test can
+    /// drive [`fire`] directly without routing a stream event through
+    /// [`dispatch`].
+    pub fn reactive(event: impl Into<String>) -> Self {
+        Self {
+            event: event.into(),
+            ..Default::default()
+        }
+    }
+}
+
 /// Route one new event to the overlookers it should fire.
 ///
 /// * a `cron` system tick carries `{overlooker}` → fire that one (scheduled);
 /// * a `manual` system tick carries `{overlooker, dry_run, reason}` → fire it
 ///   (operator "run now"), bypassing cooldown;
-/// * any other event is a reactive nudge: for each enabled overlooker with a
-///   matching reactive trigger, fire a (level-triggered) re-survey.
+/// * any other event is **normalized** to a trigger-event name (e.g. a `tag`
+///   write of the `attention` key → `session.attention`, a `pr_merged` →
+///   `pr.merged`): for each enabled overlooker whose subscription set names it,
+///   fire a (level-triggered) re-survey, handing it the triggering session.
 ///
 /// Public so a test (and the engine loop) can route a single event without the
 /// full tick cadence; in production only [`run`] calls it.
@@ -215,7 +265,15 @@ pub async fn dispatch(state: &AppState, in_flight: &InFlight, ev: &events::Event
     match ev.kind.as_str() {
         "cron" => {
             if let Some(o) = resolve_target(state, ev).await {
-                let _ = fire(state, in_flight, &o, "cron", false).await;
+                let _ = fire(
+                    state,
+                    in_flight,
+                    &o,
+                    "cron",
+                    false,
+                    &TriggerCtx::scheduled(),
+                )
+                .await;
             }
         }
         "manual" => {
@@ -230,22 +288,21 @@ pub async fn dispatch(state: &AppState, in_flight: &InFlight, ev: &events::Event
                     .get("reason")
                     .and_then(Value::as_str)
                     .unwrap_or("manual");
-                let _ = fire(state, in_flight, &o, reason, dry_run).await;
+                let _ = fire(state, in_flight, &o, reason, dry_run, &TriggerCtx::manual()).await;
             }
         }
         // The engine's own audit rows (and a `cron`/`manual` already handled)
         // must never re-trigger a reactive round, or it would chase its tail.
         "overlooker" => {}
         ev_kind => {
-            // Reactive: resolve the trigger's match `(kind, level, repo)`. A tag
-            // write is one `"tag"` event carrying `{key, value}` — its key is the
-            // match-kind and value the level, so a `{event:"attention",
-            // level:"blocked"}` trigger fires off the `attention` tag event. Every
-            // other reactive kind (`stale`, `pr_red`, hook-derived) matches on the
-            // event kind with the level from `data.level`. The repo is the
-            // repo_root of the event's branch; system rows (no branch) carry no
-            // repo and match only repo-less triggers.
-            let (match_kind, level, repo) = reactive_context(state, ev, ev_kind).await;
+            // Reactive: normalize the raw stream event into the watch-facing
+            // trigger vocabulary. An event that maps to no trigger event (a
+            // free-form tag, a `created`/`launching` status) wakes nothing.
+            let Some((event, level)) = trigger_event_of(ev, ev_kind) else {
+                return;
+            };
+            let repo = event_repo(state, ev).await;
+            let session = triggering_session(state, ev).await;
             let overlookers = match ov::list_enabled(&state.db).await {
                 Ok(o) => o,
                 Err(e) => {
@@ -255,12 +312,72 @@ pub async fn dispatch(state: &AppState, in_flight: &InFlight, ev: &events::Event
             };
             for o in overlookers {
                 if o.trigger()
-                    .matches_event(&match_kind, level.as_deref(), repo.as_deref())
+                    .matches_event(&event, level.as_deref(), repo.as_deref())
                 {
-                    let _ = fire(state, in_flight, &o, &format!("event:{match_kind}"), false).await;
+                    let ctx = TriggerCtx {
+                        event: event.clone(),
+                        level: level.clone(),
+                        session: session.clone(),
+                        branch: (!events::is_system(&ev.branch_id)).then(|| ev.branch_id.clone()),
+                        repo: repo.clone(),
+                    };
+                    let _ =
+                        fire(state, in_flight, &o, &format!("event:{event}"), false, &ctx).await;
                 }
             }
         }
+    }
+}
+
+/// Normalize a raw stream event into its watch-facing **trigger event** name and
+/// level, or `None` when the raw event isn't a subscription surface. This is the
+/// one place the internal event stream (`status`/`hook`/`tag`/`stale`/`pr_*`) is
+/// mapped to the stable, documented vocabulary scripts subscribe to — adding a
+/// new trigger event is a line here, not a change every script must learn.
+fn trigger_event_of(ev: &events::Event, ev_kind: &str) -> Option<(String, Option<String>)> {
+    let str_field = |key: &str| ev.data.get(key).and_then(Value::as_str);
+    match ev_kind {
+        // A tag write carries `{key, value}`: the agent's `attention` self-report
+        // and a watch's `triage` mark are the two trigger surfaces; a cleared tag
+        // (empty value) presents level `ok`.
+        "tag" => {
+            let level = str_field("value")
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+                .or_else(|| Some("ok".to_string()));
+            match str_field("key")? {
+                "attention" => Some(("session.attention".to_string(), level)),
+                "triage" => Some(("triage.changed".to_string(), level)),
+                _ => None,
+            }
+        }
+        // Status transitions are edge-emitted (only on real change): `running`
+        // is the agent starting work; the terminal states are an exit (the level
+        // names which).
+        "status" => match str_field("status")? {
+            "running" => Some(("session.started".to_string(), None)),
+            status @ ("done" | "error" | "archived" | "orphaned") => {
+                Some(("session.exited".to_string(), Some(status.to_string())))
+            }
+            _ => None,
+        },
+        // The `idle` Claude hook is a finished turn — the closest signal to
+        // "round complete". `working`/`waiting`/`session-start` drive status and
+        // attention instead, so they aren't duplicated here.
+        "hook" => match str_field("event")? {
+            "idle" => Some(("session.idle".to_string(), None)),
+            _ => None,
+        },
+        "stale" => Some(("session.stale".to_string(), None)),
+        "pr_red" => Some(("pr.checks_red".to_string(), None)),
+        "pr_green" => Some(("pr.checks_green".to_string(), None)),
+        "pr_opened" => Some(("pr.opened".to_string(), None)),
+        "pr_merged" => Some(("pr.merged".to_string(), None)),
+        "pr_review" => Some((
+            "pr.review_changed".to_string(),
+            str_field("decision").map(str::to_string),
+        )),
+        _ => None,
     }
 }
 
@@ -272,53 +389,35 @@ async fn resolve_target(state: &AppState, ev: &events::Event) -> Option<Overlook
     o.enabled.then_some(o)
 }
 
-/// The `(match_kind, level, repo)` an event presents for reactive matching.
-///
-/// * For a `"tag"` event the match-kind is the tag's `key` and the level its
-///   `value` (an `attention` tag with value `blocked` matches a `{event:
-///   "attention", level:"blocked"}` trigger). A cleared tag (empty value) yields
-///   no level, matching only a level-agnostic `{event:"<key>"}` trigger.
-/// * For every other reactive kind the match-kind is the event kind itself and
-///   the level comes from `data.level`.
-///
-/// `repo` is the originating branch's `repo_root`; system events have no branch
-/// and so no repo.
-async fn reactive_context(
-    state: &AppState,
-    ev: &events::Event,
-    ev_kind: &str,
-) -> (String, Option<String>, Option<String>) {
-    let (match_kind, level) = if ev_kind == "tag" {
-        let key = ev
-            .data
-            .get("key")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let level = ev
-            .data
-            .get("value")
-            .and_then(Value::as_str)
-            .filter(|v| !v.is_empty())
-            .map(str::to_string);
-        (key, level)
-    } else {
-        let level = ev
-            .data
-            .get("level")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        (ev_kind.to_string(), level)
-    };
+/// The `repo_root` an event originates from — the originating branch's repo, for
+/// the trigger's optional repo filter. System events have no branch, so no repo.
+async fn event_repo(state: &AppState, ev: &events::Event) -> Option<String> {
     if events::is_system(&ev.branch_id) {
-        return (match_kind, level, None);
+        return None;
     }
-    let repo = branch_mod::get(&state.db, &ev.branch_id)
+    branch_mod::get(&state.db, &ev.branch_id)
         .await
         .ok()
         .flatten()
-        .map(|b| b.repo_root);
-    (match_kind, level, repo)
+        .map(|b| b.repo_root)
+}
+
+/// The session a reactive event concerns: the explicit `data.session` when the
+/// event carries one (e.g. `stale`), else the active session of the event's
+/// branch. `None` for a system event. Handed to the round so it can act on the
+/// one session that changed.
+async fn triggering_session(state: &AppState, ev: &events::Event) -> Option<String> {
+    if let Some(sid) = ev.data.get("session").and_then(Value::as_str) {
+        return Some(sid.to_string());
+    }
+    if events::is_system(&ev.branch_id) {
+        return None;
+    }
+    session_mod::active_for_branch(&state.db, &ev.branch_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|s| s.id)
 }
 
 // ---------------------------------------------------------------------------
@@ -344,6 +443,7 @@ pub async fn fire(
     o: &Overlooker,
     trigger_reason: &str,
     dry_run: bool,
+    ctx: &TriggerCtx,
 ) -> Option<i64> {
     // 1. No-overlap: claim the in-flight slot or drop silently. A dropped round
     //    is intentionally not a run row — it never started.
@@ -373,6 +473,7 @@ pub async fn fire(
                     state,
                     o,
                     trigger_reason,
+                    &ctx.event,
                     &format!("cooldown: {cooldown}s gap not elapsed"),
                 )
                 .await;
@@ -381,7 +482,7 @@ pub async fn fire(
     }
 
     // Open the run row; everything from here closes it via `finish_run`.
-    let run_id = match ov::start_run(&state.db, &o.id, trigger_reason).await {
+    let run_id = match ov::start_run(&state.db, &o.id, trigger_reason, &ctx.event).await {
         Ok(id) => id,
         Err(e) => {
             tracing::warn!(overlooker = %o.id, "overlooker: opening run row failed: {e}");
@@ -396,25 +497,17 @@ pub async fn fire(
         .max(1);
     let result = tokio::time::timeout(
         Duration::from_secs(timeout_secs as u64),
-        run_program(state, o, dry_run),
+        run_program(state, o, dry_run, ctx),
     )
     .await;
 
-    let (outcome, summary, actions) = match result {
-        Ok(Ok(r)) => (r.outcome, r.summary, r.actions),
-        Ok(Err(e)) => (
-            "error".to_string(),
-            format!("round failed: {e}"),
-            Value::Array(vec![]),
-        ),
-        Err(_) => (
-            "error".to_string(),
-            format!("round exceeded {timeout_secs}s budget"),
-            Value::Array(vec![]),
-        ),
+    let round = match result {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => RoundResult::failed(format!("round failed: {e}")),
+        Err(_) => RoundResult::failed(format!("round exceeded {timeout_secs}s budget")),
     };
 
-    let _ = ov::finish_run(&state.db, run_id, &outcome, &summary, &actions).await;
+    let _ = ov::finish_run(&state.db, run_id, &round.record()).await;
     // Stamp the schedule: last_run_at = now; advance next_run_at for a scheduled
     // overlooker (a reactive one keeps None).
     let next = next_fire(o, now).map(iso);
@@ -429,10 +522,26 @@ async fn record_skipped(
     state: &AppState,
     o: &Overlooker,
     trigger_reason: &str,
+    trigger_event: &str,
     summary: &str,
 ) -> Option<i64> {
-    let run_id = ov::start_run(&state.db, &o.id, trigger_reason).await.ok()?;
-    let _ = ov::finish_run(&state.db, run_id, "skipped", summary, &Value::Array(vec![])).await;
+    let run_id = ov::start_run(&state.db, &o.id, trigger_reason, trigger_event)
+        .await
+        .ok()?;
+    let _ = ov::finish_run(
+        &state.db,
+        run_id,
+        &ov::RunRecord {
+            outcome: "skipped",
+            summary,
+            actions: &Value::Array(vec![]),
+            stdout: "",
+            stderr: "",
+            exit_code: None,
+            duration_ms: None,
+        },
+    )
+    .await;
     Some(run_id)
 }
 
@@ -440,41 +549,79 @@ async fn record_skipped(
 // The program substrate — the subprocess script executor
 // ---------------------------------------------------------------------------
 
-/// The result of running a program: an outcome, a one-line human summary, and the
-/// JSON array of actions for the run's audit trail.
+/// The result of running a program: the outcome + one-line summary + actions
+/// for the audit trail, plus the captured execution log (stdout/stderr tails,
+/// the interpreter exit code, and the wall-clock it ran).
 struct RoundResult {
     outcome: String,
     summary: String,
     actions: Value,
+    stdout: String,
+    stderr: String,
+    exit_code: Option<i64>,
+    duration_ms: Option<i64>,
 }
 
-/// Dispatch to the program the overlooker names: a builtin **script**
+impl RoundResult {
+    /// A failed round with no captured output — a guardrail (timeout) or a spawn
+    /// error that produced no streams. The script's own non-zero exit is a
+    /// different path: [`run_script`] returns an `error` result that *does* carry
+    /// the streams, so the execution log shows what it printed.
+    fn failed(summary: String) -> Self {
+        Self {
+            outcome: "error".to_string(),
+            summary,
+            actions: Value::Array(vec![]),
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            duration_ms: None,
+        }
+    }
+
+    /// Borrow this result as the [`ov::RunRecord`] `finish_run` stores.
+    fn record(&self) -> ov::RunRecord<'_> {
+        ov::RunRecord {
+            outcome: &self.outcome,
+            summary: &self.summary,
+            actions: &self.actions,
+            stdout: &self.stdout,
+            stderr: &self.stderr,
+            exit_code: self.exit_code,
+            duration_ms: self.duration_ms,
+        }
+    }
+}
+
+/// Resolve the program an overlooker names into its script source: a builtin
 /// embedded from [`crate::builtins`], or a custom program file (an absolute
-/// path, conventionally under `~/.weaver/overlookers/`) — both run on
-/// [`run_script`].
+/// path, conventionally under `~/.weaver/overlookers/`). A bare relative path
+/// or unknown builtin errors.
+fn resolve_source(program: &str) -> anyhow::Result<ScriptSource> {
+    if let Some(source) = crate::builtins::find(program).map(|b| b.source) {
+        return Ok(ScriptSource::Embedded {
+            file_name: program_file_name(program),
+            source,
+        });
+    }
+    let path = std::path::PathBuf::from(program);
+    if path.is_absolute() {
+        return Ok(ScriptSource::File(path));
+    }
+    Err(anyhow::anyhow!(
+        "unknown overlooker program '{program}' — expected 'builtin:<name>' or an absolute path"
+    ))
+}
+
+/// Run the program the overlooker names for one round, handing it the triggering
+/// context so a reactive program can scope to the session that changed.
 async fn run_program(
     state: &AppState,
     o: &Overlooker,
     dry_run: bool,
+    ctx: &TriggerCtx,
 ) -> anyhow::Result<RoundResult> {
-    if let Some(source) = crate::builtins::find(&o.program).map(|b| b.source) {
-        let file_name = program_file_name(&o.program);
-        return run_script(
-            state,
-            o,
-            dry_run,
-            ScriptSource::Embedded { file_name, source },
-        )
-        .await;
-    }
-    let path = std::path::PathBuf::from(&o.program);
-    if path.is_absolute() {
-        return run_script(state, o, dry_run, ScriptSource::File(path)).await;
-    }
-    Err(anyhow::anyhow!(
-        "unknown overlooker program '{}' — expected 'builtin:<name>' or an absolute path",
-        o.program
-    ))
+    run_script(state, o, dry_run, resolve_source(&o.program)?, ctx).await
 }
 
 /// A scratch file name for an embedded builtin: `builtin:pr-label` →
@@ -538,17 +685,111 @@ async fn run_script(
     o: &Overlooker,
     dry_run: bool,
     src: ScriptSource,
+    ctx: &TriggerCtx,
 ) -> anyhow::Result<RoundResult> {
-    // One scratch dir per round: the vendored module always lands here (for
+    let config = json!({
+        "id": o.id,
+        "name": o.name,
+        "program": o.program,
+        "params": o.params(),
+        "scope": serde_json::to_value(o.scope()).unwrap_or(Value::Null),
+        "capabilities": o.capabilities(),
+        "model": o.model,
+        "effort": o.effort,
+        "dry_run": dry_run,
+        "mode": "run",
+        "trigger": serde_json::to_value(ctx).unwrap_or(Value::Null),
+    });
+
+    // A spawn / scratch-setup failure (no interpreter, unreadable file) is a
+    // round error with no streams — propagated up; the script's own non-zero
+    // exit is recorded below *with* its captured output, so the log shows it.
+    let out = spawn_script(state, &src, &config).await?;
+    let stdout = cap_stream(&out.stdout);
+    let stderr = cap_stream(&out.stderr);
+    let duration_ms = Some(out.duration_ms);
+
+    if !out.success {
+        return Ok(RoundResult {
+            outcome: "error".to_string(),
+            summary: format!(
+                "script exited with {}: {}",
+                out.exit_code.unwrap_or(-1),
+                tail(&out.stderr, 400)
+            ),
+            actions: Value::Array(vec![]),
+            stdout,
+            stderr,
+            exit_code: out.exit_code,
+            duration_ms,
+        });
+    }
+
+    let result = match parse_round_result(&out.stdout) {
+        Some(parsed) => RoundResult {
+            outcome: parsed.outcome,
+            summary: parsed.summary,
+            actions: parsed.actions,
+            stdout,
+            stderr,
+            exit_code: out.exit_code,
+            duration_ms,
+        },
+        None => RoundResult {
+            outcome: "error".to_string(),
+            summary: format!(
+                "script printed no result JSON object ({{outcome, summary, actions}}); stdout: {}; stderr: {}",
+                tail(&out.stdout, 200),
+                tail(&out.stderr, 200)
+            ),
+            actions: Value::Array(vec![]),
+            stdout,
+            stderr,
+            exit_code: out.exit_code,
+            duration_ms,
+        },
+    };
+    Ok(result)
+}
+
+/// The captured output of one script spawn: its exit status, stdout/stderr, and
+/// the wall-clock it ran. Shared by the round executor and register-mode
+/// manifest evaluation.
+struct ScriptOutput {
+    success: bool,
+    exit_code: Option<i64>,
+    stdout: String,
+    stderr: String,
+    duration_ms: i64,
+}
+
+/// Spawn a script subprocess and capture its output. An env-stripped process
+/// (the lint-review precedent, like [`crate::agent::run_oneshot`]) that reaches
+/// the fleet only through the loom REST API: `$WEAVER_API` carries the daemon's
+/// own address and `$WEAVER_OVERLOOKER` the JSON `config`; the vendored
+/// `weaver_loom` module rides `PYTHONPATH` so a program imports the API layer
+/// with no install step. The interpreter is `python3`, or `uv run --script` when
+/// the script declares PEP 723 inline metadata and `uv` is installed.
+///
+/// `config.mode` selects what the script does: `run` executes a round (and is
+/// expected to print `{outcome, summary, actions}`); `register` asks it to print
+/// its subscription manifest instead. `kill_on_drop` reaps the subprocess if the
+/// caller's budget cancels the future.
+async fn spawn_script(
+    state: &AppState,
+    src: &ScriptSource,
+    config: &Value,
+) -> anyhow::Result<ScriptOutput> {
+    // One scratch dir per spawn: the vendored module always lands here (for
     // PYTHONPATH), an embedded builtin's source too (so a traceback carries a
-    // real file/line). Removed when the round ends.
+    // real file/line). Removed when the spawn ends.
     let scratch = tempfile::tempdir().map_err(|e| anyhow::anyhow!("creating scratch dir: {e}"))?;
     let module = scratch.path().join("weaver_loom.py");
     tokio::fs::write(&module, crate::builtins::PYTHON_MODULE)
         .await
         .map_err(|e| anyhow::anyhow!("writing {}: {e}", module.display()))?;
 
-    let (script_path, source) = match &src {
+    let (script_path, source) = match src {
         ScriptSource::Embedded { file_name, source } => {
             let path = scratch.path().join(file_name);
             tokio::fs::write(&path, source)
@@ -571,18 +812,11 @@ async fn run_script(
         _ => scratch.path().display().to_string(),
     };
 
-    let config = json!({
-        "id": o.id,
-        "name": o.name,
-        "program": o.program,
-        "params": o.params(),
-        "scope": serde_json::to_value(o.scope()).unwrap_or(Value::Null),
-        "capabilities": o.capabilities(),
-        "model": o.model,
-        "effort": o.effort,
-        "dry_run": dry_run,
-    });
-
+    let mode = config
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("run")
+        .to_string();
     let interpreter = if has_pep723(&source) && uv_available().await {
         "uv"
     } else {
@@ -596,6 +830,7 @@ async fn run_script(
         .arg(&script_path)
         .env("WEAVER_API", api_base(&state.addr))
         .env("WEAVER_OVERLOOKER", config.to_string())
+        .env("WEAVER_OVERLOOKER_MODE", &mode)
         .env("PYTHONPATH", pythonpath)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -610,28 +845,45 @@ async fn run_script(
         command.env_remove(key);
     }
 
+    let started = std::time::Instant::now();
     let out = command.output().await.map_err(|e| {
-        anyhow::anyhow!(
-            "spawning {interpreter} for '{}' failed: {e} (is {interpreter} installed?)",
-            o.program
-        )
+        anyhow::anyhow!("spawning {interpreter} failed: {e} (is {interpreter} installed?)")
     })?;
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if !out.status.success() {
+    Ok(ScriptOutput {
+        success: out.status.success(),
+        exit_code: out.status.code().map(i64::from),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        duration_ms: started.elapsed().as_millis() as i64,
+    })
+}
+
+/// Evaluate a program's **subscription manifest** by running it in register
+/// mode: the script prints its `{cron?, every?, on:[...]}` declaration instead
+/// of running a round, and that becomes the watch's stored trigger. Returns
+/// `None` when the program isn't a manifest-declaring script (a legacy script
+/// that prints a round result), so the caller keeps the existing/default
+/// trigger. Errors only on a spawn failure or a non-zero register exit.
+///
+/// This is the reconcile step: the engine calls it when a watch is created or
+/// its program changes, so the script — not whoever wired it up — owns which
+/// events wake it.
+pub async fn evaluate_manifest(
+    state: &AppState,
+    program: &str,
+    params: &Value,
+) -> anyhow::Result<Option<ov::Trigger>> {
+    let src = resolve_source(program)?;
+    let config = json!({ "mode": "register", "program": program, "params": params });
+    let out = spawn_script(state, &src, &config).await?;
+    if !out.success {
         anyhow::bail!(
-            "script exited with {}: {}",
-            out.status.code().unwrap_or(-1),
-            tail(&stderr, 400)
+            "register mode exited with {}: {}",
+            out.exit_code.unwrap_or(-1),
+            tail(&out.stderr, 400)
         );
     }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    parse_round_result(&stdout).ok_or_else(|| {
-        anyhow::anyhow!(
-            "script printed no result JSON object ({{outcome, summary, actions}}); stdout: {}; stderr: {}",
-            tail(&stdout, 200),
-            tail(&stderr, 200)
-        )
-    })
+    Ok(parse_manifest(&out.stdout))
 }
 
 /// The REST base URL a script subprocess targets — the daemon's own bound
@@ -646,20 +898,43 @@ fn api_base(addr: &str) -> String {
     format!("http://{dialable}")
 }
 
-/// Parse a script's stdout into a [`RoundResult`]: the whole stdout as one
-/// JSON object, or — so a script may log progress lines first — the **last**
-/// stdout line that is one. The fields are read leniently: a missing/unknown
-/// `outcome` reads as `ok`, a missing `summary` as empty, a missing/non-array
-/// `actions` as none — so a minimal script stays minimal.
-fn parse_round_result(stdout: &str) -> Option<RoundResult> {
-    let trimmed = stdout.trim();
-    parse_result_object(trimmed).or_else(|| trimmed.lines().rev().find_map(parse_result_object))
+/// The largest stored stdout/stderr tail per run — enough to read a traceback
+/// or a chatty progress log without an unbounded script bloating a row.
+const STREAM_CAP: usize = 64_000;
+
+/// Cap a captured stream to its [`STREAM_CAP`] tail for storage.
+fn cap_stream(s: &str) -> String {
+    tail(s, STREAM_CAP)
 }
 
-/// One candidate result line → [`RoundResult`], if it is a JSON object.
-fn parse_result_object(text: &str) -> Option<RoundResult> {
-    let v: Value = serde_json::from_str(text.trim()).ok()?;
-    let obj = v.as_object()?;
+/// The last JSON object on stdout (the whole thing, or — so a script may log
+/// progress lines first — the last line that is one).
+fn parse_last_json_object(stdout: &str) -> Option<Value> {
+    let trimmed = stdout.trim();
+    let as_object = |t: &str| {
+        serde_json::from_str::<Value>(t.trim())
+            .ok()
+            .filter(Value::is_object)
+    };
+    as_object(trimmed).or_else(|| trimmed.lines().rev().find_map(as_object))
+}
+
+/// The three fields a script's result JSON contributes to a [`RoundResult`].
+/// Named (not a bare tuple) so the two same-typed `String` slots — `outcome`
+/// and `summary` — can't be transposed at a call site.
+struct ParsedRound {
+    outcome: String,
+    summary: String,
+    actions: Value,
+}
+
+/// Parse a script's stdout into its [`ParsedRound`]. The fields are read
+/// leniently: a missing/unknown `outcome` reads as `ok`, a missing `summary` as
+/// empty, a missing/non-array `actions` as none — so a minimal script stays
+/// minimal.
+fn parse_round_result(stdout: &str) -> Option<ParsedRound> {
+    let obj = parse_last_json_object(stdout)?;
+    let obj = obj.as_object()?;
     let outcome = obj
         .get("outcome")
         .and_then(Value::as_str)
@@ -674,11 +949,25 @@ fn parse_result_object(text: &str) -> Option<RoundResult> {
         .filter(|a| a.is_array())
         .cloned()
         .unwrap_or_else(|| Value::Array(vec![]));
-    Some(RoundResult {
+    Some(ParsedRound {
         outcome: outcome.to_string(),
         summary: summary.to_string(),
         actions,
     })
+}
+
+/// Parse a script's register-mode stdout into a [`ov::Trigger`] subscription
+/// manifest, or `None` when it isn't one. A round result (an object carrying
+/// `outcome`/`actions`) is *not* a manifest — that is a legacy script that
+/// doesn't declare subscriptions, so the caller keeps the existing trigger. An
+/// explicit (even empty) `{cron?, every?, on?}` object is accepted.
+fn parse_manifest(stdout: &str) -> Option<ov::Trigger> {
+    let value = parse_last_json_object(stdout)?;
+    let obj = value.as_object()?;
+    if obj.contains_key("outcome") || obj.contains_key("actions") {
+        return None;
+    }
+    serde_json::from_value::<ov::Trigger>(value).ok()
 }
 
 /// The last `n` bytes-ish of a process stream (on a char boundary), so an
@@ -724,9 +1013,16 @@ pub async fn fire_now(
     // no-overlap domain (the engine loop guards its own concurrent fires).
     let in_flight = new_in_flight();
     let reason = if reason.is_empty() { "manual" } else { reason };
-    fire(state, &in_flight, &o, reason, dry_run)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("round skipped before it could open a run row"))
+    fire(
+        state,
+        &in_flight,
+        &o,
+        reason,
+        dry_run,
+        &TriggerCtx::manual(),
+    )
+    .await
+    .ok_or_else(|| anyhow::anyhow!("round skipped before it could open a run row"))
 }
 
 // ---------------------------------------------------------------------------
@@ -895,6 +1191,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_manifest_accepts_declarations_not_round_results() {
+        // A subscription manifest parses into a Trigger.
+        let t = parse_manifest(r#"{"on":["pr.merged","pr.opened"]}"#).unwrap();
+        assert_eq!(t.on, vec!["pr.merged", "pr.opened"]);
+        let t = parse_manifest(r#"{"cron":"0 * * * *"}"#).unwrap();
+        assert_eq!(t.cron.as_deref(), Some("0 * * * *"));
+        // An empty manifest is a valid "manual only" declaration.
+        assert!(parse_manifest("{}").is_some());
+        // A round result is NOT a manifest — a legacy script that doesn't
+        // declare subscriptions; the caller keeps the existing trigger.
+        assert!(parse_manifest(r#"{"outcome":"ok","summary":"x","actions":[]}"#).is_none());
+        // A script may log first; the last object wins.
+        let t = parse_manifest("registering...\n{\"every\":\"15m\"}\n").unwrap();
+        assert_eq!(t.every.as_deref(), Some("15m"));
+    }
+
+    #[test]
     fn has_pep723_detects_the_inline_metadata_block() {
         assert!(has_pep723(
             "# /// script\n# dependencies = []\n# ///\nprint()"
@@ -970,9 +1283,16 @@ rnd.finish("name=%s label=%s dry=%s api=%s" % (
         .unwrap();
 
         let (state, o) = script_fixture(&script.display().to_string()).await;
-        let run_id = fire(&state, &new_in_flight(), &o, "manual", true)
-            .await
-            .unwrap();
+        let run_id = fire(
+            &state,
+            &new_in_flight(),
+            &o,
+            "manual",
+            true,
+            &TriggerCtx::manual(),
+        )
+        .await
+        .unwrap();
         let run = ov::recent_runs(&state.db, &o.id, 10)
             .await
             .unwrap()
@@ -980,6 +1300,10 @@ rnd.finish("name=%s label=%s dry=%s api=%s" % (
             .find(|r| r.id == run_id)
             .unwrap();
         assert_eq!(run.outcome, "ok", "summary: {}", run.summary);
+        // The execution log captured the script's output and a clean exit.
+        assert_eq!(run.exit_code, Some(0));
+        assert!(run.duration_ms.is_some());
+        assert_eq!(run.trigger_event, "manual");
         assert!(
             run.summary
                 .contains("name=script-test label=weaver dry=true api=http://127.0.0.1:0"),
@@ -1003,9 +1327,16 @@ rnd.finish("name=%s label=%s dry=%s api=%s" % (
         std::fs::write(&script, "raise RuntimeError('kaboom')\n").unwrap();
 
         let (state, o) = script_fixture(&script.display().to_string()).await;
-        let run_id = fire(&state, &new_in_flight(), &o, "manual", false)
-            .await
-            .unwrap();
+        let run_id = fire(
+            &state,
+            &new_in_flight(),
+            &o,
+            "manual",
+            false,
+            &TriggerCtx::manual(),
+        )
+        .await
+        .unwrap();
         let run = ov::recent_runs(&state.db, &o.id, 10)
             .await
             .unwrap()
@@ -1018,5 +1349,13 @@ rnd.finish("name=%s label=%s dry=%s api=%s" % (
             "the stderr tail names the failure: {}",
             run.summary
         );
+        // A failed round still records its execution log: the traceback on
+        // stderr and the non-zero exit code.
+        assert!(
+            run.stderr.contains("kaboom"),
+            "stderr captured: {}",
+            run.stderr
+        );
+        assert_eq!(run.exit_code, Some(1));
     }
 }

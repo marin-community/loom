@@ -20,6 +20,11 @@ from weaver_loom import Round, WeaverError, parse_judgement
 #: The storable triage values; `ok` is the absence of the tag.
 STORABLE = ("attention", "blocked")
 
+#: A scheduled survey of the whole scoped fleet — the engine reads this in
+#: register mode. (A status sweep is inherently fleet-wide, so it stays on a
+#: cadence rather than a per-session event.)
+TRIGGERS = {"cron": "0 * * * *"}
+
 
 def attention_value(session):
     """The session's own `attention` tag value — `ok` when absent (calm)."""
@@ -50,8 +55,7 @@ def judge(rnd, session):
     return level, f"attention is {attention}"
 
 
-def main():
-    rnd = Round()
+def main(rnd):
     can_mark = rnd.can("mark")
     can_nudge = rnd.can("nudge")
     marked = 0
@@ -106,4 +110,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    Round.main(main, TRIGGERS)

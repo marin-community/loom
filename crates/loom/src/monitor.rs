@@ -187,7 +187,7 @@ pub fn is_stale(session: &Session, after: i64, now: DateTime<Utc>) -> bool {
 /// * No longer stale (activity resumed) → forget the id, re-arming the edge.
 ///
 /// Branch-scoped rather than system-scoped: the event carries the session's
-/// branch so the dispatcher's `reactive_context` can repo-filter it.
+/// branch so the dispatcher (`event_repo`) can repo-filter it.
 pub async fn detect_stale(
     state: &AppState,
     session: &Session,

@@ -63,7 +63,7 @@ pub const BUILTINS: &[BuiltinProgram] = &[
                       sessions are identifiable on GitHub. Read-only: it \
                       reports would-label actions.",
         source: include_str!("../overlookers/pr_label.py"),
-        default_trigger: r#"{"every":"15m"}"#,
+        default_trigger: r#"{"on":["pr.opened"]}"#,
         default_scope: "{}",
         default_params: r#"{"label":"weaver"}"#,
         default_capabilities: &["observe"],
@@ -77,7 +77,7 @@ pub const BUILTINS: &[BuiltinProgram] = &[
                       github.archive_on_merge setting still performs the \
                       archive).",
         source: include_str!("../overlookers/archive_merged.py"),
-        default_trigger: r#"{"every":"5m"}"#,
+        default_trigger: r#"{"on":["pr.merged"]}"#,
         default_scope: "{}",
         default_params: "{}",
         default_capabilities: &["observe"],

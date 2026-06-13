@@ -19,14 +19,19 @@ export function capabilitiesFrom(ticked: Record<string, boolean>): string[] {
 }
 
 // A one-line, human-readable summary of a trigger — what wakes a round.
-// e.g. "cron 0 * * * *", "every 30m", "on attention=blocked", "on pr_red".
-// An empty/unset trigger reads as "manual" (only fires on Run now).
+// e.g. "cron 0 * * * *", "every 30m", "on pr.merged, pr.opened",
+// "on session.attention=blocked". An empty/unset trigger reads as "manual"
+// (only fires on Run now). A trigger may carry both a schedule and events.
 export function triggerSummary(t: OverlookerTrigger | undefined | null): string {
   if (!t) return 'manual';
-  if (t.cron) return `cron ${t.cron}`;
-  if (t.every) return `every ${t.every}`;
-  if (t.event) return t.level ? `on ${t.event}=${t.level}` : `on ${t.event}`;
-  return 'manual';
+  const parts: string[] = [];
+  if (t.cron) parts.push(`cron ${t.cron}`);
+  if (t.every) parts.push(`every ${t.every}`);
+  // The subscription set: the `on` list plus the legacy single `event`.
+  const events = [...(t.on ?? [])];
+  if (t.event) events.push(t.level ? `${t.event}=${t.level}` : t.event);
+  if (events.length) parts.push(`on ${events.join(', ')}`);
+  return parts.length ? parts.join(' · ') : 'manual';
 }
 
 // A one-line summary of the fleet scope a round surveys.

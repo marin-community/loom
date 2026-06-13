@@ -120,6 +120,77 @@ def test_scope_repo_pin_excludes_other_repos():
     assert [s["id"] for s in rnd.sessions()] == ["here"]
 
 
+# -- triggered_sessions: scope to the session the event named ------------------
+
+
+def branch_session(id, branch_id, **kw):
+    s = session(id, **kw)
+    s["branch"]["id"] = branch_id
+    return s
+
+
+def trigger_round(trigger, sessions, scope=None):
+    client = StubClient(capabilities=[], replies={"/sessions": sessions})
+    return Round(
+        config={"name": "t", "scope": scope or {}, "trigger": trigger}, client=client
+    )
+
+
+def test_triggered_sessions_scopes_to_the_named_branch():
+    fleet = [branch_session("a", "b1"), branch_session("b", "b2")]
+    rnd = trigger_round({"event": "pr.merged", "branch": "b1"}, fleet)
+    assert [s["id"] for s in rnd.triggered_sessions()] == ["a"]
+    assert rnd.surveyed == 1
+
+
+def test_triggered_sessions_scopes_to_the_named_session():
+    fleet = [branch_session("a", "b1"), branch_session("b", "b1")]
+    rnd = trigger_round({"event": "session.idle", "session": "b"}, fleet)
+    assert [s["id"] for s in rnd.triggered_sessions()] == ["b"]
+
+
+def test_triggered_sessions_falls_back_to_full_survey_without_a_target():
+    # A cron/manual tick names no session, so the round surveys the whole fleet.
+    fleet = [session("a"), session("b"), session("done", status="done")]
+    rnd = trigger_round({"event": "cron"}, fleet)
+    assert [s["id"] for s in rnd.triggered_sessions()] == ["a", "b"]
+
+
+# -- Round.main: register declares, run executes -------------------------------
+
+
+def test_main_register_mode_prints_manifest_without_running(monkeypatch, capsys):
+    monkeypatch.setenv("WEAVER_OVERLOOKER_MODE", "register")
+    ran = []
+    Round.main(lambda rnd: ran.append(rnd), {"on": ["pr.merged"]})
+    assert ran == [], "register mode declares triggers, it never runs a round"
+    assert json.loads(capsys.readouterr().out) == {"on": ["pr.merged"]}
+
+
+def test_main_run_mode_invokes_the_round(monkeypatch):
+    monkeypatch.delenv("WEAVER_OVERLOOKER_MODE", raising=False)
+    monkeypatch.setenv("WEAVER_OVERLOOKER", "{}")
+    ran = []
+    Round.main(lambda rnd: ran.append(rnd))
+    assert len(ran) == 1 and isinstance(ran[0], Round)
+
+
+def test_register_mode_neuters_the_round(monkeypatch):
+    # A legacy script that constructs a Round directly in register mode must not
+    # be able to act: the survey is empty, the round is dry, and the engine-built
+    # client is granted no write capabilities even when the config names some.
+    monkeypatch.setenv("WEAVER_OVERLOOKER_MODE", "register")
+    monkeypatch.setenv(
+        "WEAVER_OVERLOOKER", json.dumps({"name": "t", "capabilities": ["mark"]})
+    )
+    rnd = Round()
+    assert rnd.sessions() == []
+    assert rnd.dry_run is True
+    assert not rnd.client.can("mark"), "register mode drops the granted capabilities"
+    with pytest.raises(CapabilityDenied):
+        rnd.client.mark("live", "blocked")
+
+
 # -- capability gating ---------------------------------------------------------
 
 

@@ -43,23 +43,53 @@ pub struct Overlooker {
     pub updated_at: String,
 }
 
-/// The parsed trigger: an event-match predicate. A scheduled trigger carries a
-/// `cron` (or `every`) cadence; a reactive one carries an `event` kind (and an
-/// optional `level`). An optional `repo` pins the overlooker to one repository.
-/// Stored as the JSON the plan documents, e.g. `{"cron":"0 * * * *"}` or
-/// `{"event":"attention","level":"blocked","repo":"/path"}`.
+/// The parsed trigger — a watch's **subscription manifest**: what wakes a round.
+/// A scheduled watch carries a `cron` (or `every`) cadence; a reactive one
+/// subscribes to one or more normalized trigger events via `on` (e.g.
+/// `["pr.merged", "session.exited=error"]`). An optional `repo` pins the watch
+/// to one repository. The manifest is what the watch *script declares* (it is
+/// emitted from the script's register mode and stored here), so the script —
+/// not whoever wired it up — decides which events it cares about.
+///
+/// Stored as JSON, e.g. `{"cron":"0 * * * *"}` or
+/// `{"on":["pr.merged","pr.opened"]}`. The legacy single-event shape
+/// (`{"event":"attention","level":"blocked"}`) is still parsed and folded into
+/// the subscription set, so watches predating the manifest keep working.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct Trigger {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cron: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub every: Option<String>,
+    /// The normalized trigger events this watch subscribes to. Each entry is an
+    /// event name (`"pr.merged"`) or a `name=level` filter
+    /// (`"session.attention=blocked"`). Empty means "no reactive subscription".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on: Vec<String>,
+    /// Legacy single-event subscription, kept for back-compat — folded into the
+    /// effective set by [`Trigger::subscriptions`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
+}
+
+/// Map a legacy raw event kind to its normalized trigger-event name, so a watch
+/// that predates the manifest (and named the raw stream kind) still matches the
+/// normalized names the dispatcher now emits. An unknown name passes through.
+fn normalize_event_name(name: &str) -> &str {
+    match name {
+        "attention" => "session.attention",
+        "triage" => "triage.changed",
+        "stale" => "session.stale",
+        "pr_red" => "pr.checks_red",
+        "pr_green" => "pr.checks_green",
+        "pr_merged" => "pr.merged",
+        "pr_opened" => "pr.opened",
+        other => other,
+    }
 }
 
 impl Trigger {
@@ -69,22 +99,44 @@ impl Trigger {
         self.cron.is_some() || self.every.is_some()
     }
 
-    /// Whether this trigger matches a stream event of `kind` whose payload
-    /// `level` and originating `repo` are as given. Scheduled triggers never
-    /// match a stream event directly — they fire off their own `cron` tick.
-    pub fn matches_event(&self, kind: &str, level: Option<&str>, repo: Option<&str>) -> bool {
-        let Some(want_kind) = self.event.as_deref() else {
-            return false;
-        };
-        if want_kind != kind {
+    /// The effective event subscriptions as `(event_name, optional_level)`
+    /// pairs: the `on` list (each entry an event name or `name=level`) plus the
+    /// legacy single `event`/`level`. Names are normalized so a legacy raw kind
+    /// matches the dispatcher's normalized vocabulary.
+    pub fn subscriptions(&self) -> Vec<(String, Option<String>)> {
+        let mut subs: Vec<(String, Option<String>)> = self
+            .on
+            .iter()
+            .map(|entry| match entry.split_once('=') {
+                Some((name, level)) => (
+                    normalize_event_name(name.trim()).to_string(),
+                    Some(level.trim().to_string()),
+                ),
+                None => (normalize_event_name(entry.trim()).to_string(), None),
+            })
+            .filter(|(name, _)| !name.is_empty())
+            .collect();
+        if let Some(event) = self.event.as_deref().filter(|e| !e.is_empty()) {
+            subs.push((
+                normalize_event_name(event).to_string(),
+                self.level.clone().filter(|l| !l.is_empty()),
+            ));
+        }
+        subs
+    }
+
+    /// Whether this trigger matches a normalized trigger `event` whose payload
+    /// `level` and originating `repo` are as given. Matches when any
+    /// subscription names this event and either declares no level or one equal
+    /// to the event's. Scheduled triggers never match a stream event directly —
+    /// they fire off their own `cron` tick.
+    pub fn matches_event(&self, event: &str, level: Option<&str>, repo: Option<&str>) -> bool {
+        if !self.repo_matches(repo) {
             return false;
         }
-        if let Some(want_level) = self.level.as_deref() {
-            if level != Some(want_level) {
-                return false;
-            }
-        }
-        self.repo_matches(repo)
+        self.subscriptions().iter().any(|(name, want_level)| {
+            name == event && want_level.as_deref().is_none_or(|wl| level == Some(wl))
+        })
     }
 
     /// Whether the trigger's optional `repo` filter admits an event from `repo`.
@@ -422,51 +474,78 @@ pub async fn delete(db: &Db, id: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// One execution of an overlooker — a "round". `actions` is the JSON list of
-/// marks / nudges / etc. it took.
+/// marks / nudges / etc. it took; `stdout`/`stderr`/`exit_code`/`duration_ms`
+/// are the script's captured output (the execution log), and `trigger_event`
+/// the normalized event that woke it (`cron` / `manual` / e.g. `pr.merged`).
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct OverlookerRun {
     pub id: i64,
     pub overlooker_id: String,
     pub trigger_reason: String,
+    pub trigger_event: String,
     pub started_at: String,
     pub finished_at: Option<String>,
     pub outcome: String,
     pub summary: String,
     pub actions: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i64>,
+    pub duration_ms: Option<i64>,
     pub created_at: String,
 }
 
-/// Open a run row at the start of a round; returns its id. The executor closes
-/// it with [`finish_run`].
-pub async fn start_run(db: &Db, overlooker_id: &str, trigger_reason: &str) -> Result<i64> {
+/// The closing record of a round: its outcome plus the captured execution log.
+/// Grouped into a struct so [`finish_run`] doesn't grow an unreadable argument
+/// list as the audit trail records more about each run.
+#[derive(Debug, Clone)]
+pub struct RunRecord<'a> {
+    pub outcome: &'a str,
+    pub summary: &'a str,
+    pub actions: &'a Value,
+    pub stdout: &'a str,
+    pub stderr: &'a str,
+    pub exit_code: Option<i64>,
+    pub duration_ms: Option<i64>,
+}
+
+/// Open a run row at the start of a round; returns its id. `trigger_event` is
+/// the normalized event that woke it. The executor closes it with
+/// [`finish_run`].
+pub async fn start_run(
+    db: &Db,
+    overlooker_id: &str,
+    trigger_reason: &str,
+    trigger_event: &str,
+) -> Result<i64> {
     let row = sqlx::query(
-        "INSERT INTO overlooker_runs (overlooker_id, trigger_reason, started_at)
-         VALUES (?, ?, ?) RETURNING id",
+        "INSERT INTO overlooker_runs (overlooker_id, trigger_reason, trigger_event, started_at)
+         VALUES (?, ?, ?, ?) RETURNING id",
     )
     .bind(overlooker_id)
     .bind(trigger_reason)
+    .bind(trigger_event)
     .bind(now_iso())
     .fetch_one(db)
     .await?;
     Ok(sqlx::Row::get(&row, "id"))
 }
 
-/// Close a run row with its outcome, a one-line summary, and the actions taken.
-pub async fn finish_run(
-    db: &Db,
-    run_id: i64,
-    outcome: &str,
-    summary: &str,
-    actions: &Value,
-) -> Result<()> {
+/// Close a run row with its outcome, summary, actions, and captured output.
+pub async fn finish_run(db: &Db, run_id: i64, rec: &RunRecord<'_>) -> Result<()> {
     sqlx::query(
-        "UPDATE overlooker_runs SET finished_at = ?, outcome = ?, summary = ?, actions = ?
+        "UPDATE overlooker_runs SET finished_at = ?, outcome = ?, summary = ?, actions = ?,
+           stdout = ?, stderr = ?, exit_code = ?, duration_ms = ?
          WHERE id = ?",
     )
     .bind(now_iso())
-    .bind(outcome)
-    .bind(summary)
-    .bind(actions.to_string())
+    .bind(rec.outcome)
+    .bind(rec.summary)
+    .bind(rec.actions.to_string())
+    .bind(rec.stdout)
+    .bind(rec.stderr)
+    .bind(rec.exit_code)
+    .bind(rec.duration_ms)
     .bind(run_id)
     .execute(db)
     .await?;
@@ -528,10 +607,12 @@ mod tests {
         .unwrap();
         let t = o.trigger();
         assert!(!t.is_scheduled());
-        assert!(t.matches_event("attention", Some("blocked"), Some("/r")));
-        assert!(!t.matches_event("attention", Some("ok"), Some("/r")));
+        // The legacy `{event,level}` shape folds into the normalized
+        // subscription `session.attention=blocked`.
+        assert!(t.matches_event("session.attention", Some("blocked"), Some("/r")));
+        assert!(!t.matches_event("session.attention", Some("ok"), Some("/r")));
         // The repo filter excludes other repos' events.
-        assert!(!t.matches_event("attention", Some("blocked"), Some("/other")));
+        assert!(!t.matches_event("session.attention", Some("blocked"), Some("/other")));
 
         let s = o.scope();
         assert!(s.admits("blocked", "/r"));
@@ -551,13 +632,20 @@ mod tests {
         )
         .await
         .unwrap();
-        let run = start_run(&db, &o.id, "manual").await.unwrap();
+        let run = start_run(&db, &o.id, "manual", "manual").await.unwrap();
+        let actions = serde_json::json!([{ "session": "abc", "mark": "attention" }]);
         finish_run(
             &db,
             run,
-            "ok",
-            "marked 1 session",
-            &serde_json::json!([{ "session": "abc", "mark": "attention" }]),
+            &RunRecord {
+                outcome: "ok",
+                summary: "marked 1 session",
+                actions: &actions,
+                stdout: "surveyed 3\n",
+                stderr: "",
+                exit_code: Some(0),
+                duration_ms: Some(42),
+            },
         )
         .await
         .unwrap();
@@ -565,6 +653,9 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].outcome, "ok");
         assert_eq!(runs[0].trigger_reason, "manual");
+        assert_eq!(runs[0].trigger_event, "manual");
+        assert_eq!(runs[0].stdout, "surveyed 3\n");
+        assert_eq!(runs[0].exit_code, Some(0));
         assert!(runs[0].finished_at.is_some());
     }
 

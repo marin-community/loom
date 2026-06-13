@@ -94,6 +94,23 @@ test.describe('overlooker panel', () => {
     await expect(runRows.first()).toContainText(/run \(dry\)/i);
   });
 
+  test('expands a run to show its captured execution log', async ({ page, weaver }) => {
+    const o = await weaver.seedOverlooker({ name: 'logged', scope: { attention: '!ok' } });
+    await page.goto(`${weaver.baseUrl}/overlookers/${o.id}`);
+
+    // A dry-run produces a round; with no sessions in scope the script prints a
+    // noop result line — which the run row captures as its stdout.
+    await page.getByTestId('overlooker-dryrun').click();
+    const runRows = page.getByTestId('overlooker-run-row');
+    await expect(runRows.first()).toBeVisible();
+
+    // Click the row to expand its execution log; the captured stdout is shown.
+    await runRows.first().getByTestId('overlooker-run-toggle').click();
+    const stdout = page.getByTestId('overlooker-run-stdout').first();
+    await expect(stdout).toBeVisible();
+    await expect(stdout).toContainText(/noop|surveyed 0/i);
+  });
+
   test('edits the prompt and capabilities from the detail page', async ({ page, weaver }) => {
     const o = await weaver.seedOverlooker({ name: 'editable', params: { prompt: 'original' } });
 

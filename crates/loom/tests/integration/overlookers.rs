@@ -77,6 +77,16 @@ fn survey_program() -> String {
     .to_string()
 }
 
+/// A reactive fixture that declares a `pr.merged` subscription and surveys only
+/// the triggering session (via `triggered_sessions`).
+fn survey_triggered_program() -> String {
+    concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/integration/programs/survey_triggered.py"
+    )
+    .to_string()
+}
+
 /// The session ids a run's recorded `survey` actions name.
 fn surveyed_ids(run: &ov::OverlookerRun) -> Vec<String> {
     serde_json::from_str::<serde_json::Value>(&run.actions)
@@ -535,7 +545,15 @@ async fn cooldown_and_overlap_refire_are_refused() {
         let set = overlooker::new_in_flight();
         set.lock().await.insert(o.id.clone());
         let before = ov::recent_runs(&state.db, &o.id, 100).await.unwrap().len();
-        let dropped = overlooker::fire(&state, &set, &o, "event:attention", false).await;
+        let dropped = overlooker::fire(
+            &state,
+            &set,
+            &o,
+            "event:attention",
+            false,
+            &overlooker::TriggerCtx::reactive("session.attention"),
+        )
+        .await;
         assert!(dropped.is_none(), "an in-flight re-fire is dropped");
         let after = ov::recent_runs(&state.db, &o.id, 100).await.unwrap().len();
         assert_eq!(before, after, "a dropped re-fire opens no run row");
@@ -751,7 +769,8 @@ async fn rest_lists_builtin_programs_and_validates_program_refs() {
             .contains("archive-merged"),
         "the embedded source is served"
     );
-    assert!(archive["defaults"]["trigger"]["every"].is_string());
+    // archive-merged subscribes to the PR-merged event, not a polling timer.
+    assert_eq!(archive["defaults"]["trigger"]["on"][0], "pr.merged");
     assert_eq!(archive["defaults"]["capabilities"][0], "observe");
     let status = arr
         .iter()
@@ -1287,4 +1306,88 @@ async fn ensure_warm_session_reuses_the_same_session() {
     if let Some(s) = session_mod::get(&state.db, &first).await.unwrap() {
         backend::kill_session(&s.term_session).await.ok();
     }
+}
+
+/// The end-to-end subscription path: a watch created over REST has its trigger
+/// reconciled from the script's register-mode manifest; a `pr_merged` event
+/// normalizes to `pr.merged`, wakes the subscribed watch, and the round —
+/// handed the triggering session — surveys only that branch (not the whole
+/// fleet). The run row records the captured execution log (stdout, exit code,
+/// trigger event), which is the watch execution log the UI renders.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pr_merged_event_scopes_round_to_one_session_and_logs_output() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
+    let ts = TestServer::start().await;
+    let state = engine_state(&ts).await;
+    let (merged_id, merged_branch, _repo) = make_session(&ts, "merged work").await;
+    // A second live session in the same repo: it must NOT be surveyed, proving
+    // the round scoped to the triggering branch instead of the whole fleet.
+    let (_other_id, _other_branch, _repo) = make_session(&ts, "other work").await;
+
+    // Create the watch over REST: the script declares `on: [pr.merged]`, and the
+    // register-mode reconcile stores it (the script — not the caller — picks the
+    // event), with no explicit trigger in the request.
+    let created = ts
+        .client
+        .post(
+            "/api/overlookers",
+            json!({
+                "name": "merge-watch",
+                "program": survey_triggered_program(),
+                "capabilities": ["observe"],
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        created["trigger"]["on"][0], "pr.merged",
+        "the stored trigger came from the script's manifest: {created:?}"
+    );
+    ts.client
+        .patch("/api/overlookers/merge-watch", json!({ "enabled": true }))
+        .await
+        .unwrap();
+    let o = ov::get_by_name(&state.db, "merge-watch")
+        .await
+        .unwrap()
+        .unwrap();
+
+    // A merged-PR edge on the merged branch normalizes to `pr.merged`.
+    let ev = events::Event {
+        id: 0,
+        branch_id: merged_branch.clone(),
+        kind: "pr_merged".to_string(),
+        data: json!({ "pr": 41 }),
+        created_at: db::now_iso(),
+    };
+    let in_flight = overlooker::new_in_flight();
+    overlooker::dispatch(&state, &in_flight, &ev).await;
+
+    let runs = ov::recent_runs(&state.db, &o.id, 10).await.unwrap();
+    assert_eq!(runs.len(), 1, "the pr.merged event fired exactly one round");
+    let run = &runs[0];
+    assert_eq!(run.outcome, "ok", "summary: {}", run.summary);
+    assert_eq!(run.trigger_event, "pr.merged", "the run records the event");
+    assert_eq!(
+        surveyed_ids(run),
+        vec![merged_id.clone()],
+        "the round surveyed only the triggering session, not the fleet"
+    );
+    // The execution log captured the script's output and a clean exit.
+    assert!(
+        run.stdout.contains("surveyed 1"),
+        "stdout captured: {}",
+        run.stdout
+    );
+    assert_eq!(run.exit_code, Some(0));
+    assert!(run.duration_ms.is_some());
+
+    ts.client
+        .delete(&format!("/api/sessions/{merged_id}"))
+        .await
+        .unwrap();
 }

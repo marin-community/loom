@@ -237,13 +237,18 @@ export interface FileContent {
   bytes: number;
 }
 
-/** An overlooker's trigger — the event-match predicate, parsed. A scheduled
- *  trigger carries a `cron` (or `every`) cadence; a reactive one carries an
- *  `event` kind (and optional `level`). An optional `repo` pins it to one
- *  repository. Mirrors weaver-core's `Trigger`. */
+/** An overlooker's trigger — its subscription manifest, parsed. A scheduled
+ *  trigger carries a `cron` (or `every`) cadence; a reactive one subscribes to
+ *  one or more normalized trigger events via `on` (each `"name"` or
+ *  `"name=level"`). `event`/`level` are the legacy single-event shape, still
+ *  honoured. An optional `repo` pins it to one repository. Mirrors weaver-core's
+ *  `Trigger`. */
 export interface OverlookerTrigger {
   cron?: string;
   every?: string;
+  /** The normalized trigger events this watch subscribes to, e.g.
+   *  `["pr.merged", "session.exited=error"]`. */
+  on?: string[];
   event?: string;
   level?: string;
   repo?: string;
@@ -312,16 +317,28 @@ export interface OverlookerAction {
 }
 
 /** One round in an overlooker's history — the audit trail. `actions` is the
- *  array of marks / nudges / would-dos the round recorded. Mirrors
- *  `OverlookerRunView` in web.rs. */
+ *  array of marks / nudges / would-dos the round recorded; `stdout`/`stderr`/
+ *  `exit_code`/`duration_ms` are the captured execution log — what the script
+ *  printed and returned. Mirrors `OverlookerRunView` in web.rs. */
 export interface OverlookerRun {
   id: number;
   trigger_reason: string;
+  /** The normalized event that woke the round (`cron` / `manual` / e.g.
+   *  `pr.merged`). */
+  trigger_event: string;
   started_at: string;
   finished_at: string | null;
   outcome: 'ok' | 'noop' | 'skipped' | 'error' | string;
   summary: string;
   actions: OverlookerAction[];
+  /** A tail of the script's standard output. */
+  stdout: string;
+  /** A tail of the script's standard error. */
+  stderr: string;
+  /** The interpreter's exit status, or null when it never spawned / timed out. */
+  exit_code: number | null;
+  /** Wall-clock the program ran, in milliseconds. */
+  duration_ms: number | null;
 }
 
 /** The reply from `POST /api/overlookers/{id}/run`. */

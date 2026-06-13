@@ -16,16 +16,30 @@ Two pieces:
   capabilities, the scope-filtered fleet survey, and the
   ``{outcome, summary, actions}`` result the engine reads from stdout.
 
-A minimal program::
+A program declares **what wakes it** with a ``TRIGGERS`` manifest and ends with
+``Round.main(main, TRIGGERS)`` — the engine reads the manifest in *register
+mode* and then only calls the round for those events, handing it the session
+that changed via :meth:`Round.triggered_sessions`::
 
     from weaver_loom import Round
 
-    rnd = Round()
-    for session in rnd.sessions():
-        github = (session.get("branch") or {}).get("github") or {}
-        if github.get("pr_state") == "MERGED":
-            rnd.would("archive", session=session["id"], note="PR merged")
-    rnd.finish(f"surveyed {rnd.surveyed}, {len(rnd.actions)} findings")
+    TRIGGERS = {"on": ["pr.merged"]}
+
+    def main(rnd):
+        for session in rnd.triggered_sessions():
+            github = (session.get("branch") or {}).get("github") or {}
+            if github.get("pr_state") == "MERGED":
+                rnd.would("archive", session=session["id"], note="PR merged")
+        rnd.finish(f"surveyed {rnd.surveyed}, {len(rnd.actions)} findings")
+
+    if __name__ == "__main__":
+        Round.main(main, TRIGGERS)
+
+The manifest keys are ``cron`` / ``every`` (a schedule) and ``on`` (a list of
+normalized trigger events — ``session.started``, ``session.idle``,
+``session.exited``, ``session.attention``, ``session.stale``, ``triage.changed``,
+``pr.opened``, ``pr.checks_red``, ``pr.checks_green``, ``pr.merged``,
+``pr.review_changed`` — each optionally ``name=level``).
 
 The loom engine vendors this module onto ``PYTHONPATH`` for every script it
 runs, so a program needs no install step; for standalone iteration, install it
@@ -224,11 +238,37 @@ class Round:
         #: these to :meth:`Client.agent` so judgement honours the config.
         self.model = config.get("model", "")
         self.effort = config.get("effort", "")
-        self.dry_run = bool(config.get("dry_run"))
-        self.client = client or Client(capabilities=config.get("capabilities") or [])
+        #: ``run`` (execute a round) or ``register`` (declare the manifest). The
+        #: engine sets it via the config and ``$WEAVER_OVERLOOKER_MODE``; in
+        #: register mode the round is neutered (no mutations, empty survey) so a
+        #: script that doesn't use :meth:`main` can't act when merely asked what
+        #: wakes it.
+        self.mode = config.get("mode") or os.environ.get("WEAVER_OVERLOOKER_MODE") or "run"
+        #: The triggering context the engine passed: ``{event, level, session,
+        #: branch, repo}`` for a reactive round; ``{event: "cron"|"manual"}``
+        #: otherwise. Drives :meth:`triggered_sessions`.
+        self.trigger = config.get("trigger") or {}
+        self.dry_run = bool(config.get("dry_run")) or self.mode == "register"
+        caps = [] if self.mode == "register" else (config.get("capabilities") or [])
+        self.client = client or Client(capabilities=caps)
         self.actions = []
-        #: How many live sessions the last :meth:`sessions` survey admitted.
+        #: How many live sessions the last survey admitted.
         self.surveyed = 0
+
+    @staticmethod
+    def main(fn, triggers=None):
+        """Entry point that handles both engine modes — a script ends with
+        ``Round.main(main, TRIGGERS)``.
+
+        In ``register`` mode (the engine asking what events wake this watch) it
+        prints the subscription manifest and returns *without running*, so
+        declaring triggers has no side effects. Otherwise it constructs a
+        :class:`Round` and calls ``fn(round)``.
+        """
+        if os.environ.get("WEAVER_OVERLOOKER_MODE", "run") == "register":
+            print(json.dumps(triggers or {}))
+            return
+        fn(Round())
 
     def can(self, cap):
         """Whether this round holds ``cap`` (``observe`` is always held)."""
@@ -239,11 +279,43 @@ class Round:
 
         Terminal sessions are skipped; the overlooker's scope applies its
         ``attention`` filter (``!ok`` or an exact level; an absent tag is the
-        calm ``ok``) and its ``repo`` pin. Sets :attr:`surveyed`.
+        calm ``ok``) and its ``repo`` pin. Sets :attr:`surveyed`. Empty in
+        register mode (the round must not touch the fleet just to be asked what
+        wakes it).
         """
+        if self.mode == "register":
+            self.surveyed = 0
+            return []
         admitted = []
         for session in self.client.sessions():
             if session.get("status") in TERMINAL_STATUSES:
+                continue
+            if not self._admits(session):
+                continue
+            admitted.append(session)
+        self.surveyed = len(admitted)
+        return admitted
+
+    def triggered_sessions(self):
+        """The session(s) the triggering event concerns — the survey a reactive
+        round should act on.
+
+        When the trigger names a single session/branch (a reactive event), this
+        returns just that one (scope-filtered), so the round acts on the branch
+        that changed instead of re-surveying the whole fleet — the difference
+        between one GitHub call and one per session. When it names none (a
+        ``cron``/``manual`` tick) it falls back to the full :meth:`sessions`
+        survey. Sets :attr:`surveyed`.
+        """
+        sid = (self.trigger or {}).get("session")
+        bid = (self.trigger or {}).get("branch")
+        if not sid and not bid:
+            return self.sessions()
+        admitted = []
+        for session in self.client.sessions():
+            if sid and session.get("id") != sid:
+                continue
+            if bid and (session.get("branch") or {}).get("id") != bid:
                 continue
             if not self._admits(session):
                 continue

@@ -57,6 +57,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "drop_plan_task",
         include_str!("../migrations/0008_drop_plan_task.sql"),
     ),
+    (
+        9,
+        "overlooker_run_output",
+        include_str!("../migrations/0009_overlooker_run_output.sql"),
+    ),
 ];
 
 /// Apply every pending migration, bringing the database up to the latest schema.

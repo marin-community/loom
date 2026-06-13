@@ -2,14 +2,19 @@
 
 Read-only: records a would-archive action per merged PR (the
 github.archive_on_merge setting still performs the actual archive).
+
+Subscribes to `pr.merged` — it wakes only when a PR actually merges, on the one
+branch that changed, instead of polling the whole fleet on a timer.
 """
 
 from weaver_loom import Round
 
+#: Wake only on a PR merging — the engine reads this in register mode.
+TRIGGERS = {"on": ["pr.merged"]}
 
-def main():
-    rnd = Round()
-    for session in rnd.sessions():
+
+def main(rnd):
+    for session in rnd.triggered_sessions():
         github = (session.get("branch") or {}).get("github") or {}
         if github.get("pr_state") != "MERGED":
             continue
@@ -24,4 +29,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    Round.main(main, TRIGGERS)

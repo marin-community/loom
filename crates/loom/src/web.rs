@@ -3088,13 +3088,25 @@ async fn create_overlooker(
     validate_program(&program)?;
     let capabilities = req.capabilities.unwrap_or(defaults.capabilities);
     validate_capabilities(&capabilities)?;
+    let params = json_text(req.params, &defaults.params);
+
+    // The script declares what wakes it: evaluate its subscription manifest
+    // (register mode) unless the caller pinned an explicit trigger.
+    let trigger_spec = match req.trigger {
+        Some(t) => t.to_string(),
+        None => {
+            let params_value = serde_json::from_str(&params).unwrap_or_else(|_| json!({}));
+            let fallback = program_default_trigger(&program).unwrap_or(defaults.trigger_spec);
+            reconcile_trigger(&st, &program, &params_value, &fallback).await
+        }
+    };
 
     let new = ov::NewOverlooker {
         name,
-        trigger_spec: json_text(req.trigger, &defaults.trigger_spec),
+        trigger_spec,
         scope: json_text(req.scope, &defaults.scope),
         program,
-        params: json_text(req.params, &defaults.params),
+        params,
         capabilities,
         model: req.model.unwrap_or(defaults.model),
         effort: req.effort.unwrap_or(defaults.effort),
@@ -3102,6 +3114,27 @@ async fn create_overlooker(
     };
     let o = ov::create(&st.db, &new).await?;
     Ok(Json(overlooker_view(&st.db, &o).await?))
+}
+
+/// The program's default trigger (a builtin's suggested manifest), used as the
+/// fallback when register-mode manifest evaluation declares none or fails.
+fn program_default_trigger(program: &str) -> Option<String> {
+    crate::builtins::find(program).map(|b| b.default_trigger.to_string())
+}
+
+/// Resolve a program's stored trigger from its register-mode manifest, falling
+/// back to `fallback` when the script declares no manifest or evaluation fails
+/// (a missing interpreter, a syntax error) — best-effort, never an error that
+/// blocks creating the watch.
+async fn reconcile_trigger(st: &AppState, program: &str, params: &Value, fallback: &str) -> String {
+    match ov_engine::evaluate_manifest(st, program, params).await {
+        Ok(Some(t)) => serde_json::to_string(&t).unwrap_or_else(|_| fallback.to_string()),
+        Ok(None) => fallback.to_string(),
+        Err(e) => {
+            tracing::debug!(program, error = %e, "manifest evaluation failed; using default trigger");
+            fallback.to_string()
+        }
+    }
 }
 
 async fn get_overlooker(
@@ -3128,8 +3161,23 @@ async fn patch_overlooker(
     if let Some(enabled) = req.enabled {
         ov::set_enabled(&st.db, &o.id, enabled).await?;
     }
+    // An explicit trigger wins; otherwise, when the program changes, re-evaluate
+    // the new script's manifest (with the effective params) so subscriptions
+    // follow the script — the same reconcile create does.
+    let trigger_spec = match &req.trigger {
+        Some(t) => Some(t.to_string()),
+        None => match &req.program {
+            Some(program) => {
+                let params = req.params.clone().unwrap_or_else(|| o.params());
+                let fallback =
+                    program_default_trigger(program).unwrap_or_else(|| o.trigger_spec.clone());
+                Some(reconcile_trigger(&st, program, &params, &fallback).await)
+            }
+            None => None,
+        },
+    };
     let patch = ov::OverlookerUpdate {
-        trigger_spec: req.trigger.map(|v| v.to_string()),
+        trigger_spec,
         scope: req.scope.map(|v| v.to_string()),
         program: req.program,
         params: req.params.map(|v| v.to_string()),
