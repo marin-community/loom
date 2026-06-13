@@ -1,10 +1,4 @@
 # loom — the weaver orchestrator — packaged for a reverse-proxy deploy.
-#
-# loom is not a stateless web app: it creates git worktrees and launches coding
-# agents (claude, git, gh) as subprocesses *inside this container*. The runtime
-# stage therefore stays on the Rust image and carries node + gh + the Claude
-# Code CLI, so an in-container agent can build/test weaver itself. Slim this
-# down once you know exactly which repos loom will drive.
 
 # ---- build: loom + tapestry + weaver, plus the embedded Vue bundle ----
 FROM rust:1-bookworm AS build
