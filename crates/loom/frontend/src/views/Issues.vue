@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, computed, nextTick, onMounted } from 'vue';
+import { useRouter } from 'vue-router';
 import {
   get,
   listIssues,
@@ -8,10 +9,13 @@ import {
   deleteIssue,
   setIssueTag,
   clearIssueTag,
+  launchSessionForIssue,
 } from '../api';
 import type { Issue, Session, Tag } from '../types';
 import TagPill from '../components/TagPill.vue';
 import { timeAgo } from '../lib/time';
+
+const router = useRouter();
 
 // The Issues pane — the cross-repo weaver issue board, sibling to the session
 // list and the overlooker panel. API-first: every row is an `IssueView` from
@@ -246,6 +250,23 @@ async function withBusy<T>(id: number, fn: () => Promise<T>): Promise<T | undefi
 
 async function setStatus(i: Issue, status: 'open' | 'closed') {
   await withBusy(i.id, async () => replaceIssue((await patchIssue(i.id, { status })) as Issue));
+}
+
+// Launch a fresh loom session that picks up an unclaimed backlog issue: the
+// server forks a branch in the issue's repo, claims the issue as its tracker,
+// and seeds the goal from it. On success we follow straight to the new
+// session's detail page (so the row's claim-state is re-read on the next visit).
+const launching = ref<number | null>(null);
+async function launch(i: Issue) {
+  launching.value = i.id;
+  error.value = '';
+  try {
+    const session = await launchSessionForIssue(i.repo_root, i.id);
+    router.push(`/s/${session.id}`);
+  } catch (e) {
+    error.value = (e as Error).message;
+    launching.value = null;
+  }
 }
 
 async function remove(i: Issue) {
@@ -519,6 +540,18 @@ async function removeTag(i: Issue, key: string) {
           <div
             class="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100"
           >
+            <!-- Launch a session to work this issue — the lead, accent-tinted
+                 action. Offered only for an unclaimed open item; a claimed issue
+                 already has its working session (linked in row 2). -->
+            <button
+              v-if="i.status === 'open' && !i.claimed_branch"
+              type="button"
+              class="rounded px-1.5 py-0.5 text-2xs font-medium text-accent hover:bg-subtle"
+              data-testid="issue-launch"
+              :disabled="busy[i.id] || launching === i.id"
+              :title="`Launch a session to work issue #${i.id}`"
+              @click="launch(i)"
+            >{{ launching === i.id ? 'Launching…' : 'Launch' }}</button>
             <button
               v-if="i.status === 'open'"
               type="button"

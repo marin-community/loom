@@ -141,6 +141,37 @@ test.describe('issues pane', () => {
     await expect(row.getByTestId('tag-pill')).toContainText('priority: high');
   });
 
+  test('launches a session from an unclaimed backlog issue', async ({ page, weaver }) => {
+    // Seed a session to put one repo on the board, then file an *unclaimed*
+    // backlog item in that same repo — the Launch button picks it up.
+    const session = await weaver.seedSession({ goal: 'g', name: 'feature' });
+    const backlog = await weaver.seedBacklogIssue(session.branch.repo_root, 'pick me up');
+
+    await page.goto(`${weaver.baseUrl}/issues`);
+
+    // The session's own tracking issue is already claimed, so it offers no
+    // Launch button — only the unclaimed backlog item does.
+    const claimed = (await weaver.listIssues()).find((i) => i.claimed_branch);
+    await expect(
+      page.locator(`[data-issue-id="${claimed!.id}"]`).getByTestId('issue-launch'),
+    ).toHaveCount(0);
+
+    const row = page.locator(`[data-issue-id="${backlog.id}"]`);
+    await expect(row.getByTestId('issue-launch')).toBeVisible();
+    await row.getByTestId('issue-launch').click();
+
+    // Lands on the freshly-launched session's detail page…
+    await page.waitForURL(/\/s\/[^/]+$/);
+
+    // …and the backlog issue is now claimed by a branch (its new tracker).
+    await expect
+      .poll(async () => {
+        const persisted = await weaver.listIssues();
+        return persisted.find((i) => i.id === backlog.id)?.claimed_branch;
+      })
+      .not.toBeNull();
+  });
+
   test('rejects an empty title and does not create', async ({ page, weaver }) => {
     await weaver.seedSession({ goal: 'g', name: 'feature' });
 

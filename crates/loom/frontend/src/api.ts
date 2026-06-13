@@ -61,12 +61,19 @@ export const del = (path: string) => request(path, { method: 'DELETE' });
 
 // --- Issues ----------------------------------------------------------------
 
-import type { Issue, ArtifactMeta, ArtifactView, ArtifactWriteBody } from './types';
+import type { Issue, Session, ArtifactMeta, ArtifactView, ArtifactWriteBody } from './types';
 
 /** Every issue across every repo — the Issues pane's cross-repo board. Pass
  *  `all` to include closed issues. */
 export const listIssues = (all = false) =>
   get(`/issues${all ? '?all=true' : ''}`) as Promise<Issue[]>;
+
+/** Launch a new loom session that picks up (claims) an existing weaver issue:
+ *  the issue's repo is the new session's cwd, and the backend seeds the branch's
+ *  title/goal from the issue and stamps it as the tracking (claimed) issue.
+ *  Returns the created session view, whose `id` deep-links to its detail page. */
+export const launchSessionForIssue = (repoRoot: string, issueId: number) =>
+  post('/sessions', { cwd: repoRoot, claim_issue: issueId }) as Promise<Session>;
 
 /** Create an unclaimed repo-level backlog issue. Tags aren't part of the create
  *  body — apply them as follow-up `setIssueTag` upserts on the returned id. */

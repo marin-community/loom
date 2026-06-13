@@ -114,6 +114,9 @@ export interface WeaverFixture {
   /** Create an issue claimed by a seeded session's branch (so it shares the
    *  session's canonical repo_root and resolves back to it in the Issues pane). */
   seedIssue(session: Session, title: string, body?: string): Promise<Issue>;
+  /** Create an *unclaimed* backlog issue in a repo via `POST /api/repos/issues`
+   *  — the kind the Issues pane offers a Launch button for. */
+  seedBacklogIssue(repoRoot: string, title: string, body?: string): Promise<Issue>;
   /** Write an artifact via `weaver artifact write` — creates it on first call,
    *  appends an immutable revision after. Content is piped on stdin; `--repo`
    *  publishes it repo-shared instead of scoping it to the branch. */
@@ -443,6 +446,13 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
         return (await fetchJson(`${baseUrl}/api/branches/${session.branch.id}/issues`, {
           method: 'POST',
           body: JSON.stringify({ title, body: body ?? '' }),
+        })) as Issue;
+      },
+
+      async seedBacklogIssue(repoRoot, title, body) {
+        return (await fetchJson(`${baseUrl}/api/repos/issues`, {
+          method: 'POST',
+          body: JSON.stringify({ repo_root: repoRoot, title, body: body ?? '' }),
         })) as Issue;
       },
 
