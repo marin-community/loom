@@ -77,6 +77,10 @@ test.describe('rich markdown preview', () => {
     const mermaidSvg = body.locator('.mermaid-diagram svg');
     await expect(mermaidSvg).toBeVisible({ timeout: 30_000 });
     await expect(mermaidSvg.locator('g').first()).toBeVisible({ timeout: 30_000 });
+    // Node labels must survive rendering. Mermaid draws them as HTML inside
+    // `<foreignObject>`; our DOMPurify pass has to keep that intact (it once
+    // stripped it, leaving every box blank), so assert the label text is there.
+    await expect(mermaidSvg.locator('.nodeLabel').first()).toHaveText('A');
 
     // Source flips to the Monaco editor showing the raw markdown…
     await page.getByRole('button', { name: 'Source', exact: true }).click();
@@ -86,6 +90,32 @@ test.describe('rich markdown preview', () => {
     // …and Preview flips back to the rendered view.
     await page.getByRole('button', { name: 'Preview', exact: true }).click();
     await expect(page.locator('.markdown-body h1')).toContainText('Design Doc');
+  });
+
+  test('a broken mermaid diagram errors inline, never leaking into the page body', async ({
+    page,
+    weaver,
+  }) => {
+    const session = await weaver.seedSession({ goal: 'write docs', name: 'md-bad-mermaid' });
+    // A diagram mermaid can't parse. By default mermaid draws its "bomb" error
+    // graphic into a temp node it appends to `document.body` and only removes on
+    // success — so a failed render used to leak the bomb into the page body,
+    // where it survived route changes and stacked up at the bottom of every view.
+    const doc = ['# Doc', '', '```mermaid', 'graph TD; A --> ((( broken', '```', ''].join('\n');
+    writeFileSync(join(session.work_dir, 'BAD.md'), doc);
+
+    await page.goto(`${weaver.baseUrl}/s/${session.id}/files`);
+    await page.getByText('BAD.md', { exact: true }).first().click();
+
+    // The failure surfaces as our own inline note inside the preview…
+    await expect(page.locator('.markdown-body .mermaid-error')).toBeVisible({ timeout: 30_000 });
+
+    // …and nothing leaks into the document body outside the app.
+    const leaked = await page.evaluate(() =>
+      document.querySelectorAll('body > svg[aria-roledescription="error"], body > .mermaid, body .error-icon')
+        .length,
+    );
+    expect(leaked).toBe(0);
   });
 
   test('non-markdown files have no Preview toggle', async ({ page, weaver }) => {
