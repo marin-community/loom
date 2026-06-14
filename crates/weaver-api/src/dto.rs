@@ -591,6 +591,12 @@ pub struct CreateOverlookerReq {
     pub effort: Option<String>,
     #[serde(default)]
     pub cooldown_secs: Option<i64>,
+    /// Whether the overlooker fires as soon as it is created. Omitted by API
+    /// clients that want the model default (disabled); the loom UI sends `true`
+    /// so a watcher picked from the builtin registry is live without a separate
+    /// manual enable.
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 /// Body for `PATCH /api/overlookers/{id}`: every mutable field optional.

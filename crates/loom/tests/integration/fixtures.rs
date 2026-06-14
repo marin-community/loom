@@ -21,6 +21,7 @@ use loom::{db, server};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
+use weaver_core::config as core_config;
 
 /// Run `program args` in `dir`, asserting it succeeds.
 pub fn sh(dir: &Path, program: &str, args: &[&str]) {
@@ -126,6 +127,15 @@ impl TestServer {
             bus: EventBus::new(),
             addr: addr.to_string(),
         };
+        // The overlooker master switch ships on by default, but these tests
+        // drive the engine directly and must not race the background loop that
+        // `server::serve` spawns. Pin it off so the daemon's own engine idles.
+        core_config::apply(
+            &state.db,
+            &[("overlooker.enabled".to_string(), Some("false".to_string()))],
+        )
+        .await
+        .unwrap();
         tokio::spawn(server::serve(state, listener));
 
         std::env::set_var("WEAVER_API", format!("http://{addr}"));

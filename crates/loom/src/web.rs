@@ -3111,6 +3111,7 @@ async fn create_overlooker(
         model: req.model.unwrap_or(defaults.model),
         effort: req.effort.unwrap_or(defaults.effort),
         cooldown_secs: req.cooldown_secs.unwrap_or(defaults.cooldown_secs),
+        enabled: req.enabled.unwrap_or(defaults.enabled),
     };
     let o = ov::create(&st.db, &new).await?;
     Ok(Json(overlooker_view(&st.db, &o).await?))

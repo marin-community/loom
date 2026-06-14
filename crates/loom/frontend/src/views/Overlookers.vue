@@ -194,6 +194,10 @@ async function create() {
       program: programRef || 'builtin:status',
       params,
       capabilities,
+      // Created overlookers go live immediately — the master switch is on by
+      // default, so a freshly-added watcher should fire on its trigger without
+      // a separate manual enable. The per-row toggle still disables it later.
+      enabled: true,
     };
     // Omit `trigger` for `auto` so the server reconciles from the manifest.
     if (trigger !== undefined) body.trigger = trigger;

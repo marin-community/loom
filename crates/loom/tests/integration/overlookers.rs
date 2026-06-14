@@ -8,9 +8,10 @@
 //! and its mutations land with attribution. Don't re-test program logic here.
 //!
 //! These cases drive the engine **directly** on the test server's isolated db
-//! rather than through the spawned background loop: the `overlooker.enabled`
-//! master switch is left at its default (off), so the daemon's own engine idles
-//! and never races these deterministic calls. Each test builds its own
+//! rather than through the spawned background loop: the test harness pins the
+//! `overlooker.enabled` master switch off (it ships on by default), so the
+//! daemon's own engine idles and never races these deterministic calls. Each
+//! test builds its own
 //! `AppState` over the same isolated db (the harness exports `WEAVER_HOME`) and
 //! calls the public engine seams — `dispatch`, `fire_now`, `new_in_flight` /
 //! `fire` — so a round runs without waiting on the timer.

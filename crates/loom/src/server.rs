@@ -259,8 +259,8 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     // integration is off or unavailable.
     tokio::spawn(github::poll(state.clone()));
     // The Overlooker engine (timer + dispatcher). Always spawned; it self-gates
-    // on the `overlooker.enabled` master switch, so a default loom runs it but it
-    // idles cheaply until the operator opts in.
+    // on the `overlooker.enabled` master switch, which is on by default, so a
+    // default loom runs it. Turning the switch off idles it cheaply.
     tokio::spawn(overlooker::run(state.clone()));
     tracing::debug!("background tasks spawned (monitor, github poll, overlooker)");
     // `into_make_service_with_connect_info` surfaces the peer `SocketAddr` to the

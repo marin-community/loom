@@ -429,7 +429,7 @@ through the same `weaver-api` the out-of-process programs use.
   `tags` list.
 
 **Settings (`config::registry()`):** `overlooker.enabled` (Bool, default
-`false`), `overlooker.default_timeout_secs`, `overlooker.default_cooldown_secs`,
+`true`), `overlooker.default_timeout_secs`, `overlooker.default_cooldown_secs`,
 under an **Overlooker** group.
 
 ## The panel (loom UI)
