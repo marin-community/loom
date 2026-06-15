@@ -26,10 +26,10 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 # uv — for the Python repos loom's agents work in. Only the binary lives in the
-# image; the actual interpreters are the HOST's uv-managed Pythons, shared in at
-# the same path via a bind mount (see docker-compose.yml + HOST_UV), so the
-# repos' `.venv` symlinks (which point at ~/.local/share/uv/python) resolve
-# unchanged in-container. Pinned to a recent uv; it reads venvs from older uv fine.
+# image; its downloaded interpreters and wheel cache live in a named volume (see
+# UV_PYTHON_INSTALL_DIR / UV_CACHE_DIR below + docker-compose.yml), so the
+# container manages its own Pythons — self-contained and persisted across
+# recreates, isolated from the host's uv. Pinned to a recent uv.
 COPY --from=ghcr.io/astral-sh/uv:0.11.21 /uv /uvx /usr/local/bin/
 
 # Run as the host user that owns the bind-mounted code, so the worktrees and
@@ -42,6 +42,15 @@ ARG HOST_GID=1000
 # still aborts the build instead of being masked by `|| true`.
 RUN if ! getent group "${HOST_GID}" >/dev/null; then groupadd -g "${HOST_GID}" app; fi; \
     useradd -m -u "${HOST_UID}" -g "${HOST_GID}" -d /home/app -s /bin/bash app
+
+# Where uv keeps its managed interpreters and wheel cache. Kept off /home/app so
+# the (large) Python builds don't bloat the home volume and can be reset on their
+# own; compose mounts a named volume here. Created owned by the host uid/gid so
+# the fresh volume initialises app-writable (Docker seeds a new volume from the
+# image dir's contents + ownership).
+RUN mkdir -p /opt/uv/python /opt/uv/cache && chown -R "${HOST_UID}:${HOST_GID}" /opt/uv
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python \
+    UV_CACHE_DIR=/opt/uv/cache
 
 # Let agents `git push` over HTTPS with the injected GH_TOKEN — no mounted SSH
 # key. The bind-mounted host repos usually have `git@github.com:` SSH remotes, so
