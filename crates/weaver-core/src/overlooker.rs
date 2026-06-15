@@ -262,6 +262,10 @@ pub struct NewOverlooker {
     pub model: String,
     pub effort: String,
     pub cooldown_secs: i64,
+    /// Whether the overlooker is live the moment it is created. Defaults to
+    /// `false` so a bare `NewOverlooker` (CLI / seeds / tests) starts disabled;
+    /// the loom create UI opts in to `true`.
+    pub enabled: bool,
 }
 
 impl Default for NewOverlooker {
@@ -280,6 +284,7 @@ impl Default for NewOverlooker {
             model: String::new(),
             effort: String::new(),
             cooldown_secs: 0,
+            enabled: false,
         }
     }
 }
@@ -292,10 +297,11 @@ pub async fn create(db: &Db, new: &NewOverlooker) -> Result<Overlooker> {
         "INSERT INTO overlookers
            (id, name, enabled, trigger_spec, scope, program, params, capabilities,
             model, effort, cooldown_secs, created_at, updated_at)
-         VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&new.name)
+    .bind(new.enabled)
     .bind(&new.trigger_spec)
     .bind(&new.scope)
     .bind(&new.program)

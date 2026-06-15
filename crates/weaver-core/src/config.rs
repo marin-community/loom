@@ -197,10 +197,10 @@ pub const REGISTRY: &[SettingSpec] = &[
         label: "Enable overlookers",
         description: "Master switch for the Overlooker engine — the periodic / \
             triggered watch programs that survey the fleet and stamp triage \
-            marks. Off by default: nothing fires until you opt in, even if \
-            individual overlookers are enabled.",
+            marks. On by default: turn it off to stop every overlooker cold, \
+            regardless of the individual per-overlooker toggles.",
         kind: SettingKind::Bool,
-        default: "false",
+        default: "true",
         group: "Overlooker",
         options: &[],
     },
@@ -255,8 +255,8 @@ pub const REGISTRY: &[SettingSpec] = &[
     },
 ];
 
-/// Whether the Overlooker engine master switch is on. Off by default.
-pub const DEFAULT_OVERLOOKER_ENABLED: bool = false;
+/// Whether the Overlooker engine master switch is on. On by default.
+pub const DEFAULT_OVERLOOKER_ENABLED: bool = true;
 
 /// Whether the server re-adopts engine-managed (warm) overlooker sessions on
 /// startup. On by default and independent of [`DEFAULT_AUTO_ADOPT`]: a warm
