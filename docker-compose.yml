@@ -36,6 +36,11 @@ services:
       # interpreter symlinks don't resolve here, and that's fine — separate from
       # the host's). Reset with `docker volume rm weaver_uv`.
       - uv:/opt/uv
+      # Google Cloud CLI config + credentials (CLOUDSDK_CONFIG=/opt/gcloud). A
+      # named volume so a one-time `docker exec -it weaver gcloud auth login`
+      # survives recreates — log in once, stay logged in. Isolated from the home
+      # volume and resettable on its own with `docker volume rm weaver_gcloud`.
+      - gcloud:/opt/gcloud
       # GitHub SSH remotes (git@github.com:) work without a key — the image
       # rewrites them to HTTPS over the GH_TOKEN helper. Mount your key only for
       # non-GitHub SSH remotes — uncomment & set the host path (target is the
@@ -51,3 +56,4 @@ networks:
 volumes:
   weaver_home:
   uv:
+  gcloud:

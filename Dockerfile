@@ -20,8 +20,16 @@ RUN set -eux; \
     chmod a+r /etc/apt/keyrings/githubcli-archive-keyring.gpg; \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
       > /etc/apt/sources.list.d/github-cli.list; \
+    # Google Cloud CLI repo — same keyring pattern. The published key is
+    # ASCII-armored, which bookworm's apt accepts via `signed-by` when the file
+    # carries a `.asc` extension, so no `gpg --dearmor` (and no gnupg) is needed.
+    curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+      -o /etc/apt/keyrings/cloud.google.asc; \
+    chmod a+r /etc/apt/keyrings/cloud.google.asc; \
+    echo "deb [signed-by=/etc/apt/keyrings/cloud.google.asc] https://packages.cloud.google.com/apt cloud-sdk main" \
+      > /etc/apt/sources.list.d/google-cloud-sdk.list; \
     apt-get update; \
-    apt-get install -y --no-install-recommends nodejs git ca-certificates gh; \
+    apt-get install -y --no-install-recommends nodejs git ca-certificates gh google-cloud-cli; \
     npm i -g @anthropic-ai/claude-code; \
     rm -rf /var/lib/apt/lists/*
 
@@ -51,6 +59,16 @@ RUN if ! getent group "${HOST_GID}" >/dev/null; then groupadd -g "${HOST_GID}" a
 RUN mkdir -p /opt/uv/python /opt/uv/cache && chown -R "${HOST_UID}:${HOST_GID}" /opt/uv
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python \
     UV_CACHE_DIR=/opt/uv/cache
+
+# Where the Google Cloud CLI keeps its config + credentials (CLOUDSDK_CONFIG).
+# Same pattern as uv: a dedicated dir off /home/app so compose can back it with
+# its own named volume — `gcloud auth login` (run via `docker exec`) then
+# persists across recreates, and the creds can be reset on their own without
+# touching the home volume. Created owned by the host uid/gid so the fresh
+# volume initialises app-writable (Docker seeds a new volume from the image
+# dir's contents + ownership).
+RUN mkdir -p /opt/gcloud && chown -R "${HOST_UID}:${HOST_GID}" /opt/gcloud
+ENV CLOUDSDK_CONFIG=/opt/gcloud
 
 # Let agents `git push` over HTTPS with the injected GH_TOKEN — no mounted SSH
 # key. The bind-mounted host repos usually have `git@github.com:` SSH remotes, so
