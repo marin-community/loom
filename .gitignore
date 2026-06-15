@@ -16,3 +16,7 @@ python/weaver-loom/dist/
 __pycache__/
 python/weaver-loom/.venv/
 python/weaver-loom/uv.lock
+
+# Local-only container env: a halcyon-style deploy symlinks secrets/weaver.env
+# to ./.env (holds GH_TOKEN etc.). Never commit it — it's host-specific secrets.
+.env

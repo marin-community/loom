@@ -21,6 +21,11 @@ services:
         HOST_GID: ${HOST_GID:-1000}
     restart: unless-stopped
     env_file: .env                # halcyon symlinks secrets/weaver.env -> ./.env
+    environment:
+      # Point in-container uv at the shared host interpreter set (the bind mount
+      # below), the same path baked into every repo's `.venv`, so `uv run`/`uv
+      # sync` reuse the host Pythons instead of trying to download their own.
+      UV_PYTHON_INSTALL_DIR: ${HOST_UV:-/root/.local/share/uv/python}
     volumes:
       # Persistent HOME for the container user: the weaver sqlite db, the 0600
       # loom-token, and ~/.claude.json live here and survive a recreate.
@@ -28,6 +33,10 @@ services:
       # The repos + the worktrees loom creates, shared with the host at the SAME
       # path. HOST_CODE is your repo dir (e.g. /home/you/code); set it in the env.
       - ${HOST_CODE:?set HOST_CODE (host repo dir) in secrets/weaver.env}:${HOST_CODE}
+      # The host's uv-managed Python interpreters, shared at the SAME path so the
+      # `.venv` symlinks in the bind-mounted repos resolve in-container. HOST_UV
+      # is your host uv python dir (default ~/.local/share/uv/python).
+      - ${HOST_UV:?set HOST_UV (host uv python dir) in secrets/weaver.env}:${HOST_UV}
       # GitHub SSH remotes (git@github.com:) work without a key — the image
       # rewrites them to HTTPS over the GH_TOKEN helper. Mount your key only for
       # non-GitHub SSH remotes — uncomment & set the host path (target is the

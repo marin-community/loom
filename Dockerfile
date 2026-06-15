@@ -25,6 +25,13 @@ RUN set -eux; \
     npm i -g @anthropic-ai/claude-code; \
     rm -rf /var/lib/apt/lists/*
 
+# uv — for the Python repos loom's agents work in. Only the binary lives in the
+# image; the actual interpreters are the HOST's uv-managed Pythons, shared in at
+# the same path via a bind mount (see docker-compose.yml + HOST_UV), so the
+# repos' `.venv` symlinks (which point at ~/.local/share/uv/python) resolve
+# unchanged in-container. Pinned to a recent uv; it reads venvs from older uv fine.
+COPY --from=ghcr.io/astral-sh/uv:0.11.21 /uv /uvx /usr/local/bin/
+
 # Run as the host user that owns the bind-mounted code, so the worktrees and
 # edits loom's agents create are owned by you on the host, not root. The uid/gid
 # come from build args (set HOST_UID/HOST_GID in secrets/weaver.env); the
