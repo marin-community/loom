@@ -123,7 +123,7 @@ message. This replaces the old guessed working/waiting/idle indicator, which was
 often wrong (e.g. it read "idle" while you were really waiting on a workflow).
 
 Under the hood, status is stored as **tags** on your branch. A tag is a single
-`(key, value)` annotation with a note, an author, and a timestamp. Two keys are
+`(key, value)` annotation with a note, an author, and a timestamp. Three keys are
 well known:
 
 - `attention` — your self-report, the value being `attention` or `blocked`. This
@@ -134,6 +134,11 @@ well known:
   `attention`/`blocked` ladder but authored by an overlooker (or `manual`), never
   by you. It is independent of your `attention` tag and carries its own reason
   and attribution.
+- `idle` — a soothing, *quiet* mark stamped mechanically when your agent goes
+  quiet (a finished turn or a lull): the calm "resting, no one needed" state. It
+  is **not** loud — an idle agent does not read as needing the user — and you
+  never set it yourself. The status watch may replace it with a real `attention`
+  status once it judges the session genuinely needs a human.
 
 Your prose `description` is separate from the tags and is shown even when you are
 calm. Any other key is a free-form, quiet tag. A tag is stale once your session

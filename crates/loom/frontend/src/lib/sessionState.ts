@@ -9,6 +9,13 @@ export type Attention = 'ok' | 'attention' | 'blocked';
 // pill. Mirrors weaver-core's `ATTENTION_VALUES`.
 const SEVERITY: Record<string, number> = { attention: 1, blocked: 2 };
 
+// The soothing, quiet `idle` mark loom stamps when an agent goes quiet (a
+// finished turn or a `waiting` lull): the calm "resting, no one needed" state.
+// It carries the quiet value `idle`, so it is never loud — an idle agent no
+// longer reads as needing the user. The status watch may replace it with a real
+// loud status. Mirrors weaver-core's `IDLE_KEY`.
+export const IDLE_KEY = 'idle';
+
 // Severity of a tag value: 0 is quiet (a pill), >0 is loud (a badge).
 function severityOf(value: string | undefined): number {
   return (value && SEVERITY[value]) || 0;
@@ -148,11 +155,30 @@ export function signalChips(s: Session): SignalChip[] {
 }
 
 // The session's quiet tags: every tag whose value is not loud, for the pill row.
-// These are free-form, deletable annotations (priority, needs-rebase, …).
-// Archived sessions show none.
+// These are free-form, deletable annotations (priority, needs-rebase, …). The
+// soothing `idle` mark is excluded — it is a lifecycle signal surfaced calmly by
+// idleTag/conversationState, not a free-form pill. Archived sessions show none.
 export function quietTags(s: Session): Tag[] {
   if (s.status === 'archived') return [];
-  return (s.branch.tags ?? []).filter((t) => severityOf(t.value) === 0);
+  return (s.branch.tags ?? []).filter(
+    (t) => severityOf(t.value) === 0 && t.key !== IDLE_KEY,
+  );
+}
+
+// The soothing `idle` mark to surface, or null. Present only when the session is
+// a *live* agent resting between turns: a terminal/detached lifecycle (done,
+// error, archived, orphaned) reads through its own badge, not "resting". And
+// only when genuinely calm — any loud signal (the agent's own or an outside
+// mark) supersedes the resting state — and the mark is itself live (not stale:
+// the session hasn't moved on past it). Drives the calm "Idle" presentation in
+// the list and header.
+const LIVE_STATUSES = new Set(['launching', 'running']);
+export function idleTag(s: Session): Tag | null {
+  if (!LIVE_STATUSES.has(s.status)) return null;
+  if (loudTags(s).length > 0) return null;
+  const tag = (s.branch.tags ?? []).find((t) => t.key === IDLE_KEY);
+  if (!tag || tagStale(tag, s.last_activity_at)) return null;
+  return tag;
 }
 
 // Compact conversation-state line for the detail header (#5): a derived
@@ -178,8 +204,11 @@ export function conversationState(s: Session): ConvState {
   if (level === 'blocked') return { glyph: '●', label: 'Blocked', tone: 'block' };
   if (level === 'attention') return { glyph: '●', label: 'Needs attention', tone: 'attn' };
 
-  // Otherwise infer working vs idle from lifecycle. "Working"/"Idle" stay
-  // neutral so amber/red remains the sole loud signal.
+  // Calm: an explicit `idle` mark means the agent is resting — surface it even
+  // while the lifecycle is still `running` between turns (a finished turn leaves
+  // the session running but quiet). "Working"/"Idle" stay neutral so amber/red
+  // remains the sole loud signal.
+  if (idleTag(s)) return { glyph: '✓', label: 'Idle', tone: 'muted' };
   if (s.status === 'running' || s.status === 'launching') return { glyph: '▶', label: 'Working', tone: 'muted' };
   return { glyph: '✓', label: 'Idle', tone: 'muted' };
 }

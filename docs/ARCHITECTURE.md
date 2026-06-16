@@ -307,8 +307,12 @@ agents and watches both add loud tags without a privileged key registry. A tag's
 **key is its type** (the chip label — `attention`, `review`, `stuck`, …) and its
 **value is the severity**; every other value is a free-form, quiet pill. The
 agent authors the well-known **`attention`** key for its own self-report; a watch
-authors its own typed keys. **Absence is the calm/default state** — there is no
-stored `ok`; returning to calm *clears* the tag. A tag is **stale** when its
+authors its own typed keys. The well-known **`idle`** key is a *quiet* exception:
+loom stamps it mechanically when an agent goes quiet (the soothing "resting, no
+one needed" state), carrying the non-loud value `idle` so it never raises a badge
+— the dashboard surfaces it as a calm "Idle" mark, and the status watch may
+replace it with a real loud status. **Absence is the calm/default state** — there
+is no stored `ok`; returning to calm *clears* the tag. A tag is **stale** when its
 `set_at` predates the session's `last_activity_at` (the session moved on since it
 was set). The dashboard resolves the loudest non-stale loud tag into one
 attention signal, with attribution (the agent's own, or an outside mark). The
@@ -335,13 +339,15 @@ alive, so all three set `status = running` (this also promotes a freshly
 `launching` session). Liveness is all a hook proves, so that is all the
 orchestrator tracks — it does not infer working/waiting/idle from stillness.
 
-The hooks also nudge the **`attention` tag** where they carry a genuine signal:
-`working` clears it (back to calm) and drops any pending prompt (the user is
-engaged); `waiting` raises it to `attention` and snapshots the terminal screen
-into `pending_prompt` (Claude is blocked asking the user — the snapshot conveys what
-it's waiting on, so no separate note is stored); `idle` (a turn ending) leaves
-the tag untouched, so a finished-but-fine agent isn't mistaken for one that
-needs you.
+The hooks also stamp a soothing, **quiet `idle` tag** — the calm "resting, no one
+needed" state, deliberately *not* on the loud ladder, so an idle agent never
+reads as needing the user. `working` (a prompt was submitted — the user is
+engaged) returns the agent to calm, clearing both the `idle` mark and the agent's
+own `attention` tag. `waiting` (a `Notification` lull) and `idle` (a turn ending)
+both stamp the `idle` mark; they leave the agent's `attention` tag untouched, so a
+loud self-report still wins the badge. We don't try to mechanically separate
+"truly idle" from "waiting on a sub-agent or shell" — the finished-turn hook is a
+good-enough idle signal, and the status watch upgrades it when warranted (below).
 
 The **`attention` tag** is otherwise the agent's own call, set via `weaver
 status <level> ["<message>"]`. That writes the tag (and, when a message is
@@ -354,11 +360,14 @@ the `PUT`/`DELETE /api/sessions/{id}/tags/{key}` routes do it over HTTP for the
 UI and the [overlooker](plans/overlooker.md). The builtin status watch, when a
 session goes idle (the agent's finished-turn hook), asks the judge model for the
 set of tags the session warrants and reconciles its own typed marks to that set
-— never mirroring the agent's own `attention`.
+— never mirroring the agent's own `attention`. When the judge names a genuine
+need, that session is actively waiting, not resting, so the watch *replaces* the
+soothing `idle` mark with the real loud status; a "nothing needed" verdict leaves
+`idle` in place.
 
-Archiving a session clears its loud tags (and drops any snapshotted
-`pending_prompt`): the agent is gone, so a torn-down workstream
-can't still "need me", and the dashboard stops flagging it. The UI also treats
+Archiving a session clears its loud tags **and** the soothing `idle` mark: the
+agent is gone, so a torn-down workstream can't still "need me" nor is it
+"resting", and the dashboard stops flagging or labelling it. The UI also treats
 any `archived` session as calm regardless of a stale tag left on the branch.
 
 Orphan detection is independent: if the session's supervisor is no longer alive,

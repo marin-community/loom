@@ -52,8 +52,20 @@ pub const ATTENTION_KEY: &str = "attention";
 /// anchor.
 pub const TRIAGE_KEY: &str = "triage";
 
+/// A soothing, **quiet** mark stamped mechanically when the agent goes quiet (a
+/// finished turn or a `waiting` lull — see loom's `apply_hook`). It is the calm
+/// "this agent is resting, no one is needed" signal — deliberately *not* on the
+/// loud ladder, so an idle agent no longer reads as needing the user. Its value
+/// is the fixed [`IDLE_VALUE`]; the status watch may replace it with a real loud
+/// status (or clear it) once it judges the session genuinely needs a human.
+pub const IDLE_KEY: &str = "idle";
+
+/// The fixed value the [`IDLE_KEY`] tag carries. Quiet by design (not on
+/// [`ATTENTION_VALUES`]), so it renders soothing rather than loud.
+pub const IDLE_VALUE: &str = "idle";
+
 /// The loud keys: those that raise an attention signal on the dashboard. Any
-/// other key is quiet (a deletable pill).
+/// other key is quiet (a deletable pill) — including the soothing [`IDLE_KEY`].
 pub const LOUD_KEYS: &[&str] = &[ATTENTION_KEY, TRIAGE_KEY];
 
 /// Whether `key` is a loud (badge-raising) key.
@@ -178,6 +190,13 @@ mod tests {
         // A free-form key accepts any non-empty value.
         assert!(is_valid_value("priority", "high"));
         assert!(!is_valid_value("priority", ""));
+
+        // `idle` is a quiet, soothing key — never on the loud ladder, so an idle
+        // agent doesn't read as needing the user. It validates as a free-form
+        // key (any non-empty value), and its fixed value is not loud.
+        assert!(!is_loud(IDLE_KEY));
+        assert!(!is_loud_value(IDLE_VALUE));
+        assert!(is_valid_value(IDLE_KEY, IDLE_VALUE));
 
         // Loudness is value-driven: any key holding a ladder value is loud (a
         // watch's typed `review`/`stuck`), while a quiet value never is.

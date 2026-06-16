@@ -137,32 +137,35 @@ async fn hook_event_drives_session_status() {
         "monitor should have flipped status to running"
     );
 
-    // A `waiting` hook (Claude blocked asking the user) raises the agent-declared
-    // attention axis to `attention` — the `attention` tag, the dashboard's
-    // "needs me" flag.
+    // A `waiting` hook (a quiet lull) stamps the soothing, *quiet* `idle` mark —
+    // the calm "resting, no one needed" state, never the loud `attention` axis,
+    // so an idle agent doesn't read as needing the user.
     weaver_core::events::record_local(&pool, &branch_id, "hook", json!({ "event": "waiting" }))
         .await
         .unwrap();
-    let mut attention = String::new();
+    let mut idle = String::new();
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let ws = client.get(&format!("/api/sessions/{id}")).await.unwrap();
-        attention = ws["branch"]["tags"]
-            .as_array()
-            .and_then(|tags| {
-                tags.iter()
-                    .find(|t| t["key"] == "attention")
-                    .and_then(|t| t["value"].as_str())
-            })
+        let tags = ws["branch"]["tags"].as_array().cloned().unwrap_or_default();
+        idle = tags
+            .iter()
+            .find(|t| t["key"] == "idle")
+            .and_then(|t| t["value"].as_str())
             .unwrap_or("")
             .to_string();
-        if attention == "attention" {
+        // It must NOT raise the loud attention axis.
+        assert!(
+            !tags.iter().any(|t| t["key"] == "attention"),
+            "waiting hook must not raise the loud attention tag"
+        );
+        if idle == "idle" {
             break;
         }
     }
     assert_eq!(
-        attention, "attention",
-        "waiting hook should raise the attention tag"
+        idle, "idle",
+        "waiting hook should stamp the soothing idle mark"
     );
 
     // Verify the hook event row landed too.

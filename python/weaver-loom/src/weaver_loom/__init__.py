@@ -71,6 +71,14 @@ JUDGED_LEVELS = ("ok", "attention", "blocked")
 #: ``ATTENTION_VALUES``.
 LOUD_VALUES = ("attention", "blocked")
 
+#: The quiet, soothing mark loom stamps when an agent goes quiet (a finished
+#: turn or a ``waiting`` lull): the calm "resting, no one needed" state. Not on
+#: :data:`LOUD_VALUES`, so it never raises a badge. The status watch replaces it
+#: with a real loud status — or clears it — when the session actually needs a
+#: human. Mirrors weaver-core's ``IDLE_KEY`` / ``IDLE_VALUE``.
+IDLE_KEY = "idle"
+IDLE_VALUE = "idle"
+
 
 def parse_judgement(text):
     """Parse an agent judgement into ``(level, note)``, or ``None``.

@@ -89,6 +89,34 @@ test.describe('session list view', () => {
     expect(updated.branch.tags.find((t) => t.key === 'triage')).toBeUndefined();
   });
 
+  test('a resting agent shows a soothing idle mark, not a loud signal', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({ goal: 'Resting', name: 'resting' });
+    // The idle hook stamps the quiet `idle` mark when the agent goes quiet.
+    await weaver.setTag(s, 'idle', 'idle');
+
+    await page.goto(weaver.baseUrl);
+    const card = page.locator(`[data-session-id="${s.id}"]`);
+    // It renders as a calm, neutral idle chip — never a loud signal chip, and not
+    // as a generic quiet pill (it's a lifecycle signal, surfaced soothingly).
+    await expect(card.getByTestId('idle-chip')).toContainText(/idle/i);
+    await expect(card.getByTestId('signal-chip')).toHaveCount(0);
+    await expect(card.getByTestId('tag-pill')).toHaveCount(0);
+    // A resting agent does not count toward "needs attention".
+    await expect(page.getByTestId('filter-attention')).toContainText('0');
+
+    // A loud signal supersedes the calm mark: once the agent raises attention,
+    // the idle chip yields to the loud signal chip.
+    await weaver.setStatus(s, 'attention', 'ready for review');
+    await page.reload();
+    await expect(card.getByTestId('idle-chip')).toHaveCount(0);
+    await expect(
+      card.locator('[data-testid="signal-chip"][data-signal-key="attention"]'),
+    ).toHaveAttribute('data-level', 'attention');
+  });
+
   test('a quiet free-form tag renders as a deletable pill', async ({ page, weaver }) => {
     const s = await weaver.seedSession({ goal: 'Tag me', name: 'tagged' });
     await weaver.setTag(s, 'priority', 'high');

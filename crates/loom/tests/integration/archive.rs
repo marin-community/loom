@@ -60,6 +60,16 @@ async fn archive_keeps_branch_and_history() {
         )
         .await
         .unwrap();
+    // The soothing `idle` mark is quiet (not on the loud ladder) but is still a
+    // lifecycle signal a torn-down workstream shouldn't carry: archiving clears
+    // it too.
+    client
+        .put(
+            &format!("/api/sessions/{arch_id}/tags/idle"),
+            json!({ "value": "idle", "by": "agent" }),
+        )
+        .await
+        .unwrap();
     client
         .patch(
             &format!("/api/sessions/{arch_id}"),
@@ -97,6 +107,10 @@ async fn archive_keeps_branch_and_history() {
     assert!(
         branch_tag(&view, "review").is_none(),
         "archive should clear a watch's typed loud mark too"
+    );
+    assert!(
+        branch_tag(&view, "idle").is_none(),
+        "archive should clear the soothing idle mark too"
     );
     assert_eq!(
         view["branch"]["description"], "Waiting for input",

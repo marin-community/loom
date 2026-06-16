@@ -238,26 +238,32 @@ fn parse_iso(ts: &str) -> Option<DateTime<Utc>> {
 /// Returns the new event watermark (it records its own bus events). `None` when
 /// there is no active session for the branch.
 ///
-/// Mapping rationale: hooks now drive only liveness and the genuine
-/// attention signals. Any hook means the agent process is alive → `running`
-/// (this also promotes a freshly-`launching` session). Beyond that the hook
-/// writes the agent's `attention` tag:
+/// Mapping rationale: hooks drive only liveness and a soothing idle signal. Any
+/// hook means the agent process is alive → `running` (this also promotes a
+/// freshly-`launching` session). Beyond that:
 ///
-/// * `working` (a prompt was submitted — the user is engaged) clears the
-///   attention tag back to calm (`ok`).
-/// * `waiting` (Claude is blocked asking the user) sets the attention tag to
-///   `attention`.
-/// * `idle` (a turn ended) leaves attention untouched — a finished-but-fine
-///   agent must not be mistaken for one that needs the user. If it actually
-///   needs something it will have said so via `weaver status`.
+/// * `working` (a prompt was submitted — the user is engaged) clears the calm
+///   `idle` mark *and* the agent's `attention` tag back to calm: an engaged
+///   agent is neither resting nor waiting on the user.
+/// * `waiting` (a `Notification` lull) and `idle` (a turn ended) stamp the quiet
+///   [`tags::IDLE_KEY`] mark — the soothing "resting, no one needed" state.
+///   Crucially this is **not** loud, so a finished-but-fine agent no longer
+///   reads as needing the user. They leave the agent's own `attention` tag
+///   untouched (a loud self-report still wins the badge), and the status watch
+///   may later replace this idle mark with a real loud status — or clear it —
+///   once it judges the session genuinely needs a human.
+///
+/// We don't try to mechanically tell "truly idle" from "waiting on a sub-agent
+/// or shell": the finished-turn hook is a good-enough idle signal, and the
+/// status watch upgrades it when warranted.
 async fn apply_hook(state: &AppState, branch_id: &str, kind: &str) -> Option<i64> {
-    // The attention level the hook implies, or `None` to leave it untouched. An
-    // empty string is the calm state — it clears the tag rather than storing.
-    let attention: Option<&str> = match kind {
-        "working" => Some(""),
-        "waiting" => Some("attention"),
-        "idle" => None,
-        // `session-start` and anything unknown carry no status signal.
+    // The tag mutations the hook implies: `(key, value)` where an empty value
+    // clears the tag (absence is the calm/default state). `working` returns the
+    // agent to calm (clearing both axes it might carry); the quiet signals stamp
+    // the soothing `idle` mark. `session-start` and the unknown carry none.
+    let mutations: &[(&str, &str)] = match kind {
+        "working" => &[(tags::ATTENTION_KEY, ""), (tags::IDLE_KEY, "")],
+        "waiting" | "idle" => &[(tags::IDLE_KEY, tags::IDLE_VALUE)],
         _ => return None,
     };
 
@@ -273,35 +279,6 @@ async fn apply_hook(state: &AppState, branch_id: &str, kind: &str) -> Option<i64
     }
     let _ = session_mod::touch(&state.db, &session.id).await;
 
-    // Attention, only when the hook carries a signal and the tag value differs.
-    // Calm (empty) clears the tag (absence is the default state); any other level
-    // upserts it. Emit a `tag` event on a real change so dashboards refresh.
-    let mut attention_changed: Option<&str> = None;
-    if let Some(level) = attention {
-        let current = tags::get(&state.db, branch_id, tags::ATTENTION_KEY)
-            .await
-            .ok()
-            .flatten()
-            .map(|t| t.value)
-            .unwrap_or_default();
-        if current != level {
-            if level.is_empty() {
-                let _ = tags::clear(&state.db, branch_id, tags::ATTENTION_KEY).await;
-            } else {
-                let _ = tags::set(
-                    &state.db,
-                    branch_id,
-                    tags::ATTENTION_KEY,
-                    level,
-                    "",
-                    "agent",
-                )
-                .await;
-            }
-            attention_changed = Some(level);
-        }
-    }
-
     if status_changed {
         let _ = events::record(
             &state.db,
@@ -312,18 +289,29 @@ async fn apply_hook(state: &AppState, branch_id: &str, kind: &str) -> Option<i64
         )
         .await;
     }
-    if let Some(level) = attention_changed {
-        let _ = events::record_tag(
-            &state.db,
-            &state.bus,
-            branch_id,
-            tags::ATTENTION_KEY,
-            level,
-            "",
-            "agent",
-        )
-        .await;
+
+    // Apply each tag mutation only when it actually changes the stored value, so
+    // a repeated hook (e.g. another finished turn while already idle) is a no-op
+    // and dashboards refresh only on a real edge. The author is `agent` — these
+    // are the agent's own lifecycle marks.
+    for &(key, value) in mutations {
+        let current = tags::get(&state.db, branch_id, key)
+            .await
+            .ok()
+            .flatten()
+            .map(|t| t.value)
+            .unwrap_or_default();
+        if current == value {
+            continue;
+        }
+        if value.is_empty() {
+            let _ = tags::clear(&state.db, branch_id, key).await;
+        } else {
+            let _ = tags::set(&state.db, branch_id, key, value, "", "agent").await;
+        }
+        let _ = events::record_tag(&state.db, &state.bus, branch_id, key, value, "", "agent").await;
     }
+
     // Advance the watermark past our own freshly-recorded events so the next
     // tick doesn't reprocess them. `None` on a read error just leaves the
     // caller's watermark untouched (the consumed event is already accounted for).

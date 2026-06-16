@@ -65,12 +65,15 @@ class StubClient:
         self.calls.append(("clear_tag", key, tag_key, by))
 
 
-def session(id, attention=None, watch=None, status="running"):
-    """A session dict: an optional `attention` self-report (set_by agent) and any
+def session(id, attention=None, watch=None, status="running", idle=False):
+    """A session dict: an optional `attention` self-report (set_by agent), an
+    optional soothing `idle` mark (set_by agent, the idle hook's stamp), and any
     number of watch-authored marks (set_by 'watch', this round's name)."""
     tags = []
     if attention:
         tags.append({"key": "attention", "value": attention, "set_by": "agent"})
+    if idle:
+        tags.append({"key": "idle", "value": "idle", "set_by": "agent"})
     for key, value in (watch or {}).items():
         tags.append({"key": key, "value": value, "set_by": "watch"})
     return {"id": id, "status": status, "branch": {"tags": tags, "repo_root": "/r"}}
@@ -232,6 +235,59 @@ def test_dry_run_records_would_and_mutates_nothing(capsys):
             "value": "attention", "note": "looks done"} in result["actions"]
     assert {"would": "clear", "session": "s", "key": "stuck"} in result["actions"]
     assert result["summary"] == "assessed 1 of 1, would apply 1 tag(s) (dry run, no writes applied)"
+
+
+# -- idle: a real status replaces the soothing idle mark ----------------------
+
+
+def test_real_status_replaces_the_soothing_idle_mark(capsys):
+    # The session is resting (the idle hook stamped `idle`); the judge finds work
+    # ready to review → the watch sets `review` AND clears `idle`, replacing the
+    # calm mark with the real status. The `idle` mark is the agent's own, yet the
+    # watch is allowed to clear it here.
+    client = StubClient(
+        capabilities=["mark"],
+        agent_reply=TAGS,
+        sessions=[session("s", idle=True)],
+    )
+    run_main(client, capsys)
+    assert ("set_tag", "s", "review", "attention", "looks done", "watch") in client.calls
+    assert ("clear_tag", "s", "idle", "watch") in client.calls
+
+
+def test_calm_verdict_leaves_the_idle_mark(capsys):
+    # Nothing needed → the agent stays calmly idle; the watch must NOT clear the
+    # soothing `idle` mark.
+    client = StubClient(
+        capabilities=["mark"],
+        agent_reply="[]",
+        sessions=[session("s", idle=True)],
+    )
+    run_main(client, capsys)
+    assert not any(c[0] == "clear_tag" and c[2] == "idle" for c in client.calls)
+
+
+def test_no_idle_mark_means_nothing_to_replace(capsys):
+    # A real verdict but no `idle` mark on the session → the round sets the tag
+    # without a spurious idle clear.
+    client = StubClient(
+        capabilities=["mark"],
+        agent_reply=TAGS,
+        sessions=[session("s")],
+    )
+    run_main(client, capsys)
+    assert not any(c[0] == "clear_tag" and c[2] == "idle" for c in client.calls)
+
+
+def test_dry_run_would_clear_the_idle_mark(capsys):
+    client = StubClient(
+        capabilities=["mark"],
+        agent_reply=TAGS,
+        sessions=[session("s", idle=True)],
+    )
+    result = run_main(client, capsys, dry_run=True)
+    assert sets(client) == [] and clears(client) == []
+    assert {"would": "clear", "session": "s", "key": "idle"} in result["actions"]
 
 
 def test_empty_survey_is_a_noop(capsys):

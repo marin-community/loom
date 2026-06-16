@@ -5,11 +5,12 @@ import { get, post } from '../api';
 import type { Session, RecentRepo, RepoBranch } from '../types';
 import StatusBadge from '../components/StatusBadge.vue';
 import SignalChip from '../components/SignalChip.vue';
+import IdleChip from '../components/IdleChip.vue';
 import TagPill from '../components/TagPill.vue';
 import GithubStatus from '../components/GithubStatus.vue';
 import ScratchPicker from '../components/ScratchPicker.vue';
 import { timeAgo } from '../lib/time';
-import { effectiveAttention, messageOf, quietTags, signalChips } from '../lib/sessionState';
+import { effectiveAttention, idleTag, messageOf, quietTags, signalChips } from '../lib/sessionState';
 import { del } from '../api';
 
 const sessions = ref<Session[]>([]);
@@ -751,6 +752,9 @@ onUnmounted(() => clearInterval(timer));
                  the running state — nearly every live row is running, so the pill
                  would just be repeated noise; only off-nominal states show one. -->
             <StatusBadge v-if="s.status !== 'running'" :status="s.status" class="shrink-0" />
+            <!-- Soothing idle mark: a calm, neutral chip when the agent is
+                 resting (no loud signal). Reassures rather than alarms. -->
+            <IdleChip v-if="idleTag(s)" :tag="idleTag(s)!" />
             <!-- Quiet free-form tags: deletable pills, never the loud fill. -->
             <TagPill
               v-for="t in quietTags(s)"

@@ -49,9 +49,10 @@ pub const BUILTINS: &[BuiltinProgram] = &[
                       ask the judge model (the daemon's one-shot agent) for the \
                       set of attention tags it warrants and reconcile the watch's \
                       own marks to that set. Names the kind of attention (review, \
-                      question, stuck, …) rather than a generic mark; with no \
-                      judge model available it no-ops, never mirroring the \
-                      agent's own attention tag.",
+                      question, stuck, …) rather than a generic mark, and when it \
+                      finds a genuine need it replaces the soothing `idle` mark \
+                      with that real status. With no judge model available it \
+                      no-ops, never mirroring the agent's own attention tag.",
         source: include_str!("../overlookers/status.py"),
         default_trigger: r#"{"on":["session.idle"]}"#,
         default_scope: "{}",
