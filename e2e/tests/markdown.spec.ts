@@ -2,11 +2,13 @@ import { test, expect } from '../fixtures/weaver';
 import { writeFileSync } from 'fs';
 import { join } from 'path';
 
-// The file browser's Preview mode renders Markdown the way GitHub does:
-// GFM tables/task-lists, syntax-highlighted code, inline images resolved
-// against the worktree, and mermaid diagrams. This drives a real doc through
-// the running UI and asserts each of those surfaces.
-test.describe('rich markdown preview', () => {
+// loom's Markdown rendering pipeline (MarkdownView + markdown.ts): GFM
+// tables/task-lists, syntax-highlighted code, inline images resolved against
+// the worktree, and mermaid diagrams. It is exercised here through the Artifacts
+// viewer, which hosts it (the bespoke Files browser that used to is gone — the
+// embedded editor is the file surface now). This drives a real markdown artifact
+// through the running UI and asserts each surface.
+test.describe('rich markdown rendering', () => {
   const DOC = [
     '# Design Doc',
     '',
@@ -34,16 +36,14 @@ test.describe('rich markdown preview', () => {
   test('renders GFM, code, an inline image, and a mermaid diagram', async ({ page, weaver }) => {
     const session = await weaver.seedSession({ goal: 'write docs', name: 'md-preview' });
 
-    // Drop the doc and the image it references straight into the worktree;
-    // both show up in the (untracked-aware) file tree.
-    writeFileSync(join(session.work_dir, 'DESIGN.md'), DOC);
+    // The image the doc references lives in the worktree; inline images resolve
+    // against the session's raw-bytes endpoint regardless of the hosting view.
     writeFileSync(join(session.work_dir, 'shot.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    await weaver.writeArtifact(session, 'design', DOC, { title: 'Design Doc' });
 
-    await page.goto(`${weaver.baseUrl}/s/${session.id}/files`);
+    await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/design`);
 
-    // Open the doc — markdown files default to the rendered Preview.
-    await page.getByText('DESIGN.md', { exact: true }).first().click();
-
+    // Markdown artifacts open in the rendered Preview.
     const body = page.locator('.markdown-body');
     await expect(body.locator('h1')).toContainText('Design Doc');
     // The heading is slugged and carries a GitHub-style permalink.
@@ -62,7 +62,10 @@ test.describe('rich markdown preview', () => {
     await expect(body.locator('pre.hljs')).toBeVisible();
 
     // External links open in a new tab.
-    await expect(body.locator('a', { hasText: 'external link' })).toHaveAttribute('target', '_blank');
+    await expect(body.locator('a', { hasText: 'external link' })).toHaveAttribute(
+      'target',
+      '_blank',
+    );
 
     // The relative image resolves to the session's raw-bytes endpoint.
     await expect(body.locator('img')).toHaveAttribute(
@@ -102,33 +105,20 @@ test.describe('rich markdown preview', () => {
     // success — so a failed render used to leak the bomb into the page body,
     // where it survived route changes and stacked up at the bottom of every view.
     const doc = ['# Doc', '', '```mermaid', 'graph TD; A --> ((( broken', '```', ''].join('\n');
-    writeFileSync(join(session.work_dir, 'BAD.md'), doc);
+    await weaver.writeArtifact(session, 'bad-diagram', doc, { title: 'Bad diagram' });
 
-    await page.goto(`${weaver.baseUrl}/s/${session.id}/files`);
-    await page.getByText('BAD.md', { exact: true }).first().click();
+    await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/bad-diagram`);
 
     // The failure surfaces as our own inline note inside the preview…
     await expect(page.locator('.markdown-body .mermaid-error')).toBeVisible({ timeout: 30_000 });
 
     // …and nothing leaks into the document body outside the app.
-    const leaked = await page.evaluate(() =>
-      document.querySelectorAll('body > svg[aria-roledescription="error"], body > .mermaid, body .error-icon')
-        .length,
+    const leaked = await page.evaluate(
+      () =>
+        document.querySelectorAll(
+          'body > svg[aria-roledescription="error"], body > .mermaid, body .error-icon',
+        ).length,
     );
     expect(leaked).toBe(0);
-  });
-
-  test('non-markdown files have no Preview toggle', async ({ page, weaver }) => {
-    const session = await weaver.seedSession({ goal: 'code', name: 'no-preview' });
-    writeFileSync(join(session.work_dir, 'main.rs'), 'fn main() {}\n');
-
-    await page.goto(`${weaver.baseUrl}/s/${session.id}/files`);
-    await page.getByText('main.rs', { exact: true }).first().click();
-
-    // Source code opens in Monaco; non-markdown gets neither a Preview button
-    // nor the rendered markdown surface.
-    await expect(page.locator('.monaco-editor.modified-in-monaco-diff-editor')).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Preview', exact: true })).toHaveCount(0);
-    await expect(page.locator('.markdown-body')).toHaveCount(0);
   });
 });

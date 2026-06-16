@@ -117,6 +117,8 @@ pub struct AppState {
     pub bus: EventBus,
     /// host:port the server is bound to, used to build child-process env.
     pub addr: String,
+    /// Per-session embedded code-server lifecycle + reverse-proxy registry.
+    pub ide: std::sync::Arc<crate::ide::IdeManager>,
 }
 
 // ---------------------------------------------------------------------------
@@ -258,12 +260,31 @@ async fn require_branch(db: &Db, key: &str) -> ApiResult<Branch> {
 // Caching middleware
 // ---------------------------------------------------------------------------
 
+/// Whether `path` (the `/api`-stripped path) is an embedded-editor proxy route
+/// — `/sessions/<id>/ide` or `/sessions/<id>/ide/…` — as opposed to the small
+/// `ide-info` JSON probe, which is fine to ETag.
+fn is_ide_proxy_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/sessions/") else {
+        return false;
+    };
+    match rest.split_once('/') {
+        Some((_id, after)) => after == "ide" || after.starts_with("ide/"),
+        None => false,
+    }
+}
+
 /// Add `ETag` + `Cache-Control: no-cache` to JSON API GET responses and serve
 /// `304 Not Modified` when the client's `If-None-Match` matches.
 ///
-/// Skips non-200 responses, SSE streams, and WebSocket upgrades so they pass
-/// through untouched.
+/// Skips non-200 responses, SSE streams, WebSocket upgrades, and the
+/// embedded-editor proxy so they pass through untouched.
 pub async fn api_etag_middleware(request: Request<axum::body::Body>, next: Next) -> Response {
+    // The embedded-editor reverse proxy streams arbitrary code-server traffic
+    // (assets, its own API, WebSockets). Buffering it to hash an ETag is both
+    // wasteful and, past the 16 MB cap below, corrupting — so skip it entirely.
+    if is_ide_proxy_path(request.uri().path()) {
+        return next.run(request).await;
+    }
     let if_none_match = request.headers().get(header::IF_NONE_MATCH).cloned();
     let response = next.run(request).await;
 
@@ -380,9 +401,16 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/archive", post(archive_session))
         .route("/sessions/{id}/adopt", post(adopt_session))
         .route("/sessions/{id}/github", post(refresh_github_session))
-        .route("/sessions/{id}/tree", get(tree_session))
-        .route("/sessions/{id}/file", get(file_session).put(write_file))
         .route("/sessions/{id}/raw", get(raw_session))
+        // Embedded VS Code (code-server), reverse-proxied per session. `ide-info`
+        // is the UI's availability probe; the `ide`/`ide/*` routes serve the
+        // editor itself (the static segments win over the `{*rest}` catch-all).
+        .route("/sessions/{id}/ide-info", get(crate::ide::info))
+        .route("/sessions/{id}/ide", axum::routing::any(crate::ide::proxy))
+        .route(
+            "/sessions/{id}/ide/{*rest}",
+            axum::routing::any(crate::ide::proxy),
+        )
         .route("/sessions/{id}/artifacts", get(list_artifacts))
         .route(
             "/sessions/{id}/artifacts/{name}",
@@ -1109,6 +1137,7 @@ async fn delete_session(
     let mut warnings: Vec<String> = Vec::new();
 
     backend::kill_session(&session.term_session).await.ok();
+    st.ide.kill(&session.id);
     let repo_root = PathBuf::from(&branch.repo_root);
     let work_dir = PathBuf::from(&session.work_dir);
     if let Err(e) = git::worktree_remove(&repo_root, &work_dir).await {
@@ -1158,6 +1187,7 @@ pub async fn archive(
     let mut warnings: Vec<String> = Vec::new();
 
     backend::kill_session(&session.term_session).await.ok();
+    st.ide.kill(&session.id);
     let repo_root = PathBuf::from(&branch.repo_root);
     let work_dir = PathBuf::from(&session.work_dir);
     if work_dir.exists() {
@@ -1419,32 +1449,10 @@ async fn adopt_session(
 }
 
 // ---------------------------------------------------------------------------
-// File viewer — a read-only window onto the worktree: a file tree, text content
-// (for an embedded editor), and raw bytes (for images). The worktree is the
-// agent's own checkout; these endpoints never write.
+// Raw worktree bytes — serves a single file's bytes (with a guessed content
+// type) for Markdown inline images. The embedded editor ([`crate::ide`]) is the
+// file browsing/editing surface; this endpoint only reads, never writes.
 // ---------------------------------------------------------------------------
-
-/// Text files larger than this aren't shipped to the editor — beyond a couple
-/// of MB the browser editor stops being useful and starts being a memory hog.
-const MAX_TEXT_BYTES: usize = 2 * 1024 * 1024;
-
-/// `base` selects the diff baseline: `branch` (default, the branch's fork point)
-/// or `uncommitted` (vs `HEAD`). Shared by the tree and file endpoints; absent
-/// or unknown values fall back to `branch` (see [`git::DiffBase::from_query`]).
-#[derive(Debug, Deserialize)]
-struct TreeQuery {
-    base: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FileQuery {
-    path: String,
-    /// `working` (default, read from disk) or `base` (read from the diff base).
-    #[serde(rename = "ref")]
-    reference: Option<String>,
-    /// Which baseline the `base` ref resolves to — see [`TreeQuery`].
-    base: Option<String>,
-}
 
 #[derive(Debug, Deserialize)]
 struct RawQuery {
@@ -1496,85 +1504,6 @@ fn content_type_for(path: &str) -> &'static str {
     }
 }
 
-/// The worktree file tree: every git-known path plus any base-only deletions, so
-/// removed files are still browsable, with a `path → status` map of changes vs
-/// the base branch. The flat list is assembled into a tree client-side.
-async fn tree_session(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Query(q): Query<TreeQuery>,
-) -> ApiResult<Json<Value>> {
-    let (session, branch) = require_session(&st.db, &key).await?;
-    let work_dir = PathBuf::from(&session.work_dir);
-    let mode = git::DiffBase::from_query(q.base.as_deref());
-    let files = git::list_files(&work_dir).await?;
-    // A missing/odd base shouldn't sink the whole tree — just show no badges.
-    let changed = match git::diff_since(&work_dir, &branch.base_branch, mode).await {
-        Ok(since) => git::changed_files(&work_dir, &since)
-            .await
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
-    };
-    let changed: serde_json::Map<String, Value> = changed
-        .into_iter()
-        .map(|c| (c.path, Value::String(c.status)))
-        .collect();
-    Ok(Json(
-        json!({ "files": files, "changed": changed, "base": mode.as_str() }),
-    ))
-}
-
-/// Text content of a single worktree file for the editor. Binary and oversized
-/// files report a flag instead of content so the client can fall back to the raw
-/// endpoint or a placeholder. `ref=base` reads the file as of the merge-base
-/// (the original side of a diff).
-async fn file_session(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Query(q): Query<FileQuery>,
-) -> ApiResult<Json<Value>> {
-    let (session, branch) = require_session(&st.db, &key).await?;
-    let work_dir = PathBuf::from(&session.work_dir);
-    let rel = rel_path(&q.path)?;
-
-    let bytes: Vec<u8> = if q.reference.as_deref() == Some("base") {
-        let mode = git::DiffBase::from_query(q.base.as_deref());
-        match git::diff_since(&work_dir, &branch.base_branch, mode).await {
-            Ok(since) => git::read_blob(&work_dir, &since, &rel)
-                .await?
-                .unwrap_or_default(),
-            // No base means nothing to compare against; treat as empty original.
-            Err(_) => Vec::new(),
-        }
-    } else {
-        match tokio::fs::read(work_dir.join(&rel)).await {
-            Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(AppError::not_found("file"))
-            }
-            Err(e) => return Err(e.into()),
-        }
-    };
-
-    let size = bytes.len();
-    // A NUL byte in the first 8 KiB is the usual "this is binary" heuristic.
-    let head = &bytes[..size.min(8192)];
-    if head.contains(&0) {
-        return Ok(Json(json!({ "path": rel, "binary": true, "bytes": size })));
-    }
-    if size > MAX_TEXT_BYTES {
-        return Ok(Json(
-            json!({ "path": rel, "too_large": true, "bytes": size }),
-        ));
-    }
-    Ok(Json(json!({
-        "path": rel,
-        "content": String::from_utf8_lossy(&bytes),
-        "bytes": size,
-        "binary": false,
-    })))
-}
-
 /// Raw bytes of a worktree file, with a guessed content type — for `<img>` tags
 /// and downloads. Always reads the working tree (never a git ref).
 async fn raw_session(
@@ -1600,36 +1529,6 @@ async fn raw_session(
         bytes,
     )
         .into_response())
-}
-
-/// Write raw bytes to a worktree file — the editor's save primitive (the
-/// read-only `file`/`raw` endpoints never write). Reuses `rel_path` for
-/// traversal safety and creates parent directories as needed, so a new
-/// `docs/plans/<slug>.md` can be saved into a dir that doesn't exist yet.
-async fn write_file(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Query(q): Query<RawQuery>,
-    body: Bytes,
-) -> ApiResult<Json<Value>> {
-    let (session, branch) = require_session(&st.db, &key).await?;
-    let work_dir = PathBuf::from(&session.work_dir);
-    let rel = rel_path(&q.path)?;
-    let target = work_dir.join(&rel);
-    if let Some(parent) = target.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::write(&target, &body).await?;
-    events::record(
-        &st.db,
-        &st.bus,
-        &branch.id,
-        "file_written",
-        json!({ "path": rel }),
-    )
-    .await
-    .ok();
-    Ok(Json(json!({ "path": rel, "bytes": body.len() })))
 }
 
 // ---------------------------------------------------------------------------
@@ -3360,6 +3259,7 @@ mod tests {
             db: db.clone(),
             bus: crate::events::EventBus::new(),
             addr: "127.0.0.1:0".to_string(),
+            ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
         };
         let child = branch_mod::upsert(&db, "/r", "weaver/child", "main")
             .await

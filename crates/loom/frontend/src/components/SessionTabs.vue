@@ -1,19 +1,19 @@
 <script setup lang="ts">
 // Work-area sub-nav. Terminal/Overview are component-local tabs (the terminal
-// must never unmount, so the parent flips a ref and v-shows it); Files and
-// Artifacts are real routes (Monaco is heavy and mustn't load on session-open).
-// Neutral underline indicator — no loud fills; only the active tab gets text-fg
-// + an accent underline.
+// must never unmount, so the parent flips a ref and v-shows it); Artifacts is a
+// real route (Monaco is heavy and mustn't load on session-open). Neutral
+// underline indicator — no loud fills; only the active tab gets text-fg + an
+// accent underline.
 //
 // Terminal is the working zone (the live agent); Overview is the read-only
 // context (goal, claimed issues, activity) — the issue count rides on the
-// Overview tab as a quiet pill rather than owning a tab of its own.
-// Artifacts is the agent's out-of-repo documents (designs, reports, the plan);
-// Files is the worktree tree.
-type Tab = 'terminal' | 'overview' | 'files' | 'artifacts';
+// Overview tab as a quiet pill rather than owning a tab of its own. Artifacts is
+// the agent's out-of-repo documents (designs, reports, the plan). The worktree
+// files live in the embedded editor (the side panel), not a tab.
+type Tab = 'terminal' | 'overview' | 'artifacts';
 
-// Routed tabs (Files, Artifacts) are real navigations; the rest are local.
-type LocalTab = Exclude<Tab, 'files' | 'artifacts'>;
+// The Artifacts tab is a real navigation; the rest are local.
+type LocalTab = Exclude<Tab, 'artifacts'>;
 
 defineProps<{ tab: Tab; id: string; issueCount: number }>();
 defineEmits<{ select: [LocalTab] }>();
@@ -51,16 +51,6 @@ const LOCAL_TABS: { key: LocalTab; label: string }[] = [
         : 'border-transparent text-muted hover:text-fg'"
     >
       Artifacts
-    </router-link>
-    <router-link
-      :to="`/s/${id}/files`"
-      data-tab="files"
-      class="-mb-px border-b-2 px-2.5 py-1.5"
-      :class="tab === 'files'
-        ? 'border-accent text-fg font-medium'
-        : 'border-transparent text-muted hover:text-fg'"
-    >
-      Files
     </router-link>
     <!-- The tab row's right side is otherwise dead space — hosts compact,
          always-relevant extras (the scratch attach strip on the detail page). -->

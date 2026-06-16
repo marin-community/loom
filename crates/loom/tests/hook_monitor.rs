@@ -86,6 +86,7 @@ async fn hook_event_drives_session_status() {
         db: pool.clone(),
         bus: EventBus::new(),
         addr: addr.to_string(),
+        ide: std::sync::Arc::new(loom::ide::IdeManager::new(loom::ide::ide_home())),
     };
     tokio::spawn(server::serve(state, listener));
 

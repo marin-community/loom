@@ -39,6 +39,7 @@ async fn engine_state(ts: &TestServer) -> AppState {
         db: pool,
         bus: EventBus::new(),
         addr: ts.addr.to_string(),
+        ide: std::sync::Arc::new(loom::ide::IdeManager::new(loom::ide::ide_home())),
     }
 }
 

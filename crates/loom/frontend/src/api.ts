@@ -30,8 +30,8 @@ async function request(path: string, opts: RequestInit = {}): Promise<unknown> {
   return text ? JSON.parse(text) : null;
 }
 
-// Send a raw (not JSON-encoded) body — for file uploads and the editor's
-// file-write save. The server reads the bytes straight off the request body.
+// Send a raw (not JSON-encoded) body — for scratch-file uploads. The server
+// reads the bytes straight off the request body.
 async function rawBody(method: string, path: string, body: BodyInit): Promise<unknown> {
   const res = await fetch('/api' + path, { method, body });
   if (!res.ok) {
@@ -61,7 +61,7 @@ export const del = (path: string) => request(path, { method: 'DELETE' });
 
 // --- Issues ----------------------------------------------------------------
 
-import type { Issue, Session, ArtifactMeta, ArtifactView, ArtifactWriteBody } from './types';
+import type { Issue, Session, ArtifactMeta, ArtifactView, ArtifactWriteBody, IdeInfo } from './types';
 
 /** Every issue across every repo — the Issues pane's cross-repo board. Pass
  *  `all` to include closed issues. */
@@ -114,9 +114,8 @@ export const getArtifact = (id: string, name: string, rev?: number) =>
 export const putArtifact = (id: string, name: string, body: ArtifactWriteBody) =>
   put(`/sessions/${id}/artifacts/${encodeURIComponent(name)}`, body) as Promise<ArtifactView>;
 
-/** Write a worktree file (the editor save primitive). Path is worktree-relative. */
-export const writeFile = (id: string, path: string, content: string) =>
-  rawBody('PUT', `/sessions/${id}/file?path=${encodeURIComponent(path)}`, content);
+/** Availability of the session's embedded editor (code-server). */
+export const ideInfo = (id: string) => get(`/sessions/${id}/ide-info`) as Promise<IdeInfo>;
 
 // --- Agent environment variables -------------------------------------------
 

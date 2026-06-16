@@ -92,6 +92,10 @@ fn init_repo(dir: &Path) {
 pub struct TestServer {
     pub client: Client,
     pub addr: SocketAddr,
+    /// The running server's embedded-editor manager (shared `Arc`). The IDE
+    /// proxy tests register a stub upstream on it instead of spawning a real
+    /// code-server.
+    pub ide: std::sync::Arc<loom::ide::IdeManager>,
     repo: TempDir,
     _home: TempDir,
 }
@@ -126,6 +130,7 @@ impl TestServer {
             db: pool,
             bus: EventBus::new(),
             addr: addr.to_string(),
+            ide: std::sync::Arc::new(loom::ide::IdeManager::new(loom::ide::ide_home())),
         };
         // The overlooker master switch ships on by default, but these tests
         // drive the engine directly and must not race the background loop that
@@ -136,6 +141,9 @@ impl TestServer {
         )
         .await
         .unwrap();
+        // Keep a handle to the editor manager before `state` moves into serve, so
+        // a test can register a stub upstream on the same instance.
+        let ide = state.ide.clone();
         tokio::spawn(server::serve(state, listener));
 
         std::env::set_var("WEAVER_API", format!("http://{addr}"));
@@ -155,6 +163,7 @@ impl TestServer {
         Self {
             client,
             addr,
+            ide,
             repo,
             _home: home,
         }

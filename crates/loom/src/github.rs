@@ -755,6 +755,7 @@ mod tests {
             db,
             bus: events::EventBus::new(),
             addr: "127.0.0.1:0".to_string(),
+            ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
         };
         Fixture {
             _repo: repo,
