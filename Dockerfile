@@ -33,6 +33,19 @@ RUN set -eux; \
     npm i -g @anthropic-ai/claude-code; \
     rm -rf /var/lib/apt/lists/*
 
+# code-server — the per-session embedded VS Code that `crate::ide` spawns and
+# reverse-proxies (one rooted at each worktree, behind loom's auth). The `.deb`
+# bundles its own Node, so it's self-contained on bookworm (glibc 2.28+) and
+# doesn't couple to the system node above. Pinned; bump deliberately. Without it
+# loom still runs — the editor panel just reports "not installed".
+ARG CODE_SERVER_VERSION=4.124.2
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    curl -fLo /tmp/code-server.deb \
+      "https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/code-server_${CODE_SERVER_VERSION}_${arch}.deb"; \
+    dpkg -i /tmp/code-server.deb; \
+    rm -f /tmp/code-server.deb
+
 # uv — for the Python repos loom's agents work in. Only the binary lives in the
 # image; its downloaded interpreters and wheel cache live in a named volume (see
 # UV_PYTHON_INSTALL_DIR / UV_CACHE_DIR below + docker-compose.yml), so the

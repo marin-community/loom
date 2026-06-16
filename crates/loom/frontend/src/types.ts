@@ -214,27 +214,16 @@ export interface ScratchFile {
   bytes: number;
 }
 
-/** The worktree file tree: a flat list of repo-relative paths plus a
- *  `path → status` map of changes vs the chosen baseline. Assembled into a tree
- *  client-side. Returned by `/api/sessions/{id}/tree`; the optional `base`
- *  query param ("branch" | "uncommitted") selects the baseline, echoed back. */
-export interface FileTree {
-  files: string[];
-  /** status is one of "added" | "modified" | "deleted" | "renamed" | "copied". */
-  changed: Record<string, string>;
-  /** The baseline these changes are measured against: "branch" | "uncommitted". */
-  base: string;
-}
-
-/** A single file's content for the editor. For binary or oversized files the
- *  content is omitted and a flag is set instead. Returned by
- *  `/api/sessions/{id}/file`. */
-export interface FileContent {
-  path: string;
-  content?: string;
-  binary?: boolean;
-  too_large?: boolean;
-  bytes: number;
+/** Availability of the per-session embedded editor (code-server). Returned by
+ *  `/api/sessions/{id}/ide-info`; the UI uses it to decide between mounting the
+ *  editor iframe and showing a "not installed" note. */
+export interface IdeInfo {
+  /** The `ide.enabled` master switch. */
+  enabled: boolean;
+  /** Whether the `code-server` command is runnable on the loom host. */
+  available: boolean;
+  /** Idle-reap timeout, surfaced for the panel's info text. */
+  idle_timeout_secs: number;
 }
 
 /** An overlooker's trigger — its subscription manifest, parsed. A scheduled

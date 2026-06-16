@@ -2,10 +2,9 @@ import { ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { post, patch, del } from '../api';
 
-// The session's write surface, shared by every view that hosts the page header
-// (SessionDetail and FileBrowser). The header is otherwise identical on both
-// surfaces, so its lifecycle behaviour lives here once rather than being
-// duplicated per parent.
+// The session's write surface for the page header (hosted by SessionDetail).
+// Kept as a composable so the header's lifecycle behaviour lives in one place
+// rather than being inlined into the view.
 //
 //   rename       — the one human-authored branch field (the workstream label)
 //   clearTag     — delete any one tag, loud or quiet (a chip's × clears it);

@@ -11,7 +11,6 @@ import { createRouter, createWebHistory } from 'vue-router';
 import App from './App.vue';
 import SessionList from './views/SessionList.vue';
 import SessionDetail from './views/SessionDetail.vue';
-import FileBrowser from './views/FileBrowser.vue';
 import Artifacts from './views/Artifacts.vue';
 import Settings from './views/Settings.vue';
 import Issues from './views/Issues.vue';
@@ -29,7 +28,9 @@ const router = createRouter({
     { path: '/login', component: Login, meta: { public: true } },
     { path: '/', component: SessionList },
     { path: '/s/:id', component: SessionDetail, props: true },
-    { path: '/s/:id/files', component: FileBrowser, props: true },
+    // The old Files browser is gone — the embedded editor (a side panel on the
+    // detail page) is the file surface now. Redirect stale links there.
+    { path: '/s/:id/files', redirect: (to) => `/s/${to.params.id}` },
     { path: '/s/:id/artifacts', component: Artifacts, props: true },
     { path: '/s/:id/artifacts/:name', component: Artifacts, props: true },
     { path: '/issues', component: Issues },

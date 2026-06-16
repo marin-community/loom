@@ -14,6 +14,7 @@ pub mod client;
 pub mod db;
 pub mod endpoint;
 pub mod github;
+pub mod ide;
 pub mod monitor;
 pub mod overlooker;
 pub mod repo;

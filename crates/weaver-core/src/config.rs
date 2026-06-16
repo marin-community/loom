@@ -254,6 +254,41 @@ pub const REGISTRY: &[SettingSpec] = &[
         group: "Overlooker",
         options: &[],
     },
+    SettingSpec {
+        key: "ide.enabled",
+        label: "Enable embedded editor",
+        description: "Master switch for the per-session embedded VS Code \
+            (code-server), reverse-proxied beside the terminal. On by default; \
+            turn it off to hide the editor panel and stop the proxy. A no-op \
+            wherever `code-server` is not installed (the panel reports that).",
+        kind: SettingKind::Bool,
+        default: "true",
+        group: "Editor",
+        options: &[],
+    },
+    SettingSpec {
+        key: "ide.idle_timeout_secs",
+        label: "Editor idle timeout (seconds)",
+        description: "How long an embedded code-server may sit with no proxied \
+            request before loom retires it. The next time the editor is opened \
+            for that session a fresh one is spawned. Lower it to reclaim memory \
+            sooner; raise it to keep editors warm across longer pauses.",
+        kind: SettingKind::Int,
+        default: "1800",
+        group: "Editor",
+        options: &[],
+    },
+    SettingSpec {
+        key: "ide.command",
+        label: "code-server command",
+        description: "Override the command loom launches for the embedded editor \
+            (leading arguments allowed). Empty uses `code-server` on `PATH`. The \
+            `WEAVER_IDE_CMD` environment variable takes precedence over this.",
+        kind: SettingKind::String,
+        default: "",
+        group: "Editor",
+        options: &[],
+    },
 ];
 
 /// Whether the Overlooker engine master switch is on. On by default.

@@ -1241,6 +1241,7 @@ mod tests {
             db: crate::db::connect_in_memory().await.unwrap(),
             bus: events::EventBus::new(),
             addr: "127.0.0.1:0".to_string(),
+            ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
         };
         let o = ov::create(
             &state.db,

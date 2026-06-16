@@ -28,6 +28,11 @@ clap_complete = "4"
 futures-util = "0.3"
 # Hex-encode the SHA-256 digests we store for API tokens and session cookies.
 hex = "0.4"
+# Reverse-proxying the embedded code-server (crate::ide): a pooled HTTP client
+# (hyper-util legacy) for the asset/API plane, and hyper's low-level conn for the
+# transparent WebSocket-upgrade passthrough (extension host + integrated terminal).
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 percent-encoding = "2"
 rand = "0.9"
 # `rustls-tls` is needed for the GitHub OAuth token/user calls over HTTPS — the
@@ -58,6 +63,9 @@ tokio-tungstenite = "0.29"
 futures-util = "0.3"
 # Raw-body HTTP client for the scratch-upload integration test.
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# A stub upstream (HTTP + WS echo) for the embedded-editor reverse-proxy test —
+# stands in for code-server so the proxy is exercised without it installed.
+axum = { version = "0.8", features = ["ws"] }
 # The integration tests share a `TestServer` harness that sets process-global
 # env (WEAVER_HOME / WEAVER_API / WEAVER_TAPESTRY_BIN), so they must not run
 # concurrently within the test binary; `#[serial]` serializes them.

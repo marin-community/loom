@@ -79,6 +79,7 @@ pub async fn run(addr: &str) -> Result<()> {
         db,
         bus: EventBus::new(),
         addr: actual.to_string(),
+        ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
     };
 
     let server_state = ServerState {
@@ -262,7 +263,9 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     // on the `overlooker.enabled` master switch, which is on by default, so a
     // default loom runs it. Turning the switch off idles it cheaply.
     tokio::spawn(overlooker::run(state.clone()));
-    tracing::debug!("background tasks spawned (monitor, github poll, overlooker)");
+    // Retire embedded code-server instances that have gone idle.
+    tokio::spawn(crate::ide::reap_loop(state.clone()));
+    tracing::debug!("background tasks spawned (monitor, github poll, overlooker, ide reaper)");
     // `into_make_service_with_connect_info` surfaces the peer `SocketAddr` to the
     // auth middleware, which uses it to recognise (and optionally trust) loopback.
     axum::serve(
