@@ -29,7 +29,7 @@ RUN set -eux; \
     echo "deb [signed-by=/etc/apt/keyrings/cloud.google.asc] https://packages.cloud.google.com/apt cloud-sdk main" \
       > /etc/apt/sources.list.d/google-cloud-sdk.list; \
     apt-get update; \
-    apt-get install -y --no-install-recommends nodejs git ca-certificates gh google-cloud-cli; \
+    apt-get install -y --no-install-recommends nodejs git ca-certificates gh google-cloud-cli tini; \
     npm i -g @anthropic-ai/claude-code; \
     rm -rf /var/lib/apt/lists/*
 
@@ -106,6 +106,13 @@ ENV WEAVER_STATIC_DIR=/app/static/dist
 
 USER app
 EXPOSE 7878
+# tini as PID 1. loom is a tokio app that reaps only the children it spawns, but
+# as the container's init it also inherits every orphan its agents leave behind:
+# they shell out to `gh`, `sleep`, MCP servers, etc. and routinely detach, so
+# those processes reparent to PID 1 when their immediate parent exits. With no
+# init to `wait()` on them they pile up as zombies for the container's whole
+# lifetime. tini reaps them and forwards signals through to loom.
+ENTRYPOINT ["/usr/bin/tini", "--"]
 # `server run` is the foreground daemon (REST API + Vue UI + monitor loop); bind
 # off loopback so the Caddy container can reach it over the `web` network.
 CMD ["loom", "server", "run", "--addr", "0.0.0.0:7878"]

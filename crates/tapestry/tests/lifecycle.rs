@@ -88,6 +88,70 @@ async fn capture_sees_child_output() {
 
 #[tokio::test]
 #[serial]
+async fn kill_reaps_the_whole_process_group() {
+    // A reap must take down everything the agent spawned, not just its top
+    // shell. portable_pty puts the child in its own session, so the supervisor
+    // SIGKILLs the entire process group. Spawn a backgrounded grandchild that
+    // *ignores* SIGHUP (as detached agent helpers do), so only the group-wide
+    // SIGKILL — not the PTY hangup the supervisor's exit delivers — can stop it,
+    // then confirm it is gone after the kill.
+    let pidfile = std::env::temp_dir().join(format!("tap-pg-{}.pid", std::process::id()));
+    let _ = std::fs::remove_file(&pidfile);
+    let script = format!(
+        "nohup sleep 300 >/dev/null 2>&1 & echo $! > {}; exec sleep 300",
+        pidfile.display()
+    );
+    let h = Harness::start("pgroup", &script).await;
+
+    // Wait for the grandchild to record its pid.
+    let mut pid = String::new();
+    for _ in 0..200 {
+        if let Ok(s) = std::fs::read_to_string(&pidfile) {
+            if !s.trim().is_empty() {
+                pid = s.trim().to_string();
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!pid.is_empty(), "grandchild never recorded its pid");
+    assert!(alive(&pid), "grandchild should be running before the reap");
+
+    Client::connect(&h.name)
+        .await
+        .unwrap()
+        .kill()
+        .await
+        .unwrap();
+
+    let mut gone = false;
+    for _ in 0..200 {
+        if !alive(&pid) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let _ = std::fs::remove_file(&pidfile);
+    assert!(
+        gone,
+        "grandchild {pid} survived the reap — orphaned, not killed"
+    );
+}
+
+/// `kill -0` probes a pid without delivering a signal: exit 0 ⇒ it is live (or a
+/// not-yet-reaped zombie), non-zero ⇒ gone.
+fn alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[tokio::test]
+#[serial]
 async fn send_reaches_the_shell() {
     // A bare shell; type a command and confirm its output appears on screen.
     let h = Harness::start("send", "exec sh").await;

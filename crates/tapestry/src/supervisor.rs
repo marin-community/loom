@@ -297,6 +297,17 @@ pub async fn run(cfg: SupervisorConfig) -> Result<()> {
                         subscribers.remove(&id);
                     }
                     Cmd::Kill => {
+                        // Reap the *whole* agent, not just its top shell.
+                        // portable_pty `setsid`s the child into its own session, so
+                        // the child pid is also the process-group id: SIGKILL the
+                        // negative pid to take down the shell and everything it
+                        // spawned in one shot. `killer.kill()` alone hits only the
+                        // leader, leaving group members that ignore the PTY's
+                        // SIGHUP (detached helpers, daemons) running and orphaned to
+                        // PID 1; SIGKILL can't be caught, so the teardown is total.
+                        if let Some(pid) = child_pid {
+                            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                        }
                         let _ = killer.kill();
                         break;
                     }
