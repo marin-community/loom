@@ -84,8 +84,12 @@ Explorer.
 ### 3.2 The reverse proxy (`ide.rs`)
 
 The one genuinely new piece of infra. A single handler bound to
-`ANY /api/sessions/{id}/ide` and `ANY /api/sessions/{id}/ide/{*rest}` in the
-**protected** (authenticated) router. Per request:
+`ANY /api/sessions/{id}/ide`, `ANY /api/sessions/{id}/ide/`, and
+`ANY /api/sessions/{id}/ide/{*rest}` in the **protected** (authenticated)
+router. The trailing-slash form needs its own route because a catch-all
+(`{*rest}`) does **not** match an empty final segment — without it the iframe's
+exact `…/ide/?folder=…` URL falls through to the SPA's `index.html` and renders
+loom inside its own editor pane. Per request:
 
 1. Parse `{id}` and the suffix from the original URI. code-server derives its own
    base path per-request from relative URLs and has **no base-path flag**, so the

@@ -409,10 +409,15 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/github", post(refresh_github_session))
         .route("/sessions/{id}/raw", get(raw_session))
         // Embedded VS Code (code-server), reverse-proxied per session. `ide-info`
-        // is the UI's availability probe; the `ide`/`ide/*` routes serve the
-        // editor itself (the static segments win over the `{*rest}` catch-all).
+        // is the UI's availability probe; the `ide`/`ide/`/`ide/*` routes serve
+        // the editor itself (the static segments win over the `{*rest}`
+        // catch-all). The bare `…/ide/` (trailing slash, empty rest) needs its
+        // own route: a catch-all does NOT match an empty final segment, so
+        // without it the iframe's exact `…/ide/?folder=…` URL would fall through
+        // to the SPA index.html and render loom inside its own editor pane.
         .route("/sessions/{id}/ide-info", get(crate::ide::info))
         .route("/sessions/{id}/ide", axum::routing::any(crate::ide::proxy))
+        .route("/sessions/{id}/ide/", axum::routing::any(crate::ide::proxy))
         .route(
             "/sessions/{id}/ide/{*rest}",
             axum::routing::any(crate::ide::proxy),

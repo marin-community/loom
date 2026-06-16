@@ -38,6 +38,7 @@ async fn start_stub_upstream() -> u16 {
     }
 
     let app = Router::new()
+        .route("/", get(|| async { "root-from-upstream" }))
         .route("/marker", get(|| async { "ok-from-upstream" }))
         .route("/ws", get(ws_echo));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -91,6 +92,22 @@ async fn ide_proxy_strips_prefix_redirects_and_passes_websockets() {
     assert_eq!(
         resp.headers().get(reqwest::header::LOCATION).unwrap(),
         "/api/sessions/stub/ide/?folder=/w"
+    );
+
+    // 2b. The bare `…/ide/` (trailing slash, empty rest) — the exact URL the
+    //     iframe loads — must reach the upstream root, not fall through to loom's
+    //     SPA index.html. A catch-all route (`…/ide/{*rest}`) does NOT match an
+    //     empty final segment, so this needs its own dedicated route.
+    let resp = http
+        .get(format!("{base}/api/sessions/stub/ide/?folder=/w"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.text().await.unwrap(),
+        "root-from-upstream",
+        "the trailing-slash editor root must proxy to code-server, not loom's SPA"
     );
 
     // 3. A WebSocket frame round-trips through the upgrade passthrough.
