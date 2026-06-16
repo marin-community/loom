@@ -305,8 +305,18 @@ pub async fn run(cfg: SupervisorConfig) -> Result<()> {
                         // leader, leaving group members that ignore the PTY's
                         // SIGHUP (detached helpers, daemons) running and orphaned to
                         // PID 1; SIGKILL can't be caught, so the teardown is total.
-                        if let Some(pid) = child_pid {
-                            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                        // Guard `pid != 0`: a real spawned child never has pid 0,
+                        // but `kill(-0, …)` would target the supervisor's *own*
+                        // process group, so rule the footgun out explicitly. ESRCH
+                        // (group already gone) is success; anything else is worth a
+                        // line.
+                        if let Some(pid) = child_pid.filter(|&p| p != 0) {
+                            if unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } != 0 {
+                                let err = std::io::Error::last_os_error();
+                                if err.raw_os_error() != Some(libc::ESRCH) {
+                                    tracing::warn!(pid, error = %err, "process-group kill failed");
+                                }
+                            }
                         }
                         let _ = killer.kill();
                         break;

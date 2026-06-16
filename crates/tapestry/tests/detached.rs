@@ -138,9 +138,9 @@ async fn detached_supervisor_reaps_orphaned_descendants() {
 
     // Kill it; the supervisor must reap it — /proc/<pid> disappears rather than
     // sticking around as a zombie (state 'Z').
-    let _ = std::process::Command::new("kill")
-        .args(["-9", &orphan])
-        .status();
+    if let Ok(pid) = orphan.parse::<i32>() {
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
     let mut reaped = false;
     for _ in 0..200 {
         if proc_field(&orphan, 0).is_none() {

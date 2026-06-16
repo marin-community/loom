@@ -104,18 +104,18 @@ async fn kill_reaps_the_whole_process_group() {
     let h = Harness::start("pgroup", &script).await;
 
     // Wait for the grandchild to record its pid.
-    let mut pid = String::new();
+    let mut pid = 0i32;
     for _ in 0..200 {
         if let Ok(s) = std::fs::read_to_string(&pidfile) {
-            if !s.trim().is_empty() {
-                pid = s.trim().to_string();
+            if let Ok(p) = s.trim().parse::<i32>() {
+                pid = p;
                 break;
             }
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(!pid.is_empty(), "grandchild never recorded its pid");
-    assert!(alive(&pid), "grandchild should be running before the reap");
+    assert!(pid > 0, "grandchild never recorded its pid");
+    assert!(alive(pid), "grandchild should be running before the reap");
 
     Client::connect(&h.name)
         .await
@@ -126,7 +126,7 @@ async fn kill_reaps_the_whole_process_group() {
 
     let mut gone = false;
     for _ in 0..200 {
-        if !alive(&pid) {
+        if !alive(pid) {
             gone = true;
             break;
         }
@@ -139,15 +139,14 @@ async fn kill_reaps_the_whole_process_group() {
     );
 }
 
-/// `kill -0` probes a pid without delivering a signal: exit 0 ⇒ it is live (or a
-/// not-yet-reaped zombie), non-zero ⇒ gone.
-fn alive(pid: &str) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", pid])
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+/// Whether `pid` still exists. `kill(pid, 0)` delivers no signal — it only
+/// probes: `Ok` ⇒ alive (or a not-yet-reaped zombie), `EPERM` ⇒ alive but not
+/// ours to signal, `ESRCH` ⇒ gone.
+fn alive(pid: i32) -> bool {
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[tokio::test]

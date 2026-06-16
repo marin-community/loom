@@ -24,6 +24,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 vt100 = "0.16"
 
 [dev-dependencies]
+libc = "0.2"
 tempfile = "3"
 # The lifecycle tests set the process-global WEAVER_HOME, so they must not run
 # concurrently within the test binary.
