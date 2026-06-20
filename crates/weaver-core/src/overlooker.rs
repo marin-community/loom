@@ -39,6 +39,16 @@ pub struct Overlooker {
     pub last_run_at: Option<String>,
     pub next_run_at: Option<String>,
     pub warm_session_id: Option<String>,
+    /// The program's lookaside state — a free-form JSON blob it reads at the top
+    /// of a round and writes back at the end, carried across rounds by the
+    /// engine. Opaque to the engine; the program owns its shape (e.g. a backoff
+    /// watcher keeps per-session attempt counts and retry times here).
+    pub state: String,
+    /// A one-shot dynamic re-trigger time. When a round returns `wake_in`, the
+    /// engine stamps `now + wake_in` here; the timer fires that overlooker once
+    /// when due and clears it. Lets a watch self-schedule its next look (a
+    /// backoff recheck) independent of any cron cadence.
+    pub wake_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -203,6 +213,15 @@ impl Overlooker {
     /// The raw `params` JSON (a stock program reads its `prompt` etc. here).
     pub fn params(&self) -> Value {
         serde_json::from_str(&self.params).unwrap_or(Value::Null)
+    }
+
+    /// The program's lookaside state, parsed. An unparseable/empty blob yields an
+    /// empty object so a program can always treat `rnd.state` as a dict.
+    pub fn state(&self) -> Value {
+        serde_json::from_str(&self.state)
+            .ok()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| Value::Object(Default::default()))
     }
 
     /// Whether this overlooker runs in **warm mode** — the engine keeps one
@@ -458,6 +477,31 @@ pub async fn set_schedule(
     Ok(())
 }
 
+/// Persist a round's lookaside `state` (the JSON blob it returned). Replaces the
+/// prior state wholesale — the program reads it back as `rnd.state` next round.
+pub async fn set_state(db: &Db, id: &str, state: &Value) -> Result<()> {
+    sqlx::query("UPDATE overlookers SET state = ?, updated_at = ? WHERE id = ?")
+        .bind(state.to_string())
+        .bind(now_iso())
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Set (or clear, with `None`) the one-shot dynamic wake time. The timer fires
+/// the overlooker once when `wake_at` is due and clears it; a round re-arms it by
+/// returning a fresh `wake_in`.
+pub async fn set_wake_at(db: &Db, id: &str, wake_at: Option<&str>) -> Result<()> {
+    sqlx::query("UPDATE overlookers SET wake_at = ?, updated_at = ? WHERE id = ?")
+        .bind(wake_at)
+        .bind(now_iso())
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
 pub async fn set_warm_session(db: &Db, id: &str, session_id: Option<&str>) -> Result<()> {
     sqlx::query("UPDATE overlookers SET warm_session_id = ?, updated_at = ? WHERE id = ?")
         .bind(session_id)
@@ -703,6 +747,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn state_and_wake_round_trip() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let o = create(
+            &db,
+            &NewOverlooker {
+                name: "stateful".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        // Fresh overlookers default to an empty state and no pending wake.
+        assert_eq!(o.state(), serde_json::json!({}));
+        assert!(o.wake_at.is_none());
+
+        let blob = serde_json::json!({"sess-a": {"attempts": 2, "next": 1234.5}});
+        set_state(&db, &o.id, &blob).await.unwrap();
+        set_wake_at(&db, &o.id, Some("2026-06-08T11:00:00.000Z"))
+            .await
+            .unwrap();
+        let after = get(&db, &o.id).await.unwrap().unwrap();
+        assert_eq!(after.state(), blob);
+        assert_eq!(after.wake_at.as_deref(), Some("2026-06-08T11:00:00.000Z"));
+
+        // Clearing the wake leaves the state untouched.
+        set_wake_at(&db, &o.id, None).await.unwrap();
+        let after = get(&db, &o.id).await.unwrap().unwrap();
+        assert!(after.wake_at.is_none());
+        assert_eq!(after.state(), blob);
+    }
+
+    #[tokio::test]
     async fn update_overwrites_only_the_set_fields() {
         let db = crate::db::connect_in_memory().await.unwrap();
         let o = create(
@@ -750,6 +826,8 @@ mod tests {
             last_run_at: None,
             next_run_at: None,
             warm_session_id: None,
+            state: "{}".into(),
+            wake_at: None,
             created_at: String::new(),
             updated_at: String::new(),
         };

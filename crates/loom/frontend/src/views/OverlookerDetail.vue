@@ -217,6 +217,7 @@ onMounted(() => {
             <span v-if="ov.last_run_at">last run {{ timeAgo(ov.last_run_at) }}</span>
             <span v-else>never run</span>
             <span v-if="ov.enabled && ov.next_run_at"> · next {{ timeAgo(ov.next_run_at) }}</span>
+            <span v-if="ov.enabled && ov.wake_at"> · recheck {{ timeAgo(ov.wake_at) }}</span>
           </p>
         </div>
         <div class="ml-auto flex items-center gap-2">

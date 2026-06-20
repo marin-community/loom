@@ -369,3 +369,37 @@ def test_finish_defaults_to_noop_without_actions(capsys):
     result = json.loads(capsys.readouterr().out.strip())
     assert result["outcome"] == "noop"
     assert result["actions"] == []
+
+
+def test_state_is_read_from_config_and_omitted_from_finish_by_default(capsys):
+    # The lookaside state arrives as a plain dict the program reads…
+    rnd = make_round(state={"n": 3})
+    assert rnd.state == {"n": 3}
+    # …and a program that doesn't write it back / self-schedule leaves both keys
+    # out of the result, so existing programs are unchanged.
+    rnd.finish("done")
+    result = json.loads(capsys.readouterr().out.strip())
+    assert "state" not in result and "wake_in" not in result
+
+
+def test_set_state_and_wake_in_ride_along_in_finish(capsys):
+    rnd = make_round(state={"n": 3})
+    rnd.set_state({"n": 4})
+    rnd.wake_in(60)
+    rnd.finish("rescheduled")
+    result = json.loads(capsys.readouterr().out.strip())
+    assert result["state"] == {"n": 4}
+    assert result["wake_in"] == 60
+
+
+def test_wake_in_zero_is_emitted_to_clear_a_pending_wake(capsys):
+    # wake_in(0) is distinct from never calling it: it explicitly clears.
+    rnd = make_round()
+    rnd.wake_in(0)
+    rnd.finish("nothing left to watch")
+    result = json.loads(capsys.readouterr().out.strip())
+    assert result["wake_in"] == 0
+
+
+def test_state_defaults_to_empty_dict_without_config(capsys):
+    assert make_round().state == {}

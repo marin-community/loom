@@ -430,6 +430,94 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
         .unwrap();
 }
 
+/// The `resume` builtin's wiring proof: a session whose live screen shows the
+/// transient-error signature (`API Error: 529 Overloaded`) is detected, nudged
+/// to resume, and the round persists its backoff bookkeeping — the lookaside
+/// `state` tracks the session (one attempt) and a dynamic `wake_at` is armed for
+/// the recheck. The backoff math / escalation / capability branches are covered
+/// server-free in `python/weaver-loom/tests/test_resume_program.py`; this proves
+/// the screen-scrape → nudge → state+wake plumbing against a live server.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_nudges_a_stalled_session_and_arms_backoff() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
+    use crate::fixtures::{connect_terminal, drain_until, send_input};
+    use std::time::Duration;
+
+    let ts = TestServer::start().await;
+    let state = engine_state(&ts).await;
+    let (session_id, _branch_id, _repo_root) = make_session(&ts, "resume me").await;
+
+    // Make the session's live screen show the overload error: echo it into the
+    // shell and wait for it to render before we survey.
+    let mut term = connect_terminal(&ts.addr, &session_id).await;
+    send_input(&mut term, "echo API Error: 529 Overloaded\r").await;
+    let screen = drain_until(&mut term, "529 Overloaded", Duration::from_secs(5)).await;
+    assert!(
+        screen.contains("529 Overloaded"),
+        "the overload line rendered on the session screen: {screen:?}"
+    );
+
+    let o = enabled_overlooker(
+        &state,
+        ov::NewOverlooker {
+            name: "resume-watch".to_string(),
+            trigger_spec: json!({ "on": ["session.idle", "session.stale"] }).to_string(),
+            scope: json!({}).to_string(),
+            program: "builtin:resume".to_string(),
+            capabilities: vec![
+                "observe".to_string(),
+                "nudge".to_string(),
+                "mark".to_string(),
+            ],
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // A manual round surveys the fleet, detects the stall, and nudges.
+    let run_id = overlooker::fire_now(&state, &o.name, false, "manual")
+        .await
+        .unwrap();
+
+    // The run recorded a real `nudge` of the stalled session.
+    let runs = ov::recent_runs(&state.db, &o.id, 10).await.unwrap();
+    let run = runs.iter().find(|r| r.id == run_id).unwrap();
+    assert_eq!(run.outcome, "ok", "summary: {}", run.summary);
+    let actions: serde_json::Value = serde_json::from_str(&run.actions).unwrap();
+    assert!(
+        actions
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["action"] == "nudge" && a["session"] == session_id.as_str()),
+        "the round nudges the stalled session: {actions}"
+    );
+
+    // The overlooker now tracks the session (one attempt) and has armed a wake
+    // for the backoff recheck — the lookaside-state + dynamic-wake primitives.
+    let after = ov::get(&state.db, &o.id).await.unwrap().unwrap();
+    let tracked = &after.state()[session_id.as_str()];
+    assert_eq!(
+        tracked["attempts"],
+        1,
+        "first attempt tracked: {}",
+        after.state()
+    );
+    assert!(
+        after.wake_at.is_some(),
+        "a backoff recheck wake is armed: {after:?}"
+    );
+
+    ts.client
+        .delete(&format!("/api/sessions/{session_id}"))
+        .await
+        .unwrap();
+}
+
 /// T6: the timer half emits a `cron` system tick for a due scheduled overlooker
 /// (visible in the event log) and advances its `next_run_at`; that tick then
 /// drives a round through the dispatcher — the producer→consumer chain unattended.
@@ -794,11 +882,27 @@ async fn rest_lists_builtin_programs_and_validates_program_refs() {
     let names: Vec<&str> = arr.iter().map(|p| p["program"].as_str().unwrap()).collect();
     for expected in [
         "builtin:status",
+        "builtin:resume",
         "builtin:pr-label",
         "builtin:archive-merged",
     ] {
         assert!(names.contains(&expected), "{expected} missing: {names:?}");
     }
+
+    // The resume builtin wakes on the quiet signals and opts into `nudge`.
+    let resume = arr
+        .iter()
+        .find(|p| p["program"] == "builtin:resume")
+        .unwrap();
+    assert_eq!(resume["defaults"]["trigger"]["on"][0], "session.idle");
+    assert!(
+        resume["defaults"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c == "nudge"),
+        "resume requests the nudge capability to re-prompt"
+    );
 
     // Every builtin is a script: it ships its source and suggested defaults.
     let archive = arr

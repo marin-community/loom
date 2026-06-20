@@ -167,6 +167,26 @@ pub async fn tick_timer(state: &AppState) {
     };
     let now = Utc::now();
     for o in overlookers {
+        // Dynamic one-shot wake (any overlooker, scheduled or reactive): a round
+        // asked to re-run at `wake_at`. Fire it once, clear the column, and move
+        // on — clearing first makes it strictly one-shot, so a slow round can't
+        // be re-fired by the next tick before it persists a fresh wake.
+        if let Some(wake) = o.wake_at.as_deref().and_then(parse_iso) {
+            if wake <= now {
+                let _ = ov::set_wake_at(&state.db, &o.id, None).await;
+                if let Err(e) = events::record_system(
+                    &state.db,
+                    &state.bus,
+                    "cron",
+                    json!({ "overlooker": o.id, "wake": true }),
+                )
+                .await
+                {
+                    tracing::warn!(overlooker = %o.id, "overlooker timer: recording wake tick failed: {e}");
+                }
+                continue;
+            }
+        }
         let trigger = o.trigger();
         if !trigger.is_scheduled() {
             continue;
@@ -265,11 +285,26 @@ pub async fn dispatch(state: &AppState, in_flight: &InFlight, ev: &events::Event
     match ev.kind.as_str() {
         "cron" => {
             if let Some(o) = resolve_target(state, ev).await {
+                // A wake tick (a watch's own self-scheduled recheck) carries
+                // `wake:true` and fires under reason "wake", which bypasses
+                // cooldown — the delay the round chose IS its self-imposed gap, so
+                // a global cooldown must not swallow the recheck and strand the
+                // backoff. A plain scheduled tick stays "cron" and is gated.
+                let reason = if ev
+                    .data
+                    .get("wake")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    "wake"
+                } else {
+                    "cron"
+                };
                 let _ = fire(
                     state,
                     in_flight,
                     &o,
-                    "cron",
+                    reason,
                     false,
                     &TriggerCtx::scheduled(),
                 )
@@ -432,7 +467,8 @@ async fn triggering_session(state: &AppState, ev: &events::Event) -> Option<Stri
 /// 1. **no-overlap** — a re-fire while a round of the same overlooker is in
 ///    flight is dropped (no run row); the in-flight set is the gate.
 /// 2. **cooldown** — a fire inside `max(cooldown_secs, default_cooldown_secs)`
-///    of the last run is recorded `skipped`. A `manual`/`run-now` bypasses it.
+///    of the last run is recorded `skipped`. A `manual`/`run-now`, and a watch's
+///    own self-scheduled `wake`, bypass it (the wake's delay is the gap).
 /// 3. **timeout** — the program is wrapped in a wall-clock budget; an overrun
 ///    is recorded `error`.
 /// 4. **no-recursion** — the survey ([`run_program`]) excludes overlooker warm
@@ -460,13 +496,17 @@ pub async fn fire(
     };
 
     let manual = trigger_reason == "manual" || trigger_reason.starts_with("run");
+    // A self-scheduled wake bypasses cooldown too: its backoff delay is the
+    // watch's own chosen gap, so a global cooldown must not strand the recheck.
+    let bypass_cooldown = manual || trigger_reason == "wake";
     let now = Utc::now();
 
-    // 2. Cooldown: a non-manual re-fire inside the gap is recorded `skipped`.
+    // 2. Cooldown: a re-fire inside the gap is recorded `skipped` (a manual run
+    //    or a self-scheduled wake bypasses it).
     let cooldown = o
         .cooldown_secs
         .max(get_int(&state.db, "overlooker.default_cooldown_secs", 0).await);
-    if !manual && cooldown > 0 {
+    if !bypass_cooldown && cooldown > 0 {
         if let Some(last) = o.last_run_at.as_deref().and_then(parse_iso) {
             if (now - last).num_seconds() < cooldown {
                 return record_skipped(
@@ -513,6 +553,24 @@ pub async fn fire(
     let next = next_fire(o, now).map(iso);
     let _ = ov::set_schedule(&state.db, &o.id, Some(&iso(now)), next.as_deref()).await;
 
+    // Persist the program's lookaside-state write and its dynamic-wake request.
+    // These are how a round carries memory forward and self-schedules its next
+    // look (e.g. an exponential-backoff recheck) — independent of the cron
+    // cadence above.
+    if let Some(new_state) = &round.state {
+        let _ = ov::set_state(&state.db, &o.id, new_state).await;
+    }
+    match round.wake {
+        Wake::Leave => {}
+        Wake::Clear => {
+            let _ = ov::set_wake_at(&state.db, &o.id, None).await;
+        }
+        Wake::In(secs) => {
+            let wake_at = iso(now + chrono::Duration::seconds(secs.max(1)));
+            let _ = ov::set_wake_at(&state.db, &o.id, Some(&wake_at)).await;
+        }
+    }
+
     Some(run_id)
 }
 
@@ -549,9 +607,26 @@ async fn record_skipped(
 // The program substrate — the subprocess script executor
 // ---------------------------------------------------------------------------
 
+/// What a round's result asks the engine to do with the overlooker's one-shot
+/// dynamic wake (`wake_at`). The program controls it via the `wake_in` field of
+/// its result JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Wake {
+    /// No `wake_in` in the result — leave `wake_at` as it was. Used by every
+    /// program that never self-schedules, and by the error/timeout paths so a
+    /// transient script failure never drops a pending backoff recheck.
+    Leave,
+    /// `wake_in: 0` (or negative) — the program is done; clear any pending wake.
+    Clear,
+    /// `wake_in: N` (> 0) — re-fire this overlooker in `N` seconds.
+    In(i64),
+}
+
 /// The result of running a program: the outcome + one-line summary + actions
 /// for the audit trail, plus the captured execution log (stdout/stderr tails,
-/// the interpreter exit code, and the wall-clock it ran).
+/// the interpreter exit code, and the wall-clock it ran), and the program's
+/// lookaside-state write + dynamic-wake request (both engine bookkeeping, not
+/// part of the audit record).
 struct RoundResult {
     outcome: String,
     summary: String,
@@ -560,6 +635,11 @@ struct RoundResult {
     stderr: String,
     exit_code: Option<i64>,
     duration_ms: Option<i64>,
+    /// The new lookaside state to persist (`None` = the program returned none,
+    /// leave the stored state untouched).
+    state: Option<Value>,
+    /// What to do with the dynamic wake timer.
+    wake: Wake,
 }
 
 impl RoundResult {
@@ -576,6 +656,8 @@ impl RoundResult {
             stderr: String::new(),
             exit_code: None,
             duration_ms: None,
+            state: None,
+            wake: Wake::Leave,
         }
     }
 
@@ -699,6 +781,7 @@ async fn run_script(
         "dry_run": dry_run,
         "mode": "run",
         "trigger": serde_json::to_value(ctx).unwrap_or(Value::Null),
+        "state": o.state(),
     });
 
     // A spawn / scratch-setup failure (no interpreter, unreadable file) is a
@@ -710,6 +793,8 @@ async fn run_script(
     let duration_ms = Some(out.duration_ms);
 
     if !out.success {
+        // A script crash leaves state and the dynamic wake untouched: a transient
+        // failure must not drop a pending backoff recheck.
         return Ok(RoundResult {
             outcome: "error".to_string(),
             summary: format!(
@@ -722,6 +807,8 @@ async fn run_script(
             stderr,
             exit_code: out.exit_code,
             duration_ms,
+            state: None,
+            wake: Wake::Leave,
         });
     }
 
@@ -734,6 +821,8 @@ async fn run_script(
             stderr,
             exit_code: out.exit_code,
             duration_ms,
+            state: parsed.state,
+            wake: parsed.wake,
         },
         None => RoundResult {
             outcome: "error".to_string(),
@@ -747,6 +836,8 @@ async fn run_script(
             stderr,
             exit_code: out.exit_code,
             duration_ms,
+            state: None,
+            wake: Wake::Leave,
         },
     };
     Ok(result)
@@ -919,19 +1010,25 @@ fn parse_last_json_object(stdout: &str) -> Option<Value> {
     as_object(trimmed).or_else(|| trimmed.lines().rev().find_map(as_object))
 }
 
-/// The three fields a script's result JSON contributes to a [`RoundResult`].
-/// Named (not a bare tuple) so the two same-typed `String` slots — `outcome`
-/// and `summary` — can't be transposed at a call site.
+/// The fields a script's result JSON contributes to a [`RoundResult`]. Named
+/// (not a bare tuple) so the two same-typed `String` slots — `outcome` and
+/// `summary` — can't be transposed at a call site.
 struct ParsedRound {
     outcome: String,
     summary: String,
     actions: Value,
+    /// The lookaside state to persist, if the script returned a `state` object
+    /// (`None` = absent, leave the stored state alone).
+    state: Option<Value>,
+    /// The dynamic-wake request from the script's optional `wake_in`.
+    wake: Wake,
 }
 
 /// Parse a script's stdout into its [`ParsedRound`]. The fields are read
 /// leniently: a missing/unknown `outcome` reads as `ok`, a missing `summary` as
 /// empty, a missing/non-array `actions` as none — so a minimal script stays
-/// minimal.
+/// minimal. The optional `state` (an object) and `wake_in` (seconds) drive the
+/// engine's lookaside-state and dynamic-wake bookkeeping.
 fn parse_round_result(stdout: &str) -> Option<ParsedRound> {
     let obj = parse_last_json_object(stdout)?;
     let obj = obj.as_object()?;
@@ -949,10 +1046,20 @@ fn parse_round_result(stdout: &str) -> Option<ParsedRound> {
         .filter(|a| a.is_array())
         .cloned()
         .unwrap_or_else(|| Value::Array(vec![]));
+    // Only an object is accepted as state; anything else is ignored (leave).
+    let state = obj.get("state").filter(|s| s.is_object()).cloned();
+    // `wake_in` absent → leave; <= 0 → clear; > 0 → re-fire in that many seconds.
+    let wake = match obj.get("wake_in").and_then(Value::as_i64) {
+        None => Wake::Leave,
+        Some(secs) if secs > 0 => Wake::In(secs),
+        Some(_) => Wake::Clear,
+    };
     Some(ParsedRound {
         outcome: outcome.to_string(),
         summary: summary.to_string(),
         actions,
+        state,
+        wake,
     })
 }
 
@@ -1191,6 +1298,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_round_result_reads_state_and_wake() {
+        // No state / no wake_in → leave both alone.
+        let r = parse_round_result(r#"{"outcome":"ok"}"#).unwrap();
+        assert!(r.state.is_none());
+        assert_eq!(r.wake, Wake::Leave);
+
+        // A state object is captured; wake_in > 0 schedules a re-fire.
+        let r = parse_round_result(r#"{"outcome":"ok","state":{"s":{"attempts":2}},"wake_in":30}"#)
+            .unwrap();
+        assert_eq!(r.state.unwrap(), serde_json::json!({"s":{"attempts":2}}));
+        assert_eq!(r.wake, Wake::In(30));
+
+        // wake_in 0 (or negative) clears the pending wake — "I'm done".
+        let r = parse_round_result(r#"{"outcome":"noop","wake_in":0}"#).unwrap();
+        assert_eq!(r.wake, Wake::Clear);
+        let r = parse_round_result(r#"{"outcome":"noop","wake_in":-5}"#).unwrap();
+        assert_eq!(r.wake, Wake::Clear);
+
+        // A non-object state is ignored rather than persisted as junk.
+        let r = parse_round_result(r#"{"outcome":"ok","state":"nope"}"#).unwrap();
+        assert!(r.state.is_none());
+    }
+
+    #[test]
     fn parse_manifest_accepts_declarations_not_round_results() {
         // A subscription manifest parses into a Trigger.
         let t = parse_manifest(r#"{"on":["pr.merged","pr.opened"]}"#).unwrap();
@@ -1313,6 +1444,203 @@ rnd.finish("name=%s label=%s dry=%s api=%s" % (
         );
         let actions: Value = serde_json::from_str(&run.actions).unwrap();
         assert_eq!(actions[0]["would"], "label");
+    }
+
+    /// A round that returns `state` and `wake_in` has both persisted on the
+    /// overlooker row: the lookaside state carries to the next round, and the
+    /// dynamic wake is armed for a self-scheduled recheck.
+    #[tokio::test]
+    async fn fire_persists_state_and_wake() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not on PATH");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("stateful.py");
+        std::fs::write(
+            &script,
+            r#"
+from weaver_loom import Round
+rnd = Round()
+# Echo the prior state's counter, incremented, and schedule a recheck.
+n = (rnd.state.get("n") or 0) + 1
+rnd.set_state({"n": n})
+rnd.wake_in(30)
+rnd.finish("counted to %d" % n)
+"#,
+        )
+        .unwrap();
+
+        let (state, o) = script_fixture(&script.display().to_string()).await;
+        // First round: no prior state → n = 1, wake armed.
+        fire(
+            &state,
+            &new_in_flight(),
+            &o,
+            "manual",
+            false,
+            &TriggerCtx::manual(),
+        )
+        .await
+        .unwrap();
+        let after = ov::get(&state.db, &o.id).await.unwrap().unwrap();
+        assert_eq!(after.state(), serde_json::json!({"n": 1}));
+        assert!(after.wake_at.is_some(), "a wake_in armed wake_at");
+
+        // Second round reads the persisted state back: n = 2.
+        fire(
+            &state,
+            &new_in_flight(),
+            &after,
+            "manual",
+            false,
+            &TriggerCtx::manual(),
+        )
+        .await
+        .unwrap();
+        let after = ov::get(&state.db, &o.id).await.unwrap().unwrap();
+        assert_eq!(after.state(), serde_json::json!({"n": 2}));
+    }
+
+    /// A self-scheduled `wake` fire bypasses cooldown, where a plain `cron` fire
+    /// inside the window is skipped — so a global cooldown can never strand a
+    /// backoff recheck the watch armed for itself.
+    #[tokio::test]
+    async fn wake_bypasses_cooldown_but_cron_is_gated() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not on PATH");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("noop.py");
+        std::fs::write(
+            &script,
+            "from weaver_loom import Round\nRound().finish('ok')\n",
+        )
+        .unwrap();
+        let (state, _) = script_fixture(&script.display().to_string()).await;
+        // A long cooldown so a back-to-back re-fire would normally be skipped.
+        let o = ov::create(
+            &state.db,
+            &ov::NewOverlooker {
+                name: "gated".to_string(),
+                program: script.display().to_string(),
+                cooldown_secs: 3600,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Seed last_run_at via a manual run (manual bypasses cooldown). A fresh
+        // in-flight set per fire — each is its own no-overlap domain, sidestepping
+        // the async drop of the guard between sequential calls.
+        fire(
+            &state,
+            &new_in_flight(),
+            &o,
+            "manual",
+            false,
+            &TriggerCtx::manual(),
+        )
+        .await
+        .unwrap();
+        let o = ov::get(&state.db, &o.id).await.unwrap().unwrap();
+
+        // A plain cron re-fire inside the window is skipped…
+        let cron_id = fire(
+            &state,
+            &new_in_flight(),
+            &o,
+            "cron",
+            false,
+            &TriggerCtx::scheduled(),
+        )
+        .await
+        .unwrap();
+        // …but a self-scheduled wake runs anyway.
+        let wake_id = fire(
+            &state,
+            &new_in_flight(),
+            &o,
+            "wake",
+            false,
+            &TriggerCtx::scheduled(),
+        )
+        .await
+        .unwrap();
+
+        let runs = ov::recent_runs(&state.db, &o.id, 10).await.unwrap();
+        let outcome = |id| runs.iter().find(|r| r.id == id).unwrap().outcome.as_str();
+        assert_eq!(outcome(cron_id), "skipped", "cron is gated by cooldown");
+        assert_ne!(outcome(wake_id), "skipped", "wake bypasses cooldown");
+    }
+
+    /// A due `wake_at` makes the timer emit one `cron` tick for that overlooker
+    /// and clear the column — the dynamic self-trigger, working for a reactive
+    /// overlooker the scheduled timer would otherwise never visit.
+    #[tokio::test]
+    async fn timer_fires_a_due_wake_once_and_clears_it() {
+        let state = AppState {
+            db: crate::db::connect_in_memory().await.unwrap(),
+            bus: events::EventBus::new(),
+            addr: "127.0.0.1:0".to_string(),
+            ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
+        };
+        // A reactive overlooker (no cron) — the scheduled half of the timer skips
+        // it; only the wake half should fire it.
+        let o = ov::create(
+            &state.db,
+            &ov::NewOverlooker {
+                name: "waker".to_string(),
+                trigger_spec: r#"{"on":["session.idle"]}"#.to_string(),
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        ov::set_wake_at(&state.db, &o.id, Some("2000-01-01T00:00:00.000Z"))
+            .await
+            .unwrap();
+
+        tick_timer(&state).await;
+
+        // Exactly one cron tick naming this overlooker, and the wake is cleared.
+        let crons: Vec<_> = events::since(&state.db, 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|e| {
+                e.kind == "cron"
+                    && e.data.get("overlooker").and_then(Value::as_str) == Some(o.id.as_str())
+            })
+            .collect();
+        assert_eq!(crons.len(), 1, "one wake tick emitted");
+        assert_eq!(
+            crons[0].data.get("wake").and_then(Value::as_bool),
+            Some(true),
+            "the wake tick is marked so it bypasses cooldown"
+        );
+        assert!(
+            ov::get(&state.db, &o.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .wake_at
+                .is_none(),
+            "wake_at cleared so it is strictly one-shot"
+        );
+
+        // A second pass with no wake set emits no further tick.
+        tick_timer(&state).await;
+        let crons = events::since(&state.db, 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "cron")
+            .count();
+        assert_eq!(crons, 1, "no re-fire once the wake is consumed");
     }
 
     /// A failing script errors the round with the stderr tail in the summary,

@@ -252,6 +252,21 @@ warm/fresh/rules distinctions become *library calls inside the program*:
   first use, reused after), for accumulating judgement across rounds — "still
   stuck since last hour?" The binding handles create-or-reuse; the program just
   calls it.
+- `rnd.state` / `rnd.set_state(d)` — the watch's **lookaside state**: a JSON blob
+  it reads at the top of a round and writes back at the end, carried across
+  rounds by the engine (no warm session, no file). Scratch memory for a stateful
+  rule — "how many times has this session 529'd in a row, and when do I retry?"
+- `rnd.wake_in(secs)` — a **dynamic self-trigger**: ask the engine to re-run this
+  watch once in `secs`, independent of any cron cadence (`wake_in(0)` cancels a
+  pending one). Lets a round schedule its own next look — an exponential-backoff
+  recheck rather than a fixed poll — and stop waking once its work is done.
+
+Together those last two are what let a watch **back off**: the `resume` stock
+program (below) nudges a session stalled on a transient API error (`529
+Overloaded`) to continue, tracks consecutive failures per session in `state`, and
+`wake_in`s the next attempt on a doubling delay — quietly waiting instead of
+hammering a server that is already overloaded, and escalating to a human mark only
+after it has retried and given up.
 
 Two authoring languages sit on that one substrate:
 
@@ -395,7 +410,9 @@ through the same `weaver-api` the out-of-process programs use.
   `program` (`builtin:status` or a file path under `~/.weaver/overlookers/`),
   `params` (JSON for a stock program / the prompt), `capabilities` (JSON set),
   `model`, `effort`, `cooldown_secs`, `last_run_at`, `next_run_at`,
-  `warm_session_id` (nullable), `created_at`, `updated_at`.
+  `warm_session_id` (nullable), `state` (the program's lookaside JSON, carried
+  across rounds), `wake_at` (a one-shot dynamic re-trigger a round armed for
+  itself, nullable), `created_at`, `updated_at`.
 - `overlooker_runs` — `id`, `overlooker_id`, `trigger_reason`, `trigger_event`
   (the normalized event that woke it), `started_at`, `finished_at`, `outcome`
   (`ok|noop|skipped|error`), `summary`, `actions` (JSON), plus the captured
@@ -628,7 +645,9 @@ The `deps` graph collapses into five phases, each independently shippable:
   one repository; the open call is whether finer scoping (a branch glob, a label)
   earns its keep, or whether repo + the existing `scope` fleet query is enough.
 - **Stock-program coverage.** How many declarative `builtin:` programs earn their
-  keep (status, idle-nudge, PR-watch) before the rest is "write a Python one"?
+  keep before the rest is "write a Python one"? So far: `status` (triage marks),
+  `resume` (back off and re-prompt a session stalled on a transient API error),
+  `pr-label`, `archive-merged`.
 - **Escalation channel.** `escalate` raising the overlooker's own `attention` is
   free; a real push (the deferred `PushNotification` capability) is a richer
   follow-up once the panel exists.

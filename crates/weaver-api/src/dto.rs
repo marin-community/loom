@@ -288,6 +288,14 @@ pub struct OverlookerView {
     pub warm_session_id: Option<String>,
     pub last_run_at: Option<String>,
     pub next_run_at: Option<String>,
+    /// The one-shot dynamic re-trigger time a round armed (`wake_in`), or `null`.
+    /// Distinct from `next_run_at` (the cron cadence): a self-scheduled backoff
+    /// recheck a watch set for itself.
+    pub wake_at: Option<String>,
+    /// The program's lookaside state, parsed — its scratch memory carried across
+    /// rounds (e.g. a backoff watcher's per-session attempt counts). `{}` when
+    /// the program keeps none.
+    pub state: Value,
     /// The most recent round's outcome (`ok|noop|skipped|error`), or `null` if
     /// it has never run — the at-a-glance health a list view shows.
     pub last_outcome: Option<String>,
@@ -316,6 +324,8 @@ impl OverlookerView {
             warm_session_id: o.warm_session_id.clone(),
             last_run_at: o.last_run_at.clone(),
             next_run_at: o.next_run_at.clone(),
+            wake_at: o.wake_at.clone(),
+            state: o.state(),
             last_outcome,
             created_at: o.created_at.clone(),
             updated_at: o.updated_at.clone(),

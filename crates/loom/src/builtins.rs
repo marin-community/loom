@@ -60,6 +60,23 @@ pub const BUILTINS: &[BuiltinProgram] = &[
         default_capabilities: &["observe", "mark"],
     },
     BuiltinProgram {
+        name: "resume",
+        title: "Resume stalled",
+        description: "When a session stalls on a transient API error (e.g. \
+                      `529 Overloaded`) and sits idle, gently re-prompt it to \
+                      continue — backing off exponentially so a sustained outage \
+                      is never hammered. Tracks per-session retries in its \
+                      lookaside state and reschedules itself (dynamic self-wake) \
+                      for each backoff recheck; after `max_attempts` consecutive \
+                      failures it escalates (marks the session) and stops \
+                      re-prompting until it recovers. Needs `nudge` to resume.",
+        source: include_str!("../overlookers/resume.py"),
+        default_trigger: r#"{"on":["session.idle","session.stale"]}"#,
+        default_scope: "{}",
+        default_params: "{}",
+        default_capabilities: &["observe", "nudge", "mark"],
+    },
+    BuiltinProgram {
         name: "pr-label",
         title: "PR labeller",
         description: "Flag sessions whose open pull request lacks the loom \

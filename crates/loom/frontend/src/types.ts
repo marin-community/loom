@@ -280,6 +280,12 @@ export interface Overlooker {
   warm_session_id: string | null;
   last_run_at: string | null;
   next_run_at: string | null;
+  /** A one-shot dynamic re-trigger a round armed for itself (a backoff recheck),
+   *  or null. Distinct from `next_run_at` (the cron cadence). */
+  wake_at: string | null;
+  /** The program's lookaside state — its scratch memory carried across rounds
+   *  (e.g. a backoff watcher's per-session attempt counts). `{}` when none. */
+  state: Record<string, unknown>;
   /** The most recent round's outcome, or null if it has never run. */
   last_outcome: 'ok' | 'noop' | 'skipped' | 'error' | null;
   created_at: string;

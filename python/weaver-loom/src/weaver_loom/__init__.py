@@ -284,10 +284,16 @@ class Round:
     """One overlooker round, as the engine runs it.
 
     Reads the round config from ``$WEAVER_OVERLOOKER`` (``{id, name, program,
-    params, scope, capabilities, model, effort, dry_run}``), builds a
+    params, scope, capabilities, model, effort, dry_run, state}``), builds a
     :class:`Client` granted that round's capabilities, accumulates the action
     log, and prints the result the engine parses. A mutating program must
     check :attr:`dry_run` (record a :meth:`would` action instead of acting).
+
+    Two optional primitives let a watch persist memory and pace itself across
+    rounds: :attr:`state` (read) + :meth:`set_state` (write) is its lookaside
+    scratch memory, and :meth:`wake_in` schedules a dynamic self-trigger — the
+    pair a backoff watcher uses to track per-session retries and recheck them on
+    an exponential schedule instead of polling.
     """
 
     def __init__(self, config=None, client=None):
@@ -317,6 +323,17 @@ class Round:
         self.actions = []
         #: How many live sessions the last survey admitted.
         self.surveyed = 0
+        #: The overlooker's **lookaside state** — its scratch memory from the
+        #: previous round, carried across rounds by the engine. A plain dict the
+        #: program reads at the top of a round; write the next round's state with
+        #: :meth:`set_state`. ``{}`` when the program keeps none.
+        self.state = config.get("state") or {}
+        #: The next-state write (``None`` until :meth:`set_state`) and the
+        #: dynamic-wake request (``None`` until :meth:`wake_in`); both surface in
+        #: :meth:`finish` only when set, so a program that uses neither is
+        #: unchanged.
+        self._next_state = None
+        self._wake_in = None
 
     @staticmethod
     def main(fn, triggers=None):
@@ -414,15 +431,33 @@ class Round:
         """Record an action the round actually performed."""
         self.actions.append({"action": action, **fields})
 
+    def set_state(self, state):
+        """Persist ``state`` (a JSON-able dict) as this overlooker's lookaside
+        state, replacing the prior one. It is handed back as :attr:`state` on the
+        next round — the program's across-round memory (the engine carries it; no
+        session or file needed)."""
+        self._next_state = state
+
+    def wake_in(self, seconds):
+        """Ask the engine to re-run this overlooker once in ``seconds`` — a
+        dynamic self-trigger, independent of any cron cadence. Use it to schedule
+        the next look in a backoff loop (``rnd.wake_in(60)``). ``seconds <= 0``
+        clears any pending wake (``rnd.wake_in(0)`` — "nothing left to recheck").
+        Re-arm it every round you still have pending work; the wake is one-shot."""
+        self._wake_in = int(seconds)
+
     def finish(self, summary, outcome=None):
         """Print the round result the engine reads from stdout. ``outcome``
-        defaults to ``ok`` when any action was recorded, else ``noop``."""
-        print(
-            json.dumps(
-                {
-                    "outcome": outcome or ("ok" if self.actions else "noop"),
-                    "summary": summary,
-                    "actions": self.actions,
-                }
-            )
-        )
+        defaults to ``ok`` when any action was recorded, else ``noop``. A
+        :meth:`set_state` write and a :meth:`wake_in` request ride along when
+        set, so the engine persists them after the round."""
+        result = {
+            "outcome": outcome or ("ok" if self.actions else "noop"),
+            "summary": summary,
+            "actions": self.actions,
+        }
+        if self._next_state is not None:
+            result["state"] = self._next_state
+        if self._wake_in is not None:
+            result["wake_in"] = self._wake_in
+        print(json.dumps(result))
