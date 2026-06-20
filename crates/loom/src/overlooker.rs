@@ -168,13 +168,13 @@ pub async fn tick_timer(state: &AppState) {
     let now = Utc::now();
     for o in overlookers {
         // Dynamic one-shot wake (any overlooker, scheduled or reactive): a round
-        // asked to re-run at `wake_at`. Fire it once, clear the column, and move
-        // on — clearing first makes it strictly one-shot, so a slow round can't
-        // be re-fired by the next tick before it persists a fresh wake.
+        // asked to re-run at `wake_at`. Record the tick first and only clear the
+        // column once it lands — a failed insert then leaves the wake set to retry
+        // next pass, rather than silently losing it. The clear still happens in
+        // this same (awaited) pass, before the round runs, so it stays one-shot.
         if let Some(wake) = o.wake_at.as_deref().and_then(parse_iso) {
             if wake <= now {
-                let _ = ov::set_wake_at(&state.db, &o.id, None).await;
-                if let Err(e) = events::record_system(
+                match events::record_system(
                     &state.db,
                     &state.bus,
                     "cron",
@@ -182,7 +182,17 @@ pub async fn tick_timer(state: &AppState) {
                 )
                 .await
                 {
-                    tracing::warn!(overlooker = %o.id, "overlooker timer: recording wake tick failed: {e}");
+                    Ok(_) => {
+                        if let Err(e) = ov::set_wake_at(&state.db, &o.id, None).await {
+                            // A failed clear leaves the wake set, so next pass
+                            // re-fires it — a benign idempotent re-survey (under
+                            // no-overlap), but surface it rather than swallow it.
+                            tracing::warn!(overlooker = %o.id, "overlooker timer: clearing wake_at failed: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(overlooker = %o.id, "overlooker timer: recording wake tick failed: {e}");
+                    }
                 }
                 continue;
             }

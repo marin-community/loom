@@ -403,3 +403,12 @@ def test_wake_in_zero_is_emitted_to_clear_a_pending_wake(capsys):
 
 def test_state_defaults_to_empty_dict_without_config(capsys):
     assert make_round().state == {}
+
+
+def test_set_state_rejects_non_dict():
+    # The engine only persists an object; a non-dict would be silently dropped,
+    # so the boundary rejects it loudly instead.
+    rnd = make_round()
+    for bad in ([1, 2], "nope", None, 7):
+        with pytest.raises(TypeError):
+            rnd.set_state(bad)

@@ -435,7 +435,13 @@ class Round:
         """Persist ``state`` (a JSON-able dict) as this overlooker's lookaside
         state, replacing the prior one. It is handed back as :attr:`state` on the
         next round — the program's across-round memory (the engine carries it; no
-        session or file needed)."""
+        session or file needed).
+
+        Must be a dict: the engine only persists an object, so a non-dict would be
+        silently dropped (leaving the prior state in place). Reject it here so the
+        mistake surfaces at the program boundary instead."""
+        if not isinstance(state, dict):
+            raise TypeError(f"set_state expects a dict, got {type(state).__name__}")
         self._next_state = state
 
     def wake_in(self, seconds):
