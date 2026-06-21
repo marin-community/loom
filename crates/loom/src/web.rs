@@ -437,6 +437,18 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/conversation", get(conversation_session))
         .route("/sessions/{id}/events", get(events_sse))
         .route("/sessions/{id}/terminal", get(crate::terminal::terminal_ws))
+        // Per-session worktree debug shells: `shells` lists the live ones (so the
+        // UI re-opens the tabs after a reload), `shell/{idx}/terminal` is the
+        // lazily-spawned WebSocket bridge, and DELETE closes one (the tab's ×).
+        .route("/sessions/{id}/shells", get(list_session_shells))
+        .route(
+            "/sessions/{id}/shell/{idx}",
+            axum::routing::delete(delete_session_shell),
+        )
+        .route(
+            "/sessions/{id}/shell/{idx}/terminal",
+            get(crate::terminal::session_shell_ws),
+        )
         // Drive a session's terminal pane: type a message, interrupt, peek at it.
         .route("/sessions/{id}/send", post(send_session))
         .route("/sessions/{id}/interrupt", post(interrupt_session))
@@ -1149,6 +1161,7 @@ async fn delete_session(
     let mut warnings: Vec<String> = Vec::new();
 
     backend::kill_session(&session.term_session).await.ok();
+    crate::shell::kill_debug_all(&session.id).await;
     st.ide.kill(&session.id);
     let repo_root = PathBuf::from(&branch.repo_root);
     let work_dir = PathBuf::from(&session.work_dir);
@@ -1205,6 +1218,7 @@ pub async fn archive(
     warnings.extend(log_warnings);
 
     backend::kill_session(&session.term_session).await.ok();
+    crate::shell::kill_debug_all(&session.id).await;
     st.ide.kill(&session.id);
     let repo_root = PathBuf::from(&branch.repo_root);
     let work_dir = PathBuf::from(&session.work_dir);
@@ -1254,6 +1268,28 @@ async fn archive_session(
     Ok(Json(
         json!({ "archived": true, "branch": branch.branch, "warnings": warnings }),
     ))
+}
+
+/// `GET /api/sessions/{id}/shells` — the live worktree debug-shell indices for a
+/// session, so the UI re-opens the shell tabs after a reload (the shells are
+/// detached supervisors that outlive the page). Never spawns.
+async fn list_session_shells(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<Vec<u32>>> {
+    let (session, _) = require_session(&st.db, &key).await?;
+    Ok(Json(crate::shell::list_debug(&session.id).await))
+}
+
+/// `DELETE /api/sessions/{id}/shell/{idx}` — close one worktree debug shell (the
+/// tab's ×), killing its supervisor. Idempotent: a missing shell is a no-op.
+async fn delete_session_shell(
+    State(st): State<AppState>,
+    Path((key, idx)): Path<(String, u32)>,
+) -> ApiResult<Json<Value>> {
+    let (session, _) = require_session(&st.db, &key).await?;
+    crate::shell::kill_debug(&session.id, idx).await;
+    Ok(Json(json!({ "closed": true })))
 }
 
 /// Refresh a session's GitHub PR snapshot on demand (the dashboard's "refresh"

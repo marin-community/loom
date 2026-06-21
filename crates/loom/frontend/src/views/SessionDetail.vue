@@ -3,7 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRoute } from 'vue-router';
 import { get, ideInfo } from '../api';
 import type { Session, WeaverEvent, Issue } from '../types';
-import AgentTerminal from '../components/AgentTerminal.vue';
+import SessionTerminals from '../components/SessionTerminals.vue';
 import IdeFrame from '../components/IdeFrame.vue';
 import ScratchPanel from '../components/ScratchPanel.vue';
 import SessionPageHeader from '../components/SessionPageHeader.vue';
@@ -188,12 +188,13 @@ onUnmounted(() => {
       <p v-if="error" class="mb-3 text-sm text-block">{{ error }}</p>
 
       <div class="min-h-0 flex-1">
-        <!-- Terminal (default) — the working zone: the live agent fills the
-             space. v-show, NEVER v-if: keeping the host in the DOM means
-             AgentTerminal's zero-size guard skips the bogus resize while hidden,
-             and its ResizeObserver re-fits on return. -->
+        <!-- Terminal (default) — the working zone: the live agent, plus on-demand
+             worktree debug shells in an inner tab strip. v-show, NEVER v-if:
+             keeping the agent terminal's host in the DOM means its zero-size
+             guard skips the bogus resize while hidden and its ResizeObserver
+             re-fits on return. -->
         <section v-show="tab === 'terminal'" class="h-full">
-          <AgentTerminal :id="props.id" />
+          <SessionTerminals :id="props.id" />
         </section>
 
         <!-- Overview — read-only context (goal, issues, activity). Scrolls

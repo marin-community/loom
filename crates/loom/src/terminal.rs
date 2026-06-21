@@ -82,15 +82,7 @@ pub async fn terminal_ws(
     }
     let target = session.term_session.clone();
     tracing::info!(session = %key, target = %target, "terminal websocket attached");
-    ws.max_message_size(MAX_FRAME)
-        .max_frame_size(MAX_FRAME)
-        .on_upgrade(move |socket| async move {
-            if let Err(e) = bridge(socket, target.clone()).await {
-                tracing::debug!(target = %target, error = %e, "terminal bridge ended with error");
-            } else {
-                tracing::debug!(target = %target, "terminal bridge detached cleanly");
-            }
-        })
+    upgrade_to_bridge(ws, target)
 }
 
 /// `GET /api/shell/terminal` — upgrade to a WebSocket bridged to the operator
@@ -122,13 +114,63 @@ pub async fn shell_ws(
     }
     let target = crate::shell::SHELL_SESSION.to_string();
     tracing::info!(target = %target, "shell websocket attached");
+    upgrade_to_bridge(ws, target)
+}
+
+/// `GET /api/sessions/{id}/shell/{idx}/terminal` — upgrade to a WebSocket bridged
+/// to one of the session's worktree **debug shells** (see [`crate::shell`]). Same
+/// Origin check and byte pump as [`terminal_ws`], but the target is a plain login
+/// shell *in the session's worktree*, spawned lazily here on first attach — not
+/// the agent itself. Multiple indices give multiple concurrent shells.
+pub async fn session_shell_ws(
+    ws: WebSocketUpgrade,
+    State(st): State<AppState>,
+    Path((key, idx)): Path<(String, u32)>,
+    headers: HeaderMap,
+) -> Response {
+    let base_url = crate::config::get(&st.db, "auth.base_url").await;
+    if !origin_ok(&headers, &st.addr, base_url.as_deref()) {
+        let origin = header_str(&headers, ORIGIN);
+        let host = header_str(&headers, HOST);
+        tracing::warn!(
+            session = %key,
+            origin = %origin,
+            host = %host,
+            bound = %st.addr,
+            "session shell websocket rejected: Origin is not loopback, the \
+             configured auth.base_url, nor a proxied (X-Forwarded-*) request's \
+             own Host"
+        );
+        return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
+    }
+    let (session, branch) = match require_session(&st.db, &key).await {
+        Ok(pair) => pair,
+        Err(_) => return (StatusCode::NOT_FOUND, "no such session").into_response(),
+    };
+    let target = match crate::shell::ensure_debug(&st, &session, &branch, idx).await {
+        Ok(name) => name,
+        Err(e) => {
+            tracing::error!(session = %key, idx, error = %e, "failed to bring up session debug shell");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "could not start shell").into_response();
+        }
+    };
+    tracing::info!(session = %key, target = %target, "session debug shell attached");
+    upgrade_to_bridge(ws, target)
+}
+
+/// The shared tail of every terminal/shell handler: bound the inbound frame size
+/// (keystrokes and resizes are tiny — see [`MAX_FRAME`]), then upgrade and
+/// byte-pump the socket against `target`'s supervisor until either side closes.
+/// `target` already names the supervisor in the logs, so the bridge's own lines
+/// don't requalify it as "terminal"/"shell".
+fn upgrade_to_bridge(ws: WebSocketUpgrade, target: String) -> Response {
     ws.max_message_size(MAX_FRAME)
         .max_frame_size(MAX_FRAME)
         .on_upgrade(move |socket| async move {
             if let Err(e) = bridge(socket, target.clone()).await {
-                tracing::debug!(target = %target, error = %e, "shell bridge ended with error");
+                tracing::debug!(target = %target, error = %e, "terminal bridge ended with error");
             } else {
-                tracing::debug!(target = %target, "shell bridge detached cleanly");
+                tracing::debug!(target = %target, "terminal bridge detached cleanly");
             }
         })
 }

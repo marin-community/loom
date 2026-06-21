@@ -90,7 +90,7 @@ const quiet = computed(() => quietTags(props.ws));
 </script>
 
 <template>
-  <header class="mb-2 rounded-r border-l-2 border-transparent pl-3 pr-1 py-1.5">
+  <header class="mb-1.5 rounded-r border-l-2 border-transparent py-1 pl-3 pr-1">
     <!-- Row 1 — nav, title (inline rename), attention + lifecycle controls -->
     <div class="flex items-center gap-3">
       <router-link to="/" class="shrink-0 text-sm text-muted hover:text-fg">← all</router-link>
@@ -180,18 +180,18 @@ const quiet = computed(() => quietTags(props.ws));
          foreground — it's the point of the page, not chrome. -->
     <p
       v-if="messageOf(ws)"
-      class="mt-1 line-clamp-2 text-sm leading-snug text-fg"
+      class="mt-0.5 line-clamp-2 text-sm leading-snug text-fg"
       data-testid="status-message"
     >
       {{ messageOf(ws) }}
     </p>
-    <p v-else class="mt-1 text-sm text-faint">
+    <p v-else class="mt-0.5 text-sm text-faint">
       No status yet — agent hasn't run <code>weaver status</code>.
     </p>
 
     <!-- Quiet tags — free-form, deletable pills (priority, needs-rebase, …),
          never the reserved loud fill. Each × clears that tag. -->
-    <div v-if="quiet.length" class="mt-1.5 flex flex-wrap items-center gap-1.5">
+    <div v-if="quiet.length" class="mt-1 flex flex-wrap items-center gap-1.5">
       <TagPill
         v-for="t in quiet"
         :key="t.key"
@@ -204,7 +204,7 @@ const quiet = computed(() => quietTags(props.ws));
     <!-- Row 3 — one quiet meta line: repo/branch · agent, then the calm
          conversation-state + freshness pushed to the right. (When attention is
          raised the state lives loudly up on row 1 instead.) -->
-    <div class="mt-2 flex items-center gap-2 text-xs">
+    <div class="mt-1 flex items-center gap-2 text-xs">
       <span class="min-w-0 truncate font-mono text-muted">
         {{ repoName(ws.branch.repo_root) }}/{{ ws.branch.name }}
       </span>
@@ -230,7 +230,7 @@ const quiet = computed(() => quietTags(props.ws));
 
     <!-- Write feedback (rename / clear tag / archive). Inline so it travels
          with the header on every surface. -->
-    <p v-if="error" class="mt-1.5 text-xs text-block">{{ error }}</p>
-    <p v-else-if="notice" class="mt-1.5 text-xs text-accent">{{ notice }}</p>
+    <p v-if="error" class="mt-1 text-xs text-block">{{ error }}</p>
+    <p v-else-if="notice" class="mt-1 text-xs text-accent">{{ notice }}</p>
   </header>
 </template>
