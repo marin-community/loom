@@ -117,6 +117,11 @@ export interface WeaverFixture {
   /** Create an *unclaimed* backlog issue in a repo via `POST /api/repos/issues`
    *  — the kind the Issues pane offers a Launch button for. */
   seedBacklogIssue(repoRoot: string, title: string, body?: string): Promise<Issue>;
+  /** Plant a normalized iris conversation log for a session so the Conversation
+   *  tab has something to render. Points `session.log_dir` at a temp folder and
+   *  writes the log where the endpoint's capture fallback reads it
+   *  (`<log_dir>/<branch-slug>/chat.json`). `log` is an iris `Log` shape. */
+  seedConversation(session: Session, log: unknown): Promise<void>;
   /** Write an artifact via `weaver artifact write` — creates it on first call,
    *  appends an immutable revision after. Content is piped on stdin; `--repo`
    *  publishes it repo-shared instead of scoping it to the branch. */
@@ -454,6 +459,21 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
           method: 'POST',
           body: JSON.stringify({ repo_root: repoRoot, title, body: body ?? '' }),
         })) as Issue;
+      },
+
+      async seedConversation(session, log) {
+        // The conversation endpoint prefers a live agent transcript, but a
+        // seeded `shell` session has none — so it falls back to the captured
+        // `chat.json` under the configured log dir. Point that at a temp folder
+        // and drop the log there, slugging the branch the same way the server does.
+        const logRoot = mkdtempSync(join(tmpdir(), 'weaver-conv-'));
+        await fetchJson(`${baseUrl}/api/settings`, {
+          method: 'PATCH',
+          body: JSON.stringify({ 'session.log_dir': logRoot }),
+        });
+        const slug = session.branch.branch.replace(/[^A-Za-z0-9._-]/g, '-');
+        mkdirSync(join(logRoot, slug), { recursive: true });
+        writeFileSync(join(logRoot, slug, 'chat.json'), JSON.stringify(log));
       },
 
       async writeArtifact(session, name, content, opts) {
