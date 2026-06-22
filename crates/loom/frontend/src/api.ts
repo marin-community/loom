@@ -117,6 +117,12 @@ export const putArtifact = (id: string, name: string, body: ArtifactWriteBody) =
 /** Availability of the session's embedded editor (code-server). */
 export const ideInfo = (id: string) => get(`/sessions/${id}/ide-info`) as Promise<IdeInfo>;
 
+/** Type a message into the session's agent pane and, by default, submit it with
+ *  Enter to trigger a round (the same primitive the `loom` CLI's `send` wraps).
+ *  Requires a live terminal — a torn-down or orphaned session 409s. */
+export const sendMessage = (id: string, text: string, submit = true) =>
+  post(`/sessions/${id}/send`, { text, submit });
+
 // --- Agent environment variables -------------------------------------------
 
 import type { EnvVar } from './types';

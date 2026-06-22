@@ -108,4 +108,62 @@ test.describe('conversation view', () => {
     await expect(items.nth(2)).toHaveAttribute('data-active', 'true');
     await expect(items.first()).toHaveAttribute('data-active', 'false');
   });
+
+  // The composer drives the live agent: a live (`running`) session shows a text
+  // box at the foot that types a new prompt straight into the agent pane.
+  test('the composer sends a new prompt to the agent and clears the input', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await openConversation(page, weaver);
+
+    await expect(page.getByTestId('conversation-composer')).toBeVisible();
+    const input = page.getByTestId('composer-input');
+    await input.fill('please run the tests');
+    await page.getByTestId('composer-send').click();
+
+    // The input clears once the send resolves…
+    await expect(input).toHaveValue('');
+    // …and the backend recorded the `nudge` audit event for the typed text (the
+    // send → type-into-the-pane primitive that `POST /sessions/{id}/send` wraps).
+    await expect
+      .poll(async () => {
+        const res = await fetch(`${weaver.baseUrl}/api/sessions/${s.id}/log`);
+        const log = (await res.json()) as { kind: string; data: { text?: string } }[];
+        return log.some((e) => e.kind === 'nudge' && e.data?.text === 'please run the tests');
+      })
+      .toBe(true);
+  });
+
+  // The tab follows a live session: a new turn landing in the transcript shows
+  // up without a manual Refresh, driven off the agent's lifecycle SSE edges.
+  test('the log auto-refreshes when the agent reaches a turn boundary', async ({ page, weaver }) => {
+    const s = await weaver.seedSession({ goal: 'demo', name: 'conv-live' });
+    await weaver.seedConversation(s, demoLog());
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await page.locator('[data-tab="conversation"]').click();
+    await expect(page.getByTestId('conversation')).toBeVisible();
+    await expect(page.getByText('A fresh reply just landed.')).toHaveCount(0);
+
+    // A reply the reviewer hasn't seen is appended to the captured log…
+    const base = demoLog();
+    const grown = {
+      ...base,
+      messages: [
+        ...base.messages,
+        {
+          role: 'assistant',
+          timestamp: '2026-06-21T10:12:00.000Z',
+          blocks: [{ kind: 'text', text: 'A fresh reply just landed.' }],
+        },
+      ],
+    };
+    await weaver.seedConversation(s, grown);
+
+    // …and an agent lifecycle edge (an `idle` hook → a `tag` SSE event) makes the
+    // tab re-fetch on its own — no Refresh click.
+    await weaver.hook(s, 'idle');
+    await expect(page.getByText('A fresh reply just landed.')).toBeVisible({ timeout: 15_000 });
+  });
 });

@@ -1,33 +1,45 @@
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue';
-import { get } from '../api';
-import type { IrisLog, IrisBlock } from '../types';
+import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
+import { get, sendMessage } from '../api';
+import type { IrisLog, IrisBlock, Session } from '../types';
+import { canSend } from '../lib/sessionState';
 import MarkdownView from './MarkdownView.vue';
 
-// The Conversation tab: the agent's chat with the model, rendered for review.
-// Reads the normalized iris log from `GET /sessions/{id}/conversation` (live
-// transcript when present, else the capture archived on teardown) and renders it
-// as a *skimmable* log — prose stays in full view, while the agent's machinery
-// (tool calls + outputs, thinking, injected context) folds away behind compact
-// one-liners. Runs of the same tool call are run-length collapsed (`10× TaskCreate`)
-// so a burst of bookkeeping never buries the conversation, and a right-hand
-// prompt index lets a reviewer jump straight to any user turn.
-const props = defineProps<{ id: string }>();
+// The Conversation tab: the agent's chat with the model, rendered for review and
+// — while the agent is live — driven. Reads the normalized iris log from
+// `GET /sessions/{id}/conversation` (live transcript when present, else the
+// capture archived on teardown) and renders it as a *skimmable* log — prose
+// stays in full view, while the agent's machinery (tool calls + outputs,
+// thinking, injected context) folds away behind compact one-liners. Runs of the
+// same tool call are run-length collapsed (`10× TaskCreate`) so a burst of
+// bookkeeping never buries the conversation, and a right-hand prompt index lets
+// a reviewer jump straight to any user turn. A composer at the foot sends a new
+// prompt straight to the agent's terminal, and the log auto-refreshes on the
+// agent's lifecycle edges so a reply lands without a manual reload.
+const props = defineProps<{ session: Session }>();
+const id = computed(() => props.session.id);
 
 type LoadState = 'loading' | 'ready' | 'empty' | 'error';
 const log = ref<IrisLog | null>(null);
 const state = ref<LoadState>('loading');
 const errorMsg = ref('');
 
-async function load() {
-  state.value = 'loading';
-  // Fold keys are per-render row indices (`ctx-0`, `tg-1-0`) and the highlight
-  // tracks this session's turns — so reset both when the session changes, or the
-  // next session would inherit the previous one's open folds and active anchor.
-  open.value = new Set();
-  activeAnchor.value = '';
+// `preserve` distinguishes an auto-refresh (a new turn landed: keep the reader's
+// folds, scroll, and highlight) from a fresh load (mount / session switch /
+// manual Refresh: reset them). On a preserved refresh a transient fetch error is
+// swallowed — the rendered log stays put and the next edge (or Refresh) recovers.
+async function load({ preserve = false }: { preserve?: boolean } = {}) {
+  if (!preserve) {
+    state.value = 'loading';
+    // Fold keys are per-render row indices (`ctx-0`, `tg-1-0`) and the highlight
+    // tracks this session's turns — so reset both on a fresh load, or the next
+    // session would inherit the previous one's open folds and active anchor.
+    open.value = new Set();
+    activeAnchor.value = '';
+  }
+  const stick = preserve && nearBottom();
   try {
-    const data = (await get(`/sessions/${props.id}/conversation`)) as IrisLog;
+    const data = (await get(`/sessions/${id.value}/conversation`)) as IrisLog;
     log.value = data;
     state.value = data && data.messages.length ? 'ready' : 'empty';
   } catch (e) {
@@ -36,17 +48,91 @@ async function load() {
     const msg = (e as Error).message ?? '';
     if (/not found|conversation/i.test(msg)) {
       state.value = 'empty';
-    } else {
+    } else if (!preserve) {
       errorMsg.value = msg;
       state.value = 'error';
     }
   }
   await nextTick();
+  // Chat behaviour: only follow the conversation to the newest message when the
+  // reader was already at the foot — never yank them down out of the history.
+  if (stick) scrollToBottom();
   updateActive();
 }
 
-onMounted(load);
-watch(() => props.id, load);
+// ── Live auto-refresh ───────────────────────────────────────────────────────
+// A live session's transcript grows turn by turn. We re-fetch it on the agent's
+// lifecycle edges — `status` and `tag` events fire on every working/waiting/idle
+// hook, i.e. at each turn boundary — so the view tracks the agent without a
+// manual reload. Same per-session SSE stream the rest of the detail page rides;
+// coalesced through a short debounce so a burst of edges is a single fetch.
+let source: EventSource | null = null;
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleRefresh() {
+  if (refreshTimer) return;
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    // Only when there's something rendered (or an empty live session) — never
+    // clobber an error view or a manual load mid-flight.
+    if (state.value === 'ready' || state.value === 'empty') load({ preserve: true });
+  }, 400);
+}
+function openStream() {
+  source = new EventSource(`/api/sessions/${id.value}/events`);
+  for (const kind of ['status', 'tag']) source.addEventListener(kind, scheduleRefresh);
+}
+function closeStream() {
+  source?.close();
+  source = null;
+  if (refreshTimer) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+}
+
+onMounted(() => {
+  load();
+  openStream();
+});
+onUnmounted(closeStream);
+// A session switch re-opens both the log and its stream against the new id.
+watch(
+  () => id.value,
+  () => {
+    closeStream();
+    load();
+    openStream();
+  },
+);
+
+// ── Composer ────────────────────────────────────────────────────────────────
+// Send a new prompt straight into the agent's pane (POST /send → type + Enter).
+// Shown only while the agent is live (`canSend`); a torn-down session keeps the
+// read-only log with no composer. After a send the auto-refresh (driven by the
+// agent's own working/idle hooks) brings the new turn in; we also nudge a
+// refresh so it shows promptly.
+const draft = ref('');
+const sending = ref(false);
+const sendError = ref('');
+const composerVisible = computed(
+  () => canSend(props.session) && (state.value === 'ready' || state.value === 'empty'),
+);
+
+async function submitPrompt() {
+  const text = draft.value.trim();
+  if (!text || sending.value) return;
+  sending.value = true;
+  sendError.value = '';
+  try {
+    await sendMessage(id.value, text);
+    draft.value = '';
+    scheduleRefresh();
+  } catch (e) {
+    sendError.value = (e as Error).message ?? 'Failed to send';
+  } finally {
+    sending.value = false;
+  }
+}
 
 // ── The render model ────────────────────────────────────────────────────────
 // We flatten the message/block stream into a flat list of `Row`s the template
@@ -224,6 +310,19 @@ function toggleAll() {
 const convScroll = ref<HTMLElement | null>(null);
 const activeAnchor = ref('');
 
+// Whether the stream is scrolled to (near) its foot — the cue for whether an
+// auto-refresh should follow new content down. A missing scroll root counts as
+// "at the bottom" (nothing scrolled yet).
+function nearBottom(): boolean {
+  const el = convScroll.value;
+  if (!el) return true;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+}
+function scrollToBottom() {
+  const el = convScroll.value;
+  if (el) el.scrollTop = el.scrollHeight;
+}
+
 // The "current" prompt is the last user turn scrolled to (or past) the top of
 // the viewport — so the index highlight tracks the turn you're reading.
 function updateActive() {
@@ -355,9 +454,11 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
 
     <p v-if="state === 'loading'" class="text-sm text-muted">Loading conversation…</p>
     <p v-else-if="state === 'error'" class="text-sm text-block">{{ errorMsg }}</p>
-    <p v-else-if="state === 'empty'" class="text-sm text-muted">
-      No conversation recorded for this session yet.
-    </p>
+    <!-- flex-1 so the composer below (when the agent is live) still pins to the
+         foot rather than floating under this one line. -->
+    <div v-else-if="state === 'empty'" class="flex min-h-0 flex-1 flex-col">
+      <p class="text-sm text-muted">No conversation recorded for this session yet.</p>
+    </div>
 
     <div v-else class="flex min-h-0 flex-1 gap-4">
       <!-- The conversation stream. -->
@@ -400,7 +501,7 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
               <span v-if="row.time" class="font-normal text-muted">{{ shortTime(row.time) }}</span>
             </header>
             <template v-for="(b, j) in row.blocks" :key="j">
-              <MarkdownView v-if="b.kind === 'text'" :id="props.id" path="" :source="b.text" />
+              <MarkdownView v-if="b.kind === 'text'" :id="id" path="" :source="b.text" />
               <p v-else-if="b.kind === 'image'" class="text-xs italic text-muted">[image]</p>
             </template>
           </section>
@@ -408,7 +509,7 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
           <!-- Assistant prose. No role heading — the boxed/accented user turns
                are the dividers, so the agent's replies just flow as plain text. -->
           <div v-else-if="row.type === 'text'" class="px-3">
-            <MarkdownView :id="props.id" path="" :source="row.text" />
+            <MarkdownView :id="id" path="" :source="row.text" />
           </div>
 
           <!-- Thinking — folded. -->
@@ -502,6 +603,39 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
         </ul>
       </nav>
     </div>
+
+    <!-- Composer — send a new prompt straight to the agent's terminal. Enter
+         sends; Shift+Enter inserts a newline. Hidden once the agent is gone, so
+         a torn-down session stays a read-only log. -->
+    <form
+      v-if="composerVisible"
+      class="mt-3 shrink-0 border-t border-line pt-3"
+      data-testid="conversation-composer"
+      @submit.prevent="submitPrompt"
+    >
+      <p v-if="sendError" class="mb-1.5 text-xs text-block" data-testid="composer-error">
+        {{ sendError }}
+      </p>
+      <div class="flex items-end gap-2">
+        <textarea
+          v-model="draft"
+          rows="2"
+          :disabled="sending"
+          placeholder="Send a message to the agent…  (Enter to send, Shift+Enter for a newline)"
+          data-testid="composer-input"
+          class="max-h-40 w-full flex-1 resize-y rounded bg-input px-2.5 py-2 text-sm outline-none focus:ring-1 ring-accent"
+          @keydown.enter.exact.prevent="submitPrompt"
+        ></textarea>
+        <button
+          type="submit"
+          class="btn-primary shrink-0 px-3 py-2 text-sm"
+          :disabled="sending || !draft.trim()"
+          data-testid="composer-send"
+        >
+          {{ sending ? 'Sending…' : 'Send' }}
+        </button>
+      </div>
+    </form>
   </div>
 </template>
 

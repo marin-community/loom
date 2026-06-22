@@ -397,7 +397,12 @@ backed by `GET /api/sessions/{id}/conversation` (`chatlog::conversation` →
 the live transcript when present, else the archived `chat.json`). The Vue viewer
 renders the iris log natively — user/assistant turns, collapsible thinking, and
 each tool call with its result — so a session stays reviewable in the UI after
-its terminal is gone.
+its terminal is gone. While the agent is still live the tab is also drivable: a
+composer at its foot sends a new prompt straight to the agent pane via `POST
+/api/sessions/{id}/send` (type + Enter), and the log auto-refreshes on the
+agent's lifecycle edges (the `status`/`tag` SSE events that fire at each
+turn boundary), so a reply lands without a manual reload. The composer hides
+once the terminal is gone (orphaned/done/archived), leaving the read-only log.
 
 Orphan detection is independent: if the session's supervisor is no longer alive,
 the session becomes `orphaned` and is eligible for `loom adopt`.

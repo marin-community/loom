@@ -213,7 +213,7 @@ onUnmounted(() => {
              archived capture). Mounted only when selected; it fetches on its
              own and re-fetches via its Refresh button. -->
         <div v-if="tab === 'conversation'" class="h-full">
-          <SessionConversation :id="props.id" />
+          <SessionConversation :session="ws" />
         </div>
       </div>
     </div>
