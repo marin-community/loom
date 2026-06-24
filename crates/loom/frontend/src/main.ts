@@ -16,6 +16,7 @@ import Settings from './views/Settings.vue';
 import Issues from './views/Issues.vue';
 import Overlookers from './views/Overlookers.vue';
 import OverlookerDetail from './views/OverlookerDetail.vue';
+import Chat from './views/Chat.vue';
 import Shell from './views/Shell.vue';
 import Login from './views/Login.vue';
 import { me, loadMe } from './auth';
@@ -34,6 +35,7 @@ const router = createRouter({
     { path: '/s/:id/artifacts', component: Artifacts, props: true },
     { path: '/s/:id/artifacts/:name', component: Artifacts, props: true },
     { path: '/issues', component: Issues },
+    { path: '/chat', component: Chat },
     { path: '/overlookers', component: Overlookers },
     { path: '/overlookers/:id', component: OverlookerDetail, props: true },
     { path: '/shell', component: Shell },

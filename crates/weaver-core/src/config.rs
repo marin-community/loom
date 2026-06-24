@@ -14,6 +14,9 @@ use sqlx::Row;
 use crate::db::{now_iso, Db};
 
 pub const DEFAULT_AGENT: &str = "claude";
+/// The agent that backs the fleet Chat concierge when `concierge.runtime` is
+/// unset. Claude is the default because only it fires weaver's lifecycle hooks.
+pub const DEFAULT_CONCIERGE_RUNTIME: &str = "claude";
 /// Whether the server adopts orphaned sessions on startup. Off by default:
 /// the operator opts in via `weaver config set server.auto_adopt true`.
 pub const DEFAULT_AUTO_ADOPT: bool = false;
@@ -104,6 +107,20 @@ pub const REGISTRY: &[SettingSpec] = &[
         default: "",
         group: "Agents",
         options: &[],
+    },
+    SettingSpec {
+        key: "concierge.runtime",
+        label: "Concierge agent",
+        description: "Which agent backs the fleet Chat concierge. `claude` runs \
+            the Claude Code TUI with full weaver status hooks. `codex` runs Codex: \
+            its conversation still renders in the Chat view, but Codex does not \
+            fire weaver's lifecycle hooks, so the concierge shows no live \
+            working/idle status and the Chat view won't auto-refresh on each \
+            reply (use the Refresh button).",
+        kind: SettingKind::Enum,
+        default: DEFAULT_CONCIERGE_RUNTIME,
+        group: "Agents",
+        options: &["claude", "codex"],
     },
     SettingSpec {
         key: "server.auto_adopt",

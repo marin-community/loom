@@ -54,8 +54,12 @@ pub enum LaunchMode {
     Adopt,
 }
 
+/// Build the shell command that launches one session's agent. `runtime` is the
+/// **resolved runtime** — the binary to actually run, which for the concierge
+/// role-kind is the `concierge.runtime` setting (claude|codex), and for every
+/// other kind is the kind itself.
 fn inner_command(
-    agent_kind: &str,
+    runtime: &str,
     goal_file: Option<&Path>,
     mode: LaunchMode,
     claude_args: &str,
@@ -64,7 +68,7 @@ fn inner_command(
         "" => String::new(),
         a => format!(" {a}"),
     };
-    match agent_kind {
+    match runtime {
         "shell" | "none" => String::new(),
         "claude" => match mode {
             LaunchMode::Adopt => format!("claude --continue{args}"),
@@ -73,11 +77,43 @@ fn inner_command(
                 None => format!("claude{args}"),
             },
         },
+        // Codex takes its opening prompt as a positional arg, like claude. It has
+        // no scoped "continue this worktree's session" flag, so on adopt we
+        // re-launch fresh (re-reading the primer) rather than resuming.
+        "codex" => match goal_file {
+            Some(f) => format!("codex \"$(cat '{}')\"", f.display()),
+            None => "codex".to_string(),
+        },
         other => match goal_file {
             Some(f) => format!("{other} '{}'", f.display()),
             None => other.to_string(),
         },
     }
+}
+
+/// The agent kind that marks a session as the fleet **concierge** — seeded with
+/// the [`concierge_primer`] instead of a workstream goal, hidden from the fleet
+/// list, and resolved as a singleton by the Chat surface. This is the session's
+/// *role*; the runtime it actually launches (claude|codex) is the separate
+/// `concierge.runtime` setting, resolved before launch.
+pub const CONCIERGE_KIND: &str = "concierge";
+
+/// Whether a resolved `runtime` runs the Claude runtime — the `claude` command
+/// plus the weaver lifecycle hooks and first-run launch gates. Only Claude fires
+/// the hooks today, so this also decides whether a session starts `launching`
+/// (a hook will promote it) or `running` (no hooks — it is live on launch).
+pub fn is_claude_runtime(runtime: &str) -> bool {
+    runtime == "claude"
+}
+
+/// The builtin concierge primer — how the fleet concierge explores and acts on
+/// the fleet. Catted in at build time like [`weaver_core::agent::builtin_weaver_md`],
+/// and used as a concierge session's opening prompt.
+const BUILTIN_CONCIERGE_MD: &str = include_str!("../CONCIERGE.md");
+
+/// The concierge primer text, seeded as a concierge session's opening prompt.
+pub fn concierge_primer() -> &'static str {
+    BUILTIN_CONCIERGE_MD
 }
 
 /// Wrap a value in single quotes for safe `export NAME=…` in the launch script,
@@ -90,7 +126,7 @@ fn sh_single_quote(value: &str) -> String {
 }
 
 pub fn launch_script(
-    agent_kind: &str,
+    runtime: &str,
     goal_file: Option<&Path>,
     env: &[(&str, &str)],
     weaver_dir: Option<&Path>,
@@ -104,7 +140,7 @@ pub fn launch_script(
     for (k, v) in env {
         script.push_str(&format!("export {k}={}; ", sh_single_quote(v)));
     }
-    let inner = inner_command(agent_kind, goal_file, mode, claude_args);
+    let inner = inner_command(runtime, goal_file, mode, claude_args);
     if !inner.is_empty() {
         script.push_str(&inner);
         script.push_str("; ");
@@ -118,7 +154,10 @@ pub struct LaunchSpec<'a> {
     /// The branch id — the agent uses this to resolve "its" branch via
     /// `$WEAVER_BRANCH`.
     pub branch_id: &'a str,
-    pub agent_kind: &'a str,
+    /// The resolved **runtime** to launch — the agent binary (claude|codex|shell|
+    /// a bare command), already resolved from the stored kind (so a concierge
+    /// carries its `concierge.runtime`, not the literal `concierge`).
+    pub runtime: &'a str,
     pub work_dir: &'a Path,
     pub term_session: &'a str,
     pub goal_file: Option<&'a Path>,
@@ -138,7 +177,10 @@ pub async fn launch(spec: &LaunchSpec<'_>, mode: LaunchMode) -> Result<()> {
         .map(|d| d.join("weaver").display().to_string())
         .unwrap_or_else(|| "weaver".to_string());
 
-    if spec.agent_kind == "claude" {
+    // Only the Claude runtime wires weaver's lifecycle hooks and needs its
+    // first-run gates pre-cleared. Codex (and any bare command) gets neither — it
+    // runs, but reports no working/idle status through weaver yet.
+    if is_claude_runtime(spec.runtime) {
         // Both steps are best-effort — a failure shouldn't abort the launch — but
         // log it, since a silent failure here resurfaces only as a stalled agent.
         if let Err(e) = install_hooks(spec.work_dir, &weaver_bin).await {
@@ -176,7 +218,7 @@ pub async fn launch(spec: &LaunchSpec<'_>, mode: LaunchMode) -> Result<()> {
         env.push((k.as_str(), v.as_str()));
     }
     let script = launch_script(
-        spec.agent_kind,
+        spec.runtime,
         spec.goal_file,
         &env,
         weaver_dir,
@@ -185,7 +227,7 @@ pub async fn launch(spec: &LaunchSpec<'_>, mode: LaunchMode) -> Result<()> {
     );
     tracing::debug!(
         branch = spec.branch_id,
-        agent_kind = spec.agent_kind,
+        runtime = spec.runtime,
         session = spec.term_session,
         ?mode,
         "launching agent session"
@@ -195,7 +237,7 @@ pub async fn launch(spec: &LaunchSpec<'_>, mode: LaunchMode) -> Result<()> {
         .with_context(|| format!("terminal: launching session {}", spec.term_session))?;
     tracing::info!(
         branch = spec.branch_id,
-        agent_kind = spec.agent_kind,
+        runtime = spec.runtime,
         session = spec.term_session,
         ?mode,
         "agent launched"
@@ -505,6 +547,49 @@ mod tests {
         assert!(script.contains("export WEAVER_API='http://h:1'; "));
         assert!(script.contains("claude \"$(cat '/x/goal.txt')\"; "));
         assert!(script.ends_with("exec \"${SHELL:-/bin/sh}\""));
+    }
+
+    #[test]
+    fn concierge_kind_is_a_role_not_a_runtime() {
+        // The `concierge` string marks a role; it is not a runtime, so it must be
+        // resolved (to claude|codex) before launch and never reach the command
+        // builder. `is_claude_runtime` only matches the actual Claude runtime.
+        assert!(is_claude_runtime("claude"));
+        assert!(!is_claude_runtime(CONCIERGE_KIND));
+        assert!(!is_claude_runtime("codex"));
+        // The primer the concierge is seeded with is the real fleet-ops doc.
+        assert!(concierge_primer().contains("fleet concierge"));
+    }
+
+    #[test]
+    fn codex_runtime_runs_codex_with_its_prompt() {
+        // A concierge resolved to the codex runtime launches `codex "$(cat …)"`,
+        // seeding the primer as codex's opening prompt.
+        let fresh = launch_script(
+            "codex",
+            Some(Path::new("/x/goal.txt")),
+            &[],
+            None,
+            LaunchMode::Fresh,
+            "",
+        );
+        assert!(
+            fresh.contains("codex \"$(cat '/x/goal.txt')\"; "),
+            "got: {fresh}"
+        );
+        // Codex has no scoped resume, so adopt re-launches fresh with the primer.
+        let adopt = launch_script(
+            "codex",
+            Some(Path::new("/x/goal.txt")),
+            &[],
+            None,
+            LaunchMode::Adopt,
+            "",
+        );
+        assert!(
+            adopt.contains("codex \"$(cat '/x/goal.txt')\"; "),
+            "got: {adopt}"
+        );
     }
 
     #[test]

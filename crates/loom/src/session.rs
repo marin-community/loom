@@ -142,17 +142,37 @@ pub async fn list(db: &Db) -> Result<Vec<Session>> {
     Ok(rows)
 }
 
-/// The **fleet** sessions only — ordinary work, with engine-managed (warm)
-/// sessions excluded. Warm sessions are infrastructure a watcher keeps for its
-/// across-round memory, not work to show or survey, so the dashboard `/sessions`
+/// The **fleet** sessions only — ordinary work, with infrastructure sessions
+/// excluded: engine-managed (warm) overlooker sessions, and the fleet
+/// **concierge** (the Chat agent, which watches the fleet rather than being part
+/// of it). Neither is work to show or survey, so the dashboard `/sessions`
 /// listing and an overlooker round's scope survey both read this list.
 pub async fn list_visible(db: &Db) -> Result<Vec<Session>> {
     let rows = sqlx::query_as::<_, Session>(
-        "SELECT * FROM sessions WHERE managed_by IS NULL ORDER BY created_at DESC",
+        "SELECT * FROM sessions
+         WHERE managed_by IS NULL AND agent_kind != ?
+         ORDER BY created_at DESC",
     )
+    .bind(crate::agent::CONCIERGE_KIND)
     .fetch_all(db)
     .await?;
     Ok(rows)
+}
+
+/// The live fleet **concierge** session, if one exists and is not terminal. The
+/// Chat surface resolves its singleton through this — find the running concierge,
+/// else create one. Hidden from [`list_visible`], so it never shows in the fleet.
+pub async fn active_concierge(db: &Db) -> Result<Option<Session>> {
+    let row = sqlx::query_as::<_, Session>(
+        "SELECT * FROM sessions
+         WHERE agent_kind = ? AND status NOT IN ('done', 'error', 'archived')
+         ORDER BY created_at DESC
+         LIMIT 1",
+    )
+    .bind(crate::agent::CONCIERGE_KIND)
+    .fetch_optional(db)
+    .await?;
+    Ok(row)
 }
 
 /// Every engine-managed (warm) session — those owned by an overlooker. The

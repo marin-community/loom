@@ -123,6 +123,13 @@ export const ideInfo = (id: string) => get(`/sessions/${id}/ide-info`) as Promis
 export const sendMessage = (id: string, text: string, submit = true) =>
   post(`/sessions/${id}/send`, { text, submit });
 
+// --- Chat (the fleet concierge) --------------------------------------------
+
+/** Get-or-create the singleton fleet concierge and return its session view —
+ *  what the Chat surface mounts its conversation against. 400s when no repo has
+ *  been used yet (the concierge needs one to live in). */
+export const getChat = () => get('/chat') as Promise<Session>;
+
 // --- Agent environment variables -------------------------------------------
 
 import type { EnvVar } from './types';
