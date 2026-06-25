@@ -919,12 +919,17 @@ async fn create_session_core(st: AppState, req: CreateReq) -> ApiResult<SessionV
     // launch prompt (goal.txt) only, so they reach the agent without cluttering
     // the dashboard.
     let scratch_names = write_initial_scratch(&work_dir, &req.scratch).await?;
-    let mut prompt_parts: Vec<String> = Vec::new();
-    if is_concierge {
-        // The concierge's opening prompt is its fleet-ops primer — no goal text,
-        // scratch, or tracking note.
-        prompt_parts.push(agent::concierge_primer().to_string());
+    // The concierge boots primed-but-idle: its fleet-ops primer is injected as
+    // system *context* (primer.txt → `--append-system-prompt-file`), not as a
+    // positional opening prompt, so it takes no turn until the operator sends the
+    // first message. A normal session's goal/scratch/tracking note ride in as the
+    // positional prompt (goal.txt) that seeds its first turn.
+    let (goal_file, primer_file) = if is_concierge {
+        let f = run_dir.join("primer.txt");
+        tokio::fs::write(&f, agent::concierge_primer()).await?;
+        (None, Some(f))
     } else {
+        let mut prompt_parts: Vec<String> = Vec::new();
         if !goal.is_empty() {
             prompt_parts.push(goal.clone());
         }
@@ -934,14 +939,15 @@ async fn create_session_core(st: AppState, req: CreateReq) -> ApiResult<SessionV
         if let Some(id) = tracking_issue {
             prompt_parts.push(tracking_note(id));
         }
-    }
-    let launch_prompt = prompt_parts.join("\n\n");
-    let goal_file = if launch_prompt.is_empty() {
-        None
-    } else {
-        let f = run_dir.join("goal.txt");
-        tokio::fs::write(&f, &launch_prompt).await?;
-        Some(f)
+        let launch_prompt = prompt_parts.join("\n\n");
+        let goal_file = if launch_prompt.is_empty() {
+            None
+        } else {
+            let f = run_dir.join("goal.txt");
+            tokio::fs::write(&f, &launch_prompt).await?;
+            Some(f)
+        };
+        (goal_file, None)
     };
 
     let term_session = format!("weaver-{session_id}");
@@ -958,6 +964,7 @@ async fn create_session_core(st: AppState, req: CreateReq) -> ApiResult<SessionV
             work_dir: &work_dir,
             term_session: &term_session,
             goal_file: goal_file.as_deref(),
+            primer_file: primer_file.as_deref(),
             server_addr: &st.addr,
             claude_args: &claude_args,
             extra_env: &extra_env,
@@ -1540,6 +1547,8 @@ pub async fn create_warm_session(
             work_dir: &work_dir,
             term_session: &term_session,
             goal_file: goal_file.as_deref(),
+            // A warm overlooker session is never the concierge, so no primer.
+            primer_file: None,
             server_addr: &st.addr,
             claude_args: &claude_args,
             extra_env: &extra_env,
@@ -1591,13 +1600,17 @@ pub async fn adopt(st: &AppState, session: &Session, branch: &Branch) -> Result<
             session.work_dir
         )));
     }
+    // A normal session persists its positional prompt in goal.txt; the concierge
+    // persists its primer in primer.txt instead (re-appended as system context so
+    // it stays primed-but-idle across adopt). Each session carries exactly one.
+    let run_dir = db::run_dir(&session.id);
+    let primer_file = {
+        let f = run_dir.join("primer.txt");
+        f.exists().then_some(f)
+    };
     let goal_file = {
-        let f = db::run_dir(&session.id).join("goal.txt");
-        if f.exists() {
-            Some(f)
-        } else {
-            None
-        }
+        let f = run_dir.join("goal.txt");
+        f.exists().then_some(f)
     };
     let base_args = config::get_or(&st.db, "agent.claude_args", "").await;
     let claude_args = agent::combine_args(&base_args, &session.model, &session.effort);
@@ -1610,6 +1623,7 @@ pub async fn adopt(st: &AppState, session: &Session, branch: &Branch) -> Result<
             work_dir: &work_dir,
             term_session: &session.term_session,
             goal_file: goal_file.as_deref(),
+            primer_file: primer_file.as_deref(),
             server_addr: &st.addr,
             claude_args: &claude_args,
             extra_env: &extra_env,

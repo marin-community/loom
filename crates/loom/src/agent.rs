@@ -58,9 +58,16 @@ pub enum LaunchMode {
 /// **resolved runtime** — the binary to actually run, which for the concierge
 /// role-kind is the `concierge.runtime` setting (claude|codex), and for every
 /// other kind is the kind itself.
+///
+/// `goal_file` is the **positional** opening prompt (catted in as the operator's
+/// first message); `primer_file` is system *context* appended via
+/// `--append-system-prompt-file`. They are mutually distinct: a normal session
+/// carries a `goal_file`, the concierge carries a `primer_file` (so it boots
+/// primed but idle, taking no turn until the operator speaks). At most one is set.
 fn inner_command(
     runtime: &str,
     goal_file: Option<&Path>,
+    primer_file: Option<&Path>,
     mode: LaunchMode,
     claude_args: &str,
 ) -> String {
@@ -70,21 +77,41 @@ fn inner_command(
     };
     match runtime {
         "shell" | "none" => String::new(),
-        "claude" => match mode {
-            LaunchMode::Adopt => format!("claude --continue{args}"),
-            LaunchMode::Fresh => match goal_file {
+        "claude" => match (mode, primer_file) {
+            // Primed-but-idle: the primer rides in as system context, not a
+            // positional prompt, so claude waits for the operator's first message
+            // instead of taking a turn on launch. Re-appended on adopt because the
+            // system prompt is reconstructed per launch — `--continue` resumes the
+            // conversation, but the appended context is not persisted with it.
+            (LaunchMode::Adopt, Some(p)) => {
+                format!(
+                    "claude --continue{args} --append-system-prompt-file '{}'",
+                    p.display()
+                )
+            }
+            (LaunchMode::Fresh, Some(p)) => {
+                format!("claude{args} --append-system-prompt-file '{}'", p.display())
+            }
+            (LaunchMode::Adopt, None) => format!("claude --continue{args}"),
+            (LaunchMode::Fresh, None) => match goal_file {
                 Some(f) => format!("claude{args} \"$(cat '{}')\"", f.display()),
                 None => format!("claude{args}"),
             },
         },
         // Codex takes its opening prompt as a positional arg, like claude. It has
         // no scoped "continue this worktree's session" flag, so on adopt we
-        // re-launch fresh (re-reading the primer) rather than resuming.
-        "codex" => match goal_file {
+        // re-launch fresh (re-reading the prompt) rather than resuming. It also has
+        // no `--append-system-prompt-file` equivalent and no WEAVER.md hook, so a
+        // codex concierge's primer is still seeded *positionally* (falling back to
+        // `primer_file`) and it will take a turn on boot. Making codex boot idle is
+        // a documented follow-up.
+        "codex" => match goal_file.or(primer_file) {
             Some(f) => format!("codex \"$(cat '{}')\"", f.display()),
             None => "codex".to_string(),
         },
-        other => match goal_file {
+        // A bare command likewise only takes a positional prompt, so fall back to
+        // the primer if that is all this session carries.
+        other => match goal_file.or(primer_file) {
             Some(f) => format!("{other} '{}'", f.display()),
             None => other.to_string(),
         },
@@ -128,6 +155,7 @@ fn sh_single_quote(value: &str) -> String {
 pub fn launch_script(
     runtime: &str,
     goal_file: Option<&Path>,
+    primer_file: Option<&Path>,
     env: &[(&str, &str)],
     weaver_dir: Option<&Path>,
     mode: LaunchMode,
@@ -140,7 +168,7 @@ pub fn launch_script(
     for (k, v) in env {
         script.push_str(&format!("export {k}={}; ", sh_single_quote(v)));
     }
-    let inner = inner_command(runtime, goal_file, mode, claude_args);
+    let inner = inner_command(runtime, goal_file, primer_file, mode, claude_args);
     if !inner.is_empty() {
         script.push_str(&inner);
         script.push_str("; ");
@@ -160,7 +188,15 @@ pub struct LaunchSpec<'a> {
     pub runtime: &'a str,
     pub work_dir: &'a Path,
     pub term_session: &'a str,
+    /// The **positional** opening prompt catted in as the operator's first
+    /// message. A normal session carries this; the concierge does not (it uses
+    /// [`Self::primer_file`] instead, so it boots idle).
     pub goal_file: Option<&'a Path>,
+    /// System *context* appended via `--append-system-prompt-file` (claude
+    /// runtime). The concierge's fleet-ops primer rides in here so it boots primed
+    /// but takes no turn until the operator speaks. Distinct from `goal_file`;
+    /// at most one is set.
+    pub primer_file: Option<&'a Path>,
     pub server_addr: &'a str,
     pub claude_args: &'a str,
     /// Operator-managed environment variables ([`crate::agent_env`]) exported
@@ -220,6 +256,7 @@ pub async fn launch(spec: &LaunchSpec<'_>, mode: LaunchMode) -> Result<()> {
     let script = launch_script(
         spec.runtime,
         spec.goal_file,
+        spec.primer_file,
         &env,
         weaver_dir,
         mode,
@@ -530,7 +567,7 @@ mod tests {
 
     #[test]
     fn shell_script_just_execs_a_shell() {
-        let script = launch_script("shell", None, &[], None, LaunchMode::Fresh, "");
+        let script = launch_script("shell", None, None, &[], None, LaunchMode::Fresh, "");
         assert_eq!(script, "exec \"${SHELL:-/bin/sh}\"");
     }
 
@@ -539,6 +576,7 @@ mod tests {
         let script = launch_script(
             "claude",
             Some(Path::new("/x/goal.txt")),
+            None,
             &[("WEAVER_API", "http://h:1")],
             None,
             LaunchMode::Fresh,
@@ -547,6 +585,46 @@ mod tests {
         assert!(script.contains("export WEAVER_API='http://h:1'; "));
         assert!(script.contains("claude \"$(cat '/x/goal.txt')\"; "));
         assert!(script.ends_with("exec \"${SHELL:-/bin/sh}\""));
+    }
+
+    #[test]
+    fn concierge_primer_rides_in_as_system_prompt_not_a_positional() {
+        // A concierge launches with its primer as appended system context and NO
+        // positional prompt, so it boots primed but idle (takes no turn until the
+        // operator speaks). Fresh and adopt both append the primer.
+        let fresh = launch_script(
+            "claude",
+            None,
+            Some(Path::new("/x/primer.txt")),
+            &[],
+            None,
+            LaunchMode::Fresh,
+            "",
+        );
+        assert_eq!(
+            fresh,
+            "claude --append-system-prompt-file '/x/primer.txt'; exec \"${SHELL:-/bin/sh}\""
+        );
+        // No positional `$(cat …)` prompt — that is what made it take a turn on boot.
+        assert!(!fresh.contains("$(cat"), "got: {fresh}");
+
+        // Adopt re-appends the primer (the system prompt is rebuilt per launch) and
+        // resumes the conversation with --continue.
+        let adopt = launch_script(
+            "claude",
+            None,
+            Some(Path::new("/x/primer.txt")),
+            &[],
+            None,
+            LaunchMode::Adopt,
+            "",
+        );
+        assert_eq!(
+            adopt,
+            "claude --continue --append-system-prompt-file '/x/primer.txt'; \
+             exec \"${SHELL:-/bin/sh}\""
+        );
+        assert!(!adopt.contains("$(cat"), "got: {adopt}");
     }
 
     #[test]
@@ -568,6 +646,7 @@ mod tests {
         let fresh = launch_script(
             "codex",
             Some(Path::new("/x/goal.txt")),
+            None,
             &[],
             None,
             LaunchMode::Fresh,
@@ -581,6 +660,7 @@ mod tests {
         let adopt = launch_script(
             "codex",
             Some(Path::new("/x/goal.txt")),
+            None,
             &[],
             None,
             LaunchMode::Adopt,
@@ -593,11 +673,33 @@ mod tests {
     }
 
     #[test]
+    fn codex_concierge_still_seeds_the_primer_positionally() {
+        // Codex has no `--append-system-prompt-file`, so a codex concierge (primer
+        // in `primer_file`, no `goal_file`) falls back to seeding the primer as a
+        // positional prompt — it still takes a turn on boot. Making codex boot idle
+        // is a documented follow-up.
+        let fresh = launch_script(
+            "codex",
+            None,
+            Some(Path::new("/x/primer.txt")),
+            &[],
+            None,
+            LaunchMode::Fresh,
+            "",
+        );
+        assert!(
+            fresh.contains("codex \"$(cat '/x/primer.txt')\"; "),
+            "got: {fresh}"
+        );
+    }
+
+    #[test]
     fn env_values_with_single_quotes_are_escaped() {
         // An operator env var whose value contains a single quote must not break
         // out of the `export NAME='…'` assignment.
         let script = launch_script(
             "shell",
+            None,
             None,
             &[("MSG", "it's \"quoted\"")],
             None,
@@ -640,6 +742,7 @@ mod tests {
         let script = launch_script(
             "claude",
             Some(Path::new("/x/goal.txt")),
+            None,
             &[],
             None,
             LaunchMode::Adopt,
