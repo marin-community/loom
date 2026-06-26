@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, computed, nextTick, onMounted } from 'vue';
+import { ref, reactive, computed, nextTick, onMounted, onActivated } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   get,
@@ -14,6 +14,9 @@ import {
 import type { Issue, Session, Tag } from '../types';
 import TagPill from '../components/TagPill.vue';
 import { timeAgo } from '../lib/time';
+
+// Named so App.vue's <keep-alive :include> keeps this view warm across nav.
+defineOptions({ name: 'Issues' });
 
 const router = useRouter();
 
@@ -67,6 +70,17 @@ async function load() {
 }
 
 onMounted(load);
+// Kept alive across navigation (App.vue), so refresh the board on every return —
+// otherwise it would show whatever it held when last left. Guarded so the initial
+// mount (already loaded above) doesn't fetch twice.
+let firstActivate = true;
+onActivated(() => {
+  if (firstActivate) {
+    firstActivate = false;
+    return;
+  }
+  load();
+});
 
 // The short repo label is the last path segment of the repo root.
 function repoName(p: string): string {

@@ -31,6 +31,15 @@ type ConnState = 'connecting' | 'open' | 'reconnecting' | 'error';
 const state = ref<ConnState>('connecting');
 const errorReason = ref('');
 
+// The status badge only appears once a connect has been pending past this
+// settle window — a same-origin localhost connect lands in well under it, so
+// the common fast path shows nothing at all (no "connecting…" flash on every
+// session-open / tab-return). A genuinely slow connect or a real outage still
+// surfaces, just calmly and a beat late.
+const STATUS_SETTLE_MS = 350;
+const statusVisible = ref(false);
+let revealTimer: ReturnType<typeof setTimeout> | null = null;
+
 let term: Terminal | null = null;
 let fit: FitAddon | null = null;
 let webgl: WebglAddon | null = null;
@@ -65,6 +74,21 @@ let closedByUs = false;
 let disposed = false;
 let lastCols = 0;
 let lastRows = 0;
+
+// Hold the connection badge back through the settle window so a fast connect
+// stays silent; reveal it only if we're still not open by then.
+function armStatusReveal() {
+  if (revealTimer) clearTimeout(revealTimer);
+  statusVisible.value = false;
+  revealTimer = setTimeout(() => {
+    if (!disposed && state.value !== 'open') statusVisible.value = true;
+  }, STATUS_SETTLE_MS);
+}
+function clearStatusReveal() {
+  if (revealTimer) clearTimeout(revealTimer);
+  revealTimer = null;
+  statusVisible.value = false;
+}
 
 const OP_INPUT = 0x00;
 const OP_RESIZE = 0x01;
@@ -236,6 +260,8 @@ function scheduleFit() {
 function connect() {
   closedByUs = false;
   state.value = attempt === 0 ? 'connecting' : 'reconnecting';
+  // Hold the badge back through the settle window so a fast connect is silent.
+  armStatusReveal();
   const sock = new WebSocket(wsUrl());
   sock.binaryType = 'arraybuffer';
   ws = sock;
@@ -243,6 +269,7 @@ function connect() {
   sock.onopen = () => {
     attempt = 0;
     state.value = 'open';
+    clearStatusReveal();
     // Re-establish geometry now that we can send (the supervisor repaints).
     lastCols = 0;
     lastRows = 0;
@@ -394,6 +421,7 @@ onUnmounted(() => {
   disposed = true;
   closedByUs = true;
   if (reconnectTimer) clearTimeout(reconnectTimer);
+  if (revealTimer) clearTimeout(revealTimer);
   if (rafHandle) cancelAnimationFrame(rafHandle);
   document.removeEventListener('visibilitychange', onVisible);
   observer?.disconnect();
@@ -457,11 +485,17 @@ onUnmounted(() => {
       </button>
     </div>
 
+    <!-- Connection badge — quiet by default. It appears only after the settle
+         window (so fast connects stay silent), and a routine connect/reconnect
+         reads as a calm neutral chip, never the reserved loud amber. Only a hard
+         error keeps the loud red fill. -->
     <div
-      v-if="state !== 'open'"
+      v-if="state !== 'open' && statusVisible"
       data-testid="term-status"
-      class="absolute right-2 top-2 rounded px-2 py-1 text-xs font-medium"
-      :class="state === 'error' ? 'bg-block text-block-fg' : 'bg-attn text-attn-fg'"
+      class="absolute right-2 top-2 rounded px-2 py-1 text-xs font-medium ring-1"
+      :class="state === 'error'
+        ? 'bg-block text-block-fg ring-block-line'
+        : 'bg-surface/95 text-muted ring-line'"
     >
       <span v-if="state === 'connecting'">connecting…</span>
       <span v-else-if="state === 'reconnecting'">reconnecting…</span>

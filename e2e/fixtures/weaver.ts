@@ -223,10 +223,13 @@ async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
   return text ? JSON.parse(text) : null;
 }
 
-/** Delete every session on a server (and its branch/worktree), best-effort. */
+/** Delete every session on a server (and its branch/worktree), best-effort.
+ *  Includes archived sessions (`?archived=true`) — `/api/sessions` hides them by
+ *  default, so without this an archived session survives the per-test wipe and
+ *  leaks into the next test, breaking count-based assertions ("0 sessions"). */
 async function deleteAllSessions(baseUrl: string) {
   try {
-    const all = (await fetchJson(`${baseUrl}/api/sessions`)) as Session[];
+    const all = (await fetchJson(`${baseUrl}/api/sessions?archived=true`)) as Session[];
     for (const s of all) {
       try {
         await fetch(`${baseUrl}/api/sessions/${s.id}?keep_branch=false`, {

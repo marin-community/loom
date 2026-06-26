@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, reactive, computed, onMounted, onActivated, onDeactivated, onUnmounted } from 'vue';
 import { useRoute } from 'vue-router';
 import { get, ideInfo } from '../api';
 import type { Session, WeaverEvent, Issue } from '../types';
@@ -10,11 +10,22 @@ import SessionPageHeader from '../components/SessionPageHeader.vue';
 import SessionTabs from '../components/SessionTabs.vue';
 import SessionOverview from '../components/SessionOverview.vue';
 import SessionConversation from '../components/SessionConversation.vue';
+import { useFleet } from '../lib/sessionsStore';
+
+// Named + keyed-by-id in App.vue's <keep-alive> so the page (and its live
+// terminal) stays warm across the Artifacts trip: clicking Artifacts and back
+// returns to the same terminal, scrollback intact, no reconnect — instead of
+// tearing the WebSocket/xterm down and rebuilding it every round-trip.
+defineOptions({ name: 'SessionDetail' });
 
 const props = defineProps<{ id: string }>();
 const route = useRoute();
 
-const ws = ref<Session | null>(null);
+// Seed from the shared fleet snapshot so the page paints immediately with the
+// row the list already had — no "Loading…" gap while the per-session refetch is
+// in flight. loadAll() still refreshes it to the full per-session view.
+const { sessionById } = useFleet();
+const ws = ref<Session | null>(sessionById(props.id) ?? null);
 const events = ref<WeaverEvent[]>([]);
 const issues = ref<Issue[]>([]);
 const backlog = ref<Issue[]>([]);
@@ -30,6 +41,23 @@ type WorkTab = 'terminal' | 'overview' | 'conversation';
 const tab = ref<WorkTab>(
   initialTab === 'overview' || initialTab === 'conversation' ? initialTab : 'terminal',
 );
+
+// Which tabs have ever been opened. A tab mounts lazily on first visit, then
+// stays mounted (v-show) — so flipping Terminal ↔ Overview ↔ Conversation is
+// instant and the Conversation keeps its loaded transcript instead of
+// re-fetching on every switch. The terminal is always mounted (it must never
+// drop its socket); the others start unmounted so a session-open stays cheap.
+const mounted = reactive<Record<WorkTab, boolean>>({
+  terminal: true,
+  overview: tab.value === 'overview',
+  conversation: tab.value === 'conversation',
+});
+function selectTab(t: WorkTab) {
+  // Mark mounted *before* flipping the tab so the target renders on the same
+  // tick (no one-frame flash). `selectTab` is the only path that changes `tab`.
+  mounted[t] = true;
+  tab.value = t;
+}
 
 const issueCount = computed(() => issues.value.length + backlog.value.length);
 
@@ -105,7 +133,13 @@ async function loadAll() {
   }
 }
 
+function closeStream() {
+  source?.close();
+  source = null;
+}
+
 function openStream() {
+  closeStream();
   source = new EventSource(`/api/sessions/${props.id}/events`);
   // `tag` covers every status axis (the agent's attention, an overlooker's
   // triage, any free-form key); a tag write re-fetches the session so the
@@ -160,8 +194,23 @@ onMounted(() => {
     // which is the safe default — nothing else on the page depends on it.
     .catch(() => {});
 });
+// The events SSE is paused while the page is off-screen (kept alive). A cached
+// SessionDetail would otherwise hold an EventSource open on the Artifacts trip or
+// while parked on another session — idle streams stacking up against the
+// browser's per-origin HTTP/1.1 connection cap. The terminal WebSocket (a
+// separate connection pool) stays warm regardless — that's the point of keeping
+// the page alive; only this status stream pauses. onMounted owns the first open;
+// onActivated reopens + refetches on a *return* (guarded by `source` so the
+// initial mount never double-opens). The refetch carries no "Loading…" flash —
+// `ws` is already seeded from the store.
+onActivated(() => {
+  if (source) return; // initial mount already loaded + opened the stream
+  loadAll();
+  openStream();
+});
+onDeactivated(closeStream);
 onUnmounted(() => {
-  source?.close();
+  closeStream();
   stopDrag();
 });
 </script>
@@ -176,7 +225,7 @@ onUnmounted(() => {
          AgentTerminal's ResizeObserver re-fits the terminal on the change. -->
     <div class="flex min-w-0 flex-1 flex-col px-5 py-3">
       <SessionPageHeader :ws="ws" @reload="loadAll" />
-      <SessionTabs :tab="tab" :id="props.id" :issue-count="issueCount" @select="tab = $event">
+      <SessionTabs :tab="tab" :id="props.id" :issue-count="issueCount" @select="selectTab">
         <!-- Scratch attachments ride the tab row's spare right side (drop a file
              anywhere on the page) so the terminal keeps the vertical space the
              old below-the-terminal strip used to take. -->
@@ -198,8 +247,9 @@ onUnmounted(() => {
         </section>
 
         <!-- Overview — read-only context (goal, issues, activity). Scrolls
-             within the work area so the header/tabs stay anchored. -->
-        <div v-if="tab === 'overview'" class="h-full overflow-auto pb-1">
+             within the work area so the header/tabs stay anchored. Mounted on
+             first visit, then kept (v-show) so re-selecting it is instant. -->
+        <div v-if="mounted.overview" v-show="tab === 'overview'" class="h-full overflow-auto pb-1">
           <SessionOverview
             :ws="ws"
             :events="events"
@@ -210,9 +260,10 @@ onUnmounted(() => {
         </div>
 
         <!-- Conversation — the agent's chat with the model (live, or the
-             archived capture). Mounted only when selected; it fetches on its
-             own and re-fetches via its Refresh button. -->
-        <div v-if="tab === 'conversation'" class="h-full">
+             archived capture). Lazily mounted on first visit and then kept
+             (v-show), so flipping back is instant and the loaded transcript
+             survives; its Refresh button re-pulls on demand. -->
+        <div v-if="mounted.conversation" v-show="tab === 'conversation'" class="h-full">
           <SessionConversation :session="ws" />
         </div>
       </div>

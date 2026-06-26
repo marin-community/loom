@@ -3,10 +3,11 @@ import { computed } from 'vue';
 import type { GithubStatus } from '../types';
 
 // A branch's GitHub pull-request snapshot, fetched server-side via `gh`. Tints
-// stay restrained — text color only, never a loud fill — so GitHub info never
-// competes with the attention axis (the one reserved loud signal in the UI).
-// Tokens are semantic (text-accent / text-block / text-muted) so they swap with
-// the light/dark theme.
+// are text-color only (never a loud fill) and use GitHub's own familiar hue
+// language — green open/passing, violet merged, red failing — so the PR state
+// reads at a glance without ever borrowing the reserved loud amber/red
+// attention fill. Tokens are semantic (text-ok / text-agent / text-block / …)
+// so they swap with the light/dark theme.
 const props = defineProps<{ gh: GithubStatus; compact?: boolean }>();
 
 interface Chip {
@@ -19,9 +20,9 @@ const stateChip = computed<Chip>(() => {
   const draft = props.gh.is_draft && props.gh.pr_state === 'OPEN';
   const key = draft ? 'DRAFT' : props.gh.pr_state;
   const tint: Record<string, string> = {
-    OPEN: 'text-fg',
-    MERGED: 'text-accent',
-    CLOSED: 'text-faint',
+    OPEN: 'text-ok',
+    MERGED: 'text-agent',
+    CLOSED: 'text-block',
     DRAFT: 'text-faint',
   };
   return { label: key.toLowerCase(), cls: tint[key] ?? 'text-muted' };
@@ -31,7 +32,7 @@ const reviewChip = computed<Chip | null>(() => {
   const r = props.gh.review_decision;
   if (!r) return null;
   const map: Record<string, Chip> = {
-    APPROVED: { label: 'approved', cls: 'text-accent' },
+    APPROVED: { label: 'approved', cls: 'text-ok' },
     CHANGES_REQUESTED: { label: 'changes requested', cls: 'text-block' },
     REVIEW_REQUIRED: { label: 'review required', cls: 'text-muted' },
   };
@@ -42,9 +43,9 @@ const checksChip = computed<Chip | null>(() => {
   const c = props.gh.checks;
   if (!c) return null;
   const map: Record<string, Chip> = {
-    passing: { label: 'checks passing', cls: 'text-accent' },
+    passing: { label: 'checks passing', cls: 'text-ok' },
     failing: { label: 'checks failing', cls: 'text-block' },
-    pending: { label: 'checks pending', cls: 'text-muted' },
+    pending: { label: 'checks pending', cls: 'text-info' },
   };
   return map[c] ?? { label: `checks ${c}`, cls: 'text-muted' };
 });
