@@ -1,8 +1,18 @@
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
+import {
+  ref,
+  reactive,
+  computed,
+  onMounted,
+  onActivated,
+  onDeactivated,
+  onUnmounted,
+  watch,
+  nextTick,
+} from 'vue';
 import { get, sendMessage } from '../api';
 import type { IrisLog, IrisBlock, Session } from '../types';
-import { canSend, conversationState, TONE_TEXT } from '../lib/sessionState';
+import { canSend, conversationState, effectiveAttention, TONE_TEXT } from '../lib/sessionState';
 import MarkdownView from './MarkdownView.vue';
 
 // The Conversation tab: the agent's chat with the model, rendered for review and
@@ -46,10 +56,12 @@ const convState = computed(() => conversationState(live.value));
 // is the "progress" cue the operator watches for after they hit Send.
 const agentWorking = computed(() => convState.value.label === 'Working');
 // Surface the status line only when it says something: the agent is working, or
-// it has raised a loud signal. A resting (Idle) agent shows nothing — the
-// composer placeholder already invites the next turn.
+// it has raised a loud signal (attention/blocked). A resting (Idle) agent shows
+// nothing — the composer placeholder already invites the next turn. Keyed off
+// the resolved attention level, not the tone, so the calm-state hues (Idle cyan,
+// Working green) don't accidentally force the cue on.
 const showAgentStatus = computed(
-  () => canSend(live.value) && (agentWorking.value || convState.value.tone !== 'muted'),
+  () => canSend(live.value) && (agentWorking.value || effectiveAttention(live.value).level !== 'ok'),
 );
 
 type LoadState = 'loading' | 'ready' | 'empty' | 'error';
@@ -136,11 +148,26 @@ function closeStream() {
   }
 }
 
+// The SSE is paused whenever this view is off-screen. The Conversation tab is
+// kept alive (mounted under v-show inside the kept-alive SessionDetail), so
+// without this its EventSource would stay open on every cached session — idle
+// streams piling up against the browser's per-origin HTTP/1.1 connection cap.
+// onMounted owns the first open (onActivated does NOT fire on a lazy v-if mount
+// inside an already-active keep-alive, only on a later re-activation); onActivated
+// then reopens + catches up on a *return*, guarded by `source` so the initial
+// mount — where onActivated may or may not also fire — never double-opens.
 onMounted(() => {
   load();
   refreshSession();
   openStream();
 });
+onActivated(() => {
+  if (source) return; // initial mount already opened the stream
+  openStream();
+  refreshSession();
+  if (state.value === 'ready' || state.value === 'empty') load({ preserve: true });
+});
+onDeactivated(closeStream);
 onUnmounted(closeStream);
 // A session switch re-opens both the log and its stream against the new id.
 watch(

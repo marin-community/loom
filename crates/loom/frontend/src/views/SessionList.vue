@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { get, post } from '../api';
 import type { Session, RecentRepo, RepoBranch } from '../types';
@@ -10,10 +10,19 @@ import TagPill from '../components/TagPill.vue';
 import GithubStatus from '../components/GithubStatus.vue';
 import ScratchPicker from '../components/ScratchPicker.vue';
 import { timeAgo } from '../lib/time';
-import { effectiveAttention, idleTag, messageOf, quietTags, signalChips } from '../lib/sessionState';
+import { effectiveAttention, idleTag, lifecycleDot, messageOf, quietTags, signalChips } from '../lib/sessionState';
+import { useFleet } from '../lib/sessionsStore';
 import { del } from '../api';
 
-const sessions = ref<Session[]>([]);
+// Named so App.vue's <keep-alive :include> matches it — the fleet list stays
+// alive across navigation (instant return, no refetch flash, no re-animate).
+defineOptions({ name: 'SessionList' });
+
+// The shared fleet snapshot — polled once for the whole app (App.vue), so this
+// view paints from cache the instant it mounts (and, kept alive, stays painted
+// across navigation — no refetch flash, no re-animate). `refresh()` forces an
+// immediate re-pull after a write (create / clear tag).
+const { sessions, refresh } = useFleet();
 
 // Attention filter — the dashboard's "which sessions need me?" control. The
 // URL query is the source of truth (`/?filter=attention`, the status bar's
@@ -264,18 +273,6 @@ watch([repo, branchMode], ([, mode]) => {
   if (mode === 'existing') loadBranches();
 });
 
-async function load() {
-  try {
-    // The fleet view owns its own "show N archived" toggle, so it needs the
-    // full set — the API hides archived by default (for the agent's `ls`), so
-    // ask for them explicitly.
-    sessions.value = (await get('/sessions?archived=true')) as Session[];
-    error.value = '';
-  } catch (e) {
-    error.value = (e as Error).message;
-  }
-}
-
 // A quiet pill's × clears that tag, then refreshes the row. The tag write
 // surface is the same DELETE the detail page uses.
 const clearingTag = ref('');
@@ -283,7 +280,7 @@ async function clearTag(sessionId: string, key: string) {
   clearingTag.value = `${sessionId}:${key}`;
   try {
     await del(`/sessions/${sessionId}/tags/${encodeURIComponent(key)}`);
-    await load();
+    await refresh();
   } catch (e) {
     error.value = (e as Error).message;
   } finally {
@@ -348,7 +345,7 @@ async function create() {
     }
     await post('/sessions', body);
     resetForm();
-    await load();
+    await refresh();
     await loadRecentRepos();
   } catch (e) {
     error.value = (e as Error).message;
@@ -357,12 +354,9 @@ async function create() {
   }
 }
 
-onMounted(() => {
-  load();
-  loadRecentRepos();
-  timer = window.setInterval(load, 3000);
-});
-onUnmounted(() => clearInterval(timer));
+// The recent-repos list only feeds the create form; fetch it once on first
+// mount (kept alive, so this never re-runs) and after each create.
+loadRecentRepos();
 </script>
 
 <template>
@@ -716,16 +710,15 @@ onUnmounted(() => clearInterval(timer));
       top. The row itself stays neutral — no full-tile wash — so threading reads
       cleanly; the chip carries the signal. Stagger via --i.
     -->
-    <ul v-if="sessions.length" data-testid="session-list" class="overflow-hidden rounded-md border border-line bg-surface">
+    <ul v-if="sessions.length" data-testid="session-list" class="fade-in overflow-hidden rounded-md border border-line bg-surface">
       <li
-        v-for="({ session: s, depth, verticals, isLast }, i) in treeRows"
+        v-for="{ session: s, depth, verticals, isLast } in treeRows"
         :key="s.id"
         data-testid="session-card"
         :data-session-id="s.id"
         :data-depth="depth"
-        :style="{ '--i': i }"
         :class="[
-          'stagger-in group flex cursor-pointer items-start gap-2.5 border-b border-line px-3 py-2 last:border-0',
+          'group flex cursor-pointer items-start gap-2.5 border-b border-line px-3 py-2 last:border-0',
           'min-h-11 transition-colors hover:bg-subtle',
         ]"
         @click="$router.push(`/s/${s.id}`)"
@@ -741,6 +734,14 @@ onUnmounted(() => clearInterval(timer));
           ></span>
           <span class="tree-col" :class="isLast ? 'tree-col--elbow' : 'tree-col--tee'"></span>
         </div>
+
+        <!-- Status dot: a calm, scannable hue for the row's resolved state
+             (green live · cyan resting · amber/red raised · faint detached). -->
+        <span
+          class="mt-1.5 h-2 w-2 shrink-0 rounded-full"
+          :class="lifecycleDot(s)"
+          aria-hidden="true"
+        ></span>
 
         <!-- Title + current-state (the work, in prose). -->
         <div class="min-w-0 flex-1">

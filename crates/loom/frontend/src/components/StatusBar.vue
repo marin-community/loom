@@ -1,16 +1,15 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
-import { get } from '../api';
-import type { Session } from '../types';
 import { effectiveAttention } from '../lib/sessionState';
+import { useFleet } from '../lib/sessionsStore';
 
 // The workbench status bar — live fleet vitals in one 24px mono strip (see
-// docs/loom-ui.md). Read-only API state: the same /api/sessions the fleet list
-// polls, on a slower tick. Left: session + attention counts (the attention
-// segment goes amber and links to the filtered list). Right: connection dot +
+// docs/loom-ui.md). Read-only API state from the one shared fleet snapshot the
+// whole app polls (lib/sessionsStore) — no second poll of its own. Left:
+// session + attention counts (the attention segment goes amber and links to the
+// filtered list; "all calm" reads a reassuring green). Right: connection dot +
 // a ticking clock — the "is this thing live?" glance.
-const sessions = ref<Session[]>([]);
-const online = ref(true);
+const { sessions, online } = useFleet();
 const clock = ref('');
 
 const live = computed(() => sessions.value.filter((s) => s.status !== 'archived'));
@@ -18,17 +17,7 @@ const needsMe = computed(
   () => live.value.filter((s) => effectiveAttention(s).level !== 'ok').length,
 );
 
-let pollTimer: number | undefined;
 let clockTimer: number | undefined;
-
-async function poll() {
-  try {
-    sessions.value = (await get('/sessions')) as Session[];
-    online.value = true;
-  } catch {
-    online.value = false;
-  }
-}
 
 function tick() {
   const d = new Date();
@@ -37,15 +26,10 @@ function tick() {
 }
 
 onMounted(() => {
-  poll();
   tick();
-  pollTimer = window.setInterval(poll, 5000);
   clockTimer = window.setInterval(tick, 1000);
 });
-onUnmounted(() => {
-  clearInterval(pollTimer);
-  clearInterval(clockTimer);
-});
+onUnmounted(() => clearInterval(clockTimer));
 </script>
 
 <template>
@@ -68,8 +52,8 @@ onUnmounted(() => {
         <span class="h-1.5 w-1.5 rounded-full bg-attn-line" aria-hidden="true"></span>
         {{ needsMe }} need{{ needsMe === 1 ? 's' : '' }} attention
       </router-link>
-      <span v-else class="flex items-center gap-1.5 text-faint" data-testid="status-bar-attention">
-        <span class="h-1.5 w-1.5 rounded-full bg-faint/60" aria-hidden="true"></span>
+      <span v-else class="flex items-center gap-1.5 text-ok" data-testid="status-bar-attention">
+        <span class="h-1.5 w-1.5 rounded-full bg-ok-line" aria-hidden="true"></span>
         all calm
       </span>
     </span>

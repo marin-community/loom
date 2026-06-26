@@ -81,6 +81,15 @@ function repoName(p: string): string {
 // a chip instead.
 const conv = computed(() => conversationState(props.ws));
 const toneClass = computed(() => TONE_TEXT[conv.value.tone]);
+// A quiet per-tier tint for the model name — a small scannable hue on the meta
+// line (cyan haiku · green sonnet · violet opus · blue fable), muted otherwise.
+const MODEL_TINT: Record<string, string> = {
+  haiku: 'text-info',
+  sonnet: 'text-ok',
+  opus: 'text-agent',
+  fable: 'text-accent',
+};
+const modelTint = computed(() => MODEL_TINT[props.ws.model?.toLowerCase()] ?? 'text-muted');
 const lastActivity = computed(() => timeAgo(props.ws.last_activity_at));
 // The loud signal chips: the agent's own `attention` and an overlooker's
 // `triage`, each individually deletable. Their presence is what "needs a human"
@@ -210,7 +219,7 @@ const quiet = computed(() => quietTags(props.ws));
       </span>
       <span class="text-faint">·</span>
       <span class="shrink-0 text-muted">
-        {{ ws.agent_kind }}<template v-if="ws.model"> · {{ ws.model }}</template>
+        {{ ws.agent_kind }}<template v-if="ws.model"> · <span :class="modelTint" class="font-medium">{{ ws.model }}</span></template>
       </span>
       <!-- The branch's PR, surfaced inline as a small link — the one place you
            already look — rather than buried in the Overview tab. Compact mode is

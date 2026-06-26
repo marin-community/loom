@@ -18,9 +18,18 @@ workbench and Linear's density, not a centered bootstrap template.
 - **Mono for everything machine-made.** Ids, branch refs, paths, timestamps,
   counts, statuses — `--font-mono`, usually at 11–12px, with
   `tabular-nums` so live numbers don't jump.
-- **One loud signal.** Amber (attention) and red (blocked) remain the only
-  loud colors, reserved for the resolved attention axis. Everything else —
-  lifecycle, outcomes, tags — stays neutral so the loud states truly pop.
+- **One loud signal, a calm spectrum below it.** Amber (attention) and red
+  (blocked) are the only *loud* colors, reserved for the resolved attention
+  axis. Below them sits a calm semantic palette — green (`--ok`), cyan
+  (`--info`), violet (`--agent`) — each lower-saturation than the loud axis, so
+  lifecycle, PR state, idle and model-tier read with scannable color without
+  ever out-shouting a session that needs a human. Tags and free-form metadata
+  stay neutral.
+- **Instant, not animated.** An instrument panel shows content, it doesn't
+  perform it in. Views are kept alive across navigation, so returning to the
+  fleet or a session is instant — no remount, no refetch flash, no replayed
+  entrance. There is no per-row entrance animation; the one motion is a single
+  0.12s opacity settle (`fade-in`) on a region's first paint.
 
 ## App shell
 
@@ -65,8 +74,16 @@ Modern–derived), not blue-tinted slate:
 - **Light**: canvas `#f5f5f5`, surface `#ffffff`, rail `#ebebeb`, hairline
   `#e0e0e0`, text `#1f1f1f` / muted `#5a5a5a` / faint `#8c8c8c`, accent
   `#005fb8`.
-- **Attention axis** unchanged: amber `attn-*` / red `block-*` tokens, soft
-  row washes + 2px left accent line, the slow `pulse-attention` breath.
+- **Attention axis**: amber `attn-*` / red `block-*` tokens, soft row washes +
+  2px left accent line — the only loud fills.
+- **Calm semantic hues**: `ok-*` (green — healthy / live / passing), `info-*`
+  (cyan — resting / neutral-positive), `agent-*` (violet — model / AI
+  identity). Each carries the hue plus a `-soft` wash and a `-line` for
+  dots/hairlines, and each is a step softer than the loud axis. They tint the
+  list's per-row status dot, lifecycle badges, GitHub PR state, the idle chip,
+  the "▶ Working" / "all calm" cues, and the model tier — color that *means*
+  something, so the fleet reads at a glance and a raised signal still wins the
+  eye.
 
 ## Type & density
 

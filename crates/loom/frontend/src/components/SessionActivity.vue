@@ -30,12 +30,11 @@ const visibleEvents = computed(() =>
 <template>
   <div>
     <div class="mb-2 text-2xs font-semibold uppercase tracking-wider text-muted">Recent activity</div>
-    <ul class="space-y-1 text-sm">
+    <ul class="fade-in space-y-1 text-sm">
       <li
-        v-for="(ev, i) in visibleEvents"
+        v-for="ev in visibleEvents"
         :key="ev.id"
-        class="stagger-in flex gap-2"
-        :style="{ '--i': i }"
+        class="flex gap-2"
       >
         <span class="shrink-0 font-mono text-xs text-faint">{{ ev.created_at.slice(11, 19) }}</span>
         <span class="text-muted">{{ format(ev) }}</span>

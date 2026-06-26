@@ -15,7 +15,7 @@ interface Style {
 }
 
 const styles: Record<string, Style> = {
-  ok: { label: 'ok', cls: 'bg-accent/10 text-accent ring-1 ring-inset ring-accent/30' },
+  ok: { label: 'ok', cls: 'bg-ok-soft text-ok ring-1 ring-inset ring-ok-line/30' },
   noop: { label: 'no-op', cls: 'text-faint ring-1 ring-inset ring-line' },
   skipped: { label: 'skipped', cls: 'bg-attn-soft text-attn ring-1 ring-inset ring-attn-line' },
   error: { label: 'error', cls: 'bg-block-soft text-block ring-1 ring-inset ring-block-line' },

@@ -3,17 +3,17 @@ import { computed } from 'vue';
 
 const props = defineProps<{ status: string }>();
 
-// Lifecycle (mechanical) status — deliberately NEUTRAL. Lifecycle is not the
-// loud signal; the attention axis (SignalChip) is. `running` keeps a faint
-// accent tint as the one live state worth a glance; everything else is muted
-// slate so attention stays the only chromatic thing on the page.
+// Lifecycle (mechanical) status — a calm, scannable hue per state, kept softer
+// than the loud attention axis (SignalChip) so a raised signal still wins the
+// eye. `running`/`done` read healthy green, `launching` a starting cyan, `error`
+// the soft block red, and detached/archived states recede to neutral.
 const palette: Record<string, string> = {
   created: 'bg-subtle text-muted',
-  launching: 'bg-subtle text-fg',
-  running: 'bg-accent/10 text-accent ring-1 ring-inset ring-accent/30',
+  launching: 'bg-info-soft text-info ring-1 ring-inset ring-info-line/30',
+  running: 'bg-ok-soft text-ok ring-1 ring-inset ring-ok-line/30',
   orphaned: 'bg-subtle text-muted',
-  done: 'bg-subtle text-muted',
-  error: 'bg-subtle text-fg',
+  done: 'bg-ok-soft text-ok ring-1 ring-inset ring-ok-line/30',
+  error: 'bg-block-soft text-block ring-1 ring-inset ring-block-line/30',
   archived: 'bg-subtle text-faint',
 };
 

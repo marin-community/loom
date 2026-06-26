@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue';
+import { ref, reactive, onMounted, onActivated } from 'vue';
 import { get, post, patch } from '../api';
 import type { Overlooker, OverlookerRunResult, ProgramView } from '../types';
 import OutcomeBadge from '../components/OutcomeBadge.vue';
@@ -12,6 +12,9 @@ import {
   capabilitiesFrom,
   GRANTABLE_CAPABILITIES,
 } from '../lib/overlooker';
+
+// Named so App.vue's <keep-alive :include> keeps this view warm across nav.
+defineOptions({ name: 'Overlookers' });
 
 // The Overlooker panel — infrastructure that watches the fleet, sibling to the
 // session list. API-first: every row is an `OverlookerView`, every control a
@@ -215,6 +218,17 @@ async function create() {
 onMounted(() => {
   load();
   loadPrograms();
+});
+// Kept alive across navigation (App.vue), so refresh the list on every return —
+// otherwise the panel would show whatever it held when last left. Guarded so the
+// initial mount (already loaded above) doesn't fetch twice.
+let firstActivate = true;
+onActivated(() => {
+  if (firstActivate) {
+    firstActivate = false;
+    return;
+  }
+  load();
 });
 </script>
 
@@ -430,15 +444,14 @@ onMounted(() => {
     <ul
       v-if="overlookers.length"
       data-testid="overlooker-list"
-      class="overflow-hidden rounded-md border border-line bg-surface"
+      class="fade-in overflow-hidden rounded-md border border-line bg-surface"
     >
       <li
-        v-for="(o, i) in overlookers"
+        v-for="o in overlookers"
         :key="o.id"
         data-testid="overlooker-row"
         :data-overlooker-id="o.id"
-        :style="{ '--i': i }"
-        class="stagger-in border-b border-line px-3 py-2.5 last:border-0"
+        class="border-b border-line px-3 py-2.5 last:border-0"
       >
         <div class="flex items-start gap-3">
           <!-- Identity + at-a-glance state. -->

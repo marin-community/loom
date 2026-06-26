@@ -207,7 +207,7 @@ export interface ConvState {
   glyph: string;   // ● / ▶ / ✓ / ◦ — BMP geometric chars only (emoji like the
                    // hourglass render as tofu in the system sans/mono stacks)
   label: string;   // e.g. "Blocked — needs input"
-  tone: 'block' | 'attn' | 'muted'; // which token family to color it with
+  tone: 'block' | 'attn' | 'ok' | 'info' | 'muted'; // which token family colors it
 }
 
 export function conversationState(s: Session): ConvState {
@@ -224,17 +224,38 @@ export function conversationState(s: Session): ConvState {
 
   // Calm: an explicit `idle` mark means the agent is resting — surface it even
   // while the lifecycle is still `running` between turns (a finished turn leaves
-  // the session running but quiet). "Working"/"Idle" stay neutral so amber/red
-  // remains the sole loud signal.
-  if (idleTag(s)) return { glyph: '✓', label: 'Idle', tone: 'muted' };
-  if (s.status === 'running' || s.status === 'launching') return { glyph: '▶', label: 'Working', tone: 'muted' };
-  return { glyph: '✓', label: 'Idle', tone: 'muted' };
+  // the session running but quiet). Working gets a calm green, resting a calm
+  // cyan — quiet hues well below the loud amber/red, which stays the sole signal
+  // that something needs a human.
+  if (idleTag(s)) return { glyph: '✓', label: 'Idle', tone: 'info' };
+  if (s.status === 'running' || s.status === 'launching') return { glyph: '▶', label: 'Working', tone: 'ok' };
+  return { glyph: '✓', label: 'Idle', tone: 'info' };
 }
 
 // Map ConvState.tone to a text-color token. Pages apply this; keeps motion/
-// color tokens out of the deriver.
+// color tokens out of the deriver. `ok`/`info` give the calm states a quiet
+// hue (working = green, resting = cyan) so the line reads as alive, not gray —
+// still well below the loud amber/red of a raised signal.
 export const TONE_TEXT: Record<ConvState['tone'], string> = {
   block: 'text-block',
   attn: 'text-attn',
+  ok: 'text-ok',
+  info: 'text-info',
   muted: 'text-muted',
 };
+
+// A small per-row status dot for the fleet list — a calm splash of scannable
+// color so a long fleet reads at a glance instead of as a wall of gray. The hue
+// follows the resolved state: blocked/attention reuse the loud axis (red/amber)
+// so the dot agrees with the row's signal chip; a resting agent is cyan; a
+// live, calm agent is green; anything terminal/detached (done, orphaned, error,
+// archived) recedes to faint. The dot is a quiet hairline tone, never the loud
+// chip fill, so it adds rhythm without competing with a real raised signal.
+export function lifecycleDot(s: Session): string {
+  const level = effectiveAttention(s).level;
+  if (level === 'blocked') return 'bg-block-line';
+  if (level === 'attention') return 'bg-attn-line';
+  if (idleTag(s)) return 'bg-info-line';
+  if (s.status === 'running' || s.status === 'launching') return 'bg-ok-line';
+  return 'bg-faint/50';
+}

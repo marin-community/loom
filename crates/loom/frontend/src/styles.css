@@ -30,6 +30,23 @@
   --color-code: var(--code);
   --color-code-fg: var(--code-fg);
 
+  /* Calm semantic hues — the quiet color the workbench leans on so it reads as
+     alive, not monochrome (docs/loom-ui.md "Color"). Each is low-saturation and
+     deliberately calmer than the reserved loud amber/red, so it adds rhythm and
+     scannability without ever out-shouting the attention axis. `ok` = healthy /
+     live / passing (green), `info` = resting / neutral-positive (cyan), `agent`
+     = the model/AI identity accent (violet). Each carries the hue (text/dot),
+     a `-soft` wash, and a `-line` for hairlines/dots. */
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-ok-line: var(--ok-line);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-info-line: var(--info-line);
+  --color-agent: var(--agent);
+  --color-agent-soft: var(--agent-soft);
+  --color-agent-line: var(--agent-line);
+
   /* 11px micro-size — uppercase eyebrow labels, badges, status-bar text. */
   --text-2xs: 0.6875rem;
   --text-2xs--line-height: 1rem;
@@ -89,6 +106,18 @@
   --block-fg: #fef2f2;      /* red-50 */
   --block-soft: #fee2e2;    /* red-100 */
   --block-line: #ef4444;    /* red-500 */
+
+  /* Calm semantic hues — muted, a step softer than the loud amber/red so they
+     add rhythm without out-shouting the attention axis. */
+  --ok: #15803d;            /* green-700 — healthy / live / passing */
+  --ok-soft: #e8f2ec;       /* green wash */
+  --ok-line: #4ca06a;       /* green dot / hairline */
+  --info: #0e7490;          /* cyan-700 — resting / neutral-positive */
+  --info-soft: #e3f0f4;     /* cyan wash */
+  --info-line: #3a9bb5;     /* cyan dot / hairline */
+  --agent: #7c3aed;         /* violet-600 — model / AI identity accent */
+  --agent-soft: #f0eafc;    /* violet wash */
+  --agent-line: #a98ae8;    /* violet dot / hairline */
 }
 
 /* Dark palette — near-black neutral (VS Code Modern), not slate; surfaces
@@ -121,6 +150,18 @@
   --block-fg: #fef2f2;      /* red-50 */
   --block-soft: #7f1d1d33;  /* red-900 @ 20% */
   --block-line: #ef4444;    /* red-500 */
+
+  /* Calm semantic hues — lifted for the near-black canvas; washes are a low-
+     alpha tint so they read as a faint glow, not a slab. */
+  --ok: #6cc08b;            /* green — healthy / live / passing */
+  --ok-soft: #14401f33;     /* green @ 20% — faint row wash */
+  --ok-line: #4ca06a;       /* green dot / hairline */
+  --info: #5cb8d0;          /* cyan — resting / neutral-positive */
+  --info-soft: #0e3a4533;   /* cyan @ 20% */
+  --info-line: #3a9bb5;     /* cyan dot / hairline */
+  --agent: #b89af0;         /* violet — model / AI identity accent */
+  --agent-soft: #2a1f4533;  /* violet @ 20% */
+  --agent-line: #8b6fd0;    /* violet dot / hairline */
 }
 
 html,
@@ -145,50 +186,26 @@ body {
 }
 
 /* ── Motion ─────────────────────────────────────────────────────────────────
-   CSS-only. Reduced-motion users get the final state with no animation. */
+   An instrument panel, not a website (docs/loom-ui.md): content appears, it
+   does not perform. The list deliberately has NO per-row entrance — rows are
+   present instantly, the CLI feel — and views are kept alive across navigation
+   so returning to the fleet never replays anything. `fade-in` is the one motion
+   left: a single, fast, opacity-only settle applied to a whole region on its
+   first mount, so a freshly-loaded panel arrives calmly rather than popping. No
+   translate, no per-item stagger, no looping breath — nothing that draws the
+   eye over a long day. CSS-only; reduced-motion users get the final state. */
 @media (prefers-reduced-motion: no-preference) {
-  /* One staggered list reveal on load. Each item sets --i to its index:
-       <tr class="stagger-in" :style="{ '--i': i }">
-     Delay is capped so long fleets don't crawl in. */
-  @keyframes loom-stagger-in {
+  @keyframes loom-fade-in {
     from {
       opacity: 0;
-      transform: translateY(4px);
     }
     to {
       opacity: 1;
-      transform: translateY(0);
     }
   }
 
-  .stagger-in {
-    opacity: 0;
-    animation: loom-stagger-in 0.28s ease-out forwards;
-    /* min(index, 12) * 30ms — caps cumulative delay at ~360ms. */
-    animation-delay: calc(min(var(--i, 0), 12) * 30ms);
-  }
-
-  /* Subtle, slow breath for rows that need a human. Pair with the amber/red
-     row wash (bg-attn-soft / border-l-2 border-attn-line). Not a flash. */
-  @keyframes loom-pulse-attention {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.72;
-    }
-  }
-
-  .pulse-attention {
-    animation: loom-pulse-attention 2.8s ease-in-out infinite;
-  }
-}
-
-/* Reduced motion: ensure staggered items are visible (no animation ran). */
-@media (prefers-reduced-motion: reduce) {
-  .stagger-in {
-    opacity: 1;
+  .fade-in {
+    animation: loom-fade-in 0.12s ease-out both;
   }
 }
 
