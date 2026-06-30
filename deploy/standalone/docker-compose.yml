@@ -1,0 +1,88 @@
+# Self-contained, internet-facing loom deploy (Model 1, single shared container).
+#
+# Unlike the repo-root docker-compose.yml — which attaches to an EXTERNAL `web`
+# network and assumes a Caddy front-door already exists on the host — this stack
+# OWNS its front-door: a bundled Caddy terminates TLS for $LOOM_DOMAIN and is the
+# only service that publishes ports. loom itself is never bound on the host.
+#
+# Full guide, env reference, and first-run steps: ../README.md
+name: loom
+
+services:
+  # One-shot: seed the security-relevant auth settings into the shared sqlite DB
+  # BEFORE loom starts, so an internet-exposed deploy never comes up trusting
+  # loopback or minting a non-Secure session cookie. `weaver config set` writes
+  # the settings table directly — no running server needed — then exits; loom
+  # waits on its success. Idempotent: it re-runs on every `up` and just rewrites
+  # the same three values. (See ../README.md "Security posture".)
+  loom-init:
+    image: ${LOOM_IMAGE:-loom:latest}
+    build: &loom_build
+      context: ../..
+      args:
+        HOST_UID: ${HOST_UID:-1000}
+        HOST_GID: ${HOST_GID:-1000}
+    env_file: .env
+    restart: "no"
+    volumes:
+      - loom_home:/home/app
+    # $$LOOM_DOMAIN is escaped from compose so the *container* shell expands it
+    # from the env_file — keeping the domain in one place (.env).
+    command:
+      - sh
+      - -ceu
+      - |
+        weaver config set auth.trust_loopback false
+        weaver config set auth.cookie_secure true
+        weaver config set auth.base_url "https://$$LOOM_DOMAIN"
+
+  loom:
+    image: ${LOOM_IMAGE:-loom:latest}
+    build: *loom_build
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      loom-init:
+        condition: service_completed_successfully
+    expose:
+      - "7878" # internal to the compose network only — never published
+    volumes:
+      # Persisted HOME for the container user. Everything stateful lives here and
+      # is owned by the `app` user the image runs as:
+      #   * the weaver sqlite db + the 0600 machine-local loom token (~/.weaver),
+      #   * ~/.claude.json (so a one-time `claude` login survives a recreate),
+      #   * the managed repo store the @loom webhook clones into
+      #     (WEAVER_REPOS_DIR, default ~/.weaver/repos) — inspect with
+      #     `docker compose exec loom ls .weaver/repos`.
+      # Kept inside this volume on purpose: a fresh *separate* named volume would
+      # mount root-owned (the image has no such dir to seed ownership from), and
+      # the non-root app user could not clone into it.
+      - loom_home:/home/app
+      # uv's managed interpreters + wheel cache, for Python repos the agents work
+      # in (UV_PYTHON_INSTALL_DIR / UV_CACHE_DIR point here; the Dockerfile
+      # pre-creates /opt/uv owned by app so this volume seeds writable).
+      - uv:/opt/uv
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      # Consumed by the Caddyfile. Fails fast if LOOM_DOMAIN is unset.
+      LOOM_DOMAIN: ${LOOM_DOMAIN:?set LOOM_DOMAIN in deploy/standalone/.env}
+      LOOM_TLS_EMAIL: ${LOOM_TLS_EMAIL:-}
+    ports:
+      - "80:80"     # ACME HTTP-01 challenge + the HTTP->HTTPS redirect
+      - "443:443"   # HTTPS
+      - "443:443/udp" # HTTP/3 (QUIC)
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data     # issued certs + ACME account — survive a recreate
+      - caddy_config:/config
+    depends_on:
+      - loom
+
+volumes:
+  loom_home:
+  uv:
+  caddy_data:
+  caddy_config:
