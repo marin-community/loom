@@ -1378,12 +1378,13 @@ mod tests {
     /// An `AppState` over a fresh in-memory db plus an overlooker registered on
     /// `program` — the minimum for a [`fire`] round to run a script end to end.
     async fn script_fixture(program: &str) -> (AppState, Overlooker) {
+        let db = crate::db::connect_in_memory().await.unwrap();
         let state = AppState {
-            db: crate::db::connect_in_memory().await.unwrap(),
+            trigger: crate::github_trigger::GithubTrigger::production(db.clone()),
+            db,
             bus: events::EventBus::new(),
             addr: "127.0.0.1:0".to_string(),
             ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
-            trigger: crate::github_trigger::GithubTrigger::production(),
         };
         let o = ov::create(
             &state.db,
@@ -1592,12 +1593,13 @@ rnd.finish("counted to %d" % n)
     /// overlooker the scheduled timer would otherwise never visit.
     #[tokio::test]
     async fn timer_fires_a_due_wake_once_and_clears_it() {
+        let db = crate::db::connect_in_memory().await.unwrap();
         let state = AppState {
-            db: crate::db::connect_in_memory().await.unwrap(),
+            trigger: crate::github_trigger::GithubTrigger::production(db.clone()),
+            db,
             bus: events::EventBus::new(),
             addr: "127.0.0.1:0".to_string(),
             ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
-            trigger: crate::github_trigger::GithubTrigger::production(),
         };
         // A reactive overlooker (no cron) — the scheduled half of the timer skips
         // it; only the wake half should fire it.

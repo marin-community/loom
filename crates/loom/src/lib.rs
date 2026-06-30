@@ -15,6 +15,7 @@ pub mod client;
 pub mod db;
 pub mod endpoint;
 pub mod github;
+pub mod github_app;
 pub mod github_trigger;
 pub mod ide;
 pub mod monitor;

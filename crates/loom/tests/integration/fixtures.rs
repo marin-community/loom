@@ -141,7 +141,7 @@ impl TestServer {
         let pool = db::connect(&db::default_db_path()).await.unwrap();
         let trigger = match gh {
             Some(gh) => loom::github_trigger::GithubTrigger::with_gateway(gh),
-            None => loom::github_trigger::GithubTrigger::production(),
+            None => loom::github_trigger::GithubTrigger::production(pool.clone()),
         };
         let state = AppState {
             db: pool,

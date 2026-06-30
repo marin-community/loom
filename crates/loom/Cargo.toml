@@ -31,6 +31,9 @@ clap_complete = "4"
 futures-util = "0.3"
 # Hex-encode the SHA-256 digests we store for API tokens and session cookies.
 hex = "0.4"
+# Sign the GitHub App JWT (RS256) we exchange for short-lived installation
+# tokens — the hardening that replaces the ambient GH_TOKEN (crate::github_app).
+jsonwebtoken = "9"
 # HMAC-SHA256 for verifying the GitHub webhook signature (`X-Hub-Signature-256`).
 # `Mac::verify_slice` is a constant-time compare, so the verification can't be
 # turned into a timing oracle.

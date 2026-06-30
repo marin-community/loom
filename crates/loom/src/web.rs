@@ -2871,6 +2871,16 @@ async fn github_webhook(State(st): State<AppState>, headers: HeaderMap, body: By
         return ok();
     }
 
+    // 6a. A repo the GitHub App is installed on is implicitly authorized to
+    //     trigger (design §6.3): auto-register it into the managed allowlist so
+    //     the clone path below accepts it, *complementing* the explicitly
+    //     registered repos from #95. A no-op when the App is unconfigured, the
+    //     repo is already registered, or the App is not installed on it — so the
+    //     v1 repos-table allowlist still governs the ambient-`GH_TOKEN` flow.
+    if let Some(app) = st.trigger.app() {
+        app.ensure_installed_repo_registered(&slug).await;
+    }
+
     // 7. Acquire the repo (it must be in the managed allowlist — `resolve_clone`
     //    rejects others) and create the session, seeded from the issue carried in
     //    the trusted payload. Seeding title/goal from the payload (not a `gh`
@@ -3955,7 +3965,7 @@ mod tests {
             bus: crate::events::EventBus::new(),
             addr: "127.0.0.1:0".to_string(),
             ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
-            trigger: crate::github_trigger::GithubTrigger::production(),
+            trigger: crate::github_trigger::GithubTrigger::production(db.clone()),
         };
         let child = branch_mod::upsert(&db, "/r", "weaver/child", "main")
             .await

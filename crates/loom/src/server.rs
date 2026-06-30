@@ -75,12 +75,13 @@ pub async fn run(addr: &str) -> Result<()> {
     tracing::debug!(addr = %actual, "listener bound");
 
     let db = db::connect(&db::default_db_path()).await?;
+    let trigger = crate::github_trigger::GithubTrigger::production(db.clone());
     let state = AppState {
         db,
         bus: EventBus::new(),
         addr: actual.to_string(),
         ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
-        trigger: crate::github_trigger::GithubTrigger::production(),
+        trigger,
     };
 
     let server_state = ServerState {

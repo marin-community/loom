@@ -350,21 +350,35 @@ async fn gh_capture(args: &[&str]) -> Result<String> {
 /// so a test can install a fake.
 pub struct GithubTrigger {
     gh: Arc<dyn GithubApi>,
+    /// The GitHub **App** client, when production-built: the same object the
+    /// `gh` gateway points at, kept concretely so the webhook can query
+    /// installations (the implicit allowlist, §6.3). `None` when a test installs
+    /// a bare [`GithubApi`] fake via [`with_gateway`](Self::with_gateway).
+    app: Option<Arc<crate::github_app::GithubApp>>,
     /// Per-repo trigger timestamps, pruned to [`RATE_WINDOW`] on each check.
     limiter: Mutex<HashMap<String, Vec<Instant>>>,
 }
 
 impl GithubTrigger {
-    /// The production trigger, backed by the `gh` CLI.
-    pub fn production() -> Arc<Self> {
-        Self::with_gateway(Arc::new(GhCli))
+    /// The production trigger: a GitHub **App** gateway that mints short-lived
+    /// installation tokens for the permission check and reply, falling back to
+    /// the `gh` CLI (ambient `GH_TOKEN`) when the App is unconfigured.
+    pub fn production(db: crate::db::Db) -> Arc<Self> {
+        let app = Arc::new(crate::github_app::GithubApp::new(db));
+        Arc::new(Self {
+            gh: app.clone(),
+            app: Some(app),
+            limiter: Mutex::new(HashMap::new()),
+        })
     }
 
     /// A trigger backed by an arbitrary [`GithubApi`] — the seam tests use to
-    /// substitute a fake for `gh`.
+    /// substitute a fake for `gh`. No App handle, so the installation-allowlist
+    /// step is a no-op.
     pub fn with_gateway(gh: Arc<dyn GithubApi>) -> Arc<Self> {
         Arc::new(Self {
             gh,
+            app: None,
             limiter: Mutex::new(HashMap::new()),
         })
     }
@@ -372,6 +386,12 @@ impl GithubTrigger {
     /// The GitHub gateway, for the permission check and the reply.
     pub fn gh(&self) -> &dyn GithubApi {
         self.gh.as_ref()
+    }
+
+    /// The GitHub App client, when one is configured on this trigger — the
+    /// webhook uses it to treat an App-installed repo as implicitly allowlisted.
+    pub fn app(&self) -> Option<&crate::github_app::GithubApp> {
+        self.app.as_deref()
     }
 
     /// Record a trigger attempt for `repo` and report whether it is within the
