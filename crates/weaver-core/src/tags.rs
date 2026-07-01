@@ -64,6 +64,14 @@ pub const IDLE_KEY: &str = "idle";
 /// [`ATTENTION_VALUES`]), so it renders soothing rather than loud.
 pub const IDLE_VALUE: &str = "idle";
 
+/// A quiet lifecycle mark stamped when an archived session is recovered. The
+/// GitHub PR poller uses this to avoid immediately re-archiving a session whose
+/// already-merged PR is still visible.
+pub const RECOVERED_KEY: &str = "recovered";
+
+/// The fixed value the [`RECOVERED_KEY`] tag carries.
+pub const RECOVERED_VALUE: &str = "true";
+
 /// The loud keys: those that raise an attention signal on the dashboard. Any
 /// other key is quiet (a deletable pill) — including the soothing [`IDLE_KEY`].
 pub const LOUD_KEYS: &[&str] = &[ATTENTION_KEY, TRIAGE_KEY];
@@ -217,6 +225,9 @@ mod tests {
         assert!(!is_loud(IDLE_KEY));
         assert!(!is_loud_value(IDLE_VALUE));
         assert!(is_valid_value(IDLE_KEY, IDLE_VALUE));
+        assert!(!is_loud(RECOVERED_KEY));
+        assert!(!is_loud_value(RECOVERED_VALUE));
+        assert!(is_valid_value(RECOVERED_KEY, RECOVERED_VALUE));
 
         // Loudness is value-driven: any key holding a ladder value is loud (a
         // watch's typed `review`/`stuck`), while a quiet value never is.

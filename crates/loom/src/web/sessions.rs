@@ -1691,7 +1691,28 @@ async fn recover(st: &AppState, session: &Session, branch: &Branch) -> Result<()
             .map_err(|e| AppError::bad_request(e.to_string()))?;
     }
 
-    resume_agent(st, session, branch, "session recovered").await
+    tags::set(
+        &st.db,
+        &branch.id,
+        tags::RECOVERED_KEY,
+        tags::RECOVERED_VALUE,
+        "session recovered",
+        "loom",
+    )
+    .await?;
+    events::record_tag(
+        &st.db,
+        &st.bus,
+        &branch.id,
+        tags::RECOVERED_KEY,
+        tags::RECOVERED_VALUE,
+        "session recovered",
+        "loom",
+    )
+    .await
+    .ok();
+    resume_agent(st, session, branch, "session recovered").await?;
+    Ok(())
 }
 
 pub(super) async fn recover_session(

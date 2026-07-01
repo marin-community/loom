@@ -60,6 +60,12 @@ async fn recover_rebuilds_worktree_and_resumes() {
     assert_eq!(rec["status"], "running");
     assert_eq!(rec["work_dir"], work_dir);
     assert_eq!(rec["term_session"], term_session);
+    let tags = rec["branch"]["tags"].as_array().unwrap();
+    assert!(
+        tags.iter()
+            .any(|tag| tag["key"] == "recovered" && tag["value"] == "true"),
+        "recover should stamp a quiet recovered tag"
+    );
     assert!(
         Path::new(&work_dir).exists(),
         "recover should rebuild the worktree on disk"

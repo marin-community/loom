@@ -26,6 +26,7 @@ use crate::web::AppState;
 use crate::{branch as branch_mod, config, events};
 use weaver_core::branch::Branch;
 use weaver_core::github::GithubStatus;
+use weaver_core::tags;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Issue {
@@ -428,7 +429,14 @@ async fn apply_snapshot(
         }
     }
 
-    if archive_on_merge && snap.pr_state == "MERGED" && !session_mod::is_terminal(&session.status) {
+    let recovered = tags::get(&state.db, &branch.id, tags::RECOVERED_KEY)
+        .await?
+        .is_some_and(|tag| tag.value == tags::RECOVERED_VALUE);
+    if archive_on_merge
+        && snap.pr_state == "MERGED"
+        && !session_mod::is_terminal(&session.status)
+        && !recovered
+    {
         // The merge is already on the record as a `github` event (above) and the
         // archive records a `status` event, so no extra log line is needed.
         match crate::web::archive(state, session, branch).await {
@@ -813,6 +821,74 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.pr_state, "MERGED");
+    }
+
+    #[tokio::test]
+    async fn merged_pr_does_not_archive_a_recovered_session() {
+        let f = fixture().await;
+        tags::set(
+            &f.state.db,
+            &f.branch.id,
+            tags::RECOVERED_KEY,
+            tags::RECOVERED_VALUE,
+            "session recovered",
+            "loom",
+        )
+        .await
+        .unwrap();
+        let issue = weaver_core::issue::add(
+            &f.state.db,
+            &weaver_core::issue::NewIssue {
+                repo_root: f.branch.repo_root.clone(),
+                claimed_branch: Some(f.branch.branch.clone()),
+                title: "keep working".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        apply_snapshot(&f.state, &f.session, &f.branch, &snapshot("MERGED"), true)
+            .await
+            .unwrap();
+
+        let session = session_mod::get(&f.state.db, &f.session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.status, "running");
+        assert!(f.work_dir.exists());
+        let open_issue = weaver_core::issue::get(&f.state.db, issue.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(open_issue.status, "open");
+    }
+
+    #[tokio::test]
+    async fn malformed_recovered_tag_does_not_suppress_archive_on_merge() {
+        let f = fixture().await;
+        tags::set(
+            &f.state.db,
+            &f.branch.id,
+            tags::RECOVERED_KEY,
+            "false",
+            "manual",
+            "manual",
+        )
+        .await
+        .unwrap();
+
+        apply_snapshot(&f.state, &f.session, &f.branch, &snapshot("MERGED"), true)
+            .await
+            .unwrap();
+
+        let session = session_mod::get(&f.state.db, &f.session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.status, "archived");
+        assert!(!f.work_dir.exists());
     }
 
     #[tokio::test]
