@@ -95,6 +95,29 @@ enum Cmd {
         cmd: IssueCmd,
     },
 
+    /// Guided one-time credential setup.
+    ///
+    /// `loom setup github-app` registers the GitHub App loom uses (the
+    /// webhook receiver + REST identity from `docs/github-trigger.md`, which
+    /// doubles as the "Sign in with GitHub" app) via GitHub's **manifest
+    /// flow**: it opens a local page that auto-submits to GitHub, you confirm
+    /// once, and loom exchanges the redirect for the full credential set —
+    /// app id, private key, webhook secret, OAuth client — writing them
+    /// straight into loom's settings. No `.env` editing, no restart.
+    ///
+    ///     loom setup github-app --base-url https://loom.team.dev
+    ///
+    /// `loom setup secrets` prompts for the paste-once secrets every agent
+    /// session needs (an Anthropic API key, a GitHub token) and stores them as
+    /// operator environment variables, live for every session launched from
+    /// then on:
+    ///
+    ///     loom setup secrets
+    Setup {
+        #[command(subcommand)]
+        cmd: SetupCmd,
+    },
+
     /// Launch a new session — shortcut for `loom session launch`.
     Launch(LaunchOpts),
     /// List active sessions — shortcut for `loom session ls`.
@@ -313,6 +336,60 @@ enum OverlookerCmd {
     },
 }
 
+/// Subcommands under `loom setup` — the guided credential wizards.
+#[derive(Subcommand)]
+enum SetupCmd {
+    /// Create the GitHub App loom uses, via GitHub's manifest flow.
+    GithubApp(GithubAppOpts),
+    /// Prompt for and store the paste-once agent secrets (Anthropic key, GitHub token).
+    Secrets(SecretsOpts),
+}
+
+#[derive(Args)]
+struct GithubAppOpts {
+    /// loom's public base URL, e.g. `https://loom.team.dev` (`localhost:7878`
+    /// for a local try-out). Becomes the App's homepage, webhook target
+    /// (`{base_url}/api/github/webhook`), and OAuth-login callback base
+    /// (`{base_url}/api/auth/github/callback`).
+    #[arg(long)]
+    base_url: String,
+    /// The App's display name — must be unique across all of GitHub. Defaults
+    /// to `loom-<host>`, derived from `--base-url`.
+    #[arg(long)]
+    name: Option<String>,
+    /// Create the App under this GitHub organization instead of your personal
+    /// account.
+    #[arg(long)]
+    org: Option<String>,
+    /// Local port for the manifest-flow confirmation callback. `0` (default)
+    /// picks a free port; pin one when you're tunnelling in to a remote host
+    /// (e.g. `ssh -L 8765:localhost:8765 …`, then `--port 8765`).
+    #[arg(long, default_value_t = 0)]
+    port: u16,
+    /// How long to wait for the browser confirmation, in seconds.
+    #[arg(long, default_value = "300")]
+    timeout: u64,
+    /// Don't try to open a browser automatically — just print the confirmation
+    /// page's URL.
+    #[arg(long)]
+    no_open: bool,
+    /// Also upsert the `LOOM_GITHUB_*` variables into this env file (e.g.
+    /// `deploy/standalone/.env`). Belt-and-suspenders for a restart or a
+    /// fresh deploy — the running daemon already picks the credentials up
+    /// live from the database, no restart needed.
+    #[arg(long)]
+    env_file: Option<std::path::PathBuf>,
+}
+
+#[derive(Args)]
+struct SecretsOpts {
+    /// Also upsert `ANTHROPIC_API_KEY` / `GH_TOKEN` into this env file, for
+    /// the daemon's own ambient use (cloning private repos, and the `gh`
+    /// fallback when no GitHub App is configured) — requires a restart.
+    #[arg(long)]
+    env_file: Option<std::path::PathBuf>,
+}
+
 #[derive(Subcommand)]
 enum TokenCmd {
     /// Mint a new API token. Prints the secret once — copy it now.
@@ -449,6 +526,7 @@ async fn run() -> Result<()> {
         Cmd::Issue { cmd } => run_issue(cmd).await,
         Cmd::Overlooker { cmd } => run_overlooker(cmd).await,
         Cmd::Token { cmd } => run_token(cmd).await,
+        Cmd::Setup { cmd } => run_setup(cmd).await,
         Cmd::Launch(opts) => cmd_launch(opts.into()).await,
         Cmd::Ps => cmd_ps(false, None).await,
         Cmd::Attach { branch } => cmd_attach(branch).await,
@@ -582,6 +660,272 @@ async fn cmd_token_ls() -> Result<()> {
 async fn cmd_token_rm(id: String) -> Result<()> {
     client::default().revoke_token(&id).await?;
     println!("revoked token {id}");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Setup wizards (github-app, secrets)
+// ---------------------------------------------------------------------------
+
+async fn run_setup(cmd: SetupCmd) -> Result<()> {
+    match cmd {
+        SetupCmd::GithubApp(opts) => cmd_setup_github_app(opts).await,
+        SetupCmd::Secrets(opts) => cmd_setup_secrets(opts).await,
+    }
+}
+
+/// `loom setup github-app` — the manifest-flow wizard. Talks to GitHub and to
+/// loom's sqlite database directly (the same daemon-less path `weaver` uses);
+/// it does not need the loom daemon to be running.
+async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
+    let base_url = opts.base_url.trim_end_matches('/').to_string();
+    if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+        bail!("--base-url must be a full URL, e.g. https://loom.team.dev (got '{base_url}')");
+    }
+    let name = opts
+        .name
+        .clone()
+        .unwrap_or_else(|| default_app_name(&base_url));
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", opts.port))
+        .await
+        .with_context(|| format!("binding the local callback server on port {}", opts.port))?;
+    let port = listener
+        .local_addr()
+        .context("reading the callback server's bound port")?
+        .port();
+    let redirect_url = format!("http://127.0.0.1:{port}/callback");
+
+    let manifest = loom::github_manifest::manifest_json(&loom::github_manifest::ManifestInput {
+        name: &name,
+        base_url: &base_url,
+        redirect_url: &redirect_url,
+    });
+    let state = loom::auth::random_state();
+    let target = loom::github_manifest::create_url(opts.org.as_deref(), &state);
+    let html = loom::github_manifest::submission_html(&manifest, &target);
+    // Served at `/` by the same listener that catches the `/callback` redirect
+    // — no `file://` URL, so this works unmodified through an SSH tunnel or a
+    // one-shot published Docker port when loom isn't running on the machine
+    // whose browser you're using.
+    let start_url = format!("http://127.0.0.1:{port}/");
+
+    println!("App name:  {name}");
+    println!(
+        "Owner:     {}",
+        opts.org.as_deref().unwrap_or("your personal account")
+    );
+    println!("Webhook:   {base_url}/api/github/webhook");
+    println!("Login:     {base_url}/api/auth/github/callback");
+    println!();
+    if opts.no_open {
+        println!("Open this in a browser to confirm App creation:");
+    } else {
+        println!("Opening a browser to confirm App creation. If nothing opens, visit:");
+        let _ = std::process::Command::new("xdg-open")
+            .arg(&start_url)
+            .status();
+    }
+    println!("  {start_url}");
+    println!(
+        "(Tunnelling from another machine? `ssh -L {port}:localhost:{port} …` then open the \
+         same URL there.)"
+    );
+    println!();
+    println!(
+        "Waiting for the GitHub confirmation (timeout {}s)…",
+        opts.timeout
+    );
+    let code = loom::github_manifest::run_local_server(
+        listener,
+        html,
+        state,
+        std::time::Duration::from_secs(opts.timeout),
+    )
+    .await?;
+
+    println!("Exchanging the confirmation for credentials…");
+    let conv = loom::github_manifest::convert(&code)
+        .await
+        .context("converting the manifest code into App credentials")?;
+
+    println!();
+    println!(
+        "Created {} (id {}) under {}",
+        conv.slug, conv.id, conv.owner.login
+    );
+    println!("  {}", conv.html_url);
+
+    let db = loom::db::connect(&weaver_core::db::default_db_path())
+        .await
+        .context("opening loom's database to store the App credentials")?;
+    loom::config::apply(
+        &db,
+        &[
+            (
+                loom::github_app::APP_ID_KEY.to_string(),
+                Some(conv.id.to_string()),
+            ),
+            (
+                loom::github_app::APP_PRIVATE_KEY_KEY.to_string(),
+                Some(conv.pem.clone()),
+            ),
+            (
+                loom::github_trigger::WEBHOOK_SECRET_KEY.to_string(),
+                Some(conv.webhook_secret.clone()),
+            ),
+            (
+                loom::auth::GH_CLIENT_ID_KEY.to_string(),
+                Some(conv.client_id.clone()),
+            ),
+            (
+                loom::auth::GH_CLIENT_SECRET_KEY.to_string(),
+                Some(conv.client_secret.clone()),
+            ),
+        ],
+    )
+    .await
+    .context("writing the App credentials into loom's settings")?;
+    println!();
+    println!(
+        "Stored the App id, private key, webhook secret, and OAuth client into loom's \
+         settings — live on the running daemon, no restart needed."
+    );
+
+    if let Some(path) = &opts.env_file {
+        let existing = std::fs::read_to_string(path).unwrap_or_default();
+        let updated = loom::envfile::upsert(
+            &existing,
+            &[
+                ("LOOM_GITHUB_APP_ID", conv.id.to_string().as_str()),
+                ("LOOM_GITHUB_APP_PRIVATE_KEY", conv.pem.as_str()),
+                ("LOOM_GITHUB_WEBHOOK_SECRET", conv.webhook_secret.as_str()),
+                ("LOOM_GITHUB_CLIENT_ID", conv.client_id.as_str()),
+                ("LOOM_GITHUB_CLIENT_SECRET", conv.client_secret.as_str()),
+            ],
+        );
+        write_env_file(path, &updated)?;
+        println!(
+            "Also wrote them to {} (for a fresh deploy).",
+            path.display()
+        );
+    }
+
+    println!();
+    println!("Next steps:");
+    println!("  1. Install the App on the repos loom should act on:");
+    println!(
+        "       https://github.com/apps/{}/installations/new",
+        conv.slug
+    );
+    println!("  2. Sign in at {base_url} with GitHub — the App's OAuth client now handles login.");
+    Ok(())
+}
+
+/// A default App name derived from the host in `--base-url` (`loom-<host>`,
+/// non-alphanumerics folded to `-`) — GitHub App names must be unique across
+/// all of GitHub, so this is a starting point, not a guarantee.
+fn default_app_name(base_url: &str) -> String {
+    let host = base_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split(['/', ':'])
+        .next()
+        .unwrap_or("loom");
+    let slug: String = host
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    format!("loom-{slug}")
+}
+
+/// `loom setup secrets` — prompt for the paste-once agent secrets and store
+/// them as operator environment variables (`crate::agent_env`), exported into
+/// every session loom launches from then on.
+async fn cmd_setup_secrets(opts: SecretsOpts) -> Result<()> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "loom setup secrets needs an interactive terminal (hidden input for the \
+             secrets you paste) — run it directly, not piped or in CI"
+        );
+    }
+    println!("Paste-once secrets for the agents loom launches (leave blank to skip).");
+    let anthropic = prompt_secret("ANTHROPIC_API_KEY")?;
+    let gh_token = prompt_secret("GH_TOKEN")?;
+
+    if anthropic.is_none() && gh_token.is_none() {
+        println!("nothing entered — nothing to do");
+        return Ok(());
+    }
+
+    let db = loom::db::connect(&weaver_core::db::default_db_path())
+        .await
+        .context("opening loom's database")?;
+    let mut stored = Vec::new();
+    if let Some(v) = &anthropic {
+        loom::agent_env::set(&db, "ANTHROPIC_API_KEY", v).await?;
+        stored.push("ANTHROPIC_API_KEY");
+    }
+    if let Some(v) = &gh_token {
+        loom::agent_env::set(&db, "GH_TOKEN", v).await?;
+        stored.push("GH_TOKEN");
+    }
+    println!();
+    println!(
+        "Stored {} as operator environment variables — every session launched from now \
+         on gets them (Settings → Environment in the web UI, or `GET /api/env`).",
+        stored.join(", ")
+    );
+    println!(
+        "Note: the loom daemon's own process (cloning private repos, and the `gh` \
+         fallback when no GitHub App is configured) still reads these ambiently — set \
+         them as real environment variables before the daemon starts for that to apply."
+    );
+
+    if let Some(path) = &opts.env_file {
+        let mut updates: Vec<(&str, &str)> = Vec::new();
+        if let Some(v) = &anthropic {
+            updates.push(("ANTHROPIC_API_KEY", v.as_str()));
+        }
+        if let Some(v) = &gh_token {
+            updates.push(("GH_TOKEN", v.as_str()));
+        }
+        let existing = std::fs::read_to_string(path).unwrap_or_default();
+        let updated = loom::envfile::upsert(&existing, &updates);
+        write_env_file(path, &updated)?;
+        println!(
+            "Also wrote them to {} — restart the daemon (e.g. `docker compose up -d`) to \
+             apply the ambient-process use.",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Prompt for a secret without echoing it to the terminal. An empty answer
+/// means "skip" (leave the current value, if any, alone).
+fn prompt_secret(name: &str) -> Result<Option<String>> {
+    let value = rpassword::prompt_password(format!("{name}: "))
+        .with_context(|| format!("reading {name}"))?;
+    let value = value.trim();
+    Ok((!value.is_empty()).then(|| value.to_string()))
+}
+
+/// Write `contents` to `path`, creating parent directories and restricting
+/// permissions to the owner (the file holds live secrets).
+fn write_env_file(path: &std::path::Path, contents: &str) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    std::fs::write(path, contents).with_context(|| format!("writing {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("chmod 600 {}", path.display()))?;
+    }
     Ok(())
 }
 

@@ -84,6 +84,13 @@ interpolate the compose file and as each container's `env_file`.
 | `LOOM_GITHUB_CLIENT_ID` / `_SECRET` | for login | GitHub OAuth app — the owner's only way to sign in on a fresh DB (see [first-run](#first-run-login)). Callback: `https://<LOOM_DOMAIN>/api/auth/github/callback`. |
 | `LOOM_IMAGE` | no | Override the image tag (defaults to the locally-built `loom:latest`). |
 
+`GH_TOKEN` and `ANTHROPIC_API_KEY` here cover the daemon's own ambient use
+(cloning private repos; the Claude launch-gate). Every *session* loom launches
+also needs them — `loom setup secrets` (`docker compose exec loom loom setup
+secrets`) prompts for both and stores them as operator environment variables,
+live for every session from then on, no restart. Run it in addition to (not
+instead of) setting them here.
+
 ## Security posture
 
 This deploy is reachable by anyone on the internet, so two auth settings must
@@ -118,7 +125,34 @@ bearer tokens for automation — see the repo README.
 The only account that can log in on a fresh database is `LOOM_OWNER_GITHUB`, and
 it has no password yet — so **GitHub sign-in is the way in**. Since the loopback
 trust that bootstraps a local install is off here (see above), set up OAuth
-before first start:
+before first start.
+
+The fast path is `loom setup github-app` — it registers a GitHub App via
+GitHub's manifest flow and writes its client id/secret (along with the App id,
+private key, and webhook secret, for [the `@loom` trigger](#wire-the-loom-github-trigger))
+straight into loom's settings, so no `.env` edit or restart is needed for this
+step. It confirms App creation through *your own browser*, though, so it needs
+a network path from your laptop to its local callback server — for this
+stack, that means a one-shot **published** port (`docker compose exec` runs
+inside the service's existing, unpublished network namespace and won't work)
+plus an SSH tunnel if the VM isn't your own machine:
+
+```sh
+# On the VM (a fixed port, since you're about to publish and tunnel it):
+docker compose run --rm -p 8765:8765 loom \
+  loom setup github-app --port 8765 --base-url https://<LOOM_DOMAIN>
+
+# From your laptop, in another terminal, while that's running:
+ssh -L 8765:localhost:8765 <vm-host>
+# then open http://127.0.0.1:8765/ in your own browser and confirm.
+```
+
+Running locally (loom on your own machine)? Skip the tunnel — just
+`loom setup github-app --base-url http://localhost:7878` opens the browser for
+you. (`loom setup github-app --help` covers `--org` and `--env-file` too.)
+Either way, once it's done, skip straight to step 2 below.
+
+To register by hand instead:
 
 1. Register a GitHub OAuth app with callback
    `https://<LOOM_DOMAIN>/api/auth/github/callback`, and put its credentials in
@@ -144,7 +178,16 @@ docker compose exec loom claude    # follow the prompts, then exit
 
 ## Wire the `@loom` GitHub trigger
 
-Commenting **`@loom work on this`** on an issue launches a session. To enable it:
+Commenting **`@loom work on this`** on an issue launches a session. If you ran
+`loom setup github-app` above, the App *is* the webhook — GitHub delivers
+events to any repo it's installed on with no separate webhook to add:
+
+1. **Install the App** on each repo (or org) loom should act on:
+   `https://github.com/apps/<app-slug>/installations/new` (printed at the end
+   of `loom setup github-app`) — installing it also allowlists the repo for
+   cloning, so the manual repo-registration `curl` below isn't needed.
+
+Without the App (the classic path), instead:
 
 1. **Register the repo** in loom's managed store (the clone allowlist). From the
    host, using a token minted under Settings → Tokens:
