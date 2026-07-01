@@ -85,7 +85,8 @@ and why; you don't hand-edit `.env` itself.
 | Variable | Required | Purpose |
 |---|---|---|
 | `LOOM_DOMAIN` | **yes** | Public domain Caddy serves and gets a cert for (e.g. `loom.team.dev`); `localhost` for local testing. Also seeded as `auth.base_url`. |
-| `LOOM_OWNER_GITHUB` | **yes** | GitHub login seeded as the first approved user on a fresh database. |
+| `LOOM_OWNER_GITHUB` | **yes** | GitHub login seeded as the first approved user on a fresh database. Also seeded as the first trusted owner for the `@loom` trigger. |
+| `LOOM_ALLOWED_OWNERS` | for `@loom` | Extra GitHub accounts (orgs or users), comma/space-separated, whose App installations the trigger will act for. Only repos owned by a trusted owner are auto-trusted — the safeguard that lets the App be public. Extend later in **Settings → Authorized GitHub owners**. |
 | `GH_TOKEN` | **yes** | GitHub token loom uses to clone private repos, push branches, and reply to `@loom` comments. |
 | `LOOM_GITHUB_WEBHOOK_SECRET` | for `@loom` | Shared secret for the inbound webhook; must match the secret on the GitHub webhook. Until set, the webhook rejects every delivery. |
 | `ANTHROPIC_API_KEY` | for Claude | API key for the Claude agents. Alternatively log in interactively (see [first-run](#claude-authentication)). |

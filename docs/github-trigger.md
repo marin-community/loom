@@ -74,8 +74,8 @@ Until `LOOM_GITHUB_WEBHOOK_SECRET` is set the endpoint rejects every delivery
 
 The trigger only acts on allowlisted repos. A repo is allowlisted when **either**
 it is registered in the managed repo store **or** the [GitHub App](#the-github-app)
-is installed on it (the installation *is* the grant — installing the App on a repo
-authorizes it, and loom auto-registers it into the store on first trigger).
+is installed on it **and** its owner is a [trusted owner](#trusted-owner-allowlist)
+— in which case loom auto-registers it into the store on first trigger.
 
 Register a repo explicitly with:
 
@@ -84,8 +84,31 @@ curl -X POST {base}/api/repos -H 'Authorization: Bearer $LOOM_TOKEN' \
   -H 'content-type: application/json' -d '{"repo":"owner/name"}'
 ```
 
-A comment on a repo that is neither registered nor App-installed launches
-nothing.
+A comment on a repo that is neither registered nor an App-installed repo under a
+trusted owner launches nothing.
+
+### Trusted-owner allowlist
+
+An installation counts as a grant only when the installing account is a **trusted
+owner** — a GitHub org or user in the `github_owners` allowlist. This is what makes
+the App safe to run **public**: GitHub only lets a *private* App be installed on
+the account that owns it, so wiring loom across an account boundary pushes you to
+make the App public, at which point anyone can install it. Anchoring auto-trust in
+an explicit owner list — rather than in "an installation exists" — keeps a
+stranger's installation from ever auto-registering their repo.
+
+The list is seeded at first run from the deploy owner (`LOOM_OWNER_GITHUB`) plus
+`LOOM_ALLOWED_OWNERS` (comma/space-separated), and the setup wizard adds the
+account the App was created under. Operators manage it in **Settings → Authorized
+GitHub owners** or over the API:
+
+```sh
+curl -X POST {base}/api/github/owners -H 'Authorization: Bearer $LOOM_TOKEN' \
+  -H 'content-type: application/json' -d '{"login":"your-org"}'
+```
+
+Explicitly registering a repo (`POST /api/repos`) is unaffected — that is an
+operator's deliberate act, already gated by the operator allowlist.
 
 ### Optional settings
 
@@ -101,9 +124,10 @@ A **GitHub App** is the hardened identity loom acts through. Instead of a
 long-lived, broadly-scoped shared `GH_TOKEN`, loom mints a **short-lived,
 least-privilege installation token** scoped to a single repo's installation for
 each GitHub call (the permission check and the reply), and treats the App's
-installations as the access allowlist. Tokens are signed from the App's private
-key (an RS256 JWT exchanged for an installation token via
-`POST /app/installations/{id}/access_tokens`) and cached until they near expiry.
+installations under a [trusted owner](#trusted-owner-allowlist) as the access
+allowlist. Tokens are signed from the App's private key (an RS256 JWT exchanged
+for an installation token via `POST /app/installations/{id}/access_tokens`) and
+cached until they near expiry.
 
 When the App is **not configured**, loom falls back to the ambient `GH_TOKEN`
 (the `gh` CLI), so the webhook works without it. The webhook receiver and its

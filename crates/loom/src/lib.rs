@@ -23,6 +23,7 @@ pub mod ide;
 pub mod loom_config;
 pub mod monitor;
 pub mod overlooker;
+pub mod owners;
 pub mod repo;
 pub mod repo_env;
 pub mod server;

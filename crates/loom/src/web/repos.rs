@@ -12,6 +12,7 @@ use weaver_api::CreateReq;
 
 use crate::git;
 use crate::github_trigger;
+use crate::owners;
 use crate::repo;
 
 use super::auth::external_base;
@@ -64,6 +65,48 @@ pub(super) async fn register_repo(
     let managed =
         repo::register(&st.db, &slug.slug(), &remote_url, &path.to_string_lossy()).await?;
     Ok(Json(managed))
+}
+
+// ---------------------------------------------------------------------------
+// Trusted-owner allowlist — the GitHub accounts loom will act for via the
+// inbound trigger. See `crate::owners`: this is what keeps a *public* GitHub App
+// from letting a stranger's installation drive loom.
+// ---------------------------------------------------------------------------
+
+/// `GET /api/github/owners` — the trusted-owner allowlist.
+pub(super) async fn list_owners(State(st): State<AppState>) -> ApiResult<Json<Vec<owners::Owner>>> {
+    Ok(Json(owners::list(&st.db).await?))
+}
+
+/// Body for `POST /api/github/owners`: a GitHub account login (org or user) to
+/// trust.
+#[derive(Debug, Deserialize)]
+pub(super) struct AddOwnerReq {
+    login: String,
+}
+
+/// `POST /api/github/owners` — trust a GitHub account. Idempotent: re-adding an
+/// existing login (any case) returns the stored row.
+pub(super) async fn add_owner(
+    State(st): State<AppState>,
+    Json(req): Json<AddOwnerReq>,
+) -> ApiResult<Json<owners::Owner>> {
+    let owner = owners::add(&st.db, &req.login)
+        .await
+        .map_err(|e| AppError::bad_request(e.to_string()))?;
+    Ok(Json(owner))
+}
+
+/// `DELETE /api/github/owners/{login}` — stop trusting a GitHub account.
+pub(super) async fn remove_owner(
+    State(st): State<AppState>,
+    axum::extract::Path(login): axum::extract::Path<String>,
+) -> ApiResult<StatusCode> {
+    if owners::remove(&st.db, &login).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::not_found("owner"))
+    }
 }
 
 /// `POST /api/github/webhook` — the inbound GitHub trigger (shared-loom design

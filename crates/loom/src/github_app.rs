@@ -10,8 +10,10 @@
 //!    private key, that authenticates loom *as the App* for the next ~10 minutes.
 //! 2. **Resolve a repo to its installation** ([`GithubApp::installation_id`])
 //!    via `GET /repos/{owner}/{name}/installation`. A repo the App is installed
-//!    on is, by that fact, authorized — the installation *is* the access
-//!    allowlist (complementing the managed-repo table from #95).
+//!    on is authorized when its owner is a trusted owner ([`crate::owners`]) —
+//!    the installation *is* the access allowlist, gated on the owner so a public
+//!    App can't be driven by a stranger's install (complementing the managed-repo
+//!    table from #95).
 //! 3. **Exchange the JWT for an installation access token**
 //!    (`POST /app/installations/{id}/access_tokens`), **cached per installation
 //!    with its expiry** and refreshed once stale ([`GithubApp::installation_token`]).
@@ -276,15 +278,39 @@ impl GithubApp {
 
     // -- installation as allowlist ------------------------------------------
 
-    /// When the App is installed on `slug`, ensure that repo is in the managed
-    /// allowlist (idempotent), so the trigger's clone path accepts it — the
-    /// "installation *is* the allowlist" rule (§6.3), *complementing* the
-    /// explicitly-registered repos from #95. Best-effort and a no-op when the App
-    /// is unconfigured, the repo is already registered, or the App is not
-    /// installed on it (leaving the v1 repos-table allowlist to govern).
+    /// When the App is installed on `slug` **and** its owner is a trusted owner
+    /// ([`crate::owners`]), ensure that repo is in the managed allowlist
+    /// (idempotent), so the trigger's clone path accepts it — the "installation
+    /// *is* the allowlist" rule (§6.3), *complementing* the explicitly-registered
+    /// repos from #95. The trusted-owner gate is what keeps this safe under a
+    /// *public* App: a stranger's installation on their own repo is not honored,
+    /// because their account is not on the allowlist. Best-effort and a no-op when
+    /// the App is unconfigured, the owner is untrusted, the repo is already
+    /// registered, or the App is not installed on it (leaving the v1 repos-table
+    /// allowlist to govern).
     pub async fn ensure_installed_repo_registered(&self, slug: &RepoSlug) {
         if !self.is_configured().await {
             return;
+        }
+        // The trusted-owner gate: honor an installation as a grant only for an
+        // owner an operator has allowlisted (see `crate::owners`). This is what
+        // makes a *public* App safe — a stranger who installs it on their own
+        // repo is not on the list, so their repo is never auto-registered and the
+        // clone path (`resolve_clone`) rejects it. Fails closed on a store error.
+        match crate::owners::is_allowed(&self.db, &slug.owner).await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::info!(
+                    owner = %slug.owner,
+                    repo = %slug.slug(),
+                    "not auto-registering: repo owner is not in the trusted-owner allowlist"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(repo = %slug.slug(), error = %e, "trusted-owner check failed; not auto-registering");
+                return;
+            }
         }
         let slug_str = slug.slug();
         match crate::repo::get_registered(&self.db, &slug_str).await {
@@ -746,14 +772,16 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
 
     // -- installation as the allowlist (§6.3) -------------------------------
 
-    /// A repo the App is installed on is auto-registered into the managed
-    /// allowlist, so the trigger may clone it — the "installation is the
-    /// allowlist" rule, complementing the explicitly-registered repos.
+    /// A repo the App is installed on, *whose owner is a trusted owner*, is
+    /// auto-registered into the managed allowlist so the trigger may clone it —
+    /// the "installation is the allowlist" rule, complementing the
+    /// explicitly-registered repos.
     #[tokio::test]
     async fn installed_repo_is_auto_registered() {
         let mock = MockState::new(3600);
         let base = spawn_mock(mock.clone()).await;
         let app = configured_app(base, Arc::new(RecordingFallback::default())).await;
+        crate::owners::add(&app.db, "acme").await.unwrap();
 
         let slug = crate::repo::parse_slug("acme/widgets").unwrap();
         assert!(
@@ -772,6 +800,28 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
             .expect("the installed repo was added to the allowlist");
         assert_eq!(registered.slug, "acme/widgets");
         assert_eq!(registered.remote_url, "https://github.com/acme/widgets.git");
+    }
+
+    /// The trusted-owner gate: a repo the App is installed on is **not**
+    /// auto-registered when its owner is not on the allowlist — the protection
+    /// that keeps a public App from honoring a stranger's installation.
+    #[tokio::test]
+    async fn installed_repo_with_untrusted_owner_is_not_registered() {
+        let mock = MockState::new(3600);
+        let base = spawn_mock(mock.clone()).await;
+        let app = configured_app(base, Arc::new(RecordingFallback::default())).await;
+        // Note: "stranger" is deliberately NOT added to the owner allowlist.
+
+        let slug = crate::repo::parse_slug("stranger/evil").unwrap();
+        app.ensure_installed_repo_registered(&slug).await;
+
+        assert!(
+            crate::repo::get_registered(&app.db, "stranger/evil")
+                .await
+                .unwrap()
+                .is_none(),
+            "an untrusted owner's repo must not be auto-registered"
+        );
     }
 
     /// When the App is unconfigured the auto-register step is inert: the v1

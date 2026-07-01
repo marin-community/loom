@@ -158,6 +158,19 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     expires_at TEXT NOT NULL
 );
+
+-- The GitHub accounts (orgs or users) loom is authorized to act for via the
+-- inbound trigger: a row here is the "trusted owner" allowlist. It gates the
+-- "installation is the allowlist" auto-registration (`ensure_installed_repo_
+-- registered`) so that a *public* GitHub App — one anyone can install on their
+-- own repos — cannot make loom clone and run agents on a stranger's repo. Only a
+-- repo whose owner is listed here is auto-trusted; explicitly-registered repos
+-- (an operator's deliberate `POST /api/repos`) are unaffected. `login` is
+-- matched case-insensitively (GitHub logins are), like `users.github_login`.
+CREATE TABLE IF NOT EXISTS github_owners (
+    login      TEXT PRIMARY KEY COLLATE NOCASE,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
 "#;
 
 /// Open the shared database and apply loom's additional tables on top of the
@@ -225,6 +238,7 @@ async fn migrate_loom(pool: &Db) -> Result<()> {
     // matching `model`/`effort`/`parent_branch_id`/`managed_by` above.)
     add_column_if_missing(pool, "sessions", "created_by", "TEXT").await?;
     seed_owner(pool).await?;
+    seed_owners(pool).await?;
     Ok(())
 }
 
@@ -260,6 +274,28 @@ async fn seed_owner(pool: &Db) -> Result<()> {
         .execute(pool)
         .await
         .with_context(|| format!("seeding owner user '{owner}'"))?;
+    Ok(())
+}
+
+/// Seed the trusted-owner allowlist (`github_owners`) so the inbound trigger is
+/// usable — and safe under a public App — immediately. The deploy owner's own
+/// account (`LOOM_OWNER_GITHUB`, covering the run-loom-on-my-own-repos case) plus
+/// every login in `LOOM_ALLOWED_OWNERS` (comma/space-separated — the orgs whose
+/// installations loom should honor) are inserted. `INSERT OR IGNORE` makes this a
+/// no-op once a row exists, so it never clobbers later web-flow edits.
+///
+/// Fails closed like [`seed_owner`]: there is no default login. With both env
+/// vars unset, nothing is seeded and no installation is auto-trusted until an
+/// operator adds an owner (in the UI or via config) — the allowlist never falls
+/// back to a real account.
+async fn seed_owners(pool: &Db) -> Result<()> {
+    let owner = std::env::var("LOOM_OWNER_GITHUB").unwrap_or_default();
+    let extra = std::env::var("LOOM_ALLOWED_OWNERS").unwrap_or_default();
+    for login in crate::owners::split_logins(&owner).chain(crate::owners::split_logins(&extra)) {
+        crate::owners::seed(pool, login)
+            .await
+            .with_context(|| format!("seeding trusted owner '{login}'"))?;
+    }
     Ok(())
 }
 

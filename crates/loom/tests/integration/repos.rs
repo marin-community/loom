@@ -163,3 +163,53 @@ async fn create_rejects_traversal_and_unregistered_repos() {
         "register traversal should 400, got {err}"
     );
 }
+
+/// The trusted-owner allowlist over the REST API: add, list, remove, and reject a
+/// malformed login. The deploy owner is seeded, so a freshly-added owner appears
+/// alongside it.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_owners_crud() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    // Add an owner.
+    let added = client
+        .post("/api/github/owners", json!({ "login": "acme" }))
+        .await
+        .unwrap();
+    assert_eq!(added["login"], "acme");
+
+    // It appears in the list (alongside the seeded deploy owner).
+    let list = client.get("/api/github/owners").await.unwrap();
+    let logins: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["login"].as_str().unwrap())
+        .collect();
+    assert!(
+        logins.contains(&"acme"),
+        "acme should be listed, got {logins:?}"
+    );
+
+    // A malformed login is a 400.
+    let err = client
+        .post("/api/github/owners", json!({ "login": "bad owner" }))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("400"), "malformed login should 400, got {err}");
+
+    // Remove it; a second remove is a 404.
+    client.delete("/api/github/owners/acme").await.unwrap();
+    let err = client
+        .delete("/api/github/owners/acme")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("404"),
+        "removing a missing owner should 404, got {err}"
+    );
+}

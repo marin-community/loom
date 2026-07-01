@@ -914,6 +914,20 @@ async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
     // the right owner; for `--org` it's the org's own login, so `org_owner`
     // (required, resolved above) is used instead.
     let owner_login = org_owner.as_deref().unwrap_or(conv.owner.login.as_str());
+
+    // Trust that account as a trusted owner, so its App installations are honored
+    // by the inbound trigger. This is what keeps a *public* App safe: only owners
+    // on this allowlist are auto-trusted, never a stranger who installs the App on
+    // their own repo. Written live to the running daemon here, and to loom.toml
+    // (`LOOM_ALLOWED_OWNERS`) below for a fresh DB. Add more in the UI later.
+    loom::owners::add(&db, owner_login)
+        .await
+        .context("trusting the App owner in the trusted-owner allowlist")?;
+    println!(
+        "Trusted GitHub owner '{owner_login}' for the inbound trigger — add more in \
+         Settings → Authorized GitHub owners."
+    );
+
     let updates: Vec<(&str, &str)> = vec![
         ("LOOM_GITHUB_APP_ID", app_id.as_str()),
         ("LOOM_GITHUB_APP_PRIVATE_KEY", conv.pem.as_str()),
@@ -922,6 +936,7 @@ async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
         ("LOOM_GITHUB_CLIENT_SECRET", conv.client_secret.as_str()),
         ("LOOM_DOMAIN", domain),
         ("LOOM_OWNER_GITHUB", owner_login),
+        ("LOOM_ALLOWED_OWNERS", owner_login),
     ];
     loom::loom_config::upsert(&opts.config.config, &updates)
         .context("writing the App credentials into loom.toml")?;

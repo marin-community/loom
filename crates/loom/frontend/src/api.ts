@@ -241,7 +241,7 @@ export const restartShell = () => post('/shell/restart');
 
 // --- Authentication --------------------------------------------------------
 
-import type { Me, Token, CreatedToken, User, GithubConfig } from './types';
+import type { Me, Token, CreatedToken, User, Owner, GithubConfig } from './types';
 
 /** Who the caller is + which sign-in methods to offer. Never 401s. */
 export const getMe = () => get('/auth/me') as Promise<Me>;
@@ -283,6 +283,19 @@ export const addUser = (username: string, githubLogin?: string, password?: strin
 
 /** Remove an approved operator. */
 export const removeUser = (username: string) => del(`/auth/users/${encodeURIComponent(username)}`);
+
+/** The trusted-owner allowlist — GitHub accounts loom acts for via the trigger
+ *  (`GET /api/github/owners`). */
+export const listOwners = () => get('/github/owners') as Promise<Owner[]>;
+
+/** Trust a GitHub account (org or user) for the inbound trigger
+ *  (`POST /api/github/owners`). */
+export const addOwner = (login: string) =>
+  post('/github/owners', { login }) as Promise<Owner>;
+
+/** Stop trusting a GitHub account (`DELETE /api/github/owners/{login}`). */
+export const removeOwner = (login: string) =>
+  del(`/github/owners/${encodeURIComponent(login)}`);
 
 /** The GitHub OAuth app config (secret withheld). */
 export const getGithubConfig = () => get('/auth/github/config') as Promise<GithubConfig>;

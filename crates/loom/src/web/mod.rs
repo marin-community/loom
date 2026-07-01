@@ -575,6 +575,10 @@ pub fn router(state: AppState) -> Router {
         .route("/agents", get(list_agents))
         // The managed repo store + clone allowlist (register/list).
         .route("/repos", get(list_repos).post(register_repo))
+        // The trusted-owner allowlist — GitHub accounts loom will act for via the
+        // inbound trigger (keeps a public App from trusting a stranger's install).
+        .route("/github/owners", get(list_owners).post(add_owner))
+        .route("/github/owners/{login}", delete(remove_owner))
         .route("/repos/recent", get(recent_repos))
         .route("/repos/branches", get(repo_branches))
         .route(

@@ -517,6 +517,13 @@ export interface User {
   created_at: string;
 }
 
+/** One trusted GitHub owner — an account (org or user) whose App installations
+ *  the inbound trigger will act for. Mirrors `owners::Owner`. */
+export interface Owner {
+  login: string;
+  created_at: string;
+}
+
 /** One operator-managed agent environment variable. Exported into every
  *  interactive agent session loom launches. Mirrors `agent_env::EnvVar`. */
 export interface EnvVar {
