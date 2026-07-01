@@ -16,9 +16,12 @@ up the GCE VM underneath it.
 - A GCP project with billing enabled, and the `gcloud` CLI authed
   (`gcloud auth login`) with permission to enable APIs, create service
   accounts, firewall rules, addresses, disks, and instances.
+- [`uv`](https://docs.astral.sh/uv/) on your workstation — `bootstrap.py` and
+  `secrets.py` are `uv run --script` scripts (self-contained, no venv setup;
+  `uv` fetches `click` on first run).
 - A domain you control, able to add an `A` record.
 - The credential values from [`../README.md` "Required environment"](../README.md#required-environment)
-  ready to hand to `secrets.sh` — at minimum `GH_TOKEN`, `LOOM_OWNER_GITHUB`,
+  ready to hand to `secrets.py` — at minimum `GH_TOKEN`, `LOOM_OWNER_GITHUB`,
   and either `ANTHROPIC_API_KEY` or a plan to log in to Claude interactively
   after boot.
 
@@ -27,7 +30,7 @@ up the GCE VM underneath it.
 The ordering constraint that matters: **the static IP must exist and DNS must
 resolve to it before the stack starts**, or Caddy's ACME HTTP-01 challenge
 fails and no certificate issues (Let's Encrypt is rate-limited, so repeated
-failures are expensive to retry). `bootstrap.sh` enforces this — it reserves
+failures are expensive to retry). `bootstrap.py` enforces this — it reserves
 the IP, prints the exact record to set, and then polls for DNS to resolve
 before it creates the VM.
 
@@ -36,14 +39,14 @@ cd deploy/gcp
 
 # 1. Store the secrets startup-script.sh will fetch on boot. Prompts for each
 #    (or export SECRET_NAME=value beforehand for non-interactive use).
-PROJECT=my-project ./secrets.sh
+PROJECT=my-project ./secrets.py
 
 # 2. Provision the static IP, firewall, service account, and VM. Prints the
 #    DNS A record to set, then waits for it to resolve before creating the VM.
-PROJECT=my-project LOOM_DOMAIN=loom.example.com ./bootstrap.sh
+PROJECT=my-project LOOM_DOMAIN=loom.example.com ./bootstrap.py
 ```
 
-While `bootstrap.sh` is waiting, go set the `A` record it printed at your DNS
+While `bootstrap.py` is waiting, go set the `A` record it printed at your DNS
 provider. Once it resolves, the script proceeds to create the VM. GCE runs
 `startup-script.sh` as the instance's `startup-script` metadata: it installs
 Docker, installs the `gcloud` CLI, fetches the secrets from Secret Manager,
@@ -58,13 +61,15 @@ gcloud --project=my-project compute ssh loom --zone=us-central1-a \
 ```
 
 Both scripts are check-before-create, so re-running either after an
-interruption (or to pick up a new secret value) is safe. `bootstrap.sh` will
+interruption (or to pick up a new secret value) is safe. `bootstrap.py` will
 not recreate or resize an existing instance — delete it first if you need to
 change its machine type or disks.
 
-See the top of [`bootstrap.sh`](bootstrap.sh) and [`secrets.sh`](secrets.sh)
-for the full list of configuration env vars (region, zone, machine type, disk
-sizes, image source, ...) and their defaults.
+Run `./bootstrap.py --help` and `./secrets.py --help` for the full list of
+configuration options (region, zone, machine type, disk sizes, image source,
+...) and their defaults — every option also has a same-named env var
+(`PROJECT`, `LOOM_DOMAIN`, `MACHINE_TYPE`, ...), so the env-var invocations
+above and `--flag` invocations are interchangeable.
 
 ## Manual-once checklist
 
@@ -73,7 +78,7 @@ a browser) and only need doing once per deploy:
 
 1. **Register a GitHub OAuth app** — callback URL
    `https://<LOOM_DOMAIN>/api/auth/github/callback`. Put its client
-   ID/secret in Secret Manager via `./secrets.sh LOOM_GITHUB_CLIENT_ID
+   ID/secret in Secret Manager via `./secrets.py LOOM_GITHUB_CLIENT_ID
    LOOM_GITHUB_CLIENT_SECRET`, then either wait for the next boot or
    re-trigger the startup script (`gcloud compute instances reset` or SSH in
    and re-run `sudo google_metadata_script_runner startup`) to pick it up.
@@ -94,7 +99,7 @@ Docker volumes, which live under Docker's data-root on disk. **Deleting the
 VM deletes them along with it** — you'd lose the database and have to
 re-issue a certificate (subject to Let's Encrypt's rate limits).
 
-`bootstrap.sh` mitigates this by default: it creates a separate persistent
+`bootstrap.py` mitigates this by default: it creates a separate persistent
 disk (`DATA_DISK_SIZE`, default 50GB) and `startup-script.sh` points Docker's
 entire data-root at it (`/etc/docker/daemon.json`), so every named volume
 lands on that disk without any change to `docker-compose.yml`. That disk
@@ -128,12 +133,12 @@ docker build -t us-central1-docker.pkg.dev/my-project/loom/loom:latest .
 docker push us-central1-docker.pkg.dev/my-project/loom/loom:latest
 ```
 
-Then run `bootstrap.sh` with:
+Then run `bootstrap.py` with:
 
 ```sh
 IMAGE_MODE=pull \
 AR_IMAGE=us-central1-docker.pkg.dev/my-project/loom/loom:latest \
-PROJECT=my-project LOOM_DOMAIN=loom.example.com ./bootstrap.sh
+PROJECT=my-project LOOM_DOMAIN=loom.example.com ./bootstrap.py
 ```
 
 `startup-script.sh` then does `gcloud auth configure-docker` (using the VM's
@@ -159,5 +164,5 @@ sudo google_metadata_script_runner startup
 ```
 
 7878 (loom's own port) is never opened on the VM's firewall — the only way in
-is through Caddy on 80/443/443-udp, enforced by `bootstrap.sh`'s firewall
+is through Caddy on 80/443/443-udp, enforced by `bootstrap.py`'s firewall
 rules.

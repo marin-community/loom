@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
 #
 # GCE startup-script for the loom standalone-stack VM. Set as instance
-# metadata by bootstrap.sh; GCE runs this as root on every boot (not just the
+# metadata by bootstrap.py; GCE runs this as root on every boot (not just the
 # first), so every step below is idempotent.
 #
 # Reads non-secret config from instance metadata (loom-domain, repo-url,
-# git-ref, image-mode, ar-image — set by bootstrap.sh) and secret values from
-# Secret Manager (set by secrets.sh), then brings up
+# git-ref, image-mode, ar-image — set by bootstrap.py) and secret values from
+# Secret Manager (set by secrets.py), then brings up
 # ../standalone/docker-compose.yml unmodified.
 #
 # Logs to the serial console and journalctl (GCE captures startup-script
 # stdout/stderr under the google-startup-scripts unit) — no extra logging
 # setup needed here.
+#
+# Bash, not click/uv like bootstrap.py and secrets.py: this runs as the very
+# first thing on a fresh VM boot, before Docker, gcloud, or uv exist — a
+# Python rewrite would need to bootstrap uv first, adding fragility for no
+# benefit on a boot-critical path.
 set -euo pipefail
 
 META="http://metadata.google.internal/computeMetadata/v1"
