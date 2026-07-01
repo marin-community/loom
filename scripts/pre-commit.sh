@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Shared pre-commit / CI gate: formatting and lints must both pass.
+# Shared pre-commit / CI gate: Rust formatting + lints and the frontend
+# typecheck must all pass.
 #
 # This is the single source of truth for "is the tree clean?". It is run by:
 #   - the git pre-commit hook (.githooks/pre-commit), enabled per-clone with
@@ -27,4 +28,22 @@ fi
 echo "▶ cargo clippy --workspace --all-targets --locked -- -D warnings"
 cargo clippy --workspace --all-targets --locked -- -D warnings
 
-echo "✓ fmt + clippy clean"
+# Frontend typecheck (vue-tsc). The clippy step above compiled loom, whose
+# build.rs runs `npm install` — so node_modules is normally present by now; we
+# install it here only for a fresh or Rust-only checkout that skipped that
+# (build.rs writes a placeholder and skips install when npm is absent). Skipped
+# entirely when npm isn't installed, matching build.rs's tolerance — CI always
+# has npm, so the gate is still enforced there.
+frontend="crates/loom/frontend"
+if command -v npm >/dev/null 2>&1; then
+  echo "▶ vue-tsc --noEmit ($frontend)"
+  if [ ! -d "$frontend/node_modules" ]; then
+    echo "  installing frontend deps (npm install)…"
+    npm --prefix "$frontend" install
+  fi
+  npm --prefix "$frontend" run typecheck
+  echo "✓ fmt + clippy + typecheck clean"
+else
+  echo "▶ vue-tsc typecheck — skipped (npm not found)"
+  echo "✓ fmt + clippy clean"
+fi

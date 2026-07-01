@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import * as api from '../api';
 import { me, doLogout } from '../auth';
 import type { User, Owner, GithubConfig } from '../types';
 
 // Account + access management: who you are, your password, the approved-user
-// allowlist, and the GitHub OAuth app config that powers "Continue with GitHub".
+// allowlist, and the single GitHub App that backs loom — its OAuth client powers
+// "Continue with GitHub", and the same App drives the `@loom` trigger.
 const router = useRouter();
 const error = ref('');
 const notice = ref('');
@@ -141,10 +142,20 @@ async function removeOwner(o: Owner) {
   }
 }
 
-// -- GitHub OAuth app -------------------------------------------------------
+// -- GitHub App -------------------------------------------------------------
+// One GitHub App backs loom: its OAuth client id/secret power "Continue with
+// GitHub", and the same App's id + private key power the `@loom` trigger. The
+// usual way to set it up is `loom setup github-app`; the id/secret below stay
+// editable for the manual path (or a login-only classic OAuth app).
 const gh = ref<GithubConfig | null>(null);
 const ghClientId = ref('');
 const ghClientSecret = ref('');
+
+// The App's public GitHub page, when we know its slug (recorded by
+// `loom setup github-app`). A hand-configured App has an id but no slug.
+const appUrl = computed(() =>
+  gh.value?.app_slug ? `https://github.com/apps/${gh.value.app_slug}` : '',
+);
 
 async function loadGithub() {
   try {
@@ -238,15 +249,49 @@ onMounted(() => {
       </div>
     </section>
 
-    <!-- GitHub sign-in -->
+    <!-- GitHub App -->
     <section>
       <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-1.5">
-        GitHub sign-in
+        GitHub App
       </h2>
       <div class="rounded-md border border-line bg-surface px-3 py-2.5">
+        <!-- App identity: one App powers both sign-in and the @loom trigger. -->
+        <div v-if="gh?.app_configured" class="mb-2">
+          <p class="text-sm">
+            <span class="text-accent">✓</span>
+            <a
+              v-if="appUrl"
+              :href="appUrl"
+              target="_blank"
+              rel="noopener"
+              class="font-medium text-accent hover:underline"
+              >{{ gh.app_slug }}</a
+            >
+            <span v-else class="font-medium">GitHub App</span>
+            <span class="text-faint"> · App ID {{ gh.app_id }}</span>
+          </p>
+          <p class="text-xs text-muted mt-0.5">
+            One GitHub App powers both sign-in and the <code class="font-mono">@loom</code>
+            trigger. Manage it with <code class="font-mono">loom setup github-app</code>.
+          </p>
+        </div>
+        <p v-else class="text-xs text-muted mb-2">
+          No GitHub App configured. Run
+          <code class="font-mono">loom setup github-app --base-url &lt;your loom URL&gt;</code>
+          to register one — it wires up sign-in and the <code class="font-mono">@loom</code>
+          trigger in a single step. You can also paste sign-in credentials manually below.
+        </p>
+
+        <!-- Sign-in (OAuth) credentials: the App's OAuth client, editable for
+             the manual path or a login-only classic OAuth app. -->
+        <p class="text-2xs font-semibold uppercase tracking-wider text-muted mt-3 mb-1">
+          Sign-in credentials
+        </p>
         <p class="text-xs text-muted mb-2">
-          Register an OAuth app on GitHub with the callback
-          <code class="font-mono">{{ gh?.callback_path }}</code>, then paste its id and secret.
+          <template v-if="gh?.app_configured">The same App's</template>
+          <template v-else>The</template>
+          OAuth client, with callback
+          <code class="font-mono">{{ gh?.callback_path }}</code>. Powers "Continue with GitHub".
           <span :class="gh?.configured ? 'text-accent' : 'text-faint'">
             {{ gh?.configured ? 'Configured.' : 'Not configured.' }}
           </span>

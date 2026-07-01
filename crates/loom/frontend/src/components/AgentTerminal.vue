@@ -216,7 +216,7 @@ function wsUrl(): string {
   return `${base}${path}`;
 }
 
-function inputFrame(data: string): Uint8Array {
+function inputFrame(data: string): Uint8Array<ArrayBuffer> {
   const bytes = new TextEncoder().encode(data);
   const out = new Uint8Array(bytes.length + 1);
   out[0] = OP_INPUT;
@@ -224,7 +224,7 @@ function inputFrame(data: string): Uint8Array {
   return out;
 }
 
-function resizeFrame(cols: number, rows: number): Uint8Array {
+function resizeFrame(cols: number, rows: number): Uint8Array<ArrayBuffer> {
   const b = new Uint8Array(5);
   b[0] = OP_RESIZE;
   b[1] = (cols >> 8) & 0xff;
@@ -234,7 +234,7 @@ function resizeFrame(cols: number, rows: number): Uint8Array {
   return b;
 }
 
-function sendOpen(buf: Uint8Array) {
+function sendOpen(buf: Uint8Array<ArrayBuffer>) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(buf);
 }
 

@@ -522,7 +522,7 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
         type="button"
         class="btn-secondary shrink-0 px-2 py-0.5 text-xs"
         :disabled="state === 'loading'"
-        @click="load"
+        @click="load()"
       >
         Refresh
       </button>

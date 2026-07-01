@@ -297,10 +297,10 @@ export const addOwner = (login: string) =>
 export const removeOwner = (login: string) =>
   del(`/github/owners/${encodeURIComponent(login)}`);
 
-/** The GitHub OAuth app config (secret withheld). */
+/** The GitHub App / sign-in config (secret withheld). */
 export const getGithubConfig = () => get('/auth/github/config') as Promise<GithubConfig>;
 
-/** Set the OAuth client id, and optionally the secret (omit to leave it). */
+/** Set the sign-in OAuth client id, and optionally the secret (omit to leave it). */
 export const setGithubConfig = (clientId: string, clientSecret?: string) =>
   put('/auth/github/config', {
     client_id: clientId,

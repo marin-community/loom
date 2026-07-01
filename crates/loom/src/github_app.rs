@@ -41,9 +41,11 @@ pub const APP_ID_KEY: &str = "github.app_id";
 /// Settings key (env-overridable) holding the App's RSA private key PEM. Like
 /// the OAuth client secret, this is **never** returned by `GET /api/settings`.
 pub const APP_PRIVATE_KEY_KEY: &str = "github.app_private_key";
-/// Settings key holding the App's URL slug (from the manifest conversion). Not
-/// used at runtime — recorded so `loom setup` can deep-link to the App's GitHub
-/// settings/install pages when updating an already-configured App.
+/// Settings key (env-overridable) holding the App's URL slug (e.g. `loom-acme`,
+/// from the manifest conversion). Public and non-secret. Read at runtime via
+/// [`app_slug`] so the settings view can name the App and link to
+/// `github.com/apps/{slug}`, and recorded so `loom setup` can deep-link to the
+/// App's GitHub settings/install pages when updating an already-configured App.
 pub const APP_SLUG_KEY: &str = "github.app_slug";
 /// Settings key holding the org login that owns the App, when it's an org-owned
 /// App (empty for a personal App). Together with [`APP_SLUG_KEY`] it picks the
@@ -113,6 +115,44 @@ impl CachedToken {
 }
 
 // ---------------------------------------------------------------------------
+// Configuration resolution (env-or-setting).
+//
+// These `db`-only resolvers are the single source of truth for "is the App
+// configured, and what is its public identity" — shared by the [`GithubApp`]
+// client (via the delegating methods below) and the settings view
+// ([`crate::web`]), so both agree on what the trigger will actually use.
+// ---------------------------------------------------------------------------
+
+/// The App id from `LOOM_GITHUB_APP_ID`, else the `github.app_id` setting;
+/// `None` when unset or non-numeric.
+pub async fn app_id(db: &Db) -> Option<i64> {
+    config_value(db, "LOOM_GITHUB_APP_ID", APP_ID_KEY)
+        .await?
+        .parse()
+        .ok()
+}
+
+/// The App private key PEM from `LOOM_GITHUB_APP_PRIVATE_KEY`, else the
+/// `github.app_private_key` setting; `None` when unset.
+pub async fn private_key(db: &Db) -> Option<String> {
+    config_value(db, "LOOM_GITHUB_APP_PRIVATE_KEY", APP_PRIVATE_KEY_KEY).await
+}
+
+/// The App slug from `LOOM_GITHUB_APP_SLUG`, else the `github.app_slug` setting;
+/// `None` when unset. Only `loom setup github-app` records it, so a
+/// hand-configured App may have the id and key set but no slug — callers fall
+/// back to the id.
+pub async fn app_slug(db: &Db) -> Option<String> {
+    config_value(db, "LOOM_GITHUB_APP_SLUG", APP_SLUG_KEY).await
+}
+
+/// Whether the App is fully configured (both id and private key present) — the
+/// switch between the App path and the `gh`-fallback path.
+pub async fn is_configured(db: &Db) -> bool {
+    app_id(db).await.is_some() && private_key(db).await.is_some()
+}
+
+// ---------------------------------------------------------------------------
 // The App client.
 // ---------------------------------------------------------------------------
 
@@ -158,22 +198,19 @@ impl GithubApp {
     /// The App id: `LOOM_GITHUB_APP_ID`, else the `github.app_id` setting; `None`
     /// when unset or non-numeric.
     pub async fn app_id(&self) -> Option<i64> {
-        config_value(&self.db, "LOOM_GITHUB_APP_ID", APP_ID_KEY)
-            .await?
-            .parse()
-            .ok()
+        app_id(&self.db).await
     }
 
     /// The App private key PEM: `LOOM_GITHUB_APP_PRIVATE_KEY`, else the
     /// `github.app_private_key` setting; `None` when unset.
     pub async fn private_key(&self) -> Option<String> {
-        config_value(&self.db, "LOOM_GITHUB_APP_PRIVATE_KEY", APP_PRIVATE_KEY_KEY).await
+        private_key(&self.db).await
     }
 
     /// Whether the App is fully configured (both id and private key present). The
     /// switch between the App path and the `gh`-fallback path.
     pub async fn is_configured(&self) -> bool {
-        self.app_id().await.is_some() && self.private_key().await.is_some()
+        is_configured(&self.db).await
     }
 
     /// A freshly-signed App JWT for the configured App.

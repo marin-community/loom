@@ -880,16 +880,31 @@ pub struct AddUserReq {
     pub password: Option<String>,
 }
 
-/// `GET /api/auth/github/config` — the GitHub sign-in setup, secret withheld.
+/// `GET /api/auth/github/config` — the GitHub App / sign-in setup, secret
+/// withheld. loom is driven by a single GitHub App (see [the GitHub
+/// trigger](../../../docs/github-trigger.md)): its OAuth client powers
+/// "Sign in with GitHub" (`configured`/`client_id`), and the same App's id and
+/// private key power the `@loom` trigger (`app_configured`/`app_id`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GithubConfigView {
     /// Whether both a client id and secret are present (sign-in is live).
     pub configured: bool,
-    /// The OAuth app's client id (public). Empty when unset.
+    /// The OAuth client id (public). Empty when unset. Read from env-or-settings,
+    /// so an env-configured deploy reports the live value, not a blank.
     pub client_id: String,
-    /// The callback path to register on the GitHub OAuth app
+    /// The callback path to register on the App's OAuth client
     /// (`/api/auth/github/callback`).
     pub callback_path: String,
+    /// Whether the App identity (id **and** private key) is configured — i.e.
+    /// the `@loom` trigger acts through the App rather than the ambient
+    /// `GH_TOKEN`. The same App normally backs sign-in above.
+    pub app_configured: bool,
+    /// The App's numeric id (public). Empty when unset.
+    pub app_id: String,
+    /// The App's slug (e.g. `loom-acme`), for its name and a
+    /// `github.com/apps/{slug}` link. Empty when unknown (e.g. a hand-configured
+    /// App, or one set up before the slug was recorded).
+    pub app_slug: String,
 }
 
 /// Body for `PUT /api/auth/github/config`. The secret is write-only — send it to

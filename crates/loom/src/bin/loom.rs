@@ -1332,6 +1332,7 @@ async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
     let allowed_owners = merged_allowed_owners(&opts.config.config, trusted_owner);
     let updates: Vec<(&str, &str)> = vec![
         ("LOOM_GITHUB_APP_ID", app_id.as_str()),
+        ("LOOM_GITHUB_APP_SLUG", conv.slug.as_str()),
         ("LOOM_GITHUB_APP_PRIVATE_KEY", conv.pem.as_str()),
         ("LOOM_GITHUB_WEBHOOK_SECRET", conv.webhook_secret.as_str()),
         ("LOOM_GITHUB_CLIENT_ID", conv.client_id.as_str()),

@@ -49,6 +49,11 @@ pub struct LoomConfig {
     pub allowed_owners: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_app_id: Option<String>,
+    /// The App's slug (e.g. `loom-acme`) — public, non-secret. Lets the settings
+    /// UI name the App and link to it; carried alongside the id so the env-based
+    /// deploy path surfaces it too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_app_slug: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_app_private_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -117,6 +122,12 @@ pub static FIELDS: &[FieldSpec] = &[
         secret: false,
         get_fn: |c| c.github_app_id.as_deref(),
         set_fn: |c, v| c.github_app_id = Some(v),
+    },
+    FieldSpec {
+        env_name: "LOOM_GITHUB_APP_SLUG",
+        secret: false,
+        get_fn: |c| c.github_app_slug.as_deref(),
+        set_fn: |c, v| c.github_app_slug = Some(v),
     },
     FieldSpec {
         env_name: "LOOM_GITHUB_APP_PRIVATE_KEY",

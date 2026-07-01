@@ -532,11 +532,19 @@ export interface EnvVar {
   updated_at: string;
 }
 
-/** The GitHub OAuth app config (secret withheld). Mirrors `GithubConfigView`. */
+/**
+ * The GitHub App / sign-in config (secret withheld). Mirrors `GithubConfigView`.
+ * A single GitHub App backs loom: its OAuth client powers sign-in
+ * (`configured`/`client_id`), and the same App's id + private key power the
+ * `@loom` trigger (`app_configured`/`app_id`).
+ */
 export interface GithubConfig {
   configured: boolean;
   client_id: string;
   callback_path: string;
+  app_configured: boolean;
+  app_id: string;
+  app_slug: string;
 }
 
 // --- Conversation log (iris format) ----------------------------------------

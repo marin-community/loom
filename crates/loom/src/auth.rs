@@ -673,6 +673,15 @@ async fn env_or_setting(db: &Db, env: &str, key: &str) -> String {
     crate::config::get(db, key).await.unwrap_or_default()
 }
 
+/// The configured OAuth client id (env-or-settings), or an empty string when
+/// unset. The public half of the sign-in credential — shown in the settings UI.
+/// Resolved the same way as [`github_oauth`] so the two never disagree (a deploy
+/// that sets `LOOM_GITHUB_CLIENT_ID` in its env reports the live id, not a
+/// blank, even though nothing was written to the settings table).
+pub async fn oauth_client_id(db: &Db) -> String {
+    env_or_setting(db, "LOOM_GITHUB_CLIENT_ID", GH_CLIENT_ID_KEY).await
+}
+
 /// The GitHub OAuth app config, or `None` when sign-in-with-GitHub is not set
 /// up. Reads `LOOM_GITHUB_CLIENT_ID`/`_SECRET` first, then the settings table.
 pub async fn github_oauth(db: &Db) -> Option<GithubOAuth> {
