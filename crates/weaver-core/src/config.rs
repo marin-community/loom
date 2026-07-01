@@ -46,6 +46,11 @@ pub const DEFAULT_TRUST_LOOPBACK: bool = true;
 /// default so plain-HTTP and direct-IP access work; turn it on when loom is
 /// reached over HTTPS (e.g. behind a TLS-terminating proxy).
 pub const DEFAULT_COOKIE_SECURE: bool = false;
+/// Wall-clock budget for a repo's `.weaver/config.toml` `[setup]` script, run
+/// when a session launches against an allowlisted repo. A run that overruns is
+/// killed and the session is left in a visible error state. 600s mirrors the
+/// overlooker/lint-review precedent.
+pub const DEFAULT_SETUP_TIMEOUT_SECS: i64 = 600;
 
 // ---------------------------------------------------------------------------
 // Setting registry
@@ -351,6 +356,21 @@ pub const REGISTRY: &[SettingSpec] = &[
         kind: SettingKind::String,
         default: "",
         group: "Editor",
+        options: &[],
+    },
+    SettingSpec {
+        key: "setup.timeout_secs",
+        label: "Repo setup timeout (seconds)",
+        description: "Wall-clock budget for a repo's `.weaver/config.toml` \
+            `[setup]` script, run in the worktree before the agent starts when a \
+            session launches against an allowlisted (registered) repo. A run that \
+            overruns is killed and the session is left in a visible error state \
+            rather than launching a half-provisioned worktree. Setup only runs \
+            for registered repos — the boundary that keeps it from executing \
+            arbitrary code from an unknown repo.",
+        kind: SettingKind::Int,
+        default: "600",
+        group: "Sessions",
         options: &[],
     },
     SettingSpec {

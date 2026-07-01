@@ -218,6 +218,24 @@ pub async fn get_registered(db: &Db, slug: &str) -> Result<Option<ManagedRepo>> 
     Ok(row)
 }
 
+/// Whether `repo_root` is an allowlisted (registered) managed repo — the gate
+/// that decides whether a session's committed `.weaver/config.toml` `[setup]`
+/// script may run. A registered repo's stored `path` is the managed clone
+/// (`<repos_dir>/<owner>/<name>`); the launch resolves the worktree's repo root
+/// by canonicalizing that path, so we compare canonicalized paths on both sides.
+/// A repo not in the `repos` table (e.g. a local bind-mounted checkout) is not
+/// allowlisted, and its setup script is never executed (the design's privileged
+/// code-execution boundary, §6.4).
+pub async fn is_allowlisted(db: &Db, repo_root: &Path) -> Result<bool> {
+    let target = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    Ok(list_registered(db).await?.into_iter().any(|registered| {
+        let path = PathBuf::from(&registered.path);
+        path.canonicalize().unwrap_or(path) == target
+    }))
+}
+
 /// How a managed-repo resolution can fail, so the web layer maps each cause to
 /// the right HTTP status.
 #[derive(Debug)]

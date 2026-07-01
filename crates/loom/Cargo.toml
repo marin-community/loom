@@ -43,6 +43,9 @@ hmac = "0.12"
 # transparent WebSocket-upgrade passthrough (extension host + integrated terminal).
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+# Sending SIGKILL to a timed-out setup script's whole process group (crate::setup),
+# so a bootstrap that spawns children doesn't leave them behind on timeout.
+libc = "0.2"
 percent-encoding = "2"
 rand = "0.9"
 # `rustls-tls` is needed for the GitHub OAuth token/user calls over HTTPS — the

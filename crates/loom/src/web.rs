@@ -95,7 +95,7 @@ use crate::events::{Event, EventBus};
 use crate::session::{self as session_mod, NewSession, Session};
 use crate::{
     agent, agent_env, backend, config, db, events, git, github, github_trigger,
-    overlooker as ov_engine, repo,
+    overlooker as ov_engine, repo, repo_env, setup,
 };
 use weaver_api::{
     AddUserReq, AgentOneshotReq, ArtifactMeta, ArtifactRefs, ArtifactView, ArtifactWriteBody,
@@ -506,6 +506,13 @@ pub fn router(state: AppState) -> Router {
             "/repos/issues",
             get(list_repo_issues).post(create_repo_issue),
         )
+        // Per-repo environment variables (write-only values), layered into a
+        // session's terminal above the global agent_env.
+        .route("/repos/env", get(get_repo_env))
+        .route(
+            "/repos/env/{name}",
+            axum::routing::put(put_repo_env).delete(delete_repo_env),
+        )
         .route("/settings", get(get_settings).patch(patch_settings))
         // Operator-managed agent environment variables.
         .route("/env", get(get_env))
@@ -682,25 +689,206 @@ async fn configured_agent(db: &Db, key: &str, default: &str) -> String {
     }
 }
 
+/// Whether `value` is a valid model selector (or effort, when `model` is false)
+/// for `runtime`'s agent type. A custom/unknown runtime accepts no selector here.
+fn selector_valid(runtime: &str, value: &str, model: bool) -> bool {
+    match agent::agent_type(runtime) {
+        Some(agent_type) if model => agent_type.validate(value, "").is_ok(),
+        Some(agent_type) => agent_type.validate("", value).is_ok(),
+        None => false,
+    }
+}
+
 async fn configured_selector(db: &Db, key: &str, runtime: &str, model: bool) -> String {
     let value = config::get_or(db, key, "").await;
     let value = value.trim();
-    if value.is_empty() {
+    if value.is_empty() || !selector_valid(runtime, value, model) {
         return String::new();
     }
-    let Some(agent_type) = agent::agent_type(runtime) else {
-        return String::new();
-    };
-    let valid = if model {
-        agent_type.validate(value, "").is_ok()
-    } else {
-        agent_type.validate("", value).is_ok()
-    };
-    if valid {
-        value.to_string()
-    } else {
-        String::new()
+    value.to_string()
+}
+
+/// The default agent kind for a new session when the request doesn't pin one: the
+/// repo's `.weaver/config.toml` `[agent] default` when it names a real agent
+/// type, else the operator's global `agent.default`. Repo-file values resolve
+/// over the builtin default, mirroring `WEAVER.md`.
+async fn repo_default_agent(db: &Db, cfg: &weaver_core::repo_config::RepoConfig) -> String {
+    if let Some(kind) = cfg
+        .agent
+        .default
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    {
+        if agent::agent_type(kind).is_some() {
+            return kind.to_string();
+        }
     }
+    configured_agent(db, "agent.default", config::DEFAULT_AGENT).await
+}
+
+/// The model/effort selector for a new session when the request doesn't pin one:
+/// the repo file's `[agent]` value when it validates for the runtime, else the
+/// operator's configured default. `repo_value` is `cfg.agent.model`/`.effort`.
+async fn repo_or_configured_selector(
+    db: &Db,
+    repo_value: Option<&str>,
+    key: &str,
+    runtime: &str,
+    model: bool,
+) -> String {
+    if let Some(value) = repo_value.map(str::trim).filter(|v| !v.is_empty()) {
+        if selector_valid(runtime, value, model) {
+            return value.to_string();
+        }
+    }
+    configured_selector(db, key, runtime, model).await
+}
+
+/// The valid `[env]` entries from a repo's `.weaver/config.toml`, as launch
+/// pairs. A name that isn't a shell identifier, or that uses loom's reserved
+/// `WEAVER_`/`LOOM_` prefixes, is dropped with a warning — it would corrupt the
+/// `export` or shadow the environment loom relies on (the same rule `agent_env`
+/// enforces on operator vars).
+fn config_env_pairs(cfg: &weaver_core::repo_config::RepoConfig) -> Vec<(String, String)> {
+    cfg.env
+        .iter()
+        .filter(|(name, _)| match agent_env::validate_name(name) {
+            Ok(()) => true,
+            Err(why) => {
+                tracing::warn!(name = %name, why = %why,
+                    "ignoring .weaver/config.toml [env] entry");
+                false
+            }
+        })
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// Load a repo's `.weaver/config.toml`, logging and degrading to the empty config
+/// on a parse error. For the infra launch paths (warm overlooker session, adopt)
+/// where there is no create-time request to reject: the file only supplies env
+/// and defaults there, so a malformed one must not block resuming a session — but
+/// it still gets logged rather than silently swallowed.
+fn repo_cfg_or_default(repo_root: &std::path::Path) -> weaver_core::repo_config::RepoConfig {
+    weaver_core::repo_config::load(repo_root).unwrap_or_else(|e| {
+        tracing::warn!(repo = %repo_root.display(), error = %e,
+            "ignoring malformed .weaver/config.toml");
+        weaver_core::repo_config::RepoConfig::default()
+    })
+}
+
+/// Build the environment exported into a session's agent terminal, layered in
+/// priority order: the operator's global [`agent_env`], then the per-repo
+/// [`repo_env`], then the repo's committed `.weaver/config.toml` `[env]` — each
+/// layer overriding the previous for a shared name. Best-effort: a database error
+/// in a layer degrades to the layers that did resolve. `cfg` is the already-loaded
+/// repo config (the caller reads it once for env, setup, and defaults).
+async fn launch_env(
+    db: &Db,
+    repo_root: &std::path::Path,
+    cfg: &weaver_core::repo_config::RepoConfig,
+) -> Vec<(String, String)> {
+    let repo_root_str = repo_root.display().to_string();
+    let mut env = agent_env::pairs(db).await.unwrap_or_default();
+    repo_env::layer(
+        &mut env,
+        repo_env::pairs(db, &repo_root_str)
+            .await
+            .unwrap_or_default(),
+    );
+    repo_env::layer(&mut env, config_env_pairs(cfg));
+    env
+}
+
+/// The configured wall-clock budget for a repo setup run.
+async fn setup_timeout(db: &Db) -> std::time::Duration {
+    let secs = config::get(db, "setup.timeout_secs")
+        .await
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(config::DEFAULT_SETUP_TIMEOUT_SECS as u64)
+        .max(1);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Run a registered repo's `[setup]` script in the worktree before the agent
+/// starts, recording its lifecycle as `setup` events (so the session view shows
+/// it) and capturing full output to `setup.log` in the run dir. The caller has
+/// already confirmed the repo is allowlisted. Returns the outcome; the caller
+/// decides whether to launch the agent or leave the session in an error state.
+async fn run_repo_setup(
+    st: &AppState,
+    branch_id: &str,
+    work_dir: &std::path::Path,
+    run_dir: &std::path::Path,
+    script: &str,
+    env: &[(String, String)],
+) -> setup::SetupOutcome {
+    let timeout = setup_timeout(&st.db).await;
+    events::record(
+        &st.db,
+        &st.bus,
+        branch_id,
+        "setup",
+        json!({ "phase": "started", "timeout_secs": timeout.as_secs() }),
+    )
+    .await
+    .ok();
+
+    let log_path = run_dir.join("setup.log");
+    let outcome = setup::run(work_dir, script, env, timeout, Some(&log_path))
+        .await
+        .unwrap_or_else(|e| setup::SetupOutcome {
+            success: false,
+            timed_out: false,
+            exit_code: None,
+            output: format!("failed to start setup: {e}"),
+            duration: std::time::Duration::ZERO,
+        });
+
+    // The full output lives in setup.log; the event carries a bounded tail so the
+    // timeline stays light.
+    let tail = tail_chars(&outcome.output, 4000);
+    events::record(
+        &st.db,
+        &st.bus,
+        branch_id,
+        "setup",
+        json!({
+            "phase": "finished",
+            "success": outcome.success,
+            "timed_out": outcome.timed_out,
+            "exit_code": outcome.exit_code,
+            "duration_ms": outcome.duration.as_millis() as u64,
+            "summary": outcome.summary(),
+            "output": tail,
+        }),
+    )
+    .await
+    .ok();
+    if outcome.success {
+        tracing::info!(branch = branch_id, "repo setup succeeded");
+    } else {
+        tracing::warn!(branch = branch_id, summary = %outcome.summary(), "repo setup failed");
+    }
+    outcome
+}
+
+/// The last `max` chars of `s` (whole string when shorter), prefixed with an
+/// elision marker when truncated. Keeps a setup-output event payload bounded.
+fn tail_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let tail: String = s
+        .chars()
+        .rev()
+        .take(max)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("…(truncated)\n{tail}")
 }
 
 /// A freshly launched session's lifecycle status. A Claude runtime starts
@@ -748,9 +936,33 @@ async fn create_session_core(
     // are keyed on this path and the two binaries must agree on it.
     let repo_root = repo_root.canonicalize().unwrap_or(repo_root);
 
+    // The repo's committed `.weaver/config.toml`, read from its primary checkout.
+    // It supplies agent/model/effort defaults (below an explicit request, above
+    // the operator's global default), the `[env]` layer exported into the
+    // terminal, and the `[setup]` bootstrap run for allowlisted repos. A malformed
+    // file is a hard error *only* for an allowlisted repo (whose setup would run),
+    // so the breakage is visible at create time; for any other repo it would have
+    // supplied mere defaults, so we log and proceed with an empty config.
+    let repo_cfg = match weaver_core::repo_config::load(&repo_root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            if repo::is_allowlisted(&st.db, &repo_root)
+                .await
+                .unwrap_or(false)
+            {
+                return Err(AppError::bad_request(format!(
+                    "repo .weaver/config.toml is invalid: {e}"
+                )));
+            }
+            tracing::warn!(repo = %repo_root.display(), error = %e,
+                "ignoring malformed .weaver/config.toml");
+            weaver_core::repo_config::RepoConfig::default()
+        }
+    };
+
     let agent = match req.agent {
         Some(a) => a.trim().to_string(),
-        None => configured_agent(&st.db, "agent.default", config::DEFAULT_AGENT).await,
+        None => repo_default_agent(&st.db, &repo_cfg).await,
     };
     // The concierge is the fleet Chat agent, not a workstream: it gets the
     // fleet-ops primer as its opening prompt and no tracking issue (it has no
@@ -773,12 +985,30 @@ async fn create_session_core(
     let model = match req.model.as_deref().map(str::trim) {
         Some(model) if !model.is_empty() => model.to_string(),
         Some(_) => String::new(),
-        None => configured_selector(&st.db, configured_model_key, &runtime, true).await,
+        None => {
+            repo_or_configured_selector(
+                &st.db,
+                repo_cfg.agent.model.as_deref(),
+                configured_model_key,
+                &runtime,
+                true,
+            )
+            .await
+        }
     };
     let effort = match req.effort.as_deref().map(str::trim) {
         Some(effort) if !effort.is_empty() => effort.to_string(),
         Some(_) => String::new(),
-        None => configured_selector(&st.db, configured_effort_key, &runtime, false).await,
+        None => {
+            repo_or_configured_selector(
+                &st.db,
+                repo_cfg.agent.effort.as_deref(),
+                configured_effort_key,
+                &runtime,
+                false,
+            )
+            .await
+        }
     };
     if let Some(agent_type) = agent::agent_type(&runtime) {
         agent_type
@@ -1039,7 +1269,97 @@ async fn create_session_core(
     };
 
     let term_session = format!("weaver-{session_id}");
-    let extra_env = agent_env::pairs(&st.db).await.unwrap_or_default();
+    // The resolved launch environment: global agent_env < per-repo repo_env < the
+    // repo file's [env]. The same env is handed to the setup script and the agent.
+    let extra_env = launch_env(&st.db, &repo_root, &repo_cfg).await;
+
+    // Per-repo setup: run the repo's committed `[setup]` script in the worktree
+    // before the agent starts — but ONLY for an allowlisted (registered) repo,
+    // because a setup script is arbitrary, privileged code (it runs with the
+    // shared container's credentials; design §6.4). A non-allowlisted repo's
+    // script is never executed (recorded as skipped); a failed run leaves the
+    // session in a visible error state instead of launching a half-provisioned
+    // worktree.
+    if let Some(script) = repo_cfg.setup.script() {
+        if repo::is_allowlisted(&st.db, &repo_root)
+            .await
+            .unwrap_or(false)
+        {
+            let outcome =
+                run_repo_setup(&st, &branch.id, &work_dir, &run_dir, &script, &extra_env).await;
+            if !outcome.success {
+                // Surface the failure as a loud, visible session state rather than
+                // launching the agent into a half-provisioned worktree. The
+                // worktree is left intact for inspection; full output is in the
+                // run dir's setup.log.
+                let session = session_mod::insert(
+                    &st.db,
+                    &NewSession {
+                        id: session_id.clone(),
+                        branch_id: branch.id.clone(),
+                        work_dir: work_dir.display().to_string(),
+                        term_session: term_session.clone(),
+                        agent_kind: agent.clone(),
+                        model: model.clone(),
+                        effort: effort.clone(),
+                        status: "error".to_string(),
+                        github_repo: github_repo.clone(),
+                        parent_branch_id: parent.as_ref().map(|b| b.id.clone()),
+                        managed_by: None,
+                        created_by: created_by.clone(),
+                    },
+                )
+                .await?;
+                let note = outcome.summary();
+                tags::set(
+                    &st.db,
+                    &branch.id,
+                    tags::ATTENTION_KEY,
+                    "blocked",
+                    &note,
+                    "loom",
+                )
+                .await
+                .ok();
+                events::record_tag(
+                    &st.db,
+                    &st.bus,
+                    &branch.id,
+                    tags::ATTENTION_KEY,
+                    "blocked",
+                    &note,
+                    "loom",
+                )
+                .await
+                .ok();
+                events::record(
+                    &st.db,
+                    &st.bus,
+                    &branch.id,
+                    "status",
+                    json!({ "status": "error", "reason": "repo setup failed" }),
+                )
+                .await
+                .ok();
+                let mut view = session_view(&st.db, &session, &branch).await?;
+                view.tracking_issue = tracking_issue;
+                return Ok(view);
+            }
+        } else {
+            tracing::info!(repo = %repo_root.display(),
+                "skipping .weaver/config.toml [setup]: repo is not allowlisted");
+            events::record(
+                &st.db,
+                &st.bus,
+                &branch.id,
+                "setup",
+                json!({ "phase": "skipped", "reason": "repo not allowlisted" }),
+            )
+            .await
+            .ok();
+        }
+    }
+
     agent::launch(
         &agent::LaunchSpec {
             branch_id: &branch.id,
@@ -1660,7 +1980,8 @@ pub async fn create_warm_session(
     };
 
     let term_session = format!("weaver-{session_id}");
-    let extra_env = agent_env::pairs(&st.db).await.unwrap_or_default();
+    let repo_cfg = repo_cfg_or_default(&repo_root);
+    let extra_env = launch_env(&st.db, &repo_root, &repo_cfg).await;
     // A warm session never carries the concierge role, so its runtime is its kind.
     agent::launch(
         &agent::LaunchSpec {
@@ -1737,7 +2058,13 @@ pub async fn adopt(st: &AppState, session: &Session, branch: &Branch) -> Result<
         let f = run_dir.join("goal.txt");
         f.exists().then_some(f)
     };
-    let extra_env = agent_env::pairs(&st.db).await.unwrap_or_default();
+    // Re-launch with the same layered env the session started with, so a resumed
+    // session keeps its per-repo / config-file environment (not just the global
+    // agent_env). Setup is NOT re-run on adopt — the worktree is already
+    // provisioned; this only resumes the agent.
+    let repo_root = PathBuf::from(&branch.repo_root);
+    let repo_cfg = repo_cfg_or_default(&repo_root);
+    let extra_env = launch_env(&st.db, &repo_root, &repo_cfg).await;
     let runtime = launch_runtime(&st.db, &session.agent_kind).await;
     agent::launch(
         &agent::LaunchSpec {
@@ -3208,6 +3535,73 @@ async fn delete_env(
 ) -> ApiResult<Json<Value>> {
     agent_env::remove(&st.db, &name).await?;
     env_envelope(&st.db).await
+}
+
+// ---------------------------------------------------------------------------
+// Per-repo environment variables
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct RepoEnvQuery {
+    /// Repo to scope to (canonical primary-worktree path), like the issue board.
+    repo_root: Option<String>,
+    /// Alternative for callers that only know a directory; resolved server-side.
+    cwd: Option<String>,
+}
+
+async fn repo_env_envelope(db: &Db, repo_root: &str) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({
+        "repo_root": repo_root,
+        "env": repo_env::list(db, repo_root).await?,
+    })))
+}
+
+/// `GET /api/repos/env?repo_root=…` — the per-repo variables' *metadata* for a
+/// repo. Names and timestamps only: values are write-only and never returned.
+async fn get_repo_env(
+    State(st): State<AppState>,
+    Query(q): Query<RepoEnvQuery>,
+) -> ApiResult<Json<Value>> {
+    let repo_root = resolve_repo_root(q.repo_root.as_deref(), q.cwd.as_deref()).await?;
+    repo_env_envelope(&st.db, &repo_root).await
+}
+
+/// Body for `PUT /api/repos/env/{name}`: the repo to scope to plus the value.
+#[derive(Debug, Deserialize)]
+struct PutRepoEnvBody {
+    repo_root: Option<String>,
+    cwd: Option<String>,
+    value: String,
+}
+
+/// `PUT /api/repos/env/{name}` — upsert one per-repo variable. The name (from the
+/// path) is validated as a shell identifier that isn't one of loom's reserved
+/// `WEAVER_`/`LOOM_` names, so it can't corrupt or shadow the launch env that
+/// exports it; the value is free-form and write-only. Returns the refreshed
+/// metadata list (no values).
+async fn put_repo_env(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<PutRepoEnvBody>,
+) -> ApiResult<Json<Value>> {
+    if let Err(why) = agent_env::validate_name(&name) {
+        return Err(AppError::bad_request(why));
+    }
+    let repo_root = resolve_repo_root(body.repo_root.as_deref(), body.cwd.as_deref()).await?;
+    repo_env::set(&st.db, &repo_root, &name, &body.value).await?;
+    repo_env_envelope(&st.db, &repo_root).await
+}
+
+/// `DELETE /api/repos/env/{name}?repo_root=…` — remove one per-repo variable. A
+/// missing name is not an error (the desired end state already holds).
+async fn delete_repo_env(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<RepoEnvQuery>,
+) -> ApiResult<Json<Value>> {
+    let repo_root = resolve_repo_root(q.repo_root.as_deref(), q.cwd.as_deref()).await?;
+    repo_env::remove(&st.db, &repo_root, &name).await?;
+    repo_env_envelope(&st.db, &repo_root).await
 }
 
 /// `POST /api/shell/restart` — reset the operator scratch shell, killing the

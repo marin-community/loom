@@ -132,6 +132,22 @@ CREATE TABLE IF NOT EXISTS agent_env (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
+-- Per-repo environment variables, layered into a session's agent terminal above
+-- the global `agent_env` (global < per-repo < the repo's own .weaver/config.toml
+-- [env]). Keyed by the canonical `repo_root` path, like `branches`/`issues`, so a
+-- launch (which has the resolved repo root) can look them up directly. Values are
+-- write-only: the API returns names + timestamps, never the value, since these
+-- hold per-repo secrets (registry tokens, database URLs). Blast-radius reduction,
+-- not isolation — in the single shared container any agent can still read the
+-- exported env (see the shared-loom design §6.4).
+CREATE TABLE IF NOT EXISTS repo_env (
+    repo_root  TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (repo_root, name)
+);
+
 -- Browser login sessions: the opaque cookie a successful GitHub/password login
 -- sets. Stored hashed like a token; named `auth_sessions` to stay clear of the
 -- agent `sessions` table above. A row is dropped on logout or once `expires_at`

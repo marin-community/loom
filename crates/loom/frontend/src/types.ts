@@ -225,6 +225,15 @@ export interface ManagedRepo {
   created_at: string;
 }
 
+/** One per-repo environment variable's metadata (`/api/repos/env`). Mirrors
+ *  loom's `repo_env::RepoEnvVar`. The value is **write-only**: it is set via PUT
+ *  but never returned (these hold per-repo secrets), so only the name and last
+ *  change time appear here. */
+export interface RepoEnvVar {
+  name: string;
+  updated_at: string;
+}
+
 /** Branch listing returned by `/api/repos/branches?cwd=...` — distinct from
  *  the tracked-branch model: this enumerates git branches in a repo on disk. */
 export interface RepoBranch {

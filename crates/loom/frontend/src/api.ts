@@ -70,6 +70,7 @@ import type {
   IdeInfo,
   AgentMetadata,
   ManagedRepo,
+  RepoEnvVar,
 } from './types';
 
 // --- Managed repos ---------------------------------------------------------
@@ -81,6 +82,32 @@ export const listRepos = () => get('/repos') as Promise<ManagedRepo[]>;
  *  store / allowlist (`POST /api/repos`). Returns the stored mapping. */
 export const registerRepo = (repo: string) =>
   post('/repos', { repo }) as Promise<ManagedRepo>;
+
+interface RepoEnvEnvelope {
+  repo_root: string;
+  env: RepoEnvVar[];
+}
+
+/** The per-repo env vars' metadata for a repo (`GET /api/repos/env`). Names and
+ *  timestamps only — values are write-only and never returned. */
+export const listRepoEnv = (repoRoot: string) =>
+  get(`/repos/env?repo_root=${encodeURIComponent(repoRoot)}`).then(
+    (r) => (r as RepoEnvEnvelope).env,
+  );
+
+/** Upsert one per-repo variable (`PUT /api/repos/env/{name}`); returns the
+ *  refreshed metadata list (no values). */
+export const setRepoEnv = (repoRoot: string, name: string, value: string) =>
+  put(`/repos/env/${encodeURIComponent(name)}`, { repo_root: repoRoot, value }).then(
+    (r) => (r as RepoEnvEnvelope).env,
+  );
+
+/** Delete one per-repo variable (`DELETE /api/repos/env/{name}`); returns the
+ *  refreshed metadata list. */
+export const deleteRepoEnv = (repoRoot: string, name: string) =>
+  del(`/repos/env/${encodeURIComponent(name)}?repo_root=${encodeURIComponent(repoRoot)}`).then(
+    (r) => (r as RepoEnvEnvelope).env,
+  );
 
 interface AgentsEnvelope {
   agents: AgentMetadata[];
