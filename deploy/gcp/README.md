@@ -20,25 +20,30 @@ up the GCE VM underneath it.
   `secrets.py` are `uv run --script` scripts (self-contained, no venv setup;
   `uv` fetches `click` on first run).
 - A domain you control, able to add an `A` record.
-- `deploy/standalone/.env`, populated by `loom setup github-app` and
-  `loom setup secrets` on your workstation — see
-  [`../README.md` "First-run login"](../README.md#first-run-login). That file
-  is the single credential handoff this deploy consumes; see
-  ["Credential handoff"](#credential-handoff) below.
+- The `loom` binary on your workstation (not the VM — see
+  ["Credential handoff"](#credential-handoff)), and `loom.toml` populated by
+  `loom setup github-app` and `loom setup secrets` — see
+  [`../README.md` "First-run login"](../README.md#first-run-login).
 
 ## Credential handoff
 
-`deploy/standalone/.env` is the single handoff contract between credential
-setup and every way of running the stack — `docker compose up` reads it
-directly; this deploy reads it too, by way of Secret Manager. `secrets.py`
-**consumes** that file; it does not collect credentials itself beyond a
-fallback prompt for operators who skip the wizard (see below).
+`loom.toml` (the typed config the shared `loom config` commands read and
+write — see `loom config --help`) is the single source of truth for every
+credential this deploy needs. `secrets.py` never hardcodes a field name: it
+runs `loom config render-env` and pushes the rendered result straight to
+Secret Manager as one blob, `LOOM_DOTENV`. `startup-script.sh` fetches that
+one secret and writes it to `deploy/standalone/.env` on the VM verbatim — the
+VM host never runs `loom` itself (only the container image has the binary)
+and never sees an individual field name either. Adding a config field is
+entirely a `crates/loom` change; nothing here needs updating for it.
 
 GCP infra placement — `PROJECT`, `REGION`, `ZONE`, `MACHINE_TYPE`,
-`LOOM_DOMAIN`, ... — is a separate, deploy-specific concern and is **not**
-part of that handoff: it stays `bootstrap.py` flags/env vars and instance
-metadata, the same way it would for any other host you chose to run the
-stack on.
+`LOOM_DOMAIN` (for the DNS-wait gate below), ... — is a separate,
+deploy-specific concern and is **not** part of that handoff: it stays
+`bootstrap.py` flags/env vars and instance metadata, the same way it would
+for any other host you chose to run the stack on. (`LOOM_DOMAIN` is *also* a
+`loom.toml` field the app itself reads — the two are naturally the same
+value, kept in sync by you, not by any code path here.)
 
 ## Run order
 
@@ -51,17 +56,14 @@ before it creates the VM.
 
 ```sh
 # 0. On your workstation (not the VM — these are daemon-less, no running loom
-#    needed yet): collect credentials into the standalone stack's .env, the
-#    handoff file everything downstream reads.
-cd deploy/standalone
-loom setup github-app --base-url https://loom.example.com --env-file .env
-loom setup secrets --env-file .env
+#    needed yet): populate loom.toml.
+loom setup github-app --base-url https://loom.example.com
+loom setup secrets
 
-cd ../gcp
+cd deploy/gcp
 
-# 1. Push those same secrets into Secret Manager, for startup-script.sh to
-#    fetch on boot. Auto-detects and ingests ../standalone/.env (from step 0)
-#    when no NAMES are given; falls back to prompting for anything missing.
+# 1. Render loom.toml and push it to Secret Manager as one blob, for
+#    startup-script.sh to fetch on boot.
 PROJECT=my-project ./secrets.py
 
 # 2. Provision the static IP, firewall, service account, and VM. Prints the
@@ -72,9 +74,9 @@ PROJECT=my-project LOOM_DOMAIN=loom.example.com ./bootstrap.py
 While `bootstrap.py` is waiting, go set the `A` record it printed at your DNS
 provider. Once it resolves, the script proceeds to create the VM. GCE runs
 `startup-script.sh` as the instance's `startup-script` metadata: it installs
-Docker, installs the `gcloud` CLI, fetches the secrets from Secret Manager,
-clones the repo, and runs `docker compose up -d --build` from
-`deploy/standalone` — unmodified.
+Docker, installs the `gcloud` CLI, fetches the `LOOM_DOTENV` blob from Secret
+Manager and writes it to `deploy/standalone/.env`, clones the repo, and runs
+`docker compose up -d --build` from `deploy/standalone` — unmodified.
 
 Watch it boot:
 
@@ -84,15 +86,19 @@ gcloud --project=my-project compute ssh loom --zone=us-central1-a \
 ```
 
 Both scripts are check-before-create, so re-running either after an
-interruption (or to pick up a new secret value) is safe. `bootstrap.py` will
-not recreate or resize an existing instance — delete it first if you need to
-change its machine type or disks.
+interruption is safe. Re-run `secrets.py` any time `loom.toml` changes to
+push the update, then re-trigger the startup script (see
+["Operations"](#operations)) to pick it up. `bootstrap.py` will not recreate
+or resize an existing instance — delete it first if you need to change its
+machine type or disks.
 
 Run `./bootstrap.py --help` and `./secrets.py --help` for the full list of
-configuration options (region, zone, machine type, disk sizes, image source,
-`--from-env`, ...) and their defaults — every `bootstrap.py` option also has a
+options and their defaults — every `bootstrap.py` option also has a
 same-named env var (`PROJECT`, `LOOM_DOMAIN`, `MACHINE_TYPE`, ...), so the
 env-var invocations above and `--flag` invocations are interchangeable.
+`secrets.py --granular` pushes each secret field to its own Secret Manager
+secret instead of the one `LOOM_DOTENV` blob, for independent rotation — see
+`./secrets.py --help`; the shipped `startup-script.sh` expects the blob.
 
 ## Manual-once checklist
 
