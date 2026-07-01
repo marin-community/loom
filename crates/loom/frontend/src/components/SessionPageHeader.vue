@@ -81,6 +81,7 @@ function repoName(p: string): string {
 // a chip instead.
 const conv = computed(() => conversationState(props.ws));
 const toneClass = computed(() => TONE_TEXT[conv.value.tone]);
+const statusMessage = computed(() => messageOf(props.ws));
 // A quiet per-tier tint for the model name — a small scannable hue on the meta
 // line (cyan haiku · green sonnet · violet opus · blue fable), muted otherwise.
 const MODEL_TINT: Record<string, string> = {
@@ -99,9 +100,9 @@ const quiet = computed(() => quietTags(props.ws));
 </script>
 
 <template>
-  <header class="mb-1.5 rounded-r border-l-2 border-transparent py-1 pl-3 pr-1">
+  <header class="mb-1 rounded-r border-l-2 border-transparent py-0.5 pl-3 pr-1">
     <!-- Row 1 — nav, title (inline rename), attention + lifecycle controls -->
-    <div class="flex items-center gap-3">
+    <div class="flex items-center gap-2.5">
       <router-link to="/" class="shrink-0 text-sm text-muted hover:text-fg">← all</router-link>
       <input
         v-if="editing"
@@ -198,19 +199,16 @@ const quiet = computed(() => quietTags(props.ws));
     <!-- Row 2 — the current-state headline (the agent's "where am I"). Full
          foreground — it's the point of the page, not chrome. -->
     <p
-      v-if="messageOf(ws)"
-      class="mt-0.5 line-clamp-2 text-sm leading-snug text-fg"
+      v-if="statusMessage"
+      class="mt-0.5 line-clamp-2 text-xs leading-snug text-fg"
       data-testid="status-message"
     >
-      {{ messageOf(ws) }}
-    </p>
-    <p v-else class="mt-0.5 text-sm text-faint">
-      No status yet — agent hasn't run <code>weaver status</code>.
+      {{ statusMessage }}
     </p>
 
     <!-- Quiet tags — free-form, deletable pills (priority, needs-rebase, …),
          never the reserved loud fill. Each × clears that tag. -->
-    <div v-if="quiet.length" class="mt-1 flex flex-wrap items-center gap-1.5">
+    <div v-if="quiet.length" class="mt-0.5 flex flex-wrap items-center gap-1.5">
       <TagPill
         v-for="t in quiet"
         :key="t.key"
@@ -223,7 +221,7 @@ const quiet = computed(() => quietTags(props.ws));
     <!-- Row 3 — one quiet meta line: repo/branch · agent, then the calm
          conversation-state + freshness pushed to the right. (When attention is
          raised the state lives loudly up on row 1 instead.) -->
-    <div class="mt-1 flex items-center gap-2 text-xs">
+    <div class="mt-1 flex items-center gap-1.5 text-xs">
       <span class="min-w-0 truncate font-mono text-muted">
         {{ repoName(ws.branch.repo_root) }}/{{ ws.branch.name }}
       </span>

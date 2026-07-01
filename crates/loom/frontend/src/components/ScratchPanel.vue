@@ -115,7 +115,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="flex min-w-0 items-center gap-1.5 text-xs" data-testid="scratch-panel">
+  <div class="flex min-w-0 items-center gap-1 text-xs" data-testid="scratch-panel">
     <ul v-if="files.length" class="flex min-w-0 flex-wrap items-center gap-1.5">
       <li v-for="f in files" :key="f.name" class="meta-chip text-fg">
         <span class="truncate">{{ f.name }}</span>
@@ -138,15 +138,17 @@ onUnmounted(() => {
          (Enter/Space) both open the file picker. -->
     <button
       type="button"
-      class="flex shrink-0 cursor-pointer items-center gap-1 rounded px-1.5 py-1 text-faint hover:bg-subtle hover:text-fg focus:outline-none focus-visible:ring-1 focus-visible:ring-accent"
-      title="Attach a file — the agent sees it as scratch/<name> (or drop one anywhere on the page)"
+      class="flex shrink-0 cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 text-faint hover:bg-subtle hover:text-fg focus:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+      :title="busy ? 'Uploading scratch file(s)…' : 'Attach a file — the agent sees it as scratch/<name> (or drop one anywhere on the page)'"
+      :aria-label="busy ? 'Uploading scratch file(s)' : 'Attach a scratch file'"
       @click="fileInput?.click()"
     >
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
         stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
       </svg>
-      <span>{{ busy ? 'Uploading…' : 'Attach' }}</span>
+      <span v-if="busy" class="text-2xs text-faint">Uploading…</span>
+      <span v-else-if="files.length" class="pill">{{ files.length }}</span>
     </button>
     <input ref="fileInput" type="file" multiple class="hidden" @change="onPick" />
 

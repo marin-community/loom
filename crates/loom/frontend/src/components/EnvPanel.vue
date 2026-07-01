@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue';
 import * as api from '../api';
 import type { EnvVar } from '../types';
+import SettingsTableSection from './SettingsTableSection.vue';
 
 // Operator-managed environment variables, exported into every agent session
 // loom launches (on top of loom's own WEAVER_*/LOOM_TOKEN). A flat name/value
@@ -94,85 +95,94 @@ const add = () =>
     <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-1.5">
       Agent environment
     </h2>
-    <p class="text-xs text-faint mb-3">
-      Variables exported into every interactive agent session loom launches (on top of
-      <code>WEAVER_API</code>/<code>LOOM_TOKEN</code>). Add tool config or secrets — a registry
-      token, <code>GH_HOST</code>, <code>ANTHROPIC_BASE_URL</code> — without rebuilding the image.
-      Changes apply to sessions launched after the save, not running ones. The one-shot judgement
-      agent runs env-stripped and is unaffected.
+    <p class="mb-3 text-xs text-faint">
+      Variables exported into new agent sessions loom launches. Changes apply to future sessions
+      only.
     </p>
 
     <p v-if="error" class="mb-3 text-sm text-block">{{ error }}</p>
     <p v-if="notice" class="mb-3 text-sm text-accent">{{ notice }}</p>
 
-    <!-- Add form. -->
-    <div class="mb-4 flex flex-wrap items-end gap-2">
-      <label class="flex flex-col gap-1">
-        <span class="text-2xs text-muted">Name</span>
-        <input
-          v-model="newName"
-          placeholder="e.g. GH_HOST"
-          data-testid="env-name"
-          class="rounded bg-input px-2 py-1 font-mono text-sm outline-none focus:ring-1 ring-accent"
-          @keyup.enter="add"
-        />
-      </label>
-      <label class="flex flex-1 flex-col gap-1">
-        <span class="text-2xs text-muted">Value</span>
-        <input
-          v-model="newValue"
-          placeholder="(value)"
-          data-testid="env-value"
-          class="rounded bg-input px-2 py-1 font-mono text-sm outline-none focus:ring-1 ring-accent"
-          @keyup.enter="add"
-        />
-      </label>
-      <button
-        class="btn-primary px-3 py-1.5 text-xs"
-        :disabled="busy === '+add' || !newNameValid"
-        data-testid="env-add"
-        @click="add"
+    <SettingsTableSection
+      :columns="['Name', 'Value', 'Actions']"
+      grid-class="md:grid-cols-[minmax(11rem,14rem)_minmax(0,1fr)_auto]"
+    >
+      <div
+        class="grid grid-cols-1 gap-2 border-b border-line px-3 py-2.5 md:grid-cols-[minmax(11rem,14rem)_minmax(0,1fr)_auto]"
       >
-        Add
-      </button>
-    </div>
-    <p v-if="newName.trim() && !newNameValid" class="-mt-2 mb-3 text-2xs text-block">
-      A name must start with a letter or underscore and contain only letters, digits, and
-      underscores, and can't start with <code>WEAVER_</code> or <code>LOOM_</code> (reserved by
-      loom).
-    </p>
+        <label class="flex flex-col gap-1 md:min-w-0">
+          <span class="text-2xs text-muted md:hidden">Name</span>
+          <input
+            v-model="newName"
+            placeholder="e.g. GH_HOST"
+            data-testid="env-name"
+            class="rounded bg-input px-2 py-1 font-mono text-sm outline-none focus:ring-1 ring-accent"
+            @keyup.enter="add"
+          />
+        </label>
+        <label class="flex flex-col gap-1 md:min-w-0">
+          <span class="text-2xs text-muted md:hidden">Value</span>
+          <input
+            v-model="newValue"
+            placeholder="(value)"
+            data-testid="env-value"
+            class="rounded bg-input px-2 py-1 font-mono text-sm outline-none focus:ring-1 ring-accent"
+            @keyup.enter="add"
+          />
+        </label>
+        <div class="flex items-center gap-2 md:justify-end">
+          <button
+            class="btn-primary px-2.5 py-1 text-xs"
+            :disabled="busy === '+add' || !newNameValid"
+            data-testid="env-add"
+            @click="add"
+          >
+            Add
+          </button>
+        </div>
+      </div>
+      <p v-if="newName.trim() && !newNameValid" class="border-b border-line px-3 py-2 text-2xs text-block">
+        A name must start with a letter or underscore and contain only letters, digits, and
+        underscores, and cannot start with <code>WEAVER_</code> or <code>LOOM_</code>.
+      </p>
 
-    <!-- Existing variables. -->
-    <div v-if="vars.length" class="overflow-hidden rounded-md border border-line bg-surface">
       <div
         v-for="v in vars"
         :key="v.name"
-        class="flex items-center gap-2 border-b border-line px-3 py-2.5 last:border-0"
+        class="grid grid-cols-1 gap-2 border-b border-line px-3 py-2.5 last:border-0 md:grid-cols-[minmax(11rem,14rem)_minmax(0,1fr)_auto]"
         data-testid="env-row"
       >
-        <code class="w-44 shrink-0 truncate font-mono text-sm" :title="v.name">{{ v.name }}</code>
-        <input
-          v-model="drafts[v.name]"
-          class="flex-1 rounded bg-input px-2 py-1 font-mono text-sm outline-none focus:ring-1 ring-accent"
-          @keyup.enter="save(v)"
-        />
-        <button
-          class="btn-primary px-2.5 py-1 text-xs"
-          :disabled="busy === v.name || !dirty(v)"
-          @click="save(v)"
-        >
-          Save
-        </button>
-        <button
-          class="btn-secondary px-2.5 py-1 text-xs"
-          :disabled="busy === v.name"
-          data-testid="env-delete"
-          @click="remove(v)"
-        >
-          Delete
-        </button>
+        <code class="truncate font-mono text-sm" :title="v.name">{{ v.name }}</code>
+        <div class="flex flex-col gap-1 md:min-w-0">
+          <span class="text-2xs text-muted md:hidden">Value</span>
+          <input
+            v-model="drafts[v.name]"
+            class="rounded bg-input px-2 py-1 font-mono text-sm outline-none focus:ring-1 ring-accent"
+            spellcheck="false"
+            autocapitalize="off"
+            autocomplete="off"
+            @keyup.enter="save(v)"
+          />
+        </div>
+        <div class="flex items-center gap-2 md:justify-end">
+          <button
+            class="btn-primary px-2.5 py-1 text-xs"
+            :disabled="busy === v.name || !dirty(v)"
+            @click="save(v)"
+          >
+            Save
+          </button>
+          <button
+            class="btn-secondary px-2.5 py-1 text-xs"
+            :disabled="busy === v.name"
+            data-testid="env-delete"
+            @click="remove(v)"
+          >
+            Delete
+          </button>
+        </div>
       </div>
-    </div>
-    <p v-else class="text-sm text-muted">No variables yet.</p>
+      <p v-if="!vars.length" class="px-3 py-2.5 text-sm text-muted">No variables yet.</p>
+    </SettingsTableSection>
   </div>
 </template>

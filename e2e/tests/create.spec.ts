@@ -1,6 +1,8 @@
 import { test, expect } from '../fixtures/weaver';
 
 test.describe('creating a session via the UI form', () => {
+  const repoPlaceholder = 'owner/name or /home/you/code/project';
+
   test('opens the form, submits, and the session appears in the list', async ({
     page,
     weaver,
@@ -8,10 +10,10 @@ test.describe('creating a session via the UI form', () => {
     await page.goto(weaver.baseUrl);
 
     // Form is hidden until "New session" is clicked.
-    await expect(page.getByPlaceholder('/home/you/code/project')).toBeHidden();
+    await expect(page.getByPlaceholder(repoPlaceholder)).toBeHidden();
     await page.getByRole('button', { name: 'New session' }).click();
 
-    const repoInput = page.getByPlaceholder('/home/you/code/project');
+    const repoInput = page.getByPlaceholder(repoPlaceholder);
     const goalInput = page.getByPlaceholder('Add a /health endpoint');
     await expect(repoInput).toBeVisible();
 
@@ -38,7 +40,7 @@ test.describe('creating a session via the UI form', () => {
     await page.goto(weaver.baseUrl);
     await page.getByRole('button', { name: 'New session' }).click();
 
-    const repoInput = page.getByPlaceholder('/home/you/code/project');
+    const repoInput = page.getByPlaceholder(repoPlaceholder);
     // The dropdown stays hidden until the repository field is focused.
     await expect(page.getByTestId('recent-repo')).toBeHidden();
     await repoInput.focus();
@@ -57,7 +59,7 @@ test.describe('creating a session via the UI form', () => {
     await page.goto(weaver.baseUrl);
     await page.getByRole('button', { name: 'New session' }).click();
 
-    await page.getByPlaceholder('/home/you/code/project').fill(weaver.repoPath);
+    await page.getByPlaceholder(repoPlaceholder).fill(weaver.repoPath);
     await page.getByPlaceholder('Add a /health endpoint').fill('Investigate the attached trace');
 
     // Drop two reference files via the (hidden) file input behind the dropper.
@@ -84,43 +86,28 @@ test.describe('creating a session via the UI form', () => {
     await page.getByRole('button', { name: 'New session' }).click();
 
     const form = page.locator('form');
-    const agent = form.getByLabel('Agent');
-    const model = form.getByLabel('Model');
-    const effort = form.getByLabel('Effort');
+    await expect(form.getByRole('radio', { name: /Claude/ })).toBeVisible();
+    await expect(form.getByRole('radio', { name: /Codex/ })).toBeVisible();
+    await expect(form.getByRole('radio', { name: /Shell/ })).toBeVisible();
 
-    await expect(agent.locator('option')).toContainText(['Claude', 'Codex', 'Shell']);
+    await form.getByRole('radio', { name: /Claude/ }).click();
+    await expect(form.getByRole('button', { name: 'Default' }).first()).toBeVisible();
+    await expect(form.getByRole('button', { name: 'Haiku' })).toBeVisible();
+    await expect(form.getByRole('button', { name: 'Sonnet' })).toBeVisible();
+    await expect(form.getByRole('button', { name: 'Opus' })).toBeVisible();
+    await expect(form.getByRole('button', { name: 'Fable' })).toBeVisible();
+    await expect(form.getByRole('button', { name: 'Max' })).toBeVisible();
 
-    await agent.selectOption('claude');
-    await expect(model.locator('option')).toContainText(['Default', 'Haiku', 'Sonnet', 'Opus', 'Fable']);
-    await expect(effort.locator('option')).toContainText([
-      'Default',
-      'Low',
-      'Medium',
-      'High',
-      'X-High',
-      'Max',
-    ]);
-
-    await agent.selectOption('codex');
-    await expect(model.locator('option')).toContainText([
-      'Default',
-      'GPT-5.5',
-      'GPT-5.4',
-      'GPT-5.4 Mini',
-      'GPT-5.3 Codex Spark',
-    ]);
-    await expect(model.locator('option', { hasText: 'Haiku' })).toHaveCount(0);
-    await expect(model.locator('option', { hasText: 'Sonnet' })).toHaveCount(0);
-    await expect(model.locator('option', { hasText: 'Opus' })).toHaveCount(0);
-    await expect(model.locator('option', { hasText: 'Fable' })).toHaveCount(0);
-    await expect(effort.locator('option')).toContainText([
-      'Default',
-      'Low',
-      'Medium',
-      'High',
-      'X-High',
-    ]);
-    await expect(effort.locator('option', { hasText: 'Max' })).toHaveCount(0);
+    await form.getByRole('radio', { name: /Codex/ }).click();
+    await expect(form.getByRole('button', { name: 'GPT-5.5' })).toBeVisible();
+    await expect(form.getByRole('button', { name: 'GPT-5.4', exact: true })).toBeVisible();
+    await expect(form.getByRole('button', { name: 'GPT-5.4 Mini' })).toBeVisible();
+    await expect(form.getByRole('button', { name: 'GPT-5.3 Codex Spark' })).toBeVisible();
+    await expect(form.getByRole('button', { name: 'Haiku' })).toHaveCount(0);
+    await expect(form.getByRole('button', { name: 'Sonnet' })).toHaveCount(0);
+    await expect(form.getByRole('button', { name: 'Opus' })).toHaveCount(0);
+    await expect(form.getByRole('button', { name: 'Fable' })).toHaveCount(0);
+    await expect(form.getByRole('button', { name: 'Max' })).toHaveCount(0);
   });
 
   test('Cancel hides the form again', async ({ page, weaver }) => {

@@ -35,13 +35,13 @@ const TABS: { key: Tab; label: string }[] = [
 <template>
   <!-- pl-0.5 mirrors the header's 2px left wash border so tab labels align
        with the title above. -->
-  <nav class="mb-2 flex items-center gap-1 border-b border-line pl-0.5 text-sm">
+  <nav class="mb-1.5 flex items-center gap-0.5 border-b border-line pl-0.5 text-xs">
     <button
       v-for="t in TABS"
       :key="t.key"
       type="button"
       :data-tab="t.key"
-      class="-mb-px border-b-2 px-2.5 py-1.5"
+      class="-mb-px border-b-2 px-2 py-1"
       :class="
         tab === t.key || (t.key === 'artifacts' && artifactsPopped)
           ? 'border-accent text-fg font-medium'
