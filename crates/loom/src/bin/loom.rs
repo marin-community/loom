@@ -373,10 +373,13 @@ struct GithubAppOpts {
     /// page's URL.
     #[arg(long)]
     no_open: bool,
-    /// Also upsert the `LOOM_GITHUB_*` variables into this env file (e.g.
-    /// `deploy/standalone/.env`). Belt-and-suspenders for a restart or a
-    /// fresh deploy — the running daemon already picks the credentials up
-    /// live from the database, no restart needed.
+    /// Also upsert the `LOOM_GITHUB_*` variables — plus `LOOM_DOMAIN` (from
+    /// `--base-url`) and, unless `--org` is set, `LOOM_OWNER_GITHUB` (the
+    /// App's owner) — into this env file (e.g. `deploy/standalone/.env`), so
+    /// it becomes a complete, self-sufficient handoff for `docker compose up`
+    /// or a fresh deploy. Belt-and-suspenders for the credentials themselves —
+    /// the running daemon already picks those up live from the database, no
+    /// restart needed.
     #[arg(long)]
     env_file: Option<std::path::PathBuf>,
 }
@@ -793,22 +796,35 @@ async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
     );
 
     if let Some(path) = &opts.env_file {
+        let domain = host_from_base_url(&base_url);
+        let app_id = conv.id.to_string();
         let existing = std::fs::read_to_string(path).unwrap_or_default();
-        let updated = loom::envfile::upsert(
-            &existing,
-            &[
-                ("LOOM_GITHUB_APP_ID", conv.id.to_string().as_str()),
-                ("LOOM_GITHUB_APP_PRIVATE_KEY", conv.pem.as_str()),
-                ("LOOM_GITHUB_WEBHOOK_SECRET", conv.webhook_secret.as_str()),
-                ("LOOM_GITHUB_CLIENT_ID", conv.client_id.as_str()),
-                ("LOOM_GITHUB_CLIENT_SECRET", conv.client_secret.as_str()),
-            ],
-        );
+        let mut updates: Vec<(&str, &str)> = vec![
+            ("LOOM_GITHUB_APP_ID", app_id.as_str()),
+            ("LOOM_GITHUB_APP_PRIVATE_KEY", conv.pem.as_str()),
+            ("LOOM_GITHUB_WEBHOOK_SECRET", conv.webhook_secret.as_str()),
+            ("LOOM_GITHUB_CLIENT_ID", conv.client_id.as_str()),
+            ("LOOM_GITHUB_CLIENT_SECRET", conv.client_secret.as_str()),
+            ("LOOM_DOMAIN", domain),
+        ];
+        if opts.org.is_none() {
+            updates.push(("LOOM_OWNER_GITHUB", conv.owner.login.as_str()));
+        }
+        let updated = loom::envfile::upsert(&existing, &updates);
         write_env_file(path, &updated)?;
         println!(
-            "Also wrote them to {} (for a fresh deploy).",
+            "Also wrote them, plus LOOM_DOMAIN, to {} (for a fresh deploy).",
             path.display()
         );
+        if opts.org.is_some() {
+            println!(
+                "Not writing LOOM_OWNER_GITHUB — the App is owned by the {} organization, but \
+                 that setting needs the individual GitHub login for the first approved \
+                 sign-in, which an org login isn't — set it yourself in {}.",
+                conv.owner.login,
+                path.display()
+            );
+        }
     }
 
     println!();
@@ -822,16 +838,23 @@ async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
     Ok(())
 }
 
-/// A default App name derived from the host in `--base-url` (`loom-<host>`,
-/// non-alphanumerics folded to `-`) — GitHub App names must be unique across
-/// all of GitHub, so this is a starting point, not a guarantee.
-fn default_app_name(base_url: &str) -> String {
-    let host = base_url
+/// The bare host from a `--base-url` like `https://loom.team.dev` or
+/// `http://localhost:7878` — no scheme, no port. What `LOOM_DOMAIN` expects
+/// (the Caddyfile in `deploy/standalone` templates it in directly).
+fn host_from_base_url(base_url: &str) -> &str {
+    base_url
         .trim_start_matches("https://")
         .trim_start_matches("http://")
         .split(['/', ':'])
         .next()
-        .unwrap_or("loom");
+        .unwrap_or("loom")
+}
+
+/// A default App name derived from the host in `--base-url` (`loom-<host>`,
+/// non-alphanumerics folded to `-`) — GitHub App names must be unique across
+/// all of GitHub, so this is a starting point, not a guarantee.
+fn default_app_name(base_url: &str) -> String {
+    let host = host_from_base_url(base_url);
     let slug: String = host
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -2133,6 +2156,25 @@ mod tests {
     fn truncate_respects_the_max_length() {
         assert_eq!(truncate("short", 10), "short");
         assert_eq!(truncate("a very long string", 6), "a ver…");
+    }
+
+    #[test]
+    fn host_from_base_url_strips_scheme_and_port() {
+        assert_eq!(host_from_base_url("https://loom.team.dev"), "loom.team.dev");
+        assert_eq!(host_from_base_url("http://localhost:7878"), "localhost");
+        assert_eq!(
+            host_from_base_url("https://loom.example.com/"),
+            "loom.example.com"
+        );
+    }
+
+    #[test]
+    fn default_app_name_folds_the_host_from_base_url() {
+        assert_eq!(
+            default_app_name("https://loom.team.dev"),
+            "loom-loom-team-dev"
+        );
+        assert_eq!(default_app_name("http://localhost:7878"), "loom-localhost");
     }
 
     /// clap's own consistency check over the full command tree — catches a

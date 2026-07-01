@@ -152,6 +152,13 @@ Running locally (loom on your own machine)? Skip the tunnel — just
 you. (`loom setup github-app --help` covers `--org` and `--env-file` too.)
 Either way, once it's done, skip straight to step 2 below.
 
+Pass `--env-file deploy/standalone/.env` (to both `loom setup github-app` and
+`loom setup secrets`) and this same `.env` becomes a complete, self-sufficient
+handoff — every credential plus `LOOM_DOMAIN` and `LOOM_OWNER_GITHUB` — that
+you can feed to a deploy: `docker compose up -d` reads it here directly, or
+hand it to a fresh [GCP deploy](gcp/README.md) with
+`deploy/gcp/secrets.py --from-env deploy/standalone/.env`.
+
 To register by hand instead:
 
 1. Register a GitHub OAuth app with callback

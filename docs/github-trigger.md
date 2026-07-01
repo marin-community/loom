@@ -129,8 +129,9 @@ same App's OAuth client also covers "Sign in with GitHub" (see
 one registration, not two. See `loom setup github-app --help` for `--org` (App
 under an organization instead of your account), `--port` (pin a port when
 tunnelling into a remote host), and `--env-file` (also write the
-`LOOM_GITHUB_*` variables into a deploy `.env`, for a fresh deploy or a
-restart).
+`LOOM_GITHUB_*` variables, plus `LOOM_DOMAIN` and — unless `--org` is set —
+`LOOM_OWNER_GITHUB`, into a deploy `.env`, for a fresh deploy or a restart; see
+[deploy/README.md "First-run login"](../deploy/README.md#first-run-login)).
 
 To register by hand instead, under **Settings → Developer settings → GitHub
 Apps → New GitHub App**:
