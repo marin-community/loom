@@ -203,7 +203,7 @@ The session goal is a branch-scoped artifact named `goal`. `weaver goal set
 Artifacts tab edit it like any other document. So the goal is versioned, renders
 through the same markdown pipeline as every artifact (projection included — `the
 breakdown is #41 #42 #43, design in [the plan](artifact:plan)` stays live), and
-carries the same margin comment layer. This is what lets the goal *shift* over a
+carries the same inline comment layer. This is what lets the goal *shift* over a
 session and still be the thing a restart or compaction re-reads — always its
 newest revision.
 

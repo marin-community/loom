@@ -86,10 +86,11 @@ const viewMode = ref<ViewMode>('preview');
 const draftContent = ref('');
 const sourceInput = ref<HTMLTextAreaElement | null>(null);
 
-// --- Margin comments ---------------------------------------------------------
+// --- Inline comments ---------------------------------------------------------
 // The rendered <article> from MarkdownView's `defineExpose({ body })`, and a
 // nonce bumped on every `@rendered` — ArtifactComments watches both to relocate
-// its anchors against the fresh DOM (source edit, ref update, theme flip).
+// its anchors against the fresh DOM (source edit, ref update, theme flip) and
+// re-place the inline thread cards it teleports into the flow.
 const commentsRef = ref<InstanceType<typeof ArtifactComments> | null>(null);
 const commentBodyEl = ref<HTMLElement | null>(null);
 const renderNonce = ref(0);
@@ -277,7 +278,7 @@ function openStream() {
       selected.value = '';
     }
   });
-  // Margin comments: forward to ArtifactComments rather than opening a second
+  // Inline comments: forward to ArtifactComments rather than opening a second
   // EventSource (the browser caps how many an origin can hold open).
   source.addEventListener('comment_added', (e) => {
     const d = JSON.parse((e as MessageEvent).data).data as { artifact?: string; thread?: number };

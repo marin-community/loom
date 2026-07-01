@@ -3,12 +3,13 @@ import type { Page } from '@playwright/test';
 
 // The Wave-style collaborative layer on artifacts: the session goal is now a
 // first-class `goal` artifact (versioned, rendered, commentable), and any
-// markdown artifact carries a Google-Docs-style margin comment layer —
-// select-to-comment, a highlighted span, a reply thread, and resolve (which
-// drops the thread out of the rendered view but keeps it in history). The
-// comment backend is exercised directly by the Rust suite; this drives the real
-// browser UI: text-quote anchoring, the CSS Custom Highlight paint, and the
-// rail.
+// markdown artifact carries an inline comment layer — select-to-comment, a
+// highlighted span, and a reply thread that renders in the document flow right
+// under the block it annotates (not a margin gutter), with resolve dropping the
+// thread out of the rendered view while keeping it in history. The comment
+// backend is exercised directly by the Rust suite; this drives the real browser
+// UI: text-quote anchoring, the CSS Custom Highlight paint, and the inline cards
+// teleported into the rendered body.
 
 const DOC = [
   '# Design notes',
@@ -74,7 +75,7 @@ test.describe('goal as an artifact', () => {
   });
 });
 
-test.describe('artifact margin comments', () => {
+test.describe('artifact inline comments', () => {
   test('select → comment → reply → resolve, with a painted highlight', async ({ page, weaver }) => {
     const session = await weaver.seedSession({ goal: 'commenting', name: 'comments' });
     await weaver.writeArtifact(session, 'design', DOC, { title: 'Design notes' });
@@ -121,11 +122,14 @@ test.describe('artifact margin comments', () => {
   });
 
   test('captures the comment UI in both themes', async ({ page, weaver }) => {
-    const session = await weaver.seedSession({ goal: 'shots', name: 'comments-shot' });
-    await weaver.writeArtifact(session, 'design', DOC, { title: 'Design notes' });
     const shotDir = process.env.WEAVER_SHOT_DIR;
 
     for (const t of ['light', 'dark'] as const) {
+      // A fresh session per theme so each shot is a clean single inline thread,
+      // not one carrying a leftover collapsed card from the previous iteration.
+      const session = await weaver.seedSession({ goal: 'shots', name: `comments-shot-${t}` });
+      await weaver.writeArtifact(session, 'design', DOC, { title: 'Design notes' });
+
       await page.addInitScript((theme) => localStorage.setItem('loom-theme', theme), t);
       await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/design`);
       await expect(page.locator('.markdown-body h1')).toContainText('Design notes');
@@ -135,7 +139,11 @@ test.describe('artifact margin comments', () => {
       const composer = page.getByTestId('comment-pending');
       await composer.locator('textarea').fill('Anchor survives edits — recovery-based re-locate?');
       await composer.getByRole('button', { name: 'Comment' }).click();
-      await expect(page.locator('[data-testid^="comment-card-"]').first()).toBeVisible();
+      // Wait for the create to land: the composer closes and the thread's own
+      // inline card (expanded, carrying the body) takes its place.
+      await expect(composer).toBeHidden();
+      const card = page.locator('[data-testid^="comment-card-"]').first();
+      await expect(card).toContainText('Anchor survives edits');
 
       if (shotDir) {
         await page.screenshot({ path: `${shotDir}/comments-${t}.png`, fullPage: false });

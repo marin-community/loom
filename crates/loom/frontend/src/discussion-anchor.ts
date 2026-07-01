@@ -25,6 +25,13 @@ export interface TextAnchor {
 /** Chars of surrounding context captured on each side for disambiguation. */
 const CONTEXT = 32;
 
+/** Marks an element as comment-layer chrome inserted into the rendered body, not
+ *  document content: anchoring skips the text inside a marked element (so a
+ *  card's own echo of a quote is never matched), and the layer stamps and finds
+ *  its placeholders by this attribute. One shared constant so the write and the
+ *  read can't silently desync on a typo. */
+export const COMMENT_UI_ATTR = 'data-weaver-comment-ui';
+
 // `Highlight` / `HighlightRegistry` / `CSS.highlights` are declared by the DOM
 // lib (lib.dom.d.ts) — we use them directly; `supportsHighlights` guards the
 // runtime where the API is absent.
@@ -48,7 +55,17 @@ interface TextMap {
 }
 
 function buildTextMap(root: HTMLElement): TextMap {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  // Skip text living inside the inline comment UI we teleport into the rendered
+  // body (thread cards, composers, the unanchored footer). It isn't document
+  // content, and letting it into the flattened text would let a quote match
+  // against a card's own echo of that quote on the next locate pass.
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(n) {
+      return n.parentElement?.closest(`[${COMMENT_UI_ATTR}]`)
+        ? NodeFilter.FILTER_REJECT
+        : NodeFilter.FILTER_ACCEPT;
+    },
+  });
   const spans: NodeSpan[] = [];
   let text = '';
   let node = walker.nextNode() as Text | null;
@@ -192,8 +209,22 @@ export function locate(root: HTMLElement, anchor: TextAnchor): Range | null {
   return rangeForWindow(map, best, best + quote.length);
 }
 
+/** The top-level block element within `root` (a direct child — paragraph,
+ *  heading, list, code fence, …) that contains `node`, or null if `node` is a
+ *  direct text child of `root` or lies outside it. The inline comment layer
+ *  inserts each thread's card as a sibling right after this block, so the
+ *  discussion reads directly under the prose it annotates. */
+export function blockContaining(root: HTMLElement, node: Node): HTMLElement | null {
+  if (!root.contains(node)) return null;
+  let el: HTMLElement | null =
+    node.nodeType === Node.TEXT_NODE ? node.parentElement : (node as HTMLElement);
+  if (!el || el === root) return null;
+  while (el.parentElement && el.parentElement !== root) el = el.parentElement;
+  return el.parentElement === root ? el : null;
+}
+
 /** Whether the browser supports the CSS Custom Highlight API. When false, the
- *  comment rail still works; spans just aren't tinted. */
+ *  inline comment cards still work; spans just aren't tinted. */
 export function supportsHighlights(): boolean {
   return typeof CSS !== 'undefined' && 'highlights' in CSS && typeof Highlight !== 'undefined';
 }

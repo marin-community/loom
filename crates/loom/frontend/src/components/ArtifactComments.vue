@@ -1,21 +1,28 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue';
+import { nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue';
 import type { Thread } from '../types';
 import { listThreads, createThread, addComment, resolveThread } from '../api';
 import {
   captureAnchor,
   locate,
+  blockContaining,
   paintHighlights,
   clearHighlights,
+  COMMENT_UI_ATTR,
   type TextAnchor,
 } from '../discussion-anchor';
-import CommentRail from './CommentRail.vue';
+import CommentThread from './CommentThread.vue';
 
-// The margin-comment controller for one artifact's rendered preview: loads
-// threads, locates their anchors in the live DOM (`discussion-anchor.ts`),
-// paints the CSS Custom Highlight spans, and positions a CommentRail card per
-// located thread. Mounted by ArtifactsPanel only in markdown preview mode —
-// editing and non-markdown kinds have no comment layer.
+// The inline-comment controller for one artifact's rendered preview. It loads
+// threads, locates each anchor in the live DOM (`discussion-anchor.ts`), paints
+// the CSS Custom Highlight spans, and — Google-Wave style — renders each thread
+// as a card *inside the document flow*, teleported into a placeholder inserted
+// right after the block it annotates. No margin gutter, so the card uses the
+// full text-column width (right for a half-screen rail) and the browser handles
+// its position; there is no scroll/resize bookkeeping to keep.
+//
+// Mounted by ArtifactsPanel only in markdown preview mode — editing and
+// non-markdown kinds have no comment layer.
 const props = defineProps<{
   sessionId: string;
   artifactName: string;
@@ -29,27 +36,31 @@ const props = defineProps<{
   renderNonce: number;
 }>();
 
-// Collapsed card height and the vertical space reserved for the one expanded
-// (active) card, used by the downward de-overlap pass below. Approximate —
-// there's no DOM measurement pass, just a reasonable reserve.
-const COLLAPSED_H = 46;
-const EXPANDED_GAP = 260;
-
 const threads = ref<Thread[]>([]);
 const activeId = ref<number | null>(null);
-const pending = ref<{ anchor: TextAnchor; top: number } | null>(null);
-let pendingRange: Range | null = null;
 
-// Raw (pre-de-overlap) card top per thread id, recomputed on scroll/resize.
-const positions = ref<Record<number, number>>({});
-// The live located ranges backing the current paint + position pass.
+// New-thread composer state: the captured anchor, the live range it came from
+// (used to place the composer under the right block), and its draft body.
+const pending = ref<{ anchor: TextAnchor } | null>(null);
+let pendingRange: Range | null = null;
+const pendingDraft = ref('');
+
+// The live located ranges backing the current paint — the click hit-test and
+// focus-scroll read them.
 const locatedThreads = ref<{ thread: Thread; range: Range }[]>([]);
 // Open threads whose anchor failed to locate, plus server-flagged `orphaned`
-// ones — read-only, listed in the rail's footer.
+// ones — read-only, shown in a footer disclosure at the end of the document.
 const orphaned = ref<Thread[]>([]);
+const showOrphaned = ref(false);
 
-// The floating "💬 Comment" button shown after a text selection inside the
-// rendered body.
+// Teleport targets: one placeholder per inline card, kept as direct children of
+// the rendered body and marked so `buildTextMap` skips their contents. Rebuilt
+// every locate cycle (a markdown re-render wipes them with the body's innerHTML).
+const threadSlots = ref<{ tid: number; thread: Thread; el: HTMLElement }[]>([]);
+const pendingSlot = ref<{ el: HTMLElement } | null>(null);
+const orphanSlot = ref<{ el: HTMLElement } | null>(null);
+
+// The floating "💬 Comment" button shown after a text selection inside the body.
 const selectionButton = ref<{ anchor: TextAnchor; top: number; left: number } | null>(null);
 const buttonEl = ref<HTMLElement | null>(null);
 
@@ -72,16 +83,38 @@ async function loadThreads() {
   runLocateCycle();
 }
 
-// --- locate + paint -------------------------------------------------------
+// --- locate + paint + place -----------------------------------------------
+
+function makeSlot(): HTMLElement {
+  const el = document.createElement('div');
+  el.setAttribute(COMMENT_UI_ATTR, '');
+  return el;
+}
+
+// Remove the placeholders we inserted last cycle. Their teleported content is
+// detached with them, but Vue holds the vnodes and re-homes each card into its
+// fresh placeholder below (keyed by thread id), so drafts and focus survive.
+function clearSlots(root: HTMLElement) {
+  for (const child of Array.from(root.children)) {
+    if (child instanceof HTMLElement && child.hasAttribute(COMMENT_UI_ATTR)) child.remove();
+  }
+}
 
 function runLocateCycle() {
   const root = props.bodyEl;
   if (!root) {
     locatedThreads.value = [];
+    threadSlots.value = [];
+    pendingSlot.value = null;
+    orphanSlot.value = null;
     orphaned.value = threads.value.filter((t) => t.status === 'orphaned');
     clearHighlights();
     return;
   }
+  clearSlots(root);
+
+  // Locate every open thread against the clean DOM (placeholders removed;
+  // `buildTextMap` also excludes them, so a leftover never pollutes the search).
   const open = threads.value.filter((t) => t.status === 'open');
   const located: { thread: Thread; range: Range }[] = [];
   const unlocated: Thread[] = [];
@@ -91,57 +124,58 @@ function runLocateCycle() {
     else unlocated.push(thread);
   }
   locatedThreads.value = located;
-  orphaned.value = [...unlocated, ...threads.value.filter((t) => t.status === 'orphaned')];
+
   const activeRange = located.find((x) => x.thread.id === activeId.value)?.range ?? null;
   paintHighlights(
     located.map((x) => x.range),
     activeRange,
   );
-  recomputePositions();
-}
 
-// --- position (cheap: no re-locate, just re-read live rect geometry) ------
+  // Place each card just after the block it annotates, in document order. When
+  // several land on the same block they stack in that order beneath it.
+  located.sort((a, b) => a.range.compareBoundaryPoints(Range.START_TO_START, b.range));
+  const lastAfter = new Map<HTMLElement, Node>();
+  const insertAfterBlock = (block: HTMLElement | null, ph: HTMLElement) => {
+    const after = block ? (lastAfter.get(block) ?? block) : root.lastChild;
+    root.insertBefore(ph, after ? after.nextSibling : null);
+    if (block) lastAfter.set(block, ph);
+  };
 
-function recomputePositions() {
-  const scroller = scrollerEl();
-  if (!scroller) return;
-  const scrollerRect = scroller.getBoundingClientRect();
-  const next: Record<number, number> = {};
-  for (const { thread, range } of locatedThreads.value) {
-    next[thread.id] = range.getBoundingClientRect().top - scrollerRect.top;
+  const slots: { tid: number; thread: Thread; el: HTMLElement }[] = [];
+  for (const { thread, range } of located) {
+    const block = blockContaining(root, range.endContainer) ?? blockContaining(root, range.startContainer);
+    const ph = makeSlot();
+    insertAfterBlock(block, ph);
+    slots.push({ tid: thread.id, thread, el: ph });
   }
-  positions.value = next;
-  if (pending.value && pendingRange) {
-    pending.value = { ...pending.value, top: pendingRange.getBoundingClientRect().top - scrollerRect.top };
+  threadSlots.value = slots;
+
+  // The new-thread composer sits under the block its selection ended in. If a
+  // re-render invalidated the range mid-compose (rare), fall back to the end so
+  // the draft is never dropped.
+  if (pending.value && pendingRange && root.contains(pendingRange.endContainer)) {
+    const block = blockContaining(root, pendingRange.endContainer);
+    const ph = makeSlot();
+    insertAfterBlock(block, ph);
+    pendingSlot.value = { el: ph };
+  } else if (pending.value) {
+    const ph = makeSlot();
+    root.appendChild(ph);
+    pendingSlot.value = { el: ph };
+  } else {
+    pendingSlot.value = null;
+  }
+
+  // Unanchored footer at the very end of the document.
+  orphaned.value = [...unlocated, ...threads.value.filter((t) => t.status === 'orphaned')];
+  if (orphaned.value.length) {
+    const ph = makeSlot();
+    root.appendChild(ph);
+    orphanSlot.value = { el: ph };
+  } else {
+    orphanSlot.value = null;
   }
 }
-
-let rafId: number | null = null;
-function scheduleRecompute() {
-  if (rafId != null) return;
-  rafId = requestAnimationFrame(() => {
-    rafId = null;
-    recomputePositions();
-  });
-}
-
-// --- cards (presentational shape for CommentRail) --------------------------
-
-const cards = computed(() => {
-  const raw = locatedThreads.value
-    .filter(({ thread }) => thread.status === 'open')
-    .map(({ thread }) => ({ thread, top: positions.value[thread.id] ?? 0 }))
-    .sort((a, b) => a.top - b.top);
-  let cursor = -Infinity;
-  const out: Array<{ thread: Thread; top: number; active: boolean; located: boolean }> = [];
-  for (const { thread, top: rawTop } of raw) {
-    const active = thread.id === activeId.value;
-    const top = Math.max(rawTop, cursor);
-    cursor = top + (active ? EXPANDED_GAP : COLLAPSED_H);
-    out.push({ thread, top, active, located: true });
-  }
-  return out;
-});
 
 // --- selection -> new comment -----------------------------------------------
 
@@ -154,6 +188,12 @@ function onMouseUp() {
   }
   const range = sel.getRangeAt(0);
   if (range.collapsed || !root.contains(range.startContainer) || !root.contains(range.endContainer)) {
+    selectionButton.value = null;
+    return;
+  }
+  // A selection inside an existing card (reply/quote text) is not a new anchor.
+  const start = range.startContainer;
+  if ((start instanceof Element ? start : start.parentElement)?.closest(`[${COMMENT_UI_ATTR}]`)) {
     selectionButton.value = null;
     return;
   }
@@ -177,9 +217,11 @@ function openComposer() {
   if (!selectionButton.value) return;
   const sel = window.getSelection();
   pendingRange = sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
-  pending.value = { anchor: selectionButton.value.anchor, top: selectionButton.value.top };
+  pending.value = { anchor: selectionButton.value.anchor };
+  pendingDraft.value = '';
   selectionButton.value = null;
   sel?.removeAllRanges();
+  runLocateCycle();
 }
 
 function onSelectionChange() {
@@ -195,12 +237,12 @@ function onDocMouseDown(e: MouseEvent) {
 
 // --- click-to-focus (best-effort hit test) ----------------------------------
 
-// Clicking a painted highlight focuses its thread's card. There's no cheap way
-// to know which highlight a click landed on directly (the CSS Custom Highlight
-// API paints without wrapper elements), so this falls back to the browser's
+// Clicking a painted highlight expands its thread. There's no cheap way to know
+// which highlight a click landed on directly (the CSS Custom Highlight API
+// paints without wrapper elements), so this falls back to the browser's
 // caret-from-point APIs and checks which located Range contains that caret.
 // Best-effort: unsupported browsers, or a click that misses the caret APIs,
-// simply do nothing — the rail list and card clicks remain the reliable path.
+// simply do nothing — the inline chips remain the reliable path.
 function onBodyClick(e: MouseEvent) {
   const sel = window.getSelection();
   if (sel && !sel.isCollapsed) return; // a drag-selection, not a plain click
@@ -234,15 +276,14 @@ function onBodyClick(e: MouseEvent) {
   if (hit) focusThread(hit.thread.id);
 }
 
-// --- rail events -------------------------------------------------------------
+// --- events ------------------------------------------------------------------
 
 function focusThread(tid: number) {
   activeId.value = tid;
   runLocateCycle();
   const entry = locatedThreads.value.find((x) => x.thread.id === tid);
-  if (!entry) return;
   const scroller = scrollerEl();
-  if (!scroller) return;
+  if (!entry || !scroller) return;
   const scrollerRect = scroller.getBoundingClientRect();
   const rect = entry.range.getBoundingClientRect();
   if (rect.top >= scrollerRect.top && rect.bottom <= scrollerRect.bottom) return;
@@ -266,9 +307,9 @@ async function onReply(payload: { tid: number; body: string }) {
     const comment = await addComment(props.sessionId, props.artifactName, payload.tid, { body });
     const t = threads.value.find((t) => t.id === payload.tid);
     if (t) t.comments = [...t.comments, comment];
-    // The reply landed — the thread's comment count grew, which is CommentRail's
-    // cue to clear that card's draft. A failure leaves the count (and the draft)
-    // untouched so the text can be resubmitted.
+    // The reply landed — the thread's comment count grew, which is the card's
+    // cue to clear its draft. A failure leaves the count (and draft) untouched
+    // so the text can be resubmitted.
   } catch (e) {
     console.warn('failed to post reply', e);
   }
@@ -286,8 +327,8 @@ async function onResolve(tid: number) {
   }
 }
 
-async function onCreate(body: string) {
-  const text = body.trim();
+async function onCreate() {
+  const text = pendingDraft.value.trim();
   if (!pending.value || !text) return;
   try {
     const thread = await createThread(props.sessionId, props.artifactName, {
@@ -297,11 +338,11 @@ async function onCreate(body: string) {
     });
     threads.value = [...threads.value, thread];
     activeId.value = thread.id;
-    // Only close the composer on success — clearing `pending` unmounts it,
-    // which is CommentRail's cue to drop the draft. A failure below leaves the
-    // composer open with its text intact for a retry.
+    // Only close the composer on success; a failure below keeps it open with
+    // the draft intact for a retry.
     pending.value = null;
     pendingRange = null;
+    pendingDraft.value = '';
     await nextTick();
     runLocateCycle();
   } catch (e) {
@@ -312,6 +353,8 @@ async function onCreate(body: string) {
 function onCancel() {
   pending.value = null;
   pendingRange = null;
+  pendingDraft.value = '';
+  runLocateCycle();
 }
 
 // --- lifecycle --------------------------------------------------------------
@@ -325,32 +368,11 @@ function detachBody(root: HTMLElement) {
   root.removeEventListener('click', onBodyClick);
 }
 
-let currentScroller: HTMLElement | null = null;
-let resizeObserver: ResizeObserver | null = null;
-function attachScroller(scroller: HTMLElement) {
-  scroller.addEventListener('scroll', scheduleRecompute, { passive: true });
-  resizeObserver = new ResizeObserver(scheduleRecompute);
-  resizeObserver.observe(scroller);
-  currentScroller = scroller;
-}
-function detachScroller() {
-  if (!currentScroller) return;
-  currentScroller.removeEventListener('scroll', scheduleRecompute);
-  resizeObserver?.disconnect();
-  resizeObserver = null;
-  currentScroller = null;
-}
-
 watch(
   () => props.bodyEl,
   (el, oldEl) => {
     if (oldEl) detachBody(oldEl);
-    detachScroller();
-    if (el) {
-      attachBody(el);
-      const scroller = el.parentElement;
-      if (scroller) attachScroller(scroller);
-    }
+    if (el) attachBody(el);
     runLocateCycle();
   },
   { immediate: true },
@@ -368,7 +390,9 @@ watch(
     activeId.value = null;
     pending.value = null;
     pendingRange = null;
+    pendingDraft.value = '';
     selectionButton.value = null;
+    showOrphaned.value = false;
     clearHighlights();
     loadThreads();
   },
@@ -376,18 +400,17 @@ watch(
 
 onMounted(() => {
   loadThreads();
-  window.addEventListener('resize', scheduleRecompute);
   document.addEventListener('selectionchange', onSelectionChange);
   document.addEventListener('mousedown', onDocMouseDown, true);
 });
 
 onBeforeUnmount(() => {
-  if (props.bodyEl) detachBody(props.bodyEl);
-  detachScroller();
-  window.removeEventListener('resize', scheduleRecompute);
+  if (props.bodyEl) {
+    detachBody(props.bodyEl);
+    clearSlots(props.bodyEl);
+  }
   document.removeEventListener('selectionchange', onSelectionChange);
   document.removeEventListener('mousedown', onDocMouseDown, true);
-  if (rafId != null) cancelAnimationFrame(rafId);
   clearHighlights();
 });
 
@@ -406,6 +429,8 @@ defineExpose({ onCommentEvent });
 </script>
 
 <template>
+  <!-- A thin overlay that hosts only the transient selection button; the thread
+       cards live inline in the document, teleported into the placeholders. -->
   <div class="pointer-events-none absolute inset-0 overflow-hidden" data-testid="artifact-comments">
     <button
       v-if="selectionButton"
@@ -419,16 +444,75 @@ defineExpose({ onCommentEvent });
     >
       💬 Comment
     </button>
+  </div>
 
-    <CommentRail
-      :cards="cards"
-      :pending="pending"
-      :orphaned="orphaned"
+  <!-- Inline thread cards, in the document flow under the block they annotate. -->
+  <Teleport v-for="slot in threadSlots" :key="slot.tid" :to="slot.el">
+    <CommentThread
+      :thread="slot.thread"
+      :active="slot.tid === activeId"
+      @focus="focusThread"
       @reply="onReply"
       @resolve="onResolve"
-      @create="onCreate"
-      @cancel="onCancel"
-      @focus="focusThread"
     />
-  </div>
+  </Teleport>
+
+  <!-- New-thread composer, inline under the selected block. -->
+  <Teleport v-if="pendingSlot" :to="pendingSlot.el">
+    <div
+      class="my-2 rounded border border-accent bg-subtle/40 p-2 text-xs ring-1 ring-accent"
+      data-testid="comment-pending"
+      @click.stop
+    >
+      <textarea
+        v-model="pendingDraft"
+        rows="2"
+        placeholder="Comment…"
+        class="w-full resize-none rounded border border-line bg-input p-1.5 text-xs text-fg outline-none focus:border-accent"
+        @click.stop
+        @mousedown.stop
+      ></textarea>
+      <div class="mt-1.5 flex items-center gap-1.5">
+        <button type="button" class="btn-primary px-2 py-1 text-2xs" @click.stop="onCreate">
+          Comment
+        </button>
+        <button type="button" class="btn-secondary px-2 py-1 text-2xs" @click.stop="onCancel">
+          Cancel
+        </button>
+      </div>
+    </div>
+  </Teleport>
+
+  <!-- Unanchored footer — read-only threads whose quote no longer locates. -->
+  <Teleport v-if="orphanSlot" :to="orphanSlot.el">
+    <div class="my-3 border-t border-line pt-2" data-testid="comment-orphaned" @click.stop>
+      <button
+        type="button"
+        class="pill flex w-full items-center justify-between px-2 py-1 text-2xs"
+        @click.stop="showOrphaned = !showOrphaned"
+      >
+        <span>Unanchored comments ({{ orphaned.length }})</span>
+        <span>{{ showOrphaned ? '▾' : '▸' }}</span>
+      </button>
+      <div v-if="showOrphaned" class="mt-1.5 space-y-2">
+        <div
+          v-for="t in orphaned"
+          :key="t.id"
+          class="rounded border border-line bg-subtle/40 p-2 text-xs"
+        >
+          <div class="truncate italic text-faint">&ldquo;{{ t.anchor.quote }}&rdquo;</div>
+          <div class="mt-0.5 truncate text-fg">
+            {{ t.comments[t.comments.length - 1]?.body }}
+          </div>
+          <button
+            type="button"
+            class="btn-secondary mt-1 px-2 py-0.5 text-2xs"
+            @click.stop="onResolve(t.id)"
+          >
+            Resolve
+          </button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
 </template>
