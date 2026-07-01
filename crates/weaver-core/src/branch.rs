@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::path::{Path, PathBuf};
 
+use crate::artifact::{self, NewRevision};
 use crate::db::{now_iso, Db};
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -158,14 +159,65 @@ pub async fn upsert(db: &Db, repo_root: &str, branch: &str, base_branch: &str) -
     insert(db, &id, repo_root, branch, base_branch).await
 }
 
-pub async fn set_goal(db: &Db, id: &str, goal: &str) -> Result<()> {
+/// Write the branch's goal: append a `goal` artifact revision (the source of
+/// truth) authored by `author` (`"user"` | `"agent"`), then refresh the
+/// denormalized `branches.goal` cache. The funnel every goal *setter* goes
+/// through; code that writes the goal artifact directly instead refreshes the
+/// cache via [`sync_goal_cache`].
+pub async fn set_goal(db: &Db, id: &str, goal: &str, author: &str) -> Result<()> {
+    let Some(branch) = get(db, id).await? else {
+        return Ok(());
+    };
+    artifact::write(
+        db,
+        &NewRevision {
+            repo_root: &branch.repo_root,
+            branch_id: Some(id),
+            name: "goal",
+            kind: "markdown",
+            title: "Goal",
+            content: goal,
+            author,
+        },
+    )
+    .await?;
+    sync_goal_cache(db, id).await
+}
+
+/// Refresh the `branches.goal` cache column from the live `goal` artifact's
+/// latest revision — the artifact is the source of truth, so this keeps the
+/// denormalized column in step. Call after any write to the goal artifact that
+/// does not go through [`set_goal`]. No-op when no goal artifact exists yet.
+pub async fn sync_goal_cache(db: &Db, id: &str) -> Result<()> {
+    let Some(branch) = get(db, id).await? else {
+        return Ok(());
+    };
+    let Some(a) = artifact::get(db, &branch.repo_root, id, "goal").await? else {
+        return Ok(());
+    };
+    let Some(version) = artifact::latest_version(db, a.id).await? else {
+        return Ok(());
+    };
     sqlx::query("UPDATE branches SET goal = ?, updated_at = ? WHERE id = ?")
-        .bind(goal)
+        .bind(&version.content)
         .bind(now_iso())
         .bind(id)
         .execute(db)
         .await?;
     Ok(())
+}
+
+/// The branch's authoritative goal: the latest `goal` artifact revision's
+/// content, or the cached column when no goal artifact exists yet. Reads the
+/// source of truth, so an in-session edit through the artifact store shows up
+/// immediately in the summary/orientation.
+pub async fn current_goal(db: &Db, branch: &Branch) -> Result<String> {
+    if let Some(a) = artifact::get(db, &branch.repo_root, &branch.id, "goal").await? {
+        if let Some(version) = artifact::latest_version(db, a.id).await? {
+            return Ok(version.content);
+        }
+    }
+    Ok(branch.goal.clone())
 }
 
 pub async fn set_title(db: &Db, id: &str, title: &str) -> Result<()> {
@@ -366,5 +418,99 @@ mod tests {
         // Idempotent — second call returns the same row.
         let b2 = resolve_from_path(&db, repo.path()).await.unwrap();
         assert_eq!(b.id, b2.id);
+    }
+
+    #[tokio::test]
+    async fn set_goal_creates_artifact_and_syncs_cache() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let b = upsert(&db, "/r", "main", "main").await.unwrap();
+        assert_eq!(b.goal, "");
+
+        set_goal(&db, &b.id, "Ship the thing", "user")
+            .await
+            .unwrap();
+
+        let a = crate::artifact::get(&db, "/r", &b.id, "goal")
+            .await
+            .unwrap()
+            .expect("goal artifact created");
+        assert_eq!(a.rev, 1);
+        assert_eq!(a.title, "Goal");
+        let v = crate::artifact::latest_version(&db, a.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(v.content, "Ship the thing");
+        assert_eq!(v.author, "user");
+
+        let refreshed = get(&db, &b.id).await.unwrap().unwrap();
+        assert_eq!(refreshed.goal, "Ship the thing");
+    }
+
+    #[tokio::test]
+    async fn set_goal_twice_appends_rev_and_cache_follows() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let b = upsert(&db, "/r", "main", "main").await.unwrap();
+
+        set_goal(&db, &b.id, "First goal", "user").await.unwrap();
+        set_goal(&db, &b.id, "Second goal", "agent").await.unwrap();
+
+        let a = crate::artifact::get(&db, "/r", &b.id, "goal")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.rev, 2);
+        let v = crate::artifact::latest_version(&db, a.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(v.content, "Second goal");
+        assert_eq!(v.author, "agent");
+
+        let refreshed = get(&db, &b.id).await.unwrap().unwrap();
+        assert_eq!(refreshed.goal, "Second goal");
+    }
+
+    #[tokio::test]
+    async fn current_goal_reads_artifact_even_when_cache_is_stale() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let b = upsert(&db, "/r", "main", "main").await.unwrap();
+        set_goal(&db, &b.id, "Original goal", "user").await.unwrap();
+
+        // Write a new artifact revision directly (bypassing set_goal), so the
+        // cached `branches.goal` column goes stale.
+        crate::artifact::write(
+            &db,
+            &crate::artifact::NewRevision {
+                repo_root: "/r",
+                branch_id: Some(&b.id),
+                name: "goal",
+                kind: "markdown",
+                title: "Goal",
+                content: "Edited in place",
+                author: "user",
+            },
+        )
+        .await
+        .unwrap();
+
+        let stale = get(&db, &b.id).await.unwrap().unwrap();
+        assert_eq!(stale.goal, "Original goal", "cache not yet refreshed");
+
+        // current_goal reads the artifact's latest revision, not the stale cache.
+        assert_eq!(current_goal(&db, &stale).await.unwrap(), "Edited in place");
+
+        // sync_goal_cache catches the cache column up.
+        sync_goal_cache(&db, &b.id).await.unwrap();
+        let synced = get(&db, &b.id).await.unwrap().unwrap();
+        assert_eq!(synced.goal, "Edited in place");
+    }
+
+    #[tokio::test]
+    async fn current_goal_falls_back_to_cache_when_no_artifact() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let mut b = upsert(&db, "/r", "main", "main").await.unwrap();
+        b.goal = "Column-only goal".to_string();
+        assert_eq!(current_goal(&db, &b).await.unwrap(), "Column-only goal");
     }
 }

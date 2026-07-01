@@ -10,7 +10,7 @@ use anyhow::{anyhow, bail, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::{json, Value};
 
-use weaver_core::{artifact, branch, config, db, events, issue, tags};
+use weaver_core::{artifact, branch, config, db, discussion, events, issue, tags};
 
 #[derive(Parser)]
 #[command(
@@ -290,6 +290,48 @@ enum ArtifactCmd {
         #[arg(long)]
         repo: bool,
     },
+    /// Comment on an artifact: anchor a new discussion thread to a quoted
+    /// span, or reply to an existing one.
+    ///
+    /// Without `--thread`, `--quote` is required and opens a new thread
+    /// anchored to that text (plus optional `--prefix`/`--suffix` context for
+    /// disambiguation), with `<body>` as its first comment. With `--thread
+    /// <id>`, `<body>` is appended as the next reply. The CLI always comments
+    /// as `agent` — the human side of the conversation comes through the API.
+    Comment {
+        /// The artifact name.
+        name: String,
+        /// Reply to this existing thread instead of starting a new one.
+        #[arg(long)]
+        thread: Option<i64>,
+        /// The text the new thread anchors to. Required unless `--thread`.
+        #[arg(long)]
+        quote: Option<String>,
+        /// A little context just before the quote, for disambiguation.
+        #[arg(long, default_value = "")]
+        prefix: String,
+        /// A little context just after the quote, for disambiguation.
+        #[arg(long, default_value = "")]
+        suffix: String,
+        /// The comment text. Joined with spaces.
+        body: Vec<String>,
+    },
+    /// Resolve a discussion thread on an artifact.
+    Resolve {
+        /// The artifact name.
+        name: String,
+        /// The thread id (see `weaver artifact threads`).
+        thread_id: i64,
+    },
+    /// List an artifact's discussion threads, each with its comments. Open
+    /// threads only by default; `--all` also shows resolved/orphaned ones.
+    Threads {
+        /// The artifact name.
+        name: String,
+        /// Include resolved and orphaned threads too.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -491,7 +533,7 @@ async fn cmd_goal(cmd: Option<GoalCmd>) -> Result<()> {
     let db = open_db().await?;
     let b = branch::resolve(&db).await?;
     let Some(GoalCmd::Set { text, file }) = cmd else {
-        println!("{}", b.goal);
+        println!("{}", branch::current_goal(&db, &b).await?);
         return Ok(());
     };
     // A `--file` (or `-` text) reads from disk/stdin; otherwise join the args.
@@ -506,7 +548,7 @@ async fn cmd_goal(cmd: Option<GoalCmd>) -> Result<()> {
     if goal.is_empty() {
         bail!("a goal is required — pass text, --file <path>, or pipe via '-'");
     }
-    branch::set_goal(&db, &b.id, &goal).await?;
+    branch::set_goal(&db, &b.id, &goal, "agent").await?;
     if b.title.is_empty() {
         let title = branch::derive_title(&goal);
         branch::set_title(&db, &b.id, &title).await?;
@@ -542,8 +584,9 @@ async fn render_summary(db: &db::Db, b: &branch::Branch) -> Result<String> {
 
     // Each section trails the command that drills into it, so the summary
     // doubles as a map of where to look next.
-    let goal = if !b.goal.is_empty() {
-        b.goal.clone()
+    let resolved_goal = branch::current_goal(db, b).await?;
+    let goal = if !resolved_goal.is_empty() {
+        resolved_goal
     } else if !b.title.is_empty() {
         b.title.clone()
     } else {
@@ -581,6 +624,47 @@ async fn render_summary(db: &db::Db, b: &branch::Branch) -> Result<String> {
         many => {
             let names = many.iter().map(|a| a.name.as_str()).collect::<Vec<_>>();
             let _ = writeln!(out, "Artifacts: {}  (weaver artifact ls)", names.join(", "));
+        }
+    }
+
+    // Open discussion: every open thread across the visible artifacts, newest
+    // first. Resolved/orphaned threads are excluded — this is "what's waiting
+    // on me", not a full discussion log (`weaver artifact threads <name>` for
+    // that). Silent when there's nothing open, so a quiet branch's summary
+    // doesn't grow an empty header.
+    let mut open_threads: Vec<(&str, discussion::Thread)> = Vec::new();
+    for a in &artifacts {
+        let threads = discussion::list_for_artifact(db, a.id, false).await?;
+        open_threads.extend(threads.into_iter().map(|t| (a.name.as_str(), t)));
+    }
+    if !open_threads.is_empty() {
+        open_threads
+            .sort_by(|(_, a), (_, b)| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+        out.push('\n');
+        let _ = writeln!(out, "## Open discussion");
+        let total = open_threads.len();
+        for (name, t) in open_threads.iter().take(SUMMARY_TASK_CAP) {
+            let _ = writeln!(
+                out,
+                "> {}",
+                truncate(&t.anchor_quote.replace('\n', " "), 90)
+            );
+            match t.comments.last() {
+                Some(c) => {
+                    let _ = writeln!(
+                        out,
+                        "— {}: {}  (weaver artifact threads {name})",
+                        c.author,
+                        truncate(&c.body.replace('\n', " "), 140)
+                    );
+                }
+                None => {
+                    let _ = writeln!(out, "—  (weaver artifact threads {name})");
+                }
+            }
+        }
+        if total > SUMMARY_TASK_CAP {
+            let _ = writeln!(out, "…and {} more", total - SUMMARY_TASK_CAP);
         }
     }
 
@@ -761,9 +845,10 @@ async fn cmd_status(level: Option<String>, message: String) -> Result<()> {
     if !b.title.is_empty() {
         println!("title:       {}", b.title);
     }
+    let goal = branch::current_goal(&db, &b).await?;
     println!(
         "goal:        {}",
-        if b.goal.is_empty() { "(none)" } else { &b.goal }
+        if goal.is_empty() { "(none)" } else { &goal }
     );
     let attention = resolve_attention(&db, &b.id).await?;
     let status = if b.description.is_empty() {
@@ -1280,6 +1365,13 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
                 },
             )
             .await?;
+            // `goal` is the canonical goal artifact when branch-scoped — keep the
+            // denormalized `branches.goal` cache column in sync.
+            if a.name == "goal" {
+                if let Some(id) = branch_id {
+                    branch::sync_goal_cache(&db, id).await?;
+                }
+            }
             events::record_local(
                 &db,
                 &b.id,
@@ -1385,6 +1477,140 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
             };
             println!("deleted {} ({scope}, was rev {})", a.name, a.rev);
         }
+        ArtifactCmd::Comment {
+            name,
+            thread,
+            quote,
+            prefix,
+            suffix,
+            body,
+        } => {
+            let a = artifact::get(&db, &b.repo_root, &b.id, name.trim())
+                .await?
+                .ok_or_else(|| {
+                    anyhow!("no artifact '{}' — see `weaver artifact ls`", name.trim())
+                })?;
+            let body = body.join(" ");
+            if body.trim().is_empty() {
+                bail!("a comment body is required");
+            }
+            match thread {
+                Some(thread_id) => {
+                    ensure_thread_on_artifact(&db, thread_id, a.id, &a.name).await?;
+                    let c = discussion::add_comment(&db, thread_id, "agent", &body).await?;
+                    events::record_local(
+                        &db,
+                        &b.id,
+                        "comment_added",
+                        json!({
+                            "artifact": a.name,
+                            "thread": thread_id,
+                            "seq": c.seq,
+                            "author": "agent",
+                        }),
+                    )
+                    .await?;
+                    println!(
+                        "added comment #{} to thread {thread_id} on {}",
+                        c.seq, a.name
+                    );
+                }
+                None => {
+                    let quote = quote.ok_or_else(|| {
+                        anyhow!(
+                            "--quote is required to start a new thread \
+                             (or pass --thread <id> to reply)"
+                        )
+                    })?;
+                    let t = discussion::create_thread(
+                        &db,
+                        &discussion::NewThread {
+                            artifact_id: a.id,
+                            base_rev: a.rev,
+                            anchor_quote: &quote,
+                            anchor_prefix: &prefix,
+                            anchor_suffix: &suffix,
+                            author: "agent",
+                            body: &body,
+                        },
+                    )
+                    .await?;
+                    events::record_local(
+                        &db,
+                        &b.id,
+                        "comment_added",
+                        json!({
+                            "artifact": a.name,
+                            "thread": t.id,
+                            "seq": 1,
+                            "author": "agent",
+                        }),
+                    )
+                    .await?;
+                    println!("opened thread {} on {} (rev {})", t.id, a.name, a.rev);
+                }
+            }
+        }
+        ArtifactCmd::Resolve { name, thread_id } => {
+            let a = artifact::get(&db, &b.repo_root, &b.id, name.trim())
+                .await?
+                .ok_or_else(|| {
+                    anyhow!("no artifact '{}' — see `weaver artifact ls`", name.trim())
+                })?;
+            ensure_thread_on_artifact(&db, thread_id, a.id, &a.name).await?;
+            discussion::resolve(&db, thread_id).await?;
+            events::record_local(
+                &db,
+                &b.id,
+                "comment_resolved",
+                json!({ "artifact": a.name, "thread": thread_id }),
+            )
+            .await?;
+            println!("resolved thread {thread_id} on {}", a.name);
+        }
+        ArtifactCmd::Threads { name, all } => {
+            let a = artifact::get(&db, &b.repo_root, &b.id, name.trim())
+                .await?
+                .ok_or_else(|| {
+                    anyhow!("no artifact '{}' — see `weaver artifact ls`", name.trim())
+                })?;
+            let threads = discussion::list_for_artifact(&db, a.id, all).await?;
+            if threads.is_empty() {
+                let scope = if all { "" } else { "open " };
+                println!("(no {scope}threads on {})", a.name);
+                return Ok(());
+            }
+            for t in &threads {
+                println!(
+                    "#{} [{}] \"{}\"",
+                    t.id,
+                    t.status,
+                    truncate(&t.anchor_quote, 70)
+                );
+                for c in &t.comments {
+                    println!("    {}: {}", c.author, c.body);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Confirm a discussion thread belongs to `artifact_id`, so a mistyped or
+/// stale thread id on a different artifact fails loudly instead of silently
+/// commenting/resolving the wrong discussion. Returns nothing — callers
+/// already have what they need (the thread id, the artifact).
+async fn ensure_thread_on_artifact(
+    db: &db::Db,
+    thread_id: i64,
+    artifact_id: i64,
+    artifact_name: &str,
+) -> Result<()> {
+    let t = discussion::get_thread(db, thread_id)
+        .await?
+        .ok_or_else(|| anyhow!("no thread #{thread_id}"))?;
+    if t.artifact_id != artifact_id {
+        bail!("thread #{thread_id} does not belong to artifact '{artifact_name}'");
     }
     Ok(())
 }

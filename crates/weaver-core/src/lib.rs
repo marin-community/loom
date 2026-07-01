@@ -7,6 +7,7 @@ pub mod artifact;
 pub mod branch;
 pub mod config;
 pub mod db;
+pub mod discussion;
 pub mod events;
 pub mod git;
 pub mod github;

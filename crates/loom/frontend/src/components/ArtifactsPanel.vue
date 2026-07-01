@@ -5,6 +5,7 @@ import { getArtifacts, getArtifact, putArtifact, deleteArtifact } from '../api';
 import type { ArtifactMeta, ArtifactView } from '../types';
 import MarkdownView from './MarkdownView.vue';
 import HtmlArtifactView from './HtmlArtifactView.vue';
+import ArtifactComments from './ArtifactComments.vue';
 
 // The artifacts surface, as a self-contained panel: a list of the agent's
 // out-of-repo documents (designs, reports, the `plan`) on the left, a viewer on
@@ -84,6 +85,29 @@ type ViewMode = 'preview' | 'source';
 const viewMode = ref<ViewMode>('preview');
 const draftContent = ref('');
 const sourceInput = ref<HTMLTextAreaElement | null>(null);
+
+// --- Inline comments ---------------------------------------------------------
+// The rendered <article> from MarkdownView's `defineExpose({ body })`, and a
+// nonce bumped on every `@rendered` — ArtifactComments watches both to relocate
+// its anchors against the fresh DOM (source edit, ref update, theme flip) and
+// re-place the inline thread cards it teleports into the flow.
+const commentsRef = ref<InstanceType<typeof ArtifactComments> | null>(null);
+const commentBodyEl = ref<HTMLElement | null>(null);
+const renderNonce = ref(0);
+function onMarkdownRendered(el: HTMLElement | null) {
+  commentBodyEl.value = el;
+  renderNonce.value++;
+}
+// Same gate MarkdownView/ArtifactComments mount under. Reset the stashed body
+// element when it flips off (Source, editing, a non-markdown artifact) so a
+// later remount never briefly hands ArtifactComments a stale, detached node
+// from the last preview mount before the fresh `@rendered` arrives.
+const showComments = computed(
+  () => !!view.value && isMarkdown.value && viewMode.value === 'preview' && !editing.value,
+);
+watch(showComments, (shown) => {
+  if (!shown) commentBodyEl.value = null;
+});
 
 // Load an artifact (optionally a specific revision) into the viewer. `keepMode`
 // refreshes content without resetting the preview/source choice — for a live
@@ -253,6 +277,16 @@ function openStream() {
       draftContent.value = '';
       selected.value = '';
     }
+  });
+  // Inline comments: forward to ArtifactComments rather than opening a second
+  // EventSource (the browser caps how many an origin can hold open).
+  source.addEventListener('comment_added', (e) => {
+    const d = JSON.parse((e as MessageEvent).data).data as { artifact?: string; thread?: number };
+    commentsRef.value?.onCommentEvent('comment_added', d);
+  });
+  source.addEventListener('comment_resolved', (e) => {
+    const d = JSON.parse((e as MessageEvent).data).data as { artifact?: string; thread?: number };
+    commentsRef.value?.onCommentEvent('comment_resolved', d);
   });
 }
 
@@ -490,12 +524,23 @@ onUnmounted(() => {
           ><code>{{ view.content }}</code></pre>
 
           <MarkdownView
-            v-if="view && isMarkdown && viewMode === 'preview' && !editing"
+            v-if="showComments"
             :id="props.id"
             :path="pseudoPath"
             :source="view.content"
             :refs="view.refs.issues"
             class="h-full w-full"
+            @rendered="onMarkdownRendered"
+          />
+
+          <ArtifactComments
+            v-if="showComments"
+            ref="commentsRef"
+            :session-id="props.id"
+            :artifact-name="selected"
+            :rev="view.meta.rev"
+            :body-el="commentBodyEl"
+            :render-nonce="renderNonce"
           />
 
           <HtmlArtifactView

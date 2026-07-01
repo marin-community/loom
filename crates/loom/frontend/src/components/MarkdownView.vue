@@ -27,6 +27,8 @@ const props = defineProps<{
 
 const router = useRouter();
 
+const emit = defineEmits<{ rendered: [el: HTMLElement | null] }>();
+
 const body = ref<HTMLElement | null>(null);
 const error = ref('');
 const rendering = ref(false);
@@ -50,6 +52,10 @@ async function render() {
       body.value.innerHTML = html;
       await nextTick();
       await renderMermaid(body.value, theme.value === 'dark');
+      // Every (re)render — source/refs/theme flip — reshuffles the DOM, so a
+      // parent hosting margin comments (ArtifactComments) needs to know to
+      // relocate its anchors against the fresh nodes.
+      emit('rendered', body.value);
     }
   } catch (e) {
     if (mine === runId) error.value = (e as Error).message;
@@ -86,6 +92,10 @@ function onClick(e: MouseEvent) {
     block: 'start',
   });
 }
+
+// Let a parent (ArtifactComments) reach the rendered <article> directly —
+// e.g. to attach a mouseup listener for selection-to-comment.
+defineExpose({ body });
 </script>
 
 <template>

@@ -76,8 +76,14 @@ watch(
       class="rounded border border-line bg-surface"
       data-testid="session-goal-panel"
     >
-      <header class="border-b border-line px-4 py-2.5 text-2xs font-semibold uppercase tracking-wider text-muted">
-        Goal
+      <header class="flex flex-wrap items-center gap-2 border-b border-line px-4 py-2.5">
+        <div class="text-2xs font-semibold uppercase tracking-wider text-muted">Goal</div>
+        <router-link
+          :to="`/s/${ws.id}/artifacts/goal`"
+          class="ml-auto text-xs text-accent hover:underline"
+        >
+          Open in Artifacts →
+        </router-link>
       </header>
       <div data-testid="session-goal" class="px-1 py-1">
         <MarkdownView

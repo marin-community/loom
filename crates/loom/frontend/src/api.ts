@@ -70,6 +70,10 @@ import type {
   IdeInfo,
   AgentMetadata,
   ManagedRepo,
+  Thread,
+  NewThreadBody,
+  Comment,
+  NewCommentBody,
   RepoEnvVar,
 } from './types';
 
@@ -174,6 +178,27 @@ export const deleteArtifact = (id: string, name: string) =>
 
 /** Availability of the session's embedded editor (code-server). */
 export const ideInfo = (id: string) => get(`/sessions/${id}/ide-info`) as Promise<IdeInfo>;
+
+// --- Discussion (margin comments) -------------------------------------------
+
+/** Every thread on an artifact — open, resolved, and orphaned alike. */
+export const listThreads = (id: string, name: string) =>
+  get(`/sessions/${id}/artifacts/${encodeURIComponent(name)}/threads`) as Promise<Thread[]>;
+
+/** Open a new thread anchored to a quoted span, seeded with its first comment. */
+export const createThread = (id: string, name: string, body: NewThreadBody) =>
+  post(`/sessions/${id}/artifacts/${encodeURIComponent(name)}/threads`, body) as Promise<Thread>;
+
+/** Append a reply to an existing thread. */
+export const addComment = (id: string, name: string, tid: number, body: NewCommentBody) =>
+  post(
+    `/sessions/${id}/artifacts/${encodeURIComponent(name)}/threads/${tid}/comments`,
+    body,
+  ) as Promise<Comment>;
+
+/** Mark a thread resolved. */
+export const resolveThread = (id: string, name: string, tid: number) =>
+  post(`/sessions/${id}/artifacts/${encodeURIComponent(name)}/threads/${tid}/resolve`, {}) as Promise<Thread>;
 
 /** Type a message into the session's agent pane and, by default, submit it with
  *  Enter to trigger a round (the same primitive the `loom` CLI's `send` wraps).

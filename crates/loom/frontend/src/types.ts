@@ -204,6 +204,59 @@ export interface ArtifactWriteBody {
   content: string;
   title?: string;
   kind?: string;
+  /** The revision the edit was based on, for conflict detection. */
+  base_rev?: number;
+}
+
+// --- Discussion (margin comments) -------------------------------------------
+// Google-Docs-style comment threads anchored to a quoted span of an artifact's
+// rendered markdown. Mirrors weaver-api's discussion DTOs (`dto.rs`).
+
+/** Where a thread's comment attaches: the quoted text plus enough surrounding
+ *  context (`prefix`/`suffix`) for the frontend anchoring engine to relocate
+ *  it in the rendered DOM after later edits. */
+export interface Anchor {
+  quote: string;
+  prefix: string;
+  suffix: string;
+}
+
+/** One reply in a thread. */
+export interface Comment {
+  seq: number;
+  /** `agent` | `user`. */
+  author: string;
+  body: string;
+  created_at: string;
+}
+
+/** A discussion thread on an artifact span: its anchor, status, and comments
+ *  (oldest first). */
+export interface Thread {
+  id: number;
+  /** The artifact revision the anchor was taken from. */
+  base_rev: number;
+  anchor: Anchor;
+  /** `open` | `resolved` | `orphaned` (its anchor no longer locates in the
+   *  current rendered content). */
+  status: string;
+  created_at: string;
+  resolved_at: string | null;
+  comments: Comment[];
+}
+
+/** Body for `POST /api/sessions/{id}/artifacts/{name}/threads`: open a new
+ *  thread anchored to a quoted span, seeded with its first comment. */
+export interface NewThreadBody {
+  base_rev: number;
+  anchor: Anchor;
+  body: string;
+}
+
+/** Body for `POST /api/sessions/{id}/artifacts/{name}/threads/{tid}/comments`:
+ *  append a reply to an existing thread. */
+export interface NewCommentBody {
+  body: string;
 }
 
 export interface RecentRepo {

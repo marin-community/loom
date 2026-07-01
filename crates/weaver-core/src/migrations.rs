@@ -67,6 +67,16 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "overlooker_state",
         include_str!("../migrations/0010_overlooker_state.sql"),
     ),
+    (
+        11,
+        "discussion",
+        include_str!("../migrations/0011_discussion.sql"),
+    ),
+    (
+        12,
+        "goal_artifact",
+        include_str!("../migrations/0012_goal_artifact.sql"),
+    ),
 ];
 
 /// Apply every pending migration, bringing the database up to the latest schema.
@@ -582,5 +592,95 @@ mod tests {
         // Idempotent: a second pass detects the new shape and does nothing.
         migrate_issues_to_repo_scope(&pool).await.unwrap();
         assert_eq!(table_columns(&pool, "issues").await.unwrap(), cols);
+    }
+
+    /// 0012 backfills each non-empty `branches.goal` into a branch-scoped `goal`
+    /// artifact at rev 1 (authored `user`), leaves an empty-goal branch alone,
+    /// and its `NOT EXISTS` guards make a re-run of the SQL a no-op.
+    #[tokio::test]
+    async fn goal_artifact_migration_backfills_existing_goals() {
+        let pool = empty_pool().await;
+        ensure_indicator(&pool).await.unwrap();
+        // Stand up the schema through 0011, then seed branches as a pre-0012
+        // database would carry them — a goal in the column, no `goal` artifact.
+        for (version, name, sql) in MIGRATIONS.iter().take_while(|(v, _, _)| *v < 12) {
+            for stmt in split_statements(sql) {
+                sqlx::query(&stmt).execute(&pool).await.unwrap();
+            }
+            sqlx::query(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+            )
+            .bind(version)
+            .bind(*name)
+            .bind("2026-01-01T00:00:00.000Z")
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO branches (id, repo_root, branch, goal)
+             VALUES ('b1', '/repo', 'feature', '# Ship the thing')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO branches (id, repo_root, branch, goal) VALUES ('b2', '/repo', 'calm', '')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        run(&pool).await.unwrap();
+
+        // b1's goal became a branch-scoped `goal`/`markdown` artifact, rev 1,
+        // authored `user`, with the column's content.
+        let (aid, kind, title): (i64, String, String) = sqlx::query_as(
+            "SELECT id, kind, title FROM artifacts WHERE branch_id = 'b1' AND name = 'goal'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(kind, "markdown");
+        assert_eq!(title, "Goal");
+        let (rev, author, content): (i64, String, String) = sqlx::query_as(
+            "SELECT rev, author, content FROM artifact_versions WHERE artifact_id = ?",
+        )
+        .bind(aid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rev, 1);
+        assert_eq!(author, "user");
+        assert_eq!(content, "# Ship the thing");
+
+        // The empty-goal branch got no artifact.
+        let b2: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM artifacts WHERE branch_id = 'b2' AND name = 'goal'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(b2, 0);
+
+        // The backfill SQL is itself idempotent (the `NOT EXISTS` guards) —
+        // re-executing both statements adds no envelope and no second revision.
+        let sql = MIGRATIONS.iter().find(|(v, _, _)| *v == 12).unwrap().2;
+        for stmt in split_statements(sql) {
+            sqlx::query(&stmt).execute(&pool).await.unwrap();
+        }
+        let envelopes: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE name = 'goal'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(envelopes, 1);
+        let versions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM artifact_versions WHERE artifact_id = ?")
+                .bind(aid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(versions, 1);
     }
 }

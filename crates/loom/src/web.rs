@@ -98,16 +98,18 @@ use crate::{
     overlooker as ov_engine, repo, repo_env, setup,
 };
 use weaver_api::{
-    AddUserReq, AgentOneshotReq, ArtifactMeta, ArtifactRefs, ArtifactView, ArtifactWriteBody,
-    AuthMethods, BranchView, CreateIssueReq, CreateOverlookerReq, CreateRepoIssueReq, CreateReq,
-    CreateTokenReq, CreatedTokenView, GithubConfigView, IssueRefStatus, IssueView, LoginReq,
-    MeView, OverlookerRunView, OverlookerView, PatchIssueReq, PatchOverlookerReq, PatchSessionReq,
-    ProgramView, RunOverlookerReq, ScratchUpload, SendReq, SessionView, SetGithubConfigReq,
-    SetPasswordReq, TagReq, TokenView, UserView,
+    AddUserReq, AgentOneshotReq, AnchorDto, ArtifactMeta, ArtifactRefs, ArtifactView,
+    ArtifactWriteBody, AuthMethods, BranchView, CommentDto, CreateIssueReq, CreateOverlookerReq,
+    CreateRepoIssueReq, CreateReq, CreateTokenReq, CreatedTokenView, GithubConfigView,
+    IssueRefStatus, IssueView, LoginReq, MeView, NewCommentBody, NewThreadBody, OverlookerRunView,
+    OverlookerView, PatchIssueReq, PatchOverlookerReq, PatchSessionReq, ProgramView,
+    RunOverlookerReq, ScratchUpload, SendReq, SessionView, SetGithubConfigReq, SetPasswordReq,
+    TagReq, ThreadDto, TokenView, UserView,
 };
 use weaver_core::artifact::{self, Artifact};
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::Branch;
+use weaver_core::discussion;
 use weaver_core::issue::Issue;
 use weaver_core::overlooker::{self as ov, Overlooker};
 use weaver_core::tags;
@@ -135,6 +137,10 @@ pub struct AppError {
     status: StatusCode,
     message: String,
     details: Option<Value>,
+    /// Extra keys merged into the body alongside `error` (top-level, not
+    /// nested under `details`) — for callers whose wire contract is a flat
+    /// object, e.g. the artifact write-conflict `{ "error", "latest" }`.
+    fields: Option<Value>,
 }
 
 impl AppError {
@@ -143,6 +149,7 @@ impl AppError {
             status,
             message: message.into(),
             details: None,
+            fields: None,
         }
     }
     fn bad_request(message: impl Into<String>) -> Self {
@@ -156,6 +163,12 @@ impl AppError {
     }
     fn with_details(mut self, details: Value) -> Self {
         self.details = Some(details);
+        self
+    }
+    /// Merge `fields` (must be a JSON object) into the response body
+    /// top-level, alongside `error`.
+    fn with_fields(mut self, fields: Value) -> Self {
+        self.fields = Some(fields);
         self
     }
     pub fn message(&self) -> &str {
@@ -173,6 +186,11 @@ impl IntoResponse for AppError {
         let mut body = json!({ "error": self.message });
         if let Some(details) = self.details {
             body["details"] = details;
+        }
+        if let Some(Value::Object(fields)) = self.fields {
+            if let Value::Object(map) = &mut body {
+                map.extend(fields);
+            }
         }
         (self.status, Json(body)).into_response()
     }
@@ -448,6 +466,18 @@ pub fn router(state: AppState) -> Router {
             get(get_artifact)
                 .put(write_artifact)
                 .delete(delete_artifact),
+        )
+        .route(
+            "/sessions/{id}/artifacts/{name}/threads",
+            get(list_threads).post(create_thread),
+        )
+        .route(
+            "/sessions/{id}/artifacts/{name}/threads/{tid}/comments",
+            post(add_comment),
+        )
+        .route(
+            "/sessions/{id}/artifacts/{name}/threads/{tid}/resolve",
+            post(resolve_thread),
         )
         .route(
             "/sessions/{id}/scratch",
@@ -1179,7 +1209,7 @@ async fn create_session_core(
     let branch = branch_mod::upsert(&st.db, &repo_root_str, &branch_name, &base).await?;
     branch_mod::set_title(&st.db, &branch.id, &title).await?;
     if !goal.is_empty() {
-        branch_mod::set_goal(&st.db, &branch.id, &goal).await?;
+        branch_mod::set_goal(&st.db, &branch.id, &goal, "user").await?;
     }
     if !description.is_empty() {
         branch_mod::set_description(&st.db, &branch.id, &description).await?;
@@ -1711,7 +1741,7 @@ async fn patch_session(
         branch_mod::set_title(&st.db, &branch.id, title).await?;
     }
     if let Some(goal) = &req.goal {
-        branch_mod::set_goal(&st.db, &branch.id, goal).await?;
+        branch_mod::set_goal(&st.db, &branch.id, goal, "user").await?;
         tokio::fs::write(db::run_dir(&session.id).join("goal.txt"), goal)
             .await
             .ok();
@@ -2056,7 +2086,24 @@ pub async fn adopt(st: &AppState, session: &Session, branch: &Branch) -> Result<
     };
     let goal_file = {
         let f = run_dir.join("goal.txt");
-        f.exists().then_some(f)
+        if f.exists() {
+            // Refresh from the authoritative goal artifact before the spawned
+            // shell cats this file in as the opening prompt, so a restart picks
+            // up the newest goal rather than reseeding a stale on-disk copy. A
+            // failure here is non-fatal — the existing goal.txt is still a valid
+            // prompt — but log it so a silently-stale goal is diagnosable.
+            match branch_mod::current_goal(&st.db, branch).await {
+                Ok(goal) => {
+                    if let Err(e) = tokio::fs::write(&f, &goal).await {
+                        tracing::warn!(error = %e, "failed to refresh goal.txt on adopt");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "failed to read goal for adopt refresh"),
+            }
+            Some(f)
+        } else {
+            None
+        }
     };
     // Re-launch with the same layered env the session started with, so a resumed
     // session keeps its per-repo / config-file environment (not just the global
@@ -2335,6 +2382,15 @@ async fn write_artifact(
     let existing = artifact::get(&st.db, &branch.repo_root, &branch.id, &name)
         .await?
         .ok_or_else(|| AppError::not_found("artifact"))?;
+    // Optimistic-concurrency guard: a caller that read a specific revision
+    // and supplies `base_rev` gets rejected if someone else has written since
+    // — rather than silently clobbering that newer revision. Omitting
+    // `base_rev` force-writes, same as before this guard existed.
+    if let Some(b) = body.base_rev {
+        if b != existing.rev {
+            return Err(AppError::conflict("stale").with_fields(json!({ "latest": existing.rev })));
+        }
+    }
     // Keep the existing kind/title unless the body overrides them.
     let kind = body.kind.unwrap_or_else(|| existing.kind.clone());
     let title = body.title.unwrap_or_else(|| existing.title.clone());
@@ -2354,6 +2410,11 @@ async fn write_artifact(
         },
     )
     .await?;
+    // `goal` is the canonical goal artifact — keep the denormalized
+    // `branches.goal` cache column in sync with what was just written.
+    if a.name == "goal" {
+        branch_mod::sync_goal_cache(&st.db, &branch.id).await?;
+    }
     events::record(
         &st.db,
         &st.bus,
@@ -2380,6 +2441,9 @@ async fn delete_artifact(
     let a = artifact::get(&st.db, &branch.repo_root, &branch.id, &name)
         .await?
         .ok_or_else(|| AppError::not_found("artifact"))?;
+    // FKs are off on the pool, so `ON DELETE CASCADE` doesn't fire — clean up
+    // the artifact's discussion threads/comments explicitly before/with it.
+    discussion::delete_for_artifact(&st.db, a.id).await?;
     artifact::delete(&st.db, a.id).await?;
     events::record(
         &st.db,
@@ -2391,6 +2455,157 @@ async fn delete_artifact(
     .await
     .ok();
     Ok(Json(json!({ "deleted": true, "name": a.name })))
+}
+
+// ---------------------------------------------------------------------------
+// Discussion — resolvable, stand-off comment threads anchored to a quoted span
+// of an artifact. See `weaver_core::discussion` and docs/artifacts.md. Name
+// resolution mirrors the artifact endpoints above (branch-scoped, then
+// repo-shared); API-originated threads/comments are authored `"user"`.
+// ---------------------------------------------------------------------------
+
+/// Map a domain [`discussion::Thread`] to its wire [`ThreadDto`].
+fn thread_dto(t: &discussion::Thread) -> ThreadDto {
+    ThreadDto {
+        id: t.id,
+        base_rev: t.base_rev,
+        anchor: AnchorDto {
+            quote: t.anchor_quote.clone(),
+            prefix: t.anchor_prefix.clone(),
+            suffix: t.anchor_suffix.clone(),
+        },
+        status: t.status.clone(),
+        created_at: t.created_at.clone(),
+        resolved_at: t.resolved_at.clone(),
+        comments: t
+            .comments
+            .iter()
+            .map(|c| CommentDto {
+                seq: c.seq,
+                author: c.author.clone(),
+                body: c.body.clone(),
+                created_at: c.created_at.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// Resolve `{name}` to an artifact visible from the session (branch-scoped then
+/// repo-shared, the way `get_artifact` does), returning the session's branch
+/// alongside it. Shared by every thread endpoint.
+async fn session_artifact(st: &AppState, key: &str, name: &str) -> ApiResult<(Branch, Artifact)> {
+    let (_, branch) = require_session(&st.db, key).await?;
+    let a = artifact::get(&st.db, &branch.repo_root, &branch.id, name)
+        .await?
+        .ok_or_else(|| AppError::not_found("artifact"))?;
+    Ok((branch, a))
+}
+
+/// Resolve a thread by id, confirming it belongs to the named artifact the
+/// session can see — so a thread id can't be probed across artifacts or
+/// sessions.
+async fn session_thread(
+    st: &AppState,
+    key: &str,
+    name: &str,
+    tid: i64,
+) -> ApiResult<(Branch, Artifact, discussion::Thread)> {
+    let (branch, a) = session_artifact(st, key, name).await?;
+    let thread = discussion::get_thread(&st.db, tid)
+        .await?
+        .filter(|t| t.artifact_id == a.id)
+        .ok_or_else(|| AppError::not_found("thread"))?;
+    Ok((branch, a, thread))
+}
+
+/// `GET /sessions/{id}/artifacts/{name}/threads` — every thread on an
+/// artifact, open and resolved, each with its comments.
+async fn list_threads(
+    State(st): State<AppState>,
+    Path((key, name)): Path<(String, String)>,
+) -> ApiResult<Json<Vec<ThreadDto>>> {
+    let (_, a) = session_artifact(&st, &key, &name).await?;
+    let threads = discussion::list_for_artifact(&st.db, a.id, true).await?;
+    Ok(Json(threads.iter().map(thread_dto).collect()))
+}
+
+/// `POST /sessions/{id}/artifacts/{name}/threads` — open a new thread anchored
+/// to a quoted span, seeded with its first comment. Author is `"user"`.
+async fn create_thread(
+    State(st): State<AppState>,
+    Path((key, name)): Path<(String, String)>,
+    Json(body): Json<NewThreadBody>,
+) -> ApiResult<Json<ThreadDto>> {
+    let (branch, a) = session_artifact(&st, &key, &name).await?;
+    let thread = discussion::create_thread(
+        &st.db,
+        &discussion::NewThread {
+            artifact_id: a.id,
+            base_rev: body.base_rev,
+            anchor_quote: &body.anchor.quote,
+            anchor_prefix: &body.anchor.prefix,
+            anchor_suffix: &body.anchor.suffix,
+            author: "user",
+            body: &body.body,
+        },
+    )
+    .await?;
+    events::record(
+        &st.db,
+        &st.bus,
+        &branch.id,
+        "comment_added",
+        json!({ "artifact": name, "thread": thread.id, "seq": 1, "author": "user" }),
+    )
+    .await
+    .ok();
+    Ok(Json(thread_dto(&thread)))
+}
+
+/// `POST /sessions/{id}/artifacts/{name}/threads/{tid}/comments` — append a
+/// reply to an existing thread. Author is `"user"`.
+async fn add_comment(
+    State(st): State<AppState>,
+    Path((key, name, tid)): Path<(String, String, i64)>,
+    Json(body): Json<NewCommentBody>,
+) -> ApiResult<Json<CommentDto>> {
+    let (branch, _a, thread) = session_thread(&st, &key, &name, tid).await?;
+    let comment = discussion::add_comment(&st.db, thread.id, "user", &body.body).await?;
+    events::record(
+        &st.db,
+        &st.bus,
+        &branch.id,
+        "comment_added",
+        json!({ "artifact": name, "thread": thread.id, "seq": comment.seq, "author": "user" }),
+    )
+    .await
+    .ok();
+    Ok(Json(CommentDto {
+        seq: comment.seq,
+        author: comment.author,
+        body: comment.body,
+        created_at: comment.created_at,
+    }))
+}
+
+/// `POST /sessions/{id}/artifacts/{name}/threads/{tid}/resolve` — mark a
+/// thread resolved.
+async fn resolve_thread(
+    State(st): State<AppState>,
+    Path((key, name, tid)): Path<(String, String, i64)>,
+) -> ApiResult<Json<Value>> {
+    let (branch, _a, thread) = session_thread(&st, &key, &name, tid).await?;
+    discussion::resolve(&st.db, thread.id).await?;
+    events::record(
+        &st.db,
+        &st.bus,
+        &branch.id,
+        "comment_resolved",
+        json!({ "artifact": name, "thread": thread.id }),
+    )
+    .await
+    .ok();
+    Ok(Json(json!({ "resolved": true })))
 }
 
 // ---------------------------------------------------------------------------
@@ -2721,7 +2936,7 @@ async fn patch_branch(
         branch_mod::set_title(&st.db, &branch.id, title).await?;
     }
     if let Some(goal) = &req.goal {
-        branch_mod::set_goal(&st.db, &branch.id, goal).await?;
+        branch_mod::set_goal(&st.db, &branch.id, goal, "user").await?;
     }
     if let Some(description) = &req.description {
         branch_mod::set_description(&st.db, &branch.id, description).await?;

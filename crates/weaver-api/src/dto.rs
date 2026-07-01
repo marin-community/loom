@@ -260,6 +260,64 @@ pub struct ArtifactView {
     pub refs: ArtifactRefs,
 }
 
+// ---------------------------------------------------------------------------
+// Discussion — resolvable, stand-off comment threads anchored to a quoted span
+// of an artifact. The anchor is a W3C-style text-quote selector (quote +
+// surrounding context), not a char offset, so it survives edits made
+// elsewhere in the document. See `weaver_core::discussion` and
+// docs/artifacts.md.
+// ---------------------------------------------------------------------------
+
+/// A thread's anchor: the quoted span plus a little surrounding context for
+/// disambiguation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnchorDto {
+    pub quote: String,
+    pub prefix: String,
+    pub suffix: String,
+}
+
+/// One reply in a thread, as the API exposes it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommentDto {
+    pub seq: i64,
+    /// `agent` | `user`.
+    pub author: String,
+    pub body: String,
+    pub created_at: String,
+}
+
+/// A discussion thread on an artifact span: its anchor, status, and comments
+/// (oldest first), as the GET/POST thread endpoints expose it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadDto {
+    pub id: i64,
+    /// The artifact revision the anchor was taken from.
+    pub base_rev: i64,
+    pub anchor: AnchorDto,
+    /// `open` | `resolved` | `orphaned`.
+    pub status: String,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+    pub comments: Vec<CommentDto>,
+}
+
+/// Body for `POST /api/sessions/{id}/artifacts/{name}/threads`: open a new
+/// thread anchored to a quoted span, seeded with its first comment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewThreadBody {
+    pub base_rev: i64,
+    pub anchor: AnchorDto,
+    pub body: String,
+}
+
+/// Body for `POST /api/sessions/{id}/artifacts/{name}/threads/{tid}/comments`:
+/// append a reply to an existing thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewCommentBody {
+    pub body: String,
+}
+
 /// One overlooker, as the API exposes it. The JSON-bearing columns
 /// (`trigger`, `scope`, `params`) are returned as **parsed** structured JSON so
 /// a UI never re-parses strings; `capabilities` is a real array; the rest is the
@@ -592,6 +650,12 @@ pub struct ArtifactWriteBody {
     pub title: Option<String>,
     #[serde(default)]
     pub kind: Option<String>,
+    /// Optimistic-concurrency guard: if set and it doesn't match the
+    /// artifact's current latest revision, the server rejects the write with
+    /// 409 instead of silently overwriting a newer edit. Omitted (the
+    /// default) force-writes as before — backward compatible.
+    #[serde(default)]
+    pub base_rev: Option<i64>,
 }
 
 /// Body for `POST /api/overlookers`. JSON-bearing fields take structured JSON

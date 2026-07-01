@@ -332,6 +332,21 @@
   text-decoration: underline;
 }
 
+/* Margin comment highlights — painted via the CSS Custom Highlight API
+   (`discussion-anchor.ts`'s `paintHighlights`), not wrapper elements, so a
+   re-render never fights them. `::highlight()` is a global pseudo-element (the
+   `CSS.highlights` registry isn't scoped to an element), so these rules must
+   live in a non-scoped stylesheet — this file, not a component's `<style
+   scoped>`. A soft amber wash marks every commented span; the focused thread's
+   span gets the cooler info wash on top so it reads as "this one" without
+   competing with the reserved attention amber elsewhere in the UI. */
+::highlight(weaver-comment) {
+  background-color: var(--attn-soft);
+}
+::highlight(weaver-comment-active) {
+  background-color: var(--info-soft);
+}
+
 /* Rendered mermaid diagram + the parse-error fallback. */
 .markdown-body .mermaid-diagram {
   display: flex;
