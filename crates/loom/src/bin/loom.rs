@@ -118,8 +118,10 @@ enum Cmd {
         cmd: SetupCmd,
     },
 
-    /// The typed `loom.toml` `loom setup` writes, and everything derived from
-    /// it.
+    /// The typed `loom.toml` `loom setup` writes and everything derived from
+    /// it, plus `set` — a direct-to-sqlite write of the daemon's own runtime
+    /// `settings` table (the same keys `weaver config set` exposes over
+    /// HTTP), with no server required.
     ///
     /// `loom.toml` is the single authored source of truth for every
     /// credential/setting — the shared contract a deploy (e.g. the GCP
@@ -128,6 +130,7 @@ enum Cmd {
     ///     loom config render-env                # -> deploy/standalone/.env
     ///     loom config secret-names               # the secret fields' ENV_NAMEs
     ///     loom config push-secrets --backend gcp --project my-project
+    ///     loom config set auth.cookie_secure true  # direct-to-sqlite, no server needed
     Config {
         #[command(subcommand)]
         cmd: ConfigCmd,
@@ -376,6 +379,14 @@ struct GithubAppOpts {
     /// account.
     #[arg(long)]
     org: Option<String>,
+    /// The GitHub login approved to sign in first (`LOOM_OWNER_GITHUB`).
+    /// Required with `--org`: an org install's App is owned by the org, but
+    /// the first approved sign-in needs an individual login, which the org's
+    /// own login isn't — prompted for interactively if omitted. Optional
+    /// without `--org`, where it defaults to your own account (the one that
+    /// confirms App creation).
+    #[arg(long)]
+    owner: Option<String>,
     /// Local port for the manifest-flow confirmation callback. `0` (default)
     /// picks a free port; pin one when you're tunnelling in to a remote host
     /// (e.g. `ssh -L 8765:localhost:8765 …`, then `--port 8765`).
@@ -412,6 +423,13 @@ struct ConfigPathOpts {
 /// against — see [`Cmd::Config`]. `render-env` and `push-secrets` resolve
 /// every field from `loom.toml` *or* a same-named env var (env wins) — set
 /// one to override a single invocation without editing the file.
+///
+/// `set` is a different contract — the runtime `settings` table
+/// (`weaver_core::config::REGISTRY`, the same one `weaver config set` writes
+/// over HTTP) rather than `loom.toml` — written straight to the daemon's
+/// sqlite database with no server needed. This is what
+/// `deploy/standalone/docker-compose.yml`'s `loom-init` uses to seed the
+/// security-relevant auth settings before loom itself starts listening.
 #[derive(Subcommand)]
 enum ConfigCmd {
     /// Render `loom.toml` as a dotenv file (e.g. `deploy/standalone/.env`).
@@ -421,6 +439,14 @@ enum ConfigCmd {
     /// Push each secret field's value to a secret-manager backend. Never
     /// echoes a value.
     PushSecrets(PushSecretsOpts),
+    /// Set a runtime setting directly in the sqlite `settings` table — no
+    /// running server needed (unlike `weaver config set`, which needs one).
+    Set {
+        /// Dotted key, e.g. `auth.cookie_secure` (see the settings pane, or
+        /// `weaver_core::config::REGISTRY`, for the full list).
+        key: String,
+        value: String,
+    },
 }
 
 #[derive(Args)]
@@ -747,6 +773,36 @@ async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
         .clone()
         .unwrap_or_else(|| default_app_name(&base_url));
 
+    // `--org` needs an explicit owner: the manifest flow's own confirming
+    // account (`conv.owner.login`, used below when this is `None`) is the org
+    // itself for an org install, which isn't a usable `LOOM_OWNER_GITHUB` — a
+    // fresh database with no owner seeded locks everyone out (see
+    // `db::seed_owner`). Checked before opening the callback listener so a
+    // non-interactive, misconfigured run fails fast rather than after the
+    // operator has already gone through the browser confirmation.
+    let org_owner: Option<String> = match (
+        &opts.org,
+        opts.owner
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+    ) {
+        (Some(_), Some(o)) => Some(o.to_string()),
+        (Some(org), None) => {
+            use std::io::IsTerminal;
+            if std::io::stdin().is_terminal() {
+                Some(prompt_owner(org)?)
+            } else {
+                bail!(
+                    "--org {org} needs --owner <your-github-login> — an org install's App is \
+                     owned by the org, but the first approved sign-in needs an individual \
+                     login, which the org's own login isn't"
+                );
+            }
+        }
+        (None, owner) => owner.map(str::to_string),
+    };
+
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", opts.port))
         .await
         .with_context(|| format!("binding the local callback server on port {}", opts.port))?;
@@ -854,33 +910,26 @@ async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
 
     let domain = host_from_base_url(&base_url);
     let app_id = conv.id.to_string();
-    let mut updates: Vec<(&str, &str)> = vec![
+    // For a personal install the confirming account (`conv.owner.login`) *is*
+    // the right owner; for `--org` it's the org's own login, so `org_owner`
+    // (required, resolved above) is used instead.
+    let owner_login = org_owner.as_deref().unwrap_or(conv.owner.login.as_str());
+    let updates: Vec<(&str, &str)> = vec![
         ("LOOM_GITHUB_APP_ID", app_id.as_str()),
         ("LOOM_GITHUB_APP_PRIVATE_KEY", conv.pem.as_str()),
         ("LOOM_GITHUB_WEBHOOK_SECRET", conv.webhook_secret.as_str()),
         ("LOOM_GITHUB_CLIENT_ID", conv.client_id.as_str()),
         ("LOOM_GITHUB_CLIENT_SECRET", conv.client_secret.as_str()),
         ("LOOM_DOMAIN", domain),
+        ("LOOM_OWNER_GITHUB", owner_login),
     ];
-    if opts.org.is_none() {
-        updates.push(("LOOM_OWNER_GITHUB", conv.owner.login.as_str()));
-    }
     loom::loom_config::upsert(&opts.config.config, &updates)
         .context("writing the App credentials into loom.toml")?;
     println!(
-        "Also wrote them, plus LOOM_DOMAIN, to {} — run `loom config render-env` to produce a \
-         deploy `.env` from it.",
+        "Also wrote them, plus LOOM_DOMAIN and LOOM_OWNER_GITHUB ({owner_login}), to {} — run \
+         `loom config render-env` to produce a deploy `.env` from it.",
         opts.config.config.display()
     );
-    if opts.org.is_some() {
-        println!(
-            "Not writing LOOM_OWNER_GITHUB — the App is owned by the {} organization, but that \
-             setting needs the individual GitHub login for the first approved sign-in, which an \
-             org login isn't — set it yourself in {}.",
-            conv.owner.login,
-            opts.config.config.display()
-        );
-    }
 
     println!();
     println!("Next steps:");
@@ -978,6 +1027,27 @@ async fn cmd_setup_secrets(opts: SecretsOpts) -> Result<()> {
     Ok(())
 }
 
+/// Prompt (plain, not hidden — a GitHub login isn't a secret) for the
+/// individual owner login an `--org` install needs, since the org itself
+/// can't be `LOOM_OWNER_GITHUB`.
+fn prompt_owner(org: &str) -> Result<String> {
+    use std::io::Write;
+    print!(
+        "The App will be owned by the {org} organization, but the first approved sign-in needs \
+         your individual GitHub login (LOOM_OWNER_GITHUB) — enter it: "
+    );
+    std::io::stdout().flush().ok();
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .context("reading the owner login")?;
+    let owner = input.trim().to_string();
+    if owner.is_empty() {
+        bail!("an owner GitHub login is required for an --org install");
+    }
+    Ok(owner)
+}
+
 /// Prompt for a secret without echoing it to the terminal. An empty answer
 /// means "skip" (leave the current value, if any, alone).
 fn prompt_secret(name: &str) -> Result<Option<String>> {
@@ -997,6 +1067,41 @@ async fn run_config(cmd: ConfigCmd) -> Result<()> {
         ConfigCmd::RenderEnv(opts) => cmd_config_render_env(opts),
         ConfigCmd::SecretNames(opts) => cmd_config_secret_names(opts),
         ConfigCmd::PushSecrets(opts) => cmd_config_push_secrets(opts).await,
+        ConfigCmd::Set { key, value } => cmd_config_set(key, value).await,
+    }
+}
+
+/// `loom config set` — write one runtime setting straight into the sqlite
+/// `settings` table, no running server needed. The direct-db counterpart to
+/// `weaver config set`, which does the same thing over `PATCH /api/settings`
+/// against a running daemon — the form a deploy's boot sequence needs, since
+/// it must seed the auth settings *before* loom starts listening.
+async fn cmd_config_set(key: String, value: String) -> Result<()> {
+    if let Err(why) = weaver_core::config::validate(&key, &value) {
+        bail!("{key}: {why}");
+    }
+    let db = loom::db::connect(&weaver_core::db::default_db_path())
+        .await
+        .context("opening loom's database")?;
+    weaver_core::config::apply(&db, &[(key.clone(), Some(value))])
+        .await
+        .with_context(|| format!("writing setting '{key}'"))?;
+    println!("set {key}");
+    Ok(())
+}
+
+/// Warn to stderr, naming each field, when an ambient env var silently
+/// outranked `loom.toml` for this run — the footgun a deploy workstation hits
+/// when a personal `GH_TOKEN`/`ANTHROPIC_API_KEY` etc. happens to be exported
+/// (see `loom_config::resolve_reporting_shadows`).
+fn warn_shadowed_env(shadowed: &[&str], config_path: &std::path::Path) {
+    for name in shadowed {
+        eprintln!(
+            "warning: ambient env var {name} overrides the value for {name} already set in {} \
+             for this run — that's the value being rendered/pushed. Unset {name}, or edit the \
+             file, if that's not what you want.",
+            config_path.display()
+        );
     }
 }
 
@@ -1004,8 +1109,9 @@ async fn run_config(cmd: ConfigCmd) -> Result<()> {
 /// override) and write it out as a dotenv file, the only place the
 /// field→`ENV_NAME` mapping is applied.
 fn cmd_config_render_env(opts: RenderEnvOpts) -> Result<()> {
-    let config = loom::loom_config::resolve(&opts.config.config)
+    let (config, shadowed) = loom::loom_config::resolve_reporting_shadows(&opts.config.config)
         .with_context(|| format!("loading {}", opts.config.config.display()))?;
+    warn_shadowed_env(&shadowed, &opts.config.config);
     let rendered = loom::loom_config::render_env(&config);
     if opts.out == "-" {
         print!("{rendered}");
@@ -1040,8 +1146,9 @@ fn cmd_config_secret_names(opts: ConfigPathOpts) -> Result<()> {
 /// Manager backend, secret id == `ENV_NAME`. Values travel over the
 /// subprocess's stdin, never a command-line argument or a log line.
 async fn cmd_config_push_secrets(opts: PushSecretsOpts) -> Result<()> {
-    let config = loom::loom_config::resolve(&opts.config.config)
+    let (config, shadowed) = loom::loom_config::resolve_reporting_shadows(&opts.config.config)
         .with_context(|| format!("loading {}", opts.config.config.display()))?;
+    warn_shadowed_env(&shadowed, &opts.config.config);
     let mut pushed = Vec::new();
     let mut skipped = Vec::new();
     for field in loom::loom_config::FIELDS.iter().filter(|f| f.secret) {
@@ -2570,6 +2677,42 @@ mod tests {
         assert!(body.contains("\"\"\"scaffolded — "));
         // A second `new` of the same name refuses rather than clobbering.
         assert!(cmd_overlooker_new("scaffolded".to_string()).await.is_err());
+        std::env::remove_var("WEAVER_HOME");
+    }
+
+    /// `loom config set` writes straight to the sqlite `settings` table — no
+    /// HTTP, no running server — the fix for the deploy `loom-init` one-shot,
+    /// which must seed the auth settings before loom starts listening.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn config_set_writes_directly_to_sqlite_with_no_server() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("WEAVER_HOME", home.path());
+
+        cmd_config_set("auth.cookie_secure".to_string(), "true".to_string())
+            .await
+            .unwrap();
+
+        let db = loom::db::connect(&weaver_core::db::default_db_path())
+            .await
+            .unwrap();
+        assert_eq!(
+            weaver_core::config::get(&db, "auth.cookie_secure")
+                .await
+                .as_deref(),
+            Some("true")
+        );
+
+        // An invalid value for a registered (bool) key is rejected before
+        // touching the database.
+        let err = cmd_config_set("auth.cookie_secure".to_string(), "sideways".to_string())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("auth.cookie_secure"),
+            "error should name the key: {err}"
+        );
+
         std::env::remove_var("WEAVER_HOME");
     }
 

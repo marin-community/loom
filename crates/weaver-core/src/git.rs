@@ -13,11 +13,20 @@ pub struct DiffStat {
 }
 
 async fn git(dir: &Path, args: &[&str]) -> Result<String> {
+    git_with_envs(dir, args, &[]).await
+}
+
+/// Same as [`git`], plus extra environment variables for the subprocess — how a
+/// short-lived credential is threaded into one invocation (see
+/// [`token_auth_envs`]) without ever appearing in `args` (which the failure log
+/// below prints).
+async fn git_with_envs(dir: &Path, args: &[&str], envs: &[(&str, String)]) -> Result<String> {
     tracing::debug!(?args, dir = %dir.display(), "running git");
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
         .args(args)
+        .envs(envs.iter().map(|(k, v)| (*k, v.as_str())))
         .output()
         .await
         .context("failed to spawn git")?;
@@ -63,15 +72,40 @@ pub async fn repo_root(dir: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(first))
 }
 
+/// Environment variables that make one git invocation authenticate with
+/// `token` over HTTPS, via git's env-var config mechanism
+/// (`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`, since git 2.31) rather than a CLI
+/// arg or a persisted `.git/config` entry — so the token never appears in
+/// `argv` (visible to `ps`, and to the `args`-logging `git()`/`git_with_envs`
+/// failure path above), a process listing, or the repo's remote URL. Scoped to
+/// this one subprocess only; nothing is written to disk.
+fn token_auth_envs(token: &str) -> Vec<(&'static str, String)> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let header = format!(
+        "AUTHORIZATION: basic {}",
+        STANDARD.encode(format!("x-access-token:{token}"))
+    );
+    vec![
+        ("GIT_CONFIG_COUNT", "1".to_string()),
+        ("GIT_CONFIG_KEY_0", "http.extraheader".to_string()),
+        ("GIT_CONFIG_VALUE_0", header),
+    ]
+}
+
 /// Clone `url` into `dest`, or fetch into it when `dest` is already a clone —
 /// idempotent, so two session launches racing to acquire the same managed repo
-/// converge instead of one erroring on a populated directory. Authentication
-/// rides the ambient git credential helper (the deploy image wires `GH_TOKEN`);
-/// no credentials are passed or stored here.
-pub async fn clone(url: &str, dest: &Path) -> Result<()> {
+/// converge instead of one erroring on a populated directory.
+///
+/// `token` authenticates this one clone/fetch with a caller-supplied credential
+/// (e.g. a GitHub App installation token) via [`token_auth_envs`]. Pass `None`
+/// to fall back to the ambient git credential helper (the deploy image wires
+/// `GH_TOKEN`) — the only behavior before per-call tokens existed, still used
+/// for repos with no App installation.
+pub async fn clone(url: &str, dest: &Path, token: Option<&str>) -> Result<()> {
+    let envs = token.map(token_auth_envs).unwrap_or_default();
     // An existing clone (its `.git` is present) is refreshed, not re-cloned.
     if dest.join(".git").exists() {
-        git(dest, &["fetch", "--all", "--prune"]).await?;
+        git_with_envs(dest, &["fetch", "--all", "--prune"], &envs).await?;
         tracing::info!(dest = %dest.display(), "fetched existing clone");
         return Ok(());
     }
@@ -85,6 +119,7 @@ pub async fn clone(url: &str, dest: &Path) -> Result<()> {
     let dest_str = dest.to_string_lossy();
     let out = Command::new("git")
         .args(["clone", url, &dest_str])
+        .envs(envs.iter().map(|(k, v)| (*k, v.as_str())))
         .output()
         .await
         .context("failed to spawn git clone")?;
@@ -568,6 +603,26 @@ pub async fn read_blob(work_dir: &Path, rev: &str, path: &str) -> Result<Option<
 mod tests {
     use super::*;
 
+    /// The env-var-borne `http.extraheader` decodes to exactly
+    /// `x-access-token:<token>` — the Basic-auth shape a GitHub App
+    /// installation token expects — and nothing about it (an `Authorization`
+    /// header, a config key) leaks into a persisted git config, since these are
+    /// only ever passed as subprocess env, never written to `.git/config`.
+    #[test]
+    fn token_auth_envs_carries_a_correctly_shaped_extraheader() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let envs = token_auth_envs("ghs_abc123");
+        let pairs: std::collections::HashMap<_, _> = envs.into_iter().collect();
+        assert_eq!(pairs["GIT_CONFIG_COUNT"], "1");
+        assert_eq!(pairs["GIT_CONFIG_KEY_0"], "http.extraheader");
+        let header = &pairs["GIT_CONFIG_VALUE_0"];
+        let encoded = header
+            .strip_prefix("AUTHORIZATION: basic ")
+            .expect("header should be a Basic auth line");
+        let decoded = String::from_utf8(STANDARD.decode(encoded).unwrap()).unwrap();
+        assert_eq!(decoded, "x-access-token:ghs_abc123");
+    }
+
     async fn run(dir: &Path, args: &[&str]) -> String {
         git(dir, args).await.unwrap()
     }
@@ -659,7 +714,7 @@ mod tests {
         // First call clones into a nested <root>/owner/name path (parent created).
         let root = tempfile::tempdir().unwrap();
         let dest = root.path().join("acme").join("widgets");
-        clone(&bare_url, &dest).await.unwrap();
+        clone(&bare_url, &dest, None).await.unwrap();
         assert!(dest.join(".git").exists(), "clone made a working clone");
         assert!(dest.join("a.txt").exists(), "clone checked out content");
 
@@ -671,7 +726,7 @@ mod tests {
 
         // Idempotent: the second call fetches rather than erroring, and the new
         // commit is now reachable via origin.
-        clone(&bare_url, &dest).await.unwrap();
+        clone(&bare_url, &dest, None).await.unwrap();
         assert!(
             commit_exists(&dest, &second).await,
             "fetch pulled the new remote commit into the existing clone"

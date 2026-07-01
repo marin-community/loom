@@ -267,8 +267,9 @@ impl GithubApp {
     }
 
     /// Resolve `owner/name` to an installation and return a valid token for it —
-    /// the two-step the REST gateway methods share.
-    async fn token_for_repo(&self, owner: &str, name: &str) -> Result<String> {
+    /// the two-step the REST gateway methods share, and what `crate::repo`
+    /// mints a per-clone credential from.
+    pub(crate) async fn token_for_repo(&self, owner: &str, name: &str) -> Result<String> {
         let installation_id = self.installation_id(owner, name).await?;
         self.installation_token(installation_id).await
     }

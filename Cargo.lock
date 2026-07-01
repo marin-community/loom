@@ -2908,6 +2908,7 @@ name = "weaver-core"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "rand",
  "serde",

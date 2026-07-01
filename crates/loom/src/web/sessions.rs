@@ -380,7 +380,7 @@ pub(crate) async fn create_session_core(
     // directly; otherwise fork from `cwd`'s repo (the default). The traversal /
     // allowlist gate lives in `repo::resolve_clone`.
     let repo_root = match req.repo.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(input) => repo::resolve_clone(&st.db, input)
+        Some(input) => repo::resolve_clone(&st.db, input, st.trigger.app())
             .await
             .map_err(|e| match e {
                 repo::ResolveError::BadRequest(m) => AppError::bad_request(m),

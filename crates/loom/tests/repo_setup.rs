@@ -86,6 +86,9 @@ async fn start_server() -> (TestHome, loom::client::Client, db::Db, String) {
     let home = TestHome(tempfile::tempdir().unwrap());
     std::env::set_var("WEAVER_HOME", home.0.path());
     std::env::set_var("WEAVER_TAPESTRY_BIN", tapestry_bin());
+    // `seed_owner` no longer defaults to a real login — this suite's requests
+    // ride loopback trust, which needs a seeded owner to resolve to.
+    std::env::set_var("LOOM_OWNER_GITHUB", "rjpower");
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

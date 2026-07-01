@@ -132,6 +132,9 @@ impl TestServer {
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("WEAVER_HOME", home.path());
         std::env::set_var("WEAVER_TAPESTRY_BIN", tapestry_bin());
+        // `seed_owner` no longer defaults to a real login — the suite's requests
+        // ride loopback trust, which needs a seeded owner to resolve to.
+        std::env::set_var("LOOM_OWNER_GITHUB", "rjpower");
 
         let repo = tempfile::tempdir().unwrap();
         init_repo(repo.path());

@@ -40,6 +40,10 @@ impl Env {
     async fn start() -> Self {
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("WEAVER_HOME", home.path());
+        // `seed_owner` no longer defaults to a real login — this suite's
+        // requests (the `weaver` CLI, over loopback) need a seeded owner to
+        // resolve to.
+        std::env::set_var("LOOM_OWNER_GITHUB", "rjpower");
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

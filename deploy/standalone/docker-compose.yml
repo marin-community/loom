@@ -11,7 +11,7 @@ name: loom
 services:
   # One-shot: seed the security-relevant auth settings into the shared sqlite DB
   # BEFORE loom starts, so an internet-exposed deploy never comes up trusting
-  # loopback or minting a non-Secure session cookie. `weaver config set` writes
+  # loopback or minting a non-Secure session cookie. `loom config set` writes
   # the settings table directly — no running server needed — then exits; loom
   # waits on its success. Idempotent: it re-runs on every `up` and just rewrites
   # the same three values. (See ../README.md "Security posture".)
@@ -32,9 +32,9 @@ services:
       - sh
       - -ceu
       - |
-        weaver config set auth.trust_loopback false
-        weaver config set auth.cookie_secure true
-        weaver config set auth.base_url "https://$$LOOM_DOMAIN"
+        loom config set auth.trust_loopback false
+        loom config set auth.cookie_secure true
+        loom config set auth.base_url "https://$$LOOM_DOMAIN"
 
   loom:
     image: ${LOOM_IMAGE:-loom:latest}
