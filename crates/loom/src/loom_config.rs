@@ -195,13 +195,31 @@ pub fn load(path: &Path) -> Result<LoomConfig> {
 /// resolves against; see the module docs for why the *authoring* path
 /// ([`load`]/[`upsert`]) doesn't do this.
 pub fn resolve(path: &Path) -> Result<LoomConfig> {
+    Ok(resolve_reporting_shadows(path)?.0)
+}
+
+/// [`resolve`], plus the `ENV_NAME`s where an ambient env var overrode a
+/// *different* value already present in `path` — the footgun on a deploy
+/// workstation, where a personal `GH_TOKEN`/`ANTHROPIC_API_KEY` etc. is
+/// commonly exported and would otherwise silently outrank `loom.toml` in
+/// exactly the run that pushes secrets to the shared deploy. `render-env` and
+/// `push-secrets` (`bin/loom.rs`) use this instead of bare [`resolve`] so they
+/// can warn; a value that merely fills in a field the file never had isn't a
+/// shadow (nothing on disk was overridden), so it's excluded.
+pub fn resolve_reporting_shadows(path: &Path) -> Result<(LoomConfig, Vec<&'static str>)> {
     let mut config = load(path)?;
+    let mut shadowed = Vec::new();
     for f in FIELDS {
         if let Ok(value) = std::env::var(f.env_name) {
+            if let Some(existing) = f.get(&config) {
+                if existing != value {
+                    shadowed.push(f.env_name);
+                }
+            }
             f.set(&mut config, value);
         }
     }
-    Ok(config)
+    Ok((config, shadowed))
 }
 
 /// Serialize `config` to TOML and write it to `path` (0600 — it can hold
@@ -259,6 +277,37 @@ mod tests {
         let config = upsert(&path, &[("GH_TOKEN", "ghp_new")]).unwrap();
         assert_eq!(config.domain.as_deref(), Some("loom.example.com"));
         assert_eq!(config.gh_token.as_deref(), Some("ghp_new"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_reporting_shadows_flags_only_a_genuinely_overridden_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("loom.toml");
+        upsert(
+            &path,
+            &[
+                ("LOOM_TLS_EMAIL", "from-file@example.com"),
+                ("LOOM_DOMAIN", "loom.example.com"),
+            ],
+        )
+        .unwrap();
+
+        // Shadows the file's value.
+        std::env::set_var("LOOM_TLS_EMAIL", "from-env@example.com");
+        // Same value as the file — not a shadow, nothing actually changes.
+        std::env::set_var("LOOM_DOMAIN", "loom.example.com");
+        // Fills in a field the file never had — not a shadow either.
+        std::env::set_var("HOST_UID", "1001");
+
+        let (resolved, shadowed) = resolve_reporting_shadows(&path).unwrap();
+
+        std::env::remove_var("LOOM_TLS_EMAIL");
+        std::env::remove_var("LOOM_DOMAIN");
+        std::env::remove_var("HOST_UID");
+
+        assert_eq!(resolved.tls_email.as_deref(), Some("from-env@example.com"));
+        assert_eq!(shadowed, vec!["LOOM_TLS_EMAIL"]);
     }
 
     #[test]

@@ -803,17 +803,40 @@ mod tests {
         assert!(!verify_password("hunter2", "not-a-hash"));
     }
 
-    #[tokio::test]
-    async fn seeded_owner_is_the_primary_user() {
+    /// `db::connect_in_memory`, with `LOOM_OWNER_GITHUB` set for the duration of
+    /// the call so `seed_owner` seeds `owner` — since it no longer defaults to
+    /// a real login (fail-closed on an unset env var), every test below that
+    /// relies on a pre-seeded owner sets one explicitly. The caller must be
+    /// `#[serial]`: the env var is process-global.
+    async fn connect_in_memory_with_owner(owner: &str) -> Db {
+        std::env::set_var("LOOM_OWNER_GITHUB", owner);
         let db = db::connect_in_memory().await.unwrap();
+        std::env::remove_var("LOOM_OWNER_GITHUB");
+        db
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn unset_owner_seeds_no_user_at_all() {
+        std::env::remove_var("LOOM_OWNER_GITHUB");
+        let db = db::connect_in_memory().await.unwrap();
+        assert_eq!(primary_user(&db).await.unwrap(), None);
+        assert!(list_users(&db).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn seeded_owner_is_the_primary_user() {
+        let db = connect_in_memory_with_owner("rjpower").await;
         assert_eq!(primary_user(&db).await.unwrap().as_deref(), Some("rjpower"));
         let u = user_by_github(&db, "RJPower").await.unwrap();
         assert_eq!(u.map(|u| u.username), Some("rjpower".to_string()));
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn token_lifecycle_create_lookup_revoke() {
-        let db = db::connect_in_memory().await.unwrap();
+        let db = connect_in_memory_with_owner("rjpower").await;
         let (plain, info) = create_token(&db, "rjpower", "ci", None).await.unwrap();
 
         let p = lookup_token(&db, &plain)
@@ -830,8 +853,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn expired_token_does_not_resolve() {
-        let db = db::connect_in_memory().await.unwrap();
+        let db = connect_in_memory_with_owner("rjpower").await;
         let (plain, info) = create_token(&db, "rjpower", "old", Some(30)).await.unwrap();
         // Fresh token resolves; backdate its expiry and it no longer does.
         assert!(lookup_token(&db, &plain).await.unwrap().is_some());
@@ -844,8 +868,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn local_token_is_hidden_and_unrevocable() {
-        let db = db::connect_in_memory().await.unwrap();
+        let db = connect_in_memory_with_owner("rjpower").await;
         let (plain, info) =
             create_token_kind(&db, "rjpower", LOCAL_TOKEN_NAME, None, TokenKind::Local)
                 .await
@@ -859,8 +884,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn sessions_resolve_then_clear_on_logout() {
-        let db = db::connect_in_memory().await.unwrap();
+        let db = connect_in_memory_with_owner("rjpower").await;
         let cookie = create_session(&db, "rjpower").await.unwrap();
         assert_eq!(
             lookup_session(&db, &cookie)
@@ -874,8 +900,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn password_login_and_user_management() {
-        let db = db::connect_in_memory().await.unwrap();
+        let db = connect_in_memory_with_owner("rjpower").await;
         // The seeded owner has no password yet.
         assert!(verify_login(&db, "rjpower", "x").await.unwrap().is_none());
         set_password(&db, "rjpower", Some("s3cret")).await.unwrap();
@@ -898,8 +925,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn local_token_is_minted_once_and_reused() {
-        let db = db::connect_in_memory().await.unwrap();
+        let db = connect_in_memory_with_owner("rjpower").await;
         // No file is read in-memory; mint goes through the create path twice and
         // each ensures a working bearer for the same owner.
         let first = register_then_lookup(&db).await;

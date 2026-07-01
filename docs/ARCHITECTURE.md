@@ -486,12 +486,14 @@ A request that resolves to none of these gets `401`; the SPA's router guard
 turns that into the login screen.
 
 **The allowlist.** `users` rows are the approved operators. A fresh database is
-seeded with one owner — `github_login = rjpower` by default, overridable at
-first run with `LOOM_OWNER_GITHUB`. GitHub login only succeeds for a login that
-matches a `users` row; an unknown identity is authenticated by GitHub but
-rejected by loom. A user may have a `github_login`, a `password_hash` (argon2),
-or both. All approved users are equal — there is no role hierarchy, matching the
-single-operator scale.
+seeded with one owner — whichever GitHub login `LOOM_OWNER_GITHUB` names at
+first run. There is no default: leave it unset and no owner row is seeded at
+all, so GitHub login has no `users` row to match until it's set (fail closed,
+rather than seed a real maintainer login onto an internet-facing deploy).
+GitHub login only succeeds for a login that matches a `users` row; an unknown
+identity is authenticated by GitHub but rejected by loom. A user may have a
+`github_login`, a `password_hash` (argon2), or both. All approved users are
+equal — there is no role hierarchy, matching the single-operator scale.
 
 **GitHub OAuth** is configured per-deploy: register an OAuth app and set its id
 and secret via Settings → Account or the `LOOM_GITHUB_CLIENT_ID` /
@@ -582,7 +584,7 @@ builtins are stdlib-only and need neither).
 | `WEAVER_API` | loom URL (both sides — server binds, `weaver`/`loom` CLI clients talk) | `http://127.0.0.1:7878` |
 | `WEAVER_BRANCH` | the current branch key, set by `loom session launch` in the worktree — the only source `weaver` uses; unset, every `weaver` command fails with a friendly error | — |
 | `LOOM_TOKEN` | bearer token the `weaver`/`loom` CLIs and automation send; falls back to the machine-local token file on the same host | — |
-| `LOOM_OWNER_GITHUB` | GitHub login seeded as the owner on a fresh database | `rjpower` |
+| `LOOM_OWNER_GITHUB` | GitHub login seeded as the owner on a fresh database; unset seeds no owner at all | — |
 | `LOOM_GITHUB_CLIENT_ID` / `LOOM_GITHUB_CLIENT_SECRET` | GitHub OAuth app credentials (override the settings-stored values) | — |
 | `WEAVER_TAPESTRY_DIR` | directory holding tapestry's per-session control sockets | `$WEAVER_HOME/sock` |
 | `WEAVER_TAPESTRY_BIN` | the `tapestry` supervisor binary loom re-execs (else a sibling of `loom`); set by the tests | sibling of `loom` |

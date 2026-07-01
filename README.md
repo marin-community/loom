@@ -299,9 +299,11 @@ TLS-terminating reverse proxy. Access is then gated three ways:
   `auth.trust_loopback false` behind a *same-host* proxy — see below.)
 - **GitHub or password login** for the web UI. The login screen offers
   "Continue with GitHub" once an OAuth app is configured, plus username/password.
-  A fresh install approves one user — **`rjpower`** on GitHub by default
-  (override with `LOOM_OWNER_GITHUB` at first run). Add more, set your password,
-  and configure GitHub sign-in under **Settings → Account**.
+  A fresh install approves exactly one user — whichever GitHub login you set as
+  `LOOM_OWNER_GITHUB` before first run. There is no default; leave it unset and
+  no owner is seeded, so GitHub sign-in won't work until it's set. Add more
+  users, set your password, and configure GitHub sign-in under **Settings →
+  Account**.
 - **API tokens** for automation — the `LOOM_TOKEN` a CI job or a remote `loom`
   CLI presents as a bearer. Mint one under **Settings → Tokens** or:
 
@@ -391,7 +393,7 @@ placeholder page), `cargo test --workspace` runs the backend suites, and `cd e2e
 - `WEAVER_API` — loom URL the `loom` CLI talks to (default `http://127.0.0.1:7878`)
 - `WEAVER_BRANCH` — override the branch resolver (set by `loom session launch` in the worktree)
 - `LOOM_TOKEN` — bearer token the `loom` CLI / automation sends (see [Authentication](#authentication))
-- `LOOM_OWNER_GITHUB` — GitHub login seeded as the owner on a fresh database (default `rjpower`)
+- `LOOM_OWNER_GITHUB` — GitHub login seeded as the owner on a fresh database. No default; leave it unset and no owner is seeded (GitHub sign-in won't work until it's set).
 - `LOOM_GITHUB_CLIENT_ID` / `LOOM_GITHUB_CLIENT_SECRET` — GitHub OAuth app credentials
 - `LOOM_GITHUB_WEBHOOK_SECRET` — shared secret for the inbound GitHub trigger; until set, the webhook rejects every delivery ([docs/github-trigger.md](docs/github-trigger.md))
 - `WEAVER_REPOS_DIR` — managed repo store root (default `$WEAVER_HOME/repos`)

@@ -250,7 +250,17 @@ pub enum ResolveError {
 /// `input` is a slug or URL; it is parsed strictly (traversal rejected), looked
 /// up in the registered allowlist (an unregistered repo is refused — the trigger
 /// boundary), then cloned-if-absent / fetched. Returns the managed checkout path.
-pub async fn resolve_clone(db: &Db, input: &str) -> std::result::Result<PathBuf, ResolveError> {
+///
+/// `app` (when the GitHub App is configured and installed on the repo) mints a
+/// short-lived installation token for the clone/fetch — least-privilege, in
+/// place of the ambient shared `GH_TOKEN` credential helper. Any failure to
+/// mint one (unconfigured App, no installation on this repo, API error) is
+/// non-fatal: it falls back to the ambient helper, same as `app: None`.
+pub async fn resolve_clone(
+    db: &Db,
+    input: &str,
+    app: Option<&crate::github_app::GithubApp>,
+) -> std::result::Result<PathBuf, ResolveError> {
     let slug = parse_slug(input).map_err(ResolveError::BadRequest)?;
     let slug_str = slug.slug();
     let registered = get_registered(db, &slug_str)
@@ -262,7 +272,22 @@ pub async fn resolve_clone(db: &Db, input: &str) -> std::result::Result<PathBuf,
             ))
         })?;
     let dest = PathBuf::from(&registered.path);
-    git::clone(&registered.remote_url, &dest)
+    let token = match app {
+        Some(app) => match app.token_for_repo(&slug.owner, &slug.name).await {
+            Ok(token) => Some(token),
+            Err(e) => {
+                tracing::debug!(
+                    repo = %slug_str,
+                    error = %e,
+                    "no GitHub App installation token for repo; falling back to the ambient \
+                     credential helper"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+    git::clone(&registered.remote_url, &dest, token.as_deref())
         .await
         .map_err(|e| ResolveError::Clone(format!("cloning {slug_str}: {e}")))?;
     Ok(dest)
@@ -400,12 +425,12 @@ mod tests {
 
         // Unregistered → BadRequest, no clone attempted.
         assert!(matches!(
-            resolve_clone(&db, "ghost/repo").await,
+            resolve_clone(&db, "ghost/repo", None).await,
             Err(ResolveError::BadRequest(_))
         ));
         // Traversal → BadRequest before any lookup.
         assert!(matches!(
-            resolve_clone(&db, "../etc").await,
+            resolve_clone(&db, "../etc", None).await,
             Err(ResolveError::BadRequest(_))
         ));
 
@@ -444,14 +469,60 @@ mod tests {
         .await
         .unwrap();
 
-        let path = resolve_clone(&db, "acme/widgets").await.unwrap();
+        let path = resolve_clone(&db, "acme/widgets", None).await.unwrap();
         assert_eq!(path, dest);
         assert!(
             dest.join(".git").exists(),
             "repo was cloned to the managed path"
         );
         // Idempotent: a second resolve fetches into the existing clone.
-        resolve_clone(&db, "acme/widgets").await.unwrap();
+        resolve_clone(&db, "acme/widgets", None).await.unwrap();
+    }
+
+    /// An unconfigured GitHub App (`Some(&app)`, but no App id/key stored) can't
+    /// mint an installation token — `resolve_clone` must fall back to the
+    /// ambient credential helper rather than fail the whole clone.
+    #[tokio::test]
+    async fn resolve_clone_falls_back_when_the_app_cannot_mint_a_token() {
+        let db = connect_in_memory().await.unwrap();
+
+        let src = tempfile::tempdir().unwrap();
+        let sdir = src.path();
+        run_git(sdir, &["init", "-q", "-b", "main"]).await;
+        run_git(sdir, &["config", "user.email", "t@t.t"]).await;
+        run_git(sdir, &["config", "user.name", "t"]).await;
+        std::fs::write(sdir.join("README.md"), "hi\n").unwrap();
+        run_git(sdir, &["add", "-A"]).await;
+        run_git(sdir, &["commit", "-q", "-m", "init"]).await;
+        let bare = tempfile::tempdir().unwrap();
+        let bare_path = bare.path().join("origin.git");
+        run_git(
+            sdir,
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &sdir.to_string_lossy(),
+                &bare_path.to_string_lossy(),
+            ],
+        )
+        .await;
+
+        let dest_root = tempfile::tempdir().unwrap();
+        let dest = dest_root.path().join("acme").join("gizmos");
+        register(
+            &db,
+            "acme/gizmos",
+            &bare_path.to_string_lossy(),
+            &dest.to_string_lossy(),
+        )
+        .await
+        .unwrap();
+
+        let app = crate::github_app::GithubApp::new(db.clone());
+        let path = resolve_clone(&db, "acme/gizmos", Some(&app)).await.unwrap();
+        assert_eq!(path, dest);
+        assert!(dest.join(".git").exists());
     }
 
     /// Run `git` in `dir` for the resolve test (the crate has no test-only git

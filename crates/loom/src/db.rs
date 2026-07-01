@@ -228,18 +228,32 @@ async fn migrate_loom(pool: &Db) -> Result<()> {
     Ok(())
 }
 
-/// Seed the approved-user allowlist with the deploy owner so a fresh database is
-/// usable immediately: GitHub login works for exactly this one identity until
-/// more users are added. The login defaults to `rjpower` and can be overridden
-/// at first run with `LOOM_OWNER_GITHUB`. `INSERT OR IGNORE` makes this a no-op
-/// once the row (or any same-username row) exists, so it never clobbers later
-/// edits — including a password the owner has set.
+/// Seed the approved-user allowlist with the deploy owner named by
+/// `LOOM_OWNER_GITHUB`, so a fresh database is usable immediately: GitHub login
+/// works for exactly this one identity until more users are added.
+/// `INSERT OR IGNORE` makes this a no-op once the row (or any same-username
+/// row) exists, so it never clobbers later edits — including a password the
+/// owner has set.
+///
+/// Fails closed: with `LOOM_OWNER_GITHUB` unset or empty, no owner is seeded at
+/// all — a warning is logged and GitHub/loopback login simply has no `users`
+/// row to resolve to until the operator sets it (see [`crate::auth::primary_user`]
+/// returning `None`). This never falls back to a real login (e.g. the
+/// maintainer's own), which would hand an internet-facing deploy's sole owner
+/// slot to someone other than its operator.
 async fn seed_owner(pool: &Db) -> Result<()> {
     let owner = std::env::var("LOOM_OWNER_GITHUB")
         .ok()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "rjpower".to_string());
+        .filter(|s| !s.is_empty());
+    let Some(owner) = owner else {
+        tracing::warn!(
+            "LOOM_OWNER_GITHUB is not set — no owner user was seeded. No one can log in until \
+             you set LOOM_OWNER_GITHUB and restart the daemon (seeding re-runs on every start, \
+             so no fresh migration is needed)."
+        );
+        return Ok(());
+    };
     sqlx::query("INSERT OR IGNORE INTO users (username, github_login) VALUES (?, ?)")
         .bind(&owner)
         .bind(&owner)
