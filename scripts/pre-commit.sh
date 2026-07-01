@@ -8,6 +8,11 @@
 #   - the CI `lint` job (.github/workflows/ci.yml),
 # so a commit that passes locally passes CI. Bypass the hook for one commit with
 # `git commit --no-verify`.
+#
+# The agentic lint review (scripts/lint-review.py) is deliberately NOT run here:
+# it is a separate, explicit step in the commit → PR flow (see the `pull-request`
+# skill and AGENTS.md). Keeping the agent out of the commit hook keeps this gate
+# fast and identical to CI, so a slow or flaky review never sits in the commit path.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -23,16 +28,3 @@ echo "▶ cargo clippy --workspace --all-targets --locked -- -D warnings"
 cargo clippy --workspace --all-targets --locked -- -D warnings
 
 echo "✓ fmt + clippy clean"
-
-# Agent lint review: a headless Claude sub-agent applies the docs/lint.md catalog
-# to the staged diff and errors on the agent-slop it can't be linted for
-# mechanically (naming, shape, dead code, comments, tests). lint-review.py is a
-# `uv run` script and self-skips when `claude` isn't on PATH or there are no
-# staged Rust/TS/Vue changes; we gate it on `uv` here so the CI lint job (no uv,
-# no agent) runs only the fmt+clippy gate above. Disable it for a run with
-# WEAVER_SKIP_AGENT_LINT=1; tune it via the env vars in lint-review.py.
-if command -v uv >/dev/null 2>&1; then
-  "$(git rev-parse --show-toplevel)/scripts/lint-review.py" --staged
-else
-  echo "  ⓘ agent lint skipped: uv not found on PATH (needed to run lint-review.py)"
-fi

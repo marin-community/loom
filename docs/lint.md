@@ -782,8 +782,8 @@ For an agent running this catalog against a diff.
 Pick the diff that applies, typically the current branch versus its merge-base
 with `main`, unless the caller requests a tighter set:
 
-- Feature branch: `git diff $(git merge-base origin/main HEAD)...HEAD -- '*.rs' '*.ts' '*.vue'`
-- Pre-commit (staged only): `git diff --cached -- '*.rs' '*.ts' '*.vue'`
+- Feature branch (the default `scripts/lint-review.py` scope): `git diff $(git merge-base origin/main HEAD)...HEAD -- '*.rs' '*.ts' '*.vue'`
+- Staged only: `git diff --cached -- '*.rs' '*.ts' '*.vue'`
 - A specific PR: `gh pr diff <number> -- '*.rs' '*.ts' '*.vue'`
 - A named file or two: read the file in full.
 

@@ -32,10 +32,12 @@ Test placement: pure program/module logic lives in pytest
 tests prove wiring against a live server — don't duplicate logic across them.
 
 Run `./scripts/pre-commit.sh` before committing — the fmt + clippy gate CI
-enforces, plus an [agent lint review](docs/lint.md): a headless `claude`
-sub-agent that errors on the slop fmt/clippy can't catch, and self-skips when
-`claude` is absent (so CI runs only fmt+clippy). Wire it up with `git config
-core.hooksPath .githooks`. Build/test internals and the Playwright setup live in
+enforces; wire it up as a hook with `git config core.hooksPath .githooks`.
+Separately, as a step in the commit → PR flow (see the `pull-request` skill), run
+the [agent lint review](docs/lint.md) — `scripts/lint-review.py`, a headless
+`claude` sub-agent that errors on the slop fmt/clippy can't catch. It's kept out
+of the commit hook on purpose, so a slow or flaky agent never sits in the commit
+path. Build/test internals and the Playwright setup live in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Don't disturb the user's live loom

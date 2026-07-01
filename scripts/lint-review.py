@@ -12,19 +12,22 @@ prints back. `cargo fmt` / `clippy` own the mechanical checks; this catches the
 judgement-call slop an LLM coding agent tends to leave behind — naming, shape,
 dead code, duplication, comment/test quality. See docs/lint.md.
 
+Run it as a step in the commit → PR flow (the `pull-request` skill), after you
+commit and before you open the PR. It is deliberately NOT wired into the
+pre-commit hook — that stays a fast fmt + clippy gate (scripts/pre-commit.sh),
+so a slow or flaky review never sits in the commit path. It reviews the whole
+branch against its merge-base with main.
+
 Usage:
   scripts/lint-review.py            # review this branch vs its merge-base with main
-  scripts/lint-review.py --staged   # review only staged changes (the pre-commit path)
 
 Exit status:
   0  no blocking findings — or the review was skipped (see below)
   1  one or more findings at/above the blocking confidence threshold
 
-The review SKIPS (exit 0, never blocks a commit) when it can't run a clean pass:
-`claude` not on PATH, no in-scope changes, the agent timing out, or the agent
-itself erroring. A flaky or absent agent must not wedge every commit — only real
-findings block. This is also why CI (no `claude` on PATH) is unaffected: there
-it simply skips.
+The review SKIPS (exit 0) when it can't run a clean pass: `claude` not on PATH,
+no in-scope changes, the agent timing out, or the agent itself erroring. A flaky
+or absent agent must not block progress — only real findings do.
 
 Knobs (env vars):
   WEAVER_SKIP_AGENT_LINT=1            skip the review entirely
@@ -33,7 +36,7 @@ Knobs (env vars):
   WEAVER_LINT_TIMEOUT=600             seconds before the agent run is abandoned
 
 Escape hatch for a false positive: add `// wl-allow: <code>` on the cited line
-(see docs/lint.md), or bypass the whole hook once with `git commit --no-verify`.
+(see docs/lint.md).
 """
 
 import argparse
@@ -79,12 +82,8 @@ def run(cmd: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
-def select_diff(staged: bool) -> tuple[str, str]:
+def select_diff() -> tuple[str, str]:
     """Return (diff, human-readable scope), or skip if there's nothing to review."""
-    if staged:
-        diff = run(["git", "diff", "--cached", "-U15", "--", *GLOBS]).stdout
-        return diff, "staged changes"
-
     # Diff the working tree against the merge-base so the review covers all branch
     # work, committed or not. Resolve the base leniently: a fresh clone may lack
     # origin/main, a detached worktree may lack a remote at all.
@@ -114,9 +113,9 @@ def parse_min_confidence() -> float:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Run the docs/lint.md catalog over a diff via a headless agent.")
-    ap.add_argument("--staged", action="store_true", help="review only staged changes (the pre-commit path)")
-    args = ap.parse_args()
+    # No flags: the review always covers the branch vs its merge-base with main.
+    # parse_args() still handles -h/--help and rejects stray arguments.
+    argparse.ArgumentParser(description="Run the docs/lint.md catalog over the branch diff via a headless agent.").parse_args()
 
     os.chdir(run(["git", "rev-parse", "--show-toplevel"]).stdout.strip())
 
@@ -132,7 +131,7 @@ def main() -> int:
     min_conf = parse_min_confidence()
     timeout = int(os.environ.get("WEAVER_LINT_TIMEOUT", "600"))
 
-    diff, scope = select_diff(args.staged)
+    diff, scope = select_diff()
     if not diff.strip():
         skip(f"no Rust/TS/Vue changes in {scope}")
 

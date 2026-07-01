@@ -17,7 +17,7 @@ green are not optional.
 WIP checkpoint: **1, 2, 4, 5, 7**, stop. Full list before opening/updating a PR.
 
 1. Self-review the diff.
-2. Gate — `./scripts/pre-commit.sh` (fmt + clippy + staged lint).
+2. Gate — `./scripts/pre-commit.sh` (fmt + clippy). Not the lint review — that's step 6.
 3. Tests when warranted — `cargo test --workspace`; `cd e2e && npm test` for UI.
 4. Stage the specific files.
 5. Commit. ← clean checkpoint.
