@@ -97,6 +97,12 @@ enum Cmd {
 
     /// Guided one-time credential setup.
     ///
+    /// `loom setup` with no subcommand runs the **interactive walkthrough**: it
+    /// establishes a bootstrap operator (so the daemon can start and someone can
+    /// sign in), then optionally the GitHub App and the agent secrets — one
+    /// command to get a fresh instance ready. The subcommands below run an
+    /// individual step directly.
+    ///
     /// `loom setup github-app` registers the GitHub App loom uses (the
     /// webhook receiver + REST identity from `docs/github-trigger.md`, which
     /// doubles as the "Sign in with GitHub" app) via GitHub's **manifest
@@ -114,8 +120,10 @@ enum Cmd {
     ///
     ///     loom setup secrets
     Setup {
+        /// A specific step to run directly. Omit it to run the interactive
+        /// walkthrough (which always establishes a bootstrap operator first).
         #[command(subcommand)]
-        cmd: SetupCmd,
+        cmd: Option<SetupCmd>,
     },
 
     /// The typed `loom.toml` `loom setup` writes and everything derived from
@@ -753,11 +761,181 @@ async fn cmd_token_rm(id: String) -> Result<()> {
 // Setup wizards (github-app, secrets)
 // ---------------------------------------------------------------------------
 
-async fn run_setup(cmd: SetupCmd) -> Result<()> {
+async fn run_setup(cmd: Option<SetupCmd>) -> Result<()> {
     match cmd {
-        SetupCmd::GithubApp(opts) => cmd_setup_github_app(opts).await,
-        SetupCmd::Secrets(opts) => cmd_setup_secrets(opts).await,
+        None => cmd_setup_init().await,
+        Some(SetupCmd::GithubApp(opts)) => cmd_setup_github_app(opts).await,
+        Some(SetupCmd::Secrets(opts)) => cmd_setup_secrets(opts).await,
     }
+}
+
+/// The default `loom.toml` path, mirroring [`ConfigPathOpts`]'s clap resolution
+/// (`$LOOM_CONFIG`, else `./loom.toml`) for the walkthrough, which takes no flag.
+fn default_config_path() -> std::path::PathBuf {
+    std::env::var(loom::loom_config::CONFIG_ENV_VAR)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(loom::loom_config::DEFAULT_PATH))
+}
+
+/// `loom setup` with no subcommand — the guided walkthrough. Its one hard
+/// guarantee is a **bootstrap operator**: it always seeds one (live into the DB
+/// and into `loom.toml`), so the instance can start and someone can sign in —
+/// the interactive complement to [`crate::server::ensure_bootstrap_operator`]'s
+/// boot guard. The GitHub App and agent-secret steps are offered but skippable,
+/// and delegate to the same [`cmd_setup_github_app`]/[`cmd_setup_secrets`] the
+/// subcommands use. A failure in an optional step is reported and the walkthrough
+/// continues, so a browser timeout can't cost you the operator you just set up.
+async fn cmd_setup_init() -> Result<()> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "loom setup needs an interactive terminal — run it directly (not piped or in CI). \
+             For a non-interactive deploy, set LOOM_OWNER_GITHUB (and the other LOOM_* vars) \
+             and run `loom config render-env` instead."
+        );
+    }
+    let config_path = default_config_path();
+    println!(
+        "loom setup — I'll ask a few questions, write them to {}, and apply them to the",
+        config_path.display()
+    );
+    println!("database so they take effect immediately.");
+    println!();
+
+    let db = loom::db::connect(&weaver_core::db::default_db_path())
+        .await
+        .context("opening loom's database")?;
+
+    // Step 1 — bootstrap operator (required). Without one, no one can sign in
+    // and the daemon refuses to start, so this step cannot be skipped.
+    println!("Step 1/4 · Bootstrap operator (required)");
+    println!("  The GitHub login allowed to sign in first and approve everyone else.");
+    let owner = loop {
+        let login = prompt_line("GitHub login", None)?;
+        if loom::owners::valid_login(&login) {
+            break login;
+        }
+        println!("  '{login}' isn't a valid GitHub login (letters, digits, and hyphens only).");
+    };
+    if loom::auth::get_user(&db, &owner).await?.is_none() {
+        loom::auth::add_user(&db, &owner, Some(&owner), None)
+            .await
+            .with_context(|| format!("seeding the bootstrap operator '{owner}'"))?;
+    }
+    loom::owners::add(&db, &owner)
+        .await
+        .context("trusting the bootstrap owner")?;
+    // Merge (don't overwrite) the allowlist, so re-running the walkthrough never
+    // drops owners already in loom.toml.
+    let allowed_owners = merged_allowed_owners(&config_path, &owner);
+    loom::loom_config::upsert(
+        &config_path,
+        &[
+            ("LOOM_OWNER_GITHUB", owner.as_str()),
+            ("LOOM_ALLOWED_OWNERS", allowed_owners.as_str()),
+        ],
+    )
+    .context("writing the operator into loom.toml")?;
+    println!("  ✓ '{owner}' can sign in and is a trusted owner.");
+    println!();
+
+    // Step 2 — public URL.
+    println!("Step 2/4 · Public URL");
+    println!("  Where loom is reachable; localhost for a local try-out.");
+    let base_url = prompt_line("Base URL", Some("http://localhost:7878"))?
+        .trim_end_matches('/')
+        .to_string();
+    let domain = host_from_base_url(&base_url).to_string();
+    loom::loom_config::upsert(&config_path, &[("LOOM_DOMAIN", domain.as_str())])
+        .context("writing the domain into loom.toml")?;
+    println!();
+
+    // Step 3 — GitHub App (optional; opens a browser). Delegates to the same
+    // wizard the subcommand uses, passing the operator so it stays consistent.
+    println!("Step 3/4 · GitHub App (recommended — opens your browser)");
+    println!("  Creates the App loom acts through (webhook, sign-in, per-repo tokens).");
+    if prompt_yes_no("Set up the GitHub App now?", true)? {
+        let app_opts = GithubAppOpts {
+            base_url: base_url.clone(),
+            name: None,
+            org: None,
+            owner: Some(owner.clone()),
+            port: 0,
+            timeout: 300,
+            no_open: false,
+            config: ConfigPathOpts {
+                config: config_path.clone(),
+            },
+        };
+        if let Err(e) = cmd_setup_github_app(app_opts).await {
+            println!("  ! GitHub App setup didn't complete: {e}");
+            println!("  Retry later with `loom setup github-app --base-url {base_url}`.");
+        }
+    } else {
+        println!("  Skipped — set it up later with `loom setup github-app`.");
+    }
+    println!();
+
+    // Step 4 — agent secrets. Same wizard the subcommand uses.
+    println!("Step 4/4 · Agent secrets");
+    if let Err(e) = cmd_setup_secrets(SecretsOpts {
+        config: ConfigPathOpts {
+            config: config_path.clone(),
+        },
+    })
+    .await
+    {
+        println!("  ! Secrets step didn't complete: {e}");
+        println!("  Retry later with `loom setup secrets`.");
+    }
+    println!();
+
+    println!("Setup complete. Next: run `loom config render-env` to produce a deploy `.env`,");
+    println!("then start the daemon (e.g. `docker compose up -d`).");
+    Ok(())
+}
+
+/// Prompt (plain text) for one line, showing `default` in brackets and returning
+/// it on a blank answer. A `None` default makes the answer required — it
+/// re-prompts until non-empty.
+fn prompt_line(label: &str, default: Option<&str>) -> Result<String> {
+    use std::io::Write;
+    loop {
+        match default {
+            Some(d) => print!("  {label} [{d}]: "),
+            None => print!("  {label}: "),
+        }
+        std::io::stdout().flush().ok();
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .with_context(|| format!("reading {label}"))?;
+        let value = input.trim();
+        if !value.is_empty() {
+            return Ok(value.to_string());
+        }
+        if let Some(d) = default {
+            return Ok(d.to_string());
+        }
+        println!("  (required)");
+    }
+}
+
+/// Prompt yes/no, returning `true` for yes; a blank answer takes `default_yes`.
+fn prompt_yes_no(label: &str, default_yes: bool) -> Result<bool> {
+    use std::io::Write;
+    let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
+    print!("  {label} {hint}: ");
+    std::io::stdout().flush().ok();
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .context("reading a yes/no answer")?;
+    Ok(match input.trim().to_ascii_lowercase().as_str() {
+        "" => default_yes,
+        "y" | "yes" => true,
+        _ => false,
+    })
 }
 
 /// `loom setup github-app` — the manifest-flow wizard. Talks to GitHub and to

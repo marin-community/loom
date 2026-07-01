@@ -147,6 +147,18 @@ it has no password yet — so **GitHub sign-in is the way in**. Since the loopba
 trust that bootstraps a local install is off here (see above), set up OAuth
 before first start.
 
+The daemon **refuses to start with no operator configured**: if the `users`
+allowlist is empty (no `LOOM_OWNER_GITHUB`, and nobody added yet), `loom server`
+exits with a message telling you to set it, rather than silently coming up
+locked-out. Seeding re-runs on every boot, so the fix is always "set
+`LOOM_OWNER_GITHUB` (or run `loom setup`) and restart" — you can never be locked
+out permanently.
+
+Running `loom setup` with no subcommand is the guided way through all of this:
+it interactively establishes the bootstrap operator (seeding it live and into
+`loom.toml`), then walks you through the GitHub App and the paste-once secrets.
+The individual steps below are what it calls, and can be run on their own.
+
 The fast path is `loom setup github-app` — it registers a GitHub App via
 GitHub's manifest flow and writes its client id/secret (along with the App id,
 private key, and webhook secret, for [the `@loom` trigger](#wire-the-loom-github-trigger))

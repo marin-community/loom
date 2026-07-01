@@ -63,6 +63,24 @@ fn remove_state_if_ours(path: &std::path::Path, my_pid: u32) {
     }
 }
 
+/// Refuse to launch a locked-out instance. With an empty operator allowlist no
+/// one could ever sign in, so a daemon in that state is a misconfiguration, not
+/// a valid deploy. `seed_owner` has already run (inside `db::connect` →
+/// `migrate_loom`), so a set `LOOM_OWNER_GITHUB` satisfies this; otherwise the
+/// operator runs `loom setup` or sets the env and restarts. Seeding re-runs on
+/// every boot, so recovery never needs a fresh database — this guard turns a
+/// silently-locked-out instance into a clear, actionable startup error.
+pub async fn ensure_bootstrap_operator(db: &db::Db) -> Result<()> {
+    if crate::auth::primary_user(db).await?.is_none() {
+        anyhow::bail!(
+            "refusing to start: no operator is configured, so no one could sign in. Run \
+             `loom setup`, or set LOOM_OWNER_GITHUB and restart — seeding re-runs on every \
+             boot, so the owner user is created automatically once it is set."
+        );
+    }
+    Ok(())
+}
+
 pub async fn run(addr: &str) -> Result<()> {
     let socket: SocketAddr = addr
         .parse()
@@ -75,6 +93,7 @@ pub async fn run(addr: &str) -> Result<()> {
     tracing::debug!(addr = %actual, "listener bound");
 
     let db = db::connect(&db::default_db_path()).await?;
+    ensure_bootstrap_operator(&db).await?;
     let trigger = crate::github_trigger::GithubTrigger::production(db.clone());
     let state = AppState {
         db,
@@ -318,6 +337,26 @@ mod tests {
         let json = serde_json::to_string(&state).unwrap();
         let parsed: ServerState = serde_json::from_str(&json).unwrap();
         assert_eq!(state, parsed);
+    }
+
+    /// The boot guard: an empty operator allowlist is refused; a seeded operator
+    /// passes. Deleting any env-seeded owner first keeps this independent of the
+    /// ambient `LOOM_OWNER_GITHUB`.
+    #[tokio::test]
+    async fn ensure_bootstrap_operator_requires_a_user() {
+        let db = db::connect_in_memory().await.unwrap();
+        sqlx::query("DELETE FROM users").execute(&db).await.unwrap();
+        assert!(
+            ensure_bootstrap_operator(&db).await.is_err(),
+            "no operator must refuse boot"
+        );
+        crate::auth::add_user(&db, "alice", Some("alice"), None)
+            .await
+            .unwrap();
+        assert!(
+            ensure_bootstrap_operator(&db).await.is_ok(),
+            "a seeded operator must allow boot"
+        );
     }
 
     fn write_state(path: &std::path::Path, pid: u32) {
