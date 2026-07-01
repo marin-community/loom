@@ -23,3 +23,4 @@ mod sessions;
 mod shell;
 mod terminal;
 mod typed_client;
+mod webhook;

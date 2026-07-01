@@ -30,6 +30,9 @@ pub const DEFAULT_GITHUB_POLL: bool = true;
 /// Whether loom archives a session automatically once its pull request merges.
 /// On by default — a merged branch's worktree has served its purpose.
 pub const DEFAULT_GITHUB_ARCHIVE_ON_MERGE: bool = true;
+/// The phrase an `issue_comment` must begin with to trigger a loom session via
+/// the GitHub webhook. Fixed (not free-text) in v1 to shrink the abuse surface.
+pub const DEFAULT_GITHUB_TRIGGER_PHRASE: &str = "@loom work on this";
 /// The palette the browser terminal (xterm.js) renders with. `dark` keeps the
 /// classic black background; `light` swaps in a light, readable palette.
 pub const DEFAULT_TERMINAL_THEME: &str = "dark";
@@ -43,6 +46,11 @@ pub const DEFAULT_TRUST_LOOPBACK: bool = true;
 /// default so plain-HTTP and direct-IP access work; turn it on when loom is
 /// reached over HTTPS (e.g. behind a TLS-terminating proxy).
 pub const DEFAULT_COOKIE_SECURE: bool = false;
+/// Wall-clock budget for a repo's `.weaver/config.toml` `[setup]` script, run
+/// when a session launches against an allowlisted repo. A run that overruns is
+/// killed and the session is left in a visible error state. 600s mirrors the
+/// overlooker/lint-review precedent.
+pub const DEFAULT_SETUP_TIMEOUT_SECS: i64 = 600;
 
 // ---------------------------------------------------------------------------
 // Setting registry
@@ -186,6 +194,20 @@ pub const REGISTRY: &[SettingSpec] = &[
             GitHub polling.",
         kind: SettingKind::Bool,
         default: "true",
+        group: "GitHub",
+        options: &[],
+    },
+    SettingSpec {
+        key: "github.trigger_phrase",
+        label: "GitHub trigger phrase",
+        description: "The exact phrase an issue comment must begin with for the \
+            GitHub webhook to launch a session against that repo (e.g. \
+            `@loom work on this`). Matched case-insensitively against the start \
+            of the comment; kept fixed rather than free-text to limit the abuse \
+            surface. The webhook is only active once `LOOM_GITHUB_WEBHOOK_SECRET` \
+            is configured.",
+        kind: SettingKind::String,
+        default: DEFAULT_GITHUB_TRIGGER_PHRASE,
         group: "GitHub",
         options: &[],
     },
@@ -334,6 +356,21 @@ pub const REGISTRY: &[SettingSpec] = &[
         kind: SettingKind::String,
         default: "",
         group: "Editor",
+        options: &[],
+    },
+    SettingSpec {
+        key: "setup.timeout_secs",
+        label: "Repo setup timeout (seconds)",
+        description: "Wall-clock budget for a repo's `.weaver/config.toml` \
+            `[setup]` script, run in the worktree before the agent starts when a \
+            session launches against an allowlisted (registered) repo. A run that \
+            overruns is killed and the session is left in a visible error state \
+            rather than launching a half-provisioned worktree. Setup only runs \
+            for registered repos — the boundary that keeps it from executing \
+            arbitrary code from an unknown repo.",
+        kind: SettingKind::Int,
+        default: "600",
+        group: "Sessions",
         options: &[],
     },
     SettingSpec {

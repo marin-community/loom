@@ -1,0 +1,33 @@
+# Caddyfile — the bundled TLS-terminating front-door for the standalone loom
+# deploy. Caddy provisions and renews a real certificate for $LOOM_DOMAIN
+# automatically (ACME over the published :80/:443), terminates TLS, and reverse-
+# proxies every request to the loom container on the internal compose network.
+#
+# $LOOM_DOMAIN is injected from .env by docker-compose.yml. For local testing set
+# LOOM_DOMAIN=localhost — Caddy then signs with its own internal CA instead of
+# reaching Let's Encrypt (your browser warns about the self-signed cert; expected).
+#
+# Optional: to receive certificate-expiry notices from the CA, uncomment this
+# global block and set an address (or leave LOOM_TLS_EMAIL in .env and keep the
+# {$LOOM_TLS_EMAIL} form).
+# {
+# 	email {$LOOM_TLS_EMAIL}
+# }
+
+{$LOOM_DOMAIN} {
+	# A single upstream: the loom daemon, reached by its compose service name.
+	# Caddy's reverse_proxy is all loom needs from a front-door:
+	#
+	#   * WebSocket terminal — it transparently proxies Upgrade requests (it
+	#     detects `Connection: Upgrade` and streams both directions), so the
+	#     xterm.js terminal at /api/sessions/{id}/terminal works with no extra
+	#     config.
+	#   * Origin/host checks — Caddy preserves the inbound Host header upstream by
+	#     default AND adds X-Forwarded-For / -Proto / -Host. loom's terminal
+	#     handshake requires both: it accepts the WS Origin when it matches the
+	#     request Host *and* an X-Forwarded-* header proves the request transited a
+	#     proxy (see crates/loom/src/terminal.rs / docs/browser-terminal.md). The
+	#     X-Forwarded-Proto=https also lets loom build correct https:// OAuth
+	#     callback URLs.
+	reverse_proxy loom:7878
+}

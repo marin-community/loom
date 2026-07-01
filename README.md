@@ -247,6 +247,16 @@ weaver config set github.poll false               # stop polling GitHub entirely
 Polling is a quiet no-op for repositories without a GitHub remote, or wherever
 `gh` is not installed — nothing to configure to opt out there.
 
+### Trigger sessions from issues
+
+Comment **`@loom work on this`** on a GitHub issue and loom launches a session
+against that repo, seeded from the issue, and replies with a link to it. GitHub
+delivers the comment to `POST /api/github/webhook`, which verifies the delivery's
+HMAC signature, authorizes the commenter (a loom operator or a repo writer), and
+only acts on repos in the managed allowlist. Set `LOOM_GITHUB_WEBHOOK_SECRET` and
+point a repo/org webhook at `{base}/api/github/webhook` (issue-comment events,
+`application/json`). See [docs/github-trigger.md](docs/github-trigger.md).
+
 ## REST API (brief)
 
 Loom serves a JSON API under `/api`; the Vue SPA is the primary consumer.
@@ -261,6 +271,9 @@ Loom serves a JSON API under `/api`; the Vue SPA is the primary consumer.
   `GET PATCH DELETE /api/issues/{id}`
 - `GET /api/repos/recent`, `GET /api/repos/branches?cwd=…`,
   `GET POST /api/repos/issues?repo_root=…` (the repo-wide board / backlog)
+- `GET POST /api/repos` (the managed repo store / clone allowlist)
+- `POST /api/github/webhook` (the inbound GitHub trigger; HMAC-authenticated,
+  outside the login middleware — see [docs/github-trigger.md](docs/github-trigger.md))
 - `GET PATCH /api/settings`
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the shape of `SessionView`.
@@ -378,3 +391,5 @@ placeholder page), `cargo test --workspace` runs the backend suites, and `cd e2e
 - `LOOM_TOKEN` — bearer token the `loom` CLI / automation sends (see [Authentication](#authentication))
 - `LOOM_OWNER_GITHUB` — GitHub login seeded as the owner on a fresh database (default `rjpower`)
 - `LOOM_GITHUB_CLIENT_ID` / `LOOM_GITHUB_CLIENT_SECRET` — GitHub OAuth app credentials
+- `LOOM_GITHUB_WEBHOOK_SECRET` — shared secret for the inbound GitHub trigger; until set, the webhook rejects every delivery ([docs/github-trigger.md](docs/github-trigger.md))
+- `WEAVER_REPOS_DIR` — managed repo store root (default `$WEAVER_HOME/repos`)

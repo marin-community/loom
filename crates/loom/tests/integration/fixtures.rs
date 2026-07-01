@@ -113,6 +113,19 @@ impl TestServer {
     /// answer `/api/health`. The caller must be `#[serial]`: setup writes
     /// process-global env.
     pub async fn start() -> Self {
+        Self::start_inner(None).await
+    }
+
+    /// Like [`start`](Self::start) but installs `gh` as the GitHub trigger's
+    /// gateway, so the webhook suite can drive the permission check + reply with
+    /// a fake instead of the real `gh` CLI.
+    pub async fn start_with_github(
+        gh: std::sync::Arc<dyn loom::github_trigger::GithubApi>,
+    ) -> Self {
+        Self::start_inner(Some(gh)).await
+    }
+
+    async fn start_inner(gh: Option<std::sync::Arc<dyn loom::github_trigger::GithubApi>>) -> Self {
         // Isolate weaver state in a temp home (its own db) for the lifetime of
         // the test; that home also scopes the `tapestry` socket dir. Point loom
         // at the sibling supervisor binary.
@@ -126,11 +139,16 @@ impl TestServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let pool = db::connect(&db::default_db_path()).await.unwrap();
+        let trigger = match gh {
+            Some(gh) => loom::github_trigger::GithubTrigger::with_gateway(gh),
+            None => loom::github_trigger::GithubTrigger::production(pool.clone()),
+        };
         let state = AppState {
             db: pool,
             bus: EventBus::new(),
             addr: addr.to_string(),
             ide: std::sync::Arc::new(loom::ide::IdeManager::new(loom::ide::ide_home())),
+            trigger,
         };
         // The overlooker master switch ships on by default, but these tests
         // drive the engine directly and must not race the background loop that

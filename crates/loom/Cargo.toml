@@ -20,6 +20,9 @@ tapestry = { path = "../tapestry" }
 anyhow = "1"
 # Password hashing for the user/password login path (the OWASP-recommended KDF).
 argon2 = "0.5"
+# Trait objects with async methods — the GitHub trigger's gateway abstraction
+# (`GithubApi`), so the `gh`-backed implementation and a test fake share a type.
+async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
@@ -28,11 +31,21 @@ clap_complete = "4"
 futures-util = "0.3"
 # Hex-encode the SHA-256 digests we store for API tokens and session cookies.
 hex = "0.4"
+# Sign the GitHub App JWT (RS256) we exchange for short-lived installation
+# tokens — the hardening that replaces the ambient GH_TOKEN (crate::github_app).
+jsonwebtoken = "9"
+# HMAC-SHA256 for verifying the GitHub webhook signature (`X-Hub-Signature-256`).
+# `Mac::verify_slice` is a constant-time compare, so the verification can't be
+# turned into a timing oracle.
+hmac = "0.12"
 # Reverse-proxying the embedded code-server (crate::ide): a pooled HTTP client
 # (hyper-util legacy) for the asset/API plane, and hyper's low-level conn for the
 # transparent WebSocket-upgrade passthrough (extension host + integrated terminal).
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+# Sending SIGKILL to a timed-out setup script's whole process group (crate::setup),
+# so a bootstrap that spawns children doesn't leave them behind on timeout.
+libc = "0.2"
 percent-encoding = "2"
 rand = "0.9"
 # `rustls-tls` is needed for the GitHub OAuth token/user calls over HTTPS — the
@@ -70,3 +83,10 @@ axum = { version = "0.8", features = ["ws"] }
 # env (WEAVER_HOME / WEAVER_API / WEAVER_TAPESTRY_BIN), so they must not run
 # concurrently within the test binary; `#[serial]` serializes them.
 serial_test = "3"
+# The webhook suite forges a valid `X-Hub-Signature-256` (hmac/sha2/hex) and
+# installs a fake `GithubApi` (async-trait, anyhow::Result) into the test server.
+anyhow = "1"
+async-trait = "0.1"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"

@@ -36,6 +36,7 @@ use crate::fixtures::{branch_tag, branch_tag_value, TestServer};
 async fn engine_state(ts: &TestServer) -> AppState {
     let pool = db::connect(&db::default_db_path()).await.unwrap();
     AppState {
+        trigger: loom::github_trigger::GithubTrigger::production(pool.clone()),
         db: pool,
         bus: EventBus::new(),
         addr: ts.addr.to_string(),
