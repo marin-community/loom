@@ -37,7 +37,7 @@ const actions = useSessionActions(
   () => props.ws.id,
   () => emit('reload'),
 );
-const { busy, notice, error, rename, clearTag, adopt, archive, remove } = actions;
+const { busy, notice, error, rename, clearTag, adopt, archive, recover, remove } = actions;
 
 const showDetails = ref(false);
 
@@ -162,6 +162,16 @@ const quiet = computed(() => quietTags(props.ws));
                   @click="adopt"
                 >
                   {{ busy === 'adopt' ? 'Adopting…' : 'Adopt' }}
+                </button>
+                <!-- Recover brings a torn-down (archived) session back: rebuild
+                     its worktree from the kept branch and resume the agent. -->
+                <button
+                  v-if="ws.status === 'archived'"
+                  class="rounded bg-subtle px-3 py-1.5 text-xs text-accent ring-1 ring-inset ring-accent/30 hover:bg-subtle-hover"
+                  :disabled="busy === 'recover'"
+                  @click="recover"
+                >
+                  {{ busy === 'recover' ? 'Recovering…' : 'Recover' }}
                 </button>
                 <button
                   v-if="ws.status !== 'archived'"

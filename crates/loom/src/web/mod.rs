@@ -5,7 +5,8 @@
 //! * `/api/sessions` — list + create active sessions (each session is one
 //!   terminal + one agent attached to a branch).
 //! * `/api/sessions/{id}` — GET / PATCH / DELETE a single session, plus the
-//!   action subroutes `/archive`, `/adopt`, `/tags/{key}` (PUT to set a tag,
+//!   action subroutes `/archive`, `/adopt`, `/recover` (rebuild the worktree of
+//!   an archived session and resume its agent), `/tags/{key}` (PUT to set a tag,
 //!   DELETE to clear it), `/log`, `/events`, and `/terminal` (a WebSocket
 //!   bridged to the session's terminal via a PTY — see `crate::terminal`).
 //!   Interacting with the agent (keystrokes, keys, TUIs) happens entirely over
@@ -458,6 +459,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/sessions/{id}/archive", post(archive_session))
         .route("/sessions/{id}/adopt", post(adopt_session))
+        .route("/sessions/{id}/recover", post(recover_session))
         .route("/sessions/{id}/github", post(refresh_github_session))
         .route("/sessions/{id}/raw", get(raw_session))
         // Embedded VS Code (code-server), reverse-proxied per session. `ide-info`

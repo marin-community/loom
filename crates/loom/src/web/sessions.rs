@@ -1509,7 +1509,10 @@ pub(crate) async fn create_warm_session(
     Ok(session)
 }
 
-/// Recreate an orphaned session's terminal and resume its agent.
+/// Recreate an orphaned session's terminal and resume its agent. The worktree is
+/// expected to still be on disk (an orphaned session only lost its terminal); a
+/// missing worktree is an error here — recovering a *torn-down* (archived)
+/// session, which rebuilds the worktree first, goes through [`recover`].
 pub(crate) async fn adopt(
     st: &AppState,
     session: &Session,
@@ -1527,6 +1530,22 @@ pub(crate) async fn adopt(
             session.work_dir
         )));
     }
+    resume_agent(st, session, branch, "session adopted").await
+}
+
+/// Re-launch a session's agent in a worktree that already exists on disk: the
+/// shared tail of [`adopt`] (orphaned → resume) and [`recover`] (archived →
+/// rebuild the worktree, then resume). `reason` is the status event's reason
+/// string. Setup is never re-run here — the worktree is already provisioned; this
+/// only resumes the agent (Claude via `--continue`, so it reloads its prior
+/// conversation from the same cwd).
+async fn resume_agent(
+    st: &AppState,
+    session: &Session,
+    branch: &Branch,
+    reason: &str,
+) -> Result<(), AppError> {
+    let work_dir = PathBuf::from(&session.work_dir);
     // A normal session persists its positional prompt in goal.txt; the concierge
     // persists its primer in primer.txt instead (re-appended as system context so
     // it stays primed-but-idle across adopt). Each session carries exactly one.
@@ -1590,7 +1609,7 @@ pub(crate) async fn adopt(
         &st.bus,
         &branch.id,
         "status",
-        json!({ "status": status, "reason": "session adopted" }),
+        json!({ "status": status, "reason": reason }),
     )
     .await
     .ok();
@@ -1603,6 +1622,55 @@ pub(super) async fn adopt_session(
 ) -> ApiResult<Json<SessionView>> {
     let (session, branch) = require_session(&st.db, &key).await?;
     adopt(&st, &session, &branch).await?;
+    let (session, branch) = require_session(&st.db, &session.id).await?;
+    Ok(Json(session_view(&st.db, &session, &branch).await?))
+}
+
+/// Recover an archived session: rebuild its worktree from the kept branch, then
+/// resume the agent — the inverse of [`archive`]. Where archive tears the worktree
+/// down but keeps the branch (and its commits), the session row, and the history,
+/// recover checks that branch back out at the same worktree path and re-launches
+/// the agent (resuming the prior Claude conversation with `--continue`, exactly as
+/// [`adopt`] does). The session rejoins the active fleet.
+async fn recover(st: &AppState, session: &Session, branch: &Branch) -> Result<(), AppError> {
+    if backend::has_session(&session.term_session).await {
+        return Err(AppError::conflict(
+            "session already has a running terminal process",
+        ));
+    }
+    let repo_root = PathBuf::from(&branch.repo_root);
+    let work_dir = PathBuf::from(&session.work_dir);
+
+    // Rebuild the worktree if archive removed it. Archive keeps the branch, but a
+    // later manual `git branch -D` could have deleted it — refuse clearly rather
+    // than let the checkout fail cryptically.
+    if !work_dir.exists() {
+        if !git::branch_exists(&repo_root, &branch.branch).await {
+            return Err(AppError::bad_request(format!(
+                "branch '{}' no longer exists — cannot recover",
+                branch.branch
+            )));
+        }
+        // Clear any stale worktree registration at this path first: archive's
+        // forced remove deregisters, but a manual `rm -rf` of the dir would leave
+        // git's admin entry behind and reject re-adding the same path.
+        git::worktree_prune(&repo_root).await.ok();
+        tokio::fs::create_dir_all(repo_root.join(".worktrees")).await?;
+        git::ensure_excluded(&repo_root, ".worktrees/").await.ok();
+        git::worktree_add_existing(&repo_root, &work_dir, &branch.branch)
+            .await
+            .map_err(|e| AppError::bad_request(e.to_string()))?;
+    }
+
+    resume_agent(st, session, branch, "session recovered").await
+}
+
+pub(super) async fn recover_session(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<SessionView>> {
+    let (session, branch) = require_session(&st.db, &key).await?;
+    recover(&st, &session, &branch).await?;
     let (session, branch) = require_session(&st.db, &session.id).await?;
     Ok(Json(session_view(&st.db, &session, &branch).await?))
 }

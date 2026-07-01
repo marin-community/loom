@@ -292,6 +292,8 @@ enum SessionCmd {
     Archive { branch: String },
     /// Recreate the terminal session for an orphaned session.
     Adopt { branch: String },
+    /// Recover an archived session: rebuild its worktree and resume the agent.
+    Recover { branch: String },
     /// Remove a session (worktree + terminal + DB row).
     Rm {
         branch: String,
@@ -684,6 +686,7 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
         SessionCmd::Attach { branch } => cmd_attach(branch).await,
         SessionCmd::Archive { branch } => cmd_archive(branch).await,
         SessionCmd::Adopt { branch } => cmd_adopt(branch).await,
+        SessionCmd::Recover { branch } => cmd_recover(branch).await,
         SessionCmd::Rm {
             branch,
             keep_branch,
@@ -2180,6 +2183,11 @@ async fn cmd_session_wait(
 /// or orphaned lifecycle, or — unless `lifecycle_only` — a raised attention.
 fn wake_reason(ws: &Value, key: &str, lifecycle_only: bool) -> Option<String> {
     let status = str_field(ws, "status");
+    if status == "archived" {
+        return Some(format!(
+            "session {key} is archived — its worktree was torn down (try `loom session recover {key}`)"
+        ));
+    }
     if is_terminal_status(status) {
         return Some(format!("session {key} is {status} — finished"));
     }
@@ -2474,6 +2482,22 @@ async fn cmd_adopt(key: String) -> Result<()> {
         .await?;
     println!(
         "adopted session {}  ({})",
+        str_field(&ws, "id"),
+        branch_str(&ws, "name")
+    );
+    println!("  status:  {}", str_field(&ws, "status"));
+    println!("  session: {}", str_field(&ws, "term_session"));
+    println!("  attach:  loom attach {}", str_field(&ws, "id"));
+    Ok(())
+}
+
+async fn cmd_recover(key: String) -> Result<()> {
+    let client = client::default();
+    let ws = client
+        .post(&format!("/api/sessions/{key}/recover"), json!({}))
+        .await?;
+    println!(
+        "recovered session {}  ({})",
         str_field(&ws, "id"),
         branch_str(&ws, "name")
     );

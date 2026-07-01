@@ -315,6 +315,16 @@ pub async fn worktree_remove(repo_root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Prune stale worktree administrative entries (`git worktree prune`) — drop
+/// registrations whose working directory is gone, so a later `worktree_add*` at
+/// the same path is not rejected as "already registered". Idempotent: a no-op
+/// when nothing is stale. Used when re-checking out a branch whose worktree was
+/// torn down (e.g. recovering an archived session).
+pub async fn worktree_prune(repo_root: &Path) -> Result<()> {
+    git(repo_root, &["worktree", "prune"]).await?;
+    Ok(())
+}
+
 pub async fn delete_branch(repo_root: &Path, branch: &str) -> Result<()> {
     git(repo_root, &["branch", "-D", branch]).await?;
     tracing::info!(%branch, "branch deleted");

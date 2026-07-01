@@ -11,6 +11,8 @@ import { post, patch, del } from '../api';
 //                  clearing the agent's `attention` is how a human marks it calm
 //   adopt        — recreate the terminal for an orphaned session
 //   archive      — tear down terminal + worktree, keep the branch/history
+//   recover      — rebuild an archived session's worktree and resume its agent
+//                  (the inverse of archive — reuses the kept branch/history)
 //   remove        — delete the session entirely, then route back to the list
 //
 // `reload` is called after any write that mutates server state the page shows,
@@ -73,6 +75,13 @@ export function useSessionActions(getId: () => string, reload: () => void | Prom
       await reload();
     });
 
+  const recover = () =>
+    act('recover', async () => {
+      await post(`/sessions/${getId()}/recover`);
+      notice.value = 'Session recovered — worktree rebuilt and agent resumed.';
+      await reload();
+    });
+
   const remove = () =>
     act('remove', async () => {
       if (!confirm('Remove this session, its worktree and terminal session?')) return;
@@ -80,5 +89,5 @@ export function useSessionActions(getId: () => string, reload: () => void | Prom
       router.push('/');
     });
 
-  return { busy, notice, error, rename, clearTag, adopt, archive, remove };
+  return { busy, notice, error, rename, clearTag, adopt, archive, recover, remove };
 }
