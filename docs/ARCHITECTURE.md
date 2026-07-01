@@ -5,47 +5,46 @@ how-to-work guide and links here; this file is for when you need the full map.
 
 ## Mental model
 
-weaver ships **two binaries** over a **shared sqlite database**:
+weaver ships **two binaries** over **loom's REST API**:
 
-- **`weaver`** — the **agent-facing CLI**: database-direct (no daemon, no HTTP),
-  resolving "the current branch" from `$WEAVER_BRANCH` else the git checkout
-  under cwd. Cold start is sub-50ms; it carries no `axum` / `reqwest` / SPA
-  dependencies. Agents call it to read and update the goal, report status, add
-  issues, set tags, and emit hook events. It **works whether or not `loom` is
-  running** — that decoupling is the point of the split.
-- **`loom`** — the **optional orchestrator**: the REST + SSE server, the Vue web
-  UI, the per-branch terminal supervisor + agent process (via the `sessions`
-  table), the background monitor, and the `git worktree` shell-outs. Without loom,
-  branches and issues still work; the terminal orchestration, the dashboard, and
-  the live screen do not.
+- **`weaver`** — the **agent-facing CLI**: a thin HTTP client (`weaver-api::Client`)
+  of `loom`, resolving "the current branch" solely from `$WEAVER_BRANCH` (set by
+  loom for every session it launches — there is no git-cwd fallback). It carries
+  no sqlite driver; `reqwest` (via `weaver-api`) is its only network dependency.
+  Agents call it to read and update the goal, report status, add issues, set
+  tags, and emit hook events. It **requires a reachable `loom server run`** —
+  every command fails with a friendly error if the server can't be reached.
+- **`loom`** — the **orchestrator**: the REST + SSE server, the Vue web UI, the
+  per-branch terminal supervisor + agent process (via the `sessions` table), the
+  background monitor, and the `git worktree` shell-outs. It is the only process
+  that opens the sqlite database directly.
 
 ```
-weaver CLI ──sqlite──┐
-                     ├─ ~/.weaver/weaver.db   (shared, WAL)
-loom server run ────┘    │
-  │                       │
-  ├─ axum REST + SSE      │
-  ├─ terminal + git wrap. │
-  ├─ agent launcher       │
-  ├─ monitor (consumes    │
-  │   `events` rows that  │
-  │   `weaver hook` wrote)│
-  └─ Vue SPA              │
-                          │
-  Vue SPA ──REST + SSE────┘
+weaver CLI ──HTTP (REST)──▶ loom server run
+                                │
+                                ├─ sqlite ─▶ ~/.weaver/weaver.db
+                                ├─ axum REST + SSE
+                                ├─ terminal + git wrap.
+                                ├─ agent launcher
+                                ├─ monitor (consumes
+                                │   `events` rows that
+                                │   `weaver hook` posted)
+                                └─ Vue SPA ──REST + SSE──▶ (browser)
 ```
 
-Both binaries open the sqlite file directly. The monitor watches the `events`
-table for new `hook` rows — that is how `weaver hook` reports status without
-needing the daemon to be reachable.
+Only `loom` opens the sqlite file directly; `weaver` reaches the same state
+over HTTP. The monitor watches the `events` table for new `hook` rows —
+`weaver hook` posts them via `POST /api/branches/{key}/events`, same as every
+other `weaver` subcommand.
 
 ## Module layout
 
 | Path | What's in it |
 |---|---|
-| `crates/weaver-core/` | lib: `branches`, `issues`, `events`, `db`, `migrations` (ordered SQL + `schema_migrations` indicator), `git`, `config`, `artifacts` (versioned documents), `repo_config` (`.weaver/config.toml`), `transcript` (agent conversation logs: raw → iris format → markdown), agent helpers. Pure logic; used by both binaries. |
+| `crates/weaver-core/` | lib: `branches`, `issues`, `events`, `db`, `migrations` (ordered SQL + `schema_migrations` indicator), `git`, `config`, `artifacts` (versioned documents), `repo_config` (`.weaver/config.toml`), `transcript` (agent conversation logs: raw → iris format → markdown), agent helpers. Pure logic; used by `loom` for DB access, and by `weaver` only for the DB-free pieces (`transcript`, `tags` constants/validators, the agent primer). |
+| `crates/weaver-api/` | typed loom REST client + DTOs (`Client`, `*View`/`*Req` types, `endpoint::default_client()` for resolving `$WEAVER_API`/`$LOOM_TOKEN`). Zero server deps (no `axum`, no sqlite driver) — the one cross-process seam `weaver` links against instead of `weaver-core`'s DB layer. |
 | `crates/smartdoc/` | the markdown-convention layer: parse references (`#N`, `artifact:<name>`), project live status into the render. Dependency-free of weaver. See [artifacts.md](artifacts.md). |
-| `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`goal`, `summary`, `readme`, `status` [read or set level + message], `tag` [`set`/`rm`/`ls` a branch tag], `issue …`, `where`, `log`, `chatlog` [render the agent's conversation transcript], `hook`, `config`) |
+| `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`goal`, `summary`, `readme`, `status` [read or set level + message], `tag` [`set`/`rm`/`ls` a branch tag], `issue …`, `where`, `log`, `chatlog` [render the agent's conversation transcript], `hook`, `config`) — every command drives `weaver-api::Client` over HTTP; none touch sqlite |
 | `crates/loom/src/web.rs` | axum routes, request/response types, SSE — **the API surface** (incl. the auth middleware + login/token/user handlers) |
 | `crates/loom/src/auth.rs` | authentication core: token/password crypto, the `users`/`api_tokens`/`auth_sessions` tables, the machine-local token, and the GitHub OAuth calls. `axum`-free so it unit-tests directly |
 | `crates/loom/src/server.rs` | bind, write `server.json`, spawn bg tasks |
@@ -144,7 +143,8 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
 ## Storage & state
 
 - **SQLite** at `$WEAVER_HOME/weaver.db` (default `~/.weaver/weaver.db`),
-  shared by `weaver` and `loom`. WAL mode handles concurrency.
+  opened only by `loom` — `weaver` reaches it over HTTP. WAL mode handles
+  concurrency among loom's own connections.
   - Core tables: `branches`, `issues`, `events`, `settings`.
   - Loom tables (`crates/loom/src/db.rs`): `sessions`, `recent_repos`,
     `branch_github` (per-branch PR snapshot), and the auth tables `users`
@@ -368,13 +368,15 @@ loud self-report still wins the badge. We don't try to mechanically separate
 good-enough idle signal, and the status watch upgrades it when warranted (below).
 
 The **`attention` tag** is otherwise the agent's own call, set via `weaver
-status <level> ["<message>"]`. That writes the tag (and, when a message is
-given, the `description`) directly (daemon-less) — `ok` clears the tag, the two
-loud levels upsert it — and records a `tag` event the monitor re-broadcasts over
-SSE. A bare `weaver status <level>` changes only the level and keeps the last
-message. Last write wins, so an explicit declaration overrides the hook-inferred
-default. The general `weaver tag set|rm|ls` group writes any key the same way;
-the `PUT`/`DELETE /api/sessions/{id}/tags/{key}` routes do it over HTTP for the
+status <level> ["<message>"]`. That calls `POST /api/branches/{key}/status`,
+which writes the tag (and, when a message is given, the `description`) and
+records a `tag` event the monitor re-broadcasts over SSE, atomically in one
+request — `ok` clears the tag, the two loud levels upsert it. A bare `weaver
+status <level>` changes only the level and keeps the last message. Last write
+wins, so an explicit declaration overrides the hook-inferred default. The
+general `weaver tag set|rm|ls` group writes any key the same way, over the
+branch-scoped `PUT`/`DELETE /api/branches/{key}/tags/{key}` routes; the
+session-scoped `PUT`/`DELETE /api/sessions/{id}/tags/{key}` routes serve the
 UI and the [overlooker](plans/overlooker.md). The builtin status watch, when a
 session goes idle (the agent's finished-turn hook), asks the judge model for the
 set of tags the session warrants and reconciles its own typed marks to that set
@@ -453,10 +455,11 @@ testable without invoking `gh`.
 
 ## Authentication
 
-Authentication is a **loom-only** concern — the daemon-less `weaver` CLI talks
-straight to sqlite and never authenticates. It lets loom be exposed off the
-loopback interface (so the dashboard and the API are reachable without an SSH
-tunnel) while gating who may drive the fleet. The core (crypto, the tables, the
+Authentication is a **loom-only** concern — `weaver` authenticates like any
+other REST client, sending `$LOOM_TOKEN` as a bearer token when set (falling
+back to loom's machine-local token). It lets loom be exposed off the loopback
+interface (so the dashboard and the API are reachable without an SSH tunnel)
+while gating who may drive the fleet. The core (crypto, the tables, the
 GitHub OAuth calls) lives in `crate::auth`, deliberately `axum`-free; the HTTP
 glue (the middleware, cookie handling, route handlers) lives in `crate::web`.
 
@@ -574,10 +577,10 @@ builtins are stdlib-only and need neither).
 | Var | Purpose | Default |
 |---|---|---|
 | `WEAVER_HOME` | state directory | `~/.weaver` |
-| `WEAVER_DB` | sqlite path | `$WEAVER_HOME/weaver.db` |
-| `WEAVER_API` | loom URL (both sides — server binds, CLI talks) | `http://127.0.0.1:7878` |
-| `WEAVER_BRANCH` | override the branch resolver (set by `loom session launch` in the worktree) | — |
-| `LOOM_TOKEN` | bearer token the `loom` CLI / automation sends; falls back to the machine-local token file on the same host | — |
+| `WEAVER_DB` | sqlite path, read only by `loom` | `$WEAVER_HOME/weaver.db` |
+| `WEAVER_API` | loom URL (both sides — server binds, `weaver`/`loom` CLI clients talk) | `http://127.0.0.1:7878` |
+| `WEAVER_BRANCH` | the current branch key, set by `loom session launch` in the worktree — the only source `weaver` uses; unset, every `weaver` command fails with a friendly error | — |
+| `LOOM_TOKEN` | bearer token the `weaver`/`loom` CLIs and automation send; falls back to the machine-local token file on the same host | — |
 | `LOOM_OWNER_GITHUB` | GitHub login seeded as the owner on a fresh database | `rjpower` |
 | `LOOM_GITHUB_CLIENT_ID` / `LOOM_GITHUB_CLIENT_SECRET` | GitHub OAuth app credentials (override the settings-stored values) | — |
 | `WEAVER_TAPESTRY_DIR` | directory holding tapestry's per-session control sockets | `$WEAVER_HOME/sock` |

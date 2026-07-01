@@ -59,9 +59,27 @@ pub fn client_addr() -> String {
         .unwrap_or_else(|| DEFAULT_ADDR.to_string())
 }
 
-/// The base URL (`http://host:port`) a client should use.
+/// The scheme `$WEAVER_API` carries explicitly (`http` or `https`), or `None`
+/// when it's unset or a bare `host:port`.
+fn env_scheme() -> Option<&'static str> {
+    let api = std::env::var("WEAVER_API").ok()?;
+    let api = api.trim();
+    if api.starts_with("https://") {
+        Some("https")
+    } else if api.starts_with("http://") {
+        Some("http")
+    } else {
+        None
+    }
+}
+
+/// The base URL a client should use. `$WEAVER_API`'s scheme is preserved when
+/// it specifies one explicitly, so a remote `https://` deployment isn't
+/// silently downgraded to plaintext; otherwise `http`, since the recorded or
+/// default address is always loopback-bound.
 pub fn base_url() -> String {
-    format!("http://{}", client_addr())
+    let scheme = env_scheme().unwrap_or("http");
+    format!("{scheme}://{}", client_addr())
 }
 
 #[cfg(test)]

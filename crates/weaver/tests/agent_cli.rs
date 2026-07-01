@@ -1,168 +1,302 @@
-//! Agent-facing CLI flows that must work without a running server.
+//! Agent-facing CLI flows against a real (locally isolated) loom server — the
+//! CLI's only mode now that it is an HTTP-only client of loom (see
+//! `weaver_api::endpoint`). Each test boots its own server on a random port
+//! with an isolated `WEAVER_HOME`, seeds one branch row, and drives the
+//! `weaver` binary as a subprocess pointed at it via `$WEAVER_API`/
+//! `$WEAVER_BRANCH` — the same env loom injects into every session it
+//! launches.
 //!
-//! These drive the `weaver` binary directly (`cargo run -- ...`) inside a
-//! scratch git repo and assert on stdout and the resulting sqlite rows.
+//! `Env::start` mutates process-global env (`WEAVER_HOME`), so every test is
+//! `#[serial]` — they share one binary and would otherwise race on that env.
 
 use std::io::Write;
-use std::path::Path;
+use std::net::SocketAddr;
 use std::process::{Command, Stdio};
 
-fn sh(dir: &Path, program: &str, args: &[&str]) {
-    let status = Command::new(program)
-        .args(args)
-        .current_dir(dir)
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run {program}: {e}"));
-    assert!(status.success(), "{program} {args:?} failed");
-}
+use loom::events::EventBus;
+use loom::web::AppState;
+use loom::{db, server};
+use serial_test::serial;
+use tokio::net::TcpListener;
 
 /// Path to the freshly-built `weaver` binary the test will drive.
 fn weaver_bin() -> std::path::PathBuf {
-    // Cargo sets CARGO_BIN_EXE_<name> for integration tests.
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_weaver"))
 }
 
+/// A running loom server, isolated in its own temp `WEAVER_HOME`/sqlite db,
+/// with one branch row seeded — the target `$WEAVER_BRANCH` names, exactly as
+/// loom would set it for a real session.
 struct Env {
+    addr: SocketAddr,
+    branch_id: String,
+    repo_root: String,
+    branch_name: String,
+    db: weaver_core::db::Db,
     _home: tempfile::TempDir,
-    _repo: tempfile::TempDir,
-    repo_path: std::path::PathBuf,
-    home_path: std::path::PathBuf,
 }
 
-fn setup() -> Env {
-    let home = tempfile::tempdir().unwrap();
-    let repo = tempfile::tempdir().unwrap();
-    sh(repo.path(), "git", &["init", "-b", "feature-test"]);
-    sh(repo.path(), "git", &["config", "user.email", "t@t.test"]);
-    sh(repo.path(), "git", &["config", "user.name", "Test"]);
-    std::fs::write(repo.path().join("README.md"), "hi").unwrap();
-    sh(repo.path(), "git", &["add", "."]);
-    sh(repo.path(), "git", &["commit", "-m", "init"]);
-    let repo_path = repo.path().to_path_buf();
-    let home_path = home.path().to_path_buf();
-    Env {
-        _home: home,
-        _repo: repo,
-        repo_path,
-        home_path,
+impl Env {
+    async fn start() -> Self {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("WEAVER_HOME", home.path());
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let pool = db::connect(&db::default_db_path()).await.unwrap();
+
+        let repo_root = "/repo".to_string();
+        let branch_name = "feature-test".to_string();
+        let branch = weaver_core::branch::upsert(&pool, &repo_root, &branch_name, "main")
+            .await
+            .unwrap();
+
+        let trigger = loom::github_trigger::GithubTrigger::production(pool.clone());
+        let state = AppState {
+            db: pool.clone(),
+            bus: EventBus::new(),
+            addr: addr.to_string(),
+            ide: std::sync::Arc::new(loom::ide::IdeManager::new(loom::ide::ide_home())),
+            trigger,
+        };
+        tokio::spawn(server::serve(state, listener));
+
+        let env = Env {
+            addr,
+            branch_id: branch.id,
+            repo_root,
+            branch_name,
+            db: pool,
+            _home: home,
+        };
+        env.wait_until_healthy().await;
+        env
+    }
+
+    async fn wait_until_healthy(&self) {
+        let url = format!("http://{}/api/health", self.addr);
+        for _ in 0..100 {
+            if reqwest::get(&url).await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("server never became healthy at {url}");
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::new(weaver_bin());
+        cmd.args(args)
+            .env("WEAVER_API", format!("http://{}", self.addr))
+            .env("WEAVER_BRANCH", &self.branch_id)
+            .env_remove("LOOM_TOKEN");
+        cmd
+    }
+
+    /// Run the weaver binary with the given args, returning captured stdout.
+    /// Asserts success.
+    fn run(&self, args: &[&str]) -> String {
+        let out = self.command(args).output().expect("failed to spawn weaver");
+        assert!(
+            out.status.success(),
+            "weaver {args:?} failed: {} / {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// Run the weaver binary with `stdin` piped in, returning captured stdout.
+    /// Used to drive the SessionStart hook, which reads its `source` from a
+    /// JSON payload on stdin.
+    fn run_with_stdin(&self, args: &[&str], stdin: &str) -> String {
+        let mut child = self
+            .command(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn weaver");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().expect("weaver did not exit");
+        assert!(
+            out.status.success(),
+            "weaver {args:?} failed: {} / {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// Run the weaver binary and return the raw output (not asserting on
+    /// success) — for tests exercising a failure path.
+    fn run_raw(&self, args: &[&str]) -> std::process::Output {
+        self.command(args).output().expect("failed to spawn weaver")
     }
 }
 
-/// Run the weaver binary in `dir` with `WEAVER_HOME=<home>` and the given args,
-/// returning the captured stdout.
-fn run(env: &Env, args: &[&str]) -> String {
-    let out = Command::new(weaver_bin())
-        .args(args)
-        .current_dir(&env.repo_path)
-        .env("WEAVER_HOME", &env.home_path)
-        // Make sure the CLI can't accidentally reach a real server.
-        .env("WEAVER_API", "http://127.0.0.1:1")
-        .output()
-        .expect("failed to spawn weaver");
-    assert!(
-        out.status.success(),
-        "weaver {args:?} failed: {} / {}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-#[test]
-fn goal_set_and_get() {
-    let env = setup();
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn goal_set_and_get() {
+    let env = Env::start().await;
     // No goal yet — prints an empty line.
-    let out = run(&env, &["goal"]);
+    let out = env.run(&["goal"]);
     assert_eq!(out.trim(), "");
 
-    run(&env, &["goal", "set", "ship", "the", "thing"]);
-    let out = run(&env, &["goal"]);
+    env.run(&["goal", "set", "ship", "the", "thing"]);
+    let out = env.run(&["goal"]);
     assert_eq!(out.trim(), "ship the thing");
 }
 
-#[test]
-fn where_reports_resolved_branch() {
-    let env = setup();
-    let out = run(&env, &["where"]);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn goal_set_derives_a_title_only_once() {
+    let env = Env::start().await;
+    env.run(&["goal", "set", "ship the thing\nmore detail"]);
+    let out = env.run(&["status"]);
+    assert!(out.contains("title:       ship the thing"), "status: {out}");
+
+    // A second goal set does not re-derive the title.
+    env.run(&["goal", "set", "a", "different", "goal"]);
+    let out = env.run(&["status"]);
+    assert!(out.contains("title:       ship the thing"), "status: {out}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn where_reports_resolved_branch() {
+    let env = Env::start().await;
+    let out = env.run(&["where"]);
     assert!(
         out.contains("branch:    feature-test"),
         "where output: {out}"
     );
 }
 
-#[test]
-fn issue_lifecycle() {
-    let env = setup();
-    run(&env, &["issue", "add", "fix", "the", "thing"]);
-    run(&env, &["issue", "add", "another", "task"]);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn missing_weaver_branch_gives_a_friendly_error() {
+    let env = Env::start().await;
+    let out = std::process::Command::new(weaver_bin())
+        .args(["where"])
+        .env("WEAVER_API", format!("http://{}", env.addr))
+        .env_remove("WEAVER_BRANCH")
+        .env_remove("LOOM_TOKEN")
+        .output()
+        .expect("failed to spawn weaver");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("WEAVER_BRANCH"),
+        "should name the missing env var: {stderr}"
+    );
+}
 
-    let out = run(&env, &["issue", "ls"]);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unreachable_loom_gives_a_friendly_error() {
+    let out = std::process::Command::new(weaver_bin())
+        .args(["where"])
+        // Port 1 is (almost) never listening — a fast, reliable connection
+        // refusal without a real unreachable-network dependency.
+        .env("WEAVER_API", "http://127.0.0.1:1")
+        .env("WEAVER_BRANCH", "does-not-matter")
+        .env_remove("LOOM_TOKEN")
+        .output()
+        .expect("failed to spawn weaver");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot reach loom"),
+        "stderr should give a friendly connection error: {stderr}"
+    );
+    assert!(
+        stderr.contains("loom server start"),
+        "stderr should say how to fix it: {stderr}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn issue_lifecycle() {
+    let env = Env::start().await;
+    env.run(&["issue", "add", "fix", "the", "thing"]);
+    env.run(&["issue", "add", "another", "task"]);
+
+    let out = env.run(&["issue", "ls"]);
     assert!(out.contains("fix the thing"), "ls output: {out}");
     assert!(out.contains("another task"), "ls output: {out}");
     assert_eq!(out.matches("[ ]").count(), 2, "two open issues");
 
     // Close #1, then list defaults to open only (should drop it).
-    run(&env, &["issue", "close", "1"]);
-    let out = run(&env, &["issue", "ls"]);
+    env.run(&["issue", "close", "1"]);
+    let out = env.run(&["issue", "ls"]);
     assert!(
         !out.contains("fix the thing"),
         "closed issue should be hidden"
     );
 
-    let out = run(&env, &["issue", "ls", "--all"]);
+    let out = env.run(&["issue", "ls", "--all"]);
     assert!(
         out.contains("[x]"),
         "closed marker should appear with --all"
     );
 
     // Reopen, then rm.
-    run(&env, &["issue", "reopen", "1"]);
-    let out = run(&env, &["issue", "ls"]);
+    env.run(&["issue", "reopen", "1"]);
+    let out = env.run(&["issue", "ls"]);
     assert_eq!(out.matches("[ ]").count(), 2);
 
-    run(&env, &["issue", "rm", "1"]);
-    let out = run(&env, &["issue", "ls", "--all"]);
+    env.run(&["issue", "rm", "1"]);
+    let out = env.run(&["issue", "ls", "--all"]);
     assert!(!out.contains("fix the thing"));
 }
 
 /// `issue tag set` sets a free-form label, `issue show` surfaces it, and
 /// `issue tag rm` clears it.
-#[test]
-fn issue_tag_set_show_clear() {
-    let env = setup();
-    run(&env, &["issue", "add", "label", "me"]);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn issue_tag_set_show_clear() {
+    let env = Env::start().await;
+    env.run(&["issue", "add", "label", "me"]);
 
-    run(&env, &["issue", "tag", "set", "1", "priority", "high"]);
-    let out = run(&env, &["issue", "show", "1"]);
+    env.run(&["issue", "tag", "set", "1", "priority", "high"]);
+    let out = env.run(&["issue", "show", "1"]);
     assert!(out.contains("priority=high"), "show output: {out}");
 
     // A second set overwrites the value in place (single-valued per key).
-    run(&env, &["issue", "tag", "set", "1", "priority", "low"]);
-    let out = run(&env, &["issue", "show", "1"]);
+    env.run(&["issue", "tag", "set", "1", "priority", "low"]);
+    let out = env.run(&["issue", "show", "1"]);
     assert!(out.contains("priority=low"), "show output: {out}");
     assert!(!out.contains("priority=high"));
 
-    run(&env, &["issue", "tag", "rm", "1", "priority"]);
-    let out = run(&env, &["issue", "show", "1"]);
+    env.run(&["issue", "tag", "rm", "1", "priority"]);
+    let out = env.run(&["issue", "show", "1"]);
     assert!(!out.contains("priority="), "tag should be cleared: {out}");
 }
 
-#[test]
-fn issue_ls_separates_branch_work_from_repo_backlog() {
-    let env = setup();
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn issue_ls_separates_branch_work_from_repo_backlog() {
+    let env = Env::start().await;
     // Default add → claimed by this branch. `--repo` → unclaimed backlog.
-    run(&env, &["issue", "add", "my", "task"]);
-    run(&env, &["issue", "add", "--repo", "backlog", "task"]);
+    env.run(&["issue", "add", "my", "task"]);
+    env.run(&["issue", "add", "--repo", "backlog", "task"]);
 
     // Default ls shows both, under separate sections.
-    let out = run(&env, &["issue", "ls"]);
+    let out = env.run(&["issue", "ls"]);
     assert!(out.contains("On this branch"), "ls: {out}");
     assert!(out.contains("my task"), "ls: {out}");
     assert!(out.contains("Repo backlog"), "ls: {out}");
     assert!(out.contains("backlog task"), "ls: {out}");
 
     // `--mine` drops the backlog section.
-    let out = run(&env, &["issue", "ls", "--mine"]);
+    let out = env.run(&["issue", "ls", "--mine"]);
     assert!(out.contains("my task"), "mine: {out}");
     assert!(
         !out.contains("backlog task"),
@@ -170,19 +304,20 @@ fn issue_ls_separates_branch_work_from_repo_backlog() {
     );
 
     // The badge counts only this branch's claimed work, not the backlog.
-    let out = run(&env, &["status"]);
+    let out = env.run(&["status"]);
     assert!(out.contains("open issues: 1"), "status: {out}");
 }
 
 /// `issue show` surfaces the live status of the branch working the issue, which
 /// is what lets a parent agent poll a delegated sub-tree.
-#[test]
-fn issue_show_includes_the_working_branch_status() {
-    let env = setup();
-    run(&env, &["issue", "add", "the", "sub-task"]);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn issue_show_includes_the_working_branch_status() {
+    let env = Env::start().await;
+    env.run(&["issue", "add", "the", "sub-task"]);
     // The current branch claims it; give the branch a live status.
-    run(&env, &["status", "blocked", "build", "is", "broken"]);
-    let out = run(&env, &["issue", "show", "1"]);
+    env.run(&["status", "blocked", "build", "is", "broken"]);
+    let out = env.run(&["issue", "show", "1"]);
     assert!(
         out.contains("working:"),
         "show should report progress: {out}"
@@ -195,12 +330,13 @@ fn issue_show_includes_the_working_branch_status() {
 
 /// `issue wait` returns immediately (success) when the issue is already closed,
 /// and reports a closed issue rather than hanging.
-#[test]
-fn issue_wait_returns_when_already_closed() {
-    let env = setup();
-    run(&env, &["issue", "add", "done", "already"]);
-    run(&env, &["issue", "close", "1"]);
-    let out = run(&env, &["issue", "wait", "1", "--timeout", "1"]);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn issue_wait_returns_when_already_closed() {
+    let env = Env::start().await;
+    env.run(&["issue", "add", "done", "already"]);
+    env.run(&["issue", "close", "1"]);
+    let out = env.run(&["issue", "wait", "1", "--timeout", "1"]);
     assert!(
         out.contains("nothing to wait for"),
         "wait on a closed issue should return at once: {out}"
@@ -209,37 +345,29 @@ fn issue_wait_returns_when_already_closed() {
 
 /// `issue wait` on a still-open issue gives up at the timeout with a non-zero
 /// exit, so a caller can tell "still running" from "finished".
-#[test]
-fn issue_wait_times_out_on_an_open_issue() {
-    let env = setup();
-    run(&env, &["issue", "add", "still", "going"]);
-    let out = Command::new(weaver_bin())
-        .args(["issue", "wait", "1", "--timeout", "1", "--interval", "1"])
-        .current_dir(&env.repo_path)
-        .env("WEAVER_HOME", &env.home_path)
-        .env("WEAVER_API", "http://127.0.0.1:1")
-        .output()
-        .expect("failed to spawn weaver");
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn issue_wait_times_out_on_an_open_issue() {
+    let env = Env::start().await;
+    env.run(&["issue", "add", "still", "going"]);
+    let out = env.run_raw(&["issue", "wait", "1", "--timeout", "1", "--interval", "1"]);
     assert!(
         !out.status.success(),
         "an unmet wait should exit non-zero so callers can branch on it"
     );
-    // The timeout is reported through the normal error path (stderr).
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("timed out"), "stderr: {stderr}");
 }
 
 /// A tracking issue sourced from this branch but claimed by another shows up
 /// under "Delegated by this branch", with the sub-agent's status.
-#[test]
-fn issue_ls_shows_delegated_sub_trees() {
-    let env = setup();
-    // Simulate a delegation: an issue this branch (feature-test) sourced, now
-    // claimed by a child branch with a live status. We seed it straight into
-    // the db the same way the launcher would.
-    seed_delegated_issue(&env, "feature-test", "weaver/child", "attention", "ready");
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn issue_ls_shows_delegated_sub_trees() {
+    let env = Env::start().await;
+    seed_delegated_issue(&env, "weaver/child", "attention", "ready").await;
 
-    let out = run(&env, &["issue", "ls"]);
+    let out = env.run(&["issue", "ls"]);
     assert!(
         out.contains("Delegated by this branch"),
         "ls should list delegated sub-trees: {out}"
@@ -251,75 +379,61 @@ fn issue_ls_shows_delegated_sub_trees() {
     );
 }
 
-/// Insert a delegated tracking issue (sourced by `parent`, claimed by `child`)
-/// and give `child` a branch row with the supplied attention/description —
-/// reproducing the state a `loom session launch` from inside `parent` would create.
-fn seed_delegated_issue(env: &Env, parent: &str, child: &str, attention: &str, description: &str) {
-    let db_path = env.home_path.join("weaver.db");
-    // Make sure the parent branch row exists first (a write resolves it).
-    run(env, &["goal", "set", "parent", "goal"]);
-    let repo_root = canonical_repo_root(&env.repo_path);
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let db = weaver_core::db::connect(&db_path).await.unwrap();
-        let child_id = weaver_core::branch::new_id();
-        weaver_core::branch::insert(&db, &child_id, &repo_root, child, "main")
+/// Insert a delegated tracking issue (sourced by the env's branch, claimed by
+/// `child`) and give `child` a branch row with the supplied attention/
+/// description — reproducing the state a `loom session launch` from inside
+/// the parent would create.
+async fn seed_delegated_issue(env: &Env, child: &str, attention: &str, description: &str) {
+    let child_id = weaver_core::branch::new_id();
+    weaver_core::branch::insert(&env.db, &child_id, &env.repo_root, child, "main")
+        .await
+        .unwrap();
+    // The attention level lives on the `attention` tag now; `ok` is absence.
+    if attention == "ok" {
+        weaver_core::tags::clear(&env.db, &child_id, weaver_core::tags::ATTENTION_KEY)
             .await
             .unwrap();
-        // The attention level lives on the `attention` tag now; `ok` is absence.
-        if attention == "ok" {
-            weaver_core::tags::clear(&db, &child_id, weaver_core::tags::ATTENTION_KEY)
-                .await
-                .unwrap();
-        } else {
-            weaver_core::tags::set(
-                &db,
-                &child_id,
-                weaver_core::tags::ATTENTION_KEY,
-                attention,
-                "",
-                "agent",
-            )
-            .await
-            .unwrap();
-        }
-        weaver_core::branch::set_description(&db, &child_id, description)
-            .await
-            .unwrap();
-        weaver_core::issue::add(
-            &db,
-            &weaver_core::issue::NewIssue {
-                repo_root: repo_root.clone(),
-                source_branch: Some(parent.to_string()),
-                claimed_branch: Some(child.to_string()),
-                title: "the delegated task".to_string(),
-                ..Default::default()
-            },
+    } else {
+        weaver_core::tags::set(
+            &env.db,
+            &child_id,
+            weaver_core::tags::ATTENTION_KEY,
+            attention,
+            "",
+            "agent",
         )
         .await
         .unwrap();
-    });
-}
-
-/// The canonical repo_root weaver keys on (matches `branch::resolve_from_path`).
-fn canonical_repo_root(repo: &Path) -> String {
-    repo.canonicalize()
-        .unwrap_or_else(|_| repo.to_path_buf())
-        .display()
-        .to_string()
+    }
+    weaver_core::branch::set_description(&env.db, &child_id, description)
+        .await
+        .unwrap();
+    weaver_core::issue::add(
+        &env.db,
+        &weaver_core::issue::NewIssue {
+            repo_root: env.repo_root.clone(),
+            source_branch: Some(env.branch_name.clone()),
+            claimed_branch: Some(child.to_string()),
+            title: "the delegated task".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
 }
 
 /// `summary` is the agent catch-up: it surfaces the goal, the current status,
 /// the actual list of outstanding tasks, and a generated next-step hint.
-#[test]
-fn summary_orients_an_agent_on_the_branch() {
-    let env = setup();
-    run(&env, &["goal", "set", "ship", "the", "feature"]);
-    run(&env, &["issue", "add", "wire", "up", "routes"]);
-    run(&env, &["issue", "add", "add", "tests"]);
-    run(&env, &["status", "ok", "routes", "wired"]);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn summary_orients_an_agent_on_the_branch() {
+    let env = Env::start().await;
+    env.run(&["goal", "set", "ship", "the", "feature"]);
+    env.run(&["issue", "add", "wire", "up", "routes"]);
+    env.run(&["issue", "add", "add", "tests"]);
+    env.run(&["status", "ok", "routes", "wired"]);
 
-    let out = run(&env, &["summary"]);
+    let out = env.run(&["summary"]);
     assert!(out.contains("ship the feature"), "summary: {out}");
     // The current status (level + message) is the where-you-left-off signal.
     assert!(out.contains("ok — routes wired"), "summary: {out}");
@@ -344,14 +458,15 @@ fn summary_orients_an_agent_on_the_branch() {
 /// The outstanding list is capped (across own issues *and* delegated sub-trees)
 /// so a branch with lots of work can't blow up the summary; the overflow
 /// collapses into a single "(+N more)" line.
-#[test]
-fn summary_caps_a_long_outstanding_list() {
-    let env = setup();
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn summary_caps_a_long_outstanding_list() {
+    let env = Env::start().await;
     for n in 0..13 {
         let title = format!("task{n}");
-        run(&env, &["issue", "add", title.as_str()]);
+        env.run(&["issue", "add", title.as_str()]);
     }
-    let out = run(&env, &["summary"]);
+    let out = env.run(&["summary"]);
     assert!(out.contains("Outstanding (13):"), "summary: {out}");
     // Cap is 10 → the last 3 collapse into one line, not three rows.
     assert!(
@@ -365,26 +480,25 @@ fn summary_caps_a_long_outstanding_list() {
 }
 
 /// With nothing open, summary flips its hint to "wrap up / open a PR".
-#[test]
-fn summary_with_no_open_tasks_suggests_wrapping_up() {
-    let env = setup();
-    run(&env, &["goal", "set", "tidy", "up"]);
-    let out = run(&env, &["summary"]);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn summary_with_no_open_tasks_suggests_wrapping_up() {
+    let env = Env::start().await;
+    env.run(&["goal", "set", "tidy", "up"]);
+    let out = env.run(&["summary"]);
     assert!(out.contains("Outstanding: none"), "summary: {out}");
     assert!(out.contains("no open tasks"), "summary: {out}");
     assert!(out.contains("open a PR"), "summary: {out}");
 }
 
-#[test]
-fn artifact_write_show_ls_and_revisions() {
-    let env = setup();
-    // Write from stdin (no file arg). The CLI prints a dashboard URL (the test
-    // env points WEAVER_API at a fixed address) and the new revision.
-    let out = run_with_stdin(
-        &env,
-        &["artifact", "write", "plan"],
-        "# Plan\n\nDesign here.\n",
-    );
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn artifact_write_show_ls_and_revisions() {
+    let env = Env::start().await;
+    // Write from stdin (no file arg). The CLI prints a dashboard URL (now
+    // always known — the write only succeeds because loom is reachable) and
+    // the new revision.
+    let out = env.run_with_stdin(&["artifact", "write", "plan"], "# Plan\n\nDesign here.\n");
     assert!(
         out.contains("/artifacts/plan"),
         "write should print the URL: {out}"
@@ -392,17 +506,17 @@ fn artifact_write_show_ls_and_revisions() {
     assert!(out.contains("rev 1"), "first write is rev 1: {out}");
 
     // show prints the content verbatim.
-    let shown = run(&env, &["artifact", "show", "plan"]);
+    let shown = env.run(&["artifact", "show", "plan"]);
     assert!(shown.contains("Design here."), "show: {shown}");
 
     // A second write appends rev 2, and --rev 1 still fetches the original.
-    let out2 = run_with_stdin(&env, &["artifact", "write", "plan"], "# Plan v2\n");
+    let out2 = env.run_with_stdin(&["artifact", "write", "plan"], "# Plan v2\n");
     assert!(out2.contains("rev 2"), "second write is rev 2: {out2}");
-    let v1 = run(&env, &["artifact", "show", "plan", "--rev", "1"]);
+    let v1 = env.run(&["artifact", "show", "plan", "--rev", "1"]);
     assert!(v1.contains("Design here."), "rev 1 is the original: {v1}");
 
     // --meta prints the envelope, not the content.
-    let meta = run(&env, &["artifact", "show", "plan", "--meta"]);
+    let meta = env.run(&["artifact", "show", "plan", "--meta"]);
     assert!(meta.contains("name:    plan"), "meta: {meta}");
     assert!(meta.contains("rev:     2"), "meta latest rev: {meta}");
     assert!(
@@ -411,36 +525,40 @@ fn artifact_write_show_ls_and_revisions() {
     );
 
     // ls lists the branch-scoped artifact.
-    let ls = run(&env, &["artifact", "ls"]);
+    let ls = env.run(&["artifact", "ls"]);
     assert!(ls.contains("plan"), "ls: {ls}");
     assert!(ls.contains("rev 2"), "ls shows latest rev: {ls}");
 
     // A --repo write is repo-shared; --repo ls shows it.
-    run_with_stdin(
-        &env,
-        &["artifact", "write", "shared", "--repo"],
-        "shared body\n",
-    );
-    let repo_ls = run(&env, &["artifact", "ls", "--repo"]);
+    env.run_with_stdin(&["artifact", "write", "shared", "--repo"], "shared body\n");
+    let repo_ls = env.run(&["artifact", "ls", "--repo"]);
     assert!(
         repo_ls.contains("repo:shared"),
         "repo ls shows shared scope: {repo_ls}"
     );
+
+    // rm reports the scope and revision it removed, then the artifact is gone.
+    let rm = env.run(&["artifact", "rm", "plan"]);
+    assert!(rm.contains("was rev 2"), "rm: {rm}");
+    let ls = env.run(&["artifact", "ls"]);
+    assert!(!ls.contains("plan"), "rm should remove it: {ls}");
 }
 
-#[test]
-fn goal_set_from_stdin() {
-    let env = setup();
-    run_with_stdin(&env, &["goal", "set", "-"], "ship it from stdin\n");
-    let out = run(&env, &["goal"]);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn goal_set_from_stdin() {
+    let env = Env::start().await;
+    env.run_with_stdin(&["goal", "set", "-"], "ship it from stdin\n");
+    let out = env.run(&["goal"]);
     assert_eq!(out.trim(), "ship it from stdin");
 }
 
-#[test]
-fn hook_writes_an_event_row() {
-    let env = setup();
-    run(&env, &["hook", "--event", "working"]);
-    let log = run(&env, &["log"]);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn hook_writes_an_event_row() {
+    let env = Env::start().await;
+    env.run(&["hook", "--event", "working"]);
+    let log = env.run(&["log"]);
     assert!(
         log.contains("hook"),
         "log should mention the hook event: {log}"
@@ -451,42 +569,13 @@ fn hook_writes_an_event_row() {
     );
 }
 
-/// Run the weaver binary with `stdin` piped in, returning captured stdout. Used
-/// to drive the SessionStart hook, which reads its `source` from a JSON payload
-/// on stdin.
-fn run_with_stdin(env: &Env, args: &[&str], stdin: &str) -> String {
-    let mut child = Command::new(weaver_bin())
-        .args(args)
-        .current_dir(&env.repo_path)
-        .env("WEAVER_HOME", &env.home_path)
-        .env("WEAVER_API", "http://127.0.0.1:1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn weaver");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin.as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().expect("weaver did not exit");
-    assert!(
-        out.status.success(),
-        "weaver {args:?} failed: {} / {}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
 /// `weaver readme` prints the full weaver workflow guide so an agent can pull
 /// the rules back on demand (e.g. after a compaction replayed only the catch-up).
-#[test]
-fn readme_prints_the_full_weaver_guide() {
-    let env = setup();
-    let out = run(&env, &["readme"]);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn readme_prints_the_full_weaver_guide() {
+    let env = Env::start().await;
+    let out = env.run(&["readme"]);
     assert!(
         out.contains("weaver session"),
         "readme should print the WEAVER.md guide: {out}"
@@ -499,11 +588,12 @@ fn readme_prints_the_full_weaver_guide() {
 
 /// On a genuine start/resume/clear (no `compact` source), the session-start hook
 /// injects the full WEAVER.md primer as `additionalContext`.
-#[test]
-fn session_start_hook_injects_the_full_primer() {
-    let env = setup();
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn session_start_hook_injects_the_full_primer() {
+    let env = Env::start().await;
     let payload = r#"{"hook_event_name":"SessionStart","source":"startup"}"#;
-    let out = run_with_stdin(&env, &["hook", "--event", "session-start"], payload);
+    let out = env.run_with_stdin(&["hook", "--event", "session-start"], payload);
     assert!(
         out.contains("\"hookEventName\":\"SessionStart\""),
         "hook should emit SessionStart additionalContext JSON: {out}"
@@ -522,15 +612,16 @@ fn session_start_hook_injects_the_full_primer() {
 /// After a context compaction (`source: "compact"`), the hook replays a concise
 /// re-orientation — the `weaver summary` catch-up plus the load-bearing rules and
 /// a pointer to `weaver readme` — instead of the whole WEAVER.md.
-#[test]
-fn session_start_hook_after_compaction_replays_the_concise_summary() {
-    let env = setup();
-    run(&env, &["goal", "set", "ship", "the", "feature"]);
-    run(&env, &["issue", "add", "wire", "up", "routes"]);
-    run(&env, &["status", "ok", "routes", "wired"]);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn session_start_hook_after_compaction_replays_the_concise_summary() {
+    let env = Env::start().await;
+    env.run(&["goal", "set", "ship", "the", "feature"]);
+    env.run(&["issue", "add", "wire", "up", "routes"]);
+    env.run(&["status", "ok", "routes", "wired"]);
 
     let payload = r#"{"hook_event_name":"SessionStart","source":"compact"}"#;
-    let out = run_with_stdin(&env, &["hook", "--event", "session-start"], payload);
+    let out = env.run_with_stdin(&["hook", "--event", "session-start"], payload);
 
     // Still a SessionStart context injection.
     assert!(
@@ -565,19 +656,20 @@ fn session_start_hook_after_compaction_replays_the_concise_summary() {
     );
 
     // The hook still records the lifecycle event (with its source) for the monitor.
-    let log = run(&env, &["log"]);
+    let log = env.run(&["log"]);
     assert!(
         log.contains("session-start"),
         "the hook should record a session-start event: {log}"
     );
 }
 
-#[test]
-fn set_status_with_no_id_reports_current_branch() {
-    let env = setup();
-    run(&env, &["goal", "set", "do", "the", "thing"]);
-    run(&env, &["issue", "add", "step", "one"]);
-    let out = run(&env, &["status"]);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn set_status_with_no_id_reports_current_branch() {
+    let env = Env::start().await;
+    env.run(&["goal", "set", "do", "the", "thing"]);
+    env.run(&["issue", "add", "step", "one"]);
+    let out = env.run(&["status"]);
     assert!(out.contains("branch:      feature-test"), "status: {out}");
     assert!(out.contains("goal:        do the thing"), "status: {out}");
     assert!(out.contains("open issues: 1"), "status: {out}");
@@ -585,28 +677,26 @@ fn set_status_with_no_id_reports_current_branch() {
     assert!(out.contains("status:      ok"), "status: {out}");
 }
 
-#[test]
-fn set_status_sets_level_and_message() {
-    let env = setup();
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn set_status_sets_level_and_message() {
+    let env = Env::start().await;
     // Declare a level with a message, then read it back.
-    let out = run(
-        &env,
-        &["status", "attention", "Waiting", "for", "PR", "feedback"],
-    );
+    let out = env.run(&["status", "attention", "Waiting", "for", "PR", "feedback"]);
     assert!(
         out.contains("attention — Waiting for PR feedback"),
         "set output: {out}"
     );
 
-    let out = run(&env, &["status"]);
+    let out = env.run(&["status"]);
     assert!(
         out.contains("status:      attention — Waiting for PR feedback"),
         "status read: {out}"
     );
 
     // A new message replaces the old one.
-    run(&env, &["status", "ok", "back", "to", "work"]);
-    let out = run(&env, &["status"]);
+    env.run(&["status", "ok", "back", "to", "work"]);
+    let out = env.run(&["status"]);
     assert!(
         out.contains("status:      ok — back to work"),
         "status read: {out}"
@@ -614,15 +704,15 @@ fn set_status_sets_level_and_message() {
 
     // A bare level change keeps the last message (the message is the persistent
     // current-state note; only the level is volatile).
-    run(&env, &["status", "blocked"]);
-    let out = run(&env, &["status"]);
+    env.run(&["status", "blocked"]);
+    let out = env.run(&["status"]);
     assert!(
         out.contains("status:      blocked — back to work"),
         "message should persist across a bare level change: {out}"
     );
 
     // The set also writes a `tag` event to the branch log (the attention tag).
-    let log = run(&env, &["log"]);
+    let log = env.run(&["log"]);
     assert!(log.contains("tag"), "log should record tag events: {log}");
     assert!(
         log.contains("attention"),
@@ -633,14 +723,15 @@ fn set_status_sets_level_and_message() {
 /// `weaver tag set triage` stamps the overlooker's mark on a *named* session —
 /// a status axis distinct from the agent's own `attention` — and records a `tag`
 /// event for the audit trail. The agent's attention tag is never touched.
-#[test]
-fn triage_tag_marks_a_session_without_touching_attention() {
-    let env = setup();
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn triage_tag_marks_a_session_without_touching_attention() {
+    let env = Env::start().await;
     // The agent declares its own attention about itself.
-    run(&env, &["status", "blocked", "build", "broke"]);
+    env.run(&["status", "blocked", "build", "broke"]);
 
     // No triage tag until an overlooker looks.
-    let out = run(&env, &["tag", "ls", "--session", "feature-test"]);
+    let out = env.run(&["tag", "ls", "--session", "feature-test"]);
     assert!(
         !out.contains("triage"),
         "fresh session has no triage tag: {out}"
@@ -648,25 +739,22 @@ fn triage_tag_marks_a_session_without_touching_attention() {
 
     // An overlooker stamps a *different* opinion on the same session via the
     // triage tag.
-    let out = run(
-        &env,
-        &[
-            "tag",
-            "set",
-            "triage",
-            "attention",
-            "--note",
-            "looks stuck on tests",
-            "--by",
-            "status-check",
-            "--session",
-            "feature-test",
-        ],
-    );
+    let out = env.run(&[
+        "tag",
+        "set",
+        "triage",
+        "attention",
+        "--note",
+        "looks stuck on tests",
+        "--by",
+        "status-check",
+        "--session",
+        "feature-test",
+    ]);
     assert!(out.contains("triage = attention"), "triage tag set: {out}");
 
     // Read it back with its note and attribution.
-    let out = run(&env, &["tag", "ls", "--session", "feature-test"]);
+    let out = env.run(&["tag", "ls", "--session", "feature-test"]);
     assert!(out.contains("triage = attention"), "read level: {out}");
     assert!(out.contains("looks stuck on tests"), "read note: {out}");
     assert!(out.contains("status-check"), "read attribution: {out}");
@@ -677,19 +765,19 @@ fn triage_tag_marks_a_session_without_touching_attention() {
         out.contains("attention = blocked"),
         "agent attention must survive a triage write: {out}"
     );
-    let out = run(&env, &["status"]);
+    let out = env.run(&["status"]);
     assert!(
         out.contains("status:      blocked — build broke"),
         "the resolved status reads the agent's attention tag: {out}"
     );
 
     // The mark is logged as a `tag` event.
-    let log = run(&env, &["log"]);
+    let log = env.run(&["log"]);
     assert!(log.contains("tag"), "log should record tag events: {log}");
 
     // Clearing the triage tag leaves the agent's attention untouched.
-    run(&env, &["tag", "rm", "triage", "--session", "feature-test"]);
-    let out = run(&env, &["tag", "ls", "--session", "feature-test"]);
+    env.run(&["tag", "rm", "triage", "--session", "feature-test"]);
+    let out = env.run(&["tag", "ls", "--session", "feature-test"]);
     assert!(
         !out.contains("triage"),
         "triage tag should be cleared: {out}"
@@ -702,17 +790,11 @@ fn triage_tag_marks_a_session_without_touching_attention() {
 
 /// A loud key (`attention`/`triage`) rejects a value off the attention ladder
 /// with a non-zero exit, like `status`.
-#[test]
-fn tag_set_rejects_invalid_loud_value() {
-    let env = setup();
-    run(&env, &["goal", "set", "exist"]); // materialize the branch row first
-    let out = Command::new(weaver_bin())
-        .args(["tag", "set", "triage", "bogus", "--session", "feature-test"])
-        .current_dir(&env.repo_path)
-        .env("WEAVER_HOME", &env.home_path)
-        .env("WEAVER_API", "http://127.0.0.1:1")
-        .output()
-        .expect("failed to spawn weaver");
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tag_set_rejects_invalid_loud_value() {
+    let env = Env::start().await;
+    let out = env.run_raw(&["tag", "set", "triage", "bogus", "--session", "feature-test"]);
     assert!(!out.status.success(), "an invalid loud value should fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -723,86 +805,79 @@ fn tag_set_rejects_invalid_loud_value() {
 
 /// `weaver tag set/ls/rm` round-trips a free-form (quiet) tag on the current
 /// branch with its note and author, and `tag rm` clears it.
-#[test]
-fn tag_set_ls_rm_roundtrip() {
-    let env = setup();
-    run(&env, &["goal", "set", "exist"]); // materialize the branch row first
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tag_set_ls_rm_roundtrip() {
+    let env = Env::start().await;
 
     // No tags to begin with.
-    let out = run(&env, &["tag", "ls"]);
+    let out = env.run(&["tag", "ls"]);
     assert!(out.contains("(no tags)"), "fresh branch has no tags: {out}");
 
     // Set a free-form tag with a note and author.
-    let out = run(
-        &env,
-        &[
-            "tag",
-            "set",
-            "priority",
-            "high",
-            "--note",
-            "ship by friday",
-            "--by",
-            "russell",
-        ],
-    );
+    let out = env.run(&[
+        "tag",
+        "set",
+        "priority",
+        "high",
+        "--note",
+        "ship by friday",
+        "--by",
+        "russell",
+    ]);
     assert!(out.contains("priority = high"), "tag set: {out}");
 
     // List it back with its note and attribution.
-    let out = run(&env, &["tag", "ls"]);
+    let out = env.run(&["tag", "ls"]);
     assert!(out.contains("priority = high"), "tag ls value: {out}");
     assert!(out.contains("by russell"), "tag ls author: {out}");
     assert!(out.contains("ship by friday"), "tag ls note: {out}");
 
     // Setting the same key again overwrites it (single-valued).
-    run(&env, &["tag", "set", "priority", "low"]);
-    let out = run(&env, &["tag", "ls"]);
+    env.run(&["tag", "set", "priority", "low"]);
+    let out = env.run(&["tag", "ls"]);
     assert!(out.contains("priority = low"), "tag overwrite: {out}");
     assert_eq!(out.matches("priority").count(), 1, "single-valued: {out}");
 
     // Remove it.
-    run(&env, &["tag", "rm", "priority"]);
-    let out = run(&env, &["tag", "ls"]);
+    env.run(&["tag", "rm", "priority"]);
+    let out = env.run(&["tag", "ls"]);
     assert!(out.contains("(no tags)"), "tag rm cleared it: {out}");
 }
 
 /// `status ok` clears the agent's `attention` tag (returns to calm) while
 /// leaving the branch `description` in place.
-#[test]
-fn set_status_ok_clears_attention_tag_but_keeps_description() {
-    let env = setup();
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn set_status_ok_clears_attention_tag_but_keeps_description() {
+    let env = Env::start().await;
     // Raise attention with a message.
-    run(&env, &["status", "attention", "ready", "for", "review"]);
-    let out = run(&env, &["tag", "ls"]);
+    env.run(&["status", "attention", "ready", "for", "review"]);
+    let out = env.run(&["tag", "ls"]);
     assert!(
         out.contains("attention = attention"),
         "status should write the attention tag: {out}"
     );
 
     // Return to calm — the attention tag is cleared, the description survives.
-    run(&env, &["status", "ok"]);
-    let out = run(&env, &["tag", "ls"]);
+    env.run(&["status", "ok"]);
+    let out = env.run(&["tag", "ls"]);
     assert!(
         !out.contains("attention ="),
         "status ok should clear the attention tag: {out}"
     );
-    let out = run(&env, &["status"]);
+    let out = env.run(&["status"]);
     assert!(
         out.contains("status:      ok — ready for review"),
         "ok must keep the last description beside the calm level: {out}"
     );
 }
 
-#[test]
-fn set_status_rejects_unknown_level() {
-    let env = setup();
-    let out = Command::new(weaver_bin())
-        .args(["status", "bogus"])
-        .current_dir(&env.repo_path)
-        .env("WEAVER_HOME", &env.home_path)
-        .env("WEAVER_API", "http://127.0.0.1:1")
-        .output()
-        .expect("failed to spawn weaver");
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn set_status_rejects_unknown_level() {
+    let env = Env::start().await;
+    let out = env.run_raw(&["status", "bogus"]);
     assert!(!out.status.success(), "unknown level should fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -811,29 +886,22 @@ fn set_status_rejects_unknown_level() {
     );
 }
 
-#[test]
-fn auto_creates_branch_row_on_first_write() {
-    let env = setup();
-    // The branch row should not exist before any write.
-    let db = env.home_path.join("weaver.db");
-    assert!(
-        !db.exists()
-            || std::fs::metadata(&db).map(|m| m.len()).unwrap_or(0) == 0
-            || count_branches(&db) == 0
-    );
-    run(&env, &["goal", "set", "first", "write"]);
-    assert_eq!(count_branches(&db), 1);
-}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn config_get_set_ls_rm_roundtrip() {
+    let env = Env::start().await;
+    // A known setting has a default value before anything is set.
+    let out = env.run(&["config", "ls"]);
+    assert!(out.contains("(default)"), "ls should mark defaults: {out}");
 
-fn count_branches(db_path: &Path) -> i64 {
-    // Use a tiny tokio runtime to query the DB synchronously here.
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let db = weaver_core::db::connect(db_path).await.unwrap();
-        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM branches")
-            .fetch_one(&db)
-            .await
-            .unwrap();
-        n
-    })
+    env.run(&["config", "set", "agent.default", "codex"]);
+    let out = env.run(&["config", "get", "agent.default"]);
+    assert_eq!(out.trim(), "codex");
+
+    env.run(&["config", "rm", "agent.default"]);
+    let out = env.run(&["config", "ls"]);
+    assert!(
+        out.contains("agent.default") && out.contains("(default)"),
+        "rm should restore the default: {out}"
+    );
 }

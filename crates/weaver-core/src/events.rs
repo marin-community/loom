@@ -1,7 +1,7 @@
 //! Append-only event log plus an in-process broadcast channel for SSE.
 
 use anyhow::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::Row;
 use tokio::sync::broadcast;
@@ -20,7 +20,7 @@ pub fn is_system(branch_id: &str) -> bool {
     branch_id == SYSTEM_BRANCH
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub id: i64,
     pub branch_id: String,

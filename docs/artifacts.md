@@ -132,10 +132,11 @@ the survey above:
 - **URL-addressable.** `weaver artifact write` prints the dashboard URL
   (`/s/<session>/artifacts/<name>`) so the agent can hand it to the user in
   a status message or PR comment — the Amp-thread lesson: the URL is the
-  collaboration feature. The CLI resolves the server address the way loom
-  clients already do (`$WEAVER_API`, then the recorded `server.json`
-  address); without a running loom the write still succeeds — it is a plain
-  DB write, daemon-less like everything else — and the CLI prints the name.
+  collaboration feature. The write is a REST call (`weaver-api::Client`,
+  resolving the server the same way every loom client does: `$WEAVER_API`,
+  then the recorded `server.json` address), so a reachable loom is required —
+  without one the command fails with a friendly error rather than falling
+  back to a local write.
 - **It survives archive.** Artifacts live in weaver.db next to the goal,
   events, and issues, so tearing down the worktree no longer deletes the
   design doc. This fixes the worst current asymmetry for free.

@@ -10,6 +10,7 @@
 pub mod capability;
 pub mod client;
 pub mod dto;
+pub mod endpoint;
 
 pub use capability::{require, CapabilityError};
 pub use client::Client;

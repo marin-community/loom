@@ -71,7 +71,7 @@ signal.
    proposes a delta: create issues for new tasks, close issues for deleted
    tasks, **flag (never silently rewrite) tasks whose work is already
    in-flight.** This is the "design loop ↔ work" sync the issue asks for, in
-   weaver's daemon-less, last-write-wins idiom.
+   weaver's explicit, last-write-wins idiom.
 5. **loom renders the plan as the project dashboard.** mermaid diagrams,
    tasks sorted by value with live status badges joined from issues, each task
    linking through to its issue → its session → its live terminal. This is the
@@ -273,7 +273,7 @@ The diff, by task ID:
 That last-two-rows nuance is the durable-HITL lesson made concrete: **in-flight
 work is preserved across a design change and surfaced for a human decision,
 never silently rewritten or dropped.** It is also pure weaver idiom — explicit,
-daemon-less, last-write-wins, agent-driven, exactly like `status`. No file
+last-write-wins, agent-driven, exactly like `status`. No file
 watcher, no continuous bidirectional codegen (that's the Tessl trap). The user
 edits the file, hits **Reconcile** in the dashboard (or the agent runs
 `weaver plan sync` after a design conversation), reviews the proposed delta, and
@@ -376,7 +376,7 @@ stays single-goal by default; `--plan` is the deliberate escalation.
   non-deterministic for a general agent.
 - **No multi-file spec ceremony** (the Spec Kit `.specify/` path). One file.
 - **No continuous file↔DB watcher.** Sync is an explicit verb, matching
-  weaver's daemon-less, agent-driven ethos.
+  weaver's explicit, agent-driven ethos.
 - **No new execution engine.** Plans orchestrate the mechanisms that already
   exist (issues, sessions, sub-agent workflows). The plan is the durable,
   interactive *index*; the muscle underneath stays as it is.

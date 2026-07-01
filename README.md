@@ -5,18 +5,19 @@ coding agents in managed terminals.
 
 weaver ships two binaries:
 
-- **`weaver`** — the **agent-facing CLI**. It is database-direct (no daemon,
-  no HTTP) and runs sub-50ms cold. The agent inside a worktree uses it to
-  read and update the branch's **goal**, **description**, **notes**, and the
-  repo's **issues** (each claimed by a branch or sitting in the shared
-  backlog). It works whether or not the orchestrator is running.
-- **`loom`** — the **optional orchestrator**. It runs the REST + SSE server,
-  hosts a Vue dashboard, creates worktrees, launches agents into managed
-  terminals, and periodically summarizes each branch's diff against its merge
-  base. Without loom, branches and issues still work; the terminals + the
-  dashboard do not.
+- **`weaver`** — the **agent-facing CLI**. It is a thin HTTP client of loom's
+  REST API (via the `weaver-api` crate) — every command needs a reachable
+  `loom server run`. The agent inside a worktree uses it to read and update
+  the branch's **goal**, **description**, **notes**, and the repo's
+  **issues** (each claimed by a branch or sitting in the shared backlog).
+  Without a running loom, `weaver` fails fast with a plain-text error.
+- **`loom`** — the **orchestrator**. It runs the REST + SSE server, hosts a
+  Vue dashboard, creates worktrees, launches agents into managed terminals,
+  and periodically summarizes each branch's diff against its merge base. It
+  is the only process that opens the sqlite database directly.
 
-Both binaries share one sqlite database at `~/.weaver/weaver.db`.
+`loom` owns the sqlite database at `~/.weaver/weaver.db`; `weaver` never opens
+it — every read and write goes over HTTP to `loom`.
 
 ## Getting Started
 
@@ -59,30 +60,30 @@ loom server run     # REST + SSE server, terminal launcher, background monitor
 loom open      # open the web UI (http://127.0.0.1:7878)
 ```
 
-`weaver` needs no running daemon — it talks straight to the sqlite db — so the
-agent inside a worktree works the moment it's on your PATH. `loom server run` is only
-for the dashboard, terminal sessions, and summaries. See [Usage](#usage) for the
+`weaver` requires `loom server run` to be reachable — it resolves the server
+from `$WEAVER_API` (falling back to the address loom recorded while serving)
+and fails with a friendly error if it can't connect. See [Usage](#usage) for the
 full command surface, and [AGENTS.md](AGENTS.md) for the build/test loop and how
 to work on weaver itself.
 
 ## Architecture
 
 ```
-weaver CLI ──sqlite──┐
-                     ├─ ~/.weaver/weaver.db   (shared, WAL mode)
-loom server run ────┘
-  │
-  ├─ axum REST + SSE (127.0.0.1:7878)
-  ├─ terminal supervisors + git worktree wrappers
-  ├─ agent launcher (Claude / shell / custom command)
-  ├─ background monitor (status, orphan detection, hook ingest)
-  ├─ background summarizer (headless agent → branch description)
-  └─ Vue SPA at /
+weaver CLI ──HTTP (REST)──▶ loom server run
+                                │
+                                ├─ sqlite ─▶ ~/.weaver/weaver.db
+                                ├─ axum REST + SSE (127.0.0.1:7878)
+                                ├─ terminal supervisors + git worktree wrappers
+                                ├─ agent launcher (Claude / shell / custom command)
+                                ├─ background monitor (status, orphan detection, hook ingest)
+                                ├─ background summarizer (headless agent → branch description)
+                                └─ Vue SPA at /
 ```
 
 Agents call `weaver hook` to report status; the loom monitor sees the new
-`events` row on its next tick and flips the session's status. This is the
-key decoupling — the agent CLI never speaks HTTP.
+`events` row on its next tick and flips the session's status. `weaver hook`,
+like every other subcommand, is just another HTTP call through the
+`weaver-api` client.
 
 ## Usage
 
@@ -105,7 +106,7 @@ loom session adopt <branch>                   # recreate the terminal for an orp
 loom session rm <branch>                      # remove worktree + terminal + db row
 loom open                             # open the web UI
 
-# Agent-facing (run from inside the worktree, no daemon required)
+# Agent-facing (requires a reachable `loom server run`, via $WEAVER_API)
 weaver goal "ship the feature"
 weaver goal                           # print the current goal
 weaver summary                        # goal + outstanding tasks + next-step hints
@@ -119,7 +120,7 @@ weaver issue close 7
 weaver issue show 7                   # an issue + the live status of the branch working it
 weaver issue wait 7                   # block until a sub-session finishes or needs you
 weaver status                     # read: goal + status + open-issue count
-weaver where                          # debug: print resolved repo / branch / branch-id
+weaver where                          # debug: print the current branch's repo / branch / branch-id
 weaver log --limit 50                 # recent events for the current branch
 weaver chatlog                        # render this worktree's agent conversation as markdown
 ```
@@ -334,8 +335,9 @@ genuinely remote callers need to present a token or log in.
 
 ## Configuration
 
-Settings live in the `settings` table of the sqlite database, shared by both
-binaries. Each known setting is declared in a registry (`config.rs`) with a
+Settings live in the `settings` table of the sqlite database, which only
+`loom` opens directly; `weaver config` reads and writes them over the REST
+API. Each known setting is declared in a registry (`config.rs`) with a
 label, help text, type, and default.
 
 Edit them in the **Settings** pane of the web UI, or from the CLI:

@@ -9,12 +9,15 @@ in-workspace agent sees). Run `weaver readme` for the agent workflow commands.
 
 ## What weaver is
 
-Two binaries over one shared sqlite db (`~/.weaver/weaver.db`, WAL):
+Two binaries over loom's REST API:
 
-- **`weaver`** — the daemon-less agent CLI: goal, status, issues, hook events.
-  Works with or without loom.
-- **`loom`** — the optional orchestrator: REST + SSE server, Vue SPA, per-branch
-  terminal supervisor + agent process, the monitor, and `git worktree` shell-outs.
+- **`weaver`** — the agent CLI: goal, status, issues, hook events. A thin HTTP
+  client of `loom` (`weaver-api::Client`) — every command needs a reachable
+  `loom server run`.
+- **`loom`** — the orchestrator: REST + SSE server, Vue SPA, per-branch
+  terminal supervisor + agent process, the monitor, and `git worktree`
+  shell-outs. The only process that opens the sqlite db (`~/.weaver/weaver.db`)
+  directly.
 
 Diagram and module-by-module map: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

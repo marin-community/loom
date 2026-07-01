@@ -638,6 +638,11 @@ pub struct CreateRepoIssueReq {
     pub body: String,
     #[serde(default)]
     pub github_issue: Option<i64>,
+    /// The branch that filed this backlog item (provenance) — `None` for a
+    /// bare API call with no originating branch. When set and it resolves to
+    /// a live branch in this repo, an `issue_added` event is recorded there.
+    #[serde(default)]
+    pub source_branch: Option<String>,
 }
 
 /// Body for `PUT /api/sessions/{id}/artifacts/{name}`: a user edit that appends
@@ -656,6 +661,70 @@ pub struct ArtifactWriteBody {
     /// default) force-writes as before — backward compatible.
     #[serde(default)]
     pub base_rev: Option<i64>,
+}
+
+/// Body for `PUT /api/branches/{id}/artifacts/{name}`: create-or-append,
+/// unlike the session-scoped `PUT` (which requires the artifact to already
+/// exist). `author` defaults to `agent` — the CLI's writer; a `user` edit goes
+/// through the session-scoped route instead.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ArtifactUpsertReq {
+    pub content: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub author: Option<String>,
+    /// Write the repo-shared scope (`branch_id IS NULL`) instead of this
+    /// branch's own copy.
+    #[serde(default)]
+    pub repo: bool,
+}
+
+/// Body for `POST /api/branches/{id}/goal`: set the goal atomically —
+/// deriving a title when one isn't set yet and recording the `goal_set` event
+/// server-side, the same one-call semantics `weaver goal set` has always had
+/// against the local database.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BranchGoalReq {
+    pub goal: String,
+}
+
+/// Body for `POST /api/branches/{id}/status`: set the agent's attention level
+/// and current-state message in one call. `level` is `ok` | `attention` |
+/// `blocked`; an absent or empty `message` leaves the previous one in place.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BranchStatusReq {
+    pub level: String,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// Body for `POST /api/branches/{id}/events`: append a raw event row (e.g. an
+/// agent hook). The one escape hatch for an event kind with no dedicated
+/// mutating route of its own.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreateEventReq {
+    pub kind: String,
+    #[serde(default)]
+    pub data: Value,
+}
+
+/// One registered setting with its effective value, as `GET /api/settings`
+/// exposes it (a subset of the server's richer `SettingSpec` — key, value,
+/// and whether it's unset-and-defaulted are all a CLI needs).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingView {
+    pub key: String,
+    pub value: String,
+    pub is_default: bool,
+}
+
+/// The envelope `GET /api/settings` returns: `{ "settings": [...] }`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SettingsEnvelope {
+    pub settings: Vec<SettingView>,
 }
 
 /// Body for `POST /api/overlookers`. JSON-bearing fields take structured JSON

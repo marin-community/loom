@@ -1,16 +1,23 @@
 //! weaver — the agent-facing CLI.
 //!
-//! Every command in this binary talks to the SQLite database directly. The
-//! agent can run any of these whether or not the `loom` orchestrator is up.
-//! "Current branch" resolves from `$WEAVER_BRANCH` (an internal branch id) or,
-//! failing that, from the git checkout containing the current working
-//! directory.
+//! An HTTP-only client of loom: every command drives the loom REST API
+//! through `weaver-api::Client`, never a local database. The target server is
+//! resolved from `$WEAVER_API` (or the address a local loom recorded while
+//! serving), authenticated with `$LOOM_TOKEN` when set — the same resolution
+//! `loom`'s own CLI uses (see `weaver_api::endpoint`). "Current branch"
+//! resolves from `$WEAVER_BRANCH`, set by loom for every session it launches;
+//! without it, or without a reachable loom, a command fails with a plain-text
+//! error rather than falling back to any local state.
 
 use anyhow::{anyhow, bail, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::{json, Value};
 
-use weaver_core::{artifact, branch, config, db, discussion, events, issue, tags};
+use weaver_api::{
+    ArtifactUpsertReq, BranchView, Client, CreateIssueReq, CreateRepoIssueReq, IssueView,
+    PatchIssueReq, ThreadDto,
+};
+use weaver_core::tags;
 
 #[derive(Parser)]
 #[command(
@@ -59,8 +66,7 @@ enum Cmd {
     /// one-line note and an author. The well-known loud keys are `attention`
     /// (the agent's own signal, normally written by `weaver status`) and `triage`
     /// (an overlooker's outside assessment); both accept `attention` or
-    /// `blocked`. Any other key is free-form and quiet. Daemon-less, like
-    /// `weaver status`.
+    /// `blocked`. Any other key is free-form and quiet.
     Tag {
         #[command(subcommand)]
         cmd: TagCmd,
@@ -70,7 +76,7 @@ enum Cmd {
     /// A one-shot catch-up for an agent picking up (or resuming) a branch: the
     /// goal, the current status, the outstanding tasks (this branch's open
     /// issues and any open sub-trees it delegated), and a line or two of hints
-    /// for what to do next. Read-only; derived straight from the database.
+    /// for what to do next.
     Summary,
     /// Print the full weaver workflow guide (the WEAVER.md for this branch).
     ///
@@ -285,8 +291,8 @@ enum ArtifactCmd {
     Rm {
         /// The artifact name to remove.
         name: String,
-        /// Remove the repo-shared artifact (`branch_id IS NULL`) of this name,
-        /// not the branch-scoped one.
+        /// Remove the repo-shared artifact of this name, not the branch-scoped
+        /// one.
         #[arg(long)]
         repo: bool,
     },
@@ -416,11 +422,40 @@ async fn run() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Database-backed commands
+// The loom client and "current branch" resolution
 // ---------------------------------------------------------------------------
 
-async fn open_db() -> Result<db::Db> {
-    db::connect(&db::default_db_path()).await
+/// A client pointed at the server `$WEAVER_API` (or a local loom's recorded
+/// address) resolves, authenticated with `$LOOM_TOKEN` when set.
+fn client() -> Client {
+    weaver_api::endpoint::default_client()
+}
+
+/// The branch key every command operates against: `$WEAVER_BRANCH`, set by
+/// loom for every session it launches. There is no other way to identify
+/// "the current branch" once the CLI no longer reads local git/db state —
+/// without it, this only works as a bare client of a server that's told it
+/// which branch it's fetching.
+fn branch_key() -> Result<String> {
+    let key = std::env::var("WEAVER_BRANCH").unwrap_or_default();
+    let key = key.trim();
+    if key.is_empty() {
+        bail!(
+            "not running inside a loom session ($WEAVER_BRANCH is not set) — \
+             weaver only works inside a session loom launched"
+        );
+    }
+    Ok(key.to_string())
+}
+
+/// The resolved attention level for a branch: the `attention` tag's value, or
+/// `ok` when the branch carries no such tag (absence is calm).
+fn attention_of(b: &BranchView) -> String {
+    b.tags
+        .iter()
+        .find(|t| t.key == tags::ATTENTION_KEY)
+        .map(|t| t.value.clone())
+        .unwrap_or_else(|| "ok".to_string())
 }
 
 /// Read content from a file path, or stdin when `path` is `None` or `"-"`.
@@ -530,10 +565,11 @@ fn embed_image_markdown(alt: &str, filename: Option<&str>, bytes: &[u8]) -> Resu
 /// Print the goal, or set it. With no subcommand prints the current goal;
 /// `goal set` writes a new one from text args, a `--file`, or stdin (`-`).
 async fn cmd_goal(cmd: Option<GoalCmd>) -> Result<()> {
-    let db = open_db().await?;
-    let b = branch::resolve(&db).await?;
+    let client = client();
+    let key = branch_key()?;
     let Some(GoalCmd::Set { text, file }) = cmd else {
-        println!("{}", branch::current_goal(&db, &b).await?);
+        let b = client.get_branch(&key).await?;
+        println!("{}", b.goal);
         return Ok(());
     };
     // A `--file` (or `-` text) reads from disk/stdin; otherwise join the args.
@@ -548,12 +584,7 @@ async fn cmd_goal(cmd: Option<GoalCmd>) -> Result<()> {
     if goal.is_empty() {
         bail!("a goal is required — pass text, --file <path>, or pipe via '-'");
     }
-    branch::set_goal(&db, &b.id, &goal, "agent").await?;
-    if b.title.is_empty() {
-        let title = branch::derive_title(&goal);
-        branch::set_title(&db, &b.id, &title).await?;
-    }
-    events::record_local(&db, &b.id, "goal_set", json!({ "goal": goal })).await?;
+    client.set_branch_goal(&key, &goal).await?;
     println!("goal updated");
     Ok(())
 }
@@ -564,29 +595,28 @@ const SUMMARY_TASK_CAP: usize = 10;
 /// Print a quick orientation for the current branch: the goal, the current
 /// status, the outstanding tasks, and a hint or two for what to do next.
 ///
-/// This is the catch-up an agent reads when it picks up a branch. Everything is
-/// pulled straight from the database — no LLM, no daemon. It overlaps `weaver status`
-/// (read), but where that shows an open-issue *count*, summary lists the actual
-/// tasks and points at the next action.
+/// This is the catch-up an agent reads when it picks up a branch. It overlaps
+/// `weaver status` (read), but where that shows an open-issue *count*, summary
+/// lists the actual tasks and points at the next action.
 async fn cmd_summary() -> Result<()> {
-    let db = open_db().await?;
-    let b = branch::resolve(&db).await?;
-    print!("{}", render_summary(&db, &b).await?);
+    let client = client();
+    let key = branch_key()?;
+    let b = client.get_branch(&key).await?;
+    print!("{}", render_summary(&client, &b).await?);
     Ok(())
 }
 
 /// Render the `weaver summary` catch-up as a string (see [`cmd_summary`]). Kept
 /// separate from the printing so the post-compaction hook can replay the same
 /// text into the agent's context as `additionalContext` (see [`cmd_hook`]).
-async fn render_summary(db: &db::Db, b: &branch::Branch) -> Result<String> {
+async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
     use std::fmt::Write as _;
     let mut out = String::new();
 
     // Each section trails the command that drills into it, so the summary
     // doubles as a map of where to look next.
-    let resolved_goal = branch::current_goal(db, b).await?;
-    let goal = if !resolved_goal.is_empty() {
-        resolved_goal
+    let goal = if !b.goal.is_empty() {
+        b.goal.clone()
     } else if !b.title.is_empty() {
         b.title.clone()
     } else {
@@ -594,7 +624,7 @@ async fn render_summary(db: &db::Db, b: &branch::Branch) -> Result<String> {
     };
     let _ = writeln!(out, "Goal:    {goal}  (weaver goal)");
 
-    let attention = resolve_attention(db, &b.id).await?;
+    let attention = attention_of(b);
     let status = if b.description.is_empty() {
         attention
     } else {
@@ -604,7 +634,8 @@ async fn render_summary(db: &db::Db, b: &branch::Branch) -> Result<String> {
 
     // Artifacts visible from this branch (its own + repo-shared) — the documents
     // the agent has written to weaver (designs, reports, the `plan`).
-    let artifacts = artifact::list_for_session(db, &b.repo_root, &b.id)
+    let artifacts = client
+        .list_branch_artifacts(&b.id, false)
         .await
         .unwrap_or_default();
     match artifacts.as_slice() {
@@ -627,51 +658,60 @@ async fn render_summary(db: &db::Db, b: &branch::Branch) -> Result<String> {
         }
     }
 
-    // Open discussion: every open thread across the visible artifacts, newest
-    // first. Resolved/orphaned threads are excluded — this is "what's waiting
-    // on me", not a full discussion log (`weaver artifact threads <name>` for
-    // that). Silent when there's nothing open, so a quiet branch's summary
-    // doesn't grow an empty header.
-    let mut open_threads: Vec<(&str, discussion::Thread)> = Vec::new();
+    // Open discussion: unresolved comment threads across every artifact visible
+    // from this branch — so a reviewer's feedback surfaces here even if the
+    // agent never re-opens the artifact that carries it.
+    let mut open_threads: Vec<(String, ThreadDto)> = Vec::new();
     for a in &artifacts {
-        let threads = discussion::list_for_artifact(db, a.id, false).await?;
-        open_threads.extend(threads.into_iter().map(|t| (a.name.as_str(), t)));
+        if let Ok(threads) = client.list_branch_threads(&b.id, &a.name).await {
+            open_threads.extend(
+                threads
+                    .into_iter()
+                    .filter(|t| t.status == "open")
+                    .map(|t| (a.name.clone(), t)),
+            );
+        }
     }
     if !open_threads.is_empty() {
-        open_threads
-            .sort_by(|(_, a), (_, b)| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+        open_threads.sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
         out.push('\n');
-        let _ = writeln!(out, "## Open discussion");
-        let total = open_threads.len();
+        let _ = writeln!(out, "Open discussion ({}):", open_threads.len());
         for (name, t) in open_threads.iter().take(SUMMARY_TASK_CAP) {
             let _ = writeln!(
                 out,
-                "> {}",
-                truncate(&t.anchor_quote.replace('\n', " "), 90)
+                "  #{} on {name}: \"{}\"  (weaver artifact threads {name})",
+                t.id,
+                truncate(&t.anchor.quote, 60)
             );
-            match t.comments.last() {
-                Some(c) => {
-                    let _ = writeln!(
-                        out,
-                        "— {}: {}  (weaver artifact threads {name})",
-                        c.author,
-                        truncate(&c.body.replace('\n', " "), 140)
-                    );
-                }
-                None => {
-                    let _ = writeln!(out, "—  (weaver artifact threads {name})");
-                }
-            }
         }
-        if total > SUMMARY_TASK_CAP {
-            let _ = writeln!(out, "…and {} more", total - SUMMARY_TASK_CAP);
+        if open_threads.len() > SUMMARY_TASK_CAP {
+            let _ = writeln!(
+                out,
+                "  (+{} more — weaver artifact threads <name>)",
+                open_threads.len() - SUMMARY_TASK_CAP
+            );
         }
     }
 
     // Outstanding work: this branch's own open issues, then any open sub-trees
-    // it delegated (each carrying its sub-agent's live status).
-    let open = issue::list_for_branch(db, &b.repo_root, &b.branch, false).await?;
-    let delegated = issue::list_delegated_by(db, &b.repo_root, &b.branch, false).await?;
+    // it delegated (each carrying its sub-agent's live status). One repo-wide
+    // fetch, partitioned client-side — the same data `issue ls` partitions.
+    let issues = client
+        .list_repo_issues(&b.repo_root, "repo", false)
+        .await
+        .unwrap_or_default();
+    let open: Vec<&IssueView> = issues
+        .iter()
+        .filter(|i| i.claimed_branch.as_deref() == Some(b.branch.as_str()))
+        .collect();
+    let delegated: Vec<&IssueView> = issues
+        .iter()
+        .filter(|i| {
+            i.source_branch.as_deref() == Some(b.branch.as_str())
+                && i.claimed_branch.is_some()
+                && i.claimed_branch.as_deref() != Some(b.branch.as_str())
+        })
+        .collect();
     out.push('\n');
     if open.is_empty() && delegated.is_empty() {
         let _ = writeln!(out, "Outstanding: none  (weaver issue ls)");
@@ -686,10 +726,15 @@ async fn render_summary(db: &db::Db, b: &branch::Branch) -> Result<String> {
             let _ = writeln!(out, "  #{:<4} {}", i.id, i.title);
             shown += 1;
         }
-        for i in delegated.iter().take(SUMMARY_TASK_CAP - shown) {
-            let who = working_branch_status(db, i)
-                .await
-                .unwrap_or_else(|| i.claimed_branch.clone().unwrap_or_else(|| "?".to_string()));
+        for i in delegated
+            .iter()
+            .take(SUMMARY_TASK_CAP.saturating_sub(shown))
+        {
+            let claimed = i.claimed_branch.as_deref().unwrap_or("?");
+            let who = match working_branch_status(client, &i.repo_root, claimed).await {
+                Some(s) => s,
+                None => claimed.to_string(),
+            };
             let _ = writeln!(out, "  #{:<4} {}  → {who} (delegated)", i.id, i.title);
             shown += 1;
         }
@@ -713,8 +758,9 @@ async fn render_summary(db: &db::Db, b: &branch::Branch) -> Result<String> {
 /// usefully after a context compaction, when only the concise catch-up was
 /// replayed.
 async fn cmd_readme() -> Result<()> {
-    let db = open_db().await?;
-    let b = branch::resolve(&db).await?;
+    let client = client();
+    let key = branch_key()?;
+    let b = client.get_branch(&key).await?;
     print!("{}", weaver_md_for_branch(&b));
     Ok(())
 }
@@ -722,7 +768,7 @@ async fn cmd_readme() -> Result<()> {
 /// A single suggested next action for `weaver summary`, derived from the open
 /// work: pick up the first open task, else poll a delegated sub-tree, else
 /// (nothing open) wrap up and open a PR.
-fn next_action_hint(open: &[issue::Issue], delegated: &[issue::Issue]) -> String {
+fn next_action_hint(open: &[&IssueView], delegated: &[&IssueView]) -> String {
     if let Some(first) = open.first() {
         format!(
             "pick up #{} ({}); `weaver issue ls` for the rest",
@@ -756,8 +802,10 @@ fn worktree_root(start: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
-/// Render the current worktree's (or a named file's) agent transcript. No DB
-/// access — pure filesystem, so it works whether or not loom is up.
+/// Render the current worktree's (or a named file's) agent transcript. No
+/// network access — pure filesystem, so it works whether or not loom is
+/// reachable (the agent and its own transcript file are always co-located,
+/// regardless of the isolation model).
 fn cmd_chatlog(file: Option<String>, as_json: bool) -> Result<()> {
     use weaver_core::transcript;
     let log = match file {
@@ -786,8 +834,9 @@ fn cmd_chatlog(file: Option<String>, as_json: bool) -> Result<()> {
 }
 
 async fn cmd_where() -> Result<()> {
-    let db = open_db().await?;
-    let b = branch::resolve(&db).await?;
+    let client = client();
+    let key = branch_key()?;
+    let b = client.get_branch(&key).await?;
     println!("repo:      {}", b.repo_root);
     println!("branch:    {}", b.branch);
     println!("base:      {}", b.base_branch);
@@ -796,9 +845,10 @@ async fn cmd_where() -> Result<()> {
 }
 
 async fn cmd_log(limit: i64) -> Result<()> {
-    let db = open_db().await?;
-    let b = branch::resolve(&db).await?;
-    let history = events::history(&db, &b.id, limit).await?;
+    let client = client();
+    let key = branch_key()?;
+    let mut history = client.branch_log(&key).await?;
+    history.truncate(limit.max(0) as usize);
     if history.is_empty() {
         println!("(no events)");
         return Ok(());
@@ -831,94 +881,51 @@ async fn cmd_log(limit: i64) -> Result<()> {
 }
 
 async fn cmd_status(level: Option<String>, message: String) -> Result<()> {
-    let db = open_db().await?;
-    let b = branch::resolve(&db).await?;
+    let client = client();
+    let key = branch_key()?;
     if let Some(level) = level {
-        return cmd_status_write(&db, &b, &level, &message).await;
+        return cmd_status_write(&client, &key, &level, &message).await;
     }
-    let open = issue::open_count_for_branch(&db, &b.repo_root, &b.branch)
-        .await
-        .unwrap_or(0);
+    let b = client.get_branch(&key).await?;
     println!("repo:        {}", b.repo_root);
     println!("branch:      {}", b.branch);
     println!("base:        {}", b.base_branch);
     if !b.title.is_empty() {
         println!("title:       {}", b.title);
     }
-    let goal = branch::current_goal(&db, &b).await?;
     println!(
         "goal:        {}",
-        if goal.is_empty() { "(none)" } else { &goal }
+        if b.goal.is_empty() { "(none)" } else { &b.goal }
     );
-    let attention = resolve_attention(&db, &b.id).await?;
+    let attention = attention_of(&b);
     let status = if b.description.is_empty() {
         attention
     } else {
         format!("{attention} — {}", b.description)
     };
     println!("status:      {status}");
-    println!("open issues: {open}");
+    println!("open issues: {}", b.open_issue_count);
     Ok(())
 }
 
-/// The attention value that means "calm" — the default when a branch has no
-/// `attention` tag. Never stored (absence is calm); it is both the resolved
-/// value the status reads fall back to and the `weaver status` input that clears
-/// the tag.
-const CALM: &str = "ok";
-
-/// The resolved attention level for a branch: the `attention` tag's value, or
-/// [`CALM`] when there is no tag. The single read path the CLI's status displays
-/// and `issue wait` gating share. A DB read error propagates rather than masking
-/// as calm.
-async fn resolve_attention(db: &db::Db, branch_id: &str) -> Result<String> {
-    Ok(tags::get(db, branch_id, tags::ATTENTION_KEY)
-        .await?
-        .map(|t| t.value)
-        .unwrap_or_else(|| CALM.to_string()))
-}
-
 /// Report the agent's status: set the attention level and, when a message is
-/// given, the accompanying current-state note (the branch `description`). The
-/// level lives on the `attention` tag — `ok` clears it (absence is the calm
-/// state), `attention`/`blocked` set it. Writes the description directly
-/// (daemon-less) and records a `tag` event so a running loom can push the change
-/// to the dashboard on its next tick. An empty message leaves the previous
-/// message in place — `weaver status ok` just lowers the level without wiping what
-/// the agent last said.
-async fn cmd_status_write(
-    db: &db::Db,
-    b: &branch::Branch,
-    level: &str,
-    message: &str,
-) -> Result<()> {
+/// given, the accompanying current-state note. The level lives on the
+/// `attention` tag — `ok` clears it (absence is the calm state), `attention`/
+/// `blocked` set it. One call to loom (`POST /branches/{id}/status`), which
+/// writes the description, sets or clears the tag, and records a single `tag`
+/// event atomically server-side. An empty message leaves the previous message
+/// in place — `weaver status ok` just lowers the level without wiping what the
+/// agent last said.
+async fn cmd_status_write(client: &Client, key: &str, level: &str, message: &str) -> Result<()> {
     let level = level.trim().to_ascii_lowercase();
     // `ok` is a valid *input* (return to calm) but is never stored — it clears
-    // the tag. The two storable levels come from the tags registry.
-    if level != CALM && !tags::is_valid_value(tags::ATTENTION_KEY, &level) {
+    // the tag. The two storable levels come from the tags registry. Checked
+    // client-side too so a bad level fails fast, before any network round trip.
+    if level != "ok" && !tags::is_valid_value(tags::ATTENTION_KEY, &level) {
         bail!("unknown status '{level}' — expected one of ok, attention, blocked");
     }
+    client.set_branch_status(key, &level, message).await?;
     let message = message.trim();
-    if !message.is_empty() {
-        branch::set_description(db, &b.id, message).await?;
-    }
-    // `ok` returns to calm by clearing the tag; the two loud levels upsert it.
-    // Either way record a `tag` event (empty value = cleared) so the monitor
-    // re-broadcasts and live dashboards refresh.
-    let value = if level == CALM {
-        tags::clear(db, &b.id, tags::ATTENTION_KEY).await?;
-        ""
-    } else {
-        tags::set(db, &b.id, tags::ATTENTION_KEY, &level, "", "agent").await?;
-        level.as_str()
-    };
-    events::record_local(
-        db,
-        &b.id,
-        "tag",
-        json!({ "key": tags::ATTENTION_KEY, "value": value, "note": "", "by": "agent" }),
-    )
-    .await?;
     if message.is_empty() {
         println!("status: {level}");
     } else {
@@ -929,78 +936,77 @@ async fn cmd_status_write(
 
 /// Resolve the branch a tag command targets: the named `--session` (an id,
 /// `repo:branch`, or unambiguous prefix) when given, else the current branch.
-async fn resolve_tag_target(db: &db::Db, session: Option<&str>) -> Result<branch::Branch> {
+async fn resolve_tag_target(
+    client: &Client,
+    current_key: &str,
+    session: Option<&str>,
+) -> Result<BranchView> {
     match session {
-        Some(key) => branch::resolve_key(db, key)
-            .await?
-            .ok_or_else(|| anyhow!("no session matching '{key}'")),
-        None => branch::resolve(db).await,
+        Some(key) => client
+            .get_branch(key)
+            .await
+            .map_err(|_| anyhow!("no session matching '{key}'")),
+        None => client.get_branch(current_key).await,
     }
 }
 
 /// Set, clear, or list a tag on a branch. Tags unify the agent's `attention`
 /// self-report and an overlooker's `triage` assessment with any free-form axis.
-/// Writes the tag directly (daemon-less) and records a `tag` event so a running
-/// loom can push the change to the dashboard on its next tick.
 async fn cmd_tag(cmd: TagCmd) -> Result<()> {
-    let db = open_db().await?;
+    let client = client();
+    let key = branch_key()?;
     match cmd {
         TagCmd::Set {
-            key,
+            key: tag_key,
             value,
             note,
             session,
             by,
         } => {
-            let b = resolve_tag_target(&db, session.as_deref()).await?;
-            let key = key.trim();
+            let target = resolve_tag_target(&client, &key, session.as_deref()).await?;
+            let tag_key = tag_key.trim();
             let value = value.trim();
             let note = note.trim();
             let by = by.trim();
-            if !tags::is_valid_value(key, value) {
-                if tags::is_loud(key) {
+            if !tags::is_valid_value(tag_key, value) {
+                if tags::is_loud(tag_key) {
                     bail!(
-                        "'{key}' accepts only {} — use `weaver tag rm {key}` to clear it",
+                        "'{tag_key}' accepts only {} — use `weaver tag rm {tag_key}` to clear it",
                         tags::ATTENTION_VALUES.join(", ")
                     );
                 }
-                bail!("a tag value cannot be empty — use `weaver tag rm {key}` to clear it");
+                bail!("a tag value cannot be empty — use `weaver tag rm {tag_key}` to clear it");
             }
-            tags::set(&db, &b.id, key, value, note, by).await?;
-            events::record_local(
-                &db,
-                &b.id,
-                "tag",
-                json!({ "key": key, "value": value, "note": note, "by": by }),
-            )
-            .await?;
+            client
+                .set_branch_tag(&target.id, tag_key, value, note, by)
+                .await?;
             if note.is_empty() {
-                println!("tag: {} → {key} = {value} (by {by})", b.branch);
+                println!("tag: {} → {tag_key} = {value} (by {by})", target.branch);
             } else {
-                println!("tag: {} → {key} = {value} (by {by}) — {note}", b.branch);
+                println!(
+                    "tag: {} → {tag_key} = {value} (by {by}) — {note}",
+                    target.branch
+                );
             }
         }
-        TagCmd::Rm { key, session } => {
-            let b = resolve_tag_target(&db, session.as_deref()).await?;
-            let key = key.trim();
-            tags::clear(&db, &b.id, key).await?;
-            events::record_local(
-                &db,
-                &b.id,
-                "tag",
-                json!({ "key": key, "value": "", "note": "", "by": "manual" }),
-            )
-            .await?;
-            println!("tag: {} → cleared {key}", b.branch);
+        TagCmd::Rm {
+            key: tag_key,
+            session,
+        } => {
+            let target = resolve_tag_target(&client, &key, session.as_deref()).await?;
+            let tag_key = tag_key.trim();
+            client
+                .clear_branch_tag(&target.id, tag_key, "manual")
+                .await?;
+            println!("tag: {} → cleared {tag_key}", target.branch);
         }
         TagCmd::Ls { session } => {
-            let b = resolve_tag_target(&db, session.as_deref()).await?;
-            let all = tags::list(&db, &b.id).await?;
-            if all.is_empty() {
+            let target = resolve_tag_target(&client, &key, session.as_deref()).await?;
+            if target.tags.is_empty() {
                 println!("(no tags)");
                 return Ok(());
             }
-            for t in &all {
+            for t in &target.tags {
                 let by = if t.set_by.is_empty() {
                     String::new()
                 } else {
@@ -1022,8 +1028,9 @@ async fn cmd_tag(cmd: TagCmd) -> Result<()> {
 const BACKLOG_CAP: usize = 10;
 
 async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
-    let db = open_db().await?;
-    let b = branch::resolve(&db).await?;
+    let client = client();
+    let key = branch_key()?;
+    let b = client.get_branch(&key).await?;
     match cmd {
         IssueCmd::Add {
             title,
@@ -1035,25 +1042,28 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
             if title.trim().is_empty() {
                 bail!("issue title is required");
             }
-            let new = issue::NewIssue {
-                repo_root: b.repo_root.clone(),
-                github_repo: None,
-                source_branch: Some(b.branch.clone()),
-                // `--repo` leaves it unclaimed in the backlog; otherwise this
-                // branch claims it.
-                claimed_branch: (!repo).then(|| b.branch.clone()),
-                title: title.clone(),
-                body: body.unwrap_or_default(),
-                github_issue: github,
+            let i = if repo {
+                client
+                    .create_repo_issue(&CreateRepoIssueReq {
+                        repo_root: b.repo_root.clone(),
+                        title: title.clone(),
+                        body: body.unwrap_or_default(),
+                        github_issue: github,
+                        source_branch: Some(b.branch.clone()),
+                    })
+                    .await?
+            } else {
+                client
+                    .create_branch_issue(
+                        &b.id,
+                        &CreateIssueReq {
+                            title: title.clone(),
+                            body: body.unwrap_or_default(),
+                            github_issue: github,
+                        },
+                    )
+                    .await?
             };
-            let i = issue::add(&db, &new).await?;
-            events::record_local(
-                &db,
-                &b.id,
-                "issue_added",
-                json!({ "id": i.id, "title": title }),
-            )
-            .await?;
             println!("#{} {}", i.id, i.title);
         }
         IssueCmd::Ls {
@@ -1063,14 +1073,16 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
             branch,
         } => {
             let target = branch.unwrap_or_else(|| b.branch.clone());
+            let issues = client.list_repo_issues(&b.repo_root, "repo", all).await?;
             if repo {
-                cmd_issue_ls_repo(&db, &b.repo_root, &target, all).await?;
+                print_issue_ls_repo(&issues, &target);
             } else {
-                cmd_issue_ls_default(&db, &b.repo_root, &target, all, mine).await?;
+                print_issue_ls_default(&client, &issues, &target, mine).await;
             }
         }
         IssueCmd::Show { id } => {
-            let i = ensure_issue_in_repo(&db, id, &b.repo_root).await?;
+            let i = client.get_issue(id).await?;
+            ensure_issue_in_repo(&i, &b.repo_root)?;
             println!("#{} {}", i.id, i.title);
             println!("  status:  {}", i.status);
             println!(
@@ -1080,8 +1092,11 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
             // Surface the live status of the branch working this issue — what
             // makes `issue show` a poll of a delegated sub-tree, not just a
             // record lookup.
-            if let Some(progress) = working_branch_status(&db, &i).await {
-                println!("  working: {progress}");
+            if let Some(claimed) = &i.claimed_branch {
+                if let Some(progress) = working_branch_status(&client, &i.repo_root, claimed).await
+                {
+                    println!("  working: {progress}");
+                }
             }
             if let Some(src) = &i.source_branch {
                 println!("  from:    {src}");
@@ -1089,9 +1104,9 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
             if let Some(n) = i.github_issue {
                 println!("  github:  #{n}");
             }
-            let tags = issue::list_tags(&db, i.id).await?;
-            if !tags.is_empty() {
-                let rendered = tags
+            if !i.tags.is_empty() {
+                let rendered = i
+                    .tags
                     .iter()
                     .map(|t| format!("{}={}", t.key, t.value))
                     .collect::<Vec<_>>()
@@ -1113,32 +1128,57 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
             interval,
             closed_only,
         } => {
-            cmd_issue_wait(&db, &b.repo_root, id, timeout, interval.max(1), closed_only).await?;
+            cmd_issue_wait(
+                &client,
+                &b.repo_root,
+                id,
+                timeout,
+                interval.max(1),
+                closed_only,
+            )
+            .await?;
         }
         IssueCmd::Close { id } => {
-            ensure_issue_in_repo(&db, id, &b.repo_root).await?;
-            issue::close(&db, id).await?;
-            events::record_local(&db, &b.id, "issue_closed", json!({ "id": id })).await?;
+            let i = client.get_issue(id).await?;
+            ensure_issue_in_repo(&i, &b.repo_root)?;
+            client
+                .patch_issue(
+                    id,
+                    &PatchIssueReq {
+                        status: Some("closed".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
             println!("closed #{id}");
         }
         IssueCmd::Reopen { id } => {
-            ensure_issue_in_repo(&db, id, &b.repo_root).await?;
-            issue::reopen(&db, id).await?;
-            events::record_local(&db, &b.id, "issue_reopened", json!({ "id": id })).await?;
+            let i = client.get_issue(id).await?;
+            ensure_issue_in_repo(&i, &b.repo_root)?;
+            client
+                .patch_issue(
+                    id,
+                    &PatchIssueReq {
+                        status: Some("open".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
             println!("reopened #{id}");
         }
         IssueCmd::Rm { id } => {
-            ensure_issue_in_repo(&db, id, &b.repo_root).await?;
-            issue::delete(&db, id).await?;
+            let i = client.get_issue(id).await?;
+            ensure_issue_in_repo(&i, &b.repo_root)?;
+            client.delete_issue(id).await?;
             println!("removed #{id}");
         }
-        IssueCmd::Tag { cmd } => cmd_issue_tag(&db, &b.repo_root, cmd).await?,
+        IssueCmd::Tag { cmd } => cmd_issue_tag(&client, &b.repo_root, cmd).await?,
     }
     Ok(())
 }
 
 /// Set, clear, or list a free-form tag on an issue (`weaver issue tag …`).
-async fn cmd_issue_tag(db: &db::Db, repo_root: &str, cmd: IssueTagCmd) -> Result<()> {
+async fn cmd_issue_tag(client: &Client, repo_root: &str, cmd: IssueTagCmd) -> Result<()> {
     match cmd {
         IssueTagCmd::Set {
             id,
@@ -1147,7 +1187,8 @@ async fn cmd_issue_tag(db: &db::Db, repo_root: &str, cmd: IssueTagCmd) -> Result
             note,
             by,
         } => {
-            ensure_issue_in_repo(db, id, repo_root).await?;
+            let i = client.get_issue(id).await?;
+            ensure_issue_in_repo(&i, repo_root)?;
             let key = key.trim();
             let value = value.trim();
             let note = note.trim();
@@ -1160,7 +1201,7 @@ async fn cmd_issue_tag(db: &db::Db, repo_root: &str, cmd: IssueTagCmd) -> Result
                     "a tag value cannot be empty — use `weaver issue tag rm {id} {key}` to clear it"
                 );
             }
-            issue::set_tag(db, id, key, value, note, by).await?;
+            client.set_issue_tag(id, key, value, note, by).await?;
             if note.is_empty() {
                 println!("tag: #{id} → {key} = {value} (by {by})");
             } else {
@@ -1168,18 +1209,19 @@ async fn cmd_issue_tag(db: &db::Db, repo_root: &str, cmd: IssueTagCmd) -> Result
             }
         }
         IssueTagCmd::Rm { id, key } => {
-            ensure_issue_in_repo(db, id, repo_root).await?;
-            issue::clear_tag(db, id, key.trim()).await?;
+            let i = client.get_issue(id).await?;
+            ensure_issue_in_repo(&i, repo_root)?;
+            client.clear_issue_tag(id, key.trim()).await?;
             println!("tag: #{id} → cleared {}", key.trim());
         }
         IssueTagCmd::Ls { id } => {
-            ensure_issue_in_repo(db, id, repo_root).await?;
-            let tags = issue::list_tags(db, id).await?;
-            if tags.is_empty() {
+            let i = client.get_issue(id).await?;
+            ensure_issue_in_repo(&i, repo_root)?;
+            if i.tags.is_empty() {
                 println!("(no tags)");
                 return Ok(());
             }
-            for t in &tags {
+            for t in &i.tags {
                 let note = if t.note.is_empty() {
                     String::new()
                 } else {
@@ -1192,7 +1234,7 @@ async fn cmd_issue_tag(db: &db::Db, repo_root: &str, cmd: IssueTagCmd) -> Result
     Ok(())
 }
 
-fn issue_line(i: &issue::Issue) -> String {
+fn issue_line(i: &IssueView) -> String {
     let marker = if i.status == "open" { "[ ]" } else { "[x]" };
     let gh = i
         .github_issue
@@ -1202,15 +1244,14 @@ fn issue_line(i: &issue::Issue) -> String {
 }
 
 /// Default `ls`: this branch's working set, plus the unclaimed repo backlog
-/// (capped). `--mine` drops the backlog section.
-async fn cmd_issue_ls_default(
-    db: &db::Db,
-    repo_root: &str,
-    target: &str,
-    all: bool,
-    mine: bool,
-) -> Result<()> {
-    let working = issue::list_for_branch(db, repo_root, target, all).await?;
+/// (capped). `--mine` drops the backlog section. `issues` is one repo-wide
+/// fetch (`all` already applied server-side); every section here is a
+/// client-side partition of it.
+async fn print_issue_ls_default(client: &Client, issues: &[IssueView], target: &str, mine: bool) {
+    let working: Vec<&IssueView> = issues
+        .iter()
+        .filter(|i| i.claimed_branch.as_deref() == Some(target))
+        .collect();
     let mut printed = false;
     if !working.is_empty() {
         println!("On this branch ({}):", working.len());
@@ -1221,19 +1262,31 @@ async fn cmd_issue_ls_default(
     }
     // Sub-trees this branch launched: tracking issues it sourced but another
     // branch is working. Each carries its sub-agent's live status.
-    let delegated = issue::list_delegated_by(db, repo_root, target, all).await?;
+    let delegated: Vec<&IssueView> = issues
+        .iter()
+        .filter(|i| {
+            i.source_branch.as_deref() == Some(target)
+                && i.claimed_branch.is_some()
+                && i.claimed_branch.as_deref() != Some(target)
+        })
+        .collect();
     if !delegated.is_empty() {
         println!("Delegated by this branch ({}):", delegated.len());
         for i in &delegated {
-            let status = working_branch_status(db, i)
-                .await
-                .unwrap_or_else(|| i.claimed_branch.clone().unwrap_or_else(|| "?".to_string()));
+            let claimed = i.claimed_branch.as_deref().unwrap_or("?");
+            let status = match working_branch_status(client, &i.repo_root, claimed).await {
+                Some(s) => s,
+                None => claimed.to_string(),
+            };
             println!("  {}  → {status}", issue_line(i));
         }
         printed = true;
     }
     if !mine {
-        let backlog = issue::list_backlog(db, repo_root, all).await?;
+        let backlog: Vec<&IssueView> = issues
+            .iter()
+            .filter(|i| i.claimed_branch.is_none())
+            .collect();
         if !backlog.is_empty() {
             let shown = backlog.len().min(BACKLOG_CAP);
             println!(
@@ -1256,28 +1309,26 @@ async fn cmd_issue_ls_default(
     if !printed {
         println!("(no issues)");
     }
-    Ok(())
 }
 
 /// `ls --repo`: every open (or, with `--all`, every) issue in the repo, grouped
 /// into this branch / unclaimed backlog / other branches.
-async fn cmd_issue_ls_repo(db: &db::Db, repo_root: &str, target: &str, all: bool) -> Result<()> {
-    let issues = issue::list_for_repo(db, repo_root, all).await?;
+fn print_issue_ls_repo(issues: &[IssueView], target: &str) {
     if issues.is_empty() {
         println!("(no issues)");
-        return Ok(());
+        return;
     }
     let mut mine = Vec::new();
     let mut backlog = Vec::new();
     let mut others = Vec::new();
-    for i in &issues {
+    for i in issues {
         match i.claimed_branch.as_deref() {
             Some(b) if b == target => mine.push(i),
             Some(_) => others.push(i),
             None => backlog.push(i),
         }
     }
-    let section = |title: String, items: &[&issue::Issue]| {
+    let section = |title: String, items: &[&IssueView]| {
         if items.is_empty() {
             return;
         }
@@ -1299,7 +1350,6 @@ async fn cmd_issue_ls_repo(db: &db::Db, repo_root: &str, target: &str, all: bool
         &backlog,
     );
     section(format!("Other branches ({}):", others.len()), &others);
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1307,10 +1357,10 @@ async fn cmd_issue_ls_repo(db: &db::Db, repo_root: &str, target: &str, all: bool
 // ---------------------------------------------------------------------------
 
 /// Read, write, and list artifacts — named, versioned documents stored in
-/// weaver.db. Scoped to the current branch by default; `--repo` is repo-shared.
+/// loom. Scoped to the current branch by default; `--repo` is repo-shared.
 async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
-    let db = open_db().await?;
-    let b = branch::resolve(&db).await?;
+    let client = client();
+    let key = branch_key()?;
     match cmd {
         ArtifactCmd::Write {
             name,
@@ -1349,54 +1399,30 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
                         (kind, text)
                     }
                 };
-            // `--repo` writes the repo-shared scope (branch_id = NULL); otherwise
-            // the artifact is scoped to this branch.
-            let branch_id = (!repo).then_some(b.id.as_str());
-            let a = artifact::write(
-                &db,
-                &artifact::NewRevision {
-                    repo_root: &b.repo_root,
-                    branch_id,
-                    name: name.trim(),
-                    kind: &kind,
-                    title: title.trim(),
-                    content: &content,
-                    author: "agent",
-                },
-            )
-            .await?;
-            // `goal` is the canonical goal artifact when branch-scoped — keep the
-            // denormalized `branches.goal` cache column in sync.
-            if a.name == "goal" {
-                if let Some(id) = branch_id {
-                    branch::sync_goal_cache(&db, id).await?;
-                }
-            }
-            events::record_local(
-                &db,
-                &b.id,
-                "artifact_written",
-                json!({ "name": a.name, "rev": a.rev, "title": a.title }),
-            )
-            .await?;
-            // Print the dashboard URL so the agent can hand it to the user. The
-            // write already succeeded (a plain DB write); without a running loom
-            // we fall back to the name + scope.
+            let req = ArtifactUpsertReq {
+                content,
+                title: Some(title.trim().to_string()),
+                kind: Some(kind),
+                author: None,
+                repo,
+            };
+            let view = client
+                .write_branch_artifact(&key, name.trim(), &req)
+                .await?;
+            // The write already succeeded — loom is definitionally reachable at
+            // this point, so the dashboard link is always known now (unlike the
+            // direct-db days, when it depended on `$WEAVER_API`/`loom.json`
+            // happening to be present).
             let scope = if repo { "repo-shared" } else { "this branch" };
-            match db::dashboard_addr() {
-                Some(addr) => println!(
-                    "http://{addr}/s/{}/artifacts/{}  (rev {}, {scope})",
-                    b.id, a.name, a.rev
-                ),
-                None => println!("{} (rev {}, {scope})", a.name, a.rev),
-            }
+            println!(
+                "{}/s/{key}/artifacts/{}  (rev {}, {scope})",
+                client.base(),
+                view.meta.name,
+                view.meta.rev
+            );
         }
         ArtifactCmd::Ls { repo } => {
-            let artifacts = if repo {
-                artifact::list_for_repo(&db, &b.repo_root).await?
-            } else {
-                artifact::list_for_session(&db, &b.repo_root, &b.id).await?
-            };
+            let artifacts = client.list_branch_artifacts(&key, repo).await?;
             if artifacts.is_empty() {
                 println!("(no artifacts)");
                 return Ok(());
@@ -1417,65 +1443,45 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
             }
         }
         ArtifactCmd::Show { name, rev, meta } => {
-            let a = artifact::get(&db, &b.repo_root, &b.id, name.trim())
-                .await?
-                .ok_or_else(|| {
-                    anyhow!("no artifact '{}' — see `weaver artifact ls`", name.trim())
-                })?;
+            let view = client
+                .get_branch_artifact(&key, name.trim(), rev, false)
+                .await?;
             if meta {
-                println!("id:      {}", a.id);
-                println!("name:    {}", a.name);
-                println!("kind:    {}", a.kind);
-                if !a.title.is_empty() {
-                    println!("title:   {}", a.title);
+                println!("id:      {}", view.meta.id);
+                println!("name:    {}", view.meta.name);
+                println!("kind:    {}", view.meta.kind);
+                if !view.meta.title.is_empty() {
+                    println!("title:   {}", view.meta.title);
                 }
                 println!(
                     "scope:   {}",
-                    match &a.branch_id {
+                    match &view.meta.branch_id {
                         Some(bid) => format!("branch {bid}"),
                         None => "repo-shared".to_string(),
                     }
                 );
-                println!("rev:     {}", a.rev);
-                println!("created: {}", a.created_at);
-                println!("updated: {}", a.updated_at);
+                println!("rev:     {}", view.meta.rev);
+                println!("created: {}", view.meta.created_at);
+                println!("updated: {}", view.meta.updated_at);
                 return Ok(());
             }
-            let version = match rev {
-                Some(r) => artifact::version(&db, a.id, r).await?,
-                None => artifact::latest_version(&db, a.id).await?,
-            };
-            match version {
-                Some(v) => print!("{}", v.content),
-                None => bail!(
-                    "no revision {} of artifact '{}'",
-                    rev.unwrap_or(a.rev),
-                    a.name
-                ),
-            }
+            print!("{}", view.content);
         }
         ArtifactCmd::Rm { name, repo } => {
-            // `--repo` targets the repo-shared row explicitly; the default
-            // resolves branch-scoped first, then shared — what `show` displays.
-            let a = if repo {
-                artifact::get_shared(&db, &b.repo_root, name.trim()).await?
-            } else {
-                artifact::get(&db, &b.repo_root, &b.id, name.trim()).await?
-            }
-            .ok_or_else(|| anyhow!("no artifact '{}' — see `weaver artifact ls`", name.trim()))?;
-            artifact::delete(&db, a.id).await?;
-            events::record_local(
-                &db,
-                &b.id,
-                "artifact_deleted",
-                json!({ "name": a.name, "branch_id": a.branch_id }),
-            )
-            .await?;
-            let scope = match &a.branch_id {
+            // Fetch first (branch-scoped resolution, matching `show`) so we can
+            // report the scope/revision that got removed.
+            let a = client
+                .get_branch_artifact(&key, name.trim(), None, repo)
+                .await
+                .map_err(|_| anyhow!("no artifact '{}' — see `weaver artifact ls`", name.trim()))?;
+            client
+                .delete_branch_artifact(&key, name.trim(), repo)
+                .await?;
+            let scope = match &a.meta.branch_id {
                 Some(bid) => format!("branch {bid}"),
                 None => "repo-shared".to_string(),
             };
-            println!("deleted {} ({scope}, was rev {})", a.name, a.rev);
+            println!("deleted {} ({scope}, was rev {})", a.meta.name, a.meta.rev);
         }
         ArtifactCmd::Comment {
             name,
@@ -1485,35 +1491,17 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
             suffix,
             body,
         } => {
-            let a = artifact::get(&db, &b.repo_root, &b.id, name.trim())
-                .await?
-                .ok_or_else(|| {
-                    anyhow!("no artifact '{}' — see `weaver artifact ls`", name.trim())
-                })?;
+            let name = name.trim();
             let body = body.join(" ");
             if body.trim().is_empty() {
                 bail!("a comment body is required");
             }
             match thread {
                 Some(thread_id) => {
-                    ensure_thread_on_artifact(&db, thread_id, a.id, &a.name).await?;
-                    let c = discussion::add_comment(&db, thread_id, "agent", &body).await?;
-                    events::record_local(
-                        &db,
-                        &b.id,
-                        "comment_added",
-                        json!({
-                            "artifact": a.name,
-                            "thread": thread_id,
-                            "seq": c.seq,
-                            "author": "agent",
-                        }),
-                    )
-                    .await?;
-                    println!(
-                        "added comment #{} to thread {thread_id} on {}",
-                        c.seq, a.name
-                    );
+                    let c = client
+                        .add_branch_thread_comment(&key, name, thread_id, &body)
+                        .await?;
+                    println!("added comment #{} to thread {thread_id} on {name}", c.seq);
                 }
                 None => {
                     let quote = quote.ok_or_else(|| {
@@ -1522,62 +1510,41 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
                              (or pass --thread <id> to reply)"
                         )
                     })?;
-                    let t = discussion::create_thread(
-                        &db,
-                        &discussion::NewThread {
-                            artifact_id: a.id,
-                            base_rev: a.rev,
-                            anchor_quote: &quote,
-                            anchor_prefix: &prefix,
-                            anchor_suffix: &suffix,
-                            author: "agent",
-                            body: &body,
-                        },
-                    )
-                    .await?;
-                    events::record_local(
-                        &db,
-                        &b.id,
-                        "comment_added",
-                        json!({
-                            "artifact": a.name,
-                            "thread": t.id,
-                            "seq": 1,
-                            "author": "agent",
-                        }),
-                    )
-                    .await?;
-                    println!("opened thread {} on {} (rev {})", t.id, a.name, a.rev);
+                    let a = client.get_branch_artifact(&key, name, None, false).await?;
+                    let t = client
+                        .create_branch_thread(
+                            &key,
+                            name,
+                            a.meta.rev,
+                            weaver_api::AnchorDto {
+                                quote,
+                                prefix,
+                                suffix,
+                            },
+                            &body,
+                        )
+                        .await?;
+                    println!("opened thread {} on {name} (rev {})", t.id, a.meta.rev);
                 }
             }
         }
         ArtifactCmd::Resolve { name, thread_id } => {
-            let a = artifact::get(&db, &b.repo_root, &b.id, name.trim())
-                .await?
-                .ok_or_else(|| {
-                    anyhow!("no artifact '{}' — see `weaver artifact ls`", name.trim())
-                })?;
-            ensure_thread_on_artifact(&db, thread_id, a.id, &a.name).await?;
-            discussion::resolve(&db, thread_id).await?;
-            events::record_local(
-                &db,
-                &b.id,
-                "comment_resolved",
-                json!({ "artifact": a.name, "thread": thread_id }),
-            )
-            .await?;
-            println!("resolved thread {thread_id} on {}", a.name);
+            client
+                .resolve_branch_thread(&key, name.trim(), thread_id)
+                .await?;
+            println!("resolved thread {thread_id} on {}", name.trim());
         }
         ArtifactCmd::Threads { name, all } => {
-            let a = artifact::get(&db, &b.repo_root, &b.id, name.trim())
-                .await?
-                .ok_or_else(|| {
-                    anyhow!("no artifact '{}' — see `weaver artifact ls`", name.trim())
-                })?;
-            let threads = discussion::list_for_artifact(&db, a.id, all).await?;
+            let name = name.trim();
+            let threads = client.list_branch_threads(&key, name).await?;
+            let threads: Vec<_> = if all {
+                threads
+            } else {
+                threads.into_iter().filter(|t| t.status == "open").collect()
+            };
             if threads.is_empty() {
                 let scope = if all { "" } else { "open " };
-                println!("(no {scope}threads on {})", a.name);
+                println!("(no {scope}threads on {name})");
                 return Ok(());
             }
             for t in &threads {
@@ -1585,7 +1552,7 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
                     "#{} [{}] \"{}\"",
                     t.id,
                     t.status,
-                    truncate(&t.anchor_quote, 70)
+                    truncate(&t.anchor.quote, 70)
                 );
                 for c in &t.comments {
                     println!("    {}: {}", c.author, c.body);
@@ -1596,54 +1563,28 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
     Ok(())
 }
 
-/// Confirm a discussion thread belongs to `artifact_id`, so a mistyped or
-/// stale thread id on a different artifact fails loudly instead of silently
-/// commenting/resolving the wrong discussion. Returns nothing — callers
-/// already have what they need (the thread id, the artifact).
-async fn ensure_thread_on_artifact(
-    db: &db::Db,
-    thread_id: i64,
-    artifact_id: i64,
-    artifact_name: &str,
-) -> Result<()> {
-    let t = discussion::get_thread(db, thread_id)
-        .await?
-        .ok_or_else(|| anyhow!("no thread #{thread_id}"))?;
-    if t.artifact_id != artifact_id {
-        bail!("thread #{thread_id} does not belong to artifact '{artifact_name}'");
+/// Confirm an issue exists and lives in `repo_root`. Cross-*repo* access is the
+/// real mistake to guard; within a repo, claimed and backlog items are all fair
+/// game.
+fn ensure_issue_in_repo(i: &IssueView, repo_root: &str) -> Result<()> {
+    if i.repo_root != repo_root {
+        bail!("issue #{} belongs to a different repo", i.id);
     }
     Ok(())
 }
 
-/// Confirm an issue exists and lives in `repo_root`. Cross-*repo* access is the
-/// real mistake to guard; within a repo, claimed and backlog items are all fair
-/// game. Returns the issue so callers can reuse it.
-async fn ensure_issue_in_repo(db: &db::Db, id: i64, repo_root: &str) -> Result<issue::Issue> {
-    let i = issue::get(db, id)
-        .await?
-        .ok_or_else(|| anyhow!("no issue #{id}"))?;
-    if i.repo_root != repo_root {
-        bail!("issue #{id} belongs to a different repo");
-    }
-    Ok(i)
-}
-
-/// The live status of the branch working `issue`, as `"<branch> · <attention>
-/// — <message>"`, or `None` when the issue is unclaimed or its branch row is
-/// gone. This is what turns an issue lookup into a poll of a delegated sub-tree.
-async fn working_branch_status(db: &db::Db, issue: &issue::Issue) -> Option<String> {
-    let claimed = issue.claimed_branch.as_deref()?;
-    let row = branch::find_by_repo_branch(db, &issue.repo_root, claimed)
-        .await
-        .ok()
-        .flatten()?;
-    // Best-effort display helper: on a read error show nothing rather than
-    // fabricating a calm status.
-    let attention = resolve_attention(db, &row.id).await.ok()?;
-    let status = if row.description.is_empty() {
+/// The live status of the branch working an issue, as `"<branch> · <attention>
+/// — <message>"`, or `None` when the branch row can't be resolved (a stale
+/// `claimed_branch` name, or a network hiccup — best-effort). This is what
+/// turns an issue lookup into a poll of a delegated sub-tree.
+async fn working_branch_status(client: &Client, repo_root: &str, claimed: &str) -> Option<String> {
+    let key = format!("{repo_root}:{claimed}");
+    let b = client.get_branch(&key).await.ok()?;
+    let attention = attention_of(&b);
+    let status = if b.description.is_empty() {
         attention
     } else {
-        format!("{attention} — {}", row.description)
+        format!("{attention} — {}", b.description)
     };
     Some(format!("{claimed} · {status}"))
 }
@@ -1652,20 +1593,24 @@ async fn working_branch_status(db: &db::Db, issue: &issue::Issue) -> Option<Stri
 /// claiming branch raises attention above `ok`. Polls every `interval` seconds;
 /// exits the process non-zero if `timeout` (when non-zero) elapses first.
 async fn cmd_issue_wait(
-    db: &db::Db,
+    client: &Client,
     repo_root: &str,
     id: i64,
     timeout: u64,
     interval: u64,
     closed_only: bool,
 ) -> Result<()> {
-    let issue = ensure_issue_in_repo(db, id, repo_root).await?;
+    let issue = client.get_issue(id).await?;
+    ensure_issue_in_repo(&issue, repo_root)?;
     if issue.status != "open" {
         println!("issue #{id} is {} — nothing to wait for", issue.status);
         return Ok(());
     }
-    match working_branch_status(db, &issue).await {
-        Some(s) => println!("waiting on #{id} ({}) — {s}", issue.title),
+    match issue.claimed_branch.as_deref() {
+        Some(claimed) => match working_branch_status(client, repo_root, claimed).await {
+            Some(s) => println!("waiting on #{id} ({}) — {s}", issue.title),
+            None => println!("waiting on #{id} ({})", issue.title),
+        },
         None => println!("waiting on #{id} ({})", issue.title),
     }
 
@@ -1680,20 +1625,19 @@ async fn cmd_issue_wait(
             None => interval,
         };
         tokio::time::sleep(nap).await;
-        let cur = issue::get(db, id)
-            .await?
-            .ok_or_else(|| anyhow!("issue #{id} disappeared while waiting"))?;
+        let cur = client.get_issue(id).await?;
         if cur.status != "open" {
             println!("issue #{id} closed — sub-tree finished");
             return Ok(());
         }
         if !closed_only {
             if let Some(name) = cur.claimed_branch.as_deref() {
-                if let Some(row) = branch::find_by_repo_branch(db, repo_root, name).await? {
+                let key = format!("{repo_root}:{name}");
+                if let Ok(row) = client.get_branch(&key).await {
                     // The sub-agent wants the user when its `attention` tag is
                     // present with a loud value (`attention`/`blocked`); absence
                     // is the calm `ok` state.
-                    let attention = resolve_attention(db, &row.id).await?;
+                    let attention = attention_of(&row);
                     if tags::ATTENTION_VALUES.contains(&attention.as_str()) {
                         let msg = if row.description.is_empty() {
                             attention
@@ -1710,9 +1654,12 @@ async fn cmd_issue_wait(
         // process exits non-zero (callers branch on it) without an ad-hoc
         // `process::exit` that bypasses normal error handling.
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            let progress = working_branch_status(db, &cur)
-                .await
-                .unwrap_or_else(|| "open".to_string());
+            let progress = match cur.claimed_branch.as_deref() {
+                Some(c) => working_branch_status(client, repo_root, c)
+                    .await
+                    .unwrap_or_else(|| "open".to_string()),
+                None => "open".to_string(),
+            };
             bail!("timed out after {timeout}s — #{id} still open ({progress})");
         }
     }
@@ -1722,7 +1669,7 @@ async fn cmd_issue_wait(
 /// one, else the builtin. We look in the worktree the hook is actually running
 /// in (its cwd at launch is the worktree root) and then in the primary checkout,
 /// so a `WEAVER.md` committed on the base branch is picked up either way.
-fn weaver_md_for_branch(branch: &branch::Branch) -> String {
+fn weaver_md_for_branch(branch: &BranchView) -> String {
     let candidates = std::env::current_dir()
         .ok()
         .into_iter()
@@ -1758,7 +1705,7 @@ fn read_hook_source() -> Option<String> {
 /// catch-up, and the load-bearing rules an agent must not lose (status, no
 /// blocking TUI prompts, PR-not-merge, close the tracking issue). The full guide
 /// is one `weaver readme` away.
-fn compact_replay(b: &branch::Branch, summary: &str) -> String {
+fn compact_replay(b: &BranchView, summary: &str) -> String {
     let summary = summary.trim_end();
     format!(
         "Context was just compacted — you are still in a **weaver session** on branch `{branch}` (a detached agent workstream in a git worktree; the user reviews asynchronously via the loom dashboard, not this terminal). Re-orientation:\n\n{summary}\n\nReminders: keep your status honest with `weaver status <ok|attention|blocked> \"<message>\"`; never block on an interactive TUI prompt — state the question as plain text and raise `weaver status attention`; finish by opening a PR (`gh pr create`) rather than merging, and `weaver issue close <id>` your tracking issue when the work is done. Run `weaver readme` for the full weaver workflow guide.\n",
@@ -1769,8 +1716,8 @@ fn compact_replay(b: &branch::Branch, summary: &str) -> String {
 async fn cmd_hook(event: String) -> Result<()> {
     // Hooks must never break the agent: best-effort, swallow errors.
     let result: Result<()> = (async {
-        let db = open_db().await?;
-        let b = branch::resolve(&db).await?;
+        let client = client();
+        let key = branch_key()?;
         // SessionStart carries a `source` on stdin (startup|resume|clear|compact);
         // we only read it for that event so other hooks don't touch stdin.
         let is_session_start = event == "session-start";
@@ -1780,21 +1727,18 @@ async fn cmd_hook(event: String) -> Result<()> {
             None
         };
         let is_compact = source.as_deref() == Some("compact");
-        events::record_local(
-            &db,
-            &b.id,
-            "hook",
-            json!({ "event": event, "source": source }),
-        )
-        .await?;
+        client
+            .record_branch_event(&key, "hook", json!({ "event": event, "source": source }))
+            .await?;
         if is_session_start {
             // After a compaction the agent has lost its working context but the
             // session is unchanged — replay a concise re-orientation (the
             // `weaver summary` catch-up) rather than the full WEAVER.md, which it
             // can pull back with `weaver readme` if it needs the full rules. On a
             // genuine start/resume/clear, inject the full primer.
+            let b = client.get_branch(&key).await?;
             let context = if is_compact {
-                let summary = render_summary(&db, &b).await.unwrap_or_default();
+                let summary = render_summary(&client, &b).await.unwrap_or_default();
                 compact_replay(&b, &summary)
             } else {
                 weaver_md_for_branch(&b)
@@ -1811,34 +1755,32 @@ async fn cmd_hook(event: String) -> Result<()> {
 }
 
 async fn cmd_config(cmd: ConfigCmd) -> Result<()> {
-    let db = open_db().await?;
+    let client = client();
     match cmd {
         ConfigCmd::Ls => {
-            let settings = config::describe(&db).await?;
-            for s in &settings {
+            let settings = client.list_settings().await?;
+            for s in &settings.settings {
                 let suffix = if s.is_default { "  (default)" } else { "" };
-                println!("{} = {}{suffix}", s.spec.key, s.value);
+                println!("{} = {}{suffix}", s.key, s.value);
             }
         }
         ConfigCmd::Get { key } => {
-            let settings = config::describe(&db).await?;
-            match settings.iter().find(|s| s.spec.key == key) {
+            let settings = client.list_settings().await?;
+            match settings.settings.iter().find(|s| s.key == key) {
                 Some(s) => println!("{}", s.value),
                 None => bail!("no setting '{key}' — see `weaver config ls`"),
             }
         }
         ConfigCmd::Set { key, value } => {
-            if config::spec(&key).is_none() {
-                bail!("unknown setting '{key}'");
-            }
-            if let Err(why) = config::validate(&key, &value) {
-                bail!("{key}: {why}");
-            }
-            config::apply(&db, &[(key.clone(), Some(value))]).await?;
+            let mut changes = serde_json::Map::new();
+            changes.insert(key.clone(), json!(value));
+            client.patch_settings(changes).await?;
             println!("set {key}");
         }
         ConfigCmd::Rm { key } => {
-            config::apply(&db, &[(key.clone(), None)]).await?;
+            let mut changes = serde_json::Map::new();
+            changes.insert(key.clone(), Value::Null);
+            client.patch_settings(changes).await?;
             println!("removed {key}");
         }
     }
