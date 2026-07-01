@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, watch } from 'vue';
 import type { Comment, Thread } from '../types';
 import { timeAgo } from '../lib/time';
 
@@ -38,20 +38,54 @@ function submitReply(tid: number) {
   const body = (replyDrafts.value[tid] ?? '').trim();
   if (!body) return;
   emit('reply', { tid, body });
-  replyDrafts.value[tid] = '';
+  // The draft clears only once the reply lands (the thread's comment count
+  // grows — see the watch below), so a failed post keeps the text for a retry.
 }
 
 function submitCreate() {
   const body = pendingDraft.value.trim();
   if (!body) return;
   emit('create', body);
-  pendingDraft.value = '';
+  // Cleared when the parent closes the composer on success (`pending` → null);
+  // a failed create leaves it open with the draft intact.
 }
 
 function cancelCreate() {
   pendingDraft.value = '';
   emit('cancel');
 }
+
+// Clear the new-thread draft when the parent closes the composer (success only
+// — a failed create keeps `pending` non-null, so the text survives).
+watch(
+  () => props.pending,
+  (p) => {
+    if (!p) pendingDraft.value = '';
+  },
+);
+
+// Clear the active card's reply draft when its reply lands — the active
+// thread's comment count growing is the success signal (a failed reply never
+// grows it, so the draft is preserved).
+let activeTid: number | null = null;
+let activeCount = -1;
+watch(
+  () => {
+    const a = props.cards.find((c) => c.active);
+    return a ? { tid: a.thread.id, n: a.thread.comments.length } : null;
+  },
+  (now) => {
+    if (!now) {
+      activeTid = null;
+      activeCount = -1;
+      return;
+    }
+    if (now.tid === activeTid && now.n > activeCount) replyDrafts.value[now.tid] = '';
+    activeTid = now.tid;
+    activeCount = now.n;
+  },
+  { immediate: true },
+);
 </script>
 
 <template>

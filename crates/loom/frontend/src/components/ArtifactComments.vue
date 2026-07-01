@@ -62,8 +62,11 @@ function scrollerEl(): HTMLElement | null {
 async function loadThreads() {
   try {
     threads.value = await listThreads(props.sessionId, props.artifactName);
-  } catch {
-    threads.value = [];
+  } catch (e) {
+    // A transient failure shouldn't wipe already-loaded threads out from under
+    // the reader; keep what we have and log for diagnosis. The next render /
+    // SSE refetch recovers.
+    console.warn('failed to load comment threads', e);
   }
   await nextTick();
   runLocateCycle();
@@ -263,8 +266,11 @@ async function onReply(payload: { tid: number; body: string }) {
     const comment = await addComment(props.sessionId, props.artifactName, payload.tid, { body });
     const t = threads.value.find((t) => t.id === payload.tid);
     if (t) t.comments = [...t.comments, comment];
-  } catch {
-    /* the composer keeps the draft; a retry is a re-submit */
+    // The reply landed — the thread's comment count grew, which is CommentRail's
+    // cue to clear that card's draft. A failure leaves the count (and the draft)
+    // untouched so the text can be resubmitted.
+  } catch (e) {
+    console.warn('failed to post reply', e);
   }
 }
 
@@ -291,15 +297,16 @@ async function onCreate(body: string) {
     });
     threads.value = [...threads.value, thread];
     activeId.value = thread.id;
-  } catch {
-    /* keep the composer open so the draft isn't lost */
-    return;
-  } finally {
+    // Only close the composer on success — clearing `pending` unmounts it,
+    // which is CommentRail's cue to drop the draft. A failure below leaves the
+    // composer open with its text intact for a retry.
     pending.value = null;
     pendingRange = null;
+    await nextTick();
+    runLocateCycle();
+  } catch (e) {
+    console.warn('failed to create comment thread', e);
   }
-  await nextTick();
-  runLocateCycle();
 }
 
 function onCancel() {

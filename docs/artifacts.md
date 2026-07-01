@@ -87,7 +87,7 @@ One new noun, one demotion, one deletion — and a thin shared layer:
 
 | Job the plan tab did | New home |
 |---|---|
-| Tell agents what to do | **goal** — mutable markdown on the branch; `weaver goal set <file>` |
+| Tell agents what to do | **goal** — a branch-scoped `goal` artifact (markdown), set via `weaver goal set <file>` or the Artifacts editor |
 | Steps synced to weaver | **issues** — the only task ledger; created directly, never parsed out of a doc |
 | Structured content for the user | **artifacts** — named, versioned documents in weaver.db, rendered by loom |
 
@@ -196,22 +196,32 @@ Artifacts are the outbound twin of `scratch/`: scratch is material the user
 hands the agent; artifacts are documents the agent hands the user. Scratch
 stays as-is.
 
-### Goal: settable from a file, not auto-artifacted
+### Goal: a well-known `goal` artifact
 
-`weaver goal set <file|->` reads a file (or stdin) into `branches.goal`. The
-real win is mundane: long markdown goals stop being a shell-quoting exercise,
-so agents can actually maintain the goal as understanding evolves. The
-Overview renders the goal through the same markdown pipeline as artifacts,
-projection included, so a goal can say `the breakdown is #41 #42 #43, design
-in [the plan](artifact:plan)` and stay live.
+The session goal is a branch-scoped artifact named `goal`. `weaver goal set
+<file|->` reads a file (or stdin) and appends a revision; the dashboard and the
+Artifacts tab edit it like any other document. So the goal is versioned, renders
+through the same markdown pipeline as every artifact (projection included — `the
+breakdown is #41 #42 #43, design in [the plan](artifact:plan)` stays live), and
+carries the same margin comment layer. This is what lets the goal *shift* over a
+session and still be the thing a restart or compaction re-reads — always its
+newest revision.
 
-Issue #117 floated auto-creating an artifact on `goal set` and linking it.
-Recommendation: **don't.** That puts the same text in two places — the
-disease this redesign exists to cure. The goal column already has a surface
-(Overview, `weaver goal`, `summary`), a history (`goal_set` events carry the
-full text), and a single owner. When the goal genuinely is a document, the
-agent writes the artifact and sets the goal to one line plus a reference —
-composition instead of coupling.
+The `goal` artifact is the **single source of truth**. `branches.goal` remains
+as a denormalized cache — the hot path for the fleet list and `?q=` search —
+refreshed from the artifact at every write: `branch::set_goal` (the setter every
+`goal set` / session-create / PATCH funnels through) and the direct
+artifact-write paths (the Artifacts editor, `weaver artifact write goal`) both
+call `branch::sync_goal_cache`. `branch::current_goal` reads the artifact, so
+`weaver summary`, the compact re-orientation, and `adopt()` on restart reflect
+the newest revision.
+
+Issue #117 floated auto-creating an artifact on `goal set` and warned against
+putting the same text in two places. That objection is answered by *ownership*,
+not avoidance: there is one owner (the artifact) and one derived cache kept in
+lockstep with it — not a second editable copy. The goal earns the artifact
+surface precisely because it is a document that evolves and wants history,
+rendering, and comments.
 
 ### Plans: a convention, not a noun
 

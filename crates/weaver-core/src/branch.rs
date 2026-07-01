@@ -159,11 +159,11 @@ pub async fn upsert(db: &Db, repo_root: &str, branch: &str, base_branch: &str) -
     insert(db, &id, repo_root, branch, base_branch).await
 }
 
-/// Write the branch's goal. Appends a `goal` artifact revision (the source of
-/// truth) authored by `author` (`"user"` | `"agent"`), then refreshes the
-/// denormalized `branches.goal` cache. The single funnel for the goal writers
-/// that already exist (session create, PATCH session/branch, `weaver goal
-/// set`).
+/// Write the branch's goal: append a `goal` artifact revision (the source of
+/// truth) authored by `author` (`"user"` | `"agent"`), then refresh the
+/// denormalized `branches.goal` cache. The funnel every goal *setter* goes
+/// through; code that writes the goal artifact directly instead refreshes the
+/// cache via [`sync_goal_cache`].
 pub async fn set_goal(db: &Db, id: &str, goal: &str, author: &str) -> Result<()> {
     let Some(branch) = get(db, id).await? else {
         return Ok(());
@@ -185,9 +185,9 @@ pub async fn set_goal(db: &Db, id: &str, goal: &str, author: &str) -> Result<()>
 }
 
 /// Refresh the `branches.goal` cache column from the live `goal` artifact's
-/// latest revision. Call after ANY write to the goal artifact — the funnel
-/// above and the direct artifact-write paths (the dashboard editor, `weaver
-/// artifact write goal`). No-op-safe when no goal artifact exists.
+/// latest revision — the artifact is the source of truth, so this keeps the
+/// denormalized column in step. Call after any write to the goal artifact that
+/// does not go through [`set_goal`]. No-op when no goal artifact exists yet.
 pub async fn sync_goal_cache(db: &Db, id: &str) -> Result<()> {
     let Some(branch) = get(db, id).await? else {
         return Ok(());

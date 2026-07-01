@@ -1759,9 +1759,16 @@ pub async fn adopt(st: &AppState, session: &Session, branch: &Branch) -> Result<
         if f.exists() {
             // Refresh from the authoritative goal artifact before the spawned
             // shell cats this file in as the opening prompt, so a restart picks
-            // up the newest goal rather than reseeding a stale on-disk copy.
-            if let Ok(goal) = branch_mod::current_goal(&st.db, branch).await {
-                tokio::fs::write(&f, &goal).await.ok();
+            // up the newest goal rather than reseeding a stale on-disk copy. A
+            // failure here is non-fatal — the existing goal.txt is still a valid
+            // prompt — but log it so a silently-stale goal is diagnosable.
+            match branch_mod::current_goal(&st.db, branch).await {
+                Ok(goal) => {
+                    if let Err(e) = tokio::fs::write(&f, &goal).await {
+                        tracing::warn!(error = %e, "failed to refresh goal.txt on adopt");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "failed to read goal for adopt refresh"),
             }
             Some(f)
         } else {
