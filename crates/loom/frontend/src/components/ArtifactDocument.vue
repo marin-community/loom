@@ -1,19 +1,8 @@
 <script setup lang="ts">
-import {
-  ref,
-  shallowRef,
-  watch,
-  onMounted,
-  onBeforeUnmount,
-  nextTick,
-  h,
-  isVNode,
-  type VNode,
-} from 'vue';
+import { ref, watch, onMounted, onBeforeUnmount, nextTick, h, isVNode, type VNode } from 'vue';
 import { useRouter } from 'vue-router';
-import { parseMarkdown, loadSanitizer, type RenderContext } from '../markdown';
-import { renderTokens, type RenderCtx } from '../markdown-render';
-import type Token from 'markdown-it/lib/token.mjs';
+import { renderTokens } from '../markdown-render';
+import { useMarkdownDoc, routeDocLink } from '../lib/markdownDoc';
 import type { IssueRefStatus, Thread } from '../types';
 import { listThreads, createThread, addComment, resolveThread } from '../api';
 import {
@@ -64,35 +53,11 @@ const router = useRouter();
 
 const containerEl = ref<HTMLElement | null>(null);
 const scrollerEl = ref<HTMLElement | null>(null);
-const body = ref<HTMLElement | null>(null);
-const error = ref('');
-const tokens = shallowRef<Token[]>([]);
-const ctx = shallowRef<RenderCtx | null>(null);
 
-function renderContext(): RenderContext {
-  return { sessionId: props.id, filePath: props.path, refs: props.refs };
-}
-
-let runId = 0;
-async function build() {
-  const mine = ++runId;
-  try {
-    const [toks, sanitize] = await Promise.all([
-      parseMarkdown(props.source, renderContext()),
-      loadSanitizer(),
-    ]);
-    if (mine !== runId) return;
-    ctx.value = { ...renderContext(), sanitize };
-    tokens.value = toks;
-    error.value = '';
-    await nextTick();
-    if (mine !== runId) return;
-    locateCycle();
-  } catch (e) {
-    if (mine === runId) error.value = (e as Error).message;
-  }
-}
-watch(() => [props.source, props.path, props.refs], build, { deep: true });
+// The shared markdown build pipeline: parse → reactive `tokens`/`ctx`, with the
+// out-of-order guard and the source watch. After each build lands (the fresh
+// tree painted) we re-run the comment locate pass against the new DOM.
+const { body, error, tokens, ctx } = useMarkdownDoc(props, () => locateCycle());
 
 // --- comment state ----------------------------------------------------------
 
@@ -263,24 +228,10 @@ function onDocMouseDown(e: MouseEvent) {
 // Range contains that caret. Best-effort: an unsupported browser simply does
 // nothing (the inline chips remain the reliable path).
 function onArticleClick(e: MouseEvent) {
-  const anchor = (e.target as HTMLElement).closest('a');
-  if (anchor) {
-    const href = anchor.getAttribute('href');
-    if (!href) return;
-    if (anchor.hasAttribute('data-issue') || anchor.hasAttribute('data-artifact')) {
-      e.preventDefault();
-      router.push(href);
-      return;
-    }
-    if (!href.startsWith('#')) return;
-    e.preventDefault();
-    const id = decodeURIComponent(href.slice(1));
-    body.value?.querySelector(`[id="${CSS.escape(id)}"]`)?.scrollIntoView({
-      behavior: 'smooth',
-      block: 'start',
-    });
-    return;
-  }
+  // A click on any in-document link is routed by the shared helper (or left to
+  // the browser for external links); only a plain, non-link click falls through
+  // to the caret hit-test that focuses the thread sitting under the caret.
+  if (routeDocLink(e, router, body.value)) return;
   const sel = window.getSelection();
   if (sel && !sel.isCollapsed) return; // a drag-selection, not a plain click
   const doc = document as Document & {
@@ -417,7 +368,8 @@ defineExpose({ onCommentEvent });
 onMounted(() => {
   document.addEventListener('selectionchange', onSelectionChange);
   document.addEventListener('mousedown', onDocMouseDown, true);
-  build();
+  // `useMarkdownDoc` already runs the initial build on mount; we just load the
+  // threads that overlay it.
   loadThreads();
 });
 
