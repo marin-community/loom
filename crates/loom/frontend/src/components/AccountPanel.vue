@@ -48,6 +48,51 @@ async function savePassword() {
   }
 }
 
+// -- Your GitHub token ------------------------------------------------------
+// A personal fine-grained PAT, injected as GH_TOKEN into the sessions this user
+// launches, so their agents' `git push` / `gh` act as them (not the shared
+// ambient token). Write-only: we render only whether it's set, never the value.
+const PAT_CREATE_URL = 'https://github.com/settings/personal-access-tokens/new';
+const ghToken = ref('');
+const ghTokenStatus = ref<api.GithubTokenStatus | null>(null);
+
+async function loadMyGithubToken() {
+  try {
+    ghTokenStatus.value = await api.getMyGithubToken();
+  } catch (e) {
+    fail(e);
+  }
+}
+
+async function saveMyGithubToken() {
+  if (!ghToken.value.trim()) return;
+  busy.value = true;
+  try {
+    ghTokenStatus.value = await api.setMyGithubToken(ghToken.value.trim());
+    ghToken.value = '';
+    ok('GitHub token saved — your new sessions will act as you.');
+  } catch (e) {
+    fail(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function clearMyGithubToken() {
+  if (!confirm('Remove your GitHub token? Your sessions will fall back to the shared token.'))
+    return;
+  busy.value = true;
+  try {
+    await api.deleteMyGithubToken();
+    ghTokenStatus.value = { set: false, updated_at: null };
+    ok('GitHub token removed.');
+  } catch (e) {
+    fail(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
 // -- Approved users ---------------------------------------------------------
 const users = ref<User[]>([]);
 const newUser = ref('');
@@ -190,6 +235,7 @@ async function logout() {
 }
 
 onMounted(() => {
+  loadMyGithubToken();
   loadUsers();
   loadOwners();
   loadGithub();
@@ -244,6 +290,51 @@ onMounted(() => {
             @click="savePassword"
           >
             Update
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Your GitHub token -->
+    <section>
+      <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-1.5">
+        Your GitHub token
+      </h2>
+      <div class="rounded-md border border-line bg-surface px-3 py-2.5">
+        <p class="text-xs text-muted mb-2">
+          A fine-grained token your sessions use for <code class="font-mono">git push</code> and
+          <code class="font-mono">gh</code>, so your agents act as you.
+          <a class="text-accent underline" :href="PAT_CREATE_URL" target="_blank" rel="noopener">
+            Create one</a>
+          with <span class="font-medium">Contents</span> and
+          <span class="font-medium">Pull requests</span> read/write on the repos you work in.
+          <span :class="ghTokenStatus?.set ? 'text-accent' : 'text-faint'">
+            {{ ghTokenStatus?.set ? 'Set.' : 'Not set — sessions use the shared token.' }}
+          </span>
+        </p>
+        <div class="flex flex-wrap items-center gap-2">
+          <input
+            v-model="ghToken"
+            type="password"
+            autocomplete="off"
+            placeholder="github_pat_…"
+            class="flex-1 rounded bg-input px-2 py-1 text-sm outline-none focus:ring-1 ring-accent"
+            @keyup.enter="saveMyGithubToken"
+          />
+          <button
+            class="btn-primary px-3 py-1.5 text-xs"
+            :disabled="busy || !ghToken.trim()"
+            @click="saveMyGithubToken"
+          >
+            Save
+          </button>
+          <button
+            v-if="ghTokenStatus?.set"
+            class="btn-secondary px-2.5 py-1 text-xs"
+            :disabled="busy"
+            @click="clearMyGithubToken"
+          >
+            Clear
           </button>
         </div>
       </div>

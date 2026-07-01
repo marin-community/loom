@@ -325,6 +325,10 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
         WEAVER_DB: dbPath,
         WEAVER_TAPESTRY_BIN: join(WEAVER_ROOT, 'target', 'debug', 'tapestry'),
         RUST_LOG: 'loom=warn,weaver_core=warn',
+        // Seed an operator: loom refuses to boot with no owner configured, and
+        // loopback trust authenticates every test request as this primary user
+        // (so the page is signed in without an OAuth round-trip).
+        LOOM_OWNER_GITHUB: 'loom-e2e-owner',
       };
 
       // Bind to a random free port (0) and parse the actual port from stdout.

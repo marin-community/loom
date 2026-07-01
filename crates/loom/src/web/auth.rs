@@ -16,6 +16,7 @@ use weaver_api::{
 
 use crate::auth::{self, Principal};
 use crate::config;
+use crate::user_token;
 
 use super::{ApiResult, AppError, AppState};
 
@@ -369,6 +370,53 @@ pub(super) async fn set_own_password(
         ));
     }
     auth::set_password(&st.db, &principal.username, Some(&body.new_password)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// -- Per-user GitHub token ---------------------------------------------------
+// The caller's own GitHub token (a fine-grained PAT), injected as GH_TOKEN into
+// the sessions they launch so their agents' `git push` / `gh` act as them (see
+// `crate::user_token`). Self-service: every handler acts on the authenticated
+// principal, never an arbitrary username. Write-only — the token is never read
+// back over the API.
+
+/// Body for `PUT /api/auth/github-token`.
+#[derive(Debug, Deserialize)]
+pub(super) struct SetGithubTokenReq {
+    token: String,
+}
+
+/// `GET /api/auth/github-token` — whether the caller has set a personal GitHub
+/// token, and when (status only; the token itself is never returned).
+pub(super) async fn get_github_token(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> ApiResult<Json<user_token::TokenStatus>> {
+    Ok(Json(user_token::status(&st.db, &principal.username).await?))
+}
+
+/// `PUT /api/auth/github-token` — set/replace the caller's personal GitHub token.
+/// Returns the refreshed status (never the token).
+pub(super) async fn set_github_token(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Json(body): Json<SetGithubTokenReq>,
+) -> ApiResult<Json<user_token::TokenStatus>> {
+    let token = body.token.trim();
+    if token.is_empty() {
+        return Err(AppError::bad_request("a token is required"));
+    }
+    user_token::set(&st.db, &principal.username, token).await?;
+    Ok(Json(user_token::status(&st.db, &principal.username).await?))
+}
+
+/// `DELETE /api/auth/github-token` — clear the caller's personal GitHub token;
+/// their sessions then fall back to the shared ambient GH_TOKEN.
+pub(super) async fn delete_github_token(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> ApiResult<StatusCode> {
+    user_token::remove(&st.db, &principal.username).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

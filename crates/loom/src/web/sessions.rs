@@ -262,6 +262,30 @@ async fn launch_env(
     env
 }
 
+/// Overlay the launching user's personal GitHub token onto `env` as `GH_TOKEN`,
+/// so the session's `git push` / `gh` act as that user (their pushes and PRs are
+/// attributed to them, matching the per-user commit identity loom already sets).
+/// Precedence mirrors the commit-identity handling: only for a launch that
+/// carries a `created_by` principal (webhook/warm/adopt keep the shared ambient
+/// token), and only if no higher env layer (`repo_env` / `agent_env` / the repo
+/// file) already set `GH_TOKEN` — an explicit value wins. Best-effort: a lookup
+/// failure is logged, never fatal, so a token-store hiccup can't block a launch.
+async fn apply_user_github_token(
+    db: &Db,
+    env: &mut Vec<(String, String)>,
+    created_by: Option<&str>,
+) {
+    let Some(username) = created_by else { return };
+    if env.iter().any(|(k, _)| k == "GH_TOKEN") {
+        return;
+    }
+    match crate::user_token::get(db, username).await {
+        Ok(Some(token)) => env.push(("GH_TOKEN".to_string(), token)),
+        Ok(None) => {}
+        Err(e) => tracing::warn!(%username, "failed to load user github token: {e}"),
+    }
+}
+
 /// The configured wall-clock budget for a repo setup run.
 async fn setup_timeout(db: &Db) -> std::time::Duration {
     let secs = config::get(db, "setup.timeout_secs")
@@ -758,6 +782,11 @@ pub(crate) async fn create_session_core(
             Err(e) => tracing::warn!(%username, "failed to resolve commit identity: {e}"),
         }
     }
+
+    // Run the launching user's git/gh as themselves: overlay their personal
+    // GitHub token as GH_TOKEN (design §6.3, "Level B"). See
+    // `apply_user_github_token` for the precedence rules.
+    apply_user_github_token(&st.db, &mut extra_env, created_by.as_deref()).await;
 
     // Per-repo setup: run the repo's committed `[setup]` script in the worktree
     // before the agent starts — but ONLY for an allowlisted (registered) repo,
@@ -1894,6 +1923,67 @@ pub(super) async fn preview_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn seed_user(db: &Db, username: &str) {
+        sqlx::query("INSERT INTO users (username) VALUES (?)")
+            .bind(username)
+            .execute(db)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn user_github_token_injected_as_gh_token() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        seed_user(&db, "alice").await;
+        crate::user_token::set(&db, "alice", "ghp_alice")
+            .await
+            .unwrap();
+
+        let mut env = vec![("FOO".to_string(), "bar".to_string())];
+        apply_user_github_token(&db, &mut env, Some("alice")).await;
+        assert!(
+            env.iter().any(|(k, v)| k == "GH_TOKEN" && v == "ghp_alice"),
+            "the launching user's token is exported as GH_TOKEN"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_gh_token_layer_wins_over_user_token() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        seed_user(&db, "alice").await;
+        crate::user_token::set(&db, "alice", "ghp_alice")
+            .await
+            .unwrap();
+
+        // A repo/operator env layer already set GH_TOKEN: it must survive untouched
+        // and stay the single GH_TOKEN entry (no duplicate appended).
+        let mut env = vec![("GH_TOKEN".to_string(), "repo-token".to_string())];
+        apply_user_github_token(&db, &mut env, Some("alice")).await;
+        let gh: Vec<&(String, String)> = env.iter().filter(|(k, _)| k == "GH_TOKEN").collect();
+        assert_eq!(gh.len(), 1, "no duplicate GH_TOKEN is appended");
+        assert_eq!(gh[0].1, "repo-token", "the explicit layer wins");
+    }
+
+    #[tokio::test]
+    async fn gh_token_untouched_without_token_or_principal() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        seed_user(&db, "alice").await;
+
+        // A user with no token set → nothing injected.
+        let mut env = vec![("FOO".to_string(), "bar".to_string())];
+        apply_user_github_token(&db, &mut env, Some("alice")).await;
+        assert!(!env.iter().any(|(k, _)| k == "GH_TOKEN"));
+
+        // A launch with no `created_by` (webhook/warm) → nothing injected, even
+        // though a token now exists.
+        crate::user_token::set(&db, "alice", "ghp_alice")
+            .await
+            .unwrap();
+        let mut env2 = vec![("FOO".to_string(), "bar".to_string())];
+        apply_user_github_token(&db, &mut env2, None).await;
+        assert!(!env2.iter().any(|(k, _)| k == "GH_TOKEN"));
+    }
 
     #[tokio::test]
     async fn create_tracking_issue_sources_parent_and_reuses_claims() {

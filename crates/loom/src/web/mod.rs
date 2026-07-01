@@ -629,6 +629,14 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/tokens", get(list_tokens).post(create_token))
         .route("/auth/tokens/{id}", delete(revoke_token))
         .route("/auth/password", post(set_own_password))
+        // The caller's own GitHub token (a fine-grained PAT), injected as
+        // GH_TOKEN into the sessions they launch so their agents act as them.
+        .route(
+            "/auth/github-token",
+            get(get_github_token)
+                .put(set_github_token)
+                .delete(delete_github_token),
+        )
         .route("/auth/users", get(list_users).post(add_user))
         .route("/auth/users/{username}", delete(remove_user))
         .route(

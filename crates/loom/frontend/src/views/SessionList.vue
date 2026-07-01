@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { get, post, listAgents } from '../api';
-import type { Session, RecentRepo, RepoBranch, AgentMetadata } from '../types';
+import { get, post, listAgents, listRepos, registerRepo } from '../api';
+import type { Session, RecentRepo, RepoBranch, AgentMetadata, ManagedRepo } from '../types';
 import StatusBadge from '../components/StatusBadge.vue';
 import SignalChip from '../components/SignalChip.vue';
 import IdleChip from '../components/IdleChip.vue';
@@ -234,11 +234,59 @@ function repoName(path: string): string {
   return path.replace(/\/+$/, '').split('/').pop() || path;
 }
 
+// Registered managed repos (the clone allowlist). Loaded once on mount so the
+// form can both offer them and tell when a typed slug still needs registering.
+const managedRepos = ref<ManagedRepo[]>([]);
+async function loadManagedRepos() {
+  try {
+    managedRepos.value = await listRepos();
+  } catch {
+    // The managed-repo suggestions are a convenience; ignore failures here.
+  }
+}
+
+// A GitHub `owner/name` slug or a clone URL — something loom can register and
+// clone, as opposed to a local path that already exists on the server.
+const REPO_SLUG = /^[A-Za-z0-9][\w.-]*\/[A-Za-z0-9][\w.-]*$/;
+function looksLikeRemoteRepo(s: string): boolean {
+  const q = s.trim();
+  return REPO_SLUG.test(q) || /^https?:\/\//.test(q) || q.startsWith('git@');
+}
+
+// The typed repo when it's a remote ref we could clone and isn't registered yet
+// — the target of the "add & clone" affordance. Empty otherwise.
+const cloneCandidate = computed(() => {
+  const q = repo.value.trim();
+  if (!looksLikeRemoteRepo(q)) return '';
+  const known = managedRepos.value.some((r) => r.slug === q || r.remote_url === q);
+  return known ? '' : q;
+});
+
 // Recently-used repos, narrowed to those matching what the user has typed.
 const repoMatches = computed(() => {
   const q = repo.value.trim().toLowerCase();
   return recentRepos.value.filter((r) => r.repo_root.toLowerCase().includes(q));
 });
+
+const cloningRepo = ref(false);
+// Register the typed slug/URL in the managed store (the clone is lazy — it
+// happens on first session create), then select it so create() sends it as a
+// managed `repo`.
+async function addAndCloneRepo() {
+  const q = cloneCandidate.value;
+  if (!q) return;
+  cloningRepo.value = true;
+  try {
+    const added = await registerRepo(q);
+    await loadManagedRepos();
+    repo.value = added.slug;
+    repoFocused.value = false;
+  } catch (e) {
+    error.value = (e as Error).message;
+  } finally {
+    cloningRepo.value = false;
+  }
+}
 
 const branchMatches = computed(() => {
   const q = existingBranch.value.trim().toLowerCase();
@@ -350,14 +398,31 @@ async function create() {
   if (branchMode.value === 'existing' && !existingBranch.value.trim()) return;
   creating.value = true;
   try {
+    const repoInput = repo.value.trim();
     const body: Record<string, unknown> = {
-      cwd: repo.value,
       title: title.value || undefined,
       goal: goal.value,
       agent: agent.value || undefined,
       model: model.value || undefined,
       effort: effort.value || undefined,
     };
+    // A GitHub owner/name slug or URL routes through the managed `repo` path
+    // (allowlist-checked, cloned-if-absent server-side); anything else is a local
+    // path that forks from the repo already at that `cwd` (including a managed
+    // repo picked by its on-disk path). A slug that isn't registered yet is added
+    // first, so typing one and hitting Create just works — same as the dropdown's
+    // "Clone new repo" affordance.
+    if (looksLikeRemoteRepo(repoInput)) {
+      if (
+        !managedRepos.value.some((r) => r.slug === repoInput || r.remote_url === repoInput)
+      ) {
+        await registerRepo(repoInput);
+        await loadManagedRepos();
+      }
+      body.repo = repoInput;
+    } else {
+      body.cwd = repoInput;
+    }
     if (branchMode.value === 'existing') {
       body.existing_branch = existingBranch.value.trim();
     } else {
@@ -387,6 +452,7 @@ async function create() {
 // The recent-repos list only feeds the create form; fetch it once on first
 // mount (kept alive, so this never re-runs) and after each create.
 loadRecentRepos();
+loadManagedRepos();
 loadAgents();
 </script>
 
@@ -482,7 +548,8 @@ loadAgents();
         <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted">Repository</h2>
         <div class="relative">
           <label class="block text-xs text-muted mb-1">
-            Repository path (on the server)
+            Repository — a server path, or a GitHub
+            <span class="font-mono">owner/name</span> to clone
             <span v-if="recentRepos.length" class="text-faint">— or pick a recent one</span>
           </label>
           <input
@@ -490,16 +557,29 @@ loadAgents();
             @focus="repoFocused = true"
             @input="repoFocused = true"
             @blur="repoFocused = false"
-            placeholder="/home/you/code/project"
+            placeholder="owner/name or /home/you/code/project"
             autocomplete="loom-repo"
             spellcheck="false"
             class="w-full rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent"
           />
           <ul
-            v-if="repoFocused && repoMatches.length"
+            v-if="repoFocused && (repoMatches.length || cloneCandidate)"
             data-testid="recent-repos"
             class="absolute left-0 right-0 z-10 mt-1 max-h-56 overflow-auto rounded border border-line bg-input shadow-lg"
           >
+            <li v-if="cloneCandidate">
+              <button
+                type="button"
+                data-testid="clone-repo"
+                @mousedown.prevent="addAndCloneRepo"
+                :disabled="cloningRepo"
+                class="flex w-full items-center gap-2 px-2 py-1.5 text-left text-accent hover:bg-subtle disabled:opacity-60"
+              >
+                <span class="shrink-0 text-sm">＋ Clone new repo</span>
+                <span class="min-w-0 truncate text-xs font-mono text-muted">{{ cloneCandidate }}</span>
+                <span v-if="cloningRepo" class="ml-auto shrink-0 text-2xs text-faint">adding…</span>
+              </button>
+            </li>
             <li v-for="r in repoMatches" :key="r.repo_root">
               <button
                 type="button"

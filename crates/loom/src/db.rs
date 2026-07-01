@@ -178,6 +178,20 @@ CREATE TABLE IF NOT EXISTS github_owners (
     login      TEXT PRIMARY KEY COLLATE NOCASE,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
+
+-- A user's own GitHub token (a fine-grained PAT they paste into their account
+-- pane), injected as GH_TOKEN into the interactive sessions that user launches
+-- so an agent's `git push` / `gh` acts as *them* rather than as the shared
+-- ambient GH_TOKEN from the deploy env. Write-only over the API (status +
+-- timestamp, never the token), like `repo_env` — blast-radius reduction, not
+-- isolation (any agent in the shared container can still read the exported
+-- GH_TOKEN; see the shared-loom design §6.4). One row per user; dropped with the
+-- user via ON DELETE CASCADE.
+CREATE TABLE IF NOT EXISTS user_github_tokens (
+    username   TEXT PRIMARY KEY REFERENCES users(username) ON DELETE CASCADE,
+    token      TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
 "#;
 
 /// Open the shared database and apply loom's additional tables on top of the

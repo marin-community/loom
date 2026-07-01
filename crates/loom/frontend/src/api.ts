@@ -87,6 +87,29 @@ export const listRepos = () => get('/repos') as Promise<ManagedRepo[]>;
 export const registerRepo = (repo: string) =>
   post('/repos', { repo }) as Promise<ManagedRepo>;
 
+// --- Your GitHub token (per-user) ------------------------------------------
+
+/** Whether the signed-in user has set a personal GitHub token. The token itself
+ *  is write-only — set/cleared but never read back. */
+export interface GithubTokenStatus {
+  set: boolean;
+  updated_at: string | null;
+}
+
+/** Whether you've set a personal GitHub token (`GET /api/auth/github-token`). */
+export const getMyGithubToken = () =>
+  get('/auth/github-token') as Promise<GithubTokenStatus>;
+
+/** Set/replace your personal GitHub token, injected as GH_TOKEN into the
+ *  sessions you launch so your agents act as you (`PUT /api/auth/github-token`).
+ *  Returns the refreshed status (never the token). */
+export const setMyGithubToken = (token: string) =>
+  put('/auth/github-token', { token }) as Promise<GithubTokenStatus>;
+
+/** Clear your personal GitHub token; your sessions fall back to the shared
+ *  ambient token (`DELETE /api/auth/github-token`). */
+export const deleteMyGithubToken = () => del('/auth/github-token');
+
 interface RepoEnvEnvelope {
   repo_root: string;
   env: RepoEnvVar[];
