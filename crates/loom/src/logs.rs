@@ -18,6 +18,7 @@ use tokio::sync::broadcast;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::Context;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
 /// How many recent lines the snapshot buffer retains. A few thousand is plenty to
@@ -115,11 +116,46 @@ pub fn layer() -> CaptureLayer {
 /// The layer type returned by [`layer`].
 pub struct CaptureLayer;
 
-impl<S: Subscriber> Layer<S> for CaptureLayer {
-    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+/// A span's rendered fields (e.g. `" method=GET path=/api/tasks"`), stashed in the
+/// span's extensions by [`CaptureLayer::on_new_span`] and folded into every event
+/// logged within that span — so a line carries the request it belongs to even when
+/// the event itself never named it.
+struct SpanFields(String);
+
+impl<S> Layer<S> for CaptureLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: Context<'_, S>,
+    ) {
+        let mut visitor = MessageVisitor::default();
+        attrs.record(&mut visitor);
+        if !visitor.fields.is_empty() {
+            if let Some(span) = ctx.span(id) {
+                span.extensions_mut().insert(SpanFields(visitor.fields));
+            }
+        }
+    }
+
+    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         let meta = event.metadata();
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
+        // Fold in the enclosing span scope's fields (root → leaf), so a line logged
+        // while handling a request carries its `method`/`path` even though the event
+        // never named them — e.g. `authentication required status=401 method=GET
+        // path=/api/tasks` instead of a context-free `status=401`.
+        if let Some(scope) = ctx.event_scope(event) {
+            for span in scope.from_root() {
+                if let Some(fields) = span.extensions().get::<SpanFields>() {
+                    visitor.fields.push_str(&fields.0);
+                }
+            }
+        }
         buffer().push(LogLine {
             seq: 0, // assigned in push()
             ts: chrono::Utc::now().to_rfc3339(),
@@ -225,6 +261,38 @@ mod tests {
         let snap = buf.snapshot(3);
         let msgs: Vec<&str> = snap.iter().map(|l| l.message.as_str()).collect();
         assert_eq!(msgs, ["7", "8", "9"]);
+    }
+
+    #[test]
+    fn folds_enclosing_span_fields_into_event() {
+        use tracing_subscriber::prelude::*;
+
+        // Install a registry + our capture layer for this thread, emit a warn
+        // inside a `method`/`path` span, then find our line in the global buffer by
+        // a unique marker (other tests may share the buffer).
+        let subscriber = tracing_subscriber::registry().with(layer());
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("http", method = "GET", path = "/api/tasks");
+            let _g = span.enter();
+            tracing::warn!("mark-9f3c authentication required");
+        });
+
+        let snap = buffer().snapshot(2000);
+        let line = snap
+            .iter()
+            .rev()
+            .find(|l| l.message.contains("mark-9f3c"))
+            .expect("the event was captured");
+        assert!(
+            line.message.contains("method=GET"),
+            "line carries the span's method: {}",
+            line.message
+        );
+        assert!(
+            line.message.contains("path=/api/tasks"),
+            "line carries the span's path: {}",
+            line.message
+        );
     }
 
     #[test]

@@ -114,6 +114,7 @@ use serde_json::{json, Value};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
+use tracing::Instrument;
 
 use crate::db::Db;
 use crate::events::EventBus;
@@ -151,6 +152,10 @@ pub struct AppError {
     /// nested under `details`) — for callers whose wire contract is a flat
     /// object, e.g. the artifact write-conflict `{ "error", "latest" }`.
     fields: Option<Value>,
+    /// For an internal error built from an `anyhow::Error`: the full cause chain
+    /// (and backtrace, when `RUST_BACKTRACE` is set), logged server-side so an
+    /// operator sees *why* — the client still gets only the concise `message`.
+    source_chain: Option<String>,
 }
 
 impl AppError {
@@ -160,6 +165,7 @@ impl AppError {
             message: message.into(),
             details: None,
             fields: None,
+            source_chain: None,
         }
     }
     fn bad_request(message: impl Into<String>) -> Self {
@@ -193,7 +199,13 @@ impl AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         if self.status.is_server_error() {
-            tracing::error!(status = %self.status.as_u16(), message = %self.message, "request failed");
+            // Log the full cause chain (and backtrace when captured), not just the
+            // top-level message, so the log says *why* the request 500'd.
+            tracing::error!(
+                status = %self.status.as_u16(),
+                error = %self.source_chain.as_deref().unwrap_or(&self.message),
+                "request failed"
+            );
         } else {
             tracing::warn!(status = %self.status.as_u16(), message = %self.message, "request rejected");
         }
@@ -212,7 +224,17 @@ impl IntoResponse for AppError {
 
 impl<E: Into<anyhow::Error>> From<E> for AppError {
     fn from(err: E) -> Self {
-        Self::new(StatusCode::INTERNAL_SERVER_ERROR, err.into().to_string())
+        let err = err.into();
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: err.to_string(),
+            details: None,
+            fields: None,
+            // `{err:?}` renders anyhow's full cause chain plus the backtrace when
+            // one was captured (`RUST_BACKTRACE=1`); `to_string()` above is just
+            // the top-level message the client sees.
+            source_chain: Some(format!("{err:?}")),
+        }
     }
 }
 
@@ -419,6 +441,21 @@ fn is_immutable_asset(path: &str) -> bool {
     filename
         .split('.')
         .any(|seg| seg.len() == 8 && seg.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Outermost middleware: open a per-request tracing span carrying the method and
+/// path, so *every* log line emitted while the request is handled — an auth
+/// rejection, a validation `warn`, an internal `error` — is tagged with which
+/// request produced it. Without it a bare `authentication required status=401`
+/// tells an operator nothing about *what* was being accessed. The span's fields
+/// are folded into each line by [`crate::logs::CaptureLayer`].
+async fn request_context_span(request: Request<axum::body::Body>, next: Next) -> Response {
+    let span = tracing::info_span!(
+        "http",
+        method = %request.method(),
+        path = %request.uri().path(),
+    );
+    next.run(request).instrument(span).await
 }
 
 // ---------------------------------------------------------------------------
@@ -672,6 +709,9 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(static_cache_middleware))
         .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
+        // Outermost, so it wraps auth and every other layer: tag each request's log
+        // lines with its method + path (see `request_context_span`).
+        .layer(axum::middleware::from_fn(request_context_span))
 }
 
 #[cfg(test)]

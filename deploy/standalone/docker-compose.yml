@@ -47,6 +47,13 @@ services:
     # (below), so the image exists by the time this service starts.
     restart: unless-stopped
     env_file: .env
+    # RUST_BACKTRACE feeds anyhow's backtrace capture, so an internal (500) error's
+    # server log carries the stack where the error arose, not just its message.
+    # Cheap here — loom is low-traffic and errors are rare. A backtrace at a
+    # *warning* would only show tokio executor frames (the async stack isn't the
+    # request path), so warnings rely on the per-request span (method/path) instead.
+    environment:
+      RUST_BACKTRACE: "1"
     depends_on:
       loom-init:
         condition: service_completed_successfully
