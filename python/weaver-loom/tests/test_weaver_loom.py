@@ -1,10 +1,10 @@
 """The weaver_loom contract, with no server required.
 
 These run in CI (the `python-binding` job). They cover the pure logic every
-overlooker program leans on — judgement parsing, the survey's scope filter,
+watch program leans on — judgement parsing, the survey's scope filter,
 capability gating, mark routing, and the round-result stdout contract — by
 stubbing the HTTP layer; the live end-to-end coverage is the Rust integration
-suite (`crates/loom/tests/integration/overlookers.rs`), which runs the real
+suite (`crates/loom/tests/integration/watches.rs`), which runs the real
 builtin scripts against a real loom.
 """
 
@@ -203,7 +203,7 @@ def test_triggered_sessions_falls_back_to_full_survey_without_a_target():
 
 
 def test_main_register_mode_prints_manifest_without_running(monkeypatch, capsys):
-    monkeypatch.setenv("WEAVER_OVERLOOKER_MODE", "register")
+    monkeypatch.setenv("WEAVER_WATCH_MODE", "register")
     ran = []
     Round.main(lambda rnd: ran.append(rnd), {"on": ["pr.merged"]})
     assert ran == [], "register mode declares triggers, it never runs a round"
@@ -211,8 +211,8 @@ def test_main_register_mode_prints_manifest_without_running(monkeypatch, capsys)
 
 
 def test_main_run_mode_invokes_the_round(monkeypatch):
-    monkeypatch.delenv("WEAVER_OVERLOOKER_MODE", raising=False)
-    monkeypatch.setenv("WEAVER_OVERLOOKER", "{}")
+    monkeypatch.delenv("WEAVER_WATCH_MODE", raising=False)
+    monkeypatch.setenv("WEAVER_WATCH", "{}")
     ran = []
     Round.main(lambda rnd: ran.append(rnd))
     assert len(ran) == 1 and isinstance(ran[0], Round)
@@ -222,9 +222,9 @@ def test_register_mode_neuters_the_round(monkeypatch):
     # A legacy script that constructs a Round directly in register mode must not
     # be able to act: the survey is empty, the round is dry, and the engine-built
     # client is granted no write capabilities even when the config names some.
-    monkeypatch.setenv("WEAVER_OVERLOOKER_MODE", "register")
+    monkeypatch.setenv("WEAVER_WATCH_MODE", "register")
     monkeypatch.setenv(
-        "WEAVER_OVERLOOKER", json.dumps({"name": "t", "capabilities": ["mark"]})
+        "WEAVER_WATCH", json.dumps({"name": "t", "capabilities": ["mark"]})
     )
     rnd = Round()
     assert rnd.sessions() == []
@@ -239,7 +239,7 @@ def test_register_mode_triggered_sessions_is_empty(monkeypatch):
     # even when the trigger names a concrete session, a legacy script that calls
     # it while merely being asked what wakes it must not touch the fleet. The
     # round is given a client that explodes on any survey to prove it isn't hit.
-    monkeypatch.setenv("WEAVER_OVERLOOKER_MODE", "register")
+    monkeypatch.setenv("WEAVER_WATCH_MODE", "register")
 
     class Exploding:
         def can(self, _cap):

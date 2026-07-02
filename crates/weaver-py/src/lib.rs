@@ -1,7 +1,7 @@
 //! `weaver_py` — a Pythonic, synchronous wrapper over [`weaver_api`].
 //!
-//! This is the out-of-process seam from the overlooker design: a scripted
-//! overlooker (or an agent iterating on one, or a human at a REPL) drives the
+//! This is the out-of-process seam from the watch design: a scripted
+//! watch (or an agent iterating on one, or a human at a REPL) drives the
 //! loom fleet through the same typed REST surface the `loom` CLI uses, never
 //! touching the terminal runtime directly. The loom daemon stays the single owner of the live
 //! runtime.
@@ -22,7 +22,7 @@
 //! script reads `s["id"]`, `s["branch"]["description"]`, and the branch's
 //! `tags` (a list of `{key, value, note, set_by, set_at}`) without a bespoke
 //! wrapper class per View. The well-known keys are `attention` (the agent's
-//! self-report) and `triage` (an overlooker's assessment); absence is the calm
+//! self-report) and `triage` (a watch's assessment); absence is the calm
 //! state — there is no `ok` tag.
 
 use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError, PyValueError};
@@ -234,7 +234,7 @@ impl Client {
         to_py(py, &view)
     }
 
-    /// Stamp the overlooker's triage mark on a session (needs `mark`) — a
+    /// Stamp the watch's triage mark on a session (needs `mark`) — a
     /// convenience over the `triage` tag. `level` is `attention` | `blocked` to
     /// raise it, or empty/`ok` to clear it; `by` defaults to `manual`
     /// server-side. Returns the updated session.
@@ -292,14 +292,14 @@ impl Client {
         to_py(py, &value)
     }
 
-    /// The persistent overlooker session, created-or-reused across rounds.
+    /// The persistent watch session, created-or-reused across rounds.
     ///
-    /// Not yet available: the warm-session lifecycle is T12 of the overlooker
+    /// Not yet available: the warm-session lifecycle is T12 of the watch
     /// plan and has no `weaver-api` backing today. It raises rather than faking
     /// a session so a program never silently no-ops.
     fn warm_session(&self) -> PyResult<Py<PyAny>> {
         Err(PyNotImplementedError::new_err(
-            "warm_session() arrives with the warm-session lifecycle (overlooker plan T12); \
+            "warm_session() arrives with the warm-session lifecycle (watch plan T12); \
              it is not yet backed by weaver-api",
         ))
     }
@@ -315,7 +315,7 @@ impl Client {
         self.gate("launch")?;
         Err(PyNotImplementedError::new_err(
             "run_agent() is an in-process loom helper not exposed over weaver-api; \
-             it is driven by the engine (overlooker plan T5), not this client",
+             it is driven by the engine (watch plan T5), not this client",
         ))
     }
 }

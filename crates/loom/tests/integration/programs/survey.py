@@ -1,7 +1,7 @@
 """Test fixture program: record one `survey` action per surveyed session.
 
 Owned by the engine-mechanics integration tests (`tests/integration/
-overlookers.rs`): it mutates nothing, so a test can assert "a round ran over
+watches.rs`): it mutates nothing, so a test can assert "a round ran over
 exactly these sessions" from the run row alone — no dependency on any
 builtin program's behavior.
 """

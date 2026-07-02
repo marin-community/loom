@@ -229,7 +229,7 @@ async fn cross_repo_board_and_issue_tags() {
     client.delete(&format!("/api/sessions/{id}")).await.unwrap();
 }
 
-/// The triage axis: `PUT /api/sessions/{id}/tags/triage` stamps the overlooker's
+/// The triage axis: `PUT /api/sessions/{id}/tags/triage` stamps the watch's
 /// mark on the session's branch, surfaces it on the SessionView's `branch.tags`,
 /// and never disturbs the agent's own `attention` tag. An invalid value is
 /// rejected.
@@ -258,14 +258,14 @@ async fn triage_axis_marks_a_session() {
         .await
         .unwrap();
 
-    // Fresh: no overlooker mark yet.
+    // Fresh: no watch mark yet.
     let view = client.get(&format!("/api/sessions/{id}")).await.unwrap();
     assert!(
         branch_tag(&view, "triage").is_none(),
         "unmarked: no triage tag yet"
     );
 
-    // An overlooker stamps a mark via the triage tag.
+    // A watch stamps a mark via the triage tag.
     let marked = client
         .put(
             &format!("/api/sessions/{id}/tags/triage"),

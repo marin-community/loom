@@ -29,7 +29,7 @@ watch(authed, (ok) => (ok ? startFleetPoll() : stopFleetPoll()), { immediate: tr
 // left (scroll, filter, the open create form); the session detail page returns
 // to its warm terminal (scrollback intact, no reconnect). Chat is NOT cached —
 // it is cheap to remount.
-const CACHED_VIEWS = ['SessionList', 'Issues', 'Overlookers', 'SessionDetail'];
+const CACHED_VIEWS = ['SessionList', 'Issues', 'Watches', 'SessionDetail'];
 
 // Cache key per cached instance. List views are singletons (keyed by their
 // stable path); the session detail is keyed per session id so each session gets

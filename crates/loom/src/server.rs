@@ -11,9 +11,9 @@ use tokio::net::TcpListener;
 use crate::events::EventBus;
 use crate::session as session_mod;
 use crate::web::AppState;
-use crate::{backend, config, db, github, monitor, overlooker, web};
+use crate::{backend, config, db, github, monitor, watch, web};
 use weaver_core::branch as branch_mod;
-use weaver_core::overlooker as ov;
+use weaver_core::watch as watch_store;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerState {
@@ -123,17 +123,17 @@ pub async fn run(addr: &str) -> Result<()> {
 
     // Two independent startup adopt policies. The fleet-wide one recreates every
     // recoverable *ordinary* session's terminal, gated on `server.auto_adopt`. The
-    // warm one recovers engine-managed (overlooker) sessions so a watcher resumes
+    // warm one recovers engine-managed (watch) sessions so a watcher resumes
     // its across-round memory after a restart — gated on its own
-    // `overlooker.adopt_warm`, so warm infrastructure is recovered even when
+    // `watch.adopt_warm`, so warm infrastructure is recovered even when
     // ordinary sessions are deliberately left orphaned.
     if config::get_bool(&state.db, "server.auto_adopt", config::DEFAULT_AUTO_ADOPT).await {
         reconcile_sessions(&state).await;
     }
     if config::get_bool(
         &state.db,
-        "overlooker.adopt_warm",
-        config::DEFAULT_OVERLOOKER_ADOPT_WARM,
+        "watch.adopt_warm",
+        config::DEFAULT_WATCH_ADOPT_WARM,
     )
     .await
     {
@@ -154,7 +154,7 @@ pub async fn run(addr: &str) -> Result<()> {
 
 /// On startup, adopt every recoverable *ordinary* session whose terminal is gone.
 /// Engine-managed (warm) sessions are skipped here — they have their own adopt
-/// policy in [`reconcile_managed_sessions`], gated on `overlooker.adopt_warm`.
+/// policy in [`reconcile_managed_sessions`], gated on `watch.adopt_warm`.
 async fn reconcile_sessions(state: &AppState) {
     let sessions = match session_mod::list(&state.db).await {
         Ok(s) => s,
@@ -187,15 +187,15 @@ async fn reconcile_sessions(state: &AppState) {
     }
 }
 
-/// Reconcile engine-managed (warm) overlooker sessions on startup, independent
+/// Reconcile engine-managed (warm) watch sessions on startup, independent
 /// of `server.auto_adopt`. For each managed session:
 ///
-/// * its **owning overlooker is gone** (deleted) → the session is orphaned
+/// * its **owning watch is gone** (deleted) → the session is orphaned
 ///   infrastructure with no owner, so it is **archived** (terminal killed, worktree
 ///   removed), not adopted — it would never be surveyed or reused again;
 /// * otherwise, if it is **non-terminal and its terminal is gone** → it is
 ///   **re-adopted** (terminal recreated, agent resumed) so the watcher resumes its
-///   across-round memory. Its session id (and the overlooker's
+///   across-round memory. Its session id (and the watch's
 ///   `warm_session_id` linkage) is stable across the restart — adoption recreates
 ///   terminal for the *same* row rather than spawning a new session.
 pub async fn reconcile_managed_sessions(state: &AppState) {
@@ -214,7 +214,7 @@ pub async fn reconcile_managed_sessions(state: &AppState) {
         // miss archives the warm session. A transient DB error leaves it intact —
         // destroying a live watcher's session over a flaky read is far worse than
         // deferring its recovery to the next restart.
-        let owner = match ov::get(&state.db, owner_id).await {
+        let owner = match watch_store::get(&state.db, owner_id).await {
             Ok(o) => o,
             Err(e) => {
                 tracing::warn!(
@@ -280,13 +280,13 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     // setting and on `gh` being available, so it idles cheaply when GitHub
     // integration is off or unavailable.
     tokio::spawn(github::poll(state.clone()));
-    // The Overlooker engine (timer + dispatcher). Always spawned; it self-gates
-    // on the `overlooker.enabled` master switch, which is on by default, so a
+    // The Watch engine (timer + dispatcher). Always spawned; it self-gates
+    // on the `watch.enabled` master switch, which is on by default, so a
     // default loom runs it. Turning the switch off idles it cheaply.
-    tokio::spawn(overlooker::run(state.clone()));
+    tokio::spawn(watch::run(state.clone()));
     // Retire embedded code-server instances that have gone idle.
     tokio::spawn(crate::ide::reap_loop(state.clone()));
-    tracing::debug!("background tasks spawned (monitor, github poll, overlooker, ide reaper)");
+    tracing::debug!("background tasks spawned (monitor, github poll, watch, ide reaper)");
     // `into_make_service_with_connect_info` surfaces the peer `SocketAddr` to the
     // auth middleware, which uses it to recognise (and optionally trust) loopback.
     axum::serve(

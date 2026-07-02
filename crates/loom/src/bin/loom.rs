@@ -58,22 +58,22 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SessionCmd,
     },
-    /// Manage overlookers: periodic / triggered watch programs over the fleet.
+    /// Manage watches: periodic / triggered watch programs over the fleet.
     ///
-    /// An overlooker wakes on a trigger (a cron tick or a session event),
+    /// A watch wakes on a trigger (a cron tick or a session event),
     /// surveys the fleet, and acts — marking a session, nudging a stuck one,
     /// escalating to you. Author one as a plain file an agent can edit, then
     /// register it and iterate with `--dry-run`:
     ///
-    ///     loom overlooker programs                 # the builtin programs that ship with loom
-    ///     loom overlooker new test-watch          # scaffold ~/.weaver/overlookers/test-watch.py
-    ///     loom overlooker add status --cron "0 * * * *" --capabilities observe,mark,escalate
-    ///     loom overlooker run status --dry-run     # simulate; mutating actions are stubbed
-    ///     loom overlooker enable status            # arm it
-    ///     loom overlooker ls                       # the fleet of watchers
-    Overlooker {
+    ///     loom watch programs                 # the builtin programs that ship with loom
+    ///     loom watch new test-watch          # scaffold ~/.weaver/watches/test-watch.py
+    ///     loom watch add status --cron "0 * * * *" --capabilities observe,mark,escalate
+    ///     loom watch run status --dry-run     # simulate; mutating actions are stubbed
+    ///     loom watch enable status            # arm it
+    ///     loom watch ls                       # the fleet of watchers
+    Watch {
         #[command(subcommand)]
-        cmd: OverlookerCmd,
+        cmd: WatchCmd,
     },
     /// Manage API tokens for automation (the `LOOM_TOKEN` a CI job presents).
     ///
@@ -302,58 +302,58 @@ enum SessionCmd {
     },
 }
 
-/// Subcommands under `loom overlooker` — the operator + authoring surface. A
+/// Subcommands under `loom watch` — the operator + authoring surface. A
 /// thin client over the REST API ("the API is the CLI").
 #[derive(Subcommand)]
-enum OverlookerCmd {
-    /// Scaffold a starter program file at `~/.weaver/overlookers/<name>.py`.
+enum WatchCmd {
+    /// Scaffold a starter program file at `~/.weaver/watches/<name>.py`.
     ///
     /// Writes a commented Python template against the program contract (the
-    /// fleet over `$WEAVER_API`, round config in `$WEAVER_OVERLOOKER`, result
+    /// fleet over `$WEAVER_API`, round config in `$WEAVER_WATCH`, result
     /// JSON on stdout), then prints the path. Edit it, then register it with
-    /// `loom overlooker add <name> --program <path>`.
+    /// `loom watch add <name> --program <path>`.
     New {
-        /// The overlooker name; also the file stem (`<name>.py`).
+        /// The watch name; also the file stem (`<name>.py`).
         name: String,
     },
-    /// List the builtin programs that ship with loom (GET /api/overlookers/programs).
+    /// List the builtin programs that ship with loom (GET /api/watches/programs).
     Programs {
         /// Print one program's script source instead of the table, e.g.
         /// `--source builtin:archive-merged` — a working example to start from.
         #[arg(long)]
         source: Option<String>,
     },
-    /// Register an overlooker from flags (POST /api/overlookers).
+    /// Register a watch from flags (POST /api/watches).
     Add(Box<AddOpts>),
-    /// Remove an overlooker (DELETE).
+    /// Remove a watch (DELETE).
     Rm {
-        /// Overlooker id or name.
+        /// Watch id or name.
         name: String,
     },
-    /// Enable an overlooker (arm it).
+    /// Enable a watch (arm it).
     Enable {
-        /// Overlooker id or name.
+        /// Watch id or name.
         name: String,
     },
-    /// Disable an overlooker (stop it cold, no redeploy).
+    /// Disable a watch (stop it cold, no redeploy).
     Disable {
-        /// Overlooker id or name.
+        /// Watch id or name.
         name: String,
     },
-    /// List every overlooker: name, enabled, trigger, program, last outcome.
+    /// List every watch: name, enabled, trigger, program, last outcome.
     Ls,
     /// Fire a round now and print its outcome + summary.
     Run {
-        /// Overlooker id or name.
+        /// Watch id or name.
         name: String,
         /// Simulate: every mutating action is stubbed and logged as "would do
         /// X", nothing is performed. Safe to repeat — the iteration primitive.
         #[arg(long)]
         dry_run: bool,
     },
-    /// Show an overlooker's round history (time, reason, outcome, summary).
+    /// Show a watch's round history (time, reason, outcome, summary).
     Runs {
-        /// Overlooker id or name.
+        /// Watch id or name.
         name: String,
         /// How many recent rounds to show.
         #[arg(long, default_value = "20")]
@@ -361,7 +361,7 @@ enum OverlookerCmd {
     },
     /// Show the actions each recent round took (a verbose `runs`).
     Logs {
-        /// Overlooker id or name.
+        /// Watch id or name.
         name: String,
         /// How many recent rounds to show.
         #[arg(long, default_value = "10")]
@@ -509,11 +509,11 @@ enum TokenCmd {
     },
 }
 
-/// Options for `loom overlooker add` — the flags build the trigger / scope /
-/// program / capability set the REST `CreateOverlookerReq` takes.
+/// Options for `loom watch add` — the flags build the trigger / scope /
+/// program / capability set the REST `CreateWatchReq` takes.
 #[derive(Args)]
 struct AddOpts {
-    /// The overlooker name (unique).
+    /// The watch name (unique).
     name: String,
     /// Cron trigger: a standard 5-field crontab expression (e.g. "0 * * * *").
     #[arg(long, group = "trigger")]
@@ -527,7 +527,7 @@ struct AddOpts {
     /// With `--on-event`, narrow to a single level (e.g. `blocked`).
     #[arg(long)]
     level: Option<String>,
-    /// Pin the overlooker to one repository (filters the trigger + scope).
+    /// Pin the watch to one repository (filters the trigger + scope).
     #[arg(long)]
     repo: Option<String>,
     /// Raw scope JSON, merged over the repo filter (e.g. '{"attention":"!ok"}').
@@ -624,7 +624,7 @@ async fn run() -> Result<()> {
         Cmd::Server { cmd } => run_server(cmd).await,
         Cmd::Session { cmd } => run_session(cmd).await,
         Cmd::Issue { cmd } => run_issue(cmd).await,
-        Cmd::Overlooker { cmd } => run_overlooker(cmd).await,
+        Cmd::Watch { cmd } => run_watch(cmd).await,
         Cmd::Token { cmd } => run_token(cmd).await,
         Cmd::Setup { cmd } => run_setup(cmd).await,
         Cmd::Config { cmd } => run_config(cmd).await,
@@ -694,19 +694,19 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
     }
 }
 
-/// Dispatch the `loom overlooker <verb>` subcommands.
-async fn run_overlooker(cmd: OverlookerCmd) -> Result<()> {
+/// Dispatch the `loom watch <verb>` subcommands.
+async fn run_watch(cmd: WatchCmd) -> Result<()> {
     match cmd {
-        OverlookerCmd::New { name } => cmd_overlooker_new(name).await,
-        OverlookerCmd::Programs { source } => cmd_overlooker_programs(source).await,
-        OverlookerCmd::Add(opts) => cmd_overlooker_add(*opts).await,
-        OverlookerCmd::Rm { name } => cmd_overlooker_rm(name).await,
-        OverlookerCmd::Enable { name } => cmd_overlooker_set_enabled(name, true).await,
-        OverlookerCmd::Disable { name } => cmd_overlooker_set_enabled(name, false).await,
-        OverlookerCmd::Ls => cmd_overlooker_ls().await,
-        OverlookerCmd::Run { name, dry_run } => cmd_overlooker_run(name, dry_run).await,
-        OverlookerCmd::Runs { name, limit } => cmd_overlooker_runs(name, limit, false).await,
-        OverlookerCmd::Logs { name, limit } => cmd_overlooker_runs(name, limit, true).await,
+        WatchCmd::New { name } => cmd_watch_new(name).await,
+        WatchCmd::Programs { source } => cmd_watch_programs(source).await,
+        WatchCmd::Add(opts) => cmd_watch_add(*opts).await,
+        WatchCmd::Rm { name } => cmd_watch_rm(name).await,
+        WatchCmd::Enable { name } => cmd_watch_set_enabled(name, true).await,
+        WatchCmd::Disable { name } => cmd_watch_set_enabled(name, false).await,
+        WatchCmd::Ls => cmd_watch_ls().await,
+        WatchCmd::Run { name, dry_run } => cmd_watch_run(name, dry_run).await,
+        WatchCmd::Runs { name, limit } => cmd_watch_runs(name, limit, false).await,
+        WatchCmd::Logs { name, limit } => cmd_watch_runs(name, limit, true).await,
     }
 }
 
@@ -2508,13 +2508,13 @@ async fn cmd_open() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Overlooker commands (the operator + authoring surface)
+// Watch commands (the operator + authoring surface)
 // ---------------------------------------------------------------------------
 
-/// The starter program a `loom overlooker new` scaffolds: a small, runnable
+/// The starter program a `loom watch new` scaffolds: a small, runnable
 /// template against the `weaver_loom` API layer and the program contract the
 /// engine speaks — the same shape the builtin scripts implement
-/// (`loom overlooker programs --source <name>` prints one as a fuller
+/// (`loom watch programs --source <name>` prints one as a fuller
 /// example). Plain `replace` rather than `format!`, so the template's literal
 /// braces (JSON, f-strings) stay readable.
 fn scaffold_template(name: &str) -> String {
@@ -2522,14 +2522,14 @@ fn scaffold_template(name: &str) -> String {
 # requires-python = ">=3.9"
 # dependencies = []
 # ///
-"""__NAME__ — a weaver overlooker program.
+"""__NAME__ — a weaver watch program.
 
 The engine runs this as a subprocess with WEAVER_API (the loom REST base URL)
-and WEAVER_OVERLOOKER (the round config JSON) set; `weaver_loom` is on
+and WEAVER_WATCH (the round config JSON) set; `weaver_loom` is on
 PYTHONPATH. `Round.finish` prints the result the engine reads from stdout.
 
-Register:   loom overlooker add __NAME__ --program __PATH__ --every 15m
-Try it:     loom overlooker run __NAME__ --dry-run
+Register:   loom watch add __NAME__ --program __PATH__ --every 15m
+Try it:     loom watch run __NAME__ --dry-run
 """
 
 from weaver_loom import Round
@@ -2549,28 +2549,28 @@ if __name__ == "__main__":
 "##;
     TEMPLATE
         .replace("__NAME__", name)
-        .replace("__PATH__", &overlooker_path(name).display().to_string())
+        .replace("__PATH__", &watch_path(name).display().to_string())
 }
 
-/// The conventional path for an overlooker's program file:
-/// `~/.weaver/overlookers/<name>.py`.
-fn overlooker_path(name: &str) -> std::path::PathBuf {
+/// The conventional path for a watch's program file:
+/// `~/.weaver/watches/<name>.py`.
+fn watch_path(name: &str) -> std::path::PathBuf {
     loom::db::weaver_home()
-        .join("overlookers")
+        .join("watches")
         .join(format!("{name}.py"))
 }
 
-/// `loom overlooker new` — scaffold a starter program file and print its path.
+/// `loom watch new` — scaffold a starter program file and print its path.
 /// A local file-convention command: it touches no server (T8 file convention),
 /// so it works before the Python binding exists.
-async fn cmd_overlooker_new(name: String) -> Result<()> {
+async fn cmd_watch_new(name: String) -> Result<()> {
     let name = name.trim();
     if name.is_empty() {
         bail!("name must not be empty");
     }
-    let dir = loom::db::weaver_home().join("overlookers");
+    let dir = loom::db::weaver_home().join("watches");
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let path = overlooker_path(name);
+    let path = watch_path(name);
     if path.exists() {
         bail!(
             "{} already exists — edit it, or pick another name",
@@ -2582,19 +2582,19 @@ async fn cmd_overlooker_new(name: String) -> Result<()> {
     println!("scaffolded {}", path.display());
     println!("  edit it, then register:");
     println!(
-        "    loom overlooker add {name} --program {} --cron \"0 * * * *\"",
+        "    loom watch add {name} --program {} --cron \"0 * * * *\"",
         path.display()
     );
     Ok(())
 }
 
-/// `loom overlooker programs` — list the builtin programs that ship with loom
+/// `loom watch programs` — list the builtin programs that ship with loom
 /// (the registry the panel offers), or print one program's script source with
 /// `--source` as a working example to start a custom program from.
-async fn cmd_overlooker_programs(source: Option<String>) -> Result<()> {
+async fn cmd_watch_programs(source: Option<String>) -> Result<()> {
     let client = client::default();
     let rows = client
-        .get("/api/overlookers/programs")
+        .get("/api/watches/programs")
         .await?
         .as_array()
         .cloned()
@@ -2602,7 +2602,7 @@ async fn cmd_overlooker_programs(source: Option<String>) -> Result<()> {
     if let Some(want) = source {
         let row = rows.iter().find(|p| str_field(p, "program") == want);
         let Some(row) = row else {
-            bail!("no builtin program '{want}' — `loom overlooker programs` lists them");
+            bail!("no builtin program '{want}' — `loom watch programs` lists them");
         };
         print!("{}", str_field(row, "source"));
         return Ok(());
@@ -2642,7 +2642,7 @@ fn build_trigger(opts: &AddOpts) -> Value {
 }
 
 /// Build the scope JSON: the explicit `--scope` JSON if given (parsed), with the
-/// `--repo` filter folded in so a repo-pinned overlooker only surveys its repo.
+/// `--repo` filter folded in so a repo-pinned watch only surveys its repo.
 fn build_scope(opts: &AddOpts) -> Result<Value> {
     let mut scope = match &opts.scope {
         Some(raw) => serde_json::from_str::<Value>(raw)
@@ -2657,8 +2657,8 @@ fn build_scope(opts: &AddOpts) -> Result<Value> {
     Ok(scope)
 }
 
-/// `loom overlooker add` — register an overlooker via POST /api/overlookers.
-async fn cmd_overlooker_add(opts: AddOpts) -> Result<()> {
+/// `loom watch add` — register a watch via POST /api/watches.
+async fn cmd_watch_add(opts: AddOpts) -> Result<()> {
     let client = client::default();
     let trigger = build_trigger(&opts);
     let scope = build_scope(&opts)?;
@@ -2689,9 +2689,9 @@ async fn cmd_overlooker_add(opts: AddOpts) -> Result<()> {
         body.insert("cooldown_secs".into(), json!(cooldown));
     }
 
-    let o = client.post("/api/overlookers", Value::Object(body)).await?;
+    let o = client.post("/api/watches", Value::Object(body)).await?;
     println!(
-        "registered overlooker {}  ({})",
+        "registered watch {}  ({})",
         str_field(&o, "name"),
         str_field(&o, "id")
     );
@@ -2699,48 +2699,48 @@ async fn cmd_overlooker_add(opts: AddOpts) -> Result<()> {
     println!("  program: {}", str_field(&o, "program"));
     println!("  caps:    {}", capabilities_summary(&o));
     println!(
-        "  enabled: no — arm it with `loom overlooker enable {}`",
+        "  enabled: no — arm it with `loom watch enable {}`",
         opts.name
     );
     Ok(())
 }
 
-/// `loom overlooker rm` — delete an overlooker.
-async fn cmd_overlooker_rm(name: String) -> Result<()> {
+/// `loom watch rm` — delete a watch.
+async fn cmd_watch_rm(name: String) -> Result<()> {
     let client = client::default();
-    client.delete(&format!("/api/overlookers/{name}")).await?;
-    println!("removed overlooker {name}");
+    client.delete(&format!("/api/watches/{name}")).await?;
+    println!("removed watch {name}");
     Ok(())
 }
 
-/// `loom overlooker enable|disable` — PATCH the `enabled` toggle.
-async fn cmd_overlooker_set_enabled(name: String, enabled: bool) -> Result<()> {
+/// `loom watch enable|disable` — PATCH the `enabled` toggle.
+async fn cmd_watch_set_enabled(name: String, enabled: bool) -> Result<()> {
     let client = client::default();
     let o = client
         .patch(
-            &format!("/api/overlookers/{name}"),
+            &format!("/api/watches/{name}"),
             json!({ "enabled": enabled }),
         )
         .await?;
     println!(
-        "{} overlooker {}",
+        "{} watch {}",
         if enabled { "enabled" } else { "disabled" },
         str_field(&o, "name")
     );
     Ok(())
 }
 
-/// `loom overlooker ls` — a table of every overlooker.
-async fn cmd_overlooker_ls() -> Result<()> {
+/// `loom watch ls` — a table of every watch.
+async fn cmd_watch_ls() -> Result<()> {
     let client = client::default();
     let rows = client
-        .get("/api/overlookers")
+        .get("/api/watches")
         .await?
         .as_array()
         .cloned()
         .unwrap_or_default();
     if rows.is_empty() {
-        println!("no overlookers — scaffold one with `loom overlooker new <name>`");
+        println!("no watches — scaffold one with `loom watch new <name>`");
         return Ok(());
     }
     println!(
@@ -2766,12 +2766,12 @@ async fn cmd_overlooker_ls() -> Result<()> {
     Ok(())
 }
 
-/// `loom overlooker run` — fire a round now and print outcome + summary.
-async fn cmd_overlooker_run(name: String, dry_run: bool) -> Result<()> {
+/// `loom watch run` — fire a round now and print outcome + summary.
+async fn cmd_watch_run(name: String, dry_run: bool) -> Result<()> {
     let client = client::default();
     let res = client
         .post(
-            &format!("/api/overlookers/{name}/run"),
+            &format!("/api/watches/{name}/run"),
             json!({ "dry_run": dry_run }),
         )
         .await?;
@@ -2785,18 +2785,18 @@ async fn cmd_overlooker_run(name: String, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-/// `loom overlooker runs` / `logs` — the round history. `verbose` (the `logs`
+/// `loom watch runs` / `logs` — the round history. `verbose` (the `logs`
 /// alias) also prints each round's actions.
-async fn cmd_overlooker_runs(name: String, limit: i64, verbose: bool) -> Result<()> {
+async fn cmd_watch_runs(name: String, limit: i64, verbose: bool) -> Result<()> {
     let client = client::default();
     let rows = client
-        .get(&format!("/api/overlookers/{name}/runs?limit={limit}"))
+        .get(&format!("/api/watches/{name}/runs?limit={limit}"))
         .await?
         .as_array()
         .cloned()
         .unwrap_or_default();
     if rows.is_empty() {
-        println!("no rounds yet for {name} — fire one with `loom overlooker run {name}`");
+        println!("no rounds yet for {name} — fire one with `loom watch run {name}`");
         return Ok(());
     }
     if !verbose {
@@ -2867,7 +2867,7 @@ fn action_summary(a: &Value) -> String {
     }
 }
 
-/// A compact human summary of an `OverlookerView`'s parsed `trigger` object.
+/// A compact human summary of an `WatchView`'s parsed `trigger` object.
 fn trigger_summary(o: &Value) -> String {
     let Some(t) = o.get("trigger") else {
         return "—".to_string();
@@ -2887,7 +2887,7 @@ fn trigger_summary(o: &Value) -> String {
     "—".to_string()
 }
 
-/// The granted capability set, comma-joined, for an `OverlookerView`.
+/// The granted capability set, comma-joined, for an `WatchView`.
 fn capabilities_summary(o: &Value) -> String {
     o.get("capabilities")
         .and_then(Value::as_array)
@@ -3155,25 +3155,25 @@ mod tests {
         // be the most likely raw-string bug).
         assert!(out.contains("\"\"\"test-watch — "));
         // It documents the program contract and uses the API layer.
-        assert!(out.contains("WEAVER_OVERLOOKER"));
+        assert!(out.contains("WEAVER_WATCH"));
         assert!(out.contains("from weaver_loom import Round"));
-        assert!(out.contains("loom overlooker add test-watch"));
+        assert!(out.contains("loom watch add test-watch"));
     }
 
-    /// `loom overlooker new` writes the file under `~/.weaver/overlookers/`,
+    /// `loom watch new` writes the file under `~/.weaver/watches/`,
     /// creating the dir, and refuses to clobber an existing one.
     #[tokio::test]
     #[serial_test::serial]
-    async fn overlooker_new_scaffolds_under_weaver_home() {
+    async fn watch_new_scaffolds_under_weaver_home() {
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("WEAVER_HOME", home.path());
-        cmd_overlooker_new("scaffolded".to_string()).await.unwrap();
-        let path = home.path().join("overlookers").join("scaffolded.py");
+        cmd_watch_new("scaffolded".to_string()).await.unwrap();
+        let path = home.path().join("watches").join("scaffolded.py");
         assert!(path.exists(), "the program file was written");
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("\"\"\"scaffolded — "));
         // A second `new` of the same name refuses rather than clobbering.
-        assert!(cmd_overlooker_new("scaffolded".to_string()).await.is_err());
+        assert!(cmd_watch_new("scaffolded".to_string()).await.is_err());
         std::env::remove_var("WEAVER_HOME");
     }
 

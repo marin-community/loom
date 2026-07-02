@@ -24,14 +24,14 @@ const label = computed(() =>
 const cls = computed(() =>
   props.chip.level === 'blocked' ? 'bg-block text-block-fg' : 'bg-attn text-attn-fg',
 );
-const fromOverlooker = computed(() => props.chip.raisedBy === 'overlooker');
+const fromWatch = computed(() => props.chip.raisedBy === 'watch');
 
 const tooltip = computed(() => {
-  if (fromOverlooker.value) {
+  if (fromWatch.value) {
     const who = props.chip.by && props.chip.by !== 'manual' ? ` (${props.chip.by})` : '';
     const base = props.chip.note
-      ? `Overlooker${who}: ${props.chip.note}`
-      : `Raised by overlooker${who}`;
+      ? `Watch${who}: ${props.chip.note}`
+      : `Raised by watch${who}`;
     return props.chip.stale ? `${base} — stale, session has moved on` : base;
   }
   return props.chip.note || label.value;
@@ -49,7 +49,7 @@ const tooltip = computed(() => {
     :title="tooltip"
     class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-2xs font-medium uppercase tracking-wide"
   >
-    <span v-if="fromOverlooker" aria-hidden="true">⊙</span>
+    <span v-if="fromWatch" aria-hidden="true">⊙</span>
     <span v-else class="h-1.5 w-1.5 rounded-full bg-current opacity-80"></span>
     {{ label }}
     <button

@@ -197,7 +197,7 @@ function closeStream() {
 function openStream() {
   closeStream();
   source = new EventSource(`/api/sessions/${props.id}/events`);
-  // `tag` covers every status axis (the agent's attention, an overlooker's
+  // `tag` covers every status axis (the agent's attention, a watch's
   // triage, any free-form key); a tag write re-fetches the session so the
   // resolved badge and the pill row refresh.
   for (const kind of ['status', 'tag', 'github']) {

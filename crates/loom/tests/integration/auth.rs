@@ -87,7 +87,7 @@ async fn loopback_trust_then_token_local_and_cookie_gate_access() {
     assert_eq!(r.status(), StatusCode::OK);
 
     // 4c. The machine-local token (what loom injects into its subprocesses) works
-    //     too — that is what keeps the agent and overlookers running with trust off.
+    //     too — that is what keeps the agent and watches running with trust off.
     let home = std::env::var("WEAVER_HOME").unwrap();
     let local = std::fs::read_to_string(Path::new(&home).join("loom-token")).unwrap();
     let r = http

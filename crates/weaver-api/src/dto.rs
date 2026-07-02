@@ -5,7 +5,7 @@
 //!
 //! The response (`*View`) types carry `from_parts` constructors that build a
 //! plain wire struct from the `weaver-core` domain types (`Branch`, `Issue`,
-//! `Overlooker`, …). The async server-side builders that touch the database
+//! `Watch`, …). The async server-side builders that touch the database
 //! (counting open issues, joining the latest run) stay in the loom server and
 //! call these once they've gathered the parts — so the wire struct has exactly
 //! one definition while the DB access stays where the daemon owns it.
@@ -16,8 +16,8 @@ use serde_json::Value;
 use weaver_core::branch::Branch;
 use weaver_core::github::GithubStatus;
 use weaver_core::issue::Issue;
-use weaver_core::overlooker::{Overlooker, OverlookerRun};
 use weaver_core::tags::Tag;
+use weaver_core::watch::{Watch, WatchRun};
 
 // ---------------------------------------------------------------------------
 // View payloads (responses)
@@ -25,7 +25,7 @@ use weaver_core::tags::Tag;
 
 /// One tag on a branch, as the API exposes it. A `(key, value)` annotation with
 /// a reason, author, and timestamp. The well-known keys are `attention` (the
-/// agent's self-report) and `triage` (an overlooker's assessment); any other key
+/// agent's self-report) and `triage` (a watch's assessment); any other key
 /// is a free-form, quiet pill. Absence is the calm state — there is no `ok` tag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TagView {
@@ -60,7 +60,7 @@ pub struct BranchView {
     /// The agent's current-state message, set via `weaver status`, shown even
     /// when the branch is calm. The attention *level* is the `attention` tag.
     pub description: String,
-    /// Every tag on the branch (the agent's `attention`, an overlooker's
+    /// Every tag on the branch (the agent's `attention`, a watch's
     /// `triage`, and any free-form key), ordered by key. Empty when the branch is
     /// calm and unmarked — absence is the default state, there is no `ok` tag.
     pub tags: Vec<TagView>,
@@ -128,7 +128,7 @@ pub struct SessionView {
     pub parent_id: Option<String>,
     /// The principal (username) that launched this session — attribution for the
     /// shared team board. `null` for engine-created sessions (the concierge, warm
-    /// overlooker sessions) and rows that predate the column. A tracking/UX field,
+    /// watch sessions) and rows that predate the column. A tracking/UX field,
     /// not a security boundary: the fleet stays co-owned by everyone authenticated.
     pub created_by: Option<String>,
     /// The tracking issue opened for this session's task at launch (the handle
@@ -318,12 +318,12 @@ pub struct NewCommentBody {
     pub body: String,
 }
 
-/// One overlooker, as the API exposes it. The JSON-bearing columns
+/// One watch, as the API exposes it. The JSON-bearing columns
 /// (`trigger`, `scope`, `params`) are returned as **parsed** structured JSON so
 /// a UI never re-parses strings; `capabilities` is a real array; the rest is the
 /// stored definition plus its schedule bookkeeping.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OverlookerView {
+pub struct WatchView {
     pub id: String,
     pub name: String,
     pub enabled: bool,
@@ -332,7 +332,7 @@ pub struct OverlookerView {
     /// The fleet query a round surveys, parsed: `{attention?, repo?}`.
     pub scope: Value,
     /// `builtin:<name>` for a stock program, or an absolute path under
-    /// `~/.weaver/overlookers/` for a custom one.
+    /// `~/.weaver/watches/` for a custom one.
     pub program: String,
     /// Stock-program parameters (e.g. the judgement `prompt`), parsed.
     pub params: Value,
@@ -343,10 +343,10 @@ pub struct OverlookerView {
     pub effort: String,
     pub cooldown_secs: i64,
     /// Warm mode (`params.warm`): the engine keeps one long-lived, fleet-hidden
-    /// session for this overlooker so it has across-round memory.
+    /// session for this watch so it has across-round memory.
     pub warm: bool,
     /// The id of that warm session once the engine has created it, else `null`.
-    /// Its live terminal is reachable from the overlooker's detail page (the
+    /// Its live terminal is reachable from the watch's detail page (the
     /// session is hidden from the fleet listing).
     pub warm_session_id: Option<String>,
     pub last_run_at: Option<String>,
@@ -366,11 +366,11 @@ pub struct OverlookerView {
     pub updated_at: String,
 }
 
-impl OverlookerView {
-    /// Build the wire view from an overlooker plus the most recent round's
+impl WatchView {
+    /// Build the wire view from a watch plus the most recent round's
     /// outcome (the server reads that from the run history). The JSON columns
     /// are parsed here via the domain accessors.
-    pub fn from_parts(o: &Overlooker, last_outcome: Option<String>) -> Self {
+    pub fn from_parts(o: &Watch, last_outcome: Option<String>) -> Self {
         Self {
             id: o.id.clone(),
             name: o.name.clone(),
@@ -396,12 +396,12 @@ impl OverlookerView {
     }
 }
 
-/// One round in an overlooker's history (the audit trail), with `actions`
+/// One round in a watch's history (the audit trail), with `actions`
 /// parsed back into JSON for a UI to render. The `stdout`/`stderr`/`exit_code`/
 /// `duration_ms` fields are the captured execution log — what the script printed
 /// and returned — surfaced so a run page shows exactly what happened.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OverlookerRunView {
+pub struct WatchRunView {
     pub id: i64,
     pub trigger_reason: String,
     /// The normalized event that woke the round (`cron` / `manual` / e.g.
@@ -423,8 +423,8 @@ pub struct OverlookerRunView {
     pub duration_ms: Option<i64>,
 }
 
-impl From<OverlookerRun> for OverlookerRunView {
-    fn from(r: OverlookerRun) -> Self {
+impl From<WatchRun> for WatchRunView {
+    fn from(r: WatchRun) -> Self {
         Self {
             id: r.id,
             trigger_reason: r.trigger_reason,
@@ -442,12 +442,12 @@ impl From<OverlookerRun> for OverlookerRunView {
     }
 }
 
-/// One **program** an overlooker can run, as `GET /api/overlookers/programs`
+/// One **program** a watch can run, as `GET /api/watches/programs`
 /// exposes it. Builtin programs are Python scripts that ship inside the loom
 /// binary; the embedded source is returned for a read-only view in the panel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgramView {
-    /// The reference an overlooker's `program` field names it by, e.g.
+    /// The reference a watch's `program` field names it by, e.g.
     /// `builtin:status` or `builtin:archive-merged`.
     pub program: String,
     pub title: String,
@@ -455,7 +455,7 @@ pub struct ProgramView {
     /// The program's embedded Python source. Read-only — it ships with the
     /// binary.
     pub source: String,
-    /// Suggested starting config for a new overlooker running this program:
+    /// Suggested starting config for a new watch running this program:
     /// `{trigger, scope, params, capabilities}` — what a create form prefills.
     pub defaults: Value,
 }
@@ -552,7 +552,7 @@ pub struct TagReq {
     /// One-line reason accompanying the tag.
     #[serde(default)]
     pub note: String,
-    /// Who is setting it (an overlooker name or `manual`); the server defaults a
+    /// Who is setting it (a watch name or `manual`); the server defaults a
     /// missing author.
     #[serde(default)]
     pub by: Option<String>,
@@ -567,7 +567,7 @@ pub struct SendReq {
     /// agent round). Defaults to true; pass false to stage input unsubmitted.
     #[serde(default = "default_submit")]
     pub submit: bool,
-    /// Who is sending (an overlooker name or `manual`) — recorded on the
+    /// Who is sending (a watch name or `manual`) — recorded on the
     /// `nudge` audit event; the server defaults a missing author.
     #[serde(default)]
     pub by: Option<String>,
@@ -591,7 +591,7 @@ impl SendReq {
 /// Body for `POST /api/agent/oneshot`: run a fresh, env-stripped one-shot
 /// headless agent (`claude -p`) with `prompt` on stdin and return its stdout
 /// as `{output}` (`null` when the agent is absent or fails — callers degrade
-/// gracefully). The judgement primitive overlooker programs reach through the
+/// gracefully). The judgement primitive watch programs reach through the
 /// daemon, which owns the agent command and timeout configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentOneshotReq {
@@ -718,11 +718,11 @@ pub struct SettingsEnvelope {
     pub settings: Vec<SettingView>,
 }
 
-/// Body for `POST /api/overlookers`. JSON-bearing fields take structured JSON
+/// Body for `POST /api/watches`. JSON-bearing fields take structured JSON
 /// (`trigger`/`scope`/`params`), which the server serializes into the stored
 /// text columns. Optional fields fall back to the model's defaults.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CreateOverlookerReq {
+pub struct CreateWatchReq {
     pub name: String,
     #[serde(default)]
     pub trigger: Option<Value>,
@@ -740,7 +740,7 @@ pub struct CreateOverlookerReq {
     pub effort: Option<String>,
     #[serde(default)]
     pub cooldown_secs: Option<i64>,
-    /// Whether the overlooker fires as soon as it is created. Omitted by API
+    /// Whether the watch fires as soon as it is created. Omitted by API
     /// clients that want the model default (disabled); the loom UI sends `true`
     /// so a watcher picked from the builtin registry is live without a separate
     /// manual enable.
@@ -748,9 +748,9 @@ pub struct CreateOverlookerReq {
     pub enabled: Option<bool>,
 }
 
-/// Body for `PATCH /api/overlookers/{id}`: every mutable field optional.
+/// Body for `PATCH /api/watches/{id}`: every mutable field optional.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PatchOverlookerReq {
+pub struct PatchWatchReq {
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
@@ -771,9 +771,9 @@ pub struct PatchOverlookerReq {
     pub cooldown_secs: Option<i64>,
 }
 
-/// Body for `POST /api/overlookers/{id}/run`.
+/// Body for `POST /api/watches/{id}/run`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RunOverlookerReq {
+pub struct RunWatchReq {
     #[serde(default)]
     pub dry_run: bool,
 }

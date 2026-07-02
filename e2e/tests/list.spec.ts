@@ -64,25 +64,25 @@ test.describe('session list view', () => {
     await expect(page.getByTestId('filter-attention')).toContainText('0');
   });
 
-  test('an overlooker triage mark is its own chip, attributed and clearable', async ({
+  test('a watch triage mark is its own chip, attributed and clearable', async ({
     page,
     weaver,
   }) => {
     const s = await weaver.seedSession({ goal: 'Looks stuck', name: 'watched' });
-    // The agent itself is calm; an overlooker stamps a triage mark. It renders as
-    // its own chip, attributed to the overlooker (⊙).
+    // The agent itself is calm; a watch stamps a triage mark. It renders as
+    // its own chip, attributed to the watch (⊙).
     await weaver.mark(s, 'blocked', { note: 'no progress in an hour', by: 'status-check' });
 
     await page.goto(weaver.baseUrl);
     const card = page.locator(`[data-session-id="${s.id}"]`);
     const chip = card.locator('[data-testid="signal-chip"][data-signal-key="triage"]');
     await expect(chip).toHaveAttribute('data-level', 'blocked');
-    await expect(chip).toHaveAttribute('data-raised-by', 'overlooker');
+    await expect(chip).toHaveAttribute('data-raised-by', 'watch');
     // It counts toward "needs attention" even though the agent is calm.
     await expect(page.getByTestId('filter-attention')).toContainText('1');
 
     // The human can resolve it by clearing the chip — no privileged "Mark OK"
-    // path; the × DELETEs the `triage` tag the overlooker set.
+    // path; the × DELETEs the `triage` tag the watch set.
     await chip.getByTestId('signal-chip-clear').click();
     await expect(chip).toHaveCount(0);
     const updated = await weaver.getSession(s.id);

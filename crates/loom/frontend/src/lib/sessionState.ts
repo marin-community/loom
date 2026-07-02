@@ -42,7 +42,7 @@ function levelValue(value: string): Exclude<Attention, 'ok'> {
   return value === 'blocked' ? 'blocked' : 'attention';
 }
 
-// An agent's own self-report vs an outside mark (a watch/overlooker, or a
+// An agent's own self-report vs an outside mark (a watch/watch, or a
 // manual mark). The agent authors the well-known `attention` key; anything else
 // loud is an outside assessment, rendered with the ⊙ "watched" treatment.
 function isAgentTag(tag: Tag): boolean {
@@ -76,10 +76,10 @@ function loudTags(s: Session): Tag[] {
 // badge and an outside mark with the ⊙ "watched" treatment.
 export interface EffectiveAttention {
   level: Attention;
-  /** Which axis is loudest: 'agent' (its own loud tag) or 'overlooker' (an
+  /** Which axis is loudest: 'agent' (its own loud tag) or 'watch' (an
    *  outside mark). 'none' when calm. */
-  raisedBy: 'none' | 'agent' | 'overlooker';
-  /** The `set_by` of the loudest tag (the overlooker name, or 'agent'). */
+  raisedBy: 'none' | 'agent' | 'watch';
+  /** The `set_by` of the loudest tag (the watch name, or 'agent'). */
   by: string;
   /** The key of the loudest tag — its type, e.g. 'attention', 'review'. */
   key: string;
@@ -107,8 +107,8 @@ function markOf(s: Session, tag: Tag): Omit<SignalChip, 'stale'> {
   return {
     key: tag.key,
     level: levelValue(tag.value),
-    by: tag.set_by || (agent ? 'agent' : 'overlooker'),
-    raisedBy: agent ? 'agent' : 'overlooker',
+    by: tag.set_by || (agent ? 'agent' : 'watch'),
+    raisedBy: agent ? 'agent' : 'watch',
     note: tag.note || (tag.key === 'attention' ? messageOf(s) : ''),
   };
 }
@@ -171,10 +171,10 @@ export interface SignalChip {
   /** The tag key to DELETE when the chip is cleared, and the chip's type label. */
   key: string;
   level: Exclude<Attention, 'ok'>;
-  /** Who set it: 'agent', or the overlooker's / mark's name. */
+  /** Who set it: 'agent', or the watch's / mark's name. */
   by: string;
-  /** Which axis: 'agent' (its own loud tag) or 'overlooker' (an outside mark). */
-  raisedBy: 'agent' | 'overlooker';
+  /** Which axis: 'agent' (its own loud tag) or 'watch' (an outside mark). */
+  raisedBy: 'agent' | 'watch';
   /** One-line reason from the tag. */
   note: string;
   /** An outside mark the session has moved on past — shown faded, still clearable. */

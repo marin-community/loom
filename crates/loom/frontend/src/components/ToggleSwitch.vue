@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // The one boolean control (docs/loom-ui.md): a compact switch used for
-// overlooker enablement and bool settings. The knob carries a hairline ring
+// watch enablement and bool settings. The knob carries a hairline ring
 // (no shadow — borders, not shadows) so it reads against both track states in
 // both palettes. State is exposed via the switch role's aria-checked.
 defineProps<{

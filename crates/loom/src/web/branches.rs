@@ -325,7 +325,7 @@ mod tests {
             Json(TagReq {
                 value: "blocked".to_string(),
                 note: "flaky test".to_string(),
-                by: Some("overlooker-x".to_string()),
+                by: Some("watch-x".to_string()),
             }),
         )
         .await
@@ -333,7 +333,7 @@ mod tests {
         .0;
         let tag = view.tags.iter().find(|t| t.key == "triage").unwrap();
         assert_eq!(tag.value, "blocked");
-        assert_eq!(tag.set_by, "overlooker-x");
+        assert_eq!(tag.set_by, "watch-x");
 
         let view = clear_branch_tag(
             State(st),

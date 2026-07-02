@@ -21,7 +21,7 @@ defineOptions({ name: 'Issues' });
 const router = useRouter();
 
 // The Issues pane — the cross-repo weaver issue board, sibling to the session
-// list and the overlooker panel. API-first: every row is an `IssueView` from
+// list and the watch panel. API-first: every row is an `IssueView` from
 // `GET /api/issues`, every control a REST call. Issues are repo-scoped data, so
 // the whole fleet's issues land here and a repo chip / filter disambiguates when
 // more than one repo is in play.

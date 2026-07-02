@@ -77,6 +77,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "goal_artifact",
         include_str!("../migrations/0012_goal_artifact.sql"),
     ),
+    (
+        13,
+        "watches",
+        include_str!("../migrations/0013_watches.sql"),
+    ),
 ];
 
 /// Apply every pending migration, bringing the database up to the latest schema.

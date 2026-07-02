@@ -1,11 +1,11 @@
 [project]
 name = "weaver-loom"
 version = "0.2.0"
-description = "Python layer over the loom REST API: fleet reads, capability-gated actions, and the overlooker round context."
+description = "Python layer over the loom REST API: fleet reads, capability-gated actions, and the watch round context."
 readme = "README.md"
 requires-python = ">=3.9"
 # Stdlib-only on purpose: the loom engine vendors this module onto PYTHONPATH
-# for every overlooker script it runs, so a script needs no install step.
+# for every watch script it runs, so a script needs no install step.
 dependencies = []
 
 [build-system]

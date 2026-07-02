@@ -1,17 +1,17 @@
 //! The capability gate — the security-relevant core of the intervention ladder.
 //!
-//! An out-of-process consumer (the Python binding, a scripted overlooker) is
+//! An out-of-process consumer (the Python binding, a scripted watch) is
 //! constructed with a *granted* capability set and must pass each mutating
 //! action through [`require`] before it touches the fleet. Keeping the gate here
 //! — a pure function over `&[String]`, not buried in pyo3 glue — means the same
 //! check the binding enforces is unit-tested by the workspace `test` job. The
-//! capability vocabulary itself lives in `weaver_core::overlooker::CAPABILITIES`
+//! capability vocabulary itself lives in `weaver_core::watch::CAPABILITIES`
 //! (observe / mark / escalate / nudge / interrupt / launch); this module decides
 //! whether a given grant set admits a given action.
 
 use std::fmt;
 
-pub use weaver_core::overlooker::CAPABILITIES;
+pub use weaver_core::watch::CAPABILITIES;
 
 /// A denied action: the capability a call needed and the set it was checked
 /// against. The binding maps this to a Python exception; Rust callers match on
@@ -56,7 +56,7 @@ pub fn is_known(cap: &str) -> bool {
 /// Gate a mutating action: succeed iff `needed` is held by `granted`.
 ///
 /// `observe` is implicit — always granted, the read floor — mirroring
-/// `Overlooker::has_capability`. An unknown `needed` is a hard error, never an
+/// `Watch::has_capability`. An unknown `needed` is a hard error, never an
 /// implicit denial, so a typo'd gate can't read as "allowed". A `granted` set
 /// containing an unknown capability is tolerated (it simply grants nothing); the
 /// gate only validates the capability being *required*.

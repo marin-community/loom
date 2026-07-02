@@ -12,10 +12,10 @@ use serde_json::Value;
 
 use crate::dto::{
     AnchorDto, ArtifactMeta, ArtifactUpsertReq, ArtifactView, BranchStatusReq, BranchView,
-    CommentDto, CreateEventReq, CreateIssueReq, CreateOverlookerReq, CreateRepoIssueReq, CreateReq,
-    CreateTokenReq, CreatedTokenView, IssueView, NewCommentBody, NewThreadBody, OverlookerView,
-    PatchIssueReq, PatchOverlookerReq, PatchSessionReq, RunOverlookerReq, SendReq, SessionView,
-    SettingsEnvelope, TagReq, ThreadDto, TokenView,
+    CommentDto, CreateEventReq, CreateIssueReq, CreateRepoIssueReq, CreateReq, CreateTokenReq,
+    CreateWatchReq, CreatedTokenView, IssueView, NewCommentBody, NewThreadBody, PatchIssueReq,
+    PatchSessionReq, PatchWatchReq, RunWatchReq, SendReq, SessionView, SettingsEnvelope, TagReq,
+    ThreadDto, TokenView, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -203,7 +203,7 @@ impl Client {
 
     /// Clear a tag on a session (`DELETE /api/sessions/{key}/tags/{tag_key}`) —
     /// how a loud axis returns to calm (`ok`). `by` attributes the clear on
-    /// the audit event (an overlooker name); the server defaults `manual`.
+    /// the audit event (a watch name); the server defaults `manual`.
     pub async fn clear_tag(
         &self,
         key: &str,
@@ -229,7 +229,7 @@ impl Client {
             .map_err(|e| anyhow!("decoding response from /api/sessions/{key}/tags/{tag_key}: {e}"))
     }
 
-    /// Stamp an overlooker's mark on a session — the `triage` tag. A convenience
+    /// Stamp a watch's mark on a session — the `triage` tag. A convenience
     /// over [`Client::set_tag`] / [`Client::clear_tag`] that keeps the `mark`
     /// capability name: a `level` of `attention`/`blocked` sets the tag, an empty
     /// `level` (or `ok`) clears it.
@@ -643,50 +643,46 @@ impl Client {
         self.patch("/api/settings", Value::Object(changes)).await
     }
 
-    // -- Overlookers ------------------------------------------------------
+    // -- Watches ------------------------------------------------------
 
-    /// List every overlooker (`GET /api/overlookers`).
-    pub async fn list_overlookers(&self) -> Result<Vec<OverlookerView>> {
-        self.get_typed("/api/overlookers").await
+    /// List every watch (`GET /api/watches`).
+    pub async fn list_watches(&self) -> Result<Vec<WatchView>> {
+        self.get_typed("/api/watches").await
     }
 
-    /// Get one overlooker by id or name (`GET /api/overlookers/{key}`).
-    pub async fn get_overlooker(&self, key: &str) -> Result<OverlookerView> {
-        self.get_typed(&format!("/api/overlookers/{}", Self::seg(key)))
+    /// Get one watch by id or name (`GET /api/watches/{key}`).
+    pub async fn get_watch(&self, key: &str) -> Result<WatchView> {
+        self.get_typed(&format!("/api/watches/{}", Self::seg(key)))
             .await
     }
 
-    /// Register an overlooker (`POST /api/overlookers`).
-    pub async fn create_overlooker(&self, req: &CreateOverlookerReq) -> Result<OverlookerView> {
-        self.send_typed(Method::POST, "/api/overlookers", Some(req))
+    /// Register a watch (`POST /api/watches`).
+    pub async fn create_watch(&self, req: &CreateWatchReq) -> Result<WatchView> {
+        self.send_typed(Method::POST, "/api/watches", Some(req))
             .await
     }
 
-    /// Patch an overlooker (`PATCH /api/overlookers/{key}`).
-    pub async fn patch_overlooker(
-        &self,
-        key: &str,
-        req: &PatchOverlookerReq,
-    ) -> Result<OverlookerView> {
+    /// Patch a watch (`PATCH /api/watches/{key}`).
+    pub async fn patch_watch(&self, key: &str, req: &PatchWatchReq) -> Result<WatchView> {
         self.send_typed(
             Method::PATCH,
-            &format!("/api/overlookers/{}", Self::seg(key)),
+            &format!("/api/watches/{}", Self::seg(key)),
             Some(req),
         )
         .await
     }
 
-    /// Delete an overlooker (`DELETE /api/overlookers/{key}`).
-    pub async fn delete_overlooker(&self, key: &str) -> Result<Value> {
-        self.delete(&format!("/api/overlookers/{}", Self::seg(key)))
+    /// Delete a watch (`DELETE /api/watches/{key}`).
+    pub async fn delete_watch(&self, key: &str) -> Result<Value> {
+        self.delete(&format!("/api/watches/{}", Self::seg(key)))
             .await
     }
 
     /// Fire a round now and return the raw `{run_id, outcome, summary}`
-    /// (`POST /api/overlookers/{key}/run`).
-    pub async fn run_overlooker(&self, key: &str, req: &RunOverlookerReq) -> Result<Value> {
+    /// (`POST /api/watches/{key}/run`).
+    pub async fn run_watch(&self, key: &str, req: &RunWatchReq) -> Result<Value> {
         let body = serde_json::to_value(req)?;
-        self.post(&format!("/api/overlookers/{}/run", Self::seg(key)), body)
+        self.post(&format!("/api/watches/{}/run", Self::seg(key)), body)
             .await
     }
 

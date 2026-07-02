@@ -850,7 +850,7 @@ fn apply_launch_gates(root: &mut Value, seed: &GateSeed) -> bool {
 /// Markers of a *calling* Claude Code session, stripped before spawning a
 /// subprocess so it runs fresh and isolated (the lint-review precedent).
 /// Mirrors `scripts/lint-review.py`'s `STRIPPED_ENV`. Shared by the one-shot
-/// agent here and the overlooker script executor.
+/// agent here and the watch script executor.
 pub const STRIPPED_ENV: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "CLAUDECODE",
@@ -865,7 +865,7 @@ pub const STRIPPED_ENV: &[&str] = &[
 /// `None` when the agent is absent, errors, or exceeds `timeout` — callers
 /// must degrade gracefully, so a missing `claude` never breaks them.
 ///
-/// The command is `WEAVER_OVERLOOKER_AGENT_CMD` (default `claude -p`); a
+/// The command is `WEAVER_WATCH_AGENT_CMD` (default `claude -p`); a
 /// non-empty `model`/`effort` is appended as `--model`/`--effort`.
 pub async fn run_oneshot(
     prompt: &str,
@@ -874,7 +874,7 @@ pub async fn run_oneshot(
     timeout: std::time::Duration,
 ) -> Option<String> {
     let cmd_str =
-        std::env::var("WEAVER_OVERLOOKER_AGENT_CMD").unwrap_or_else(|_| "claude -p".to_string());
+        std::env::var("WEAVER_WATCH_AGENT_CMD").unwrap_or_else(|_| "claude -p".to_string());
     let mut parts = cmd_str.split_whitespace();
     let program = parts.next()?;
     let mut args: Vec<String> = parts.map(str::to_string).collect();

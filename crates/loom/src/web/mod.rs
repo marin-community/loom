@@ -58,7 +58,7 @@
 //! ```
 //!
 //! A branch's status axes — the agent's self-reported `attention` and an
-//! overlooker's `triage` — are **tags**: well-known keys under `tags`, set
+//! watch's `triage` — are **tags**: well-known keys under `tags`, set
 //! through `PUT /api/sessions/{id}/tags/{key}` and cleared through `DELETE`.
 //! Absence is the calm state; there is no stored `ok` tag.
 
@@ -70,12 +70,12 @@ mod discussion;
 mod env;
 mod issues;
 mod logview;
-mod overlookers;
 mod repo_env;
 mod repos;
 mod scratch;
 mod sessions;
 mod settings;
+mod watches;
 
 use agents::*;
 use artifacts::*;
@@ -85,14 +85,14 @@ use discussion::*;
 use env::*;
 use issues::*;
 use logview::*;
-use overlookers::*;
 use repo_env::*;
 use repos::*;
 use scratch::*;
 use sessions::*;
 use settings::*;
+use watches::*;
 
-// Re-exported so the rest of the crate (server.rs, github.rs, overlooker.rs)
+// Re-exported so the rest of the crate (server.rs, github.rs, watch.rs)
 // can keep calling these as `crate::web::{archive, adopt, create_warm_session}`
 // — they're session lifecycle operations, but not routed through this file's
 // `router()`, so the glob imports above don't cover them.
@@ -231,7 +231,7 @@ pub(crate) type ApiResult<T> = Result<T, AppError>;
 /// Build a [`BranchView`] for a branch, joining its tags, the denormalized
 /// open-issue count, and the latest GitHub snapshot from the database.
 pub(crate) async fn branch_view(db: &Db, branch: &Branch) -> ApiResult<BranchView> {
-    // Every tag (the agent's `attention`, an overlooker's `triage`, any free-form
+    // Every tag (the agent's `attention`, a watch's `triage`, any free-form
     // key) the dashboard resolves into a badge or a pill.
     let tags = tags::list(db, &branch.id).await?;
     // The badge counts the work this branch has claimed, not the whole repo.
@@ -616,23 +616,18 @@ pub fn router(state: AppState) -> Router {
         .route("/logs", get(logs_snapshot))
         .route("/logs/stream", get(logs_stream))
         .route("/status", get(server_status))
-        // Overlookers — periodic / triggered watch programs over the fleet.
-        .route(
-            "/overlookers",
-            get(list_overlookers).post(create_overlooker),
-        )
+        // Watches — periodic / triggered watch programs over the fleet.
+        .route("/watches", get(list_watches).post(create_watch))
         // The static segment wins over the `{id}` capture below, so a program
         // named "programs" can't shadow this listing.
-        .route("/overlookers/programs", get(list_programs))
+        .route("/watches/programs", get(list_programs))
         .route(
-            "/overlookers/{id}",
-            get(get_overlooker)
-                .patch(patch_overlooker)
-                .delete(delete_overlooker),
+            "/watches/{id}",
+            get(get_watch).patch(patch_watch).delete(delete_watch),
         )
-        .route("/overlookers/{id}/run", post(run_overlooker))
-        .route("/overlookers/{id}/runs", get(overlooker_runs))
-        // The one-shot headless agent — the judgement primitive overlooker
+        .route("/watches/{id}/run", post(run_watch))
+        .route("/watches/{id}/runs", get(watch_runs))
+        // The one-shot headless agent — the judgement primitive watch
         // programs (and any script) call through the daemon.
         .route("/agent/oneshot", post(agent_oneshot))
         // Authentication management: API tokens, the caller's password, the

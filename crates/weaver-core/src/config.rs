@@ -38,7 +38,7 @@ pub const DEFAULT_GITHUB_TRIGGER_PHRASE: &str = "@loom";
 pub const DEFAULT_TERMINAL_THEME: &str = "dark";
 /// Whether requests from the loopback interface are trusted as the machine owner
 /// without a token or login. On by default: it keeps the local CLI, the agent,
-/// and overlooker scripts working with no configuration. Turn it off behind a
+/// and watch scripts working with no configuration. Turn it off behind a
 /// same-host reverse proxy, where forwarded requests appear to come from
 /// loopback (the proxy and local automation then authenticate with tokens).
 pub const DEFAULT_TRUST_LOOPBACK: bool = true;
@@ -49,7 +49,7 @@ pub const DEFAULT_COOKIE_SECURE: bool = false;
 /// Wall-clock budget for a repo's `.weaver/config.toml` `[setup]` script, run
 /// when a session launches against an allowlisted repo. A run that overruns is
 /// killed and the session is left in a visible error state. 600s mirrors the
-/// overlooker/lint-review precedent.
+/// watch/lint-review precedent.
 pub const DEFAULT_SETUP_TIMEOUT_SECS: i64 = 600;
 
 // ---------------------------------------------------------------------------
@@ -215,7 +215,7 @@ pub const REGISTRY: &[SettingSpec] = &[
         label: "Trust loopback requests",
         description: "When enabled, requests from 127.0.0.1/::1 are trusted as \
             the machine owner with no token or login — keeping the local CLI, \
-            the agent, and overlooker scripts working with zero configuration. \
+            the agent, and watch scripts working with zero configuration. \
             Turn this OFF behind a same-host reverse proxy, where forwarded \
             requests appear to come from loopback; local automation then uses \
             the machine token loom injects.",
@@ -262,64 +262,64 @@ pub const REGISTRY: &[SettingSpec] = &[
         options: &["dark", "light"],
     },
     SettingSpec {
-        key: "overlooker.enabled",
-        label: "Enable overlookers",
-        description: "Master switch for the Overlooker engine — the periodic / \
+        key: "watch.enabled",
+        label: "Enable watches",
+        description: "Master switch for the Watch engine — the periodic / \
             triggered watch programs that survey the fleet and stamp triage \
-            marks. On by default: turn it off to stop every overlooker cold, \
-            regardless of the individual per-overlooker toggles.",
+            marks. On by default: turn it off to stop every watch cold, \
+            regardless of the individual per-watch toggles.",
         kind: SettingKind::Bool,
         default: "true",
-        group: "Overlooker",
+        group: "Watch",
         options: &[],
     },
     SettingSpec {
-        key: "overlooker.default_timeout_secs",
+        key: "watch.default_timeout_secs",
         label: "Round timeout (seconds)",
-        description: "Wall-clock budget for one overlooker round. A round that \
+        description: "Wall-clock budget for one watch round. A round that \
             overruns is killed and recorded as an error; the next trigger still \
             fires. Mirrors the lint-review 600s precedent.",
         kind: SettingKind::Int,
         default: "600",
-        group: "Overlooker",
+        group: "Watch",
         options: &[],
     },
     SettingSpec {
-        key: "overlooker.default_cooldown_secs",
+        key: "watch.default_cooldown_secs",
         label: "Default cooldown (seconds)",
-        description: "Minimum gap between two rounds of the same overlooker when \
+        description: "Minimum gap between two rounds of the same watch when \
             it does not set its own cooldown. A re-fire inside the gap is \
             skipped, so a chatty event stream can't hammer a watcher.",
         kind: SettingKind::Int,
         default: "0",
-        group: "Overlooker",
+        group: "Watch",
         options: &[],
     },
     SettingSpec {
-        key: "overlooker.adopt_warm",
+        key: "watch.adopt_warm",
         label: "Adopt warm sessions on startup",
         description: "When enabled, the server re-adopts each engine-managed \
-            (warm) overlooker session whose terminal is gone on startup — recreating \
+            (warm) watch session whose terminal is gone on startup — recreating \
             it so a watcher resumes its across-round memory after a daemon \
             restart. Independent of the fleet-wide `server.auto_adopt`: warm \
             infrastructure is recovered even when ordinary sessions are left \
-            orphaned. A warm session whose owning overlooker has been deleted is \
+            orphaned. A warm session whose owning watch has been deleted is \
             archived instead of adopted.",
         kind: SettingKind::Bool,
         default: "true",
-        group: "Overlooker",
+        group: "Watch",
         options: &[],
     },
     SettingSpec {
-        key: "overlooker.stale_after_secs",
+        key: "watch.stale_after_secs",
         label: "Stale-after (seconds)",
         description: "How long a non-terminal session may go without any activity \
             before the monitor emits a one-shot `stale` event into the stream — a \
-            reactive trigger an overlooker can match. Edge-detected, so a session \
+            reactive trigger a watch can match. Edge-detected, so a session \
             that stays quiet is announced once, not every tick.",
         kind: SettingKind::Int,
         default: "1800",
-        group: "Overlooker",
+        group: "Watch",
         options: &[],
     },
     SettingSpec {
@@ -387,18 +387,18 @@ pub const REGISTRY: &[SettingSpec] = &[
     },
 ];
 
-/// Whether the Overlooker engine master switch is on. On by default.
-pub const DEFAULT_OVERLOOKER_ENABLED: bool = true;
+/// Whether the Watch engine master switch is on. On by default.
+pub const DEFAULT_WATCH_ENABLED: bool = true;
 
-/// Whether the server re-adopts engine-managed (warm) overlooker sessions on
+/// Whether the server re-adopts engine-managed (warm) watch sessions on
 /// startup. On by default and independent of [`DEFAULT_AUTO_ADOPT`]: a warm
 /// session is infrastructure a watcher depends on, so it is recovered across a
 /// restart even when ordinary fleet sessions are left orphaned.
-pub const DEFAULT_OVERLOOKER_ADOPT_WARM: bool = true;
+pub const DEFAULT_WATCH_ADOPT_WARM: bool = true;
 
 /// How many seconds a non-terminal session may be idle before the monitor emits
 /// a one-shot `stale` event. 30 minutes by default.
-pub const DEFAULT_OVERLOOKER_STALE_AFTER_SECS: i64 = 1800;
+pub const DEFAULT_WATCH_STALE_AFTER_SECS: i64 = 1800;
 
 /// Look up the [`SettingSpec`] for a key, if it is a registered setting.
 pub fn spec(key: &str) -> Option<&'static SettingSpec> {

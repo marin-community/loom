@@ -25,9 +25,9 @@ questions you actually have are in plain language:
 - *"What did the auth-refactor session actually change?"*
 - *"Spin up a session to fix the flaky e2e test, and tell me when it's done."*
 
-[The overlooker](overlooker.md) answers the *push* half of this: it wakes on a
+[The watch](watch.md) answers the *push* half of this: it wakes on a
 timer, surveys the fleet, and stamps a `triage` mark on what looks stuck. But an
-overlooker can't be *asked*. It runs a fixed program on a schedule; it can't
+watch can't be *asked*. It runs a fixed program on a schedule; it can't
 hold a conversation, follow a hunch, or do the one-off investigation you only
 thought of just now. The missing primitive is the **pull** half: an agent that
 **holds the whole fleet in its head**, that you **converse with on demand**, and
@@ -39,9 +39,9 @@ The goal: a **Chat** surface — a top-level view, sibling to the session list �
 backed by a fleet-aware agent that is *auto-hooked into loom* the moment it
 starts, so you can ask about the floor and have it answer, link, and act.
 
-## The insight: the overlooker's conversational twin
+## The insight: the watch's conversational twin
 
-The overlooker design already did the hard architectural thinking, and it lands
+The watch design already did the hard architectural thinking, and it lands
 on the exact seam this feature needs:
 
 > Everything loom can do is a REST route; an out-of-process agent reaches the
@@ -51,12 +51,12 @@ on the exact seam this feature needs:
 
 That is *already built*: `python/weaver-loom` is a capability-gated `Client` over
 the REST API; `POST /api/agent/oneshot` is the env-stripped headless-agent
-primitive; the overlooker engine is the autonomous consumer of it.
+primitive; the watch engine is the autonomous consumer of it.
 
 So the concierge is **not a new subsystem — it is a second front-end on the same
 substrate.** Two ways to drive one fleet API:
 
-| | **Watch** (overlooker) | **Chat** (concierge) |
+| | **Watch** (watch) | **Chat** (concierge) |
 |---|---|---|
 | Trigger | a cron tick or a fleet event | a message you type |
 | Cadence | autonomous, scheduled | on-demand, interactive |
@@ -67,22 +67,22 @@ substrate.** Two ways to drive one fleet API:
 
 They are siblings in the nav rail (the rail already pairs them: **Watch** is an
 eye over the looms; **Chat** is the conversation about them) and they *converge*:
-the most natural way to *create* an overlooker — "ping me whenever a session goes
-red" — is to **ask the concierge to draft one for you** (the overlooker plan
-already calls for agent-authored overlookers via the CLI). Chat is how you reach
+the most natural way to *create* a watch — "ping me whenever a session goes
+red" — is to **ask the concierge to draft one for you** (the watch plan
+already calls for agent-authored watches via the CLI). Chat is how you reach
 into the fleet right now; Watch is how you ask it to keep an eye out for you.
 The concierge is the front door to both.
 
 ## The name
 
 The mill metaphor runs through weaver — `loom`, `weaver`, `tapestry`, and the
-**overlooker** who walks the rows and tends the looms. The conversational
+**watch** who walks the rows and tends the looms. The conversational
 companion plays a different role: the one who *knows where everything is*, points
 you to what needs you, and runs an errand on your behalf. That is a
 **concierge**. It is the working noun in the code and the API (`agent_kind =
 "concierge"`); the UI surface is plainly labelled **Chat** (what the user does
 there). (Decided over the themed `gaffer` — the Lancashire mill foreman — for
-legibility; `overlooker` already carries the dialect.)
+legibility; `watch` already carries the dialect.)
 
 - A **concierge** is the fleet-aware chat agent.
 - A **chat** is one conversation with it.
@@ -121,9 +121,9 @@ legibility; `overlooker` already carries the dialect.)
    `observe`/`link` are always on; `nudge`, `interrupt`, and `launch` are
    capability-gated and — because a human is *right there in the chat* — confirmed
    conversationally before they fire. Every action is an `events` row, exactly
-   like an overlooker's.
+   like a watch's.
 6. **It never authors another actor's facts.** The agent owns its `attention`
-   tag; the overlooker owns `triage`. The concierge **talks** — its findings live
+   tag; the watch owns `triage`. The concierge **talks** — its findings live
    in the conversation, not as a third writer fighting over the same tag.
 
 The rest argues each point.
@@ -137,7 +137,7 @@ flowchart TD
 
     subgraph daemon["loom daemon — sole runtime owner"]
       rest["REST + SSE API (web.rs)"]
-      engine["Overlooker engine<br/>(autonomous consumer)"]
+      engine["Watch engine<br/>(autonomous consumer)"]
       oneshot["agent/oneshot + session launch"]
     end
 
@@ -155,7 +155,7 @@ flowchart TD
 ```
 
 The concierge is just another out-of-process consumer of the REST API — like the
-overlooker binding and the `loom` CLI — wrapped this time as MCP tools and driven
+watch binding and the `loom` CLI — wrapped this time as MCP tools and driven
 by a conversation instead of a cron tick.
 
 ## The fleet tool surface: the CLI now, a typed MCP later
@@ -169,7 +169,7 @@ surface**, and an MCP is a later ergonomics upgrade.
   act on the entire fleet: `loom session ls` (the fleet), `loom session preview
   <id>` (a screen glance), `loom session poll/wait/send/break <id>` (observe and
   drive), `loom session launch "<task>"` (spawn work), and `weaver issue ls/show`
-  (the boards). "The CLI *is* the API mirror," as the overlooker plan puts it — so
+  (the boards). "The CLI *is* the API mirror," as the watch plan puts it — so
   a working concierge needs *no new tool surface at all*.
 - **The primer is the tips.** `CONCIERGE.md` (below) is the "readme" — not an API
   reference but *judgement*: which command to reach for, and how to read what it
@@ -218,13 +218,13 @@ path as a normal claude session. Two deltas at launch, both small:
 2. **No withheld capabilities.** With launch-by-default at single-operator scale,
    the concierge holds the full ladder; the permission gate is the conversation,
    so there is **no per-session capability column** to add for v1. (A later
-   unattended/multi-user mode adds one — the overlooker's binding already gates
+   unattended/multi-user mode adds one — the watch's binding already gates
    in-process, so the pattern exists when needed.)
 
 Lifecycle reuse is the point: the concierge rides launch, the live terminal,
 orphan/adopt, and the already-drivable Conversation tab unchanged. It is
 **identified and hidden from the fleet by its `agent_kind`** — *not* by the
-overlooker's `managed_by` field, which carries adoption/archival semantics the
+watch's `managed_by` field, which carries adoption/archival semantics the
 concierge must not inherit. A one-line filter drops `agent_kind = "concierge"`
 from the session list; the **Chat** view finds the singleton by the same kind.
 
@@ -303,31 +303,31 @@ Two tiers of action, both reusing existing primitives:
   wait` / `loom session poll`) and report back in a later turn — "the flaky-test
   fix is /s/cd34; it opened a PR, CI is green."
 
-The concierge **does not write the `triage` tag** — that is the overlooker's
-fact, and two actors authoring one fact is the anti-pattern the overlooker plan
+The concierge **does not write the `triage` tag** — that is the watch's
+fact, and two actors authoring one fact is the anti-pattern the watch plan
 is built to avoid. Its findings live in the conversation. If a durable mark is
 ever wanted, it writes its *own* typed key (loudness lives in the value, not the
 key), never `attention` or `triage`.
 
 ## Capabilities & safety
 
-The concierge inherits the overlooker's safety frame wholesale — it is the same
+The concierge inherits the watch's safety frame wholesale — it is the same
 ladder over the same API:
 
 - **The intervention ladder, enforced at the MCP boundary.** `observe`/`link`
   always on; `nudge`/`interrupt`/`launch` gated. A tool call past the granted set
   is refused before it hits the API.
-- **Human-in-the-loop by construction.** Unlike an autonomous overlooker, every
+- **Human-in-the-loop by construction.** Unlike an autonomous watch, every
   concierge action is bracketed by a user turn — it proposes, you confirm. That
   is what makes a more permissive default capability set safe.
-- **No recursion.** A concierge's `fleet_list` excludes concierge and overlooker
+- **No recursion.** A concierge's `fleet_list` excludes concierge and watch
   sessions; it cannot act on a watcher. Watchers don't watch watchers, and the
   concierge doesn't drive itself.
 - **Everything is an event.** Every nudge, interrupt, and launch is an `events`
-  row with the concierge as author — the same audit trail the overlooker round
+  row with the concierge as author — the same audit trail the watch round
   history renders, visible on the touched session's activity.
 - **Kill switches.** Archiving the concierge session tears it down like any
-  other; a `concierge.enabled` (or reuse `overlooker.enabled`-style) setting gates
+  other; a `concierge.enabled` (or reuse `watch.enabled`-style) setting gates
   the feature.
 
 ## Worked example: "any stale sessions I should know about?"
@@ -358,7 +358,7 @@ exposes.
 
 A codex pass over the codebase corrected three overstated seams, now folded in
 above: `agent_kind` selects the *command* (so the concierge maps to the Claude
-runtime, not a free-standing kind); the hidden/warm lifecycle is overlooker-
+runtime, not a free-standing kind); the hidden/warm lifecycle is watch-
 specific (`managed_by`), so the concierge is hidden by its **kind** instead; and
 there is no `/sessions/{id}/diff` route. It also flagged that the capability
 column, the MCP server, the `session:<id>` chip, and interrupt/launch audit
@@ -411,10 +411,10 @@ concierge-driven `launch`, so every action the concierge takes is auditable like
 `nudge` is today. Acceptance: interrupt and launch show in the touched session's
 activity with an author.
 
-### C7 — Overlooker authoring from chat  `value: low`  `deps: C4, overlooker T8`
-The concierge drafts/dry-runs/registers an overlooker so "ping me whenever a PR
+### C7 — Watch authoring from chat  `value: low`  `deps: C4, watch T8`
+The concierge drafts/dry-runs/registers a watch so "ping me whenever a PR
 goes red" becomes a real watch. The Chat ⇄ Watch convergence. Acceptance: the
-concierge scaffolds and dry-runs an overlooker from a chat turn.
+concierge scaffolds and dry-runs a watch from a chat turn.
 
 ## Rollout
 
@@ -424,7 +424,7 @@ concierge scaffolds and dry-runs an overlooker from a chat turn.
   launch on your say-so, all over the existing CLI. No new server, schema, or dep.
 - **Phase 1 — Ergonomics & polish.** C4 (typed MCP), C5 (session chips), C6 (audit
   parity). Sharper tools and clickable chips over the same working concierge.
-- **Phase 2 — Convergence.** C7 (author overlookers from chat). Chat becomes the
+- **Phase 2 — Convergence.** C7 (author watches from chat). Chat becomes the
   front door to Watch.
 
 ## Non-goals
@@ -435,9 +435,9 @@ concierge scaffolds and dry-runs an overlooker from a chat turn.
 - **Not a new status axis.** The concierge talks; it never writes `attention` or
   `triage`. Two actors never author one fact.
 - **Not a second fleet API.** The MCP wraps the existing REST routes — one seam,
-  one more consumer beside the overlooker binding and the `loom` CLI.
+  one more consumer beside the watch binding and the `loom` CLI.
 - **Not autonomous.** The concierge acts only inside a conversation, each action
-  confirmed by a user turn. The autonomous watcher is the overlooker; this is its
+  confirmed by a user turn. The autonomous watcher is the watch; this is its
   on-demand twin.
 - **Not multi-tenant yet.** One singleton concierge at the single-operator scale;
   many named chats is a later, additive step.
@@ -465,7 +465,7 @@ concierge scaffolds and dry-runs an overlooker from a chat turn.
   orphan/adopt. Recommend session-backed (maximal reuse, ships fastest); revisit if
   the empty worktree grates.
 - **Staleness as a server signal.** The concierge computes staleness client-side
-  from `last_activity_at` + tags. The overlooker plan (T7) also wants a synthetic
+  from `last_activity_at` + tags. The watch plan (T7) also wants a synthetic
   `session.stale` event — if that lands, both consumers should share one
   definition rather than each rolling their own.
 - **Singleton scope.** One concierge per machine, per operator, or per repo? Start

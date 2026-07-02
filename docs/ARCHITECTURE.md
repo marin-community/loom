@@ -49,9 +49,9 @@ other `weaver` subcommand.
 | `crates/loom/src/auth.rs` | authentication core: token/password crypto, the `users`/`api_tokens`/`auth_sessions` tables, the machine-local token, and the GitHub OAuth calls. `axum`-free so it unit-tests directly |
 | `crates/loom/src/server.rs` | bind, write `server.json`, spawn bg tasks |
 | `crates/loom/src/monitor.rs` | status detection, orphan marking, hook-event consumer |
-| `crates/loom/src/overlooker.rs` | the overlooker engine: cron timer + event dispatcher + the round executor (the script subprocess executor every program runs on) |
-| `crates/loom/src/builtins.rs` | the builtin overlooker program registry; the script programs are real Python files in `crates/loom/overlookers/`, embedded into the binary |
-| `python/weaver-loom/` | the pure-Python layer over the loom REST API (`weaver_loom`: client + overlooker round context); stdlib-only, uv-buildable, vendored onto every script's `PYTHONPATH` by the engine; server-free contract tests in `tests/` (`uv run pytest`, CI's `python-binding` job) |
+| `crates/loom/src/watch.rs` | the watch engine: cron timer + event dispatcher + the round executor (the script subprocess executor every program runs on) |
+| `crates/loom/src/builtins.rs` | the builtin watch program registry; the script programs are real Python files in `crates/loom/watches/`, embedded into the binary |
+| `python/weaver-loom/` | the pure-Python layer over the loom REST API (`weaver_loom`: client + watch round context); stdlib-only, uv-buildable, vendored onto every script's `PYTHONPATH` by the engine; server-free contract tests in `tests/` (`uv run pytest`, CI's `python-binding` job) |
 | `crates/loom/src/agent.rs` | launching agents into per-session terminals + installing `.claude/settings.local.json` hooks + the one-shot headless agent behind `POST /api/agent/oneshot` |
 | `crates/loom/src/session.rs` | `Session` row + sqlx queries |
 | `crates/loom/src/chatlog.rs` | conversation log: capture at archive (write the iris `chat.json` + rendered `chat.md` under `session.log_dir`) and serve it for the Conversation tab (`conversation()` — live transcript, else the capture) |
@@ -210,9 +210,9 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `POST /api/auth/password` | set the caller's own password |
 | `GET POST /api/auth/users` / `DELETE /api/auth/users/{username}` | the approved-operator allowlist |
 | `GET PUT /api/auth/github/config` | the GitHub OAuth app config (secret write-only) |
-| `GET POST /api/overlookers` / `GET PATCH DELETE /api/overlookers/{id}` | overlooker CRUD (see [Overlookers](#overlookers)) |
-| `GET /api/overlookers/programs` | the builtin program registry: titles, suggested defaults, read-only script sources |
-| `POST /api/overlookers/{id}/run` / `GET /api/overlookers/{id}/runs` | fire a round now (`{dry_run}` stubs mutations) / the round-history audit |
+| `GET POST /api/watches` / `GET PATCH DELETE /api/watches/{id}` | watch CRUD (see [Watches](#watches)) |
+| `GET /api/watches/programs` | the builtin program registry: titles, suggested defaults, read-only script sources |
+| `POST /api/watches/{id}/run` / `GET /api/watches/{id}/runs` | fire a round now (`{dry_run}` stubs mutations) / the round-history audit |
 
 `SessionView` (`/api/sessions[/...]`) returns session-specific fields
 top-level (`id`, `status`, `work_dir`, `term_session`, `agent_kind`, `model`,
@@ -226,7 +226,7 @@ top-level (`id`, `status`, `work_dir`, `term_session`, `agent_kind`, `model`,
 `BranchView::tags` is the branch's tag list — each a `TagView`
 (`key`, `value`, `note`, `set_by`, `set_at`). A tag is a single-valued
 `(key, value)` annotation on a branch; the well-known keys are `attention` (the
-agent's self-report) and `triage` (an overlooker's assessment), and any other
+agent's self-report) and `triage` (a watch's assessment), and any other
 key is a free-form, quiet pill. Absence of a key is the calm/default state —
 there is no stored `ok` value; the list is empty for an unmarked branch. The
 signal is **value-driven**, with a ladder on either side of calm: a value on the
@@ -379,7 +379,7 @@ wins, so an explicit declaration overrides the hook-inferred default. The
 general `weaver tag set|rm|ls` group writes any key the same way, over the
 branch-scoped `PUT`/`DELETE /api/branches/{key}/tags/{key}` routes; the
 session-scoped `PUT`/`DELETE /api/sessions/{id}/tags/{key}` routes serve the
-UI and the [overlooker](plans/overlooker.md). The builtin status watch, when a
+UI and the [watch](plans/watches.md). The builtin status watch, when a
 session goes idle (the agent's finished-turn hook), asks the judge model for the
 set of tags the session warrants and reconciles its own typed marks to that set
 — never mirroring the agent's own `attention`. When the judge names a genuine
@@ -479,7 +479,7 @@ request to a `Principal` three ways, in order:
 - **Loopback trust** — a request from `127.0.0.1`/`::1` is taken to be the
   machine owner (the seeded primary user), gated on the `auth.trust_loopback`
   setting (on by default). This keeps the local CLI, the agent's in-worktree
-  `loom` calls, and overlooker scripts working with zero configuration. To get
+  `loom` calls, and watch scripts working with zero configuration. To get
   the peer address, the server runs `into_make_service_with_connect_info`; the
   decision uses the real socket peer, **never** a forwarded header.
 
@@ -507,7 +507,7 @@ button is hidden and `GET /api/auth/me` reports `methods.github = false`.
 **The machine-local token.** On startup loom mints (and persists, 0600, at
 `$WEAVER_HOME/loom-token`) a `kind = 'local'` `api_tokens` row owned by the
 primary user, and injects it as `LOOM_TOKEN` into the environments of its own
-same-host subprocesses (the agent's terminal, overlooker scripts) — and the `loom`
+same-host subprocesses (the agent's terminal, watch scripts) — and the `loom`
 CLI reads it. This makes `auth.trust_loopback = false` a fully working mode:
 behind a **same-host reverse proxy** (where forwarded requests look like
 loopback and so trust must be off) local automation still authenticates via this
@@ -521,20 +521,20 @@ use. The `auth.*` settings live in `weaver-core::config::registry()` under the
 **Authentication** group; the GitHub client id/secret are stored outside the
 registry so the secret never rides `GET /api/settings`.
 
-## Overlookers
+## Watches
 
-An **overlooker** is a periodic / triggered watch program over the fleet: it
+A **watch** is a periodic / triggered program over the fleet: it
 wakes on a trigger (a cron tick or a session event), surveys the sessions in
 scope, and acts within an explicit capability set. The design of record is
-[docs/plans/overlooker.md](plans/overlooker.md). The engine
-(`loom::overlooker`, spawned in `server::serve`, self-gated on the
-`overlooker.enabled` setting) runs each **round** under non-optional guardrails
+[docs/plans/watches.md](plans/watches.md). The engine
+(`loom::watch`, spawned in `server::serve`, self-gated on the
+`watch.enabled` setting) runs each **round** under non-optional guardrails
 — no-overlap, cooldown, a wall-clock timeout, no-recursion — and records it in
-`overlooker_runs`, the audit trail the panel's round history renders.
+`watch_runs`, the audit trail the panel's round history renders.
 
-A round runs the **program** the overlooker names:
+A round runs the **program** the watch names:
 
-- **Builtin scripts** — real Python files in `crates/loom/overlookers/`,
+- **Builtin scripts** — real Python files in `crates/loom/watches/`,
   embedded into the binary and registered in `loom::builtins`:
   `builtin:status` (stamp a `triage` mark on each in-scope session, judging
   via the configured `prompt` through the daemon's one-shot agent when
@@ -546,11 +546,11 @@ A round runs the **program** the overlooker names:
   `mark`), `builtin:pr-label` (flag sessions whose open PR lacks the loom label)
   and `builtin:archive-merged` (flag live sessions whose PR has merged). The
   last two are **read-only**: they record `would:` actions and mutate nothing —
-  the actual archive is still `github.archive_on_merge`, above. The Overlooker
-  panel and `loom overlooker programs` list the registry; script sources
+  the actual archive is still `github.archive_on_merge`, above. The Watch
+  panel and `loom watch programs` list the registry; script sources
   render read-only (they ship with the binary).
 - **A custom program file** — an absolute path, conventionally
-  `~/.weaver/overlookers/<name>.py` (`loom overlooker new` scaffolds one).
+  `~/.weaver/watches/<name>.py` (`loom watch new` scaffolds one).
 
 Builtin scripts and custom files run on one executor: an env-stripped
 subprocess that reaches the fleet only through the loom REST API — everything
@@ -558,7 +558,7 @@ loom can do is an HTTP route (including one-shot agent judgement, at
 `POST /api/agent/oneshot`), and Python is purely a convenience layer on top.
 There is deliberately no privileged in-Rust program shape: a builtin sees
 exactly the API a custom program sees.
-The contract: `$WEAVER_API` carries the daemon's base URL, `$WEAVER_OVERLOOKER`
+The contract: `$WEAVER_API` carries the daemon's base URL, `$WEAVER_WATCH`
 the round's config (`{id, name, program, params, scope, capabilities, model,
 effort, dry_run}`), and the script prints one JSON object — `{outcome, summary,
 actions}` — as its final stdout line. A non-zero exit, no result object, or a
@@ -589,5 +589,5 @@ builtins are stdlib-only and need neither).
 | `LOOM_GITHUB_CLIENT_ID` / `LOOM_GITHUB_CLIENT_SECRET` | GitHub OAuth app credentials (override the settings-stored values) | — |
 | `WEAVER_TAPESTRY_DIR` | directory holding tapestry's per-session control sockets | `$WEAVER_HOME/sock` |
 | `WEAVER_TAPESTRY_BIN` | the `tapestry` supervisor binary loom re-execs (else a sibling of `loom`); set by the tests | sibling of `loom` |
-| `WEAVER_OVERLOOKER_AGENT_CMD` | the one-shot headless agent command behind `POST /api/agent/oneshot` (judgement calls) | `claude -p` |
+| `WEAVER_WATCH_AGENT_CMD` | the one-shot headless agent command behind `POST /api/agent/oneshot` (judgement calls) | `claude -p` |
 | `RUST_LOG` / `EnvFilter` | tracing filter | `loom=info,weaver_core=info,tower_http=warn` |

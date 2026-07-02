@@ -66,7 +66,7 @@ async fn typed_create_list_get_and_mark() {
         "unmarked at first"
     );
 
-    // Typed mark (triage): stamps the overlooker axis as the `triage` tag, the
+    // Typed mark (triage): stamps the watch axis as the `triage` tag, the
     // agent's own `attention` tag untouched.
     let marked = client
         .mark(&id, "attention", "looks stuck", Some("typed-test"))

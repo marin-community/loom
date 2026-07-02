@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 
-// The outcome of an overlooker round (`ok | noop | skipped | error`), as a
+// The outcome of a watch round (`ok | noop | skipped | error`), as a
 // small, quiet badge. Like the rest of the panel it leans NEUTRAL: `ok` reads
 // as a calm "all good", `noop` recedes to faint (nothing to do), and only the
 // genuinely-wrong states (`error`, `skipped`) borrow the soft attention/block

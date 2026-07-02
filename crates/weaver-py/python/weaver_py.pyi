@@ -88,7 +88,7 @@ class Client:
         """Send a break to interrupt the agent's current turn. Needs `interrupt`."""
 
     def warm_session(self) -> Any:
-        """The persistent overlooker session. Not yet available (plan T12)."""
+        """The persistent watch session. Not yet available (plan T12)."""
 
     def run_agent(self, prompt: str) -> Any:
         """Spawn a fresh one-shot agent. Not exposed over weaver-api (engine-only)."""

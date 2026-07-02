@@ -11,8 +11,8 @@ Two pieces:
   DTOs cross as plain dicts (the shapes `frontend/types.ts` documents);
   mutating calls check the granted capability set *before* issuing a request,
   mirroring the intervention-ladder contract of the `weaver-py` binding.
-* :class:`Round` — the overlooker program context: the round config the engine
-  passes in ``$WEAVER_OVERLOOKER``, a client granted that round's
+* :class:`Round` — the watch program context: the round config the engine
+  passes in ``$WEAVER_WATCH``, a client granted that round's
   capabilities, the scope-filtered fleet survey, and the
   ``{outcome, summary, actions}`` result the engine reads from stdout.
 
@@ -235,8 +235,8 @@ class Client:
         return self._request("GET", f"/sessions/{key}/tree")
 
     def programs(self):
-        """The builtin overlooker program registry."""
-        return self._request("GET", "/overlookers/programs")
+        """The builtin watch program registry."""
+        return self._request("GET", "/watches/programs")
 
     def agent(self, prompt, model="", effort=""):
         """Run a one-shot headless agent in the daemon and return its stdout,
@@ -262,13 +262,13 @@ class Client:
 
     def clear_tag(self, key, tag_key, by=None):
         """Clear a tag — how a loud axis returns to calm; needs ``mark``.
-        ``by`` attributes the clear (an overlooker name)."""
+        ``by`` attributes the clear (a watch name)."""
         self._gate("mark")
         query = f"?by={urllib.parse.quote(by, safe='')}" if by else ""
         return self._request("DELETE", f"/sessions/{key}/tags/{tag_key}{query}")
 
     def mark(self, key, level, note="", by=None):
-        """Stamp the overlooker's ``triage`` mark; needs ``mark``. A ``level``
+        """Stamp the watch's ``triage`` mark; needs ``mark``. A ``level``
         of ``attention``/``blocked`` sets it; empty or ``ok`` clears it."""
         if not level or level == "ok":
             return self.clear_tag(key, "triage", by)
@@ -290,9 +290,9 @@ class Client:
 
 
 class Round:
-    """One overlooker round, as the engine runs it.
+    """One watch round, as the engine runs it.
 
-    Reads the round config from ``$WEAVER_OVERLOOKER`` (``{id, name, program,
+    Reads the round config from ``$WEAVER_WATCH`` (``{id, name, program,
     params, scope, capabilities, model, effort, dry_run, state}``), builds a
     :class:`Client` granted that round's capabilities, accumulates the action
     log, and prints the result the engine parses. A mutating program must
@@ -307,21 +307,21 @@ class Round:
 
     def __init__(self, config=None, client=None):
         if config is None:
-            config = json.loads(os.environ.get("WEAVER_OVERLOOKER", "{}"))
+            config = json.loads(os.environ.get("WEAVER_WATCH", "{}"))
         self.config = config
         self.name = config.get("name", "")
         self.params = config.get("params") or {}
         self.scope = config.get("scope") or {}
-        #: The overlooker's configured agent model / reasoning effort — pass
+        #: The watch's configured agent model / reasoning effort — pass
         #: these to :meth:`Client.agent` so judgement honours the config.
         self.model = config.get("model", "")
         self.effort = config.get("effort", "")
         #: ``run`` (execute a round) or ``register`` (declare the manifest). The
-        #: engine sets it via the config and ``$WEAVER_OVERLOOKER_MODE``; in
+        #: engine sets it via the config and ``$WEAVER_WATCH_MODE``; in
         #: register mode the round is neutered (no mutations, empty survey) so a
         #: script that doesn't use :meth:`main` can't act when merely asked what
         #: wakes it.
-        self.mode = config.get("mode") or os.environ.get("WEAVER_OVERLOOKER_MODE") or "run"
+        self.mode = config.get("mode") or os.environ.get("WEAVER_WATCH_MODE") or "run"
         #: The triggering context the engine passed: ``{event, level, session,
         #: branch, repo}`` for a reactive round; ``{event: "cron"|"manual"}``
         #: otherwise. Drives :meth:`triggered_sessions`.
@@ -332,7 +332,7 @@ class Round:
         self.actions = []
         #: How many live sessions the last survey admitted.
         self.surveyed = 0
-        #: The overlooker's **lookaside state** — its scratch memory from the
+        #: The watch's **lookaside state** — its scratch memory from the
         #: previous round, carried across rounds by the engine. A plain dict the
         #: program reads at the top of a round; write the next round's state with
         #: :meth:`set_state`. ``{}`` when the program keeps none.
@@ -354,7 +354,7 @@ class Round:
         declaring triggers has no side effects. Otherwise it constructs a
         :class:`Round` and calls ``fn(round)``.
         """
-        if os.environ.get("WEAVER_OVERLOOKER_MODE", "run") == "register":
+        if os.environ.get("WEAVER_WATCH_MODE", "run") == "register":
             print(json.dumps(triggers or {}))
             return
         fn(Round())
@@ -366,7 +366,7 @@ class Round:
     def sessions(self):
         """The round's survey: the live fleet, scope-filtered.
 
-        Terminal sessions are skipped; the overlooker's scope applies its
+        Terminal sessions are skipped; the watch's scope applies its
         ``attention`` filter (``!ok`` or an exact level; an absent tag is the
         calm ``ok``) and its ``repo`` pin. Sets :attr:`surveyed`. Empty in
         register mode (the round must not touch the fleet just to be asked what
@@ -441,7 +441,7 @@ class Round:
         self.actions.append({"action": action, **fields})
 
     def set_state(self, state):
-        """Persist ``state`` (a JSON-able dict) as this overlooker's lookaside
+        """Persist ``state`` (a JSON-able dict) as this watch's lookaside
         state, replacing the prior one. It is handed back as :attr:`state` on the
         next round — the program's across-round memory (the engine carries it; no
         session or file needed).
@@ -454,7 +454,7 @@ class Round:
         self._next_state = state
 
     def wake_in(self, seconds):
-        """Ask the engine to re-run this overlooker once in ``seconds`` — a
+        """Ask the engine to re-run this watch once in ``seconds`` — a
         dynamic self-trigger, independent of any cron cadence. Use it to schedule
         the next look in a backoff loop (``rnd.wake_in(60)``). ``seconds <= 0``
         clears any pending wake (``rnd.wake_in(0)`` — "nothing left to recheck").

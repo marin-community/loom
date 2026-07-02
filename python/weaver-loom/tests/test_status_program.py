@@ -1,6 +1,6 @@
 """The builtin status program's decision logic, with no server required.
 
-Loads `crates/loom/overlookers/status.py` straight from the repo and drives it
+Loads `crates/loom/watches/status.py` straight from the repo and drives it
 with stubbed clients: the judge's parse + no-judgement split, the reconcile
 (set recommended tags, clear the watch's own dropped ones), the capability
 branches, dry-run, and the summary all live here. The Rust integration suite
@@ -19,11 +19,11 @@ from pathlib import Path
 
 from weaver_loom import Round, WeaverError
 
-OVERLOOKERS = Path(__file__).resolve().parents[3] / "crates" / "loom" / "overlookers"
+WATCHES = Path(__file__).resolve().parents[3] / "crates" / "loom" / "watches"
 
 
 def load_program(name):
-    spec = importlib.util.spec_from_file_location(name, OVERLOOKERS / f"{name}.py")
+    spec = importlib.util.spec_from_file_location(name, WATCHES / f"{name}.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

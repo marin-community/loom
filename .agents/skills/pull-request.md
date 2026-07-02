@@ -55,7 +55,7 @@ Unrelated changes go in a separate commit, not smuggled in.
 ## 5. Commit
 
 Conventional Commits: `type(scope): summary` — `feat`/`fix`/`docs`/`refactor`/
-`chore`, scope is the area (`loom`, `weaver`, `lint`, `config`, `overlooker`).
+`chore`, scope is the area (`loom`, `weaver`, `lint`, `config`, `watch`).
 Imperative, lower-case, ≤72 chars. The `(#NN)` suffix lands on merge, not from you.
 
 - Body (optional): what changed and why — context the diff lacks. Short.

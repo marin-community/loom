@@ -12,7 +12,7 @@ const FRONTEND_DIR = join(WEAVER_ROOT, 'crates', 'loom', 'frontend');
 const DIST_INDEX = join(WEAVER_ROOT, 'crates', 'loom', 'static', 'dist', 'index.html');
 
 /** One (key, value) annotation on a branch. The well-known loud keys are
- *  `attention` (the agent) and `triage` (an overlooker / `manual`); any other
+ *  `attention` (the agent) and `triage` (a watch / `manual`); any other
  *  key is a quiet pill. Absence is the calm state — there is no `ok` tag. */
 export interface TagView {
   key: string;
@@ -30,7 +30,7 @@ export interface Branch {
   goal: string;
   /** Current-state message, set with the `attention` tag via `weaver status`. */
   description: string;
-  /** Every tag on the branch (the agent's `attention`, an overlooker's
+  /** Every tag on the branch (the agent's `attention`, a watch's
    *  `triage`, any free-form key). Empty when calm — absence is the default. */
   tags: TagView[];
   repo_root: string;
@@ -68,9 +68,9 @@ export interface SeedOpts {
   parent?: string;
 }
 
-/** An overlooker as returned by `/api/overlookers` (the fields the e2e tests
+/** A watch as returned by `/api/watches` (the fields the e2e tests
  *  read; the full DTO has more). */
-export interface Overlooker {
+export interface Watch {
   id: string;
   name: string;
   enabled: boolean;
@@ -91,7 +91,7 @@ export interface Issue {
   tags: TagView[];
 }
 
-export interface SeedOverlookerOpts {
+export interface SeedWatchOpts {
   name: string;
   /** Trigger predicate; defaults to a manual `{}` (only fires on Run now). */
   trigger?: Record<string, unknown>;
@@ -109,8 +109,8 @@ export interface WeaverFixture {
   repoPath: string;
   /** Create a session directly via the API using the `shell` agent. */
   seedSession(opts: SeedOpts): Promise<Session>;
-  /** Register an overlooker directly via the API. */
-  seedOverlooker(opts: SeedOverlookerOpts): Promise<Overlooker>;
+  /** Register a watch directly via the API. */
+  seedWatch(opts: SeedWatchOpts): Promise<Watch>;
   /** Create an issue claimed by a seeded session's branch (so it shares the
    *  session's canonical repo_root and resolves back to it in the Issues pane). */
   seedIssue(session: Session, title: string, body?: string): Promise<Issue>;
@@ -163,7 +163,7 @@ export interface WeaverFixture {
   ): Promise<void>;
   /** Clear one tag via `DELETE …/tags/{key}`. */
   clearTag(session: Session, key: string): Promise<void>;
-  /** Stamp an overlooker's `triage` mark — sugar over `setTag(triage, …)`. */
+  /** Stamp a watch's `triage` mark — sugar over `setTag(triage, …)`. */
   mark(
     session: Session,
     level: 'attention' | 'blocked',
@@ -249,14 +249,14 @@ async function deleteAllSessions(baseUrl: string) {
   }
 }
 
-/** Delete every overlooker on a server, best-effort — overlookers aren't tied
+/** Delete every watch on a server, best-effort — watches aren't tied
  *  to a session, so the per-test wipe clears them explicitly. */
-async function deleteAllOverlookers(baseUrl: string) {
+async function deleteAllWatches(baseUrl: string) {
   try {
-    const all = (await fetchJson(`${baseUrl}/api/overlookers`)) as { id: string }[];
+    const all = (await fetchJson(`${baseUrl}/api/watches`)) as { id: string }[];
     for (const o of all) {
       try {
-        await fetch(`${baseUrl}/api/overlookers/${o.id}`, { method: 'DELETE' });
+        await fetch(`${baseUrl}/api/watches/${o.id}`, { method: 'DELETE' });
       } catch {
         /* best effort */
       }
@@ -461,8 +461,8 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
         })) as Session;
       },
 
-      async seedOverlooker(opts) {
-        return (await fetchJson(`${baseUrl}/api/overlookers`, {
+      async seedWatch(opts) {
+        return (await fetchJson(`${baseUrl}/api/watches`, {
           method: 'POST',
           body: JSON.stringify({
             name: opts.name,
@@ -472,7 +472,7 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
             params: opts.params ?? {},
             capabilities: opts.capabilities ?? ['observe', 'mark', 'escalate'],
           }),
-        })) as Overlooker;
+        })) as Watch;
       },
 
       async seedIssue(session, title, body) {
@@ -592,11 +592,16 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       },
     };
 
+    // The daemon seeds the builtin watches at boot; clear them (and anything a
+    // crashed prior test left) so every test starts from a deterministic empty
+    // panel regardless of ordering.
+    await deleteAllWatches(baseUrl);
+
     await use(fixture);
 
     // Reset for the next test in this worker.
     await deleteAllSessions(baseUrl);
-    await deleteAllOverlookers(baseUrl);
+    await deleteAllWatches(baseUrl);
     await deleteAllIssues(baseUrl);
   },
 });

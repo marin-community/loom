@@ -28,7 +28,7 @@ import GithubStatus from './GithubStatus.vue';
 // The old full-width "▶ Working … last activity" strip is gone: when the session
 // is calm, its state is a quiet note on row 3; when a loud signal is raised it
 // shows up on row 1 as a deletable chip (the agent's `attention` and/or an
-// overlooker's `triage`), and the human clears it with the chip's × — there is
+// watch's `triage`), and the human clears it with the chip's × — there is
 // no separate "Mark OK" control. ⁱ shown only when a signal is actually raised.
 const props = defineProps<{ ws: Session }>();
 const emit = defineEmits<{ reload: [] }>();
@@ -92,7 +92,7 @@ const MODEL_TINT: Record<string, string> = {
 };
 const modelTint = computed(() => MODEL_TINT[props.ws.model?.toLowerCase()] ?? 'text-muted');
 const lastActivity = computed(() => timeAgo(props.ws.last_activity_at));
-// The loud signal chips: the agent's own `attention` and an overlooker's
+// The loud signal chips: the agent's own `attention` and a watch's
 // `triage`, each individually deletable. Their presence is what "needs a human"
 // means here; clearing a chip DELETEs that tag (there is no "Mark OK" verb).
 const signals = computed(() => signalChips(props.ws));
@@ -128,9 +128,9 @@ const quiet = computed(() => quietTags(props.ws));
       </div>
 
       <div class="ml-auto flex shrink-0 items-center gap-2">
-        <!-- The loud signals, inline: the agent's `attention` and an overlooker's
+        <!-- The loud signals, inline: the agent's `attention` and a watch's
              `triage`, each a deletable chip. The × clears that tag (calm is its
-             absence) — there is no separate "Mark OK". An overlooker chip carries
+             absence) — there is no separate "Mark OK". A watch chip carries
              the ⊙ glyph and fades when stale. -->
         <SignalChip
           v-for="chip in signals"

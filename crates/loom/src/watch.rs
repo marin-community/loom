@@ -1,26 +1,26 @@
-//! The Overlooker **engine** — the timer, dispatcher, and round executor that
+//! The Watch **engine** — the timer, dispatcher, and round executor that
 //! run inside the loom daemon (the single owner of the terminal/session runtime).
 //!
-//! The storage + model (`Overlooker`, `Trigger`, `Scope`, the run audit) lives
-//! in [`weaver_core::overlooker`]; this module is the live machinery that turns
+//! The storage + model (`Watch`, `Trigger`, `Scope`, the run audit) lives
+//! in [`weaver_core::watch`]; this module is the live machinery that turns
 //! those rows into action. It is built as **two halves of one event loop**, the
-//! design of record in `docs/plans/overlooker.md`:
+//! design of record in `docs/plans/watches.md`:
 //!
-//! * **The timer (producer).** For each enabled scheduled overlooker it keeps a
+//! * **The timer (producer).** For each enabled scheduled watch it keeps a
 //!   `next_run_at`, and when due writes a `cron` system event into the same
 //!   `events` stream session changes flow through — nothing more. A cron tick is
 //!   a first-class, logged row.
 //! * **The dispatcher (consumer).** A sibling of [`crate::monitor::run`] on its
 //!   own independent watermark: it reads `events::since`, and for each new event
-//!   fires every enabled overlooker whose trigger matches — a scheduled one
+//!   fires every enabled watch whose trigger matches — a scheduled one
 //!   matches its own `cron` tick, a reactive one matches a `tag` write (the
 //!   tag's key/value become the trigger's match kind/level, so `attention` and
 //!   `triage` tags still drive `{event:"attention"|"triage"}` triggers) or a
 //!   `stale` tick, and `manual` ticks (operator "run now") fire the named
-//!   overlooker.
+//!   watch.
 //!
 //! Both halves are folded into one [`run`] loop, self-gated on the
-//! `overlooker.enabled` master switch so the daemon can always spawn it and it
+//! `watch.enabled` master switch so the daemon can always spawn it and it
 //! idles cheaply when off.
 //!
 //! A **round** is one execution ([`fire`]). It is **level-triggered**: the event
@@ -28,7 +28,7 @@
 //! never "handles" the specific event, so firing twice is idempotent. The round
 //! runs a **program** under the non-optional guardrails — no-overlap, cooldown,
 //! timeout, no-recursion — and records every mutating action as both an
-//! `overlooker_runs` action entry and an `events` row (the audit rule). Two
+//! `watch_runs` action entry and an `events` row (the audit rule). Two
 //! program shapes share that one substrate ([`run_program`]): the builtin
 //! **scripts** embedded from [`crate::builtins`] and custom program files —
 //! both run by the same subprocess executor ([`run_script`]), reaching the
@@ -47,7 +47,7 @@ use crate::session as session_mod;
 use crate::web::AppState;
 use weaver_core::branch as branch_mod;
 use weaver_core::config as core_config;
-use weaver_core::overlooker::{self as ov, Overlooker};
+use weaver_core::watch::{self as watch_store, Watch};
 
 /// How often the engine wakes to drain new events and check the timer. Matches
 /// the monitor's cadence closely enough that a reactive event is acted on
@@ -64,7 +64,7 @@ pub(crate) async fn get_int(db: &crate::Db, key: &str, default: i64) -> i64 {
         .unwrap_or(default)
 }
 
-/// The set of overlooker ids with a round currently in flight. Shared across the
+/// The set of watch ids with a round currently in flight. Shared across the
 /// dispatcher and any `fire_now` caller so the **no-overlap** guardrail holds no
 /// matter what woke the round. A `Mutex<HashSet>` is enough: the critical
 /// sections are tiny (insert/remove of one id) and rounds are not hot.
@@ -77,9 +77,9 @@ pub fn new_in_flight() -> InFlight {
     Arc::new(Mutex::new(HashSet::new()))
 }
 
-/// A round-scoped guard that removes its overlooker id from the in-flight set on
+/// A round-scoped guard that removes its watch id from the in-flight set on
 /// drop, so a panicking or early-returning round can never wedge the set and
-/// block every future round of that overlooker.
+/// block every future round of that watch.
 struct InFlightGuard {
     set: InFlight,
     id: String,
@@ -99,23 +99,57 @@ impl Drop for InFlightGuard {
 }
 
 // ---------------------------------------------------------------------------
+// Builtin seeding
+// ---------------------------------------------------------------------------
+
+/// Ensure every builtin program has its watch row, enabled and on the
+/// program's suggested defaults. Runs at engine start, keyed by name: a watch
+/// the user has since reconfigured or disabled is left exactly as it is (the
+/// row exists), and a deleted one comes back on the next boot — builtins are
+/// stock; the off switch is the enabled toggle, not deletion.
+pub async fn seed_builtins(db: &crate::Db) -> anyhow::Result<()> {
+    for b in crate::builtins::BUILTINS {
+        if watch_store::get_by_name(db, b.name).await?.is_some() {
+            continue;
+        }
+        let new = watch_store::NewWatch {
+            name: b.name.to_string(),
+            trigger_spec: b.default_trigger.to_string(),
+            scope: b.default_scope.to_string(),
+            program: b.program(),
+            params: b.default_params.to_string(),
+            capabilities: b
+                .default_capabilities
+                .iter()
+                .map(|c| c.to_string())
+                .collect(),
+            enabled: true,
+            ..Default::default()
+        };
+        let w = watch_store::create(db, &new).await?;
+        tracing::info!(watch = %w.id, name = %w.name, "seeded builtin watch");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // The engine loop (timer + dispatcher)
 // ---------------------------------------------------------------------------
 
 /// The background engine: spawned in [`crate::server::serve`] alongside the
 /// monitor and the GitHub poller. One loop drives both halves — the timer emits
 /// `cron` ticks, then the dispatcher drains new events and fires matching
-/// overlookers — so cron and reactive triggers share exactly one code path.
+/// watches — so cron and reactive triggers share exactly one code path.
 pub async fn run(state: AppState) {
+    if let Err(e) = seed_builtins(&state.db).await {
+        tracing::warn!("watch: seeding builtin watches failed: {e}");
+    }
     let in_flight = new_in_flight();
     // Independent watermark: process every event written after this id. Init
     // from the current max so a restart self-heals on the next tick rather than
     // replaying history (level-triggered — the round always re-surveys).
     let mut last_event = events::max_id(&state.db).await.unwrap_or(0);
-    tracing::info!(
-        tick_ms = TICK.as_millis() as u64,
-        "overlooker engine started"
-    );
+    tracing::info!(tick_ms = TICK.as_millis() as u64, "watch engine started");
 
     loop {
         tokio::time::sleep(TICK).await;
@@ -124,8 +158,8 @@ pub async fn run(state: AppState) {
         // so flipping it on doesn't replay the backlog accumulated while off.
         if !core_config::get_bool(
             &state.db,
-            "overlooker.enabled",
-            core_config::DEFAULT_OVERLOOKER_ENABLED,
+            "watch.enabled",
+            core_config::DEFAULT_WATCH_ENABLED,
         )
         .await
         {
@@ -133,7 +167,7 @@ pub async fn run(state: AppState) {
             continue;
         }
 
-        // 1. Timer (producer): emit `cron` ticks for any scheduled overlooker
+        // 1. Timer (producer): emit `cron` ticks for any scheduled watch
         //    that is due. Each tick is a visible `events` row the dispatcher
         //    then consumes below.
         tick_timer(&state).await;
@@ -146,28 +180,28 @@ pub async fn run(state: AppState) {
                     dispatch(&state, &in_flight, &ev).await;
                 }
             }
-            Err(e) => tracing::warn!("overlooker: reading new events failed: {e}"),
+            Err(e) => tracing::warn!("watch: reading new events failed: {e}"),
         }
     }
 }
 
-/// The timer half: for each enabled scheduled overlooker, compute (and persist)
+/// The timer half: for each enabled scheduled watch, compute (and persist)
 /// its `next_run_at` if missing, and when it is due emit a `cron` system tick and
 /// advance the schedule. Self-gating on the master switch happens in [`run`].
 ///
 /// Public so a test can drive one timer pass without the loop's master-switch
 /// gate or tick cadence; in production only [`run`] calls it.
 pub async fn tick_timer(state: &AppState) {
-    let overlookers = match ov::list_enabled(&state.db).await {
+    let watches = match watch_store::list_enabled(&state.db).await {
         Ok(o) => o,
         Err(e) => {
-            tracing::warn!("overlooker timer: listing enabled failed: {e}");
+            tracing::warn!("watch timer: listing enabled failed: {e}");
             return;
         }
     };
     let now = Utc::now();
-    for o in overlookers {
-        // Dynamic one-shot wake (any overlooker, scheduled or reactive): a round
+    for o in watches {
+        // Dynamic one-shot wake (any watch, scheduled or reactive): a round
         // asked to re-run at `wake_at`. Record the tick first and only clear the
         // column once it lands — a failed insert then leaves the wake set to retry
         // next pass, rather than silently losing it. The clear still happens in
@@ -178,20 +212,20 @@ pub async fn tick_timer(state: &AppState) {
                     &state.db,
                     &state.bus,
                     "cron",
-                    json!({ "overlooker": o.id, "wake": true }),
+                    json!({ "watch": o.id, "wake": true }),
                 )
                 .await
                 {
                     Ok(_) => {
-                        if let Err(e) = ov::set_wake_at(&state.db, &o.id, None).await {
+                        if let Err(e) = watch_store::set_wake_at(&state.db, &o.id, None).await {
                             // A failed clear leaves the wake set, so next pass
                             // re-fires it — a benign idempotent re-survey (under
                             // no-overlap), but surface it rather than swallow it.
-                            tracing::warn!(overlooker = %o.id, "overlooker timer: clearing wake_at failed: {e}");
+                            tracing::warn!(watch = %o.id, "watch timer: clearing wake_at failed: {e}");
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(overlooker = %o.id, "overlooker timer: recording wake tick failed: {e}");
+                        tracing::warn!(watch = %o.id, "watch timer: recording wake tick failed: {e}");
                     }
                 }
                 continue;
@@ -201,7 +235,7 @@ pub async fn tick_timer(state: &AppState) {
         if !trigger.is_scheduled() {
             continue;
         }
-        // Seed a never-scheduled overlooker's next-fire without firing it now.
+        // Seed a never-scheduled watch's next-fire without firing it now.
         let next = match o.next_run_at.as_deref() {
             Some(ts) => parse_iso(ts),
             None => None,
@@ -210,7 +244,7 @@ pub async fn tick_timer(state: &AppState) {
             Some(n) => n,
             None => {
                 if let Some(n) = next_fire(&o, now) {
-                    let _ = ov::set_schedule(&state.db, &o.id, None, Some(&iso(n))).await;
+                    let _ = watch_store::set_schedule(&state.db, &o.id, None, Some(&iso(n))).await;
                 }
                 continue;
             }
@@ -220,14 +254,13 @@ pub async fn tick_timer(state: &AppState) {
         }
         // Due: emit the cron tick (the dispatcher fires the round) and advance.
         if let Err(e) =
-            events::record_system(&state.db, &state.bus, "cron", json!({ "overlooker": o.id }))
-                .await
+            events::record_system(&state.db, &state.bus, "cron", json!({ "watch": o.id })).await
         {
-            tracing::warn!(overlooker = %o.id, "overlooker timer: recording cron tick failed: {e}");
+            tracing::warn!(watch = %o.id, "watch timer: recording cron tick failed: {e}");
             continue;
         }
         let advanced = next_fire(&o, now).map(iso);
-        let _ = ov::set_schedule(&state.db, &o.id, None, advanced.as_deref()).await;
+        let _ = watch_store::set_schedule(&state.db, &o.id, None, advanced.as_deref()).await;
     }
 }
 
@@ -279,14 +312,14 @@ impl TriggerCtx {
     }
 }
 
-/// Route one new event to the overlookers it should fire.
+/// Route one new event to the watches it should fire.
 ///
-/// * a `cron` system tick carries `{overlooker}` → fire that one (scheduled);
-/// * a `manual` system tick carries `{overlooker, dry_run, reason}` → fire it
+/// * a `cron` system tick carries `{watch}` → fire that one (scheduled);
+/// * a `manual` system tick carries `{watch, dry_run, reason}` → fire it
 ///   (operator "run now"), bypassing cooldown;
 /// * any other event is **normalized** to a trigger-event name (e.g. a `tag`
 ///   write of the `attention` key → `session.attention`, a `pr_merged` →
-///   `pr.merged`): for each enabled overlooker whose subscription set names it,
+///   `pr.merged`): for each enabled watch whose subscription set names it,
 ///   fire a (level-triggered) re-survey, handing it the triggering session.
 ///
 /// Public so a test (and the engine loop) can route a single event without the
@@ -338,7 +371,7 @@ pub async fn dispatch(state: &AppState, in_flight: &InFlight, ev: &events::Event
         }
         // The engine's own audit rows (and a `cron`/`manual` already handled)
         // must never re-trigger a reactive round, or it would chase its tail.
-        "overlooker" => {}
+        "watch" => {}
         ev_kind => {
             // Reactive: normalize the raw stream event into the watch-facing
             // trigger vocabulary. An event that maps to no trigger event (a
@@ -348,14 +381,14 @@ pub async fn dispatch(state: &AppState, in_flight: &InFlight, ev: &events::Event
             };
             let repo = event_repo(state, ev).await;
             let session = triggering_session(state, ev).await;
-            let overlookers = match ov::list_enabled(&state.db).await {
+            let watches = match watch_store::list_enabled(&state.db).await {
                 Ok(o) => o,
                 Err(e) => {
-                    tracing::warn!("overlooker dispatch: listing enabled failed: {e}");
+                    tracing::warn!("watch dispatch: listing enabled failed: {e}");
                     return;
                 }
             };
-            for o in overlookers {
+            for o in watches {
                 if o.trigger()
                     .matches_event(&event, level.as_deref(), repo.as_deref())
                 {
@@ -426,11 +459,11 @@ fn trigger_event_of(ev: &events::Event, ev_kind: &str) -> Option<(String, Option
     }
 }
 
-/// The named overlooker carried by a `cron`/`manual` system tick's `{overlooker}`
+/// The named watch carried by a `cron`/`manual` system tick's `{watch}`
 /// field, if it still exists and is enabled.
-async fn resolve_target(state: &AppState, ev: &events::Event) -> Option<Overlooker> {
-    let key = ev.data.get("overlooker").and_then(Value::as_str)?;
-    let o = ov::resolve(&state.db, key).await.ok().flatten()?;
+async fn resolve_target(state: &AppState, ev: &events::Event) -> Option<Watch> {
+    let key = ev.data.get("watch").and_then(Value::as_str)?;
+    let o = watch_store::resolve(&state.db, key).await.ok().flatten()?;
     o.enabled.then_some(o)
 }
 
@@ -474,19 +507,19 @@ async fn triggering_session(state: &AppState, ev: &events::Event) -> Option<Stri
 /// round before a run row was opened (no-overlap / cooldown).
 ///
 /// Guardrails, in order:
-/// 1. **no-overlap** — a re-fire while a round of the same overlooker is in
+/// 1. **no-overlap** — a re-fire while a round of the same watch is in
 ///    flight is dropped (no run row); the in-flight set is the gate.
 /// 2. **cooldown** — a fire inside `max(cooldown_secs, default_cooldown_secs)`
 ///    of the last run is recorded `skipped`. A `manual`/`run-now`, and a watch's
 ///    own self-scheduled `wake`, bypass it (the wake's delay is the gap).
 /// 3. **timeout** — the program is wrapped in a wall-clock budget; an overrun
 ///    is recorded `error`.
-/// 4. **no-recursion** — the survey ([`run_program`]) excludes overlooker warm
+/// 4. **no-recursion** — the survey ([`run_program`]) excludes watch warm
 ///    sessions, so a watcher never acts on another watcher.
 pub async fn fire(
     state: &AppState,
     in_flight: &InFlight,
-    o: &Overlooker,
+    o: &Watch,
     trigger_reason: &str,
     dry_run: bool,
     ctx: &TriggerCtx,
@@ -496,7 +529,7 @@ pub async fn fire(
     {
         let mut set = in_flight.lock().await;
         if !set.insert(o.id.clone()) {
-            tracing::debug!(overlooker = %o.id, "overlooker: round already in flight; skipping re-fire");
+            tracing::debug!(watch = %o.id, "watch: round already in flight; skipping re-fire");
             return None;
         }
     }
@@ -515,7 +548,7 @@ pub async fn fire(
     //    or a self-scheduled wake bypasses it).
     let cooldown = o
         .cooldown_secs
-        .max(get_int(&state.db, "overlooker.default_cooldown_secs", 0).await);
+        .max(get_int(&state.db, "watch.default_cooldown_secs", 0).await);
     if !bypass_cooldown && cooldown > 0 {
         if let Some(last) = o.last_run_at.as_deref().and_then(parse_iso) {
             if (now - last).num_seconds() < cooldown {
@@ -532,18 +565,18 @@ pub async fn fire(
     }
 
     // Open the run row; everything from here closes it via `finish_run`.
-    let run_id = match ov::start_run(&state.db, &o.id, trigger_reason, &ctx.event).await {
+    let run_id = match watch_store::start_run(&state.db, &o.id, trigger_reason, &ctx.event).await {
         Ok(id) => id,
         Err(e) => {
-            tracing::warn!(overlooker = %o.id, "overlooker: opening run row failed: {e}");
+            tracing::warn!(watch = %o.id, "watch: opening run row failed: {e}");
             return None;
         }
     };
-    tracing::info!(overlooker = %o.id, run = run_id, trigger = trigger_reason, "overlooker run started");
+    tracing::info!(watch = %o.id, run = run_id, trigger = trigger_reason, "watch run started");
 
     // 3. Timeout: budget the program run. An overrun is `error`, the schedule
     //    still advances so the next trigger fires.
-    let timeout_secs = get_int(&state.db, "overlooker.default_timeout_secs", 600)
+    let timeout_secs = get_int(&state.db, "watch.default_timeout_secs", 600)
         .await
         .max(1);
     let result = tokio::time::timeout(
@@ -558,28 +591,28 @@ pub async fn fire(
         Err(_) => RoundResult::failed(format!("round exceeded {timeout_secs}s budget")),
     };
 
-    let _ = ov::finish_run(&state.db, run_id, &round.record()).await;
-    tracing::info!(overlooker = %o.id, run = run_id, outcome = %round.outcome, "overlooker run completed");
+    let _ = watch_store::finish_run(&state.db, run_id, &round.record()).await;
+    tracing::info!(watch = %o.id, run = run_id, outcome = %round.outcome, "watch run completed");
     // Stamp the schedule: last_run_at = now; advance next_run_at for a scheduled
-    // overlooker (a reactive one keeps None).
+    // watch (a reactive one keeps None).
     let next = next_fire(o, now).map(iso);
-    let _ = ov::set_schedule(&state.db, &o.id, Some(&iso(now)), next.as_deref()).await;
+    let _ = watch_store::set_schedule(&state.db, &o.id, Some(&iso(now)), next.as_deref()).await;
 
     // Persist the program's lookaside-state write and its dynamic-wake request.
     // These are how a round carries memory forward and self-schedules its next
     // look (e.g. an exponential-backoff recheck) — independent of the cron
     // cadence above.
     if let Some(new_state) = &round.state {
-        let _ = ov::set_state(&state.db, &o.id, new_state).await;
+        let _ = watch_store::set_state(&state.db, &o.id, new_state).await;
     }
     match round.wake {
         Wake::Leave => {}
         Wake::Clear => {
-            let _ = ov::set_wake_at(&state.db, &o.id, None).await;
+            let _ = watch_store::set_wake_at(&state.db, &o.id, None).await;
         }
         Wake::In(secs) => {
             let wake_at = iso(now + chrono::Duration::seconds(secs.max(1)));
-            let _ = ov::set_wake_at(&state.db, &o.id, Some(&wake_at)).await;
+            let _ = watch_store::set_wake_at(&state.db, &o.id, Some(&wake_at)).await;
         }
     }
 
@@ -590,18 +623,18 @@ pub async fn fire(
 /// row, unlike the silent no-overlap drop). Returns the run id.
 async fn record_skipped(
     state: &AppState,
-    o: &Overlooker,
+    o: &Watch,
     trigger_reason: &str,
     trigger_event: &str,
     summary: &str,
 ) -> Option<i64> {
-    let run_id = ov::start_run(&state.db, &o.id, trigger_reason, trigger_event)
+    let run_id = watch_store::start_run(&state.db, &o.id, trigger_reason, trigger_event)
         .await
         .ok()?;
-    let _ = ov::finish_run(
+    let _ = watch_store::finish_run(
         &state.db,
         run_id,
-        &ov::RunRecord {
+        &watch_store::RunRecord {
             outcome: "skipped",
             summary,
             actions: &Value::Array(vec![]),
@@ -619,7 +652,7 @@ async fn record_skipped(
 // The program substrate — the subprocess script executor
 // ---------------------------------------------------------------------------
 
-/// What a round's result asks the engine to do with the overlooker's one-shot
+/// What a round's result asks the engine to do with the watch's one-shot
 /// dynamic wake (`wake_at`). The program controls it via the `wake_in` field of
 /// its result JSON.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -630,7 +663,7 @@ enum Wake {
     Leave,
     /// `wake_in: 0` (or negative) — the program is done; clear any pending wake.
     Clear,
-    /// `wake_in: N` (> 0) — re-fire this overlooker in `N` seconds.
+    /// `wake_in: N` (> 0) — re-fire this watch in `N` seconds.
     In(i64),
 }
 
@@ -673,9 +706,9 @@ impl RoundResult {
         }
     }
 
-    /// Borrow this result as the [`ov::RunRecord`] `finish_run` stores.
-    fn record(&self) -> ov::RunRecord<'_> {
-        ov::RunRecord {
+    /// Borrow this result as the [`watch_store::RunRecord`] `finish_run` stores.
+    fn record(&self) -> watch_store::RunRecord<'_> {
+        watch_store::RunRecord {
             outcome: &self.outcome,
             summary: &self.summary,
             actions: &self.actions,
@@ -687,9 +720,9 @@ impl RoundResult {
     }
 }
 
-/// Resolve the program an overlooker names into its script source: a builtin
+/// Resolve the program a watch names into its script source: a builtin
 /// embedded from [`crate::builtins`], or a custom program file (an absolute
-/// path, conventionally under `~/.weaver/overlookers/`). A bare relative path
+/// path, conventionally under `~/.weaver/watches/`). A bare relative path
 /// or unknown builtin errors.
 fn resolve_source(program: &str) -> anyhow::Result<ScriptSource> {
     if let Some(source) = crate::builtins::find(program).map(|b| b.source) {
@@ -703,15 +736,15 @@ fn resolve_source(program: &str) -> anyhow::Result<ScriptSource> {
         return Ok(ScriptSource::File(path));
     }
     Err(anyhow::anyhow!(
-        "unknown overlooker program '{program}' — expected 'builtin:<name>' or an absolute path"
+        "unknown watch program '{program}' — expected 'builtin:<name>' or an absolute path"
     ))
 }
 
-/// Run the program the overlooker names for one round, handing it the triggering
+/// Run the program the watch names for one round, handing it the triggering
 /// context so a reactive program can scope to the session that changed.
 async fn run_program(
     state: &AppState,
-    o: &Overlooker,
+    o: &Watch,
     dry_run: bool,
     ctx: &TriggerCtx,
 ) -> anyhow::Result<RoundResult> {
@@ -762,7 +795,7 @@ async fn uv_available() -> bool {
 /// Run a **script program**: an env-stripped subprocess (the lint-review
 /// precedent, like [`crate::agent::run_oneshot`]) that reaches the fleet only
 /// through the loom REST API. `$WEAVER_API` carries the daemon's own address
-/// and `$WEAVER_OVERLOOKER` the round config (`{id, name, program, params,
+/// and `$WEAVER_WATCH` the round config (`{id, name, program, params,
 /// scope, capabilities, model, effort, dry_run}`); the vendored `weaver_loom`
 /// module rides
 /// `PYTHONPATH` so every program can import the API layer with no install
@@ -776,7 +809,7 @@ async fn uv_available() -> bool {
 /// declare third-party dependencies; the builtins are stdlib-only).
 async fn run_script(
     state: &AppState,
-    o: &Overlooker,
+    o: &Watch,
     dry_run: bool,
     src: ScriptSource,
     ctx: &TriggerCtx,
@@ -869,7 +902,7 @@ struct ScriptOutput {
 /// Spawn a script subprocess and capture its output. An env-stripped process
 /// (the lint-review precedent, like [`crate::agent::run_oneshot`]) that reaches
 /// the fleet only through the loom REST API: `$WEAVER_API` carries the daemon's
-/// own address and `$WEAVER_OVERLOOKER` the JSON `config`; the vendored
+/// own address and `$WEAVER_WATCH` the JSON `config`; the vendored
 /// `weaver_loom` module rides `PYTHONPATH` so a program imports the API layer
 /// with no install step. The interpreter is `python3`, or `uv run --script` when
 /// the script declares PEP 723 inline metadata and `uv` is installed.
@@ -932,8 +965,8 @@ async fn spawn_script(
     command
         .arg(&script_path)
         .env("WEAVER_API", api_base(&state.addr))
-        .env("WEAVER_OVERLOOKER", config.to_string())
-        .env("WEAVER_OVERLOOKER_MODE", &mode)
+        .env("WEAVER_WATCH", config.to_string())
+        .env("WEAVER_WATCH_MODE", &mode)
         .env("PYTHONPATH", pythonpath)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -975,7 +1008,7 @@ pub async fn evaluate_manifest(
     state: &AppState,
     program: &str,
     params: &Value,
-) -> anyhow::Result<Option<ov::Trigger>> {
+) -> anyhow::Result<Option<watch_store::Trigger>> {
     let src = resolve_source(program)?;
     let config = json!({ "mode": "register", "program": program, "params": params });
     let out = spawn_script(state, &src, &config).await?;
@@ -1047,7 +1080,7 @@ fn parse_round_result(stdout: &str) -> Option<ParsedRound> {
     let outcome = obj
         .get("outcome")
         .and_then(Value::as_str)
-        .filter(|o| ov::OUTCOMES.contains(o))
+        .filter(|o| watch_store::OUTCOMES.contains(o))
         .unwrap_or("ok");
     let summary = obj
         .get("summary")
@@ -1075,18 +1108,18 @@ fn parse_round_result(stdout: &str) -> Option<ParsedRound> {
     })
 }
 
-/// Parse a script's register-mode stdout into a [`ov::Trigger`] subscription
+/// Parse a script's register-mode stdout into a [`watch_store::Trigger`] subscription
 /// manifest, or `None` when it isn't one. A round result (an object carrying
 /// `outcome`/`actions`) is *not* a manifest — that is a legacy script that
 /// doesn't declare subscriptions, so the caller keeps the existing trigger. An
 /// explicit (even empty) `{cron?, every?, on?}` object is accepted.
-fn parse_manifest(stdout: &str) -> Option<ov::Trigger> {
+fn parse_manifest(stdout: &str) -> Option<watch_store::Trigger> {
     let value = parse_last_json_object(stdout)?;
     let obj = value.as_object()?;
     if obj.contains_key("outcome") || obj.contains_key("actions") {
         return None;
     }
-    serde_json::from_value::<ov::Trigger>(value).ok()
+    serde_json::from_value::<watch_store::Trigger>(value).ok()
 }
 
 /// The last `n` bytes-ish of a process stream (on a char boundary), so an
@@ -1109,8 +1142,8 @@ fn tail(s: &str, n: usize) -> String {
 // The in-process entry point for the operator CLI (T8 will call this)
 // ---------------------------------------------------------------------------
 
-/// Fire `key` (an overlooker id or name) now, returning the run id. Used by the
-/// operator's `loom overlooker run` (a later task) and by tests to drive a round
+/// Fire `key` (a watch id or name) now, returning the run id. Used by the
+/// operator's `loom watch run` (a later task) and by tests to drive a round
 /// without waiting on the timer.
 ///
 /// It **runs the round directly** rather than injecting a `manual` event: the
@@ -1125,9 +1158,9 @@ pub async fn fire_now(
     dry_run: bool,
     reason: &str,
 ) -> anyhow::Result<i64> {
-    let o = ov::resolve(&state.db, key)
+    let o = watch_store::resolve(&state.db, key)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("no overlooker '{key}'"))?;
+        .ok_or_else(|| anyhow::anyhow!("no watch '{key}'"))?;
     // A fresh, request-scoped in-flight set: a direct operator run is its own
     // no-overlap domain (the engine loop guards its own concurrent fires).
     let in_flight = new_in_flight();
@@ -1148,35 +1181,32 @@ pub async fn fire_now(
 // Warm-session lifecycle (T12)
 // ---------------------------------------------------------------------------
 
-/// Ensure the warm overlooker `o` has its long-lived, engine-managed session,
+/// Ensure the warm watch `o` has its long-lived, engine-managed session,
 /// returning its id. **Idempotent and reuse-first**: if `o` already owns a live
 /// managed session, that id is returned (and re-linked into `warm_session_id` if
 /// it had drifted) — no duplicate is spawned. The session id is stable across
-/// rounds and across a daemon restart, which is what gives the overlooker its
+/// rounds and across a daemon restart, which is what gives the watch its
 /// across-round memory.
 ///
 /// On first need it forks a dedicated worktree and brings up a real terminal session
 /// (via [`crate::web::create_warm_session`], the same launch machinery ordinary
 /// sessions use), stamps it `managed_by = o.id` so the fleet hides it, and
-/// records its id on the overlooker.
+/// records its id on the watch.
 ///
-/// A non-warm overlooker (`params.warm` unset) returns `Ok(None)` without
-/// spawning anything. The repo to anchor the worktree is the overlooker's
-/// `scope.repo`, else the most recently used repo; an overlooker with no repo to
+/// A non-warm watch (`params.warm` unset) returns `Ok(None)` without
+/// spawning anything. The repo to anchor the worktree is the watch's
+/// `scope.repo`, else the most recently used repo; a watch with no repo to
 /// anchor errors rather than guessing.
-pub async fn ensure_warm_session(
-    state: &AppState,
-    o: &Overlooker,
-) -> anyhow::Result<Option<String>> {
+pub async fn ensure_warm_session(state: &AppState, o: &Watch) -> anyhow::Result<Option<String>> {
     if !o.warm() {
         return Ok(None);
     }
 
     // Reuse-first: an existing live managed session is the warm session. Keep its
-    // id and (cheaply) repair the overlooker linkage if it drifted.
+    // id and (cheaply) repair the watch linkage if it drifted.
     if let Some(existing) = session_mod::active_managed_by(&state.db, &o.id).await? {
         if o.warm_session_id.as_deref() != Some(existing.id.as_str()) {
-            ov::set_warm_session(&state.db, &o.id, Some(&existing.id)).await?;
+            watch_store::set_warm_session(&state.db, &o.id, Some(&existing.id)).await?;
         }
         return Ok(Some(existing.id));
     }
@@ -1196,8 +1226,8 @@ pub async fn ensure_warm_session(
     let session = crate::web::create_warm_session(state, o, &repo_root)
         .await
         .map_err(|e| anyhow::anyhow!("creating warm session: {}", e.message()))?;
-    ov::set_warm_session(&state.db, &o.id, Some(&session.id)).await?;
-    tracing::info!(overlooker = %o.id, session = %session.id, "overlooker warm session created");
+    watch_store::set_warm_session(&state.db, &o.id, Some(&session.id)).await?;
+    tracing::info!(watch = %o.id, session = %session.id, "watch warm session created");
     Ok(Some(session.id))
 }
 
@@ -1205,11 +1235,11 @@ pub async fn ensure_warm_session(
 // Schedule arithmetic (cron + `every` sugar)
 // ---------------------------------------------------------------------------
 
-/// The next fire time for a scheduled overlooker after `from`. A `cron` field is
+/// The next fire time for a scheduled watch after `from`. A `cron` field is
 /// parsed with `croner` (standard 5-field crontab); an `every` field is the
-/// duration sugar (`30m`, `2h`, `45s`). A reactive (non-scheduled) overlooker
+/// duration sugar (`30m`, `2h`, `45s`). A reactive (non-scheduled) watch
 /// has no next fire.
-fn next_fire(o: &Overlooker, from: DateTime<Utc>) -> Option<DateTime<Utc>> {
+fn next_fire(o: &Watch, from: DateTime<Utc>) -> Option<DateTime<Utc>> {
     let trigger = o.trigger();
     if let Some(cron) = trigger.cron.as_deref() {
         return next_cron(cron, from);
@@ -1378,9 +1408,40 @@ mod tests {
 
     use crate::builtins::python3_available;
 
-    /// An `AppState` over a fresh in-memory db plus an overlooker registered on
+    /// Boot seeding gives every builtin program a watch row, enabled and on
+    /// its suggested defaults — and leaves existing rows exactly as they are
+    /// on a re-run, so a user's disable/reconfigure survives restarts.
+    #[tokio::test]
+    async fn seed_builtins_is_idempotent_and_enables_by_default() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        seed_builtins(&db).await.unwrap();
+        let all = watch_store::list(&db).await.unwrap();
+        assert_eq!(all.len(), crate::builtins::BUILTINS.len());
+        for w in &all {
+            assert!(w.enabled, "{}: builtins seed enabled", w.name);
+            assert_eq!(w.program, format!("builtin:{}", w.name));
+        }
+
+        // Disable one, then re-seed: nothing is re-created or re-enabled.
+        watch_store::set_enabled(&db, &all[0].id, false)
+            .await
+            .unwrap();
+        seed_builtins(&db).await.unwrap();
+        let after = watch_store::list(&db).await.unwrap();
+        assert_eq!(after.len(), all.len(), "re-seed adds nothing");
+        assert!(!after.iter().find(|w| w.id == all[0].id).unwrap().enabled);
+
+        // A deleted builtin comes back (stock watches re-seed on boot).
+        watch_store::delete(&db, &all[0].id).await.unwrap();
+        seed_builtins(&db).await.unwrap();
+        let restored = watch_store::list(&db).await.unwrap();
+        assert_eq!(restored.len(), all.len());
+        assert!(restored.iter().any(|w| w.name == all[0].name && w.enabled));
+    }
+
+    /// An `AppState` over a fresh in-memory db plus a watch registered on
     /// `program` — the minimum for a [`fire`] round to run a script end to end.
-    async fn script_fixture(program: &str) -> (AppState, Overlooker) {
+    async fn script_fixture(program: &str) -> (AppState, Watch) {
         let db = crate::db::connect_in_memory().await.unwrap();
         let state = AppState {
             trigger: crate::github_trigger::GithubTrigger::production(db.clone()),
@@ -1389,9 +1450,9 @@ mod tests {
             addr: "127.0.0.1:0".to_string(),
             ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
         };
-        let o = ov::create(
+        let o = watch_store::create(
             &state.db,
-            &ov::NewOverlooker {
+            &watch_store::NewWatch {
                 name: "script-test".to_string(),
                 program: program.to_string(),
                 params: r#"{"label":"weaver"}"#.to_string(),
@@ -1405,7 +1466,7 @@ mod tests {
 
     /// A custom script file round-trips the whole contract **through the
     /// vendored `weaver_loom` module**: the engine puts the API layer on
-    /// PYTHONPATH, the `Round` context exposes the `$WEAVER_OVERLOOKER` config
+    /// PYTHONPATH, the `Round` context exposes the `$WEAVER_WATCH` config
     /// (params and the dry-run flag included), and `finish()`'s printed
     /// `{outcome, summary, actions}` lands on the run row.
     #[tokio::test]
@@ -1440,7 +1501,7 @@ rnd.finish("name=%s label=%s dry=%s api=%s" % (
         )
         .await
         .unwrap();
-        let run = ov::recent_runs(&state.db, &o.id, 10)
+        let run = watch_store::recent_runs(&state.db, &o.id, 10)
             .await
             .unwrap()
             .into_iter()
@@ -1462,7 +1523,7 @@ rnd.finish("name=%s label=%s dry=%s api=%s" % (
     }
 
     /// A round that returns `state` and `wake_in` has both persisted on the
-    /// overlooker row: the lookaside state carries to the next round, and the
+    /// watch row: the lookaside state carries to the next round, and the
     /// dynamic wake is armed for a self-scheduled recheck.
     #[tokio::test]
     async fn fire_persists_state_and_wake() {
@@ -1498,7 +1559,7 @@ rnd.finish("counted to %d" % n)
         )
         .await
         .unwrap();
-        let after = ov::get(&state.db, &o.id).await.unwrap().unwrap();
+        let after = watch_store::get(&state.db, &o.id).await.unwrap().unwrap();
         assert_eq!(after.state(), serde_json::json!({"n": 1}));
         assert!(after.wake_at.is_some(), "a wake_in armed wake_at");
 
@@ -1513,7 +1574,7 @@ rnd.finish("counted to %d" % n)
         )
         .await
         .unwrap();
-        let after = ov::get(&state.db, &o.id).await.unwrap().unwrap();
+        let after = watch_store::get(&state.db, &o.id).await.unwrap().unwrap();
         assert_eq!(after.state(), serde_json::json!({"n": 2}));
     }
 
@@ -1535,9 +1596,9 @@ rnd.finish("counted to %d" % n)
         .unwrap();
         let (state, _) = script_fixture(&script.display().to_string()).await;
         // A long cooldown so a back-to-back re-fire would normally be skipped.
-        let o = ov::create(
+        let o = watch_store::create(
             &state.db,
-            &ov::NewOverlooker {
+            &watch_store::NewWatch {
                 name: "gated".to_string(),
                 program: script.display().to_string(),
                 cooldown_secs: 3600,
@@ -1560,7 +1621,7 @@ rnd.finish("counted to %d" % n)
         )
         .await
         .unwrap();
-        let o = ov::get(&state.db, &o.id).await.unwrap().unwrap();
+        let o = watch_store::get(&state.db, &o.id).await.unwrap().unwrap();
 
         // A plain cron re-fire inside the window is skipped…
         let cron_id = fire(
@@ -1585,15 +1646,17 @@ rnd.finish("counted to %d" % n)
         .await
         .unwrap();
 
-        let runs = ov::recent_runs(&state.db, &o.id, 10).await.unwrap();
+        let runs = watch_store::recent_runs(&state.db, &o.id, 10)
+            .await
+            .unwrap();
         let outcome = |id| runs.iter().find(|r| r.id == id).unwrap().outcome.as_str();
         assert_eq!(outcome(cron_id), "skipped", "cron is gated by cooldown");
         assert_ne!(outcome(wake_id), "skipped", "wake bypasses cooldown");
     }
 
-    /// A due `wake_at` makes the timer emit one `cron` tick for that overlooker
+    /// A due `wake_at` makes the timer emit one `cron` tick for that watch
     /// and clear the column — the dynamic self-trigger, working for a reactive
-    /// overlooker the scheduled timer would otherwise never visit.
+    /// watch the scheduled timer would otherwise never visit.
     #[tokio::test]
     async fn timer_fires_a_due_wake_once_and_clears_it() {
         let db = crate::db::connect_in_memory().await.unwrap();
@@ -1604,11 +1667,11 @@ rnd.finish("counted to %d" % n)
             addr: "127.0.0.1:0".to_string(),
             ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
         };
-        // A reactive overlooker (no cron) — the scheduled half of the timer skips
+        // A reactive watch (no cron) — the scheduled half of the timer skips
         // it; only the wake half should fire it.
-        let o = ov::create(
+        let o = watch_store::create(
             &state.db,
-            &ov::NewOverlooker {
+            &watch_store::NewWatch {
                 name: "waker".to_string(),
                 trigger_spec: r#"{"on":["session.idle"]}"#.to_string(),
                 enabled: true,
@@ -1617,20 +1680,20 @@ rnd.finish("counted to %d" % n)
         )
         .await
         .unwrap();
-        ov::set_wake_at(&state.db, &o.id, Some("2000-01-01T00:00:00.000Z"))
+        watch_store::set_wake_at(&state.db, &o.id, Some("2000-01-01T00:00:00.000Z"))
             .await
             .unwrap();
 
         tick_timer(&state).await;
 
-        // Exactly one cron tick naming this overlooker, and the wake is cleared.
+        // Exactly one cron tick naming this watch, and the wake is cleared.
         let crons: Vec<_> = events::since(&state.db, 0)
             .await
             .unwrap()
             .into_iter()
             .filter(|e| {
                 e.kind == "cron"
-                    && e.data.get("overlooker").and_then(Value::as_str) == Some(o.id.as_str())
+                    && e.data.get("watch").and_then(Value::as_str) == Some(o.id.as_str())
             })
             .collect();
         assert_eq!(crons.len(), 1, "one wake tick emitted");
@@ -1640,7 +1703,7 @@ rnd.finish("counted to %d" % n)
             "the wake tick is marked so it bypasses cooldown"
         );
         assert!(
-            ov::get(&state.db, &o.id)
+            watch_store::get(&state.db, &o.id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1683,7 +1746,7 @@ rnd.finish("counted to %d" % n)
         )
         .await
         .unwrap();
-        let run = ov::recent_runs(&state.db, &o.id, 10)
+        let run = watch_store::recent_runs(&state.db, &o.id, 10)
             .await
             .unwrap()
             .into_iter()

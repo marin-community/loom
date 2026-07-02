@@ -43,7 +43,7 @@ pub async fn run(state: AppState) {
                     last_event = last_event.max(ev.id);
                     match ev.kind.as_str() {
                         // A `tag` write — `weaver status` (the agent's
-                        // `attention`), an overlooker's `triage`, or any free-form
+                        // `attention`), a watch's `triage`, or any free-form
                         // key — or an `artifact_written` from `weaver artifact
                         // write`: recorded daemon-less by the CLI, so it never
                         // touched the bus. Re-broadcast so live dashboards refresh
@@ -83,18 +83,18 @@ pub async fn run(state: AppState) {
         let mut alive: HashSet<String> = HashSet::new();
 
         // Edge-detect no-activity staleness once per walk, gated on the
-        // overlooker master switch (no consumer ⇒ no point emitting). The
+        // watch master switch (no consumer ⇒ no point emitting). The
         // threshold and `now` are read once and shared across the walk.
         let stale_enabled = core_config::get_bool(
             &state.db,
-            "overlooker.enabled",
-            core_config::DEFAULT_OVERLOOKER_ENABLED,
+            "watch.enabled",
+            core_config::DEFAULT_WATCH_ENABLED,
         )
         .await;
-        let stale_after = core_config::get(&state.db, "overlooker.stale_after_secs")
+        let stale_after = core_config::get(&state.db, "watch.stale_after_secs")
             .await
             .and_then(|v| v.trim().parse::<i64>().ok())
-            .unwrap_or(core_config::DEFAULT_OVERLOOKER_STALE_AFTER_SECS);
+            .unwrap_or(core_config::DEFAULT_WATCH_STALE_AFTER_SECS);
         let now = Utc::now();
 
         for session in &sessions {

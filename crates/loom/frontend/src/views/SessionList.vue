@@ -75,7 +75,7 @@ const visibleSessions = computed<Session[]>(() => {
 
 // Counts reflect the full fleet (NOT the archived-hidden view) so the filter
 // chips read the true picture; effectiveAttention() already forces archived → ok
-// and ignores stale overlooker marks, keeping "needs attention" honest.
+// and ignores stale watch marks, keeping "needs attention" honest.
 const counts = computed(() => {
   const c = { all: sessions.value.length, attention: 0, ok: 0 };
   for (const s of sessions.value) {
@@ -123,7 +123,7 @@ const treeRows = computed<TreeRow[]>(() => {
   // than the calm default, and a parked row (waiting on an external reviewer —
   // nothing for the user to do) sinks below it. Used to float urgent threads to
   // the top and sink parked ones to the bottom. Uses the resolved signal (agent's
-  // own report or a non-stale overlooker mark) so a triaged thread floats too —
+  // own report or a non-stale watch mark) so a triaged thread floats too —
   // matching visibleSessions/counts above.
   const rankOf = (s: Session): number => priorityRank(s);
   // Memoized max render rank across a session's whole subtree (itself + all
@@ -354,7 +354,7 @@ async function handleCreated() {
             >
               {{ s.branch.title || s.branch.name }}
             </router-link>
-            <!-- Loud signals: the agent's `attention` and an overlooker's
+            <!-- Loud signals: the agent's `attention` and a watch's
                  `triage`, each a deletable chip. The × clears that tag (calm is
                  its absence) — there is no separate "Mark OK" verb. -->
             <SignalChip

@@ -25,14 +25,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     status             TEXT NOT NULL,
     github_repo        TEXT,
     last_activity_at   TEXT,
-    -- The overlooker id that owns this session when it is engine-managed
+    -- The watch id that owns this session when it is engine-managed
     -- infrastructure — a warm session a watcher keeps for its across-round
     -- memory. NULL for an ordinary fleet session. A managed session is hidden
     -- from the fleet listing and the survey scope, and its restart adoption is
-    -- governed by `overlooker.adopt_warm`, independent of `server.auto_adopt`.
+    -- governed by `watch.adopt_warm`, independent of `server.auto_adopt`.
     managed_by         TEXT,
     -- The principal (username) that launched this session — attribution for the
-    -- shared team board. NULL for engine-created sessions (warm overlooker
+    -- shared team board. NULL for engine-created sessions (warm watch
     -- sessions) and rows that predate the column. A tracking/UX field, never a
     -- security boundary: the fleet stays co-owned, this just records who/what
     -- launched each session.
@@ -256,7 +256,7 @@ async fn migrate_loom(pool: &Db) -> Result<()> {
     // NULL for a top-level session. Sessions predating the column stay NULL (they
     // render flat, as they did before threading existed).
     add_column_if_missing(pool, "sessions", "parent_branch_id", "TEXT").await?;
-    // The owning overlooker id for an engine-managed (warm) session; NULL for an
+    // The owning watch id for an engine-managed (warm) session; NULL for an
     // ordinary fleet session. Sessions predating the column stay NULL (they are
     // all ordinary fleet sessions, as they were before warm sessions existed).
     add_column_if_missing(pool, "sessions", "managed_by", "TEXT").await?;

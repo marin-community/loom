@@ -1,8 +1,8 @@
-//! The Overlooker model: periodic / triggered watch programs over the fleet,
-//! plus the round-execution audit (`overlooker_runs`).
+//! The Watch model: periodic / triggered watch programs over the fleet,
+//! plus the round-execution audit (`watch_runs`).
 //!
 //! This module is **pure storage + parsing**. The engine that actually *runs* an
-//! overlooker — the timer, the dispatcher, the program executor — lives in the
+//! watch — the timer, the dispatcher, the program executor — lives in the
 //! loom daemon, which stays the single owner of the terminal/session runtime. Here
 //! we only describe *what* to watch (the trigger, scope, program, capabilities)
 //! and record *what happened* (each round's outcome and actions).
@@ -22,14 +22,14 @@ use crate::db::{now_iso, Db};
 /// One configured watch definition. `trigger_spec`, `scope`, `params`, and
 /// `capabilities` are stored as JSON text; the typed accessors below parse them.
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct Overlooker {
+pub struct Watch {
     pub id: String,
     pub name: String,
     pub enabled: bool,
     pub trigger_spec: String,
     pub scope: String,
     /// `builtin:<name>` for a stock program, or a path under
-    /// `~/.weaver/overlookers/` for a custom one.
+    /// `~/.weaver/watches/` for a custom one.
     pub program: String,
     pub params: String,
     pub capabilities: String,
@@ -45,7 +45,7 @@ pub struct Overlooker {
     /// watcher keeps per-session attempt counts and retry times here).
     pub state: String,
     /// A one-shot dynamic re-trigger time. When a round returns `wake_in`, the
-    /// engine stamps `now + wake_in` here; the timer fires that overlooker once
+    /// engine stamps `now + wake_in` here; the timer fires that watch once
     /// when due and clears it. Lets a watch self-schedule its next look (a
     /// backoff recheck) independent of any cron cadence.
     pub wake_at: Option<String>,
@@ -197,7 +197,7 @@ impl Scope {
     }
 }
 
-impl Overlooker {
+impl Watch {
     /// Parse the trigger; an unparseable spec yields the empty (never-matching,
     /// never-scheduled) trigger rather than erroring a whole round.
     pub fn trigger(&self) -> Trigger {
@@ -224,10 +224,10 @@ impl Overlooker {
             .unwrap_or_else(|| Value::Object(Default::default()))
     }
 
-    /// Whether this overlooker runs in **warm mode** — the engine keeps one
+    /// Whether this watch runs in **warm mode** — the engine keeps one
     /// long-lived, engine-managed session for it (hidden from the fleet) so it
     /// has across-round memory. Opt in via `params.warm = true`; off by default,
-    /// so an ordinary overlooker spawns no session. Carried in `params` rather
+    /// so an ordinary watch spawns no session. Carried in `params` rather
     /// than a dedicated column to keep the opt-in a zero-migration knob the
     /// existing `params` plumbing (REST, CLI, PyO3) already round-trips.
     pub fn warm(&self) -> bool {
@@ -242,14 +242,14 @@ impl Overlooker {
         serde_json::from_str(&self.capabilities).unwrap_or_default()
     }
 
-    /// Whether the overlooker holds `cap` (gating the intervention ladder).
+    /// Whether the watch holds `cap` (gating the intervention ladder).
     /// `observe` is always granted.
     pub fn has_capability(&self, cap: &str) -> bool {
         cap == "observe" || self.capabilities().iter().any(|c| c == cap)
     }
 }
 
-/// The capabilities an overlooker can hold, calm → loud (the intervention
+/// The capabilities a watch can hold, calm → loud (the intervention
 /// ladder). `observe` is implicit; the rest are explicit grants.
 pub const CAPABILITIES: &[&str] = &[
     "observe",
@@ -260,18 +260,18 @@ pub const CAPABILITIES: &[&str] = &[
     "launch",
 ];
 
-/// Round outcomes recorded on `overlooker_runs.outcome`.
+/// Round outcomes recorded on `watch_runs.outcome`.
 pub const OUTCOMES: &[&str] = &["ok", "noop", "skipped", "error"];
 
 // ---------------------------------------------------------------------------
 // Create / read / update / delete
 // ---------------------------------------------------------------------------
 
-/// The fields needed to register a new overlooker. JSON-bearing fields take the
+/// The fields needed to register a new watch. JSON-bearing fields take the
 /// already-serialized text; the typed `Trigger`/`Scope` serialize cleanly into
 /// them at the call site.
 #[derive(Debug, Clone)]
-pub struct NewOverlooker {
+pub struct NewWatch {
     pub name: String,
     pub trigger_spec: String,
     pub scope: String,
@@ -281,13 +281,13 @@ pub struct NewOverlooker {
     pub model: String,
     pub effort: String,
     pub cooldown_secs: i64,
-    /// Whether the overlooker is live the moment it is created. Defaults to
-    /// `false` so a bare `NewOverlooker` (CLI / seeds / tests) starts disabled;
+    /// Whether the watch is live the moment it is created. Defaults to
+    /// `false` so a bare `NewWatch` (CLI / seeds / tests) starts disabled;
     /// the loom create UI opts in to `true`.
     pub enabled: bool,
 }
 
-impl Default for NewOverlooker {
+impl Default for NewWatch {
     fn default() -> Self {
         Self {
             name: String::new(),
@@ -308,12 +308,12 @@ impl Default for NewOverlooker {
     }
 }
 
-pub async fn create(db: &Db, new: &NewOverlooker) -> Result<Overlooker> {
+pub async fn create(db: &Db, new: &NewWatch) -> Result<Watch> {
     let id = new_id();
     let now = now_iso();
     let caps = serde_json::to_string(&new.capabilities)?;
     sqlx::query(
-        "INSERT INTO overlookers
+        "INSERT INTO watches
            (id, name, enabled, trigger_spec, scope, program, params, capabilities,
             model, effort, cooldown_secs, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -335,53 +335,53 @@ pub async fn create(db: &Db, new: &NewOverlooker) -> Result<Overlooker> {
     .await?;
     get(db, &id)
         .await?
-        .ok_or_else(|| anyhow!("overlooker vanished after insert"))
+        .ok_or_else(|| anyhow!("watch vanished after insert"))
 }
 
-pub async fn get(db: &Db, id: &str) -> Result<Option<Overlooker>> {
+pub async fn get(db: &Db, id: &str) -> Result<Option<Watch>> {
     Ok(
-        sqlx::query_as::<_, Overlooker>("SELECT * FROM overlookers WHERE id = ?")
+        sqlx::query_as::<_, Watch>("SELECT * FROM watches WHERE id = ?")
             .bind(id)
             .fetch_optional(db)
             .await?,
     )
 }
 
-pub async fn get_by_name(db: &Db, name: &str) -> Result<Option<Overlooker>> {
+pub async fn get_by_name(db: &Db, name: &str) -> Result<Option<Watch>> {
     Ok(
-        sqlx::query_as::<_, Overlooker>("SELECT * FROM overlookers WHERE name = ?")
+        sqlx::query_as::<_, Watch>("SELECT * FROM watches WHERE name = ?")
             .bind(name)
             .fetch_optional(db)
             .await?,
     )
 }
 
-/// Resolve an overlooker by id or by name (the operator CLI accepts either).
-pub async fn resolve(db: &Db, key: &str) -> Result<Option<Overlooker>> {
+/// Resolve a watch by id or by name (the operator CLI accepts either).
+pub async fn resolve(db: &Db, key: &str) -> Result<Option<Watch>> {
     if let Some(o) = get(db, key).await? {
         return Ok(Some(o));
     }
     get_by_name(db, key).await
 }
 
-pub async fn list(db: &Db) -> Result<Vec<Overlooker>> {
+pub async fn list(db: &Db) -> Result<Vec<Watch>> {
     Ok(
-        sqlx::query_as::<_, Overlooker>("SELECT * FROM overlookers ORDER BY name ASC")
+        sqlx::query_as::<_, Watch>("SELECT * FROM watches ORDER BY name ASC")
             .fetch_all(db)
             .await?,
     )
 }
 
-pub async fn list_enabled(db: &Db) -> Result<Vec<Overlooker>> {
-    Ok(sqlx::query_as::<_, Overlooker>(
-        "SELECT * FROM overlookers WHERE enabled = 1 ORDER BY name ASC",
+pub async fn list_enabled(db: &Db) -> Result<Vec<Watch>> {
+    Ok(
+        sqlx::query_as::<_, Watch>("SELECT * FROM watches WHERE enabled = 1 ORDER BY name ASC")
+            .fetch_all(db)
+            .await?,
     )
-    .fetch_all(db)
-    .await?)
 }
 
 pub async fn set_enabled(db: &Db, id: &str, enabled: bool) -> Result<()> {
-    sqlx::query("UPDATE overlookers SET enabled = ?, updated_at = ? WHERE id = ?")
+    sqlx::query("UPDATE watches SET enabled = ?, updated_at = ? WHERE id = ?")
         .bind(enabled)
         .bind(now_iso())
         .bind(id)
@@ -390,12 +390,12 @@ pub async fn set_enabled(db: &Db, id: &str, enabled: bool) -> Result<()> {
     Ok(())
 }
 
-/// A partial update of an overlooker's mutable definition: every field is
+/// A partial update of a watch's mutable definition: every field is
 /// optional, and only the `Some(_)` ones are written (`enabled` is handled by
 /// [`set_enabled`], schedule bookkeeping by [`set_schedule`]). JSON-bearing
-/// fields take the already-serialized text, mirroring [`NewOverlooker`].
+/// fields take the already-serialized text, mirroring [`NewWatch`].
 #[derive(Debug, Clone, Default)]
-pub struct OverlookerUpdate {
+pub struct WatchUpdate {
     pub trigger_spec: Option<String>,
     pub scope: Option<String>,
     pub program: Option<String>,
@@ -406,7 +406,7 @@ pub struct OverlookerUpdate {
     pub cooldown_secs: Option<i64>,
 }
 
-impl OverlookerUpdate {
+impl WatchUpdate {
     /// Whether any field is set — lets a caller skip a no-op write.
     pub fn is_empty(&self) -> bool {
         self.trigger_spec.is_none()
@@ -420,16 +420,16 @@ impl OverlookerUpdate {
     }
 }
 
-/// Apply a partial update to an overlooker's mutable fields. Each `Some(_)`
+/// Apply a partial update to a watch's mutable fields. Each `Some(_)`
 /// overwrites; `COALESCE(?, col)` leaves an absent field untouched. `updated_at`
 /// always advances.
-pub async fn update(db: &Db, id: &str, patch: &OverlookerUpdate) -> Result<()> {
+pub async fn update(db: &Db, id: &str, patch: &WatchUpdate) -> Result<()> {
     let caps = match &patch.capabilities {
         Some(c) => Some(serde_json::to_string(c)?),
         None => None,
     };
     sqlx::query(
-        "UPDATE overlookers SET
+        "UPDATE watches SET
            trigger_spec  = COALESCE(?, trigger_spec),
            scope         = COALESCE(?, scope),
            program       = COALESCE(?, program),
@@ -465,7 +465,7 @@ pub async fn set_schedule(
     next_run_at: Option<&str>,
 ) -> Result<()> {
     sqlx::query(
-        "UPDATE overlookers SET last_run_at = COALESCE(?, last_run_at),
+        "UPDATE watches SET last_run_at = COALESCE(?, last_run_at),
            next_run_at = ?, updated_at = ? WHERE id = ?",
     )
     .bind(last_run_at)
@@ -480,7 +480,7 @@ pub async fn set_schedule(
 /// Persist a round's lookaside `state` (the JSON blob it returned). Replaces the
 /// prior state wholesale — the program reads it back as `rnd.state` next round.
 pub async fn set_state(db: &Db, id: &str, state: &Value) -> Result<()> {
-    sqlx::query("UPDATE overlookers SET state = ?, updated_at = ? WHERE id = ?")
+    sqlx::query("UPDATE watches SET state = ?, updated_at = ? WHERE id = ?")
         .bind(state.to_string())
         .bind(now_iso())
         .bind(id)
@@ -490,10 +490,10 @@ pub async fn set_state(db: &Db, id: &str, state: &Value) -> Result<()> {
 }
 
 /// Set (or clear, with `None`) the one-shot dynamic wake time. The timer fires
-/// the overlooker once when `wake_at` is due and clears it; a round re-arms it by
+/// the watch once when `wake_at` is due and clears it; a round re-arms it by
 /// returning a fresh `wake_in`.
 pub async fn set_wake_at(db: &Db, id: &str, wake_at: Option<&str>) -> Result<()> {
-    sqlx::query("UPDATE overlookers SET wake_at = ?, updated_at = ? WHERE id = ?")
+    sqlx::query("UPDATE watches SET wake_at = ?, updated_at = ? WHERE id = ?")
         .bind(wake_at)
         .bind(now_iso())
         .bind(id)
@@ -503,7 +503,7 @@ pub async fn set_wake_at(db: &Db, id: &str, wake_at: Option<&str>) -> Result<()>
 }
 
 pub async fn set_warm_session(db: &Db, id: &str, session_id: Option<&str>) -> Result<()> {
-    sqlx::query("UPDATE overlookers SET warm_session_id = ?, updated_at = ? WHERE id = ?")
+    sqlx::query("UPDATE watches SET warm_session_id = ?, updated_at = ? WHERE id = ?")
         .bind(session_id)
         .bind(now_iso())
         .bind(id)
@@ -513,11 +513,11 @@ pub async fn set_warm_session(db: &Db, id: &str, session_id: Option<&str>) -> Re
 }
 
 pub async fn delete(db: &Db, id: &str) -> Result<()> {
-    sqlx::query("DELETE FROM overlookers WHERE id = ?")
+    sqlx::query("DELETE FROM watches WHERE id = ?")
         .bind(id)
         .execute(db)
         .await?;
-    sqlx::query("DELETE FROM overlooker_runs WHERE overlooker_id = ?")
+    sqlx::query("DELETE FROM watch_runs WHERE watch_id = ?")
         .bind(id)
         .execute(db)
         .await?;
@@ -528,14 +528,14 @@ pub async fn delete(db: &Db, id: &str) -> Result<()> {
 // Runs (the audit trail)
 // ---------------------------------------------------------------------------
 
-/// One execution of an overlooker — a "round". `actions` is the JSON list of
+/// One execution of a watch — a "round". `actions` is the JSON list of
 /// marks / nudges / etc. it took; `stdout`/`stderr`/`exit_code`/`duration_ms`
 /// are the script's captured output (the execution log), and `trigger_event`
 /// the normalized event that woke it (`cron` / `manual` / e.g. `pr.merged`).
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct OverlookerRun {
+pub struct WatchRun {
     pub id: i64,
-    pub overlooker_id: String,
+    pub watch_id: String,
     pub trigger_reason: String,
     pub trigger_event: String,
     pub started_at: String,
@@ -569,15 +569,15 @@ pub struct RunRecord<'a> {
 /// [`finish_run`].
 pub async fn start_run(
     db: &Db,
-    overlooker_id: &str,
+    watch_id: &str,
     trigger_reason: &str,
     trigger_event: &str,
 ) -> Result<i64> {
     let row = sqlx::query(
-        "INSERT INTO overlooker_runs (overlooker_id, trigger_reason, trigger_event, started_at)
+        "INSERT INTO watch_runs (watch_id, trigger_reason, trigger_event, started_at)
          VALUES (?, ?, ?, ?) RETURNING id",
     )
-    .bind(overlooker_id)
+    .bind(watch_id)
     .bind(trigger_reason)
     .bind(trigger_event)
     .bind(now_iso())
@@ -589,7 +589,7 @@ pub async fn start_run(
 /// Close a run row with its outcome, summary, actions, and captured output.
 pub async fn finish_run(db: &Db, run_id: i64, rec: &RunRecord<'_>) -> Result<()> {
     sqlx::query(
-        "UPDATE overlooker_runs SET finished_at = ?, outcome = ?, summary = ?, actions = ?,
+        "UPDATE watch_runs SET finished_at = ?, outcome = ?, summary = ?, actions = ?,
            stdout = ?, stderr = ?, exit_code = ?, duration_ms = ?
          WHERE id = ?",
     )
@@ -607,11 +607,11 @@ pub async fn finish_run(db: &Db, run_id: i64, rec: &RunRecord<'_>) -> Result<()>
     Ok(())
 }
 
-pub async fn recent_runs(db: &Db, overlooker_id: &str, limit: i64) -> Result<Vec<OverlookerRun>> {
-    Ok(sqlx::query_as::<_, OverlookerRun>(
-        "SELECT * FROM overlooker_runs WHERE overlooker_id = ? ORDER BY id DESC LIMIT ?",
+pub async fn recent_runs(db: &Db, watch_id: &str, limit: i64) -> Result<Vec<WatchRun>> {
+    Ok(sqlx::query_as::<_, WatchRun>(
+        "SELECT * FROM watch_runs WHERE watch_id = ? ORDER BY id DESC LIMIT ?",
     )
-    .bind(overlooker_id)
+    .bind(watch_id)
     .bind(limit)
     .fetch_all(db)
     .await?)
@@ -626,7 +626,7 @@ mod tests {
         let db = crate::db::connect_in_memory().await.unwrap();
         let o = create(
             &db,
-            &NewOverlooker {
+            &NewWatch {
                 name: "status-check".to_string(),
                 trigger_spec: r#"{"cron":"0 * * * *"}"#.to_string(),
                 scope: r#"{"attention":"!ok"}"#.to_string(),
@@ -635,7 +635,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(!o.enabled, "new overlookers start disabled");
+        assert!(!o.enabled, "new watches start disabled");
         assert_eq!(
             resolve(&db, &o.id).await.unwrap().unwrap().name,
             "status-check"
@@ -651,7 +651,7 @@ mod tests {
         let db = crate::db::connect_in_memory().await.unwrap();
         let o = create(
             &db,
-            &NewOverlooker {
+            &NewWatch {
                 name: "blocked-watch".to_string(),
                 trigger_spec: r#"{"event":"attention","level":"blocked","repo":"/r"}"#.to_string(),
                 scope: r#"{"attention":"!ok","repo":"/r"}"#.to_string(),
@@ -712,7 +712,7 @@ mod tests {
         let db = crate::db::connect_in_memory().await.unwrap();
         let o = create(
             &db,
-            &NewOverlooker {
+            &NewWatch {
                 name: "auditor".to_string(),
                 ..Default::default()
             },
@@ -751,14 +751,14 @@ mod tests {
         let db = crate::db::connect_in_memory().await.unwrap();
         let o = create(
             &db,
-            &NewOverlooker {
+            &NewWatch {
                 name: "stateful".to_string(),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
-        // Fresh overlookers default to an empty state and no pending wake.
+        // Fresh watches default to an empty state and no pending wake.
         assert_eq!(o.state(), serde_json::json!({}));
         assert!(o.wake_at.is_none());
 
@@ -783,7 +783,7 @@ mod tests {
         let db = crate::db::connect_in_memory().await.unwrap();
         let o = create(
             &db,
-            &NewOverlooker {
+            &NewWatch {
                 name: "patchme".to_string(),
                 program: "builtin:status".to_string(),
                 cooldown_secs: 10,
@@ -795,7 +795,7 @@ mod tests {
         update(
             &db,
             &o.id,
-            &OverlookerUpdate {
+            &WatchUpdate {
                 program: Some("/abs/path.py".to_string()),
                 capabilities: Some(vec!["observe".to_string(), "nudge".to_string()]),
                 ..Default::default()
@@ -811,7 +811,7 @@ mod tests {
 
     #[test]
     fn capabilities_default_to_observe_plus_grants() {
-        let o = Overlooker {
+        let o = Watch {
             id: "x".into(),
             name: "x".into(),
             enabled: false,

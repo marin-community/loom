@@ -26,8 +26,8 @@ use crate::{
 use weaver_api::{CreateReq, PatchSessionReq, SendReq, SessionView, TagReq};
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::Branch;
-use weaver_core::overlooker::{self as ov, Overlooker};
 use weaver_core::tags;
+use weaver_core::watch::{self as watch_store, Watch};
 
 use super::scratch::{scratch_note, write_initial_scratch};
 use super::{author_or_manual, require_branch, require_session, session_view};
@@ -71,13 +71,13 @@ pub(super) async fn list_sessions(
     Query(q): Query<ListSessionsQuery>,
 ) -> ApiResult<Json<Vec<SessionView>>> {
     // The fleet listing shows work, not infrastructure: engine-managed (warm)
-    // sessions are excluded here, so neither the dashboard nor an overlooker
+    // sessions are excluded here, so neither the dashboard nor a watch
     // round's survey (scripts read this route) ever sees a watcher's own
     // session — the no-recursion guarantee. `list_visible` drops `managed_by`
     // rows; the `warm_session_id` check below is belt-and-braces for a warm
     // session not yet stamped. Internal liveness/adopt paths use
     // `session::list` instead.
-    let warm: std::collections::HashSet<String> = ov::list(&st.db)
+    let warm: std::collections::HashSet<String> = watch_store::list(&st.db)
         .await?
         .into_iter()
         .filter_map(|o| o.warm_session_id)
@@ -236,7 +236,7 @@ fn config_env_pairs(cfg: &weaver_core::repo_config::RepoConfig) -> Vec<(String, 
 }
 
 /// Load a repo's `.weaver/config.toml`, logging and degrading to the empty config
-/// on a parse error. For the infra launch paths (warm overlooker session, adopt)
+/// on a parse error. For the infra launch paths (warm watch session, adopt)
 /// where there is no create-time request to reject: the file only supplies env
 /// and defaults there, so a malformed one must not block resuming a session — but
 /// it still gets logged rather than silently swallowed.
@@ -1216,7 +1216,7 @@ async fn create_tracking_issue(
 
 /// Set (upsert) a tag on a session's branch: validate `value` against the key's
 /// ladder, write the tag, and broadcast a `tag` event. The well-known keys are
-/// `attention` (the agent's self-report) and `triage` (an overlooker's, or a
+/// `attention` (the agent's self-report) and `triage` (a watch's, or a
 /// hand operator's, assessment); any other key is a free-form quiet pill. To
 /// return a loud key to calm, `DELETE` the tag rather than setting an `ok` value.
 pub(super) async fn set_session_tag(
@@ -1249,7 +1249,7 @@ pub(super) async fn set_session_tag(
 /// Clear a tag on a session's branch — delete the row and broadcast a `tag`
 /// event with an empty value (the cleared signal). How a loud axis returns to
 /// calm (`ok`). A no-op when the tag is already absent. DELETE carries no
-/// body, so the author rides the `by` query parameter (an overlooker name),
+/// body, so the author rides the `by` query parameter (a watch name),
 /// defaulting to `manual`.
 pub(super) async fn clear_session_tag(
     State(st): State<AppState>,
@@ -1481,20 +1481,20 @@ pub(super) async fn refresh_github_session(
     Ok(Json(session_view(&st.db, &session, &branch).await?))
 }
 
-/// Bring up an engine-managed (warm) session for an overlooker, reusing the same
+/// Bring up an engine-managed (warm) session for a watch, reusing the same
 /// branch/worktree/terminal launch machinery as an ordinary session — the only
-/// differences are that it forks a dedicated `weaver/overlooker-<name>` branch
-/// and the row is stamped `managed_by = overlooker.id` so the fleet listing and
+/// differences are that it forks a dedicated `weaver/watch-<name>` branch
+/// and the row is stamped `managed_by = watch.id` so the fleet listing and
 /// every survey hide it.
 ///
 /// A warm session is the watcher's own long-lived agent; its persistence across
-/// rounds (the same terminal/worktree, resumed on adopt) is what gives the overlooker
+/// rounds (the same terminal/worktree, resumed on adopt) is what gives the watch
 /// across-round memory. The engine calls this once, on first need
-/// ([`crate::overlooker::ensure_warm_session`]); thereafter it reuses the stored
+/// ([`crate::watch::ensure_warm_session`]); thereafter it reuses the stored
 /// session id.
 pub(crate) async fn create_warm_session(
     st: &AppState,
-    overlooker: &Overlooker,
+    watch: &Watch,
     repo_root: &std::path::Path,
 ) -> Result<Session, AppError> {
     let repo_root = repo_root
@@ -1503,9 +1503,9 @@ pub(crate) async fn create_warm_session(
     let repo_root_str = repo_root.display().to_string();
     let base = git::default_base(&repo_root).await?;
 
-    // A stable, collision-resistant branch slug per overlooker; if an old warm
+    // A stable, collision-resistant branch slug per watch; if an old warm
     // branch lingers (a prior warm session was archived), suffix to a fresh one.
-    let base_slug = format!("overlooker-{}", branch_mod::slugify(&overlooker.name));
+    let base_slug = format!("watch-{}", branch_mod::slugify(&watch.name));
     let mut slug = base_slug.clone();
     let mut suffix = 2;
     loop {
@@ -1526,22 +1526,17 @@ pub(crate) async fn create_warm_session(
         .map_err(|e| AppError::bad_request(e.to_string()))?;
 
     let branch = branch_mod::upsert(&st.db, &repo_root_str, &branch_name, &base).await?;
-    branch_mod::set_title(
-        &st.db,
-        &branch.id,
-        &format!("overlooker {}", overlooker.name),
-    )
-    .await?;
+    branch_mod::set_title(&st.db, &branch.id, &format!("watch {}", watch.name)).await?;
 
     let session_id = branch_mod::new_id();
     let run_dir = db::run_dir(&session_id);
     tokio::fs::create_dir_all(&run_dir).await?;
 
-    // The warm session runs the configured default agent (the overlooker's
+    // The warm session runs the configured default agent (the watch's
     // judging agent, normally `claude`); its `prompt` param, when set, seeds the
     // first turn.
     let agent = configured_agent(&st.db, "agent.default", config::DEFAULT_AGENT).await;
-    let goal_file = match overlooker
+    let goal_file = match watch
         .params()
         .get("prompt")
         .and_then(Value::as_str)
@@ -1567,11 +1562,11 @@ pub(crate) async fn create_warm_session(
             work_dir: &work_dir,
             term_session: &term_session,
             goal_file: goal_file.as_deref(),
-            // A warm overlooker session is never the concierge, so no primer.
+            // A warm watch session is never the concierge, so no primer.
             primer_file: None,
             server_addr: &st.addr,
-            model: &overlooker.model,
-            effort: &overlooker.effort,
+            model: &watch.model,
+            effort: &watch.effort,
             extra_env: &extra_env,
         },
         agent::LaunchMode::Fresh,
@@ -1588,12 +1583,12 @@ pub(crate) async fn create_warm_session(
             work_dir: work_dir.display().to_string(),
             term_session,
             agent_kind: agent,
-            model: overlooker.model.clone(),
-            effort: overlooker.effort.clone(),
+            model: watch.model.clone(),
+            effort: watch.effort.clone(),
             status: status.to_string(),
             github_repo: None,
             parent_branch_id: None,
-            managed_by: Some(overlooker.id.clone()),
+            managed_by: Some(watch.id.clone()),
             // Engine-created infrastructure, no user behind it.
             created_by: None,
         },
@@ -1602,7 +1597,7 @@ pub(crate) async fn create_warm_session(
 
     repo::record_use(&st.db, &repo_root_str).await.ok();
     tracing::info!(
-        overlooker = %overlooker.id,
+        watch = %watch.id,
         session = %session.id,
         "warm session created"
     );
@@ -1948,7 +1943,7 @@ async fn require_live_terminal(session: &Session) -> ApiResult<()> {
 /// Type a message into a session's agent pane and, by default, submit it with
 /// Enter to trigger an agent round. Every send is also a `nudge` events row
 /// (the audit rule — every mutating action is an events row), attributed to
-/// `by` (an overlooker name, or `manual` when absent).
+/// `by` (a watch name, or `manual` when absent).
 pub(super) async fn send_session(
     State(st): State<AppState>,
     Path(key): Path<String>,

@@ -24,7 +24,6 @@ pub mod ide;
 pub mod logs;
 pub mod loom_config;
 pub mod monitor;
-pub mod overlooker;
 pub mod repo;
 pub mod repo_env;
 pub mod server;
@@ -33,6 +32,7 @@ pub mod setup;
 pub mod shell;
 pub mod terminal;
 pub mod user_token;
+pub mod watch;
 pub mod web;
 
 pub use web::AppState;

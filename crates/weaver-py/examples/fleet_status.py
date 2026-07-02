@@ -2,7 +2,7 @@
 """fleet_status — the acceptance demo for weaver_py.
 
 Query the fleet and, capabilities permitting, mark a session. This is the
-out-of-process overlooker pattern in miniature: a plain Python script driving
+out-of-process watch pattern in miniature: a plain Python script driving
 the loom REST API through the binding, with the capability gate enforced in the
 binding so the script can never exceed its grant.
 

@@ -152,8 +152,8 @@ well known:
   is what `weaver status` writes; `ok` is the absence of the tag, so
   `weaver status ok` clears it. Absence is the calm state — a calm branch carries no
   attention tag, only its `description` message.
-- `triage` — an overlooker's outside assessment of your branch, the same
-  `attention`/`blocked` ladder but authored by an overlooker (or `manual`), never
+- `triage` — a watch's outside assessment of your branch, the same
+  `attention`/`blocked` ladder but authored by a watch (or `manual`), never
   by you. It is independent of your `attention` tag and carries its own reason
   and attribution.
 - `idle` — a soothing, *quiet* mark stamped mechanically when your agent goes

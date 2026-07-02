@@ -296,7 +296,7 @@ without an SSH tunnel — `loom server run --addr 0.0.0.0:7878`, ideally behind 
 TLS-terminating reverse proxy. Access is then gated three ways:
 
 - **Local use needs nothing.** Requests from the loopback interface are trusted
-  as the machine owner, so the local `loom` CLI, the agent, and overlooker
+  as the machine owner, so the local `loom` CLI, the agent, and watch
   scripts keep working with zero configuration. (Turn this off with
   `auth.trust_loopback false` behind a *same-host* proxy — see below.)
 - **GitHub or password login** for the web UI. The login screen offers

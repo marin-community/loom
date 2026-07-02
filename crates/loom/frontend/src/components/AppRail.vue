@@ -13,7 +13,7 @@ interface RailItem {
   to: string;
   /** The short rail caption (the rail is 56px — long names don't fit). */
   label: string;
-  /** Tooltip; defaults to the label. Lets "Watch" expand to "Overlookers". */
+  /** Tooltip; defaults to the label. Lets "Watch" expand to "Watches". */
   title?: string;
   /** Active when the current path matches one of these prefixes ('/' is exact,
    *  plus the session pages which drill down from the fleet list). */
@@ -49,10 +49,10 @@ const MAIN: RailItem[] = [
     ],
   },
   {
-    to: '/overlookers',
+    to: '/watches',
     label: 'Watch',
-    title: 'Overlookers — watch agents over the fleet',
-    match: (p) => p.startsWith('/overlookers'),
+    title: 'Watches — watch agents over the fleet',
+    match: (p) => p.startsWith('/watches'),
     // eye — the watchers over the fleet.
     paths: [
       'M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0',

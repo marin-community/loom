@@ -1,4 +1,4 @@
-//! The Overlooker engine's **wiring**: the dispatcher's event→trigger
+//! The Watch engine's **wiring**: the dispatcher's event→trigger
 //! matching, rounds landing marks and audit rows against the live server, and
 //! the guardrails (cooldown / no-overlap → `skipped`).
 //!
@@ -9,7 +9,7 @@
 //!
 //! These cases drive the engine **directly** on the test server's isolated db
 //! rather than through the spawned background loop: the test harness pins the
-//! `overlooker.enabled` master switch off (it ships on by default), so the
+//! `watch.enabled` master switch off (it ships on by default), so the
 //! daemon's own engine idles and never races these deterministic calls. Each
 //! test builds its own
 //! `AppState` over the same isolated db (the harness exports `WEAVER_HOME`) and
@@ -24,9 +24,9 @@ use serial_test::serial;
 
 use loom::events::EventBus;
 use loom::web::AppState;
-use loom::{backend, db, events, monitor, overlooker, server, session as session_mod};
+use loom::{backend, db, events, monitor, server, session as session_mod, watch};
 use weaver_core::config as core_config;
-use weaver_core::overlooker as ov;
+use weaver_core::watch as watch_store;
 
 use crate::fixtures::{branch_tag, branch_tag_value, TestServer};
 
@@ -60,11 +60,13 @@ async fn make_session(ts: &TestServer, goal: &str) -> (String, String, String) {
     (id, branch_id, repo_root)
 }
 
-/// Register an enabled overlooker and return it.
-async fn enabled_overlooker(state: &AppState, new: ov::NewOverlooker) -> ov::Overlooker {
-    let o = ov::create(&state.db, &new).await.unwrap();
-    ov::set_enabled(&state.db, &o.id, true).await.unwrap();
-    ov::get(&state.db, &o.id).await.unwrap().unwrap()
+/// Register an enabled watch and return it.
+async fn enabled_watch(state: &AppState, new: watch_store::NewWatch) -> watch_store::Watch {
+    let o = watch_store::create(&state.db, &new).await.unwrap();
+    watch_store::set_enabled(&state.db, &o.id, true)
+        .await
+        .unwrap();
+    watch_store::get(&state.db, &o.id).await.unwrap().unwrap()
 }
 
 /// The test-owned **survey fixture program** (`programs/survey.py`): records
@@ -91,7 +93,7 @@ fn survey_triggered_program() -> String {
 }
 
 /// The session ids a run's recorded `survey` actions name.
-fn surveyed_ids(run: &ov::OverlookerRun) -> Vec<String> {
+fn surveyed_ids(run: &watch_store::WatchRun) -> Vec<String> {
     serde_json::from_str::<serde_json::Value>(&run.actions)
         .ok()
         .and_then(|v| v.as_array().cloned())
@@ -102,7 +104,7 @@ fn surveyed_ids(run: &ov::OverlookerRun) -> Vec<String> {
         .collect()
 }
 
-/// T4: a reactive event whose trigger matches fires the right overlooker exactly
+/// T4: a reactive event whose trigger matches fires the right watch exactly
 /// once and lands a run row; a repo filter excludes another repo's event; and
 /// re-firing the same event is idempotent (a fresh re-survey, never a second
 /// "handling" of the event).
@@ -127,11 +129,11 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
         .await
         .unwrap();
 
-    // An overlooker reacting to `attention` events in *this* repo, surveying
+    // A watch reacting to `attention` events in *this* repo, surveying
     // the scoped (non-ok) fleet via the test-owned fixture program.
-    let o = enabled_overlooker(
+    let o = enabled_watch(
         &state,
-        ov::NewOverlooker {
+        watch_store::NewWatch {
             name: "blocked-watch".to_string(),
             trigger_spec: json!({ "event": "attention", "repo": repo_root }).to_string(),
             scope: json!({ "attention": "!ok" }).to_string(),
@@ -142,7 +144,7 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
     )
     .await;
 
-    let in_flight = overlooker::new_in_flight();
+    let in_flight = watch::new_in_flight();
 
     // A matching reactive event: a `tag` write of the `attention` tag (value
     // `blocked`) on a branch in this repo. The dispatcher maps the tag's
@@ -154,11 +156,13 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
         data: json!({ "key": "attention", "value": "blocked" }),
         created_at: db::now_iso(),
     };
-    overlooker::dispatch(&state, &in_flight, &ev).await;
+    watch::dispatch(&state, &in_flight, &ev).await;
 
     // Exactly one run, and its run row records the survey of the in-scope
     // session — the engine-observable proof the round ran.
-    let runs = ov::recent_runs(&state.db, &o.id, 10).await.unwrap();
+    let runs = watch_store::recent_runs(&state.db, &o.id, 10)
+        .await
+        .unwrap();
     assert_eq!(runs.len(), 1, "one matching event fires exactly one round");
     assert_eq!(runs[0].outcome, "ok");
     assert_eq!(
@@ -169,8 +173,10 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
 
     // Re-firing the identical event is idempotent: level-triggered, the round
     // just re-surveys the current fleet — a fresh run row, same survey.
-    overlooker::dispatch(&state, &in_flight, &ev).await;
-    let runs = ov::recent_runs(&state.db, &o.id, 10).await.unwrap();
+    watch::dispatch(&state, &in_flight, &ev).await;
+    let runs = watch_store::recent_runs(&state.db, &o.id, 10)
+        .await
+        .unwrap();
     assert_eq!(runs.len(), 2, "a re-fire is a fresh round");
     assert_eq!(
         surveyed_ids(&runs[0]),
@@ -179,8 +185,11 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
     );
 
     // The repo filter excludes an event from another repo: same kind/level but a
-    // branch that lives elsewhere must not fire this overlooker.
-    let runs_before = ov::recent_runs(&state.db, &o.id, 100).await.unwrap().len();
+    // branch that lives elsewhere must not fire this watch.
+    let runs_before = watch_store::recent_runs(&state.db, &o.id, 100)
+        .await
+        .unwrap()
+        .len();
     let other_repo_event = events::Event {
         id: 0,
         // A system (branchless) event carries no repo, so the repo-filtered
@@ -190,8 +199,11 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
         data: json!({ "key": "attention", "value": "blocked" }),
         created_at: db::now_iso(),
     };
-    overlooker::dispatch(&state, &in_flight, &other_repo_event).await;
-    let runs_after = ov::recent_runs(&state.db, &o.id, 100).await.unwrap().len();
+    watch::dispatch(&state, &in_flight, &other_repo_event).await;
+    let runs_after = watch_store::recent_runs(&state.db, &o.id, 100)
+        .await
+        .unwrap()
+        .len();
     assert_eq!(
         runs_before, runs_after,
         "a repo-filtered trigger ignores an event from outside its repo"
@@ -204,12 +216,12 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
 }
 
 /// T7: a session that crosses the staleness threshold causes the monitor to emit
-/// a one-shot `stale` event, an overlooker with an `{"event":"stale"}` trigger
+/// a one-shot `stale` event, a watch with an `{"event":"stale"}` trigger
 /// fires a round off it, and the emission is edge-detected — driving the
 /// staleness check twice produces exactly one `stale` row, not one per pass.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stale_session_emits_one_event_and_wakes_a_reactive_overlooker() {
+async fn stale_session_emits_one_event_and_wakes_a_reactive_watch() {
     if !python3_available() {
         eprintln!("skipping: python3 not on PATH");
         return;
@@ -219,7 +231,7 @@ async fn stale_session_emits_one_event_and_wakes_a_reactive_overlooker() {
     let (session_id, _branch_id, _repo_root) = make_session(&ts, "go stale").await;
 
     // The session reports `attention` about itself so it falls inside the
-    // overlooker's `!ok` scope (the survey will name it, proving it ran).
+    // watch's `!ok` scope (the survey will name it, proving it ran).
     ts.client
         .put(
             &format!("/api/sessions/{session_id}/tags/attention"),
@@ -228,10 +240,10 @@ async fn stale_session_emits_one_event_and_wakes_a_reactive_overlooker() {
         .await
         .unwrap();
 
-    // A reactive overlooker matching `stale` events fleet-wide.
-    let o = enabled_overlooker(
+    // A reactive watch matching `stale` events fleet-wide.
+    let o = enabled_watch(
         &state,
-        ov::NewOverlooker {
+        watch_store::NewWatch {
             name: "stale-watch".to_string(),
             trigger_spec: json!({ "event": "stale" }).to_string(),
             scope: json!({ "attention": "!ok" }).to_string(),
@@ -281,9 +293,11 @@ async fn stale_session_emits_one_event_and_wakes_a_reactive_overlooker() {
 
     // The dispatcher consumes the stale tick and fires the reactive round; the
     // run row records the survey of the in-scope stale session.
-    let in_flight = overlooker::new_in_flight();
-    overlooker::dispatch(&state, &in_flight, stale_ev).await;
-    let runs = ov::recent_runs(&state.db, &o.id, 10).await.unwrap();
+    let in_flight = watch::new_in_flight();
+    watch::dispatch(&state, &in_flight, stale_ev).await;
+    let runs = watch_store::recent_runs(&state.db, &o.id, 10)
+        .await
+        .unwrap();
     assert_eq!(runs.len(), 1, "the stale event fires exactly one round");
     assert_eq!(
         surveyed_ids(&runs[0]),
@@ -317,18 +331,18 @@ async fn stale_session_emits_one_event_and_wakes_a_reactive_overlooker() {
 }
 
 /// Write a one-shot fake judge agent that ignores its stdin (the composed
-/// prompt) and prints `out`, point `WEAVER_OVERLOOKER_AGENT_CMD` at it, and
+/// prompt) and prints `out`, point `WEAVER_WATCH_AGENT_CMD` at it, and
 /// return its path. Robust where `cat` is not: the round feeds a real terminal
 /// screen into the prompt, and a shell screen can carry brackets that would
 /// corrupt an echo-then-parse. Reused paths overwrite, so a test can re-stub
-/// between fires. Restore `WEAVER_OVERLOOKER_AGENT_CMD=true` after.
+/// between fires. Restore `WEAVER_WATCH_AGENT_CMD=true` after.
 fn fake_judge_agent(name: &str, out: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = std::env::temp_dir().join(name);
     let script = format!("#!/bin/sh\ncat >/dev/null 2>&1\ncat <<'WEAVER_EOF'\n{out}\nWEAVER_EOF\n");
     std::fs::write(&path, script).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::env::set_var("WEAVER_OVERLOOKER_AGENT_CMD", path.to_str().unwrap());
+    std::env::set_var("WEAVER_WATCH_AGENT_CMD", path.to_str().unwrap());
     path
 }
 
@@ -357,9 +371,9 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
         r#"[{"key":"review","value":"attention","note":"looks done"}]"#,
     );
 
-    let o = enabled_overlooker(
+    let o = enabled_watch(
         &state,
-        ov::NewOverlooker {
+        watch_store::NewWatch {
             name: "status-check".to_string(),
             trigger_spec: json!({ "on": ["session.idle"] }).to_string(),
             scope: json!({}).to_string(),
@@ -371,7 +385,7 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
     .await;
 
     // A manual round (run-now) fires the stock program directly.
-    let run_id = overlooker::fire_now(&state, &o.name, false, "manual")
+    let run_id = watch::fire_now(&state, &o.name, false, "manual")
         .await
         .unwrap();
 
@@ -396,7 +410,9 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
     );
 
     // The run row records a `tag` action (not the old generic `mark`).
-    let runs = ov::recent_runs(&state.db, &o.id, 10).await.unwrap();
+    let runs = watch_store::recent_runs(&state.db, &o.id, 10)
+        .await
+        .unwrap();
     let run = runs.iter().find(|r| r.id == run_id).unwrap();
     assert_eq!(run.outcome, "ok");
     let actions: serde_json::Value = serde_json::from_str(&run.actions).unwrap();
@@ -410,7 +426,7 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
 
     // Reconcile: a follow-up "nothing needed" verdict clears the watch's own mark.
     let _calm = fake_judge_agent("weaver-fake-judge-status", "[]");
-    overlooker::fire_now(&state, &o.name, false, "manual")
+    watch::fire_now(&state, &o.name, false, "manual")
         .await
         .unwrap();
     let view = ts
@@ -424,7 +440,7 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
     );
 
     // Restore the fixture's no-op agent for the tests that follow.
-    std::env::set_var("WEAVER_OVERLOOKER_AGENT_CMD", "true");
+    std::env::set_var("WEAVER_WATCH_AGENT_CMD", "true");
     ts.client
         .delete(&format!("/api/sessions/{session_id}"))
         .await
@@ -462,9 +478,9 @@ async fn resume_nudges_a_stalled_session_and_arms_backoff() {
         "the overload line rendered on the session screen: {screen:?}"
     );
 
-    let o = enabled_overlooker(
+    let o = enabled_watch(
         &state,
-        ov::NewOverlooker {
+        watch_store::NewWatch {
             name: "resume-watch".to_string(),
             trigger_spec: json!({ "on": ["session.idle", "session.stale"] }).to_string(),
             scope: json!({}).to_string(),
@@ -480,12 +496,14 @@ async fn resume_nudges_a_stalled_session_and_arms_backoff() {
     .await;
 
     // A manual round surveys the fleet, detects the stall, and nudges.
-    let run_id = overlooker::fire_now(&state, &o.name, false, "manual")
+    let run_id = watch::fire_now(&state, &o.name, false, "manual")
         .await
         .unwrap();
 
     // The run recorded a real `nudge` of the stalled session.
-    let runs = ov::recent_runs(&state.db, &o.id, 10).await.unwrap();
+    let runs = watch_store::recent_runs(&state.db, &o.id, 10)
+        .await
+        .unwrap();
     let run = runs.iter().find(|r| r.id == run_id).unwrap();
     assert_eq!(run.outcome, "ok", "summary: {}", run.summary);
     let actions: serde_json::Value = serde_json::from_str(&run.actions).unwrap();
@@ -498,9 +516,9 @@ async fn resume_nudges_a_stalled_session_and_arms_backoff() {
         "the round nudges the stalled session: {actions}"
     );
 
-    // The overlooker now tracks the session (one attempt) and has armed a wake
+    // The watch now tracks the session (one attempt) and has armed a wake
     // for the backoff recheck — the lookaside-state + dynamic-wake primitives.
-    let after = ov::get(&state.db, &o.id).await.unwrap().unwrap();
+    let after = watch_store::get(&state.db, &o.id).await.unwrap().unwrap();
     let tracked = &after.state()[session_id.as_str()];
     assert_eq!(
         tracked["attempts"],
@@ -519,12 +537,12 @@ async fn resume_nudges_a_stalled_session_and_arms_backoff() {
         .unwrap();
 }
 
-/// T6: the timer half emits a `cron` system tick for a due scheduled overlooker
+/// T6: the timer half emits a `cron` system tick for a due scheduled watch
 /// (visible in the event log) and advances its `next_run_at`; that tick then
 /// drives a round through the dispatcher — the producer→consumer chain unattended.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn timer_emits_cron_tick_for_a_due_overlooker_and_dispatches_it() {
+async fn timer_emits_cron_tick_for_a_due_watch_and_dispatches_it() {
     if !python3_available() {
         eprintln!("skipping: python3 not on PATH");
         return;
@@ -540,9 +558,9 @@ async fn timer_emits_cron_tick_for_a_due_overlooker_and_dispatches_it() {
         .await
         .unwrap();
 
-    let o = enabled_overlooker(
+    let o = enabled_watch(
         &state,
-        ov::NewOverlooker {
+        watch_store::NewWatch {
             // `every` sugar so the next-fire is deterministic duration arithmetic.
             trigger_spec: json!({ "every": "30m" }).to_string(),
             name: "hourly".to_string(),
@@ -555,26 +573,26 @@ async fn timer_emits_cron_tick_for_a_due_overlooker_and_dispatches_it() {
     .await;
 
     // Force it due: set next_run_at into the past.
-    ov::set_schedule(&state.db, &o.id, None, Some("2000-01-01T00:00:00.000Z"))
+    watch_store::set_schedule(&state.db, &o.id, None, Some("2000-01-01T00:00:00.000Z"))
         .await
         .unwrap();
 
     let watermark = events::max_id(&state.db).await.unwrap();
-    overlooker::tick_timer(&state).await;
+    watch::tick_timer(&state).await;
 
     // The tick is a first-class, logged `cron` system event carrying our id.
     let new_events = events::since(&state.db, watermark).await.unwrap();
     let cron = new_events
         .iter()
-        .find(|e| e.kind == "cron" && e.data["overlooker"] == o.id.as_str())
-        .expect("the timer emits a cron tick for the due overlooker");
+        .find(|e| e.kind == "cron" && e.data["watch"] == o.id.as_str())
+        .expect("the timer emits a cron tick for the due watch");
     assert!(
         events::is_system(&cron.branch_id),
         "a cron tick is a fleet-global (system) row"
     );
 
     // It advanced next_run_at into the future, so it won't re-fire every tick.
-    let after = ov::get(&state.db, &o.id).await.unwrap().unwrap();
+    let after = watch_store::get(&state.db, &o.id).await.unwrap().unwrap();
     assert!(
         after.next_run_at.is_some(),
         "the timer advances next_run_at"
@@ -587,9 +605,11 @@ async fn timer_emits_cron_tick_for_a_due_overlooker_and_dispatches_it() {
 
     // The dispatcher consumes that cron tick and runs the scheduled round; the
     // run row records the survey of the in-scope session.
-    let in_flight = overlooker::new_in_flight();
-    overlooker::dispatch(&state, &in_flight, cron).await;
-    let runs = ov::recent_runs(&state.db, &o.id, 10).await.unwrap();
+    let in_flight = watch::new_in_flight();
+    watch::dispatch(&state, &in_flight, cron).await;
+    let runs = watch_store::recent_runs(&state.db, &o.id, 10)
+        .await
+        .unwrap();
     assert_eq!(runs.len(), 1, "the cron tick fires exactly one round");
     assert_eq!(
         surveyed_ids(&runs[0]),
@@ -624,12 +644,12 @@ async fn cooldown_and_overlap_refire_are_refused() {
         .await
         .unwrap();
 
-    // A reactive overlooker with a long cooldown, so a second reactive fire
+    // A reactive watch with a long cooldown, so a second reactive fire
     // inside the gap is skipped. (A manual run-now bypasses cooldown by design,
     // so the reactive path is what exercises this guardrail.)
-    let o = enabled_overlooker(
+    let o = enabled_watch(
         &state,
-        ov::NewOverlooker {
+        watch_store::NewWatch {
             name: "cooldown-watch".to_string(),
             trigger_spec: json!({ "event": "attention", "repo": repo_root }).to_string(),
             scope: json!({ "attention": "!ok" }).to_string(),
@@ -641,7 +661,7 @@ async fn cooldown_and_overlap_refire_are_refused() {
     )
     .await;
 
-    let in_flight = overlooker::new_in_flight();
+    let in_flight = watch::new_in_flight();
     let ev = events::Event {
         id: 0,
         branch_id: branch_id.clone(),
@@ -651,11 +671,13 @@ async fn cooldown_and_overlap_refire_are_refused() {
     };
 
     // First reactive fire runs; it stamps `last_run_at`.
-    overlooker::dispatch(&state, &in_flight, &ev).await;
+    watch::dispatch(&state, &in_flight, &ev).await;
     // Second reactive fire inside the cooldown gap is recorded `skipped`.
-    overlooker::dispatch(&state, &in_flight, &ev).await;
+    watch::dispatch(&state, &in_flight, &ev).await;
 
-    let runs = ov::recent_runs(&state.db, &o.id, 10).await.unwrap();
+    let runs = watch_store::recent_runs(&state.db, &o.id, 10)
+        .await
+        .unwrap();
     assert_eq!(runs.len(), 2, "both fires produce a run row");
     assert_eq!(runs[0].outcome, "skipped", "the second fire is on cooldown");
     assert!(
@@ -665,24 +687,30 @@ async fn cooldown_and_overlap_refire_are_refused() {
     );
     assert_eq!(runs[1].outcome, "ok", "the first fire ran");
 
-    // No-overlap: with the overlooker's id already in the in-flight set, a fire
+    // No-overlap: with the watch's id already in the in-flight set, a fire
     // is dropped (no new run row) — a round of it is conceptually already
     // running.
     {
-        let set = overlooker::new_in_flight();
+        let set = watch::new_in_flight();
         set.lock().await.insert(o.id.clone());
-        let before = ov::recent_runs(&state.db, &o.id, 100).await.unwrap().len();
-        let dropped = overlooker::fire(
+        let before = watch_store::recent_runs(&state.db, &o.id, 100)
+            .await
+            .unwrap()
+            .len();
+        let dropped = watch::fire(
             &state,
             &set,
             &o,
             "event:attention",
             false,
-            &overlooker::TriggerCtx::reactive("session.attention"),
+            &watch::TriggerCtx::reactive("session.attention"),
         )
         .await;
         assert!(dropped.is_none(), "an in-flight re-fire is dropped");
-        let after = ov::recent_runs(&state.db, &o.id, 100).await.unwrap().len();
+        let after = watch_store::recent_runs(&state.db, &o.id, 100)
+            .await
+            .unwrap()
+            .len();
         assert_eq!(before, after, "a dropped re-fire opens no run row");
     }
 
@@ -699,7 +727,7 @@ async fn cooldown_and_overlap_refire_are_refused() {
 /// both rejected.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rest_overlooker_lifecycle_and_validation() {
+async fn rest_watch_lifecycle_and_validation() {
     if !python3_available() {
         eprintln!("skipping: python3 not on PATH");
         return;
@@ -720,11 +748,11 @@ async fn rest_overlooker_lifecycle_and_validation() {
         r#"[{"key":"review","value":"attention","note":"looks done"}]"#,
     );
 
-    // Create: structured trigger/scope/params JSON in, an OverlookerView out.
+    // Create: structured trigger/scope/params JSON in, a WatchView out.
     let created = ts
         .client
         .post(
-            "/api/overlookers",
+            "/api/watches",
             json!({
                 "name": "rest-watch",
                 "trigger": { "cron": "0 * * * *" },
@@ -738,7 +766,7 @@ async fn rest_overlooker_lifecycle_and_validation() {
         .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
     assert_eq!(created["name"], "rest-watch");
-    assert_eq!(created["enabled"], false, "new overlookers start disabled");
+    assert_eq!(created["enabled"], false, "new watches start disabled");
     // JSON-bearing fields come back parsed, not as strings.
     assert_eq!(created["trigger"]["cron"], "0 * * * *");
     assert_eq!(created["scope"]["attention"], "!ok");
@@ -749,7 +777,7 @@ async fn rest_overlooker_lifecycle_and_validation() {
     // A duplicate name is rejected (the client surfaces the error status).
     let dup = ts
         .client
-        .post("/api/overlookers", json!({ "name": "rest-watch" }))
+        .post("/api/watches", json!({ "name": "rest-watch" }))
         .await;
     assert!(dup.is_err(), "a duplicate name is rejected");
 
@@ -757,24 +785,20 @@ async fn rest_overlooker_lifecycle_and_validation() {
     let bad_cap = ts
         .client
         .post(
-            "/api/overlookers",
+            "/api/watches",
             json!({ "name": "bad", "capabilities": ["observe", "teleport"] }),
         )
         .await;
     assert!(bad_cap.is_err(), "an unknown capability is rejected");
 
     // GET by id (resolve also accepts the name).
-    let got = ts
-        .client
-        .get(&format!("/api/overlookers/{id}"))
-        .await
-        .unwrap();
+    let got = ts.client.get(&format!("/api/watches/{id}")).await.unwrap();
     assert_eq!(got["name"], "rest-watch");
-    let by_name = ts.client.get("/api/overlookers/rest-watch").await.unwrap();
+    let by_name = ts.client.get("/api/watches/rest-watch").await.unwrap();
     assert_eq!(by_name["id"], id.as_str());
 
     // It shows up in the list.
-    let list = ts.client.get("/api/overlookers").await.unwrap();
+    let list = ts.client.get("/api/watches").await.unwrap();
     assert!(list
         .as_array()
         .unwrap()
@@ -785,7 +809,7 @@ async fn rest_overlooker_lifecycle_and_validation() {
     let patched = ts
         .client
         .patch(
-            &format!("/api/overlookers/{id}"),
+            &format!("/api/watches/{id}"),
             json!({ "enabled": true, "cooldown_secs": 120 }),
         )
         .await
@@ -797,7 +821,7 @@ async fn rest_overlooker_lifecycle_and_validation() {
     let run = ts
         .client
         .post(
-            &format!("/api/overlookers/{id}/run"),
+            &format!("/api/watches/{id}/run"),
             json!({ "dry_run": true }),
         )
         .await
@@ -821,7 +845,7 @@ async fn rest_overlooker_lifecycle_and_validation() {
     // GET /runs returns the audit history with actions parsed back to JSON.
     let runs = ts
         .client
-        .get(&format!("/api/overlookers/{id}/runs?limit=10"))
+        .get(&format!("/api/watches/{id}/runs?limit=10"))
         .await
         .unwrap();
     let runs = runs.as_array().unwrap();
@@ -835,12 +859,12 @@ async fn rest_overlooker_lifecycle_and_validation() {
     // DELETE.
     let deleted = ts
         .client
-        .delete(&format!("/api/overlookers/{id}"))
+        .delete(&format!("/api/watches/{id}"))
         .await
         .unwrap();
     assert_eq!(deleted["deleted"], true);
-    let gone = ts.client.get(&format!("/api/overlookers/{id}")).await;
-    assert!(gone.is_err(), "a deleted overlooker 404s");
+    let gone = ts.client.get(&format!("/api/watches/{id}")).await;
+    assert!(gone.is_err(), "a deleted watch 404s");
 
     ts.client
         .delete(&format!("/api/sessions/{session_id}"))
@@ -878,7 +902,7 @@ fn pr_snapshot(state: &str, number: i64) -> weaver_core::github::GithubStatus {
 async fn rest_lists_builtin_programs_and_validates_program_refs() {
     let ts = TestServer::start().await;
 
-    let programs = ts.client.get("/api/overlookers/programs").await.unwrap();
+    let programs = ts.client.get("/api/watches/programs").await.unwrap();
     let arr = programs.as_array().unwrap();
     let names: Vec<&str> = arr.iter().map(|p| p["program"].as_str().unwrap()).collect();
     for expected in [
@@ -952,7 +976,7 @@ async fn rest_lists_builtin_programs_and_validates_program_refs() {
     let bad = ts
         .client
         .post(
-            "/api/overlookers",
+            "/api/watches",
             json!({ "name": "bad", "program": "builtin:nope" }),
         )
         .await;
@@ -960,7 +984,7 @@ async fn rest_lists_builtin_programs_and_validates_program_refs() {
     let ok = ts
         .client
         .post(
-            "/api/overlookers",
+            "/api/watches",
             json!({ "name": "good", "program": "builtin:archive-merged" }),
         )
         .await
@@ -993,9 +1017,9 @@ async fn builtin_scripts_report_merged_and_unlabelled_prs() {
         .unwrap();
 
     // archive-merged: exactly the merged session is reported, as a would-do.
-    enabled_overlooker(
+    enabled_watch(
         &state,
-        ov::NewOverlooker {
+        watch_store::NewWatch {
             name: "archive-watch".to_string(),
             program: "builtin:archive-merged".to_string(),
             capabilities: vec!["observe".to_string()],
@@ -1003,12 +1027,12 @@ async fn builtin_scripts_report_merged_and_unlabelled_prs() {
         },
     )
     .await;
-    let run_id = overlooker::fire_now(&state, "archive-watch", false, "manual")
+    let run_id = watch::fire_now(&state, "archive-watch", false, "manual")
         .await
         .unwrap();
     let runs = ts
         .client
-        .get("/api/overlookers/archive-watch/runs?limit=10")
+        .get("/api/watches/archive-watch/runs?limit=10")
         .await
         .unwrap();
     let run = runs
@@ -1030,9 +1054,9 @@ async fn builtin_scripts_report_merged_and_unlabelled_prs() {
     assert_eq!(actions[0]["pr"], 41);
 
     // pr-label: exactly the open PR is reported, with the default label.
-    enabled_overlooker(
+    enabled_watch(
         &state,
-        ov::NewOverlooker {
+        watch_store::NewWatch {
             name: "label-watch".to_string(),
             program: "builtin:pr-label".to_string(),
             capabilities: vec!["observe".to_string()],
@@ -1040,12 +1064,12 @@ async fn builtin_scripts_report_merged_and_unlabelled_prs() {
         },
     )
     .await;
-    let run_id = overlooker::fire_now(&state, "label-watch", false, "manual")
+    let run_id = watch::fire_now(&state, "label-watch", false, "manual")
         .await
         .unwrap();
     let runs = ts
         .client
-        .get("/api/overlookers/label-watch/runs?limit=10")
+        .get("/api/watches/label-watch/runs?limit=10")
         .await
         .unwrap();
     let run = runs
@@ -1100,9 +1124,9 @@ async fn review_wait_parks_and_unparks_a_session_awaiting_review() {
         .await
         .unwrap();
 
-    enabled_overlooker(
+    enabled_watch(
         &state,
-        ov::NewOverlooker {
+        watch_store::NewWatch {
             name: "review-wait".to_string(),
             program: "builtin:review-wait".to_string(),
             capabilities: vec!["observe".to_string(), "mark".to_string()],
@@ -1112,7 +1136,7 @@ async fn review_wait_parks_and_unparks_a_session_awaiting_review() {
     .await;
 
     // Park: the round stamps `awaiting: review`, attributed to the watch.
-    overlooker::fire_now(&state, "review-wait", false, "manual")
+    watch::fire_now(&state, "review-wait", false, "manual")
         .await
         .unwrap();
     let view = ts
@@ -1136,7 +1160,7 @@ async fn review_wait_parks_and_unparks_a_session_awaiting_review() {
     loom::github::upsert_status(&state.db, &branch, &snap)
         .await
         .unwrap();
-    overlooker::fire_now(&state, "review-wait", false, "manual")
+    watch::fire_now(&state, "review-wait", false, "manual")
         .await
         .unwrap();
     let view = ts
@@ -1171,7 +1195,7 @@ async fn status_judgement_uses_the_oneshot_agent() {
     let ts = TestServer::start().await;
 
     // The endpoint itself: `cat` echoes the prompt; an empty prompt 400s.
-    std::env::set_var("WEAVER_OVERLOOKER_AGENT_CMD", "cat");
+    std::env::set_var("WEAVER_WATCH_AGENT_CMD", "cat");
     let reply = ts
         .client
         .post("/api/agent/oneshot", json!({ "prompt": "ping" }))
@@ -1194,9 +1218,9 @@ async fn status_judgement_uses_the_oneshot_agent() {
         "weaver-fake-judge-oneshot",
         r#"[{"key":"stuck","value":"blocked","note":"the judge says so"}]"#,
     );
-    let o = enabled_overlooker(
+    let o = enabled_watch(
         &state,
-        ov::NewOverlooker {
+        watch_store::NewWatch {
             name: "judge-watch".to_string(),
             trigger_spec: json!({ "on": ["session.idle"] }).to_string(),
             program: "builtin:status".to_string(),
@@ -1206,7 +1230,7 @@ async fn status_judgement_uses_the_oneshot_agent() {
         },
     )
     .await;
-    overlooker::fire_now(&state, &o.name, false, "manual")
+    watch::fire_now(&state, &o.name, false, "manual")
         .await
         .unwrap();
 
@@ -1225,7 +1249,7 @@ async fn status_judgement_uses_the_oneshot_agent() {
     assert_eq!(branch_tag(&view, "stuck").unwrap()["set_by"], "judge-watch");
 
     // Restore the fixture's no-op agent for the tests that follow.
-    std::env::set_var("WEAVER_OVERLOOKER_AGENT_CMD", "true");
+    std::env::set_var("WEAVER_WATCH_AGENT_CMD", "true");
     ts.client
         .delete(&format!("/api/sessions/{session_id}"))
         .await
@@ -1243,21 +1267,20 @@ async fn set_config(state: &AppState, key: &str, value: &str) {
         .unwrap();
 }
 
-/// Insert a managed (warm) session row directly, owned by `overlooker_id`. The
+/// Insert a managed (warm) session row directly, owned by `watch_id`. The
 /// branch is a throwaway in the test repo. Returns the session id. A direct
 /// insert keeps the hide/reconcile logic deterministic without standing up a
 /// real agent.
 async fn insert_managed_session(
     state: &AppState,
     repo_root: &str,
-    overlooker_id: &str,
+    watch_id: &str,
     term_session: &str,
     work_dir: &str,
 ) -> String {
-    let branch =
-        weaver_core::branch::upsert(&state.db, repo_root, "weaver/overlooker-warm", "main")
-            .await
-            .unwrap();
+    let branch = weaver_core::branch::upsert(&state.db, repo_root, "weaver/watch-warm", "main")
+        .await
+        .unwrap();
     let id = weaver_core::branch::new_id();
     session_mod::insert(
         &state.db,
@@ -1272,7 +1295,7 @@ async fn insert_managed_session(
             status: "running".to_string(),
             github_repo: None,
             parent_branch_id: None,
-            managed_by: Some(overlooker_id.to_string()),
+            managed_by: Some(watch_id.to_string()),
             created_by: None,
         },
     )
@@ -1282,7 +1305,7 @@ async fn insert_managed_session(
 }
 
 /// T12: a managed (warm) session is hidden from the fleet — it appears in neither
-/// the dashboard `/sessions` listing nor an overlooker round's survey — while an
+/// the dashboard `/sessions` listing nor a watch round's survey — while an
 /// ordinary session does.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1304,10 +1327,10 @@ async fn warm_session_is_hidden_from_fleet_and_survey() {
         .await
         .unwrap();
 
-    // An overlooker plus its warm session (inserted directly, also non-ok).
-    let o = enabled_overlooker(
+    // A watch plus its warm session (inserted directly, also non-ok).
+    let o = enabled_watch(
         &state,
-        ov::NewOverlooker {
+        watch_store::NewWatch {
             name: "warm-watch".to_string(),
             trigger_spec: json!({ "cron": "0 * * * *" }).to_string(),
             scope: json!({ "attention": "!ok" }).to_string(),
@@ -1361,10 +1384,12 @@ async fn warm_session_is_hidden_from_fleet_and_survey() {
 
     // A round surveys the ordinary session but never the warm one — asserted
     // on the run row the engine records, not on any program side-effect.
-    let run_id = overlooker::fire_now(&state, &o.name, false, "manual")
+    let run_id = watch::fire_now(&state, &o.name, false, "manual")
         .await
         .unwrap();
-    let runs = ov::recent_runs(&state.db, &o.id, 10).await.unwrap();
+    let runs = watch_store::recent_runs(&state.db, &o.id, 10)
+        .await
+        .unwrap();
     let run = runs.iter().find(|r| r.id == run_id).unwrap();
     let surveyed = surveyed_ids(run);
     assert!(
@@ -1383,9 +1408,9 @@ async fn warm_session_is_hidden_from_fleet_and_survey() {
 }
 
 /// T12: a warm session survives a daemon restart independent of
-/// `server.auto_adopt`. With auto-adopt OFF and `overlooker.adopt_warm` ON, the
+/// `server.auto_adopt`. With auto-adopt OFF and `watch.adopt_warm` ON, the
 /// managed reconcile pass re-adopts a warm session whose terminal is gone — and the
-/// inverse: a warm session whose owning overlooker was deleted is archived, not
+/// inverse: a warm session whose owning watch was deleted is archived, not
 /// adopted.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1395,17 +1420,17 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
 
     // The restart policy under test: fleet auto-adopt off, warm-adopt on.
     set_config(&state, "server.auto_adopt", "false").await;
-    set_config(&state, "overlooker.adopt_warm", "true").await;
+    set_config(&state, "watch.adopt_warm", "true").await;
     // Warm sessions launch the default agent; pin it to `shell` so creation is
     // deterministic without a real `claude` on PATH.
     set_config(&state, "agent.default", "shell").await;
 
     let repo_root = ts.repo_path().canonicalize().unwrap().display().to_string();
 
-    // A warm overlooker, scoped to the test repo so its warm session anchors here.
-    let o = enabled_overlooker(
+    // A warm watch, scoped to the test repo so its warm session anchors here.
+    let o = enabled_watch(
         &state,
-        ov::NewOverlooker {
+        watch_store::NewWatch {
             name: "memory-watch".to_string(),
             trigger_spec: json!({ "cron": "0 * * * *" }).to_string(),
             scope: json!({ "repo": repo_root }).to_string(),
@@ -1417,10 +1442,10 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
     .await;
 
     // First need: the engine creates the warm session (a real shell terminal).
-    let warm_id = overlooker::ensure_warm_session(&state, &o)
+    let warm_id = watch::ensure_warm_session(&state, &o)
         .await
         .unwrap()
-        .expect("a warm overlooker gets a session");
+        .expect("a warm watch gets a session");
     let warm = session_mod::get(&state.db, &warm_id)
         .await
         .unwrap()
@@ -1430,14 +1455,14 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
         "the warm session has a live terminal"
     );
     assert_eq!(
-        ov::get(&state.db, &o.id)
+        watch_store::get(&state.db, &o.id)
             .await
             .unwrap()
             .unwrap()
             .warm_session_id
             .as_deref(),
         Some(warm_id.as_str()),
-        "the overlooker is linked to its warm session"
+        "the watch is linked to its warm session"
     );
 
     // Simulate the daemon being down: its terminal is gone, the row remains.
@@ -1464,7 +1489,7 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
         "the warm session's terminal is recreated by warm-adopt"
     );
 
-    // The session id and the overlooker linkage are stable across the restart.
+    // The session id and the watch linkage are stable across the restart.
     let still = session_mod::get(&state.db, &warm_id)
         .await
         .unwrap()
@@ -1473,10 +1498,10 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
     assert_eq!(
         still.managed_by.as_deref(),
         Some(o.id.as_str()),
-        "it is still owned by its overlooker"
+        "it is still owned by its watch"
     );
     assert_eq!(
-        ov::get(&state.db, &o.id)
+        watch_store::get(&state.db, &o.id)
             .await
             .unwrap()
             .unwrap()
@@ -1488,7 +1513,7 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
 
     // Inverse: a warm session whose owner is gone is archived, not adopted.
     backend::kill_session(&still.term_session).await.ok();
-    ov::delete(&state.db, &o.id).await.unwrap();
+    watch_store::delete(&state.db, &o.id).await.unwrap();
     server::reconcile_managed_sessions(&state).await;
     let orphaned = session_mod::get(&state.db, &warm_id)
         .await
@@ -1505,7 +1530,7 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
 }
 
 /// T12: the engine reuses one warm session across rounds — asked twice to ensure
-/// a warm session for the same overlooker, it returns the same id and spawns no
+/// a warm session for the same watch, it returns the same id and spawns no
 /// duplicate (the reuse that gives across-round memory).
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1515,9 +1540,9 @@ async fn ensure_warm_session_reuses_the_same_session() {
     set_config(&state, "agent.default", "shell").await;
 
     let repo_root = ts.repo_path().canonicalize().unwrap().display().to_string();
-    let o = enabled_overlooker(
+    let o = enabled_watch(
         &state,
-        ov::NewOverlooker {
+        watch_store::NewWatch {
             name: "reuse-watch".to_string(),
             trigger_spec: json!({ "cron": "0 * * * *" }).to_string(),
             scope: json!({ "repo": repo_root }).to_string(),
@@ -1528,19 +1553,19 @@ async fn ensure_warm_session_reuses_the_same_session() {
     )
     .await;
 
-    let first = overlooker::ensure_warm_session(&state, &o)
+    let first = watch::ensure_warm_session(&state, &o)
         .await
         .unwrap()
         .unwrap();
     // Re-fetch so the second call sees the persisted `warm_session_id` linkage.
-    let o = ov::get(&state.db, &o.id).await.unwrap().unwrap();
-    let second = overlooker::ensure_warm_session(&state, &o)
+    let o = watch_store::get(&state.db, &o.id).await.unwrap().unwrap();
+    let second = watch::ensure_warm_session(&state, &o)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(first, second, "the same warm session id is reused");
 
-    // Exactly one managed session exists for this overlooker — no duplicate spawn.
+    // Exactly one managed session exists for this watch — no duplicate spawn.
     let managed = session_mod::list_managed(&state.db).await.unwrap();
     let owned: Vec<_> = managed
         .iter()
@@ -1580,7 +1605,7 @@ async fn pr_merged_event_scopes_round_to_one_session_and_logs_output() {
     let created = ts
         .client
         .post(
-            "/api/overlookers",
+            "/api/watches",
             json!({
                 "name": "merge-watch",
                 "program": survey_triggered_program(),
@@ -1594,10 +1619,10 @@ async fn pr_merged_event_scopes_round_to_one_session_and_logs_output() {
         "the stored trigger came from the script's manifest: {created:?}"
     );
     ts.client
-        .patch("/api/overlookers/merge-watch", json!({ "enabled": true }))
+        .patch("/api/watches/merge-watch", json!({ "enabled": true }))
         .await
         .unwrap();
-    let o = ov::get_by_name(&state.db, "merge-watch")
+    let o = watch_store::get_by_name(&state.db, "merge-watch")
         .await
         .unwrap()
         .unwrap();
@@ -1610,10 +1635,12 @@ async fn pr_merged_event_scopes_round_to_one_session_and_logs_output() {
         data: json!({ "pr": 41 }),
         created_at: db::now_iso(),
     };
-    let in_flight = overlooker::new_in_flight();
-    overlooker::dispatch(&state, &in_flight, &ev).await;
+    let in_flight = watch::new_in_flight();
+    watch::dispatch(&state, &in_flight, &ev).await;
 
-    let runs = ov::recent_runs(&state.db, &o.id, 10).await.unwrap();
+    let runs = watch_store::recent_runs(&state.db, &o.id, 10)
+        .await
+        .unwrap();
     assert_eq!(runs.len(), 1, "the pr.merged event fired exactly one round");
     let run = &runs[0];
     assert_eq!(run.outcome, "ok", "summary: {}", run.summary);

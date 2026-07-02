@@ -9,7 +9,7 @@ export interface Tag {
   value: string;
   /** One-line reason accompanying the tag. */
   note: string;
-  /** Who set it — `agent`, a watch/overlooker name, or `manual`. */
+  /** Who set it — `agent`, a watch/watch name, or `manual`. */
   set_by: string;
   /** When it was last set (ISO). The dashboard fades an outside mark stale once
    *  the session's activity advances past this. */
@@ -88,7 +88,7 @@ export interface Session {
   parent_id: string | null;
   /** The principal (username) that launched this session — attribution for the
    *  shared team board. null for engine-created sessions (the concierge, warm
-   *  overlooker sessions) and rows predating the column. A tracking/UX field, not
+   *  watch sessions) and rows predating the column. A tracking/UX field, not
    *  a security boundary: the fleet stays co-owned by everyone authenticated. */
   created_by: string | null;
   /** The tracking issue opened for this session's task at launch (the handle
@@ -352,13 +352,13 @@ export interface IdeInfo {
   idle_timeout_secs: number;
 }
 
-/** An overlooker's trigger — its subscription manifest, parsed. A scheduled
+/** A watch's trigger — its subscription manifest, parsed. A scheduled
  *  trigger carries a `cron` (or `every`) cadence; a reactive one subscribes to
  *  one or more normalized trigger events via `on` (each `"name"` or
  *  `"name=level"`). `event`/`level` are the legacy single-event shape, still
  *  honoured. An optional `repo` pins it to one repository. Mirrors weaver-core's
  *  `Trigger`. */
-export interface OverlookerTrigger {
+export interface WatchTrigger {
   cron?: string;
   every?: string;
   /** The normalized trigger events this watch subscribes to, e.g.
@@ -371,24 +371,24 @@ export interface OverlookerTrigger {
 
 /** The fleet query a round surveys, parsed. `attention` is `!ok` (anything not
  *  ok) or an exact level; `repo` scopes the survey to one repository. */
-export interface OverlookerScope {
+export interface WatchScope {
   attention?: string;
   repo?: string;
 }
 
-/** One overlooker: a periodic / triggered watch program over the fleet. The
+/** One watch: a periodic / triggered watch program over the fleet. The
  *  JSON-bearing fields (`trigger`, `scope`, `params`) arrive as parsed objects;
- *  `capabilities` is a real array. Mirrors `OverlookerView` in web.rs. */
-export interface Overlooker {
+ *  `capabilities` is a real array. Mirrors `WatchView` in web.rs. */
+export interface Watch {
   id: string;
   name: string;
   enabled: boolean;
   /** The event-match predicate: `{cron|every|event|level|repo}`. */
-  trigger: OverlookerTrigger;
+  trigger: WatchTrigger;
   /** The fleet query a round surveys: `{attention?, repo?}`. */
-  scope: OverlookerScope;
+  scope: WatchScope;
   /** `builtin:<name>` for a stock program, or an absolute path under
-   *  `~/.weaver/overlookers/` for a custom one. */
+   *  `~/.weaver/watches/` for a custom one. */
   program: string;
   /** Stock-program parameters, e.g. `{prompt}`. */
   params: Record<string, unknown>;
@@ -399,7 +399,7 @@ export interface Overlooker {
   effort: string;
   cooldown_secs: number;
   /** Warm mode (`params.warm`): the engine keeps one long-lived, fleet-hidden
-   *  session for this overlooker so it has across-round memory. */
+   *  session for this watch so it has across-round memory. */
   warm: boolean;
   /** The id of that warm session once the engine has created it, else null. Its
    *  live terminal is reachable here (it is hidden from the fleet listing). */
@@ -421,7 +421,7 @@ export interface Overlooker {
 /** One action a round recorded — a mark, nudge, interrupt, or a stubbed
  *  "would do X" from a dry-run. The shape is loose (the engine writes free-form
  *  JSON); these are the fields the panel renders when present. */
-export interface OverlookerAction {
+export interface WatchAction {
   /** The session the action targeted, when it targets one. */
   session?: string;
   /** A performed action's verb (e.g. `mark`, `nudge`). */
@@ -437,11 +437,11 @@ export interface OverlookerAction {
   [key: string]: unknown;
 }
 
-/** One round in an overlooker's history — the audit trail. `actions` is the
+/** One round in a watch's history — the audit trail. `actions` is the
  *  array of marks / nudges / would-dos the round recorded; `stdout`/`stderr`/
  *  `exit_code`/`duration_ms` are the captured execution log — what the script
- *  printed and returned. Mirrors `OverlookerRunView` in web.rs. */
-export interface OverlookerRun {
+ *  printed and returned. Mirrors `WatchRunView` in web.rs. */
+export interface WatchRun {
   id: number;
   trigger_reason: string;
   /** The normalized event that woke the round (`cron` / `manual` / e.g.
@@ -451,7 +451,7 @@ export interface OverlookerRun {
   finished_at: string | null;
   outcome: 'ok' | 'noop' | 'skipped' | 'error' | string;
   summary: string;
-  actions: OverlookerAction[];
+  actions: WatchAction[];
   /** A tail of the script's standard output. */
   stdout: string;
   /** A tail of the script's standard error. */
@@ -462,27 +462,27 @@ export interface OverlookerRun {
   duration_ms: number | null;
 }
 
-/** The reply from `POST /api/overlookers/{id}/run`. */
-export interface OverlookerRunResult {
+/** The reply from `POST /api/watches/{id}/run`. */
+export interface WatchRunResult {
   run_id: number;
   outcome: string;
   summary: string;
 }
 
-/** One program an overlooker can run, served by `GET /api/overlookers/programs`.
+/** One program a watch can run, served by `GET /api/watches/programs`.
  *  Builtin programs are Python scripts that ship inside the loom binary; the
  *  embedded `source` is rendered read-only in the panel. `defaults` is the
  *  suggested starting config a create form prefills. Mirrors `ProgramView` in
  *  weaver-api. */
 export interface ProgramView {
-  /** The reference an overlooker's `program` field uses, e.g. `builtin:status`. */
+  /** The reference a watch's `program` field uses, e.g. `builtin:status`. */
   program: string;
   title: string;
   description: string;
   source: string;
   defaults: {
-    trigger?: OverlookerTrigger;
-    scope?: OverlookerScope;
+    trigger?: WatchTrigger;
+    scope?: WatchScope;
     params?: Record<string, unknown>;
     capabilities?: string[];
   };

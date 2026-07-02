@@ -9,7 +9,7 @@ use tokio::sync::broadcast;
 use crate::db::{now_iso, Db};
 
 /// Reserved `branch_id` for **fleet-global** ("system") events that belong to no
-/// single branch — e.g. an overlooker's `cron` tick or `manual` trigger. They
+/// single branch — e.g. a watch's `cron` tick or `manual` trigger. They
 /// ride the same append-only `events` stream every consumer already reads, so
 /// the dispatcher needs no second mechanism. A real branch id is an 8-char
 /// slug, so this sentinel can never collide with one.
@@ -98,10 +98,10 @@ pub async fn record_local(db: &Db, branch_id: &str, kind: &str, data: Value) -> 
 }
 
 /// Persist and broadcast a `tag` event — the single event kind for a tag being
-/// set or cleared on a branch (the agent's `attention`, an overlooker's
+/// set or cleared on a branch (the agent's `attention`, a watch's
 /// `triage`, or any free-form key). The payload carries the tag's `key`,
 /// `value` (empty when the tag was cleared), `note`, and author `by`. The
-/// monitor re-broadcasts these, and an overlooker dispatcher maps `key`/`value`
+/// monitor re-broadcasts these, and a watch dispatcher maps `key`/`value`
 /// onto a trigger's match `kind`/`level`. Sugar over [`record`] so every tag
 /// mutation logs through one well-shaped path.
 pub async fn record_tag(
@@ -118,7 +118,7 @@ pub async fn record_tag(
 }
 
 /// Persist and broadcast a fleet-global event under the [`SYSTEM_BRANCH`] scope
-/// — the overlooker timer's `cron` tick and the `manual` trigger. Sugar over
+/// — the watch timer's `cron` tick and the `manual` trigger. Sugar over
 /// [`record`] so system rows go through one well-named path.
 pub async fn record_system(db: &Db, bus: &EventBus, kind: &str, data: Value) -> Result<Event> {
     record(db, bus, SYSTEM_BRANCH, kind, data).await

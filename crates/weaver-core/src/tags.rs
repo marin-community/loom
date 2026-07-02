@@ -3,7 +3,7 @@
 //! A tag is a single-valued `(key, value)` fact stamped on a branch, with a
 //! one-line `note`, the author (`set_by`), and a timestamp (`set_at`). It
 //! collapses what used to be two near-identical status axes — the agent's
-//! `attention` self-report and an overlooker's `triage` assessment — into one
+//! `attention` self-report and a watch's `triage` assessment — into one
 //! mechanism: those become two **well-known keys** (see [`ATTENTION_KEY`] /
 //! [`TRIAGE_KEY`]), and a new axis (priority, needs-rebase, …) costs zero
 //! schema.
@@ -31,7 +31,7 @@ pub struct Tag {
     pub value: String,
     /// One-line reason accompanying the tag.
     pub note: String,
-    /// Who set it — `agent`, an overlooker name, or `manual`. Attribution.
+    /// Who set it — `agent`, a watch name, or `manual`. Attribution.
     pub set_by: String,
     /// When it was last set. Compared against a session's last activity to render
     /// the tag stale once the session has moved past it.
@@ -46,7 +46,7 @@ pub struct Tag {
 /// the agent via `weaver status`. Loud (raises a badge).
 pub const ATTENTION_KEY: &str = "attention";
 
-/// An overlooker's (or `manual`) outside assessment of a branch — a second axis
+/// A watch's (or `manual`) outside assessment of a branch — a second axis
 /// distinct from the agent's own [`ATTENTION_KEY`]. Loud (raises a badge). Its
 /// `note`/`set_by`/`set_at` carry the mark's reason, attribution, and staleness
 /// anchor.
@@ -328,7 +328,7 @@ mod tests {
         set(&db, &b.id, ATTENTION_KEY, "blocked", "", "agent")
             .await
             .unwrap();
-        // The overlooker stamps a different opinion via triage — an independent
+        // The watch stamps a different opinion via triage — an independent
         // row with its own value and attribution.
         set(
             &db,

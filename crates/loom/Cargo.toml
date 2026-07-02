@@ -64,7 +64,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 # The authored `loom.toml` (crate::loom_config) — parsed *and* serialized, unlike
 # weaver-core's read-only `.weaver/config.toml` loader.
 toml = { version = "1", default-features = false, features = ["parse", "display", "serde"] }
-# The overlooker engine materializes embedded builtin scripts to a scratch file
+# The watch engine materializes embedded builtin scripts to a scratch file
 # before running them; the tests reuse it for fixtures.
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }

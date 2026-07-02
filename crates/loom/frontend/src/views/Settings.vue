@@ -25,7 +25,7 @@ type Category =
   | 'sessions'
   | 'github'
   | 'authentication'
-  | 'overlookers'
+  | 'watches'
   | 'editor'
   | 'appearance'
   | 'env'
@@ -66,9 +66,9 @@ const categories: CategoryItem[] = [
     summary: 'Browser and API authentication behavior for this loom server.',
   },
   {
-    id: 'overlookers',
-    label: 'Overlookers',
-    group: 'Overlooker',
+    id: 'watches',
+    label: 'Watches',
+    group: 'Watch',
     summary: 'Fleet watcher defaults and engine-level safety controls.',
   },
   {

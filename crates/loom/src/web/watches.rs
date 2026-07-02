@@ -7,30 +7,30 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use weaver_api::{
-    AgentOneshotReq, CreateOverlookerReq, OverlookerRunView, OverlookerView, PatchOverlookerReq,
-    ProgramView, RunOverlookerReq,
+    AgentOneshotReq, CreateWatchReq, PatchWatchReq, ProgramView, RunWatchReq, WatchRunView,
+    WatchView,
 };
-use weaver_core::overlooker::{self as ov, Overlooker};
+use weaver_core::watch::{self as watch_store, Watch};
 
 use crate::agent;
 use crate::db::Db;
-use crate::overlooker as ov_engine;
+use crate::watch as ov_engine;
 
 use super::{ApiResult, AppError, AppState};
 
 // ---------------------------------------------------------------------------
-// Overlookers — the operator + authoring surface (server-owned state)
+// Watches — the operator + authoring surface (server-owned state)
 // ---------------------------------------------------------------------------
 
-/// Build an [`OverlookerView`] for an overlooker, joining the most recent
+/// Build an [`WatchView`] for a watch, joining the most recent
 /// round's outcome from the run history.
-async fn overlooker_view(db: &Db, o: &Overlooker) -> ApiResult<OverlookerView> {
-    let last_outcome = ov::recent_runs(db, &o.id, 1)
+async fn watch_view(db: &Db, o: &Watch) -> ApiResult<WatchView> {
+    let last_outcome = watch_store::recent_runs(db, &o.id, 1)
         .await?
         .into_iter()
         .next()
         .map(|r| r.outcome);
-    Ok(OverlookerView::from_parts(o, last_outcome))
+    Ok(WatchView::from_parts(o, last_outcome))
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,10 +43,10 @@ pub(super) struct RunsQuery {
 /// offender. Returns the cleaned set on success.
 fn validate_capabilities(caps: &[String]) -> ApiResult<()> {
     for c in caps {
-        if !ov::CAPABILITIES.contains(&c.as_str()) {
+        if !watch_store::CAPABILITIES.contains(&c.as_str()) {
             return Err(AppError::bad_request(format!(
                 "unknown capability '{c}' — expected a subset of {}",
-                ov::CAPABILITIES.join(", ")
+                watch_store::CAPABILITIES.join(", ")
             )));
         }
     }
@@ -54,7 +54,7 @@ fn validate_capabilities(caps: &[String]) -> ApiResult<()> {
 }
 
 /// A program reference must be a known `builtin:<name>` program or an absolute
-/// path (a file under `~/.weaver/overlookers/`). An unknown builtin is rejected
+/// path (a file under `~/.weaver/watches/`). An unknown builtin is rejected
 /// here, naming the registry, rather than erroring every round; a bare relative
 /// path is rejected so the engine never resolves it against an ambiguous cwd.
 fn validate_program(program: &str) -> ApiResult<()> {
@@ -79,44 +79,42 @@ fn validate_program(program: &str) -> ApiResult<()> {
     Ok(())
 }
 
-/// `GET /api/overlookers/programs` — the builtin program registry: what the
+/// `GET /api/watches/programs` — the builtin program registry: what the
 /// create form offers and the panel's read-only script viewer renders.
 pub(super) async fn list_programs() -> Json<Vec<ProgramView>> {
     Json(crate::builtins::BUILTINS.iter().map(|b| b.view()).collect())
 }
 
-/// Resolve an overlooker (by id or name) or 404.
-async fn require_overlooker(db: &Db, key: &str) -> ApiResult<Overlooker> {
-    ov::resolve(db, key)
+/// Resolve a watch (by id or name) or 404.
+async fn require_watch(db: &Db, key: &str) -> ApiResult<Watch> {
+    watch_store::resolve(db, key)
         .await?
-        .ok_or_else(|| AppError::not_found("overlooker"))
+        .ok_or_else(|| AppError::not_found("watch"))
 }
 
-pub(super) async fn list_overlookers(
-    State(st): State<AppState>,
-) -> ApiResult<Json<Vec<OverlookerView>>> {
+pub(super) async fn list_watches(State(st): State<AppState>) -> ApiResult<Json<Vec<WatchView>>> {
     let mut out = Vec::new();
-    for o in ov::list(&st.db).await? {
-        out.push(overlooker_view(&st.db, &o).await?);
+    for o in watch_store::list(&st.db).await? {
+        out.push(watch_view(&st.db, &o).await?);
     }
     Ok(Json(out))
 }
 
-pub(super) async fn create_overlooker(
+pub(super) async fn create_watch(
     State(st): State<AppState>,
-    Json(req): Json<CreateOverlookerReq>,
-) -> ApiResult<Json<OverlookerView>> {
+    Json(req): Json<CreateWatchReq>,
+) -> ApiResult<Json<WatchView>> {
     let name = req.name.trim().to_string();
     if name.is_empty() {
         return Err(AppError::bad_request("name must not be empty"));
     }
-    if ov::get_by_name(&st.db, &name).await?.is_some() {
+    if watch_store::get_by_name(&st.db, &name).await?.is_some() {
         return Err(AppError::conflict(format!(
-            "an overlooker named '{name}' already exists"
+            "a watch named '{name}' already exists"
         )));
     }
 
-    let defaults = ov::NewOverlooker::default();
+    let defaults = watch_store::NewWatch::default();
     let program = req.program.unwrap_or(defaults.program);
     validate_program(&program)?;
     let capabilities = req.capabilities.unwrap_or(defaults.capabilities);
@@ -134,7 +132,7 @@ pub(super) async fn create_overlooker(
         }
     };
 
-    let new = ov::NewOverlooker {
+    let new = watch_store::NewWatch {
         name,
         trigger_spec,
         scope: json_text(req.scope, &defaults.scope),
@@ -146,9 +144,9 @@ pub(super) async fn create_overlooker(
         cooldown_secs: req.cooldown_secs.unwrap_or(defaults.cooldown_secs),
         enabled: req.enabled.unwrap_or(defaults.enabled),
     };
-    let o = ov::create(&st.db, &new).await?;
-    tracing::info!(overlooker = %o.id, name = %o.name, "overlooker created");
-    Ok(Json(overlooker_view(&st.db, &o).await?))
+    let o = watch_store::create(&st.db, &new).await?;
+    tracing::info!(watch = %o.id, name = %o.name, "watch created");
+    Ok(Json(watch_view(&st.db, &o).await?))
 }
 
 /// The program's default trigger (a builtin's suggested manifest), used as the
@@ -172,20 +170,20 @@ async fn reconcile_trigger(st: &AppState, program: &str, params: &Value, fallbac
     }
 }
 
-pub(super) async fn get_overlooker(
+pub(super) async fn get_watch(
     State(st): State<AppState>,
     Path(key): Path<String>,
-) -> ApiResult<Json<OverlookerView>> {
-    let o = require_overlooker(&st.db, &key).await?;
-    Ok(Json(overlooker_view(&st.db, &o).await?))
+) -> ApiResult<Json<WatchView>> {
+    let o = require_watch(&st.db, &key).await?;
+    Ok(Json(watch_view(&st.db, &o).await?))
 }
 
-pub(super) async fn patch_overlooker(
+pub(super) async fn patch_watch(
     State(st): State<AppState>,
     Path(key): Path<String>,
-    Json(req): Json<PatchOverlookerReq>,
-) -> ApiResult<Json<OverlookerView>> {
-    let o = require_overlooker(&st.db, &key).await?;
+    Json(req): Json<PatchWatchReq>,
+) -> ApiResult<Json<WatchView>> {
+    let o = require_watch(&st.db, &key).await?;
 
     if let Some(program) = &req.program {
         validate_program(program)?;
@@ -194,7 +192,7 @@ pub(super) async fn patch_overlooker(
         validate_capabilities(caps)?;
     }
     if let Some(enabled) = req.enabled {
-        ov::set_enabled(&st.db, &o.id, enabled).await?;
+        watch_store::set_enabled(&st.db, &o.id, enabled).await?;
     }
     // An explicit trigger wins; otherwise, when the program changes, re-evaluate
     // the new script's manifest (with the effective params) so subscriptions
@@ -211,7 +209,7 @@ pub(super) async fn patch_overlooker(
             None => None,
         },
     };
-    let patch = ov::OverlookerUpdate {
+    let patch = watch_store::WatchUpdate {
         trigger_spec,
         scope: req.scope.map(|v| v.to_string()),
         program: req.program,
@@ -222,34 +220,34 @@ pub(super) async fn patch_overlooker(
         cooldown_secs: req.cooldown_secs,
     };
     if !patch.is_empty() {
-        ov::update(&st.db, &o.id, &patch).await?;
+        watch_store::update(&st.db, &o.id, &patch).await?;
     }
-    let o = require_overlooker(&st.db, &o.id).await?;
-    Ok(Json(overlooker_view(&st.db, &o).await?))
+    let o = require_watch(&st.db, &o.id).await?;
+    Ok(Json(watch_view(&st.db, &o).await?))
 }
 
-pub(super) async fn delete_overlooker(
+pub(super) async fn delete_watch(
     State(st): State<AppState>,
     Path(key): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let o = require_overlooker(&st.db, &key).await?;
-    ov::delete(&st.db, &o.id).await?;
-    tracing::info!(overlooker = %o.id, name = %o.name, "overlooker deleted");
+    let o = require_watch(&st.db, &key).await?;
+    watch_store::delete(&st.db, &o.id).await?;
+    tracing::info!(watch = %o.id, name = %o.name, "watch deleted");
     Ok(Json(json!({ "deleted": true })))
 }
 
 /// Fire a round now, in the daemon (the single terminal owner), and report its
 /// outcome. `dry_run` stubs every mutating action — the iteration primitive,
 /// safe to repeat. Re-reads the closed run row to surface outcome + summary.
-pub(super) async fn run_overlooker(
+pub(super) async fn run_watch(
     State(st): State<AppState>,
     Path(key): Path<String>,
-    Json(req): Json<RunOverlookerReq>,
+    Json(req): Json<RunWatchReq>,
 ) -> ApiResult<Json<Value>> {
-    let o = require_overlooker(&st.db, &key).await?;
+    let o = require_watch(&st.db, &key).await?;
     let reason = if req.dry_run { "run (dry)" } else { "run" };
     let run_id = ov_engine::fire_now(&st, &o.id, req.dry_run, reason).await?;
-    let run = ov::recent_runs(&st.db, &o.id, 50)
+    let run = watch_store::recent_runs(&st.db, &o.id, 50)
         .await?
         .into_iter()
         .find(|r| r.id == run_id);
@@ -264,8 +262,8 @@ pub(super) async fn run_overlooker(
 }
 
 /// Run a one-shot headless agent and return `{output}` — the judgement
-/// primitive overlooker programs call. The daemon owns the agent command
-/// (`WEAVER_OVERLOOKER_AGENT_CMD`, default `claude -p`) and the timeout
+/// primitive watch programs call. The daemon owns the agent command
+/// (`WEAVER_WATCH_AGENT_CMD`, default `claude -p`) and the timeout
 /// budget. Best-effort by contract: an absent or failing agent returns
 /// `{output: null}` rather than an error, so callers degrade to their
 /// deterministic fallback.
@@ -276,7 +274,7 @@ pub(super) async fn agent_oneshot(
     if req.prompt.trim().is_empty() {
         return Err(AppError::bad_request("prompt must be non-empty"));
     }
-    let budget = ov_engine::get_int(&st.db, "overlooker.default_timeout_secs", 600)
+    let budget = ov_engine::get_int(&st.db, "watch.default_timeout_secs", 600)
         .await
         .max(1) as u64;
     let output = agent::run_oneshot(
@@ -289,17 +287,15 @@ pub(super) async fn agent_oneshot(
     Ok(Json(json!({ "output": output })))
 }
 
-pub(super) async fn overlooker_runs(
+pub(super) async fn watch_runs(
     State(st): State<AppState>,
     Path(key): Path<String>,
     Query(q): Query<RunsQuery>,
-) -> ApiResult<Json<Vec<OverlookerRunView>>> {
-    let o = require_overlooker(&st.db, &key).await?;
+) -> ApiResult<Json<Vec<WatchRunView>>> {
+    let o = require_watch(&st.db, &key).await?;
     let limit = q.limit.unwrap_or(50).clamp(1, 1000);
-    let runs = ov::recent_runs(&st.db, &o.id, limit).await?;
-    Ok(Json(
-        runs.into_iter().map(OverlookerRunView::from).collect(),
-    ))
+    let runs = watch_store::recent_runs(&st.db, &o.id, limit).await?;
+    Ok(Json(runs.into_iter().map(WatchRunView::from).collect()))
 }
 
 /// Serialize an optional structured-JSON field into the text column the model

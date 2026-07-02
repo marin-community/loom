@@ -175,12 +175,12 @@ impl TestServer {
             ide: std::sync::Arc::new(loom::ide::IdeManager::new(loom::ide::ide_home())),
             trigger,
         };
-        // The overlooker master switch ships on by default, but these tests
+        // The watch master switch ships on by default, but these tests
         // drive the engine directly and must not race the background loop that
         // `server::serve` spawns. Pin it off so the daemon's own engine idles.
         core_config::apply(
             &state.db,
-            &[("overlooker.enabled".to_string(), Some("false".to_string()))],
+            &[("watch.enabled".to_string(), Some("false".to_string()))],
         )
         .await
         .unwrap();
@@ -199,7 +199,7 @@ impl TestServer {
         // output, so a judgement degrades to the deterministic fallback
         // rather than spawning a real (slow, environment-dependent) claude.
         // A test exercising the agent path overrides this itself.
-        std::env::set_var("WEAVER_OVERLOOKER_AGENT_CMD", "true");
+        std::env::set_var("WEAVER_WATCH_AGENT_CMD", "true");
         let client = client::default();
         for _ in 0..60 {
             if client.get("/api/health").await.is_ok() {
@@ -274,7 +274,7 @@ pub fn plant_claude_transcript(home: &Path, work_dir: &str, user: &str, assistan
 
 /// One tag off a `SessionView` (or `BranchView`) JSON `branch.tags` array by
 /// key, or `None` when the branch carries no tag for that key. The status axes
-/// — the agent's `attention` and an overlooker's `triage` — are tags, so this is
+/// — the agent's `attention` and a watch's `triage` — are tags, so this is
 /// how a test reads a level/note/author off the wire.
 pub fn branch_tag<'a>(view: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
     view.get("branch")

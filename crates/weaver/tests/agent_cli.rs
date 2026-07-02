@@ -770,7 +770,7 @@ async fn set_status_sets_level_and_message() {
     );
 }
 
-/// `weaver tag set triage` stamps the overlooker's mark on a *named* session —
+/// `weaver tag set triage` stamps the watch's mark on a *named* session —
 /// a status axis distinct from the agent's own `attention` — and records a `tag`
 /// event for the audit trail. The agent's attention tag is never touched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -780,14 +780,14 @@ async fn triage_tag_marks_a_session_without_touching_attention() {
     // The agent declares its own attention about itself.
     env.run(&["status", "blocked", "build", "broke"]);
 
-    // No triage tag until an overlooker looks.
+    // No triage tag until a watch looks.
     let out = env.run(&["tag", "ls", "--session", "feature-test"]);
     assert!(
         !out.contains("triage"),
         "fresh session has no triage tag: {out}"
     );
 
-    // An overlooker stamps a *different* opinion on the same session via the
+    // A watch stamps a *different* opinion on the same session via the
     // triage tag.
     let out = env.run(&[
         "tag",

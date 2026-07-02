@@ -47,7 +47,7 @@ workbench and Linear's density, not a centered bootstrap template.
 ```
 
 - **Rail** (56px, `--rail` background, 1px right border): the wordmark up
-  top, then Sessions / Issues / Overlookers as icon+label items; Settings and
+  top, then Sessions / Issues / Watches as icon+label items; Settings and
   the theme toggle pinned at the bottom (the VS Code idiom). The active view
   gets a 2px accent bar on the rail item's left edge plus full-strength icon;
   inactive items sit muted. There is **no top app bar** — the rail is the nav,
@@ -59,7 +59,7 @@ workbench and Linear's density, not a centered bootstrap template.
   list polls; the bar is read-only API state, never browser-local truth.
 - **View toolbars**: one ~32px line — a small-caps 11px `<h1>` (kept for
   accessibility and tests), count pill, view filters, and the primary action
-  pushed right. Detail pages (session, overlooker) keep their richer headers.
+  pushed right. Detail pages (session, watch) keep their richer headers.
 
 ## Color
 
@@ -108,7 +108,7 @@ Modern–derived), not blue-tinted slate:
 - All badges (lifecycle, outcome, issue status) share one recipe: 11px mono
   uppercase, `px-1.5 py-0.5`, radius 4, neutral fill. The attention badge is
   the only filled loud chip.
-- `ToggleSwitch` is the one boolean control (overlooker enable, bool
+- `ToggleSwitch` is the one boolean control (watch enable, bool
   settings).
 - Focus: a crisp 1px accent `:focus-visible` outline, never removed, no glow.
 - Hover: background shift only (`--subtle`), ≤150ms, no lift/scale.

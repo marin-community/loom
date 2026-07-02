@@ -13,9 +13,9 @@ pub mod git;
 pub mod github;
 pub mod issue;
 pub mod migrations;
-pub mod overlooker;
 pub mod repo_config;
 pub mod tags;
 pub mod transcript;
+pub mod watch;
 
 pub use db::Db;

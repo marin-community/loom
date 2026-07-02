@@ -13,8 +13,7 @@ import SessionList from './views/SessionList.vue';
 import SessionDetail from './views/SessionDetail.vue';
 import Settings from './views/Settings.vue';
 import Issues from './views/Issues.vue';
-import Overlookers from './views/Overlookers.vue';
-import OverlookerDetail from './views/OverlookerDetail.vue';
+import Watches from './views/Watches.vue';
 import Chat from './views/Chat.vue';
 import Shell from './views/Shell.vue';
 import Login from './views/Login.vue';
@@ -38,8 +37,8 @@ const router = createRouter({
     { path: '/s/:id/artifacts/:name', component: SessionDetail, props: true },
     { path: '/issues', component: Issues },
     { path: '/chat', component: Chat },
-    { path: '/overlookers', component: Overlookers },
-    { path: '/overlookers/:id', component: OverlookerDetail, props: true },
+    { path: '/watches', component: Watches },
+    { path: '/watches/:id', component: Watches, props: true },
     { path: '/shell', component: Shell },
     { path: '/settings', component: Settings },
   ],

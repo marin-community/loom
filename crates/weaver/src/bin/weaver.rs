@@ -54,7 +54,7 @@ enum Cmd {
     /// A tag is a single-valued `(key, value)` annotation on a branch with a
     /// one-line note and an author. The well-known loud keys are `attention`
     /// (the agent's own signal, normally written by `weaver status`) and `triage`
-    /// (an overlooker's outside assessment); both accept `attention` or
+    /// (a watch's outside assessment); both accept `attention` or
     /// `blocked`. Any other key is free-form and quiet.
     Tag {
         #[command(subcommand)]
@@ -884,7 +884,7 @@ async fn resolve_tag_target(
 }
 
 /// Set, clear, or list a tag on a branch. Tags unify the agent's `attention`
-/// self-report and an overlooker's `triage` assessment with any free-form axis.
+/// self-report and a watch's `triage` assessment with any free-form axis.
 async fn cmd_tag(cmd: TagCmd) -> Result<()> {
     let client = client();
     let key = branch_key()?;

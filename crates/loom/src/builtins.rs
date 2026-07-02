@@ -1,24 +1,24 @@
-//! The **builtin overlooker programs** — the stock programs that ship inside
-//! the loom binary and that an overlooker's `program` field names as
+//! The **builtin watch programs** — the stock programs that ship inside
+//! the loom binary and that a watch's `program` field names as
 //! `builtin:<name>`.
 //!
 //! Every builtin is a **script**: a real Python file under
-//! `crates/loom/overlookers/`, embedded here with `include_str!` and run by
-//! the engine's script executor ([`crate::overlooker`]) exactly like a user's
+//! `crates/loom/watches/`, embedded here with `include_str!` and run by
+//! the engine's script executor ([`crate::watch`]) exactly like a user's
 //! custom program file. Living in the repo makes each one diffable,
 //! reviewable, and the working example of the program contract; the panel
 //! shows the source read-only. There is deliberately no privileged in-Rust
 //! program shape — everything a builtin does, it does through the loom REST
 //! API a custom program also sees.
 //!
-//! `GET /api/overlookers/programs` serves this table (as [`ProgramView`]s) so
-//! the panel and the `loom overlooker programs` CLI list one source of truth.
+//! `GET /api/watches/programs` serves this table (as [`ProgramView`]s) so
+//! the panel and the `loom watch programs` CLI list one source of truth.
 
 use serde_json::{json, Value};
 use weaver_api::ProgramView;
 
 /// The `weaver_loom` Python module — the API layer over the loom REST API that
-/// overlooker programs import. Vendored into the binary so the engine can
+/// watch programs import. Vendored into the binary so the engine can
 /// place it on every script's `PYTHONPATH` (no install step); the source of
 /// truth (and the installable package) is `python/weaver-loom/`.
 pub const PYTHON_MODULE: &str =
@@ -53,7 +53,7 @@ pub const BUILTINS: &[BuiltinProgram] = &[
                       finds a genuine need it replaces the soothing `idle` mark \
                       with that real status. With no judge model available it \
                       no-ops, never mirroring the agent's own attention tag.",
-        source: include_str!("../overlookers/status.py"),
+        source: include_str!("../watches/status.py"),
         default_trigger: r#"{"on":["session.idle"]}"#,
         default_scope: "{}",
         default_params: "{}",
@@ -70,7 +70,7 @@ pub const BUILTINS: &[BuiltinProgram] = &[
                       for each backoff recheck; after `max_attempts` consecutive \
                       failures it escalates (marks the session) and stops \
                       re-prompting until it recovers. Needs `nudge` to resume.",
-        source: include_str!("../overlookers/resume.py"),
+        source: include_str!("../watches/resume.py"),
         default_trigger: r#"{"on":["session.idle","session.stale"]}"#,
         default_scope: "{}",
         default_params: "{}",
@@ -83,7 +83,7 @@ pub const BUILTINS: &[BuiltinProgram] = &[
                       label (params.label, default 'weaver'), so PRs born from \
                       sessions are identifiable on GitHub. Read-only: it \
                       reports would-label actions.",
-        source: include_str!("../overlookers/pr_label.py"),
+        source: include_str!("../watches/pr_label.py"),
         default_trigger: r#"{"on":["pr.opened"]}"#,
         default_scope: "{}",
         default_params: r#"{"label":"weaver"}"#,
@@ -102,7 +102,7 @@ pub const BUILTINS: &[BuiltinProgram] = &[
                       a scanning user skips past it. Clears the mark the moment \
                       review lands, the PR merges, or the draft flag flips. \
                       Needs `mark` to park / un-park.",
-        source: include_str!("../overlookers/review_wait.py"),
+        source: include_str!("../watches/review_wait.py"),
         default_trigger: r#"{"on":["pr.review_changed","pr.opened","pr.merged"]}"#,
         default_scope: "{}",
         default_params: "{}",
@@ -116,7 +116,7 @@ pub const BUILTINS: &[BuiltinProgram] = &[
                       Read-only: it reports would-archive actions (the \
                       github.archive_on_merge setting still performs the \
                       archive).",
-        source: include_str!("../overlookers/archive_merged.py"),
+        source: include_str!("../watches/archive_merged.py"),
         default_trigger: r#"{"on":["pr.merged"]}"#,
         default_scope: "{}",
         default_params: "{}",
@@ -125,7 +125,7 @@ pub const BUILTINS: &[BuiltinProgram] = &[
 ];
 
 impl BuiltinProgram {
-    /// The reference an overlooker's `program` field uses: `builtin:<name>`.
+    /// The reference a watch's `program` field uses: `builtin:<name>`.
     pub fn program(&self) -> String {
         format!("builtin:{}", self.name)
     }
@@ -197,7 +197,7 @@ mod tests {
             }
             for cap in b.default_capabilities {
                 assert!(
-                    weaver_core::overlooker::CAPABILITIES.contains(cap),
+                    weaver_core::watch::CAPABILITIES.contains(cap),
                     "{}: unknown capability {cap}",
                     b.name
                 );

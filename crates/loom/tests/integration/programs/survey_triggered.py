@@ -4,7 +4,7 @@ action per session. Declares a `pr.merged` subscription so a test can drive it
 through the engine's register-mode reconcile and event dispatch.
 
 Owned by the engine-mechanics integration tests (`tests/integration/
-overlookers.rs`); it mutates nothing.
+watches.rs`); it mutates nothing.
 """
 
 from weaver_loom import Round

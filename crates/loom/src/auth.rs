@@ -10,7 +10,7 @@
 //!   carried by the browser. Stored hashed, same as tokens.
 //! * **Loopback trust** — a request from `127.0.0.1`/`::1` is taken to be the
 //!   machine owner (the seeded primary user), so the local CLI, the agent, and
-//!   overlooker scripts keep working with zero configuration. Gated on the
+//!   watch scripts keep working with zero configuration. Gated on the
 //!   `auth.trust_loopback` setting (on by default).
 //!
 //! The machine also mints a **local token** ([`ensure_local_token`]) it injects
@@ -582,7 +582,7 @@ pub fn local_token_path() -> PathBuf {
 /// Ensure the machine-local bearer token exists and return its plaintext.
 ///
 /// loom injects this into the environments of its own same-host subprocesses
-/// (the agent's terminal, overlooker scripts) and the `loom` CLI reads it, so local
+/// (the agent's terminal, watch scripts) and the `loom` CLI reads it, so local
 /// automation authenticates even when `auth.trust_loopback` is off. The
 /// plaintext is persisted (0600) under `$WEAVER_HOME` and reused across
 /// restarts; if the database is reset but the file survives, the same plaintext

@@ -28,15 +28,15 @@ pub struct Session {
     /// dashboard's session tree. `None` for a top-level session. Set once at
     /// creation from the resolved launcher, never re-derived.
     pub parent_branch_id: Option<String>,
-    /// The overlooker id that owns this session when it is engine-managed
+    /// The watch id that owns this session when it is engine-managed
     /// infrastructure — a *warm session* a watcher keeps for its across-round
     /// memory. `None` for an ordinary fleet session. A managed session is hidden
     /// from the fleet listing ([`list_visible`]) and the survey scope, and its
-    /// restart adoption is governed by `overlooker.adopt_warm` rather than
+    /// restart adoption is governed by `watch.adopt_warm` rather than
     /// `server.auto_adopt`.
     pub managed_by: Option<String>,
     /// The principal (username) that launched this session — attribution for the
-    /// shared team board. `None` for engine-created sessions (warm overlooker
+    /// shared team board. `None` for engine-created sessions (warm watch
     /// sessions) and rows that predate the column. Stamped once at creation from
     /// the resolving [`crate::auth::Principal`]; a tracking/UX field, never a
     /// security boundary.
@@ -81,7 +81,7 @@ pub struct NewSession {
     /// Branch id of the launching session (the parent in the session tree), or
     /// `None` for a top-level launch. See [`Session::parent_branch_id`].
     pub parent_branch_id: Option<String>,
-    /// The owning overlooker id for an engine-managed (warm) session, or `None`
+    /// The owning watch id for an engine-managed (warm) session, or `None`
     /// for an ordinary fleet session. See [`Session::managed_by`].
     pub managed_by: Option<String>,
     /// The principal (username) that launched this session, or `None` for an
@@ -153,10 +153,10 @@ pub async fn list(db: &Db) -> Result<Vec<Session>> {
 }
 
 /// The **fleet** sessions only — ordinary work, with infrastructure sessions
-/// excluded: engine-managed (warm) overlooker sessions, and the fleet
+/// excluded: engine-managed (warm) watch sessions, and the fleet
 /// **concierge** (the Chat agent, which watches the fleet rather than being part
 /// of it). Neither is work to show or survey, so the dashboard `/sessions`
-/// listing and an overlooker round's scope survey both read this list.
+/// listing and a watch round's scope survey both read this list.
 pub async fn list_visible(db: &Db) -> Result<Vec<Session>> {
     let rows = sqlx::query_as::<_, Session>(
         "SELECT * FROM sessions
@@ -185,10 +185,10 @@ pub async fn active_concierge(db: &Db) -> Result<Option<Session>> {
     Ok(row)
 }
 
-/// Every engine-managed (warm) session — those owned by an overlooker. The
+/// Every engine-managed (warm) session — those owned by a watch. The
 /// managed-session reconcile pass walks these to re-adopt a warm session whose
-/// terminal is gone (when `overlooker.adopt_warm` is on) and to clean up one whose
-/// owning overlooker has been deleted.
+/// terminal is gone (when `watch.adopt_warm` is on) and to clean up one whose
+/// owning watch has been deleted.
 pub async fn list_managed(db: &Db) -> Result<Vec<Session>> {
     let rows = sqlx::query_as::<_, Session>(
         "SELECT * FROM sessions WHERE managed_by IS NOT NULL ORDER BY created_at DESC",
@@ -198,17 +198,17 @@ pub async fn list_managed(db: &Db) -> Result<Vec<Session>> {
     Ok(rows)
 }
 
-/// The owned (warm) session for an overlooker, if one exists and is not
+/// The owned (warm) session for a watch, if one exists and is not
 /// terminal. Lets the engine reuse the same warm session across rounds rather
 /// than spawning a duplicate.
-pub async fn active_managed_by(db: &Db, overlooker_id: &str) -> Result<Option<Session>> {
+pub async fn active_managed_by(db: &Db, watch_id: &str) -> Result<Option<Session>> {
     let row = sqlx::query_as::<_, Session>(
         "SELECT * FROM sessions
          WHERE managed_by = ? AND status NOT IN ('done', 'error', 'archived')
          ORDER BY created_at DESC
          LIMIT 1",
     )
-    .bind(overlooker_id)
+    .bind(watch_id)
     .fetch_optional(db)
     .await?;
     Ok(row)
@@ -297,7 +297,7 @@ mod tests {
     async fn managed_by_partitions_the_listings() {
         let db = crate::db::connect_in_memory().await.unwrap();
         let ordinary_branch = branch_id(&db, "weaver/work").await;
-        let warm_branch = branch_id(&db, "weaver/overlooker-x").await;
+        let warm_branch = branch_id(&db, "weaver/watch-x").await;
 
         insert(&db, &new_session("ordinary", &ordinary_branch, None))
             .await
@@ -327,10 +327,10 @@ mod tests {
         assert_eq!(managed, vec!["warm".to_string()], "only managed listed");
 
         let owned = active_managed_by(&db, "ov-1").await.unwrap().unwrap();
-        assert_eq!(owned.id, "warm", "the overlooker's warm session resolves");
+        assert_eq!(owned.id, "warm", "the watch's warm session resolves");
         assert!(
             active_managed_by(&db, "ov-other").await.unwrap().is_none(),
-            "no warm session for an overlooker that owns none"
+            "no warm session for a watch that owns none"
         );
     }
 }

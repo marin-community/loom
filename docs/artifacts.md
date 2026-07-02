@@ -186,7 +186,7 @@ DELETE /api/sessions/{id}/artifacts/{name}          # remove it + its history
 
 Each write records an `artifact_written` event (`{name, rev, title}`) through
 the existing bus, and a delete records `artifact_deleted` (`{name, branch_id}`),
-so the SSE stream, the activity feed, and overlookers see both with no new
+so the SSE stream, the activity feed, and watches see both with no new
 plumbing. `rm`/DELETE resolve the name the way `show` does (branch-scoped first,
 then repo-shared — the single row the listing shows), so removing from the UI
 takes exactly the artifact on screen; `--repo` targets the shared row when a

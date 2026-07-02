@@ -2,7 +2,7 @@
 
 A Pythonic, synchronous wrapper over [`weaver-api`](../weaver-api) — drive the
 loom fleet from Python, capability-gated. This is the out-of-process seam of the
-[overlooker design](../../docs/plans/overlooker.md): a scripted overlooker (or an
+[watch design](../../docs/plans/watches.md): a scripted watch (or an
 agent iterating on one, or a human at a REPL) talks to the loom daemon through
 the same typed REST surface the `loom` CLI uses, never touching the terminal runtime directly.
 The daemon stays the single owner of the live runtime.
@@ -38,7 +38,7 @@ for s in c.sessions():
     branch = s["branch"]
     # Status lives in `branch["tags"]`, a list of {key, value, note, set_by,
     # set_at}. The well-known keys are `attention` (the agent's self-report) and
-    # `triage` (an overlooker's assessment); a missing key means calm.
+    # `triage` (a watch's assessment); a missing key means calm.
     tags = {t["key"]: t["value"] for t in branch["tags"]}
     print(s["id"], branch["title"], branch["description"],
           tags.get("attention", "calm"), tags.get("triage", "calm"))
@@ -75,7 +75,7 @@ grant is absent.
 |-------------|------------------------------------------|----------|
 | `observe`   | all reads (`sessions`/`session`/`preview`/`diff`) | always on |
 | `mark`      | write a tag (`set_tag`/`clear_tag`/`mark`) | opt-in   |
-| `escalate`  | raise the overlooker's own attention     | opt-in   |
+| `escalate`  | raise the watch's own attention     | opt-in   |
 | `nudge`     | `nudge` — type a message into a session  | opt-in   |
 | `interrupt` | `interrupt` — break the agent's turn     | opt-in   |
 | `launch`    | spawn new sessions (highest privilege)   | opt-in   |
@@ -90,7 +90,7 @@ core lives below the pyo3 glue, not buried in it.
 
 ### Not yet available
 
-`warm_session()` (the overlooker's persistent session) and `run_agent()` (a
+`warm_session()` (the watch's persistent session) and `run_agent()` (a
 fresh one-shot judgement agent) are named in the design but not backed by the
 REST client today: `warm_session` is the warm-session lifecycle (plan T12), and
 `run_agent` is an in-process engine helper, not an out-of-process endpoint. They
