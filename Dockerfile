@@ -61,21 +61,13 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends nodejs git ca-certificates gh google-cloud-cli tini; \
     rm -rf /var/lib/apt/lists/*
 
-# Claude Code — the agent runtime loom's sessions launch — is installed in two
-# places on purpose:
-#
-#   * a baked *fallback* here under /opt/claude (root-owned, deliberately kept
-#     OFF /usr/local/bin and placed last on PATH, so it never shadows the
-#     writable copy). It exists only so a brand-new or offline container still
-#     has a working `claude`.
-#   * the real copy the entrypoint lays down at first boot into the app user's
-#     $HOME/.local — on the persisted loom_home volume, so it is writable. That
-#     one wins on PATH, and because it lives on a writable volume Claude Code's
-#     background auto-updater works and the updates survive container recreates.
-#
-# A bare `npm i -g @anthropic-ai/claude-code` (the old approach) lands in the
-# read-only, root-owned npm global dir and makes Claude report it "can't update".
-RUN npm install -g @anthropic-ai/claude-code --prefix /opt/claude
+# Claude Code — the agent runtime loom's sessions launch — is deliberately NOT
+# baked into the image. The container runs as a non-root user, so a Claude
+# installed into the read-only system dirs (what `npm i -g` does) can't
+# auto-update and reports it's "installed in a read-only location". Instead
+# loom-entrypoint (below) runs Claude's own installer at first boot into the app
+# user's $HOME/.local — on the persisted loom_home volume, so it is writable,
+# auto-updates itself in place, and the updates survive container recreates.
 
 # code-server — the per-session embedded VS Code that `crate::ide` spawns and
 # reverse-proxies (one rooted at each worktree, behind loom's auth). The `.deb`
@@ -111,13 +103,13 @@ RUN if ! getent group "${HOST_GID}" >/dev/null; then groupadd -g "${HOST_GID}" a
 # Set $HOME explicitly: the entrypoint and Claude's installer resolve
 # $HOME/.local, and `USER app` alone doesn't reliably export HOME.
 ENV HOME=/home/app
-# The writable, self-updating Claude install and any client packages added at
-# runtime live under the app user's persisted $HOME, ahead of the baked fallback
-# on PATH. NPM_CONFIG_PREFIX points `npm i -g` at a home dir too, so new CLI
-# packages can be installed live (and persist on the loom_home volume) without an
-# image rebuild — only OS/apt packages still need one.
+# The writable, self-updating Claude install (see loom-entrypoint) and any client
+# packages added at runtime live under the app user's persisted $HOME, early on
+# PATH. NPM_CONFIG_PREFIX points `npm i -g` at a home dir too, so new CLI packages
+# can be installed live (and persist on the loom_home volume) without an image
+# rebuild — only OS/apt packages still need one.
 ENV NPM_CONFIG_PREFIX=/home/app/.npm-global \
-    PATH=/home/app/.local/bin:/home/app/.npm-global/bin:${PATH}:/opt/claude/bin
+    PATH=/home/app/.local/bin:/home/app/.npm-global/bin:${PATH}
 
 # Where uv keeps its managed interpreters and wheel cache. Kept off /home/app so
 # the (large) Python builds don't bloat the home volume and can be reset on their
@@ -167,12 +159,15 @@ cat > /usr/local/bin/loom-entrypoint <<'SH'
 set -eu
 if [ "${1:-}" = loom ] && [ "${2:-}" = server ] && [ ! -x "$HOME/.local/bin/claude" ]; then
   echo "loom: installing self-updating Claude Code into $HOME/.local ..." >&2
-  # Use the baked fallback's own installer to write the native build onto the
-  # writable volume; Claude then auto-updates itself in place. Pin with
-  # CLAUDE_CODE_VERSION (stable|latest|<version>; default stable). Non-fatal:
-  # loom still boots on failure and agents use the baked fallback meanwhile.
-  claude install "${CLAUDE_CODE_VERSION:-stable}" \
-    || echo "loom: WARNING: Claude install failed; using baked fallback for now" >&2
+  # The stock native installer drops claude into $HOME/.local/bin (writable, on
+  # the volume); Claude then auto-updates itself in place. Pin with
+  # CLAUDE_CODE_VERSION (stable|latest|<version>; default stable). `curl | bash`
+  # can't surface a download failure through the pipe, so check the binary landed
+  # rather than trusting the exit status. Non-fatal: loom still boots either way;
+  # agents just lack `claude` until a boot with network installs it.
+  curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_CODE_VERSION:-stable}" || true
+  [ -x "$HOME/.local/bin/claude" ] \
+    || echo "loom: WARNING: Claude install failed (offline?); agents lack 'claude' until a later boot installs it" >&2
 fi
 exec "$@"
 SH

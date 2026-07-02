@@ -305,15 +305,14 @@ The agent tooling the image ships splits by how it updates:
 
 - **Claude Code updates itself, no image rebuild.** The container runs as a
   non-root user, so a Claude installed into the read-only system dirs could not
-  auto-update ("installed in a read-only location"). Instead, the daemon
-  installs Claude Code into the persisted `loom_home` volume
-  (`~/.local/bin/claude`) the first time it starts, and Claude auto-updates
-  itself in place from then on — updates land without a rebuild and survive
-  `up`/`down`/recreate. The image also carries a baked fallback under
-  `/opt/claude` (kept last on `PATH`) so a fresh or offline container still has
-  a working `claude` before the volume copy exists. Pin the tracked build by
-  setting `CLAUDE_CODE_VERSION` (`stable` — the default — `latest`, or an exact
-  version like `2.1.198`) in the `loom` service's `environment:` in
+  auto-update ("installed in a read-only location"). Instead, the first time the
+  daemon starts it runs Claude's native installer into the persisted `loom_home`
+  volume (`~/.local/bin/claude`), and Claude auto-updates itself in place from
+  then on — updates land without a rebuild and survive `up`/`down`/recreate. That
+  first install needs network (the deploy needs it anyway); if it fails loom
+  still comes up and installs on a later boot. Pin the tracked build with
+  `CLAUDE_CODE_VERSION` (`stable` — the default — `latest`, or an exact version
+  like `2.1.198`) in the `loom` service's `environment:` in
   [`docker-compose.yml`](standalone/docker-compose.yml); force one live with
   `docker compose exec loom claude install <version> --force`.
 
