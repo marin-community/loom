@@ -184,18 +184,12 @@ pub async fn exists(db: &Db, kind: &str) -> bool {
     matches!(metadata_for(db, kind).await, Ok(Some(_)))
 }
 
-/// The lifecycle status a freshly launched session of `runtime` starts in. An
-/// agent that fires weaver's hooks starts `launching` (its SessionStart/work hook
-/// promotes it to `running`); a hookless agent (codex, most custom agents) never
-/// gets that hook, so it is `running` from the start rather than stuck
-/// `launching`. An unknown runtime is treated as hookless.
-pub async fn initial_status(db: &Db, runtime: &str) -> &'static str {
-    let hooked = matches!(metadata_for(db, runtime).await, Ok(Some(m)) if m.supports_hooks);
-    if hooked {
-        "launching"
-    } else {
-        "running"
-    }
+/// The lifecycle status a freshly launched or resumed session starts in. Every
+/// runtime is live the moment its terminal spawns, so this is always `running` —
+/// there is no separate `launching` state to wait out. Kept as the single place
+/// that names a new session's initial status.
+pub async fn initial_status(_db: &Db, _runtime: &str) -> &'static str {
+    "running"
 }
 
 /// Check that `model` is one of `metadata`'s offered choices (blank is always

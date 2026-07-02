@@ -188,9 +188,8 @@ CREATE TABLE IF NOT EXISTS user_github_tokens (
 --   * `setup`  — run in the worktree before launch (e.g. installing status hooks);
 --   * `launch` — the fresh-session command, with the goal appended as an argument;
 --   * `resume` — the adopt/resume command (blank falls back to `launch`).
--- `reports_status` records whether the agent fires weaver's lifecycle hooks (so a
--- fresh session waits at `launching` for the first hook rather than going straight
--- to `running`).
+-- `reports_status` records whether the agent fires weaver's lifecycle hooks, which
+-- drive the idle/attention signals (a fresh session is `running` immediately).
 CREATE TABLE IF NOT EXISTS custom_agents (
     name           TEXT PRIMARY KEY,
     label          TEXT NOT NULL,

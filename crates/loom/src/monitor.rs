@@ -240,7 +240,8 @@ fn parse_iso(ts: &str) -> Option<DateTime<Utc>> {
 ///
 /// Mapping rationale: the work hooks drive only liveness and a soothing idle
 /// signal. A `working` / `waiting` / `idle` hook means the agent process is
-/// alive → `running` (this also promotes a freshly-`launching` session).
+/// alive → `running` (this also lifts a recovered `orphaned` session back to
+/// `running`).
 /// `session-start` is returned early below — it is recorded for the primer
 /// injection (in the `weaver hook` CLI) but the launch path owns the initial
 /// status, so it carries no liveness or tag signal here. Beyond liveness:

@@ -273,6 +273,20 @@ pub async fn worktree_add_existing(repo_root: &Path, path: &Path, branch: &str) 
     Ok(())
 }
 
+/// Materialize a local `branch` from `origin/<branch>` — used to check out a PR's
+/// head branch after a fetch, since a bare branch name resolves only local heads.
+/// A no-op when the local branch already exists; errors if `origin/<branch>` was
+/// never fetched. Creating from a remote-tracking ref sets upstream, so a later
+/// `git push` targets the same branch (updating the PR).
+pub async fn create_local_branch_from_origin(repo_root: &Path, branch: &str) -> Result<()> {
+    if branch_exists(repo_root, branch).await {
+        return Ok(());
+    }
+    git(repo_root, &["branch", branch, &format!("origin/{branch}")]).await?;
+    tracing::info!(%branch, "created local branch from origin");
+    Ok(())
+}
+
 /// List local branch names (`refs/heads/*`).
 pub async fn list_branches(repo_root: &Path) -> Result<Vec<String>> {
     let out = git(

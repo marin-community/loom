@@ -220,13 +220,13 @@ export function quietTags(s: Session): Tag[] {
 // `set_at` — so the mark would be born stale and a finished turn would never read
 // "Idle"; and (2) sub-agent or shell pane activity under an idle mark is, by
 // design, still "resting" (see monitor `apply_hook`), not a reason to retract it.
-const LIVE_STATUSES = new Set(['launching', 'running']);
+const LIVE_STATUSES = new Set(['running']);
 
 // Whether the session still has a live agent pane to type into — the gate for
 // the conversation composer. `POST /sessions/{id}/send` 409s once the terminal
 // is gone (orphaned / done / error / archived), so the composer only shows while
-// the agent is launching or running. Reuses LIVE_STATUSES: the same "the agent
-// is here" notion as the idle mark.
+// the agent is running. Reuses LIVE_STATUSES: the same "the agent is here" notion
+// as the idle mark.
 export function canSend(s: Session): boolean {
   return LIVE_STATUSES.has(s.status);
 }
@@ -266,7 +266,7 @@ export function conversationState(s: Session): ConvState {
   // cyan — quiet hues well below the loud amber/red, which stays the sole signal
   // that something needs a human.
   if (idleTag(s)) return { glyph: '✓', label: 'Idle', tone: 'info' };
-  if (s.status === 'running' || s.status === 'launching') return { glyph: '▶', label: 'Working', tone: 'ok' };
+  if (s.status === 'running') return { glyph: '▶', label: 'Working', tone: 'ok' };
   return { glyph: '✓', label: 'Idle', tone: 'info' };
 }
 
@@ -294,6 +294,6 @@ export function lifecycleDot(s: Session): string {
   if (level === 'blocked') return 'bg-block-line';
   if (level === 'attention') return 'bg-attn-line';
   if (idleTag(s)) return 'bg-info-line';
-  if (s.status === 'running' || s.status === 'launching') return 'bg-ok-line';
+  if (s.status === 'running') return 'bg-ok-line';
   return 'bg-faint/50';
 }

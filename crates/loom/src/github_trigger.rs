@@ -159,6 +159,18 @@ pub struct IssuePayload {
     /// GitHub sends `null` for an empty issue body, so this is an `Option`.
     #[serde(default)]
     pub body: Option<String>,
+    /// Present (a `{ url, … }` object) only when the comment is on a **pull
+    /// request** — GitHub reuses the `issue_comment` event for both. Its mere
+    /// presence is the PR/issue discriminant; the fields inside are unused.
+    #[serde(default)]
+    pub pull_request: Option<serde_json::Value>,
+}
+
+impl IssuePayload {
+    /// Whether this comment is on a pull request (vs a plain issue).
+    pub fn is_pr(&self) -> bool {
+        self.pull_request.is_some()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -271,14 +283,28 @@ const RATE_MAX: usize = 20;
 // The GitHub gateway — the two external operations the trigger performs.
 // ---------------------------------------------------------------------------
 
-/// The one GitHub operation the trigger performs — posting the reply — behind a
-/// trait so the `gh`-backed implementation ([`GhCli`]) and a test fake are
-/// interchangeable. The production impl is the GitHub **App** (short-lived
-/// installation tokens); the [`GhCli`] fallback uses the ambient `GH_TOKEN`.
+/// A pull request's head branch — where its commits live — plus whether that
+/// branch is in a fork (`cross_repo`). loom attaches a session's worktree to the
+/// head branch so the agent's commits land on the PR directly; a cross-repo PR's
+/// head lives in a fork loom can't push to, so those fall back to a fresh branch.
+#[derive(Debug, Clone)]
+pub struct PrHead {
+    pub head_ref: String,
+    pub cross_repo: bool,
+}
+
+/// The GitHub operations the trigger performs — posting a reply and resolving a
+/// PR's head branch — behind a trait so the `gh`-backed implementation
+/// ([`GhCli`]) and a test fake are interchangeable. The production impl is the
+/// GitHub **App** (short-lived installation tokens); the [`GhCli`] fallback uses
+/// the ambient `GH_TOKEN`.
 #[async_trait::async_trait]
 pub trait GithubApi: Send + Sync {
     /// Post a comment on `issue` of `repo` (`owner/name`).
     async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<()>;
+
+    /// Resolve pull request `number` of `repo` (`owner/name`) to its head branch.
+    async fn pr_head(&self, repo: &str, number: i64) -> Result<PrHead>;
 }
 
 /// The production [`GithubApi`]: shells out to the `gh` CLI with the ambient
@@ -292,6 +318,32 @@ impl GithubApi for GhCli {
         gh_capture(&["issue", "comment", &number, "--repo", repo, "--body", body]).await?;
         tracing::info!(repo, issue, "posted issue comment");
         Ok(())
+    }
+
+    async fn pr_head(&self, repo: &str, number: i64) -> Result<PrHead> {
+        let n = number.to_string();
+        let out = gh_capture(&[
+            "pr",
+            "view",
+            &n,
+            "--repo",
+            repo,
+            "--json",
+            "headRefName,isCrossRepository",
+        ])
+        .await?;
+        #[derive(Deserialize)]
+        struct View {
+            #[serde(rename = "headRefName")]
+            head_ref: String,
+            #[serde(rename = "isCrossRepository")]
+            cross_repo: bool,
+        }
+        let view: View = serde_json::from_str(&out).context("parsing `gh pr view` json")?;
+        Ok(PrHead {
+            head_ref: view.head_ref,
+            cross_repo: view.cross_repo,
+        })
     }
 }
 
@@ -508,6 +560,13 @@ mod tests {
                 .unwrap()
                 .push((repo.to_string(), issue, body.to_string()));
             Ok(())
+        }
+
+        async fn pr_head(&self, _repo: &str, _number: i64) -> Result<PrHead> {
+            Ok(PrHead {
+                head_ref: "feature".to_string(),
+                cross_repo: false,
+            })
         }
     }
 

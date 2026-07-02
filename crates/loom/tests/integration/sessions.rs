@@ -218,8 +218,8 @@ async fn chat_get_or_creates_a_hidden_singleton_concierge() {
     let chat_id = chat["id"].as_str().unwrap().to_string();
     assert_eq!(chat["agent_kind"], "concierge");
     assert_eq!(
-        chat["status"], "launching",
-        "the default (claude) concierge waits for its first hook to go running"
+        chat["status"], "running",
+        "every runtime is live on launch — there is no `launching` state"
     );
     // It boots primed-but-idle (no positional prompt ⇒ no turn ⇒ no `Stop` hook),
     // so creation seeds the soothing `idle` mark itself — otherwise the chat would

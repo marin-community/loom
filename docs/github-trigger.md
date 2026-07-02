@@ -1,9 +1,12 @@
 # GitHub trigger (`@loom`)
 
-loom turns an issue comment into a session. Comment **`@loom`** on a GitHub
-issue or PR and loom launches a session against that repo — seeded from the
-issue — and replies on the issue with a link to the live session
-(`On it — {base}/s/{id}`).
+loom turns an issue or PR comment into a session. Comment **`@loom`** on a GitHub
+issue or pull request and loom launches a session against that repo — attached to
+the PR's own branch (so the agent's commits land on the PR) or, for an issue, a
+stable `weaver/issue-<n>` branch — seeded with the thread's context, and replies
+with a link to the live session (`On it — {base}/s/{id}`). A follow-up `@loom` on
+a thread that already has a running session is handed to that session instead of
+starting a second one.
 
 This is an internet-exposed, untrusted-input endpoint. Two gates protect it:
 every delivery is verified cryptographically (HMAC), and the commenter is
@@ -31,12 +34,24 @@ receiver, in order:
    else is silently ignored. A per-repo rate limit blunts comment spam.
 6. **Resolves the repo** through the [managed repo store](#which-repos) — an
    approved user's trigger on any repo the App is installed on registers it — and
-   creates the session, seeded with the issue title and body.
-7. **Replies** on the issue with the session URL.
+   picks the branch to work on: a **pull request** comment attaches the session's
+   worktree to the PR's head branch, so the agent's commits push straight to the
+   PR; an **issue** comment gets a stable `weaver/issue-<n>` branch. (A PR from a
+   fork, whose head loom can't push to, falls back to a fresh branch.)
+7. **Reuses or creates.** If an active session already owns that branch, the new
+   comment is forwarded into it (a nudge in its terminal) rather than launching a
+   duplicate. Otherwise loom creates the session, seeded with the issue/PR title,
+   body, and the triggering comment, plus a primer on how to respond — push to the
+   PR branch (or open a PR for an issue) and reply on the thread with `gh`.
+8. **Replies** on the thread with the session URL (or, for a forwarded comment,
+   that it was passed to the running session).
 
-The reply (step 7) reaches GitHub through the [GitHub App](#the-github-app) when
+The reply (step 8) reaches GitHub through the [GitHub App](#the-github-app) when
 one is configured — with a short-lived, per-installation token — and otherwise
-through the `gh` CLI's ambient `GH_TOKEN`.
+through the `gh` CLI's ambient `GH_TOKEN`. The **session itself** acts as the
+commenter: its `GH_TOKEN` is that user's personal token (**Settings → Account**),
+falling back to the ambient `GH_TOKEN` when they have none — so its pushes and
+`gh` replies are attributed to them.
 
 Everything past the signature check returns **200** whether or not it launched a
 session (a non-trigger comment, a replay, an unauthorized commenter, an

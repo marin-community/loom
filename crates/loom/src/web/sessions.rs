@@ -274,25 +274,31 @@ async fn launch_env(
 /// Overlay the launching user's personal GitHub token onto `env` as `GH_TOKEN`,
 /// so the session's `git push` / `gh` act as that user (their pushes and PRs are
 /// attributed to them, matching the per-user commit identity loom already sets).
-/// Precedence mirrors the commit-identity handling: only for a launch that
-/// carries a `created_by` principal (webhook/warm/adopt keep the shared ambient
-/// token), and only if no higher env layer (`repo_env` / `agent_env` / the repo
-/// file) already set a non-empty `GH_TOKEN` — an explicit usable value wins.
-/// Best-effort: a lookup failure is logged, never fatal, so a token-store hiccup
-/// can't block a launch.
+/// The user's registered token takes precedence over any ambient `GH_TOKEN`; when
+/// they have none, whatever a lower env layer set (the ambient Settings →
+/// Environment value, `repo_env`, or the repo file) stands as the fallback. Only
+/// for a launch that carries a `created_by` username. Best-effort: a lookup
+/// failure is logged, never fatal, so a token-store hiccup can't block a launch.
 async fn apply_user_github_token(
     db: &Db,
     env: &mut Vec<(String, String)>,
     created_by: Option<&str>,
 ) {
     let Some(username) = created_by else { return };
-    if env_has_nonempty(env, "GH_TOKEN") {
-        return;
-    }
     match crate::user_token::get(db, username).await {
-        Ok(Some(token)) => env.push(("GH_TOKEN".to_string(), token)),
-        Ok(None) => {}
+        Ok(Some(token)) if !token.trim().is_empty() => set_env(env, "GH_TOKEN", token),
+        Ok(_) => {}
         Err(e) => tracing::warn!(%username, "failed to load user github token: {e}"),
+    }
+}
+
+/// Set `name` in `env`, replacing an existing entry in place (so a user token
+/// overrides an ambient value) or appending it when absent.
+fn set_env(env: &mut Vec<(String, String)>, name: &str, value: String) {
+    if let Some(slot) = env.iter_mut().find(|(k, _)| k == name) {
+        slot.1 = value;
+    } else {
+        env.push((name.to_string(), value));
     }
 }
 
@@ -958,9 +964,7 @@ pub(crate) async fn create_session_core(
     .await
     .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Only an agent that fires weaver's hooks starts `launching` (its hook
-    // promotes it to `running`); a hookless runtime (codex, most custom agents) is
-    // live on launch.
+    // Live the moment the terminal spawns — there is no `launching` state.
     let status = agent::initial_status(&st.db, &runtime).await;
     let session = session_mod::insert(
         &st.db,
@@ -1696,8 +1700,7 @@ async fn resume_agent(
     )
     .await
     .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    // A hookless runtime (codex, most custom agents) won't get the hook that would
-    // promote `launching` → `running`, so mark it live now rather than stranding it.
+    // A resumed agent is already established and live — mark it `running`.
     let status = agent::initial_status(&st.db, &runtime).await;
     session_mod::set_status(&st.db, &session.id, status).await?;
     events::record(
@@ -2066,41 +2069,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_gh_token_layer_wins_over_user_token() {
+    async fn user_token_overrides_ambient_gh_token_layer() {
         let db = crate::db::connect_in_memory().await.unwrap();
         seed_user(&db, "alice").await;
         crate::user_token::set(&db, "alice", "ghp_alice")
             .await
             .unwrap();
 
-        // A repo/operator env layer already set GH_TOKEN: it must survive untouched
-        // and stay the single GH_TOKEN entry (no duplicate appended).
-        let mut env = vec![("GH_TOKEN".to_string(), "repo-token".to_string())];
+        // A lower env layer (the ambient Settings → Environment value, repo_env, …)
+        // already set GH_TOKEN: the user's own token overrides it *in place* — so
+        // their push/comment act as them — with no duplicate entry appended.
+        let mut env = vec![("GH_TOKEN".to_string(), "ambient-token".to_string())];
         apply_user_github_token(&db, &mut env, Some("alice")).await;
         let gh: Vec<&(String, String)> = env.iter().filter(|(k, _)| k == "GH_TOKEN").collect();
         assert_eq!(gh.len(), 1, "no duplicate GH_TOKEN is appended");
-        assert_eq!(gh[0].1, "repo-token", "the explicit layer wins");
+        assert_eq!(
+            gh[0].1, "ghp_alice",
+            "the user's own token wins over the ambient layer"
+        );
     }
 
     #[tokio::test]
-    async fn empty_gh_token_layer_does_not_block_user_token() {
+    async fn ambient_gh_token_is_the_fallback_without_a_user_token() {
         let db = crate::db::connect_in_memory().await.unwrap();
-        seed_user(&db, "alice").await;
-        crate::user_token::set(&db, "alice", "ghp_alice")
-            .await
-            .unwrap();
+        seed_user(&db, "bob").await; // bob has no stored token
 
-        let mut env = vec![("GH_TOKEN".to_string(), "  ".to_string())];
-        apply_user_github_token(&db, &mut env, Some("alice")).await;
+        // With no user token, whatever a lower layer set stands as the fallback.
+        let mut env = vec![("GH_TOKEN".to_string(), "ambient-token".to_string())];
+        apply_user_github_token(&db, &mut env, Some("bob")).await;
         let gh: Vec<&(String, String)> = env.iter().filter(|(k, _)| k == "GH_TOKEN").collect();
+        assert_eq!(gh.len(), 1, "the ambient layer is left untouched");
         assert_eq!(
-            gh.len(),
-            2,
-            "the user token is appended after the empty layer"
-        );
-        assert_eq!(
-            gh[1].1, "ghp_alice",
-            "the appended token wins at export time"
+            gh[0].1, "ambient-token",
+            "with no user token, the ambient value is the fallback"
         );
     }
 

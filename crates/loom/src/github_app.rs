@@ -32,7 +32,7 @@ use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 
-use crate::github_trigger::{GhCli, GithubApi};
+use crate::github_trigger::{GhCli, GithubApi, PrHead};
 use crate::repo::RepoSlug;
 use weaver_core::db::Db;
 
@@ -407,6 +407,44 @@ impl GithubApi for GithubApp {
         tracing::info!(repo, issue, "posted issue comment");
         Ok(())
     }
+
+    async fn pr_head(&self, repo: &str, number: i64) -> Result<PrHead> {
+        if !self.is_configured().await {
+            return self.fallback.pr_head(repo, number).await;
+        }
+        let slug = crate::repo::parse_slug(repo).map_err(|e| anyhow!(e))?;
+        let token = self.token_for_repo(&slug.owner, &slug.name).await?;
+        let url = format!(
+            "{}/repos/{}/{}/pulls/{number}",
+            self.api_base, slug.owner, slug.name
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .header(reqwest::header::ACCEPT, GH_ACCEPT)
+            .header("X-GitHub-Api-Version", GH_API_VERSION)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .context("fetching the pull request")?;
+        let resp = check_status(resp, "fetching the pull request").await?;
+        let body: serde_json::Value = resp.json().await.context("parsing pull request json")?;
+        let head_ref = body["head"]["ref"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("pull request #{number} has no head ref"))?
+            .to_string();
+        // A cross-repo PR's head lives in a fork (`head.repo.full_name` differs
+        // from `base.repo.full_name`); GitHub also sets `head.repo` to null when
+        // the fork was deleted, which we likewise treat as unpushable.
+        let head_repo = body["head"]["repo"]["full_name"].as_str();
+        let base_repo = body["base"]["repo"]["full_name"].as_str();
+        let cross_repo = head_repo.is_none() || head_repo != base_repo;
+        Ok(PrHead {
+            head_ref,
+            cross_repo,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -645,6 +683,13 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
                 .unwrap()
                 .push((repo.to_string(), issue, body.to_string()));
             Ok(())
+        }
+
+        async fn pr_head(&self, _repo: &str, _number: i64) -> Result<PrHead> {
+            Ok(PrHead {
+                head_ref: "fallback-head".to_string(),
+                cross_repo: false,
+            })
         }
     }
 

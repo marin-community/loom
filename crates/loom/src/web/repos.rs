@@ -10,9 +10,12 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use weaver_api::CreateReq;
 
+use crate::backend;
 use crate::git;
 use crate::github_trigger;
 use crate::repo;
+use crate::session::{self as session_mod, Session};
+use weaver_core::branch as branch_mod;
 
 use super::auth::external_base;
 use super::sessions::create_session_core;
@@ -194,20 +197,123 @@ pub(super) async fn github_webhook(
         app.ensure_installed_repo_registered(&slug).await;
     }
 
-    // 7. Acquire the repo (it must be in the managed allowlist — `resolve_clone`
-    //    rejects others) and create the session, seeded from the issue carried in
-    //    the trusted payload. Seeding title/goal from the payload (not a `gh`
-    //    re-fetch) means the managed clone needs no reachable GitHub remote.
-    //    Attribute the launch to the webhook bot, annotated with the triggering
-    //    GitHub login (`created_by`, from PR #94) — tracking, not a boundary.
-    let req = CreateReq {
+    // 7. Resolve the commenter to their loom user (proven to exist by `authorize`
+    //    above). Attributing the launch to them makes their personal GitHub token
+    //    the session's `GH_TOKEN` — so its push / `gh` act as them — with the
+    //    ambient token as the fallback (see `apply_user_github_token`).
+    let username = match crate::auth::user_by_github(&st.db, &author).await {
+        Ok(Some(u)) => u.username,
+        _ => {
+            tracing::warn!(login = %author, "github webhook: approved user vanished before launch");
+            return ok();
+        }
+    };
+
+    // 8. Acquire the managed clone (allowlist-gated; `resolve_clone` also fetches
+    //    `--all`, so a PR's head lands as `origin/<ref>`), then resolve the branch
+    //    this trigger targets: a PR works on its own head branch so the agent's
+    //    commits land on the PR; an issue gets a stable `weaver/issue-<n>`.
+    let repo_root = match repo::resolve_clone(&st.db, &slug.slug(), st.trigger.app()).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(repo = %slug.slug(), error = ?e, "github webhook: clone/allowlist rejected");
+            return ok();
+        }
+    };
+    let repo_root_str = repo_root.to_string_lossy().to_string();
+    let number = event.issue.number;
+    let is_pr = event.issue.is_pr();
+
+    let mut target_branch = if is_pr {
+        match st.trigger.gh().pr_head(&slug.slug(), number).await {
+            // A fork PR's head is unreachable/unpushable — fall through to a fresh
+            // auto-named branch rather than pretend to attach to it.
+            Ok(h) if h.cross_repo => {
+                tracing::info!(repo = %slug.slug(), pr = number, "cross-repo PR; using a fresh branch");
+                None
+            }
+            Ok(h) => Some(h.head_ref),
+            Err(e) => {
+                tracing::warn!(repo = %slug.slug(), pr = number, error = %e, "github webhook: PR head lookup failed");
+                None
+            }
+        }
+    } else {
+        Some(format!("weaver/issue-{number}"))
+    };
+
+    // Materialize a PR head branch locally — bare names resolve only local heads,
+    // so `existing_branch` needs a real `refs/heads/<ref>`. On failure, drop to a
+    // fresh branch.
+    if is_pr {
+        if let Some(branch) = target_branch.clone() {
+            if let Err(e) = git::create_local_branch_from_origin(&repo_root, &branch).await {
+                tracing::warn!(repo = %slug.slug(), %branch, error = %e, "github webhook: could not materialize PR branch");
+                target_branch = None;
+            }
+        }
+    }
+
+    // 9. If an active session already owns the target branch, forward the new
+    //    comment into it rather than spawning a duplicate.
+    if let Some(branch) = target_branch.as_deref() {
+        if let Ok(Some(b)) = branch_mod::find_by_repo_branch(&st.db, &repo_root_str, branch).await {
+            if let Ok(Some(sess)) = session_mod::active_for_branch(&st.db, &b.id).await {
+                if forward_comment_to_session(&sess, &author, is_pr, number, &event.comment.body)
+                    .await
+                {
+                    crate::events::record(
+                        &st.db,
+                        &st.bus,
+                        &b.id,
+                        "nudge",
+                        serde_json::json!({ "by": format!("github ({author})"), "text": event.comment.body }),
+                    )
+                    .await
+                    .ok();
+                    let base = external_base(&st, &headers)
+                        .await
+                        .unwrap_or_else(|| format!("http://{}", st.addr));
+                    let reply = format!(
+                        "Passed your note to the session already on this thread — {base}/s/{}",
+                        sess.id
+                    );
+                    if let Err(e) = st
+                        .trigger
+                        .gh()
+                        .post_issue_comment(&slug.slug(), number, &reply)
+                        .await
+                    {
+                        tracing::warn!(error = %e, repo = %slug.slug(), "github webhook: posting forward-ack failed");
+                    }
+                    tracing::info!(session = %sess.id, repo = %slug.slug(), number, "github webhook: forwarded comment to active session");
+                }
+                return ok();
+            }
+        }
+    }
+
+    // 10. Otherwise create a new session. A PR (or a dormant issue branch that
+    //     already exists) attaches to that branch so work lands on it; a first-time
+    //     issue creates `weaver/issue-<n>`; a fork PR / lookup failure auto-names.
+    let branch_exists_locally = match target_branch.as_deref() {
+        Some(b) => git::branch_exists(&repo_root, b).await,
+        None => false,
+    };
+    let mut req = CreateReq {
         repo: Some(slug.slug()),
         title: Some(event.issue.title.clone()),
-        goal: Some(event.goal_seed()),
+        goal: Some(trigger_goal(&slug.slug(), is_pr, number, &event, &author)),
         ..Default::default()
     };
-    let created_by = format!("github-webhook ({author})");
-    let view = match create_session_core(st.clone(), req, Some(created_by)).await {
+    if let Some(branch) = target_branch {
+        if is_pr || branch_exists_locally {
+            req.existing_branch = Some(branch);
+        } else {
+            req.name = Some(format!("issue-{number}"));
+        }
+    }
+    let view = match create_session_core(st.clone(), req, Some(username)).await {
         Ok(v) => v,
         Err(e) => {
             // A non-allowlisted repo lands here (a BadRequest from resolve_clone),
@@ -217,7 +323,7 @@ pub(super) async fn github_webhook(
         }
     };
 
-    // 8. Reply on the issue with the live session URL.
+    // 11. Reply on the thread with the live session URL.
     let base = external_base(&st, &headers)
         .await
         .unwrap_or_else(|| format!("http://{}", st.addr));
@@ -225,7 +331,7 @@ pub(super) async fn github_webhook(
     if let Err(e) = st
         .trigger
         .gh()
-        .post_issue_comment(&slug.slug(), event.issue.number, &reply)
+        .post_issue_comment(&slug.slug(), number, &reply)
         .await
     {
         tracing::warn!(error = %e, repo = %slug.slug(), "github webhook: posting reply failed");
@@ -233,11 +339,94 @@ pub(super) async fn github_webhook(
     tracing::info!(
         session = %view.id,
         repo = %slug.slug(),
-        issue = event.issue.number,
+        number,
+        is_pr,
         login = %author,
         "github webhook: launched session"
     );
     ok()
+}
+
+/// Build the opening goal for a trigger-launched session: the issue/PR title and
+/// body, the triggering comment, and how to respond — push to the PR branch (or
+/// open a PR) and reply on the thread with `gh`.
+fn trigger_goal(
+    repo: &str,
+    is_pr: bool,
+    number: i64,
+    event: &github_trigger::IssueCommentEvent,
+    author: &str,
+) -> String {
+    let (kind, title_kind, url) = if is_pr {
+        (
+            "pull request",
+            "Pull request",
+            format!("https://github.com/{repo}/pull/{number}"),
+        )
+    } else {
+        (
+            "issue",
+            "Issue",
+            format!("https://github.com/{repo}/issues/{number}"),
+        )
+    };
+    let body = event
+        .issue
+        .body
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .unwrap_or("(no description)");
+    let respond = if is_pr {
+        format!(
+            "- This worktree is checked out on the PR's own branch — commit and `git push` here to update pull request #{number} directly.\n\
+             - Reply on the thread when you have something to report: `gh pr comment {number} --repo {repo} --body \"…\"`."
+        )
+    } else {
+        format!(
+            "- Do the work on this branch and open a pull request against the default branch when it's ready.\n\
+             - Reply on the thread when you have something to report: `gh issue comment {number} --repo {repo} --body \"…\"`."
+        )
+    };
+    format!(
+        "You've been tagged into GitHub {kind} #{number} of {repo} ({url}) via a comment.\n\n\
+         ## {title_kind}\n{}\n\n{body}\n\n\
+         ## Triggering comment (from @{author})\n{}\n\n\
+         ## How to respond\n{respond}",
+        event.issue.title.trim(),
+        event.comment.body.trim(),
+    )
+}
+
+/// Inject a "new comment" note into an already-running session's terminal so a
+/// follow-up @loom comment continues the existing thread instead of forking a new
+/// session. Returns whether the note was delivered (best-effort: a dead terminal
+/// — e.g. an orphaned session — logs and returns `false`).
+async fn forward_comment_to_session(
+    session: &Session,
+    author: &str,
+    is_pr: bool,
+    number: i64,
+    comment: &str,
+) -> bool {
+    let (thread, cmd) = if is_pr {
+        ("PR", "pr")
+    } else {
+        ("issue", "issue")
+    };
+    let note = format!(
+        "New @loom comment from @{author} on {thread} #{number}:\n\n{}\n\n\
+         (Reply on the thread with `gh {cmd} comment {number} --body \"…\"` if a response is warranted.)",
+        comment.trim(),
+    );
+    if let Err(e) = backend::send_literal(&session.term_session, &note).await {
+        tracing::warn!(session = %session.id, error = %e, "github webhook: forwarding comment to session failed");
+        return false;
+    }
+    if let Err(e) = backend::send_enter(&session.term_session).await {
+        tracing::warn!(session = %session.id, error = %e, "github webhook: submitting forwarded comment failed");
+    }
+    true
 }
 
 #[derive(Debug, Deserialize)]

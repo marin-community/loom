@@ -62,7 +62,15 @@ async fn make_session(ts: &TestServer, goal: &str) -> (String, String, String) {
 
 /// Register an enabled watch and return it.
 async fn enabled_watch(state: &AppState, new: watch_store::NewWatch) -> watch_store::Watch {
-    let o = watch_store::create(&state.db, &new).await.unwrap();
+    // Builtins are seeded (enabled) at engine start, so a watch with a builtin's
+    // name may already exist — reuse it rather than colliding on UNIQUE(name).
+    let o = match watch_store::get_by_name(&state.db, &new.name)
+        .await
+        .unwrap()
+    {
+        Some(existing) => existing,
+        None => watch_store::create(&state.db, &new).await.unwrap(),
+    };
     watch_store::set_enabled(&state.db, &o.id, true)
         .await
         .unwrap();

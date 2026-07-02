@@ -14,9 +14,9 @@
 //!   positional `"$(cat …)"` argument, mirroring the builtin runtimes;
 //! * `resume` — the adopt/resume command (no goal). Blank falls back to `launch`.
 //!
-//! `reports_status` records whether the agent fires weaver's lifecycle hooks, so
-//! [`crate::agent`] knows whether a fresh session should wait at `launching` for
-//! the first hook or go straight to `running`.
+//! `reports_status` records whether the agent fires weaver's lifecycle hooks —
+//! the working / idle / attention signals — surfaced to the UI as the runtime's
+//! `supports_hooks` capability.
 
 use anyhow::Result;
 use serde::Serialize;
@@ -44,8 +44,8 @@ pub struct CustomAgent {
     pub launch: String,
     /// The adopt/resume command (no goal). Blank reuses [`Self::launch`].
     pub resume: String,
-    /// Whether the agent fires weaver's lifecycle hooks (so a fresh session waits
-    /// at `launching` rather than going straight to `running`).
+    /// Whether the agent fires weaver's lifecycle hooks — the working / idle /
+    /// attention signals, surfaced as the runtime's `supports_hooks` capability.
     pub reports_status: bool,
     pub created_at: String,
     pub updated_at: String,

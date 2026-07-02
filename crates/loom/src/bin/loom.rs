@@ -3003,7 +3003,7 @@ mod tests {
         for s in ["done", "error", "archived"] {
             assert!(is_terminal_status(s), "{s} should be terminal");
         }
-        for s in ["created", "launching", "running", "orphaned"] {
+        for s in ["created", "running", "orphaned"] {
             assert!(!is_terminal_status(s), "{s} should not be terminal");
         }
     }

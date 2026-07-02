@@ -29,10 +29,13 @@ fn sign(secret: &str, body: &[u8]) -> String {
 }
 
 /// A recording GitHub gateway standing in for `gh`: it captures every reply
-/// posted (the one outbound call the trigger makes).
+/// posted and answers `pr_head` with a value a PR-flow test can pin.
 #[derive(Default)]
 struct FakeGithub {
     comments: Mutex<Vec<(String, i64, String)>>,
+    /// What `pr_head` returns; a PR-flow test sets this to a branch it created in
+    /// the fixture remote. `None` → a plain same-repo head named `feature`.
+    pr_head: Mutex<Option<loom::github_trigger::PrHead>>,
 }
 
 #[async_trait::async_trait]
@@ -43,6 +46,22 @@ impl loom::github_trigger::GithubApi for FakeGithub {
             .unwrap()
             .push((repo.to_string(), issue, body.to_string()));
         Ok(())
+    }
+
+    async fn pr_head(
+        &self,
+        _repo: &str,
+        _number: i64,
+    ) -> anyhow::Result<loom::github_trigger::PrHead> {
+        Ok(self
+            .pr_head
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(loom::github_trigger::PrHead {
+                head_ref: "feature".to_string(),
+                cross_repo: false,
+            }))
     }
 }
 
@@ -67,6 +86,8 @@ fn make_bare_remote(root: &Path) -> String {
     std::fs::write(work.join("README.md"), "hello\n").unwrap();
     sh(&work, "git", &["add", "."]);
     sh(&work, "git", &["commit", "-q", "-m", "init"]);
+    // A second branch so a PR-head-attach test has an `origin/feature` to fetch.
+    sh(&work, "git", &["branch", "feature"]);
 
     let bare = root.join("acme").join("widgets");
     std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
@@ -109,6 +130,24 @@ fn trigger_body(login: &str, number: i64, comment: &str) -> Vec<u8> {
     json!({
         "action": "created",
         "issue": {"number": number, "title": "Make it faster", "body": "perf please"},
+        "comment": {"body": comment, "user": {"login": login}},
+        "repository": {"full_name": "acme/widgets"}
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// Like [`trigger_body`], but the issue carries a `pull_request` link, so the
+/// handler treats it as a PR comment (attaching to the PR's head branch).
+fn trigger_body_pr(login: &str, number: i64, comment: &str) -> Vec<u8> {
+    json!({
+        "action": "created",
+        "issue": {
+            "number": number,
+            "title": "Fix the tests",
+            "body": "they are red",
+            "pull_request": {"url": "https://api.github.com/repos/acme/widgets/pulls/7"}
+        },
         "comment": {"body": comment, "user": {"login": login}},
         "repository": {"full_name": "acme/widgets"}
     })
@@ -258,8 +297,8 @@ async fn happy_path_creates_session_and_replies() {
     );
     assert_eq!(
         session["created_by"].as_str(),
-        Some("github-webhook (rjpower)"),
-        "the session is attributed to the webhook bot, annotated with the triggering login"
+        Some("rjpower"),
+        "the session is attributed to the commenting user, so its GH_TOKEN is theirs"
     );
 
     // loom replied on the triggering issue with the session URL.
@@ -320,6 +359,96 @@ async fn replayed_delivery_is_a_noop() {
         .as_str()
         .unwrap()
         .to_string();
+    ts.client
+        .delete(&format!("/api/sessions/{id}"))
+        .await
+        .unwrap();
+}
+
+/// A second @loom comment on a thread that already has a live session forwards the
+/// comment into that session (an ack, no duplicate) instead of spawning a new one.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeat_trigger_forwards_to_active_session() {
+    let (ts, fake) = boot().await;
+    let _remotes = prepare_repo(&ts).await;
+
+    let body = trigger_body("rjpower", 42, "@loom start");
+    assert_eq!(
+        post(&ts, "d-first", Some(sign(SECRET, &body)), &body)
+            .await
+            .status(),
+        200
+    );
+    assert_eq!(
+        session_count(&ts).await,
+        1,
+        "the first trigger creates a session"
+    );
+
+    // A second @loom on the same issue (new delivery) is forwarded, not forked.
+    let body2 = trigger_body("rjpower", 42, "@loom also handle the edge case");
+    assert_eq!(
+        post(&ts, "d-second", Some(sign(SECRET, &body2)), &body2)
+            .await
+            .status(),
+        200
+    );
+    assert_eq!(
+        session_count(&ts).await,
+        1,
+        "the repeat trigger spawns no duplicate session"
+    );
+
+    let comments = fake.comments.lock().unwrap().clone();
+    assert_eq!(comments.len(), 2, "one ack per trigger");
+    assert!(
+        comments[1].2.contains("Passed your note"),
+        "the repeat trigger is acked as a forward: {}",
+        comments[1].2
+    );
+
+    let id = ts.client.get("/api/sessions").await.unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ts.client
+        .delete(&format!("/api/sessions/{id}"))
+        .await
+        .unwrap();
+}
+
+/// A comment on a **pull request** attaches the session's worktree to the PR's own
+/// head branch, so the agent's commits land on the PR.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pr_trigger_attaches_to_pr_head_branch() {
+    let (ts, fake) = boot().await;
+    let _remotes = prepare_repo(&ts).await;
+    // The mock resolves PR #7's head to the `feature` branch the fixture created.
+    *fake.pr_head.lock().unwrap() = Some(loom::github_trigger::PrHead {
+        head_ref: "feature".to_string(),
+        cross_repo: false,
+    });
+
+    let body = trigger_body_pr("rjpower", 7, "@loom fix the failing tests");
+    assert_eq!(
+        post(&ts, "d-pr", Some(sign(SECRET, &body)), &body)
+            .await
+            .status(),
+        200
+    );
+
+    let sessions = ts.client.get("/api/sessions").await.unwrap();
+    let sessions = sessions.as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "the PR trigger launched one session");
+    assert_eq!(
+        sessions[0]["branch"]["branch"].as_str(),
+        Some("feature"),
+        "the session is attached to the PR's head branch, not a fresh one"
+    );
+
+    let id = sessions[0]["id"].as_str().unwrap().to_string();
     ts.client
         .delete(&format!("/api/sessions/{id}"))
         .await
