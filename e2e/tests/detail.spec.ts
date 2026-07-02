@@ -28,6 +28,22 @@ test.describe('session detail view', () => {
     await expect(details.getByText(`base ${s.branch.base_branch}`)).toBeVisible();
   });
 
+  test('sets the browser tab title to the open session', async ({ page, weaver }) => {
+    const s = await weaver.seedSession({ goal: 'Name my tab', name: 'tab-task' });
+
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+
+    // The tab title tracks the open session (its title, falling back to the
+    // branch name) so several loom tabs are tellable apart. It's derived from
+    // the shared fleet snapshot, which the deep link fills a beat after landing,
+    // so toHaveTitle auto-retries until the row arrives.
+    await expect(page).toHaveTitle('tab-task · weaver');
+
+    // Leaving the session for the fleet list drops back to the bare app name.
+    await page.goto(`${weaver.baseUrl}/`);
+    await expect(page).toHaveTitle('weaver');
+  });
+
   test('clearing the attention chip marks the agent’s attention calm', async ({ page, weaver }) => {
     const s = await weaver.seedSession({ goal: 'Acknowledge me', name: 'ack-task' });
     // The agent raises its attention; the human's only write here is to clear it.

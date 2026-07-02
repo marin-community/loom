@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, watch } from 'vue';
+import { useRoute } from 'vue-router';
 import AppRail from './components/AppRail.vue';
 import StatusBar from './components/StatusBar.vue';
 import { me } from './auth';
@@ -21,8 +22,26 @@ const authed = computed(() => me.authenticated);
 // view paints from cache the instant it mounts (no empty-state flash, no
 // refetch round-trip) and there is exactly one request per tick. Start it once
 // authenticated; stop on sign-out so the login screen never polls.
-const { startFleetPoll, stopFleetPoll } = useFleet();
+const { startFleetPoll, stopFleetPoll, sessionById } = useFleet();
 watch(authed, (ok) => (ok ? startFleetPoll() : stopFleetPoll()), { immediate: true });
+
+// The browser tab title tracks what you're looking at: on a session page it's
+// the session's title (falling back to its branch name), so several open loom
+// tabs are tellable apart at a glance; everywhere else it's the bare app name.
+// Derived from the shared fleet snapshot — the same source the page header reads
+// — so a rename reflects here on the next poll, and a deep link shows the base
+// title only until that row arrives (no wrong-name flash, just a late refine).
+const route = useRoute();
+const BASE_TITLE = 'weaver';
+const docTitle = computed(() => {
+  const id = route.params.id;
+  if (typeof id === 'string' && route.path.startsWith(`/s/${id}`)) {
+    const name = sessionById(id)?.branch.title || sessionById(id)?.branch.name;
+    if (name) return `${name} · ${BASE_TITLE}`;
+  }
+  return BASE_TITLE;
+});
+watch(docTitle, (t) => (document.title = t), { immediate: true });
 
 // Views kept alive across navigation so returning is instant — no remount, no
 // refetch flash, no entrance-animation replay. The list views return exactly as
