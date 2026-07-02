@@ -62,6 +62,20 @@ def find_loom() -> str:
     die("`loom` not found — build it (`cargo build -p loom`) or put it on PATH.")
 
 
+def docker_gid() -> str | None:
+    """The host's `docker` group gid, so the loom container's app user can join
+    it (compose `group_add`) and reach the bind-mounted Docker socket for
+    `docker build`. None when there's no such group (e.g. Docker Desktop on
+    macOS, where the socket isn't group-owned anyway) — the compose file's 999
+    fallback then applies. Keep in sync with gcp/startup-script.sh's derivation."""
+    try:
+        import grp
+
+        return str(grp.getgrnam("docker").gr_gid)
+    except (ImportError, KeyError):
+        return None
+
+
 def owner_configured(env_text: str) -> bool:
     """Whether the rendered env names a non-empty LOOM_OWNER_GITHUB. Without one
     the daemon refuses to boot (it would come up locked out), so we fail early
@@ -114,6 +128,11 @@ def main(local_: bool, config: str | None, no_build: bool) -> None:
     # arch deploy doesn't need a multi-arch container builder. Respects an
     # explicit BUILDX_BUILDER if you've set one.
     env.setdefault("BUILDX_BUILDER", "default")
+    # Pass the host docker gid through for the loom service's `group_add`, so
+    # sessions can reach the bind-mounted Docker socket (see docker-compose.yml).
+    gid = docker_gid()
+    if gid:
+        env.setdefault("DOCKER_GID", gid)
     if local_:
         env["LOOM_DOMAIN"] = "localhost"
     run(render, env=env)

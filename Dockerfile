@@ -57,8 +57,19 @@ RUN set -eux; \
     chmod a+r /etc/apt/keyrings/cloud.google.asc; \
     echo "deb [signed-by=/etc/apt/keyrings/cloud.google.asc] https://packages.cloud.google.com/apt cloud-sdk main" \
       > /etc/apt/sources.list.d/google-cloud-sdk.list; \
+    # Docker CLI — client only, NO daemon. loom sessions run `docker build`; the
+    # container reaches the *host's* Docker daemon over the bind-mounted
+    # /var/run/docker.sock (see docker-compose.yml), so only the CLI + the buildx
+    # and compose plugins ship here, not docker-ce/containerd. Same signed-repo
+    # keyring idiom as gh/gcloud above.
+    curl -fsSL https://download.docker.com/linux/debian/gpg \
+      -o /etc/apt/keyrings/docker.asc; \
+    chmod a+r /etc/apt/keyrings/docker.asc; \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+      > /etc/apt/sources.list.d/docker.list; \
     apt-get update; \
-    apt-get install -y --no-install-recommends nodejs git ca-certificates gh google-cloud-cli tini; \
+    apt-get install -y --no-install-recommends nodejs git ca-certificates gh google-cloud-cli tini \
+      docker-ce-cli docker-buildx-plugin docker-compose-plugin; \
     rm -rf /var/lib/apt/lists/*
 
 # Claude Code — the agent runtime loom's sessions launch — is deliberately NOT

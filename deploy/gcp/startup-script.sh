@@ -141,6 +141,15 @@ gcloud secrets versions access latest --project="$PROJECT" --secret=LOOM_DOTENV 
 if [ "$IMAGE_MODE" = "pull" ] && [ -n "$AR_IMAGE" ]; then
   echo "LOOM_IMAGE=${AR_IMAGE}" >>"$ENV_FILE"
 fi
+# Docker-out-of-Docker: the loom container mounts this host's Docker socket (see
+# ../standalone/docker-compose.yml) so sessions can `docker build`. The non-root
+# app user reaches the root-owned socket by joining the host `docker` group, so
+# pass its numeric gid through .env — also deploy-placement, not a config field.
+# Docker is installed above, so the group exists by now.
+DOCKER_GID="$(getent group docker | cut -d: -f3)"
+if [ -n "$DOCKER_GID" ]; then
+  echo "DOCKER_GID=${DOCKER_GID}" >>"$ENV_FILE"
+fi
 chmod 600 "$ENV_FILE"
 
 # ---- bring up the stack -----------------------------------------------------

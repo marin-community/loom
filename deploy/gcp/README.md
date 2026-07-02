@@ -152,10 +152,14 @@ re-issue a certificate (subject to Let's Encrypt's rate limits).
 `bootstrap.py` mitigates this by default: it creates a separate persistent
 disk (`DATA_DISK_SIZE`, default 500GB) and `startup-script.sh` points Docker's
 entire data-root at it (`/etc/docker/daemon.json`), so every named volume
-lands on that disk without any change to `docker-compose.yml`. That disk
-still gets deleted if you delete the VM *and* the disk together — it is
-durability against VM recreation, not against `terraform destroy`-style
-teardown. To keep state across a full teardown, detach the disk first
+lands on that disk without any change to `docker-compose.yml`. The images and
+layers agents build with in-session `docker build` land there too — the loom
+container shares this host daemon over its socket (see
+[`../README.md` "Agent runtime"](../README.md#agent-runtime--client-packages)),
+so `docker system df` on the VM and the 500GB default both cover your build
+footprint. That disk still gets deleted if you delete the VM *and* the disk
+together — it is durability against VM recreation, not against
+`terraform destroy`-style teardown. To keep state across a full teardown, detach the disk first
 (`gcloud compute instances detach-disk`) or snapshot it
 (`gcloud compute disks snapshot`) before deleting the instance.
 

@@ -107,6 +107,7 @@ and why; you don't hand-edit `.env` itself.
 | `LOOM_TLS_EMAIL` | no | ACME contact for cert-expiry notices; only used if you uncomment the global block in the Caddyfile. |
 | `HOST_UID` / `HOST_GID` | no (1000) | uid:gid the image runs as — matters only if you bind-mount a host dir. |
 | `LOOM_IMAGE` | no | Override the image tag (defaults to the locally-built `loom:latest`). |
+| `DOCKER_GID` | no (999) | Host `docker` group gid the loom container joins to reach the bind-mounted Docker socket for in-session `docker build` (see [Agent runtime](#agent-runtime--client-packages)). `run.py` and the GCP startup-script derive it from the host automatically; set it by hand only for a manual `docker compose up` on a host whose docker gid isn't the 999 default. |
 
 Every one of these is an ordinary `loom.toml` field (`tls_email`, `host_uid`,
 `host_gid`, `image`, alongside the credential fields above) — there's no
@@ -141,6 +142,15 @@ you can forget to apply:
 - **`auth.base_url = https://<LOOM_DOMAIN>`** — the canonical public origin, used
   for the GitHub OAuth callback and trusted by the terminal's WebSocket
   origin check.
+
+Separately, the `loom` container is given access to the **host's Docker socket**
+so sessions can `docker build` (see
+[Agent runtime](#agent-runtime--client-packages)). Socket access is
+root-equivalent on the host, and it is the *same* daemon that runs this stack —
+so a session's `docker` commands can reach loom's own containers and volumes (the
+database included). This is deliberate for a single-tenant host running the
+owner's own agents; do not carry it into a deploy that runs code you do not
+trust.
 
 Background on these knobs is in the repo
 [README "Authentication"](../README.md#authentication) and
@@ -328,6 +338,19 @@ The agent tooling the image ships splits by how it updates:
   Only OS/system packages (`apt-get`) still need an image rebuild — the system
   dirs are read-only to the non-root user. Add those to the
   [`Dockerfile`](../Dockerfile) and rerun `docker compose up -d --build`.
+
+- **`docker build` in sessions.** The image ships the Docker CLI (client only,
+  plus the buildx/compose plugins), and the `loom` container bind-mounts the
+  host's `/var/run/docker.sock` — so a session's `docker build`/`docker compose`
+  runs against the *host* daemon, reusing its layer cache and writing images to
+  the host data-root (the persistent data disk on the GCP deploy), not into the
+  container. The non-root app user reaches the socket by joining the host
+  `docker` group via `DOCKER_GID`, which `run.py` and the GCP startup-script
+  derive from the host for you. Note the socket-share tradeoff in
+  [Security posture](#security-posture): it is the same daemon that runs this
+  stack. `docker build` and `docker run` with in-container paths work; a
+  `docker run -v <worktree-path>:…` bind mount does **not**, because that path
+  exists in the loom container, not on the host the daemon resolves it against.
 
 ## Operations
 
