@@ -14,6 +14,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::logs::{self, LogLine};
+use crate::tasks::{self, TaskRecord};
 
 #[derive(Debug, Deserialize)]
 pub(super) struct LogsQuery {
@@ -60,4 +61,11 @@ pub(super) async fn server_status() -> Json<ServerStatus> {
         pid: std::process::id(),
         started_at: logs::buffer().started_at().to_string(),
     })
+}
+
+/// `GET /api/tasks` — recent detached background tasks (the GitHub-trigger
+/// launches that run off the webhook request), newest first. Operator-only, same
+/// as the log endpoints — a task label names a repo/issue an operator can act on.
+pub(super) async fn tasks_snapshot() -> Json<Vec<TaskRecord>> {
+    Json(tasks::registry().snapshot())
 }

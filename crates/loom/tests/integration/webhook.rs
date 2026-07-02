@@ -187,6 +187,31 @@ async fn session_count(ts: &TestServer) -> usize {
         .len()
 }
 
+/// The trigger's real work — clone, session create, reply — now runs in a detached
+/// task *after* the webhook's `200`, so tests wait for the effect rather than
+/// reading it synchronously. Poll until the fleet shows at least `n` sessions.
+async fn wait_for_sessions(ts: &TestServer, n: usize) {
+    for _ in 0..200 {
+        if session_count(ts).await >= n {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("expected >= {n} sessions, saw {}", session_count(ts).await);
+}
+
+/// Poll until the fake gateway has recorded at least `n` replies.
+async fn wait_for_comments(fake: &FakeGithub, n: usize) {
+    for _ in 0..200 {
+        if fake.comments.lock().unwrap().len() >= n {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let have = fake.comments.lock().unwrap().len();
+    panic!("expected >= {n} replies, saw {have}");
+}
+
 /// A missing signature, and one computed with the wrong secret, are both
 /// rejected with 401 — and nothing is launched.
 #[serial]
@@ -239,12 +264,13 @@ async fn non_trigger_comment_is_ignored() {
     assert!(fake.comments.lock().unwrap().is_empty());
 }
 
-/// A commenter who is not an approved loom user is refused: nothing launches
-/// and, to avoid amplifying spam, no reply is posted. (Repo write access is not
-/// itself a grant — only the approved-user allowlist is.)
+/// A commenter who is not an approved loom user launches nothing — but instead of
+/// a silent drop, loom replies once with a friendly "request access" note so they
+/// know how to proceed. (Repo write access is not itself a grant — only the
+/// approved-user allowlist is; the per-repo rate limit bounds the reply.)
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unauthorized_commenter_is_rejected() {
+async fn unauthorized_commenter_gets_access_reply() {
     let (ts, fake) = boot().await;
     let _remotes = prepare_repo(&ts).await;
 
@@ -255,14 +281,23 @@ async fn unauthorized_commenter_is_rejected() {
         200,
         "an unauthorized trigger is acknowledged, not errored"
     );
+
+    // The reply is posted from a detached task; wait for it.
+    wait_for_comments(&fake, 1).await;
+    let comments = fake.comments.lock().unwrap().clone();
+    assert_eq!(comments.len(), 1, "exactly one access-info reply");
+    let (repo, issue, reply) = &comments[0];
+    assert_eq!(repo, "acme/widgets");
+    assert_eq!(*issue, 5);
+    assert!(
+        reply.contains("access"),
+        "the reply tells them they need access: {reply}"
+    );
+
     assert_eq!(
         session_count(&ts).await,
         0,
         "an unauthorized commenter launches nothing"
-    );
-    assert!(
-        fake.comments.lock().unwrap().is_empty(),
-        "no reply to an unauthorized commenter"
     );
 }
 
@@ -279,6 +314,9 @@ async fn happy_path_creates_session_and_replies() {
     let body = trigger_body("rjpower", 42, "@loom work on this please");
     let resp = post(&ts, "d-happy", Some(sign(SECRET, &body)), &body).await;
     assert_eq!(resp.status(), 200);
+
+    // The launch runs in a detached task after the 200; wait for it to land.
+    wait_for_sessions(&ts, 1).await;
 
     // A session now exists, seeded from the issue title.
     let sessions = ts.client.get("/api/sessions").await.unwrap();
@@ -302,6 +340,7 @@ async fn happy_path_creates_session_and_replies() {
     );
 
     // loom replied on the triggering issue with the session URL.
+    wait_for_comments(&fake, 1).await;
     let comments = fake.comments.lock().unwrap().clone();
     assert_eq!(comments.len(), 1, "exactly one reply");
     let (repo, issue, reply) = &comments[0];
@@ -335,13 +374,11 @@ async fn replayed_delivery_is_a_noop() {
 
     let resp = post(&ts, "d-replay", Some(sig.clone()), &body).await;
     assert_eq!(resp.status(), 200);
-    assert_eq!(
-        session_count(&ts).await,
-        1,
-        "first delivery launches a session"
-    );
+    wait_for_sessions(&ts, 1).await;
+    wait_for_comments(&fake, 1).await;
 
-    // The exact same delivery again — same GUID, body, signature.
+    // The exact same delivery again — same GUID, body, signature. The GUID dedupe
+    // rejects it synchronously (before any spawn), so nothing new can appear.
     let resp = post(&ts, "d-replay", Some(sig), &body).await;
     assert_eq!(resp.status(), 200);
     assert_eq!(
@@ -380,11 +417,11 @@ async fn repeat_trigger_forwards_to_active_session() {
             .status(),
         200
     );
-    assert_eq!(
-        session_count(&ts).await,
-        1,
-        "the first trigger creates a session"
-    );
+    // Wait for the first session to exist *and* its reply to land, so the second
+    // delivery deterministically finds an active session to forward into (and its
+    // ack is the second comment, not a race with the first).
+    wait_for_sessions(&ts, 1).await;
+    wait_for_comments(&fake, 1).await;
 
     // A second @loom on the same issue (new delivery) is forwarded, not forked.
     let body2 = trigger_body("rjpower", 42, "@loom also handle the edge case");
@@ -394,6 +431,7 @@ async fn repeat_trigger_forwards_to_active_session() {
             .status(),
         200
     );
+    wait_for_comments(&fake, 2).await;
     assert_eq!(
         session_count(&ts).await,
         1,
@@ -438,6 +476,7 @@ async fn pr_trigger_attaches_to_pr_head_branch() {
             .status(),
         200
     );
+    wait_for_sessions(&ts, 1).await;
 
     let sessions = ts.client.get("/api/sessions").await.unwrap();
     let sessions = sessions.as_array().unwrap();

@@ -120,6 +120,12 @@ pub async fn create_pr(work_dir: &Path, base: &str, title: &str, body: &str) -> 
 
 const POLL_TICK: Duration = Duration::from_secs(30);
 
+/// Branch tag marking that loom has back-linked this branch's PR to its session
+/// (posted the `…/s/{id}` comment). Set by the poll loop's back-link poster or,
+/// for a `@loom`-triggered PR, by the trigger reply — so exactly one link lands.
+/// Shared with [`crate::web`] (the trigger reply path).
+pub const LINKED_TAG: &str = "github.linked";
+
 /// The fields requested from `gh pr view --json`. Kept in one place so the parse
 /// struct and the query can't drift.
 const PR_FIELDS: &str =
@@ -431,6 +437,13 @@ async fn apply_snapshot(
         }
     }
 
+    // Back-link the PR to its loom session — a one-time comment on the open PR, so
+    // someone reading the GitHub thread can jump to the live session. Skipped once
+    // the branch is tagged linked (here or by the trigger reply).
+    if snap.pr_state == "OPEN" {
+        maybe_post_backlink(state, session, branch, snap).await;
+    }
+
     let recovered = tags::get(&state.db, &branch.id, tags::RECOVERED_KEY)
         .await?
         .is_some_and(|tag| tag.value == tags::RECOVERED_VALUE);
@@ -458,6 +471,71 @@ async fn apply_snapshot(
         }
     }
     Ok(())
+}
+
+/// Derive the `owner/name` slug for a managed clone from its on-disk root
+/// (`<repos_dir>/owner/name`). `None` for a local-path repo (forked from `cwd`),
+/// which has no managed slug — and may have no GitHub remote — so it's skipped.
+fn slug_from_repo_root(repo_root: &str) -> Option<String> {
+    let rest = Path::new(repo_root)
+        .strip_prefix(crate::repo::repos_dir())
+        .ok()?;
+    let s = rest.to_string_lossy().replace('\\', "/");
+    (s.matches('/').count() == 1 && !s.is_empty()).then_some(s)
+}
+
+/// Post a one-time comment on the branch's open PR linking back to its loom
+/// session, unless the branch is already linked (the `@loom` reply tagged it, or a
+/// prior poll posted it). Managed repos only — the App gateway needs the slug —
+/// and only when a public base URL is configured, so the link resolves.
+/// Best-effort: every failure logs and returns, leaving the tag unset to retry.
+async fn maybe_post_backlink(
+    state: &AppState,
+    session: &Session,
+    branch: &Branch,
+    snap: &GithubStatus,
+) {
+    match tags::get(&state.db, &branch.id, LINKED_TAG).await {
+        Ok(Some(_)) => return, // already linked
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(branch = %branch.branch, error = %e, "back-link: reading link tag failed");
+            return;
+        }
+    }
+    let Some(slug) = slug_from_repo_root(&branch.repo_root) else {
+        return; // local-path repo: no managed slug
+    };
+    let base = crate::config::get(&state.db, "auth.base_url")
+        .await
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    if base.is_empty() {
+        return; // no public URL configured → a link wouldn't resolve
+    }
+    let body = format!("Working on this in loom: {base}/s/{}", session.id);
+    if let Err(e) = state
+        .trigger
+        .gh()
+        .post_issue_comment(&slug, snap.pr_number, &body)
+        .await
+    {
+        tracing::warn!(repo = %slug, pr = snap.pr_number, error = %e, "back-link: posting comment failed");
+        return;
+    }
+    tags::set(
+        &state.db,
+        &branch.id,
+        LINKED_TAG,
+        &session.id,
+        "loom back-link comment posted",
+        "loom",
+    )
+    .await
+    .ok();
+    tracing::info!(session = %session.id, repo = %slug, pr = snap.pr_number, "posted loom back-link comment on PR");
 }
 
 /// Close every open weaver issue the merged branch was working and log each
@@ -553,6 +631,28 @@ mod tests {
     #[test]
     fn rollup_none_when_empty() {
         assert_eq!(rollup_checks(&[]), None);
+    }
+
+    #[test]
+    fn slug_from_managed_clone_root() {
+        // A managed clone lives at `<repos_dir>/owner/name`.
+        let root = crate::repo::repos_dir().join("acme").join("widgets");
+        assert_eq!(
+            slug_from_repo_root(&root.to_string_lossy()),
+            Some("acme/widgets".to_string())
+        );
+    }
+
+    #[test]
+    fn slug_none_for_local_path_repo() {
+        // A repo forked from an arbitrary local checkout has no managed slug — the
+        // back-link poster must skip it rather than invent an `owner/name`.
+        assert_eq!(slug_from_repo_root("/home/someone/projects/thing"), None);
+        // The repos_dir root itself (no owner/name tail) is not a slug either.
+        assert_eq!(
+            slug_from_repo_root(&crate::repo::repos_dir().to_string_lossy()),
+            None
+        );
     }
 
     #[test]

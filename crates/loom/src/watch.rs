@@ -208,6 +208,7 @@ pub async fn tick_timer(state: &AppState) {
         // this same (awaited) pass, before the round runs, so it stays one-shot.
         if let Some(wake) = o.wake_at.as_deref().and_then(parse_iso) {
             if wake <= now {
+                tracing::debug!(watch = %o.id, name = %o.name, "watch timer: wake due; emitting tick");
                 match events::record_system(
                     &state.db,
                     &state.bus,
@@ -253,6 +254,7 @@ pub async fn tick_timer(state: &AppState) {
             continue;
         }
         // Due: emit the cron tick (the dispatcher fires the round) and advance.
+        tracing::debug!(watch = %o.id, name = %o.name, "watch timer: cron due; emitting tick");
         if let Err(e) =
             events::record_system(&state.db, &state.bus, "cron", json!({ "watch": o.id })).await
         {
@@ -343,6 +345,7 @@ pub async fn dispatch(state: &AppState, in_flight: &InFlight, ev: &events::Event
                 } else {
                     "cron"
                 };
+                tracing::debug!(watch = %o.id, name = %o.name, reason, "dispatching cron tick to watch");
                 let _ = fire(
                     state,
                     in_flight,
@@ -366,6 +369,7 @@ pub async fn dispatch(state: &AppState, in_flight: &InFlight, ev: &events::Event
                     .get("reason")
                     .and_then(Value::as_str)
                     .unwrap_or("manual");
+                tracing::info!(watch = %o.id, name = %o.name, reason, dry_run, "dispatching manual run to watch");
                 let _ = fire(state, in_flight, &o, reason, dry_run, &TriggerCtx::manual()).await;
             }
         }
@@ -381,6 +385,14 @@ pub async fn dispatch(state: &AppState, in_flight: &InFlight, ev: &events::Event
             };
             let repo = event_repo(state, ev).await;
             let session = triggering_session(state, ev).await;
+            tracing::debug!(
+                event = %event,
+                level = ?level,
+                branch = %ev.branch_id,
+                session = ?session,
+                repo = ?repo,
+                "watch dispatch: normalized reactive event"
+            );
             let watches = match watch_store::list_enabled(&state.db).await {
                 Ok(o) => o,
                 Err(e) => {
@@ -399,6 +411,14 @@ pub async fn dispatch(state: &AppState, in_flight: &InFlight, ev: &events::Event
                         branch: (!events::is_system(&ev.branch_id)).then(|| ev.branch_id.clone()),
                         repo: repo.clone(),
                     };
+                    tracing::debug!(
+                        watch = %o.id,
+                        name = %o.name,
+                        event = %event,
+                        branch = ?ctx.branch,
+                        session = ?ctx.session,
+                        "watch trigger matched; dispatching round"
+                    );
                     let _ =
                         fire(state, in_flight, &o, &format!("event:{event}"), false, &ctx).await;
                 }
@@ -631,6 +651,7 @@ async fn record_skipped(
     let run_id = watch_store::start_run(&state.db, &o.id, trigger_reason, trigger_event)
         .await
         .ok()?;
+    tracing::info!(watch = %o.id, name = %o.name, run = run_id, summary, "watch round skipped");
     let _ = watch_store::finish_run(
         &state.db,
         run_id,
@@ -1165,6 +1186,7 @@ pub async fn fire_now(
     // no-overlap domain (the engine loop guards its own concurrent fires).
     let in_flight = new_in_flight();
     let reason = if reason.is_empty() { "manual" } else { reason };
+    tracing::info!(watch = %o.id, name = %o.name, reason, dry_run, "operator fired watch now");
     fire(
         state,
         &in_flight,
@@ -1206,7 +1228,10 @@ pub async fn ensure_warm_session(state: &AppState, o: &Watch) -> anyhow::Result<
     // id and (cheaply) repair the watch linkage if it drifted.
     if let Some(existing) = session_mod::active_managed_by(&state.db, &o.id).await? {
         if o.warm_session_id.as_deref() != Some(existing.id.as_str()) {
+            tracing::info!(watch = %o.id, session = %existing.id, "repairing drifted warm session linkage");
             watch_store::set_warm_session(&state.db, &o.id, Some(&existing.id)).await?;
+        } else {
+            tracing::debug!(watch = %o.id, session = %existing.id, "reusing existing warm session");
         }
         return Ok(Some(existing.id));
     }

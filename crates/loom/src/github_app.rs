@@ -223,6 +223,7 @@ impl GithubApp {
             .private_key()
             .await
             .ok_or_else(|| anyhow!("GitHub App private key is not configured"))?;
+        tracing::debug!(app_id, "minting app jwt");
         build_app_jwt(app_id, &pem, Utc::now().timestamp())
     }
 
@@ -233,6 +234,7 @@ impl GithubApp {
     /// that the App is installed on — and so authorized for — the repo. Errors
     /// (e.g. a 404 when the App is not installed) propagate so callers fail closed.
     pub async fn installation_id(&self, owner: &str, name: &str) -> Result<i64> {
+        tracing::debug!(owner, name, "resolving repo installation");
         let jwt = self.current_jwt().await?;
         let url = format!("{}/repos/{owner}/{name}/installation", self.api_base);
         let resp = self
@@ -249,6 +251,12 @@ impl GithubApp {
             .json()
             .await
             .context("parsing the installation response")?;
+        tracing::debug!(
+            owner,
+            name,
+            installation = body.id,
+            "resolved repo installation"
+        );
         Ok(body.id)
     }
 
@@ -385,6 +393,11 @@ impl GithubApp {
 impl GithubApi for GithubApp {
     async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<()> {
         if !self.is_configured().await {
+            tracing::debug!(
+                repo,
+                issue,
+                "app not configured; posting comment via gh fallback"
+            );
             return self.fallback.post_issue_comment(repo, issue, body).await;
         }
         let slug = crate::repo::parse_slug(repo).map_err(|e| anyhow!(e))?;
@@ -410,6 +423,11 @@ impl GithubApi for GithubApp {
 
     async fn pr_head(&self, repo: &str, number: i64) -> Result<PrHead> {
         if !self.is_configured().await {
+            tracing::debug!(
+                repo,
+                number,
+                "app not configured; fetching pr head via gh fallback"
+            );
             return self.fallback.pr_head(repo, number).await;
         }
         let slug = crate::repo::parse_slug(repo).map_err(|e| anyhow!(e))?;
@@ -440,6 +458,13 @@ impl GithubApi for GithubApp {
         let head_repo = body["head"]["repo"]["full_name"].as_str();
         let base_repo = body["base"]["repo"]["full_name"].as_str();
         let cross_repo = head_repo.is_none() || head_repo != base_repo;
+        tracing::info!(
+            repo,
+            number,
+            head_ref = %head_ref,
+            cross_repo,
+            "resolved pull request head"
+        );
         Ok(PrHead {
             head_ref,
             cross_repo,
@@ -484,6 +509,7 @@ async fn check_status(resp: reqwest::Response, what: &str) -> Result<reqwest::Re
         return Ok(resp);
     }
     let body = resp.text().await.unwrap_or_default();
+    tracing::warn!(what, %status, "github rest call failed");
     bail!("{what}: GitHub returned {status}: {}", body.trim())
 }
 

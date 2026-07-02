@@ -107,6 +107,15 @@ pub async fn insert(db: &Db, s: &NewSession) -> Result<Session> {
     .bind(&now)
     .execute(db)
     .await?;
+    tracing::info!(
+        session = %s.id,
+        branch = %s.branch_id,
+        agent_kind = %s.agent_kind,
+        status = %s.status,
+        managed_by = s.managed_by.as_deref().unwrap_or("-"),
+        parent_branch = s.parent_branch_id.as_deref().unwrap_or("-"),
+        "session created"
+    );
     get(db, &s.id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("session vanished after insert"))
@@ -245,6 +254,7 @@ pub async fn touch(db: &Db, id: &str) -> Result<()> {
         .bind(id)
         .execute(db)
         .await?;
+    tracing::debug!(session = %id, "session activity touched");
     Ok(())
 }
 
@@ -253,6 +263,7 @@ pub async fn delete(db: &Db, id: &str) -> Result<()> {
         .bind(id)
         .execute(db)
         .await?;
+    tracing::info!(session = %id, "session row deleted");
     Ok(())
 }
 

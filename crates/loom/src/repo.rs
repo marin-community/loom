@@ -180,6 +180,7 @@ pub struct ManagedRepo {
 
 /// Register (or update the remote/path of) a managed repo, returning the row.
 pub async fn register(db: &Db, slug: &str, remote_url: &str, path: &str) -> Result<ManagedRepo> {
+    tracing::info!(slug, path, "registering managed repo");
     sqlx::query(
         "INSERT INTO repos (slug, remote_url, path) VALUES (?, ?, ?)
          ON CONFLICT(slug) DO UPDATE SET
@@ -216,6 +217,7 @@ pub async fn get_registered(db: &Db, slug: &str) -> Result<Option<ManagedRepo>> 
     .bind(slug)
     .fetch_optional(db)
     .await?;
+    tracing::debug!(slug, found = row.is_some(), "looked up registered repo");
     Ok(row)
 }
 
@@ -231,10 +233,12 @@ pub async fn is_allowlisted(db: &Db, repo_root: &Path) -> Result<bool> {
     let target = repo_root
         .canonicalize()
         .unwrap_or_else(|_| repo_root.to_path_buf());
-    Ok(list_registered(db).await?.into_iter().any(|registered| {
+    let allowed = list_registered(db).await?.into_iter().any(|registered| {
         let path = PathBuf::from(&registered.path);
         path.canonicalize().unwrap_or(path) == target
-    }))
+    });
+    tracing::debug!(repo = %repo_root.display(), allowed, "checked repo allowlist");
+    Ok(allowed)
 }
 
 /// How a managed-repo resolution can fail, so the web layer maps each cause to
@@ -262,12 +266,14 @@ pub async fn resolve_clone(
     input: &str,
     app: Option<&crate::github_app::GithubApp>,
 ) -> std::result::Result<PathBuf, ResolveError> {
+    tracing::debug!(input, "resolving managed repo clone");
     let slug = parse_slug(input).map_err(ResolveError::BadRequest)?;
     let slug_str = slug.slug();
     let registered = get_registered(db, &slug_str)
         .await
         .map_err(|e| ResolveError::Clone(e.to_string()))?
         .ok_or_else(|| {
+            tracing::info!(repo = %slug_str, "repo not registered; refusing clone");
             ResolveError::BadRequest(format!(
                 "repo '{slug_str}' is not registered — register it via POST /api/repos first"
             ))
@@ -275,7 +281,10 @@ pub async fn resolve_clone(
     let dest = PathBuf::from(&registered.path);
     let token = match app {
         Some(app) => match app.token_for_repo(&slug.owner, &slug.name).await {
-            Ok(token) => Some(token),
+            Ok(token) => {
+                tracing::debug!(repo = %slug_str, "minted GitHub App installation token for repo");
+                Some(token)
+            }
             Err(e) => {
                 tracing::debug!(
                     repo = %slug_str,
@@ -288,9 +297,14 @@ pub async fn resolve_clone(
         },
         None => None,
     };
+    tracing::info!(repo = %slug_str, dest = %dest.display(), authenticated = token.is_some(), "acquiring managed repo clone");
     git::clone(&registered.remote_url, &dest, token.as_deref())
         .await
-        .map_err(|e| ResolveError::Clone(format!("cloning {slug_str}: {e}")))?;
+        .map_err(|e| {
+            tracing::warn!(repo = %slug_str, dest = %dest.display(), error = %e, "managed repo clone/fetch failed");
+            ResolveError::Clone(format!("cloning {slug_str}: {e}"))
+        })?;
+    tracing::info!(repo = %slug_str, dest = %dest.display(), "managed repo clone ready");
     Ok(dest)
 }
 

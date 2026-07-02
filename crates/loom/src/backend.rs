@@ -21,7 +21,8 @@ pub async fn has_session(name: &str) -> bool {
 
 /// Create a detached session running `script` via `sh -c` in `cwd`.
 pub async fn new_session(name: &str, cwd: &std::path::Path, script: &str) -> Result<()> {
-    tapestry::spawn_detached(&tapestry::LaunchOptions {
+    tracing::info!(session = %name, cwd = %cwd.display(), "spawning terminal session");
+    let result = tapestry::spawn_detached(&tapestry::LaunchOptions {
         name,
         cwd,
         script,
@@ -32,7 +33,12 @@ pub async fn new_session(name: &str, cwd: &std::path::Path, script: &str) -> Res
         rows: 24,
         supervisor_bin: tapestry_bin().as_deref(),
     })
-    .await
+    .await;
+    match &result {
+        Ok(()) => tracing::info!(session = %name, "terminal session spawned"),
+        Err(e) => tracing::warn!(session = %name, error = %e, "failed to spawn terminal session"),
+    }
+    result
 }
 
 /// Render the session's screen to text; `history` extra scrollback lines.
@@ -44,18 +50,22 @@ pub async fn capture(name: &str, history: usize) -> Result<String> {
 /// Type `text` into the session verbatim (the `send-keys -l` analogue). No
 /// trailing newline; pair with [`send_enter`] to submit.
 pub async fn send_literal(name: &str, text: &str) -> Result<()> {
+    tracing::debug!(session = %name, bytes = text.len(), "sending literal input to terminal");
     let mut c = tapestry::Client::connect(name).await?;
     c.send(text.as_bytes()).await
 }
 
 /// Send a single named key (e.g. `Enter`, `Escape`) to the session.
 pub async fn send_key(name: &str, key: &str) -> Result<()> {
+    let bytes = key_bytes(key);
+    tracing::debug!(session = %name, bytes = bytes.len(), "sending key to terminal");
     let mut c = tapestry::Client::connect(name).await?;
-    c.send(key_bytes(key)).await
+    c.send(bytes).await
 }
 
 /// Submit the current input — a bare `Enter`.
 pub async fn send_enter(name: &str) -> Result<()> {
+    tracing::debug!(session = %name, "submitting terminal input");
     send_key(name, "Enter").await
 }
 

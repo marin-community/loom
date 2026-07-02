@@ -611,11 +611,13 @@ pub fn router(state: AppState) -> Router {
         // container, for one-time setup like `gcloud auth login`.
         .route("/shell/terminal", get(crate::terminal::shell_ws))
         .route("/shell/restart", post(restart_shell))
-        // Server logs (Settings → Logs) — snapshot + live SSE tail + build status.
-        // Operator-only: server logs can carry tokens injected into agents.
+        // Server logs + background tasks (Settings → Debug) — snapshot + live SSE
+        // tail + build status + the detached trigger-task list. Operator-only:
+        // server logs can carry tokens injected into agents.
         .route("/logs", get(logs_snapshot))
         .route("/logs/stream", get(logs_stream))
         .route("/status", get(server_status))
+        .route("/tasks", get(tasks_snapshot))
         // Watches — periodic / triggered watch programs over the fleet.
         .route("/watches", get(list_watches).post(create_watch))
         // The static segment wins over the `{id}` capture below, so a program

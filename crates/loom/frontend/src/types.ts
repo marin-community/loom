@@ -615,3 +615,19 @@ export interface ServerStatus {
   pid: number;
   started_at: string;
 }
+
+/** One detached background task (a `@loom` webhook launch). Mirrors
+ *  `loom::tasks::TaskRecord`. */
+export interface TaskRecord {
+  id: number;
+  /** Coarse category, e.g. `github-trigger` or `github-unauthorized`. */
+  kind: string;
+  /** Human label, e.g. `owner/repo#123 (@user)`. */
+  label: string;
+  /** `running` | `done` | `error`. */
+  state: string;
+  /** Outcome detail: a session id, `forwarded…`, or an error message. */
+  detail: string;
+  started_at: string;
+  finished_at: string | null;
+}

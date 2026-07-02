@@ -81,6 +81,7 @@ pub async fn run(state: AppState) {
             }
         };
         let mut alive: HashSet<String> = HashSet::new();
+        tracing::debug!(sessions = sessions.len(), "monitor tick: session walk");
 
         // Edge-detect no-activity staleness once per walk, gated on the
         // watch master switch (no consumer ⇒ no point emitting). The
@@ -145,6 +146,7 @@ pub async fn run(state: AppState) {
             let h = hash(&normalize_screen(&screen));
             if screen_hash.get(&session.id) != Some(&h) {
                 screen_hash.insert(session.id.clone(), h);
+                tracing::debug!(id = %session.id, "activity detected; touching session");
                 let _ = session_mod::touch(&state.db, &session.id).await;
             }
         }
@@ -199,6 +201,7 @@ pub async fn detect_stale(
     if is_stale(session, after, now) {
         if seen.insert(session.id.clone()) {
             let idle_secs = idle_secs(session, now);
+            tracing::info!(id = %session.id, idle_secs, "session marked stale");
             if events::record(
                 &state.db,
                 &state.bus,
@@ -214,7 +217,9 @@ pub async fn detect_stale(
         }
     } else {
         // Activity resumed (or never crossed): re-arm the edge.
-        seen.remove(&session.id);
+        if seen.remove(&session.id) {
+            tracing::info!(id = %session.id, "session activity resumed; no longer stale");
+        }
     }
     last_event
 }
@@ -280,6 +285,16 @@ async fn apply_hook(state: &AppState, branch_id: &str, kind: &str) -> Option<i64
     // terminal state.
     let status_changed = session.status != "running" && !session_mod::is_terminal(&session.status);
     if status_changed {
+        if session.status == "orphaned" {
+            tracing::info!(id = %session.id, branch = %branch_id, "lifting orphaned session back to running");
+        } else {
+            tracing::debug!(
+                id = %session.id,
+                branch = %branch_id,
+                previous_status = %session.status,
+                "session transitioning to running via hook"
+            );
+        }
         let _ = session_mod::set_status(&state.db, &session.id, "running").await;
     }
     let _ = session_mod::touch(&state.db, &session.id).await;
@@ -309,6 +324,7 @@ async fn apply_hook(state: &AppState, branch_id: &str, kind: &str) -> Option<i64
         if current == value {
             continue;
         }
+        tracing::debug!(branch = %branch_id, key, value, "hook applied tag mutation");
         if value.is_empty() {
             let _ = tags::clear(&state.db, branch_id, key).await;
         } else {

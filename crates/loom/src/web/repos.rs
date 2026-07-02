@@ -180,44 +180,121 @@ pub(super) async fn github_webhook(
 
     // 6. Authorize the commenter (the untrusted boundary): they must be an
     //    approved loom user — the same allowlist that gates signing in to the app.
-    //    Repo write access is *not* itself a grant. Unauthorized → silent no-op;
-    //    replying would amplify spam across a flood of comments.
+    //    Repo write access is *not* itself a grant. Unauthorized → reply once with
+    //    a friendly "request access" note instead of a silent drop, so a would-be
+    //    user knows to ask rather than assume loom is broken. The per-repo rate
+    //    limit above bounds this against a comment flood; the reply is spawned (a
+    //    comment post is a round-trip) and tracked so the attempt shows on Debug.
     if !github_trigger::authorize(&st.db, &author).await {
-        tracing::info!(login = %author, repo = %slug.slug(), "github webhook: commenter not authorized");
+        tracing::info!(login = %author, repo = %slug.slug(), "github webhook: commenter not authorized; replying with access info");
+        let number = event.issue.number;
+        let slug_str = slug.slug();
+        let task_id = crate::tasks::registry().start(
+            "github-unauthorized",
+            &format!("{slug_str}#{number} (@{author})"),
+        );
+        tokio::spawn(async move {
+            let body = format!(
+                "Hi @{author} — thanks for the ping. You're not on this loom instance's \
+                 access list yet, so I can't pick this up. Ask an operator to grant you \
+                 access, then tag me again and I'll jump in."
+            );
+            match st
+                .trigger
+                .gh()
+                .post_issue_comment(&slug_str, number, &body)
+                .await
+            {
+                Ok(_) => crate::tasks::registry().finish(task_id, "done", "replied: needs access"),
+                Err(e) => {
+                    tracing::warn!(repo = %slug_str, error = %e, "github webhook: posting access-info reply failed");
+                    crate::tasks::registry().finish(
+                        task_id,
+                        "error",
+                        &format!("reply failed: {e}"),
+                    );
+                }
+            }
+        });
         return ok();
     }
 
-    // 6a. An approved user has been authorized above, so honor the App's
-    //     installation as the repo grant: auto-register any repo the App is
-    //     installed on into the managed allowlist, so the clone path below accepts
-    //     it, *complementing* explicitly registered repos. A no-op when the App is
-    //     unconfigured, the repo is already registered, or the App is not installed
-    //     on it (leaving the repos-table allowlist to govern).
+    // 6b. Accept the trigger and hand the heavy work — clone, branch resolution,
+    //     session create, reply — to a detached task. That work can take far
+    //     longer than GitHub's ~10s webhook timeout on a large repo; doing it
+    //     inline lets GitHub drop the connection and cancel the handler mid-clone
+    //     (and, since the delivery is already recorded, never retry). So log the
+    //     receipt (the Debug stream shows the hook firing), return `200` now, and
+    //     run it in the background, tracked in the task registry for the Debug page.
+    let number = event.issue.number;
+    tracing::info!(
+        repo = %slug.slug(),
+        number,
+        login = %author,
+        is_pr = event.issue.is_pr(),
+        "github webhook: trigger accepted, launching in background"
+    );
+    let task_id = crate::tasks::registry().start(
+        "github-trigger",
+        &format!("{}#{number} (@{author})", slug.slug()),
+    );
+    tokio::spawn(async move {
+        match handle_trigger(st, headers, slug, event, author).await {
+            Ok(Some(id)) => {
+                crate::tasks::registry().finish(task_id, "done", &format!("session {id}"))
+            }
+            Ok(None) => {
+                crate::tasks::registry().finish(task_id, "done", "forwarded to existing session")
+            }
+            Err(e) => crate::tasks::registry().finish(task_id, "error", &e),
+        }
+    });
+    ok()
+}
+
+/// The heavy half of a `@loom` trigger, run detached from the webhook request so
+/// a slow clone can't blow the delivery timeout: acquire the clone, resolve the
+/// target branch, forward-or-create the session, and reply on the thread. Returns
+/// the new session id (`Some`), `None` when the comment was forwarded to an
+/// existing session, or an `Err` describing why nothing launched — the string is
+/// surfaced on the Debug page's task list.
+async fn handle_trigger(
+    st: AppState,
+    headers: HeaderMap,
+    slug: repo::RepoSlug,
+    event: github_trigger::IssueCommentEvent,
+    author: String,
+) -> Result<Option<String>, String> {
+    // Honor the App's installation as the repo grant: auto-register any repo the
+    // App is installed on into the managed allowlist, so the clone path below
+    // accepts it, *complementing* explicitly registered repos. A no-op when the
+    // App is unconfigured, the repo is already registered, or the App is not
+    // installed on it (leaving the repos-table allowlist to govern).
     if let Some(app) = st.trigger.app() {
         app.ensure_installed_repo_registered(&slug).await;
     }
 
-    // 7. Resolve the commenter to their loom user (proven to exist by `authorize`
-    //    above). Attributing the launch to them makes their personal GitHub token
-    //    the session's `GH_TOKEN` — so its push / `gh` act as them — with the
-    //    ambient token as the fallback (see `apply_user_github_token`).
+    // Resolve the commenter to their loom user (proven to exist by `authorize`).
+    // Attributing the launch to them makes their personal GitHub token the
+    // session's `GH_TOKEN` — so its push / `gh` act as them — with the ambient
+    // token as the fallback (see `apply_user_github_token`).
     let username = match crate::auth::user_by_github(&st.db, &author).await {
         Ok(Some(u)) => u.username,
         _ => {
             tracing::warn!(login = %author, "github webhook: approved user vanished before launch");
-            return ok();
+            return Err("approved user vanished before launch".to_string());
         }
     };
 
-    // 8. Acquire the managed clone (allowlist-gated; `resolve_clone` also fetches
-    //    `--all`, so a PR's head lands as `origin/<ref>`), then resolve the branch
-    //    this trigger targets: a PR works on its own head branch so the agent's
-    //    commits land on the PR; an issue gets a stable `weaver/issue-<n>`.
+    // Acquire the managed clone (allowlist-gated; `resolve_clone` also fetches
+    // `--all`, so a PR's head lands as `origin/<ref>`), then resolve the branch
+    // this trigger targets: a PR works on its own head branch so the agent's
+    // commits land on the PR; an issue gets a stable `weaver/issue-<n>`.
     let repo_root = match repo::resolve_clone(&st.db, &slug.slug(), st.trigger.app()).await {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(repo = %slug.slug(), error = ?e, "github webhook: clone/allowlist rejected");
-            return ok();
+            return Err(format!("clone/allowlist rejected: {e:?}"));
         }
     };
     let repo_root_str = repo_root.to_string_lossy().to_string();
@@ -288,7 +365,7 @@ pub(super) async fn github_webhook(
                     }
                     tracing::info!(session = %sess.id, repo = %slug.slug(), number, "github webhook: forwarded comment to active session");
                 }
-                return ok();
+                return Ok(None);
             }
         }
     }
@@ -316,10 +393,8 @@ pub(super) async fn github_webhook(
     let view = match create_session_core(st.clone(), req, Some(username)).await {
         Ok(v) => v,
         Err(e) => {
-            // A non-allowlisted repo lands here (a BadRequest from resolve_clone),
-            // as does a clone/launch failure. Acknowledge; don't make GitHub retry.
             tracing::warn!(repo = %slug.slug(), error = ?e, "github webhook: session create failed");
-            return ok();
+            return Err(format!("session create failed: {e:?}"));
         }
     };
 
@@ -344,7 +419,23 @@ pub(super) async fn github_webhook(
         login = %author,
         "github webhook: launched session"
     );
-    ok()
+    // A PR's `On it` comment already carries the session's loom URL, so mark the
+    // branch linked and the poll loop's back-link poster leaves it alone. An
+    // issue's `On it` sits on the issue, not the eventual PR, so it doesn't count
+    // — the poster links the PR when it opens.
+    if is_pr {
+        weaver_core::tags::set(
+            &st.db,
+            &view.branch.id,
+            crate::github::LINKED_TAG,
+            &view.id,
+            "loom back-link posted with the trigger reply",
+            "loom",
+        )
+        .await
+        .ok();
+    }
+    Ok(Some(view.id))
 }
 
 /// Build the opening goal for a trigger-launched session: the issue/PR title and

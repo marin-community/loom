@@ -100,8 +100,8 @@ const categories: CategoryItem[] = [
   },
   {
     id: 'logs',
-    label: 'Logs',
-    summary: 'Live server logs and build status for debugging this loom deployment.',
+    label: 'Debug',
+    summary: 'Background tasks, live server logs, and build status for debugging this loom deployment.',
   },
 ];
 

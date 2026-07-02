@@ -268,6 +268,7 @@ async fn launch_env(
             .unwrap_or_default(),
     );
     repo_env::layer(&mut env, config_env_pairs(cfg));
+    tracing::debug!(repo = %repo_root_str, env_vars = env.len(), "layered launch environment");
     env
 }
 
@@ -286,8 +287,13 @@ async fn apply_user_github_token(
 ) {
     let Some(username) = created_by else { return };
     match crate::user_token::get(db, username).await {
-        Ok(Some(token)) if !token.trim().is_empty() => set_env(env, "GH_TOKEN", token),
-        Ok(_) => {}
+        Ok(Some(token)) if !token.trim().is_empty() => {
+            set_env(env, "GH_TOKEN", token);
+            tracing::info!(%username, "applied user github token as GH_TOKEN");
+        }
+        Ok(_) => {
+            tracing::debug!(%username, "no personal github token on file, leaving ambient GH_TOKEN")
+        }
         Err(e) => tracing::warn!(%username, "failed to load user github token: {e}"),
     }
 }
@@ -351,6 +357,7 @@ async fn ensure_github_token_available(
     {
         return Ok(());
     }
+    tracing::warn!(created_by = ?created_by, runtime = %runtime, "launch blocked: no github token available");
     Err(AppError::new(
         StatusCode::PRECONDITION_REQUIRED,
         MISSING_GITHUB_TOKEN_MESSAGE,
@@ -381,6 +388,7 @@ async fn run_repo_setup(
     env: &[(String, String)],
 ) -> setup::SetupOutcome {
     let timeout = setup_timeout(&st.db).await;
+    tracing::info!(branch = branch_id, work_dir = %work_dir.display(), timeout_secs = timeout.as_secs(), "running repo [setup] script");
     events::record(
         &st.db,
         &st.bus,
@@ -458,6 +466,12 @@ pub(crate) async fn create_session_core(
     req: CreateReq,
     created_by: Option<String>,
 ) -> ApiResult<SessionView> {
+    tracing::info!(
+        repo = ?req.repo,
+        agent = ?req.agent,
+        created_by = ?created_by,
+        "create_session_core: starting session creation"
+    );
     // Resolve the repo root. An explicit managed `repo` (a slug/URL) is
     // allowlist-checked and cloned-if-absent into the managed store, then used
     // directly; otherwise fork from `cwd`'s repo (the default). The traversal /
@@ -479,6 +493,7 @@ pub(crate) async fn create_session_core(
     // Canonicalize so repo identity matches the `weaver` CLI's resolver — issues
     // are keyed on this path and the two binaries must agree on it.
     let repo_root = repo_root.canonicalize().unwrap_or(repo_root);
+    tracing::debug!(repo_root = %repo_root.display(), "resolved repo root");
 
     // The repo's committed `.weaver/config.toml`, read from its primary checkout.
     // It supplies agent/model/effort defaults (below an explicit request, above
@@ -503,6 +518,7 @@ pub(crate) async fn create_session_core(
             weaver_core::repo_config::RepoConfig::default()
         }
     };
+    tracing::debug!(repo_root = %repo_root.display(), "loaded repo config");
 
     let agent = match req.agent {
         Some(a) => a.trim().to_string(),
@@ -513,6 +529,7 @@ pub(crate) async fn create_session_core(
     // deliverable to track), and is hidden from the fleet list by its kind.
     let is_concierge = agent == agent::CONCIERGE_KIND;
     let runtime = launch_runtime(&st.db, &agent).await;
+    tracing::debug!(agent = %agent, runtime = %runtime, is_concierge, "resolved agent runtime");
     // The resolved launch environment: global agent_env < per-repo repo_env < the
     // repo file's [env]. It is needed before provisioning so a real agent launch
     // can stop cleanly when neither the user nor the deployment provides GH_TOKEN.
@@ -574,7 +591,9 @@ pub(crate) async fn create_session_core(
         }
         None => return Err(AppError::bad_request(format!("unknown agent '{runtime}'"))),
     }
+    tracing::debug!(model = %model, effort = %effort, "resolved and validated model/effort");
     ensure_github_token_available(&st.db, &extra_env, created_by.as_deref(), &runtime).await?;
+    tracing::debug!(runtime = %runtime, "github token availability check passed");
 
     // Build title/goal/description; an optional GitHub issue seeds all three.
     let mut goal = req.goal.unwrap_or_default().trim().to_string();
@@ -586,6 +605,7 @@ pub(crate) async fn create_session_core(
     let mut github_repo = None;
     let mut github_issue: Option<i64> = None;
     if let Some(number) = req.issue {
+        tracing::info!(issue = number, repo = %repo_root.display(), "fetching github issue to seed session");
         let issue = github::fetch_issue(&repo_root, number)
             .await
             .map_err(|e| AppError::bad_request(format!("issue #{number}: {e}")))?;
@@ -602,12 +622,14 @@ pub(crate) async fn create_session_core(
         description = issue.body.clone();
         github_issue = Some(number);
         github_repo = github::repo_slug(&repo_root).await.ok();
+        tracing::debug!(issue = number, github_repo = ?github_repo, "seeded session fields from github issue");
     }
 
     // Claiming an existing weaver issue seeds the same three fields from it.
     let repo_root_str = repo_root.display().to_string();
     let mut claimed_issue_id: Option<i64> = None;
     if let Some(issue_id) = req.claim_issue {
+        tracing::debug!(issue_id, "claiming existing weaver issue for new session");
         let issue = weaver_core::issue::get(&st.db, issue_id)
             .await?
             .ok_or_else(|| AppError::not_found("issue"))?;
@@ -664,8 +686,10 @@ pub(crate) async fn create_session_core(
         Some(b) => b,
         None => git::default_base(&repo_root).await?,
     };
+    tracing::debug!(base = %base, "resolved base branch");
 
     let (branch_name, work_dir) = if let Some(existing_branch) = existing {
+        tracing::info!(branch = %existing_branch, "reusing existing branch for session");
         if !git::branch_exists(&repo_root, existing_branch).await {
             return Err(AppError::bad_request(format!(
                 "branch '{existing_branch}' does not exist in this repo"
@@ -688,12 +712,16 @@ pub(crate) async fn create_session_core(
             .await
             .map_err(|e| AppError::bad_request(e.to_string()))?
         {
-            Some(p) => p,
+            Some(p) => {
+                tracing::debug!(branch = %existing_branch, work_dir = %p.display(), "found existing worktree for branch");
+                p
+            }
             None => {
                 let slug = branch_mod::slugify(existing_branch);
                 let dir = repo_root.join(".worktrees").join(&slug);
                 tokio::fs::create_dir_all(repo_root.join(".worktrees")).await?;
                 git::ensure_excluded(&repo_root, ".worktrees/").await.ok();
+                tracing::info!(branch = %existing_branch, work_dir = %dir.display(), "provisioning worktree for existing branch");
                 git::worktree_add_existing(&repo_root, &dir, existing_branch)
                     .await
                     .map_err(|e| AppError::bad_request(e.to_string()))?;
@@ -705,6 +733,7 @@ pub(crate) async fn create_session_core(
         // Create `weaver/<slug>` with a unique suffix.
         let explicit = req.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
         let base_slug = branch_mod::slugify(explicit.unwrap_or(title.as_str()));
+        tracing::debug!(base_slug = %base_slug, base = %base, "creating new branch for session");
         let mut slug = base_slug.clone();
         let mut suffix = 2;
         loop {
@@ -725,6 +754,7 @@ pub(crate) async fn create_session_core(
         let work_dir = repo_root.join(".worktrees").join(&slug);
         tokio::fs::create_dir_all(repo_root.join(".worktrees")).await?;
         git::ensure_excluded(&repo_root, ".worktrees/").await.ok();
+        tracing::info!(branch = %branch_name, work_dir = %work_dir.display(), base = %base, "provisioning worktree for new branch");
         git::worktree_add(&repo_root, &work_dir, &branch_name, &base)
             .await
             .map_err(|e| AppError::bad_request(e.to_string()))?;
@@ -733,6 +763,7 @@ pub(crate) async fn create_session_core(
 
     // Get-or-create the branch row, then stamp its title/goal/description.
     let branch = branch_mod::upsert(&st.db, &repo_root_str, &branch_name, &base).await?;
+    tracing::debug!(branch = %branch.id, branch_name = %branch_name, "upserted branch row");
     branch_mod::set_title(&st.db, &branch.id, &title).await?;
     if !goal.is_empty() {
         branch_mod::set_goal(&st.db, &branch.id, &goal, "user").await?;
@@ -744,6 +775,7 @@ pub(crate) async fn create_session_core(
     let branch = branch_mod::get(&st.db, &branch.id)
         .await?
         .ok_or_else(|| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "branch vanished"))?;
+    tracing::debug!(branch = %branch.id, title = %title, "stamped branch title/goal/description");
 
     // Resolve the launching parent once: it names the tracking issue's
     // `source_branch` *and* the session's tree parent (`parent_branch_id`).
@@ -769,6 +801,7 @@ pub(crate) async fn create_session_core(
     let tracking_issue = if is_concierge {
         None
     } else {
+        tracing::debug!(branch = %branch.id, "opening tracking issue for session");
         create_tracking_issue(
             &st,
             &branch,
@@ -782,10 +815,12 @@ pub(crate) async fn create_session_core(
         )
         .await?
     };
+    tracing::debug!(branch = %branch.id, tracking_issue = ?tracking_issue, "tracking issue resolved");
 
     let session_id = branch_mod::new_id();
     let run_dir = db::run_dir(&session_id);
     tokio::fs::create_dir_all(&run_dir).await?;
+    tracing::info!(session = %session_id, branch = %branch.id, run_dir = %run_dir.display(), "allocated session id and run dir");
 
     // Drop any attached reference files into the worktree before the agent
     // launches, then tell the agent they are there. The branch goal stays the
@@ -793,6 +828,7 @@ pub(crate) async fn create_session_core(
     // launch prompt (goal.txt) only, so they reach the agent without cluttering
     // the dashboard.
     let scratch_names = write_initial_scratch(&work_dir, &req.scratch).await?;
+    tracing::debug!(session = %session_id, scratch_files = scratch_names.len(), "wrote initial scratch files");
     // The concierge boots primed-but-idle: its fleet-ops primer is injected as
     // system *context* (primer.txt → `--append-system-prompt-file`), not as a
     // positional opening prompt, so it takes no turn until the operator sends the
@@ -801,6 +837,7 @@ pub(crate) async fn create_session_core(
     let (goal_file, primer_file) = if is_concierge {
         let f = run_dir.join("primer.txt");
         tokio::fs::write(&f, agent::concierge_primer()).await?;
+        tracing::debug!(session = %session_id, "wrote concierge primer file");
         (None, Some(f))
     } else {
         let mut prompt_parts: Vec<String> = Vec::new();
@@ -819,12 +856,14 @@ pub(crate) async fn create_session_core(
         } else {
             let f = run_dir.join("goal.txt");
             tokio::fs::write(&f, &launch_prompt).await?;
+            tracing::debug!(session = %session_id, "wrote goal file for launch prompt");
             Some(f)
         };
         (goal_file, None)
     };
 
     let term_session = format!("weaver-{session_id}");
+    tracing::debug!(session = %session_id, term_session = %term_session, "derived terminal session name");
 
     // Attribute the agent's commits to the launching user (design §6.3, Level A):
     // export their GitHub identity as the git author/committer. Inserted only if
@@ -845,8 +884,11 @@ pub(crate) async fn create_session_core(
                         extra_env.push((k.to_string(), v.clone()));
                     }
                 }
+                tracing::debug!(%username, "attributed commits to launching user");
             }
-            Ok(None) => {}
+            Ok(None) => {
+                tracing::debug!(%username, "no commit identity registered, using shared identity")
+            }
             Err(e) => tracing::warn!(%username, "failed to resolve commit identity: {e}"),
         }
     }
@@ -859,6 +901,7 @@ pub(crate) async fn create_session_core(
     // session in a visible error state instead of launching a half-provisioned
     // worktree.
     if let Some(script) = repo_cfg.setup.script() {
+        tracing::debug!(branch = %branch.id, repo = %repo_root.display(), "repo declares a [setup] script");
         if repo::is_allowlisted(&st.db, &repo_root)
             .await
             .unwrap_or(false)
@@ -866,6 +909,7 @@ pub(crate) async fn create_session_core(
             let outcome =
                 run_repo_setup(&st, &branch.id, &work_dir, &run_dir, &script, &extra_env).await;
             if !outcome.success {
+                tracing::warn!(branch = %branch.id, "repo setup failed, aborting launch before agent start");
                 // Surface the failure as a loud, visible session state rather than
                 // launching the agent into a half-provisioned worktree. The
                 // worktree is left intact for inspection; full output is in the
@@ -945,6 +989,14 @@ pub(crate) async fn create_session_core(
         }
     }
 
+    tracing::info!(
+        session = %session_id,
+        branch = %branch.id,
+        runtime = %runtime,
+        work_dir = %work_dir.display(),
+        env_vars = extra_env.len(),
+        "launching agent terminal"
+    );
     agent::launch(
         &st.db,
         &agent::LaunchSpec {
@@ -963,6 +1015,7 @@ pub(crate) async fn create_session_core(
     )
     .await
     .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    tracing::info!(session = %session_id, branch = %branch.id, "agent terminal launched");
 
     // Live the moment the terminal spawns — there is no `launching` state.
     let status = agent::initial_status(&st.db, &runtime).await;
@@ -984,6 +1037,7 @@ pub(crate) async fn create_session_core(
         },
     )
     .await?;
+    tracing::debug!(session = %session.id, status = %status, "inserted session row");
 
     if let Err(e) = repo::record_use(&st.db, &branch.repo_root).await {
         tracing::warn!(branch = %branch.id, error = %e, "failed to record recent repo");
@@ -1008,6 +1062,7 @@ pub(crate) async fn create_session_core(
     // normal session seeds a positional prompt and runs a turn on launch, so its
     // own hooks drive this mark — only the idle-booting concierge needs the seed.
     if is_concierge {
+        tracing::debug!(branch = %branch.id, "stamping concierge idle mark");
         if let Err(e) = tags::set(
             &st.db,
             &branch.id,
@@ -1075,6 +1130,7 @@ async fn create_concierge(st: AppState) -> ApiResult<SessionView> {
                 "the concierge needs a repo to live in — open a session in a repo first",
             )
         })?;
+    tracing::info!(repo = %home.repo_root, "launching fleet concierge session");
     let req = CreateReq {
         cwd: home.repo_root,
         agent: Some(agent::CONCIERGE_KIND.to_string()),
@@ -1092,6 +1148,7 @@ async fn create_concierge(st: AppState) -> ApiResult<SessionView> {
 /// place, so the operator gets a fresh agent with none of the prior context.
 /// Returns the new session view, exactly as [`get_chat`] would.
 pub(super) async fn reset_chat(State(st): State<AppState>) -> ApiResult<Json<SessionView>> {
+    tracing::info!("resetting fleet concierge chat");
     if let Some(session) = session_mod::active_concierge(&st.db).await? {
         if let Some(branch) = branch_mod::get(&st.db, &session.branch_id).await? {
             // Best-effort teardown of the old concierge; a warning here must not
@@ -1139,6 +1196,7 @@ async fn create_tracking_issue(
     claim_issue: Option<i64>,
 ) -> ApiResult<Option<i64>> {
     let source = parent_branch.unwrap_or(&branch.branch).to_string();
+    tracing::debug!(branch = %branch.id, source = %source, "resolving tracking issue for session");
 
     // Claiming an existing weaver issue: that issue *is* the tracker, so the
     // claim must actually land — otherwise we'd hand back a tracking id for an
@@ -1326,6 +1384,7 @@ pub(super) async fn delete_session(
     Query(q): Query<DeleteQuery>,
 ) -> ApiResult<Json<Value>> {
     let (session, branch) = require_session(&st.db, &key).await?;
+    tracing::info!(session = %session.id, branch = %branch.id, keep_branch = q.keep_branch, "deleting session");
     let mut warnings: Vec<String> = Vec::new();
 
     backend::kill_session(&session.term_session).await.ok();
@@ -1333,11 +1392,13 @@ pub(super) async fn delete_session(
     st.ide.kill(&session.id);
     let repo_root = PathBuf::from(&branch.repo_root);
     let work_dir = PathBuf::from(&session.work_dir);
+    tracing::debug!(session = %session.id, "killed terminal, debug shells, and ide sessions");
     if let Err(e) = git::worktree_remove(&repo_root, &work_dir).await {
         warnings.push(format!("worktree remove: {e}"));
         tokio::fs::remove_dir_all(&work_dir).await.ok();
     }
     if !q.keep_branch {
+        tracing::debug!(session = %session.id, branch_name = %branch.branch, "deleting git branch");
         if let Err(e) = git::delete_branch(&repo_root, &branch.branch).await {
             warnings.push(format!("delete branch: {e}"));
         }
@@ -1379,6 +1440,7 @@ pub(crate) async fn archive(
     session: &Session,
     branch: &Branch,
 ) -> Result<Vec<String>, AppError> {
+    tracing::info!(session = %session.id, branch = %branch.id, "archiving session");
     let mut warnings: Vec<String> = Vec::new();
 
     // Capture the agent's conversation log before teardown. The transcript lives
@@ -1386,13 +1448,16 @@ pub(crate) async fn archive(
     // it whole regardless. Best-effort: failures are warnings, never fatal.
     let (_, log_warnings) = crate::chatlog::capture(&st.db, session, branch).await;
     warnings.extend(log_warnings);
+    tracing::debug!(session = %session.id, "captured conversation transcript before teardown");
 
     backend::kill_session(&session.term_session).await.ok();
     crate::shell::kill_debug_all(&session.id).await;
     st.ide.kill(&session.id);
     let repo_root = PathBuf::from(&branch.repo_root);
     let work_dir = PathBuf::from(&session.work_dir);
+    tracing::debug!(session = %session.id, "killed terminal, debug shells, and ide sessions");
     if work_dir.exists() {
+        tracing::debug!(session = %session.id, work_dir = %work_dir.display(), "removing worktree");
         if let Err(e) = git::worktree_remove(&repo_root, &work_dir).await {
             warnings.push(format!("worktree remove: {e}"));
             tokio::fs::remove_dir_all(&work_dir).await.ok();
@@ -1436,6 +1501,7 @@ pub(super) async fn archive_session(
     Path(key): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let (session, branch) = require_session(&st.db, &key).await?;
+    tracing::debug!(key = %key, session = %session.id, "handling archive session request");
     let warnings = archive(&st, &session, &branch).await?;
     Ok(Json(
         json!({ "archived": true, "branch": branch.branch, "warnings": warnings }),
@@ -1501,6 +1567,7 @@ pub(crate) async fn create_warm_session(
     watch: &Watch,
     repo_root: &std::path::Path,
 ) -> Result<Session, AppError> {
+    tracing::info!(watch = %watch.id, repo = %repo_root.display(), "creating warm session for watch");
     let repo_root = repo_root
         .canonicalize()
         .unwrap_or_else(|_| repo_root.to_path_buf());
@@ -1525,16 +1592,19 @@ pub(crate) async fn create_warm_session(
     let work_dir = repo_root.join(".worktrees").join(&slug);
     tokio::fs::create_dir_all(repo_root.join(".worktrees")).await?;
     git::ensure_excluded(&repo_root, ".worktrees/").await.ok();
+    tracing::info!(watch = %watch.id, branch = %branch_name, work_dir = %work_dir.display(), "provisioning worktree for warm session");
     git::worktree_add(&repo_root, &work_dir, &branch_name, &base)
         .await
         .map_err(|e| AppError::bad_request(e.to_string()))?;
 
     let branch = branch_mod::upsert(&st.db, &repo_root_str, &branch_name, &base).await?;
     branch_mod::set_title(&st.db, &branch.id, &format!("watch {}", watch.name)).await?;
+    tracing::debug!(watch = %watch.id, branch = %branch.id, "upserted warm session branch row");
 
     let session_id = branch_mod::new_id();
     let run_dir = db::run_dir(&session_id);
     tokio::fs::create_dir_all(&run_dir).await?;
+    tracing::debug!(watch = %watch.id, session = %session_id, "allocated warm session id and run dir");
 
     // The warm session runs the configured default agent (the watch's
     // judging agent, normally `claude`); its `prompt` param, when set, seeds the
@@ -1558,6 +1628,7 @@ pub(crate) async fn create_warm_session(
     let repo_cfg = repo_cfg_or_default(&repo_root);
     let extra_env = launch_env(&st.db, &repo_root, &repo_cfg).await;
     // A warm session never carries the concierge role, so its runtime is its kind.
+    tracing::info!(watch = %watch.id, session = %session_id, agent = %agent, work_dir = %work_dir.display(), "launching warm session agent terminal");
     agent::launch(
         &st.db,
         &agent::LaunchSpec {
@@ -1577,6 +1648,7 @@ pub(crate) async fn create_warm_session(
     )
     .await
     .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    tracing::info!(watch = %watch.id, session = %session_id, "warm session agent terminal launched");
 
     let status = agent::initial_status(&st.db, &agent).await;
     let session = session_mod::insert(
@@ -1617,6 +1689,7 @@ pub(crate) async fn adopt(
     session: &Session,
     branch: &Branch,
 ) -> Result<(), AppError> {
+    tracing::info!(session = %session.id, branch = %branch.id, "adopting orphaned session");
     if backend::has_session(&session.term_session).await {
         return Err(AppError::conflict(
             "session already has a running terminal process",
@@ -1629,6 +1702,7 @@ pub(crate) async fn adopt(
             session.work_dir
         )));
     }
+    tracing::debug!(session = %session.id, work_dir = %work_dir.display(), "adopt preflight checks passed");
     resume_agent(st, session, branch, "session adopted").await
 }
 
@@ -1644,6 +1718,7 @@ async fn resume_agent(
     branch: &Branch,
     reason: &str,
 ) -> Result<(), AppError> {
+    tracing::info!(session = %session.id, branch = %branch.id, reason = %reason, "resuming agent");
     let work_dir = PathBuf::from(&session.work_dir);
     // A normal session persists its positional prompt in goal.txt; the concierge
     // persists its primer in primer.txt instead (re-appended as system context so
@@ -1669,6 +1744,7 @@ async fn resume_agent(
                 }
                 Err(e) => tracing::warn!(error = %e, "failed to read goal for adopt refresh"),
             }
+            tracing::debug!(session = %session.id, "refreshed goal file for resume");
             Some(f)
         } else {
             None
@@ -1682,6 +1758,7 @@ async fn resume_agent(
     let repo_cfg = repo_cfg_or_default(&repo_root);
     let extra_env = launch_env(&st.db, &repo_root, &repo_cfg).await;
     let runtime = launch_runtime(&st.db, &session.agent_kind).await;
+    tracing::info!(session = %session.id, branch = %branch.id, runtime = %runtime, work_dir = %work_dir.display(), "relaunching agent terminal for resume");
     agent::launch(
         &st.db,
         &agent::LaunchSpec {
@@ -1700,6 +1777,7 @@ async fn resume_agent(
     )
     .await
     .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    tracing::debug!(session = %session.id, "agent terminal relaunched, resuming conversation");
     // A resumed agent is already established and live — mark it `running`.
     let status = agent::initial_status(&st.db, &runtime).await;
     session_mod::set_status(&st.db, &session.id, status).await?;
@@ -1721,6 +1799,7 @@ pub(super) async fn adopt_session(
     Path(key): Path<String>,
 ) -> ApiResult<Json<SessionView>> {
     let (session, branch) = require_session(&st.db, &key).await?;
+    tracing::debug!(key = %key, session = %session.id, "handling adopt session request");
     adopt(&st, &session, &branch).await?;
     let (session, branch) = require_session(&st.db, &session.id).await?;
     Ok(Json(session_view(&st.db, &session, &branch).await?))
@@ -1733,6 +1812,7 @@ pub(super) async fn adopt_session(
 /// the agent (resuming the prior Claude conversation with `--continue`, exactly as
 /// [`adopt`] does). The session rejoins the active fleet.
 async fn recover(st: &AppState, session: &Session, branch: &Branch) -> Result<(), AppError> {
+    tracing::info!(session = %session.id, branch = %branch.id, "recovering archived session");
     if backend::has_session(&session.term_session).await {
         return Err(AppError::conflict(
             "session already has a running terminal process",
@@ -1757,9 +1837,12 @@ async fn recover(st: &AppState, session: &Session, branch: &Branch) -> Result<()
         git::worktree_prune(&repo_root).await.ok();
         tokio::fs::create_dir_all(repo_root.join(".worktrees")).await?;
         git::ensure_excluded(&repo_root, ".worktrees/").await.ok();
+        tracing::info!(session = %session.id, branch = %branch.id, work_dir = %work_dir.display(), "rebuilding worktree for recovered session");
         git::worktree_add_existing(&repo_root, &work_dir, &branch.branch)
             .await
             .map_err(|e| AppError::bad_request(e.to_string()))?;
+    } else {
+        tracing::debug!(session = %session.id, "worktree still present, skipping rebuild");
     }
 
     tags::set(
@@ -1782,6 +1865,7 @@ async fn recover(st: &AppState, session: &Session, branch: &Branch) -> Result<()
     )
     .await
     .ok();
+    tracing::debug!(session = %session.id, branch = %branch.id, "marked session recovered, resuming agent");
     resume_agent(st, session, branch, "session recovered").await?;
     Ok(())
 }
@@ -1791,6 +1875,7 @@ pub(super) async fn recover_session(
     Path(key): Path<String>,
 ) -> ApiResult<Json<SessionView>> {
     let (session, branch) = require_session(&st.db, &key).await?;
+    tracing::debug!(key = %key, session = %session.id, "handling recover session request");
     recover(&st, &session, &branch).await?;
     let (session, branch) = require_session(&st.db, &session.id).await?;
     Ok(Json(session_view(&st.db, &session, &branch).await?))

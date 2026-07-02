@@ -105,11 +105,13 @@ pub async fn clone(url: &str, dest: &Path, token: Option<&str>) -> Result<()> {
     let envs = token.map(token_auth_envs).unwrap_or_default();
     // An existing clone (its `.git` is present) is refreshed, not re-cloned.
     if dest.join(".git").exists() {
+        tracing::info!(dest = %dest.display(), authenticated = token.is_some(), "fetching existing clone");
         git_with_envs(dest, &["fetch", "--all", "--prune"], &envs).await?;
         tracing::info!(dest = %dest.display(), "fetched existing clone");
         return Ok(());
     }
     if let Some(parent) = dest.parent() {
+        tracing::debug!(parent = %parent.display(), "ensuring repo parent dir exists");
         tokio::fs::create_dir_all(parent)
             .await
             .with_context(|| format!("creating repo parent {}", parent.display()))?;
@@ -117,6 +119,7 @@ pub async fn clone(url: &str, dest: &Path, token: Option<&str>) -> Result<()> {
     // `git clone` has no working tree to `-C` into yet, so it is spawned directly
     // rather than through the `git()` helper.
     let dest_str = dest.to_string_lossy();
+    tracing::info!(dest = %dest.display(), authenticated = token.is_some(), "cloning repository");
     let out = Command::new("git")
         .args(["clone", url, &dest_str])
         .envs(envs.iter().map(|(k, v)| (*k, v.as_str())))
@@ -141,6 +144,7 @@ pub async fn clone(url: &str, dest: &Path, token: Option<&str>) -> Result<()> {
 /// that (for example) the in-repo `.worktrees/` directory is not reported as
 /// untracked content. This is local-only and never touches a tracked file.
 pub async fn ensure_excluded(repo_root: &Path, pattern: &str) -> Result<()> {
+    tracing::debug!(repo = %repo_root.display(), pattern, "ensuring exclude pattern present");
     let common = git(
         repo_root,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -153,6 +157,7 @@ pub async fn ensure_excluded(repo_root: &Path, pattern: &str) -> Result<()> {
         .await
         .unwrap_or_default();
     if current.lines().any(|l| l.trim() == pattern) {
+        tracing::debug!(repo = %repo_root.display(), pattern, "exclude pattern already present");
         return Ok(());
     }
     let mut next = current;
@@ -186,7 +191,9 @@ pub async fn branch_exists(dir: &Path, branch: &str) -> bool {
 
 /// Whether a remote named `name` is configured (`git remote get-url`).
 async fn has_remote(dir: &Path, name: &str) -> bool {
-    git(dir, &["remote", "get-url", name]).await.is_ok()
+    let present = git(dir, &["remote", "get-url", name]).await.is_ok();
+    tracing::debug!(dir = %dir.display(), remote = name, present, "checked remote presence");
+    present
 }
 
 /// Whether `rev` resolves to a commit in this repo.
@@ -217,15 +224,18 @@ async fn origin_default_branch(dir: &Path) -> Option<String> {
     {
         if let Some(name) = out.strip_prefix("origin/") {
             if !name.is_empty() {
+                tracing::debug!(dir = %dir.display(), default_branch = name, "resolved origin default branch from origin/HEAD");
                 return Some(name.to_string());
             }
         }
     }
     for cand in ["main", "master"] {
         if commit_exists(dir, &format!("origin/{cand}")).await {
+            tracing::debug!(dir = %dir.display(), default_branch = cand, "resolved origin default branch by probing candidates");
             return Some(cand.to_string());
         }
     }
+    tracing::debug!(dir = %dir.display(), "could not resolve an origin default branch");
     None
 }
 
@@ -243,14 +253,18 @@ async fn origin_default_branch(dir: &Path) -> Option<String> {
 /// fall back to the current branch.
 pub async fn default_base(dir: &Path) -> Result<String> {
     if !has_remote(dir, "origin").await {
+        tracing::debug!(dir = %dir.display(), "no origin remote; falling back to current branch");
         return current_branch(dir).await;
     }
     if let Some(default) = origin_default_branch(dir).await {
         // Best-effort: refresh the tracking ref so the fork point is current.
         // Ignore network failures — a stale ref still beats the local branch.
-        let _ = git(dir, &["fetch", "origin", &default]).await;
+        tracing::info!(dir = %dir.display(), branch = %default, "fetching origin to refresh default base");
+        let fetch_result = git(dir, &["fetch", "origin", &default]).await;
+        tracing::debug!(dir = %dir.display(), branch = %default, ok = fetch_result.is_ok(), "fetch of default branch completed");
         let remote_ref = format!("origin/{default}");
         if commit_exists(dir, &remote_ref).await {
+            tracing::debug!(dir = %dir.display(), base = %remote_ref, "using fresh origin default as launch base");
             return Ok(remote_ref);
         }
     }
@@ -260,6 +274,7 @@ pub async fn default_base(dir: &Path) -> Result<String> {
 /// Create a new worktree at `path` on a new `branch` forked from `base`.
 pub async fn worktree_add(repo_root: &Path, path: &Path, branch: &str, base: &str) -> Result<()> {
     let path = path.to_string_lossy();
+    tracing::info!(repo = %repo_root.display(), %branch, base, path = %path, "creating worktree with new branch");
     git(repo_root, &["worktree", "add", "-b", branch, &path, base]).await?;
     tracing::info!(%branch, base, path = %path, "worktree created");
     Ok(())
@@ -268,6 +283,7 @@ pub async fn worktree_add(repo_root: &Path, path: &Path, branch: &str, base: &st
 /// Check out an existing `branch` into a new worktree at `path` (no `-b`).
 pub async fn worktree_add_existing(repo_root: &Path, path: &Path, branch: &str) -> Result<()> {
     let path = path.to_string_lossy();
+    tracing::info!(repo = %repo_root.display(), %branch, path = %path, "creating worktree for existing branch");
     git(repo_root, &["worktree", "add", &path, branch]).await?;
     tracing::info!(%branch, path = %path, "worktree created for existing branch");
     Ok(())
@@ -280,8 +296,10 @@ pub async fn worktree_add_existing(repo_root: &Path, path: &Path, branch: &str) 
 /// `git push` targets the same branch (updating the PR).
 pub async fn create_local_branch_from_origin(repo_root: &Path, branch: &str) -> Result<()> {
     if branch_exists(repo_root, branch).await {
+        tracing::debug!(repo = %repo_root.display(), %branch, "local branch already exists; skipping create");
         return Ok(());
     }
+    tracing::info!(repo = %repo_root.display(), %branch, "creating local branch from origin");
     git(repo_root, &["branch", branch, &format!("origin/{branch}")]).await?;
     tracing::info!(%branch, "created local branch from origin");
     Ok(())
@@ -294,11 +312,13 @@ pub async fn list_branches(repo_root: &Path) -> Result<Vec<String>> {
         &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
     )
     .await?;
-    Ok(out
+    let branches: Vec<String> = out
         .lines()
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
-        .collect())
+        .collect();
+    tracing::debug!(repo = %repo_root.display(), count = branches.len(), "listed local branches");
+    Ok(branches)
 }
 
 /// Path of the worktree that currently has `branch` checked out, if any.
@@ -314,17 +334,20 @@ pub async fn worktree_for_branch(repo_root: &Path, branch: &str) -> Result<Optio
             current = Some(PathBuf::from(rest));
         } else if let Some(rest) = line.strip_prefix("branch ") {
             if rest == target {
+                tracing::debug!(repo = %repo_root.display(), %branch, path = ?current, "found worktree for branch");
                 return Ok(current);
             }
         } else if line.is_empty() {
             current = None;
         }
     }
+    tracing::debug!(repo = %repo_root.display(), %branch, "no worktree checked out for branch");
     Ok(None)
 }
 
 pub async fn worktree_remove(repo_root: &Path, path: &Path) -> Result<()> {
     let path = path.to_string_lossy();
+    tracing::info!(repo = %repo_root.display(), path = %path, "removing worktree");
     git(repo_root, &["worktree", "remove", "--force", &path]).await?;
     tracing::info!(path = %path, "worktree removed");
     Ok(())
@@ -336,12 +359,14 @@ pub async fn worktree_remove(repo_root: &Path, path: &Path) -> Result<()> {
 /// when nothing is stale. Used when re-checking out a branch whose worktree was
 /// torn down (e.g. recovering an archived session).
 pub async fn worktree_prune(repo_root: &Path) -> Result<()> {
+    tracing::debug!(repo = %repo_root.display(), "pruning stale worktree entries");
     git(repo_root, &["worktree", "prune"]).await?;
     tracing::info!(repo = %repo_root.display(), "worktree pruned");
     Ok(())
 }
 
 pub async fn delete_branch(repo_root: &Path, branch: &str) -> Result<()> {
+    tracing::info!(repo = %repo_root.display(), %branch, "deleting branch");
     git(repo_root, &["branch", "-D", branch]).await?;
     tracing::info!(%branch, "branch deleted");
     Ok(())

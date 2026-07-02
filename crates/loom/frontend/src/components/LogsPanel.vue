@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
 import * as api from '../api';
-import type { LogLine, ServerStatus } from '../types';
+import type { LogLine, ServerStatus, TaskRecord } from '../types';
 
 // Live server logs, straight from the process's tracing output — the same lines
 // that go to stdout / `docker compose logs`, but readable from the browser so an
@@ -185,35 +185,104 @@ const uptime = computed(() => {
   return h ? `${h}h ${m}m` : m ? `${m}m ${s}s` : `${s}s`;
 });
 
+// --- Background tasks ------------------------------------------------------
+// The detached `@loom` webhook launches (clone → create → reply) that run off the
+// webhook request. Polled — low-frequency, so a few-second refresh is plenty; no
+// SSE like the logs.
+const tasks = ref<TaskRecord[]>([]);
+async function loadTasks() {
+  try {
+    tasks.value = await api.getTasks();
+  } catch {
+    /* keep the last snapshot; the log pane surfaces server-side errors */
+  }
+}
+const taskStateClass = (s: string): string =>
+  s === 'done' ? 'text-ok' : s === 'error' ? 'text-block' : 'text-info';
+let taskTimer: ReturnType<typeof setInterval> | null = null;
+
+// Refresh both the log snapshot and the task list (the toolbar Refresh button).
+function refresh() {
+  loadSnapshot();
+  loadTasks();
+}
+
 onMounted(() => {
   loadSnapshot().then(() => {
     if (live.value) openStream();
   });
+  loadTasks();
+  taskTimer = setInterval(loadTasks, 5000);
 });
-onUnmounted(closeStream);
+onUnmounted(() => {
+  closeStream();
+  if (taskTimer) clearInterval(taskTimer);
+});
 </script>
 
 <template>
   <div>
-    <h2 class="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">Server logs</h2>
-    <p class="mb-3 text-xs text-faint">
-      The running server's log stream, live. The same lines go to
-      <code>docker compose logs</code>; this is a read-only mirror so you can debug from the browser.
-      May contain secrets — visible to approved operators only.
-    </p>
-
     <p v-if="error" class="mb-3 text-sm text-block">{{ error }}</p>
 
-    <!-- Status line -->
+    <!-- Status line: server identity, so a redeploy is visible (pid/start change). -->
     <div
       v-if="status"
-      class="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border border-line bg-surface px-3 py-2 font-mono text-2xs text-muted"
+      class="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border border-line bg-surface px-3 py-2 font-mono text-2xs text-muted"
     >
       <span>v<span class="text-accent">{{ status.version }}</span></span>
       <span>pid <span class="text-accent">{{ status.pid }}</span></span>
       <span>up <span class="text-accent">{{ uptime }}</span></span>
       <span :title="status.started_at">started {{ shortTime(status.started_at) }}</span>
     </div>
+
+    <!-- Background tasks: the detached @loom webhook launches. -->
+    <section class="mb-5">
+      <h2 class="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">
+        Background tasks
+      </h2>
+      <p class="mb-2 text-xs text-faint">
+        Detached <code>@loom</code> webhook launches — the clone, session create, and reply that run
+        after the webhook returns its <code>200</code>. Newest first.
+      </p>
+      <div class="overflow-x-auto rounded-md border border-line">
+        <table class="w-full border-collapse font-mono text-2xs">
+          <thead>
+            <tr class="bg-surface text-left text-faint">
+              <th class="px-2 py-1 font-medium">State</th>
+              <th class="px-2 py-1 font-medium">Kind</th>
+              <th class="px-2 py-1 font-medium">Task</th>
+              <th class="px-2 py-1 font-medium">Detail</th>
+              <th class="whitespace-nowrap px-2 py-1 font-medium">Started</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="!tasks.length">
+              <td colspan="5" class="px-2 py-2 text-muted">No background tasks yet.</td>
+            </tr>
+            <tr v-for="t in tasks" :key="t.id" class="border-t border-line/40 align-top">
+              <td class="px-2 py-1 font-semibold" :class="taskStateClass(t.state)">{{ t.state }}</td>
+              <td class="whitespace-nowrap px-2 py-1 text-muted">{{ t.kind }}</td>
+              <td class="px-2 py-1 break-all">{{ t.label }}</td>
+              <td class="px-2 py-1 break-all text-muted">{{ t.detail || '—' }}</td>
+              <td
+                class="whitespace-nowrap px-2 py-1 text-faint"
+                :title="t.started_at"
+              >
+                {{ shortTime(t.started_at) }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Server logs -->
+    <h2 class="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">Server logs</h2>
+    <p class="mb-3 text-xs text-faint">
+      The running server's log stream, live. The same lines go to
+      <code>docker compose logs</code>; this is a read-only mirror so you can debug from the browser.
+      May contain secrets — visible to approved operators only.
+    </p>
 
     <!-- Controls -->
     <div class="mb-2 flex flex-wrap items-center gap-2">
@@ -242,7 +311,7 @@ onUnmounted(closeStream);
         class="min-w-0 flex-1 rounded bg-input px-2 py-1 font-mono text-xs outline-none focus:ring-1 ring-accent"
       />
 
-      <button class="btn-secondary px-2.5 py-1 text-xs" @click="loadSnapshot">Refresh</button>
+      <button class="btn-secondary px-2.5 py-1 text-xs" @click="refresh">Refresh</button>
       <button class="btn-secondary px-2.5 py-1 text-xs" @click="copyLogs">
         {{ copied ? 'Copied' : 'Copy' }}
       </button>

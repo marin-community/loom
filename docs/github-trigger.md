@@ -30,8 +30,10 @@ receiver, in order:
    prefix only — no free-text.
 5. **Authorizes the commenter.** Their GitHub login must be an
    [approved loom user](#who-can-trigger) — the *same* allowlist that gates
-   signing in to the app. Repo write access is **not** by itself a grant. Anyone
-   else is silently ignored. A per-repo rate limit blunts comment spam.
+   signing in to the app. Repo write access is **not** by itself a grant. An
+   unapproved commenter gets a one-line "request access" reply — rather than a
+   silent drop, so they know to ask instead of assuming loom is broken. A per-repo
+   rate limit bounds both the launch and that reply against comment spam.
 6. **Resolves the repo** through the [managed repo store](#which-repos) — an
    approved user's trigger on any repo the App is installed on registers it — and
    picks the branch to work on: a **pull request** comment attaches the session's
@@ -46,17 +48,25 @@ receiver, in order:
 8. **Replies** on the thread with the session URL (or, for a forwarded comment,
    that it was passed to the running session).
 
+Steps 6–8 (clone, create-or-forward, reply) run in a **detached task**: the
+handler returns `200` as soon as the gates pass. Cloning a large repo can outlast
+GitHub's ~10s delivery timeout, and a timed-out delivery would cancel an inline
+handler mid-clone. Each launch is tracked on **Settings → Debug** (running / done
+/ error, with the outcome), so you can follow it after the `200`.
+
 The reply (step 8) reaches GitHub through the [GitHub App](#the-github-app) when
 one is configured — with a short-lived, per-installation token — and otherwise
 through the `gh` CLI's ambient `GH_TOKEN`. The **session itself** acts as the
 commenter: its `GH_TOKEN` is that user's personal token (**Settings → Account**),
 falling back to the ambient `GH_TOKEN` when they have none — so its pushes and
-`gh` replies are attributed to them.
+`gh` replies are attributed to them. Separately, the poll loop posts a one-time
+back-link comment (`Working on this in loom: {base}/s/{id}`) on a session's open
+PR when one isn't already linked, so a reader of the PR can jump to the session.
 
 Everything past the signature check returns **200** whether or not it launched a
-session (a non-trigger comment, a replay, an unauthorized commenter, an
-unregistered repo, a rate-limited repo), so GitHub does not retry a delivery loom
-deliberately ignored.
+session (a non-trigger comment, a replay, an unregistered or rate-limited repo,
+or an unauthorized commenter — who gets the access-request reply), so GitHub does
+not retry a delivery loom handled without launching.
 
 ## Who can trigger
 
@@ -248,14 +258,17 @@ and which gate did it hit?* Work through it in order:
      `issue_comment`;
    - *401* — the webhook secret loom holds does not match the one GitHub signs
      with;
-   - *200 but nothing launched* — it hit a silent gate (below); read the logs.
+   - *200 but nothing launched* — it hit a gate (below), or the launch is still
+     running / failed in the background; read the logs and the **Debug** page's
+     background-task list, which shows each launch's outcome.
 
    `scripts/gh_app_deliveries.py` prints the same delivery log from the command
    line (it mints an App JWT from the key in `loom.toml`).
 
-3. **Read the server logs.** The quickest path is **Settings → Logs** in the web
-   UI — a live, filterable mirror of the server's log stream, so you can watch a
-   delivery land without shelling into the box (handy on the Docker deploy). The
+3. **Read the server logs.** The quickest path is **Settings → Debug** in the web
+   UI — a live, filterable mirror of the server's log stream (plus the
+   background-task list), so you can watch a delivery land without shelling into
+   the box (handy on the Docker deploy). The
    same lines go to the process stdout, so `docker compose logs -f loom` (or
    `RUST_LOG=loom=debug` for the outbound `gh`/REST calls) works too. Each gate
    logs a distinct line — look for: `signature verification failed` (401, secret
