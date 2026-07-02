@@ -7,6 +7,7 @@ import ToggleSwitch from '../components/ToggleSwitch.vue';
 import TokensPanel from '../components/TokensPanel.vue';
 import AccountPanel from '../components/AccountPanel.vue';
 import EnvPanel from '../components/EnvPanel.vue';
+import LogsPanel from '../components/LogsPanel.vue';
 import AgentProfileEditor from '../components/AgentProfileEditor.vue';
 import CustomAgentsPanel from '../components/CustomAgentsPanel.vue';
 import SettingFieldRow from '../components/SettingFieldRow.vue';
@@ -29,7 +30,8 @@ type Category =
   | 'appearance'
   | 'env'
   | 'tokens'
-  | 'account';
+  | 'account'
+  | 'logs';
 
 interface CategoryItem {
   id: Category;
@@ -95,6 +97,11 @@ const categories: CategoryItem[] = [
     id: 'account',
     label: 'Account',
     summary: 'Signed-in identity, approved users, and GitHub App configuration.',
+  },
+  {
+    id: 'logs',
+    label: 'Logs',
+    summary: 'Live server logs and build status for debugging this loom deployment.',
   },
 ];
 
@@ -427,6 +434,7 @@ onMounted(load);
         <EnvPanel v-if="category === 'env'" />
         <TokensPanel v-else-if="category === 'tokens'" />
         <AccountPanel v-else-if="category === 'account'" />
+        <LogsPanel v-else-if="category === 'logs'" />
 
         <div v-else-if="category === 'agents'" class="space-y-4">
           <AgentProfileEditor

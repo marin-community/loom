@@ -79,6 +79,7 @@ pub async fn set(db: &Db, repo_root: &str, name: &str, value: &str) -> Result<()
     .execute(db)
     .await?;
     tracing::debug!(repo_root, name, "repo_env set");
+    tracing::info!(repo_root, name, "repo env var set");
     Ok(())
 }
 
@@ -91,6 +92,7 @@ pub async fn remove(db: &Db, repo_root: &str, name: &str) -> Result<bool> {
         .await?;
     let removed = res.rows_affected() > 0;
     tracing::debug!(repo_root, name, removed, "repo_env remove");
+    tracing::info!(repo_root, name, removed, "repo env var removed");
     Ok(removed)
 }
 

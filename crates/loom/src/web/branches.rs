@@ -57,6 +57,15 @@ pub(super) async fn patch_branch(
     if let Some(description) = &req.description {
         branch_mod::set_description(&st.db, &branch.id, description).await?;
     }
+    if req.title.is_some() || req.goal.is_some() || req.description.is_some() {
+        tracing::info!(
+            branch = %branch.id,
+            title = req.title.is_some(),
+            goal = req.goal.is_some(),
+            description = req.description.is_some(),
+            "branch patched"
+        );
+    }
     let branch = branch_mod::get(&st.db, &branch.id)
         .await?
         .ok_or_else(|| AppError::not_found("branch"))?;
@@ -84,6 +93,7 @@ pub(super) async fn set_branch_goal(
         let title = branch_mod::derive_title(goal);
         branch_mod::set_title(&st.db, &branch.id, &title).await?;
     }
+    tracing::info!(branch = %branch.id, goal_len = goal.len(), "branch goal set");
     events::record(
         &st.db,
         &st.bus,
@@ -138,6 +148,7 @@ pub(super) async fn set_branch_status(
         tags::set(&st.db, &branch.id, tags::ATTENTION_KEY, &level, "", "agent").await?;
         level.clone()
     };
+    tracing::info!(branch = %branch.id, level = %level, "branch status set");
     events::record(
         &st.db,
         &st.bus,
@@ -169,6 +180,7 @@ pub(super) async fn create_branch_event(
         return Err(AppError::bad_request("event kind is required"));
     }
     let event = events::record(&st.db, &st.bus, &branch.id, kind, req.data).await?;
+    tracing::info!(branch = %branch.id, kind = %kind, "branch event created");
     Ok(Json(event))
 }
 
@@ -195,6 +207,7 @@ pub(super) async fn set_branch_tag(
     let by = author_or_manual(req.by.as_deref());
     let note = req.note.trim();
     tags::set(&st.db, &branch.id, &tag_key, value, note, &by).await?;
+    tracing::info!(branch = %branch.id, tag = %tag_key, value = %value, "branch tag set");
     events::record_tag(&st.db, &st.bus, &branch.id, &tag_key, value, note, &by)
         .await
         .ok();
@@ -210,6 +223,7 @@ pub(super) async fn clear_branch_tag(
     let branch = require_branch(&st.db, &key).await?;
     let by = author_or_manual(q.by.as_deref());
     tags::clear(&st.db, &branch.id, &tag_key).await?;
+    tracing::info!(branch = %branch.id, tag = %tag_key, "branch tag cleared");
     events::record_tag(&st.db, &st.bus, &branch.id, &tag_key, "", "", &by)
         .await
         .ok();

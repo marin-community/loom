@@ -145,6 +145,7 @@ pub async fn insert(
     .bind(&now)
     .execute(db)
     .await?;
+    tracing::info!(id = %id, repo_root = %repo_root, branch = %branch, base_branch = %base_branch, "branch created");
     get(db, id)
         .await?
         .ok_or_else(|| anyhow!("branch vanished after insert"))
@@ -241,10 +242,19 @@ pub async fn set_description(db: &Db, id: &str, description: &str) -> Result<()>
 }
 
 pub async fn delete(db: &Db, id: &str) -> Result<()> {
+    // Looked up first (best-effort) so the deletion is logged with the branch
+    // name and repo, not just the opaque id.
+    let existing = get(db, id).await.ok().flatten();
     sqlx::query("DELETE FROM branches WHERE id = ?")
         .bind(id)
         .execute(db)
         .await?;
+    match existing {
+        Some(b) => {
+            tracing::info!(id = %id, repo_root = %b.repo_root, branch = %b.branch, "branch deleted")
+        }
+        None => tracing::info!(id = %id, "branch deleted"),
+    }
     Ok(())
 }
 

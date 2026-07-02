@@ -41,12 +41,6 @@ pub struct LoomConfig {
     pub domain: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_github: Option<String>,
-    /// Extra GitHub accounts (orgs or users), comma/space-separated, whose App
-    /// installations loom should trust — the bootstrap trusted-owner allowlist.
-    /// The deploy `owner_github` is always trusted; this adds the orgs you run
-    /// loom for. Keeps a public App from honoring a stranger's installation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allowed_owners: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_app_id: Option<String>,
     /// The App's slug (e.g. `loom-acme`) — public, non-secret. Lets the settings
@@ -110,12 +104,6 @@ pub static FIELDS: &[FieldSpec] = &[
         secret: false,
         get_fn: |c| c.owner_github.as_deref(),
         set_fn: |c, v| c.owner_github = Some(v),
-    },
-    FieldSpec {
-        env_name: "LOOM_ALLOWED_OWNERS",
-        secret: false,
-        get_fn: |c| c.allowed_owners.as_deref(),
-        set_fn: |c, v| c.allowed_owners = Some(v),
     },
     FieldSpec {
         env_name: "LOOM_GITHUB_APP_ID",

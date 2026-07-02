@@ -66,6 +66,8 @@ pub(super) async fn patch_settings(
         return Err(AppError::bad_request(message).with_details(Value::Object(errors)));
     }
     config::apply(&st.db, &changes).await?;
+    let keys: Vec<&str> = changes.iter().map(|(k, _)| k.as_str()).collect();
+    tracing::info!(keys = ?keys, "settings updated");
     settings_envelope(&st.db).await
 }
 

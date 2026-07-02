@@ -548,13 +548,6 @@ export interface User {
   created_at: string;
 }
 
-/** One trusted GitHub owner — an account (org or user) whose App installations
- *  the inbound trigger will act for. Mirrors `owners::Owner`. */
-export interface Owner {
-  login: string;
-  created_at: string;
-}
-
 /** One operator-managed agent environment variable. Exported into every
  *  interactive agent session loom launches. Mirrors `agent_env::EnvVar`. */
 export interface EnvVar {
@@ -605,4 +598,20 @@ export interface IrisLog {
   model?: string;
   cwd?: string;
   messages: IrisMessage[];
+}
+
+/** One captured server log line. Mirrors `loom::logs::LogLine`. */
+export interface LogLine {
+  seq: number;
+  ts: string;
+  level: string;
+  target: string;
+  message: string;
+}
+
+/** Build/runtime status of the server. Mirrors `loom::web::logview::ServerStatus`. */
+export interface ServerStatus {
+  version: string;
+  pid: number;
+  started_at: string;
 }

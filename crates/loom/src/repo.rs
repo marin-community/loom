@@ -191,6 +191,7 @@ pub async fn register(db: &Db, slug: &str, remote_url: &str, path: &str) -> Resu
     .bind(path)
     .execute(db)
     .await?;
+    tracing::info!(slug, path, "repo registered");
     get_registered(db, slug)
         .await?
         .ok_or_else(|| anyhow::anyhow!("registered repo '{slug}' vanished"))

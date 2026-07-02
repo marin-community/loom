@@ -251,13 +251,14 @@ Polling is a quiet no-op for repositories without a GitHub remote, or wherever
 
 ### Trigger sessions from issues
 
-Comment **`@loom work on this`** on a GitHub issue and loom launches a session
-against that repo, seeded from the issue, and replies with a link to it. GitHub
-delivers the comment to `POST /api/github/webhook`, which verifies the delivery's
-HMAC signature, authorizes the commenter (a loom operator or a repo writer), and
-only acts on repos in the managed allowlist. Set `LOOM_GITHUB_WEBHOOK_SECRET` and
-point a repo/org webhook at `{base}/api/github/webhook` (issue-comment events,
-`application/json`). See [docs/github-trigger.md](docs/github-trigger.md).
+Comment **`@loom`** on a GitHub issue or PR and loom launches a session against
+that repo, seeded from the issue, and replies with a link to it. GitHub delivers
+the comment to `POST /api/github/webhook`, which verifies the delivery's HMAC
+signature and authorizes the commenter against the **approved-user allowlist**
+(the same people who can sign in to loom — repo write access is not itself a
+grant). Set `LOOM_GITHUB_WEBHOOK_SECRET` and point a repo/org webhook at
+`{base}/api/github/webhook` (issue-comment events, `application/json`). See
+[docs/github-trigger.md](docs/github-trigger.md).
 
 ## REST API (brief)
 

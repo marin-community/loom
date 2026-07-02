@@ -147,6 +147,7 @@ pub(super) async fn create_overlooker(
         enabled: req.enabled.unwrap_or(defaults.enabled),
     };
     let o = ov::create(&st.db, &new).await?;
+    tracing::info!(overlooker = %o.id, name = %o.name, "overlooker created");
     Ok(Json(overlooker_view(&st.db, &o).await?))
 }
 
@@ -233,6 +234,7 @@ pub(super) async fn delete_overlooker(
 ) -> ApiResult<Json<Value>> {
     let o = require_overlooker(&st.db, &key).await?;
     ov::delete(&st.db, &o.id).await?;
+    tracing::info!(overlooker = %o.id, name = %o.name, "overlooker deleted");
     Ok(Json(json!({ "deleted": true })))
 }
 

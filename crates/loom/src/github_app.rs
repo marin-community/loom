@@ -262,6 +262,11 @@ impl GithubApp {
         }
         let jwt = self.current_jwt().await?;
         let fresh = self.fetch_installation_token(&jwt, installation_id).await?;
+        tracing::info!(
+            installation = installation_id,
+            expires_at = %fresh.expires_at,
+            "minted installation access token"
+        );
         let token = fresh.token.clone();
         self.tokens
             .lock()
@@ -323,39 +328,19 @@ impl GithubApp {
 
     // -- installation as allowlist ------------------------------------------
 
-    /// When the App is installed on `slug` **and** its owner is a trusted owner
-    /// ([`crate::owners`]), ensure that repo is in the managed allowlist
-    /// (idempotent), so the trigger's clone path accepts it — the "installation
-    /// *is* the allowlist" rule (§6.3), *complementing* the explicitly-registered
-    /// repos from #95. The trusted-owner gate is what keeps this safe under a
-    /// *public* App: a stranger's installation on their own repo is not honored,
-    /// because their account is not on the allowlist. Best-effort and a no-op when
-    /// the App is unconfigured, the owner is untrusted, the repo is already
-    /// registered, or the App is not installed on it (leaving the v1 repos-table
-    /// allowlist to govern).
+    /// When the App is installed on `slug`, ensure that repo is in the managed
+    /// allowlist (idempotent), so the trigger's clone path accepts it — the
+    /// "installation *is* the allowlist" rule, *complementing* the
+    /// explicitly-registered repos. Callers reach this only *after* an
+    /// [approved user][crate::github_trigger::authorize] has been authorized to
+    /// trigger, so the person — not the repo owner — is the trust boundary: a
+    /// stranger installing a *public* App on their own repo changes nothing,
+    /// because no approved user will comment there. Best-effort and a no-op when
+    /// the App is unconfigured, the repo is already registered, or the App is not
+    /// installed on it (leaving the repos-table allowlist to govern).
     pub async fn ensure_installed_repo_registered(&self, slug: &RepoSlug) {
         if !self.is_configured().await {
             return;
-        }
-        // The trusted-owner gate: honor an installation as a grant only for an
-        // owner an operator has allowlisted (see `crate::owners`). This is what
-        // makes a *public* App safe — a stranger who installs it on their own
-        // repo is not on the list, so their repo is never auto-registered and the
-        // clone path (`resolve_clone`) rejects it. Fails closed on a store error.
-        match crate::owners::is_allowed(&self.db, &slug.owner).await {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::info!(
-                    owner = %slug.owner,
-                    repo = %slug.slug(),
-                    "not auto-registering: repo owner is not in the trusted-owner allowlist"
-                );
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(repo = %slug.slug(), error = %e, "trusted-owner check failed; not auto-registering");
-                return;
-            }
         }
         let slug_str = slug.slug();
         match crate::repo::get_registered(&self.db, &slug_str).await {
@@ -398,40 +383,6 @@ impl GithubApp {
 
 #[async_trait::async_trait]
 impl GithubApi for GithubApp {
-    async fn collaborator_permission(
-        &self,
-        owner: &str,
-        name: &str,
-        login: &str,
-    ) -> Result<String> {
-        if !self.is_configured().await {
-            return self
-                .fallback
-                .collaborator_permission(owner, name, login)
-                .await;
-        }
-        let token = self.token_for_repo(owner, name).await?;
-        let url = format!(
-            "{}/repos/{owner}/{name}/collaborators/{login}/permission",
-            self.api_base
-        );
-        let resp = self
-            .http
-            .get(&url)
-            .header(reqwest::header::ACCEPT, GH_ACCEPT)
-            .header("X-GitHub-Api-Version", GH_API_VERSION)
-            .bearer_auth(&token)
-            .send()
-            .await
-            .context("requesting the collaborator permission")?;
-        let resp = check_status(resp, "checking the collaborator permission").await?;
-        let body: PermissionResponse = resp
-            .json()
-            .await
-            .context("parsing the collaborator permission response")?;
-        Ok(body.permission)
-    }
-
     async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<()> {
         if !self.is_configured().await {
             return self.fallback.post_issue_comment(repo, issue, body).await;
@@ -453,6 +404,7 @@ impl GithubApi for GithubApp {
             .await
             .context("posting the issue comment")?;
         check_status(resp, "posting the issue comment").await?;
+        tracing::info!(repo, issue, "posted issue comment");
         Ok(())
     }
 }
@@ -471,11 +423,6 @@ struct InstallationTokenResponse {
     token: String,
     /// RFC 3339, e.g. `2016-07-11T22:14:10Z`.
     expires_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct PermissionResponse {
-    permission: String,
 }
 
 /// `env`, else the `key` setting; `None` when neither holds a non-empty value.
@@ -634,12 +581,14 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         Json(json!({ "token": "ghs_installation_token", "expires_at": exp.to_rfc3339() }))
     }
 
-    async fn mock_installation() -> Json<Value> {
-        Json(json!({ "id": 42 }))
-    }
-
-    async fn mock_permission() -> Json<Value> {
-        Json(json!({ "permission": "write" }))
+    async fn mock_installation(
+        Path((owner, _name)): Path<(String, String)>,
+    ) -> Result<Json<Value>, StatusCode> {
+        // Simulate "the App is not installed on this repo" for a sentinel owner.
+        if owner == "uninstalled" {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        Ok(Json(json!({ "id": 42 })))
     }
 
     async fn mock_comments(
@@ -669,10 +618,6 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
             )
             .route("/repos/{owner}/{name}/installation", get(mock_installation))
             .route(
-                "/repos/{owner}/{name}/collaborators/{login}/permission",
-                get(mock_permission),
-            )
-            .route(
                 "/repos/{owner}/{name}/issues/{issue}/comments",
                 post(mock_comments),
             )
@@ -689,20 +634,11 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     /// prove the App delegates to it when unconfigured.
     #[derive(Default)]
     struct RecordingFallback {
-        permission_calls: Mutex<Vec<(String, String, String)>>,
         comment_calls: Mutex<Vec<(String, i64, String)>>,
     }
 
     #[async_trait::async_trait]
     impl GithubApi for RecordingFallback {
-        async fn collaborator_permission(&self, o: &str, n: &str, l: &str) -> Result<String> {
-            self.permission_calls.lock().unwrap().push((
-                o.to_string(),
-                n.to_string(),
-                l.to_string(),
-            ));
-            Ok("admin".to_string())
-        }
         async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<()> {
             self.comment_calls
                 .lock()
@@ -772,26 +708,6 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
 
     // -- REST gateway calls -------------------------------------------------
 
-    /// The permission check goes over REST with an installation token (resolve
-    /// installation → mint token → GET permission).
-    #[tokio::test]
-    async fn collaborator_permission_uses_rest() {
-        let mock = MockState::new(3600);
-        let base = spawn_mock(mock.clone()).await;
-        let app = configured_app(base, Arc::new(RecordingFallback::default())).await;
-
-        let perm = app
-            .collaborator_permission("acme", "widgets", "octocat")
-            .await
-            .unwrap();
-        assert_eq!(perm, "write");
-        assert_eq!(
-            mock.token_mints.load(Ordering::SeqCst),
-            1,
-            "an installation token was minted for the call"
-        );
-    }
-
     /// The reply posts over REST, authenticated with the installation token.
     #[tokio::test]
     async fn post_issue_comment_uses_installation_token() {
@@ -817,16 +733,16 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
 
     // -- installation as the allowlist (§6.3) -------------------------------
 
-    /// A repo the App is installed on, *whose owner is a trusted owner*, is
-    /// auto-registered into the managed allowlist so the trigger may clone it —
-    /// the "installation is the allowlist" rule, complementing the
-    /// explicitly-registered repos.
+    /// A repo the App is installed on is auto-registered into the managed
+    /// allowlist so the trigger may clone it — the "installation is the allowlist"
+    /// rule, complementing the explicitly-registered repos. (Callers reach this
+    /// only after an approved user is authorized, so the person is the trust
+    /// boundary; there is no owner gate here.)
     #[tokio::test]
     async fn installed_repo_is_auto_registered() {
         let mock = MockState::new(3600);
         let base = spawn_mock(mock.clone()).await;
         let app = configured_app(base, Arc::new(RecordingFallback::default())).await;
-        crate::owners::add(&app.db, "acme").await.unwrap();
 
         let slug = crate::repo::parse_slug("acme/widgets").unwrap();
         assert!(
@@ -847,25 +763,26 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         assert_eq!(registered.remote_url, "https://github.com/acme/widgets.git");
     }
 
-    /// The trusted-owner gate: a repo the App is installed on is **not**
-    /// auto-registered when its owner is not on the allowlist — the protection
-    /// that keeps a public App from honoring a stranger's installation.
+    /// A repo the App is **not installed on** is not auto-registered — the
+    /// installation lookup 404s, so the clone path never accepts it. This is the
+    /// remaining repo guard once owner-trust is gone: the person is authorized
+    /// (upstream), and the App install is what scopes which repos loom can act on.
     #[tokio::test]
-    async fn installed_repo_with_untrusted_owner_is_not_registered() {
+    async fn uninstalled_repo_is_not_auto_registered() {
         let mock = MockState::new(3600);
         let base = spawn_mock(mock.clone()).await;
         let app = configured_app(base, Arc::new(RecordingFallback::default())).await;
-        // Note: "stranger" is deliberately NOT added to the owner allowlist.
 
-        let slug = crate::repo::parse_slug("stranger/evil").unwrap();
+        // The mock 404s the installation lookup for the "uninstalled" owner.
+        let slug = crate::repo::parse_slug("uninstalled/evil").unwrap();
         app.ensure_installed_repo_registered(&slug).await;
 
         assert!(
-            crate::repo::get_registered(&app.db, "stranger/evil")
+            crate::repo::get_registered(&app.db, "uninstalled/evil")
                 .await
                 .unwrap()
                 .is_none(),
-            "an untrusted owner's repo must not be auto-registered"
+            "a repo the App is not installed on must not be auto-registered"
         );
     }
 
@@ -907,17 +824,11 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
 
         assert!(!app.is_configured().await);
 
-        let perm = app
-            .collaborator_permission("acme", "widgets", "octocat")
-            .await
-            .unwrap();
         app.post_issue_comment("acme/widgets", 7, "hi")
             .await
             .unwrap();
 
-        // The fallback handled both calls…
-        assert_eq!(perm, "admin");
-        assert_eq!(fallback.permission_calls.lock().unwrap().len(), 1);
+        // The fallback handled the reply…
         assert_eq!(fallback.comment_calls.lock().unwrap().len(), 1);
         // …and the REST API was never reached.
         assert_eq!(mock.token_mints.load(Ordering::SeqCst), 0);

@@ -142,6 +142,7 @@ pub(super) async fn patch_issue(
                 )));
             }
         }
+        tracing::info!(issue = id, status, "issue status changed");
         let kind = if status == "open" {
             "issue_reopened"
         } else {
@@ -163,6 +164,7 @@ pub(super) async fn patch_issue(
             .bind(id)
             .execute(&st.db)
             .await?;
+        tracing::info!(issue = id, "issue updated");
     }
     let issue = weaver_core::issue::get(&st.db, id)
         .await?
@@ -248,6 +250,7 @@ pub(super) async fn delete_issue(
         .await?
         .ok_or_else(|| AppError::not_found("issue"))?;
     weaver_core::issue::delete(&st.db, id).await?;
+    tracing::info!(issue = id, "issue deleted");
     Ok(Json(json!({ "deleted": true })))
 }
 

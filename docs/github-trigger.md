@@ -1,13 +1,14 @@
-# GitHub trigger (`@loom work on this`)
+# GitHub trigger (`@loom`)
 
-loom turns an issue comment into a session. Comment **`@loom work on this`** on a
-GitHub issue and loom launches a session against that repo — seeded from the
+loom turns an issue comment into a session. Comment **`@loom`** on a GitHub
+issue or PR and loom launches a session against that repo — seeded from the
 issue — and replies on the issue with a link to the live session
 (`On it — {base}/s/{id}`).
 
 This is an internet-exposed, untrusted-input endpoint. Two gates protect it:
 every delivery is verified cryptographically (HMAC), and the commenter is
-authorized before anything is launched.
+authorized — against the [approved-user allowlist](#who-can-trigger) — before
+anything is launched.
 
 ## How it works
 
@@ -22,26 +23,51 @@ receiver, in order:
 3. **Filters** to `issue_comment` / `action == created`. Edits, deletions, other
    events, and the bot's own comments (set `github.bot_login`) are ignored.
 4. **Matches the command.** The comment must *begin* with the trigger phrase
-   (`github.trigger_phrase`, default `@loom work on this`), matched
-   case-insensitively. Fixed phrase only — no free-text in v1.
-5. **Authorizes the commenter.** They must be a known loom operator (their GitHub
-   login is on the allowlist) **or** have write/admin permission on the repo
-   (checked via `GET /repos/{owner}/{repo}/collaborators/{login}/permission`).
-   Anyone else is silently ignored. A per-repo rate limit blunts comment spam.
-6. **Resolves the repo** through the [managed repo store](#repo-allowlist) — only
-   an allowlisted repo is cloned and launched against — and creates the session,
-   seeded with the issue title and body.
+   (`github.trigger_phrase`, default `@loom`), matched case-insensitively. Fixed
+   prefix only — no free-text.
+5. **Authorizes the commenter.** Their GitHub login must be an
+   [approved loom user](#who-can-trigger) — the *same* allowlist that gates
+   signing in to the app. Repo write access is **not** by itself a grant. Anyone
+   else is silently ignored. A per-repo rate limit blunts comment spam.
+6. **Resolves the repo** through the [managed repo store](#which-repos) — an
+   approved user's trigger on any repo the App is installed on registers it — and
+   creates the session, seeded with the issue title and body.
 7. **Replies** on the issue with the session URL.
 
-The permission check (step 5) and the reply (step 7) reach GitHub through the
-[GitHub App](#the-github-app) when one is configured — with a short-lived,
-per-installation token — and otherwise through the `gh` CLI's ambient
-`GH_TOKEN`.
+The reply (step 7) reaches GitHub through the [GitHub App](#the-github-app) when
+one is configured — with a short-lived, per-installation token — and otherwise
+through the `gh` CLI's ambient `GH_TOKEN`.
 
 Everything past the signature check returns **200** whether or not it launched a
 session (a non-trigger comment, a replay, an unauthorized commenter, an
 unregistered repo, a rate-limited repo), so GitHub does not retry a delivery loom
 deliberately ignored.
+
+## Who can trigger
+
+The people who can trigger `@loom` are exactly the people who can sign in to
+loom: the **approved users** (the `users` table). One allowlist governs both
+surfaces — being approved lets someone sign in *and* drive the trigger by
+commenting; no one else can do either. Write access to the repo is **not** by
+itself a grant, so opening a repo to loom never hands the trigger to everyone who
+can push to it.
+
+The first approved user is seeded from `LOOM_OWNER_GITHUB` on a fresh database.
+Manage the rest in **Settings → Approved users** or over the API (set
+`github_login` so the person can both sign in with GitHub and trigger):
+
+```sh
+curl -X POST {base}/api/auth/users -H 'Authorization: Bearer $LOOM_TOKEN' \
+  -H 'content-type: application/json' \
+  -d '{"username":"octocat","github_login":"octocat"}'
+```
+
+> **Extending this later.** Today an approved user is an explicit login. A
+> role-scoped rule — e.g. "admins of org `acme`" — would slot into the same
+> authorization step ([`github_trigger::authorize`]), evaluated against the
+> GitHub API; it is not implemented yet.
+
+[`github_trigger::authorize`]: ../crates/loom/src/github_trigger.rs
 
 ## Configure the webhook
 
@@ -70,50 +96,34 @@ Add a webhook on the repo or org (**Settings → Webhooks → Add webhook**):
 Until `LOOM_GITHUB_WEBHOOK_SECRET` is set the endpoint rejects every delivery
 (it cannot verify a signature without it).
 
-### Repo allowlist
+### Which repos
 
-The trigger only acts on allowlisted repos. A repo is allowlisted when **either**
-it is registered in the managed repo store **or** the [GitHub App](#the-github-app)
-is installed on it **and** its owner is a [trusted owner](#trusted-owner-allowlist)
-— in which case loom auto-registers it into the store on first trigger.
+The trigger acts on repos in the managed repo store. A repo lands there one of
+two ways:
 
-Register a repo explicitly with:
+- **An approved user triggers on it.** When an approved user comments `@loom` on a
+  repo the [GitHub App](#the-github-app) is installed on, loom registers that repo
+  automatically and launches. The *person* is the trust boundary — since only an
+  approved user can trigger, a stranger installing the public App on their own
+  repo changes nothing (no approved user will comment there). The App installation
+  scopes *which* repos loom can reach; the approved-user gate decides *whether* it
+  acts.
+- **You register it explicitly.** An operator's deliberate act, independent of the
+  App:
 
-```sh
-curl -X POST {base}/api/repos -H 'Authorization: Bearer $LOOM_TOKEN' \
-  -H 'content-type: application/json' -d '{"repo":"owner/name"}'
-```
+  ```sh
+  curl -X POST {base}/api/repos -H 'Authorization: Bearer $LOOM_TOKEN' \
+    -H 'content-type: application/json' -d '{"repo":"owner/name"}'
+  ```
 
-A comment on a repo that is neither registered nor an App-installed repo under a
-trusted owner launches nothing.
-
-### Trusted-owner allowlist
-
-An installation counts as a grant only when the installing account is a **trusted
-owner** — a GitHub org or user in the `github_owners` allowlist. This is what makes
-the App safe to run **public**: GitHub only lets a *private* App be installed on
-the account that owns it, so wiring loom across an account boundary pushes you to
-make the App public, at which point anyone can install it. Anchoring auto-trust in
-an explicit owner list — rather than in "an installation exists" — keeps a
-stranger's installation from ever auto-registering their repo.
-
-The list is seeded at first run from the deploy owner (`LOOM_OWNER_GITHUB`) plus
-`LOOM_ALLOWED_OWNERS` (comma/space-separated), and the setup wizard adds the
-account the App was created under. Operators manage it in **Settings → Authorized
-GitHub owners** or over the API:
-
-```sh
-curl -X POST {base}/api/github/owners -H 'Authorization: Bearer $LOOM_TOKEN' \
-  -H 'content-type: application/json' -d '{"login":"your-org"}'
-```
-
-Explicitly registering a repo (`POST /api/repos`) is unaffected — that is an
-operator's deliberate act, already gated by the operator allowlist.
+A comment on a repo that is neither registered nor one the App is installed on
+launches nothing.
 
 ### Optional settings
 
-- `github.trigger_phrase` — the phrase a comment must begin with
-  (default `@loom work on this`). Settable in **Settings → GitHub** or
+- `github.trigger_phrase` — the phrase a comment must begin with (default
+  `@loom`). Matched as a case-insensitive prefix, so `@loom rebase onto main`
+  triggers. Settable in **Settings → GitHub** or
   `weaver config set github.trigger_phrase "…"`.
 - `github.bot_login` (or `LOOM_GITHUB_BOT_LOGIN`) — a GitHub login whose own
   comments are ignored, so a bot account can post without re-triggering itself.
@@ -123,16 +133,16 @@ operator's deliberate act, already gated by the operator allowlist.
 A **GitHub App** is the hardened identity loom acts through. Instead of a
 long-lived, broadly-scoped shared `GH_TOKEN`, loom mints a **short-lived,
 least-privilege installation token** scoped to a single repo's installation for
-each GitHub call (the permission check and the reply), and treats the App's
-installations under a [trusted owner](#trusted-owner-allowlist) as the access
-allowlist. Tokens are signed from the App's private key (an RS256 JWT exchanged
-for an installation token via `POST /app/installations/{id}/access_tokens`) and
-cached until they near expiry.
+the reply, and treats the repos the App is installed on as the set it can reach
+(the [approved-user gate](#who-can-trigger) decides whether it acts). Tokens are
+signed from the App's private key (an RS256 JWT exchanged for an installation
+token via `POST /app/installations/{id}/access_tokens`) and cached until they
+near expiry.
 
 When the App is **not configured**, loom falls back to the ambient `GH_TOKEN`
 (the `gh` CLI), so the webhook works without it. The webhook receiver and its
 security controls (HMAC, idempotency, authorization) are identical either way —
-the App only changes which credential the two outbound GitHub calls use.
+the App only changes which credential the outbound reply uses.
 
 ### Create the App
 
@@ -198,8 +208,65 @@ LOOM_GITHUB_APP_ID=<the App ID>
 LOOM_GITHUB_APP_PRIVATE_KEY=<the private-key PEM>
 ```
 
-With both set, loom uses the App for the permission check and the reply and
-treats App-installed repos as allowlisted. With either unset it falls back to the
-ambient `GH_TOKEN`. (Cloning still uses the ambient git credentials; granting the
-App **Contents** access keeps a single least-privilege credential set as the
-deploy migrates off the shared PAT.)
+With both set, loom uses the App for the reply and reaches any repo the App is
+installed on (registered on an approved user's first trigger). With either unset
+it falls back to the ambient `GH_TOKEN`. (Cloning still uses the ambient git
+credentials; granting the App **Contents** access keeps a single least-privilege
+credential set as the deploy migrates off the shared PAT.)
+
+## Debugging the trigger
+
+The trigger is a **webhook, not a poll** — "nothing happened" always means the
+`POST` either never arrived or was dropped at one of the gates above. Nothing
+picks a comment up later, so debugging is one question: *did the delivery arrive,
+and which gate did it hit?* Work through it in order:
+
+1. **Was the comment the right shape?** It must be a PR/issue **conversation**
+   comment (an `issue_comment`) that *begins* with the trigger phrase. An inline
+   code-review comment and a review summary are different events loom does not
+   subscribe to, so `@loom` in those never fires.
+
+2. **Did GitHub deliver it, and what did loom answer?** The GitHub App's
+   **Settings → Advanced → Recent Deliveries** (or the repo/org webhook's) shows
+   every delivery, its payload, and loom's HTTP response:
+   - *no delivery* — the App is not installed on the repo, or it was not an
+     `issue_comment`;
+   - *401* — the webhook secret loom holds does not match the one GitHub signs
+     with;
+   - *200 but nothing launched* — it hit a silent gate (below); read the logs.
+
+   `scripts/gh_app_deliveries.py` prints the same delivery log from the command
+   line (it mints an App JWT from the key in `loom.toml`).
+
+3. **Read the server logs.** The quickest path is **Settings → Logs** in the web
+   UI — a live, filterable mirror of the server's log stream, so you can watch a
+   delivery land without shelling into the box (handy on the Docker deploy). The
+   same lines go to the process stdout, so `docker compose logs -f loom` (or
+   `RUST_LOG=loom=debug` for the outbound `gh`/REST calls) works too. Each gate
+   logs a distinct line — look for: `signature verification failed` (401, secret
+   mismatch), `duplicate delivery ignored` (a replay — see below), `commenter not
+   authorized` (not an approved user), `session create failed` (repo not
+   registered, or the clone failed), `per-repo rate limit hit`, and the success
+   line `launched session`.
+
+### Reproduce without a PR or a deploy
+
+The webhook is just a signed HTTP `POST`, so you can exercise the whole handler
+without touching a PR or redeploying. `scripts/loom_webhook_replay.py` signs a
+synthetic `issue_comment` with the webhook secret and posts it, minting a fresh
+delivery GUID each run so it is never dropped as a duplicate:
+
+```sh
+export LOOM_GITHUB_WEBHOOK_SECRET=<the secret>
+# against a local dev loom:
+scripts/loom_webhook_replay.py --url http://127.0.0.1:8080 \
+  --repo owner/name --author your-login --body '@loom rebase onto main'
+# or replay a payload captured from Recent Deliveries:
+scripts/loom_webhook_replay.py --url http://127.0.0.1:8080 --payload delivery.json
+```
+
+GitHub's own **Redeliver** button re-sends the exact payload, but it reuses the
+original `X-GitHub-Delivery` GUID — which loom deduplicates *before* any business
+logic — so redelivering an already-processed delivery is a no-op. Use Redeliver
+to retry a delivery that 401'd (a rejected delivery is never recorded); use the
+replay script (fresh GUID) to re-exercise the logic.

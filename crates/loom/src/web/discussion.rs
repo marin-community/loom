@@ -108,6 +108,7 @@ pub(super) async fn create_thread(
         },
     )
     .await?;
+    tracing::info!(artifact = %name, thread = thread.id, "comment posted");
     events::record(
         &st.db,
         &st.bus,
@@ -129,6 +130,7 @@ pub(super) async fn add_comment(
 ) -> ApiResult<Json<CommentDto>> {
     let (branch, _a, thread) = session_thread(&st, &key, &name, tid).await?;
     let comment = discussion::add_comment(&st.db, thread.id, "user", &body.body).await?;
+    tracing::info!(artifact = %name, thread = thread.id, seq = comment.seq, "comment posted");
     events::record(
         &st.db,
         &st.bus,
@@ -232,6 +234,7 @@ pub(super) async fn create_branch_thread(
         },
     )
     .await?;
+    tracing::info!(artifact = %name, thread = thread.id, "comment posted");
     events::record(
         &st.db,
         &st.bus,
@@ -253,6 +256,7 @@ pub(super) async fn add_branch_thread_comment(
 ) -> ApiResult<Json<CommentDto>> {
     let (branch, _a, thread) = branch_thread(&st, &key, &name, tid).await?;
     let comment = discussion::add_comment(&st.db, thread.id, "agent", &body.body).await?;
+    tracing::info!(artifact = %name, thread = thread.id, seq = comment.seq, "comment posted");
     events::record(
         &st.db,
         &st.bus,

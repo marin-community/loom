@@ -74,6 +74,7 @@ pub(crate) async fn write_initial_scratch(
     }
     names.sort();
     names.dedup();
+    tracing::info!(files = ?names, "scratch files written");
     Ok(names)
 }
 
@@ -149,6 +150,7 @@ pub(super) async fn upload_scratch(
         tokio::fs::write(&gitignore, "*\n").await?;
     }
     tokio::fs::write(dir.join(&name), &body).await?;
+    tracing::info!(session = %session.id, file = %name, bytes = body.len(), "scratch file written");
     Ok(Json(json!({
         "name": name,
         "bytes": body.len(),
@@ -165,7 +167,10 @@ pub(super) async fn delete_scratch(
     let name = scratch_name(&q.name)?;
     let path = PathBuf::from(&session.work_dir).join("scratch").join(&name);
     match tokio::fs::remove_file(&path).await {
-        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Ok(()) => {
+            tracing::info!(session = %session.id, file = %name, "scratch file deleted");
+            Ok(StatusCode::NO_CONTENT)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Err(AppError::not_found("scratch file"))
         }

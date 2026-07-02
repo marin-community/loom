@@ -833,7 +833,7 @@ async fn cmd_setup_init() -> Result<()> {
     println!("  The GitHub login allowed to sign in first and approve everyone else.");
     let owner = loop {
         let login = prompt_line("GitHub login", prefill_owner.as_deref())?;
-        if loom::owners::valid_login(&login) {
+        if loom::github_trigger::valid_login(&login) {
             break login;
         }
         println!("  '{login}' isn't a valid GitHub login (letters, digits, and hyphens only).");
@@ -843,21 +843,9 @@ async fn cmd_setup_init() -> Result<()> {
             .await
             .with_context(|| format!("seeding the bootstrap operator '{owner}'"))?;
     }
-    loom::owners::add(&db, &owner)
-        .await
-        .context("trusting the bootstrap owner")?;
-    // Merge (don't overwrite) the allowlist, so re-running the walkthrough never
-    // drops owners already in loom.toml.
-    let allowed_owners = merged_allowed_owners(&config_path, &owner);
-    loom::loom_config::upsert(
-        &config_path,
-        &[
-            ("LOOM_OWNER_GITHUB", owner.as_str()),
-            ("LOOM_ALLOWED_OWNERS", allowed_owners.as_str()),
-        ],
-    )
-    .context("writing the operator into loom.toml")?;
-    println!("  ✓ '{owner}' can sign in and is a trusted owner.");
+    loom::loom_config::upsert(&config_path, &[("LOOM_OWNER_GITHUB", owner.as_str())])
+        .context("writing the operator into loom.toml")?;
+    println!("  ✓ '{owner}' can sign in and trigger sessions by commenting.");
     println!();
 
     // Step 2 — public URL.
@@ -1311,28 +1299,22 @@ async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
     // install the confirming account (`conv.owner.login`); for an org install
     // `org_owner` (the org itself can't sign in, so an individual is required).
     let owner_login = org_owner.as_deref().unwrap_or(conv.owner.login.as_str());
-    // The account whose App installations the inbound trigger honors: for an org
-    // install that's the *org* (its repos are org-owned, so trusting the
-    // individual wouldn't cover them); for a personal install it's the same
-    // personal account that signs in.
-    let trusted_owner = org.as_deref().unwrap_or(owner_login);
 
-    // Trust that account, so its App installations are honored by the inbound
-    // trigger. This is what keeps a *public* App safe: only owners on this
-    // allowlist are auto-trusted, never a stranger who installs the App on their
-    // own repo. Written live to the running daemon here, and to loom.toml
-    // (`LOOM_ALLOWED_OWNERS`) below for a fresh DB. Add more in the UI later.
-    loom::owners::add(&db, trusted_owner)
-        .await
-        .context("trusting the App owner in the trusted-owner allowlist")?;
+    // Approve that individual so they can sign in and trigger sessions. Written
+    // live to the running daemon here, and to loom.toml (`LOOM_OWNER_GITHUB`)
+    // below for a fresh DB. Their triggers on any repo the App is installed on
+    // auto-register it — so an org install needs no separate owner allowlist.
+    // Add more people in Settings → Approved users.
+    if loom::auth::get_user(&db, owner_login).await?.is_none() {
+        loom::auth::add_user(&db, owner_login, Some(owner_login), None)
+            .await
+            .context("approving the bootstrap operator")?;
+    }
     println!(
-        "Trusted GitHub owner '{trusted_owner}' for the inbound trigger — add more in \
-         Settings → Authorized GitHub owners."
+        "Approved '{owner_login}' — they can sign in and trigger sessions. Add more in \
+         Settings → Approved users."
     );
 
-    // Merge (don't overwrite) the allowlist, so re-running setup never silently
-    // drops owners an operator already added to loom.toml.
-    let allowed_owners = merged_allowed_owners(&opts.config.config, trusted_owner);
     let updates: Vec<(&str, &str)> = vec![
         ("LOOM_GITHUB_APP_ID", app_id.as_str()),
         ("LOOM_GITHUB_APP_SLUG", conv.slug.as_str()),
@@ -1342,7 +1324,6 @@ async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
         ("LOOM_GITHUB_CLIENT_SECRET", conv.client_secret.as_str()),
         ("LOOM_DOMAIN", domain),
         ("LOOM_OWNER_GITHUB", owner_login),
-        ("LOOM_ALLOWED_OWNERS", allowed_owners.as_str()),
     ];
     loom::loom_config::upsert(&opts.config.config, &updates)
         .context("writing the App credentials into loom.toml")?;
@@ -1361,25 +1342,6 @@ async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
     );
     println!("  2. Sign in at {base_url} with GitHub — the App's OAuth client now handles login.");
     Ok(())
-}
-
-/// The `LOOM_ALLOWED_OWNERS` value to write after adding `owner`: the owners
-/// already authored in `config_path` (if any) with `owner` appended when absent
-/// (case-insensitive). This makes writing the allowlist a **merge**, not an
-/// overwrite, so re-running setup never silently drops previously trusted
-/// owners. Returns a comma-separated list.
-fn merged_allowed_owners(config_path: &std::path::Path, owner: &str) -> String {
-    let existing = loom::loom_config::load(config_path)
-        .ok()
-        .and_then(|c| c.allowed_owners);
-    let mut owners: Vec<String> = existing
-        .as_deref()
-        .map(|s| loom::owners::split_logins(s).map(str::to_string).collect())
-        .unwrap_or_default();
-    if !owners.iter().any(|o| o.eq_ignore_ascii_case(owner)) {
-        owners.push(owner.to_string());
-    }
-    owners.join(", ")
 }
 
 /// The bare host from a `--base-url` like `https://loom.team.dev` or
@@ -1498,7 +1460,7 @@ fn prompt_org() -> Result<Option<String>> {
     }
     let org = loop {
         let login = prompt_line("Organization login", None)?;
-        if loom::owners::valid_login(&login) {
+        if loom::github_trigger::valid_login(&login) {
             break login;
         }
         println!("  '{login}' isn't a valid GitHub org login (letters, digits, and hyphens only).");
@@ -1726,10 +1688,18 @@ async fn run_gcloud_with_stdin(args: &[&str], stdin_data: &str) -> Result<()> {
 }
 
 fn init_tracing() {
+    use tracing_subscriber::prelude::*;
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("loom=info,weaver_core=info,tower_http=warn"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    // Registry-of-layers so the ring-buffer capture (the in-browser log viewer)
+    // runs *alongside* the existing stdout output — `docker compose logs` is
+    // unchanged; the buffer just tees. The one `EnvFilter` gates both layers.
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(loom::logs::layer())
+        .init();
 }
 
 fn str_field<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -2990,19 +2960,6 @@ mod tests {
             "loom-loom-team-dev"
         );
         assert_eq!(default_app_name("http://localhost:7878"), "loom-localhost");
-    }
-
-    #[test]
-    fn merged_allowed_owners_appends_without_dropping() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("loom.toml");
-        // No file yet → just the new owner.
-        assert_eq!(merged_allowed_owners(&path, "acme"), "acme");
-        // With an existing list, a new owner is appended and the rest kept.
-        loom::loom_config::upsert(&path, &[("LOOM_ALLOWED_OWNERS", "org-a, org-b")]).unwrap();
-        assert_eq!(merged_allowed_owners(&path, "acme"), "org-a, org-b, acme");
-        // An already-present owner (any case) is not duplicated.
-        assert_eq!(merged_allowed_owners(&path, "ORG-A"), "org-a, org-b");
     }
 
     /// clap's own consistency check over the full command tree — catches a

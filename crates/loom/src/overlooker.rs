@@ -539,6 +539,7 @@ pub async fn fire(
             return None;
         }
     };
+    tracing::info!(overlooker = %o.id, run = run_id, trigger = trigger_reason, "overlooker run started");
 
     // 3. Timeout: budget the program run. An overrun is `error`, the schedule
     //    still advances so the next trigger fires.
@@ -558,6 +559,7 @@ pub async fn fire(
     };
 
     let _ = ov::finish_run(&state.db, run_id, &round.record()).await;
+    tracing::info!(overlooker = %o.id, run = run_id, outcome = %round.outcome, "overlooker run completed");
     // Stamp the schedule: last_run_at = now; advance next_run_at for a scheduled
     // overlooker (a reactive one keeps None).
     let next = next_fire(o, now).map(iso);
@@ -1195,6 +1197,7 @@ pub async fn ensure_warm_session(
         .await
         .map_err(|e| anyhow::anyhow!("creating warm session: {}", e.message()))?;
     ov::set_warm_session(&state.db, &o.id, Some(&session.id)).await?;
+    tracing::info!(overlooker = %o.id, session = %session.id, "overlooker warm session created");
     Ok(Some(session.id))
 }
 

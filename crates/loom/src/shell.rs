@@ -94,6 +94,7 @@ pub async fn ensure(st: &AppState) -> Result<()> {
 /// a fresh one up. Used by `POST /api/shell/restart` — e.g. to pick up newly
 /// edited operator env vars, or to clear a wedged session.
 pub async fn restart(st: &AppState) -> Result<()> {
+    tracing::info!(session = SHELL_SESSION, "restarting operator scratch shell");
     backend::kill_session(SHELL_SESSION).await.ok();
     // The supervisor removes its socket as it exits; wait briefly for liveness to
     // drop so `ensure` actually respawns rather than re-adopting the dying one.
@@ -162,18 +163,27 @@ pub async fn list_debug(session_id: &str) -> Vec<u32> {
 /// Kill one of a session's debug shells (the UI's tab-close). Best-effort: a
 /// missing supervisor is already gone.
 pub async fn kill_debug(session_id: &str, idx: u32) {
-    backend::kill_session(&debug_session(session_id, idx))
-        .await
-        .ok();
+    let name = debug_session(session_id, idx);
+    tracing::info!(session = %name, "session debug shell killed");
+    backend::kill_session(&name).await.ok();
 }
 
 /// Tear down every debug shell for a session — called from archive/remove
 /// teardown so a worktree shell never outlives the worktree it sits in.
 pub async fn kill_debug_all(session_id: &str) {
     let prefix = debug_prefix(session_id);
+    let mut killed = 0u32;
     for name in backend::list_sessions().await.unwrap_or_default() {
         if name.starts_with(&prefix) {
             backend::kill_session(&name).await.ok();
+            killed += 1;
         }
+    }
+    if killed > 0 {
+        tracing::info!(
+            session = session_id,
+            count = killed,
+            "session debug shells killed"
+        );
     }
 }

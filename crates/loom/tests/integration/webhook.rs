@@ -28,24 +28,15 @@ fn sign(secret: &str, body: &[u8]) -> String {
     format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
 }
 
-/// A recording GitHub gateway standing in for `gh`: it reports a configurable
-/// repo permission and captures every reply posted.
+/// A recording GitHub gateway standing in for `gh`: it captures every reply
+/// posted (the one outbound call the trigger makes).
 #[derive(Default)]
 struct FakeGithub {
-    permission: Mutex<String>,
     comments: Mutex<Vec<(String, i64, String)>>,
 }
 
 #[async_trait::async_trait]
 impl loom::github_trigger::GithubApi for FakeGithub {
-    async fn collaborator_permission(
-        &self,
-        _o: &str,
-        _n: &str,
-        _l: &str,
-    ) -> anyhow::Result<String> {
-        Ok(self.permission.lock().unwrap().clone())
-    }
     async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> anyhow::Result<()> {
         self.comments
             .lock()
@@ -197,9 +188,8 @@ async fn bad_and_missing_signature_are_rejected() {
 async fn non_trigger_comment_is_ignored() {
     let (ts, fake) = boot().await;
     let _remotes = prepare_repo(&ts).await;
-    *fake.permission.lock().unwrap() = "admin".to_string();
 
-    let body = trigger_body("alice", 1, "just a normal comment, nothing to see");
+    let body = trigger_body("rjpower", 1, "just a normal comment, nothing to see");
     let resp = post(&ts, "d-chatter", Some(sign(SECRET, &body)), &body).await;
     assert_eq!(resp.status(), 200, "a non-trigger comment is acknowledged");
     assert_eq!(
@@ -210,14 +200,14 @@ async fn non_trigger_comment_is_ignored() {
     assert!(fake.comments.lock().unwrap().is_empty());
 }
 
-/// A commenter with only read access (and not a loom user) is refused: nothing
-/// launches and, to avoid amplifying spam, no reply is posted.
+/// A commenter who is not an approved loom user is refused: nothing launches
+/// and, to avoid amplifying spam, no reply is posted. (Repo write access is not
+/// itself a grant — only the approved-user allowlist is.)
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unauthorized_commenter_is_rejected() {
     let (ts, fake) = boot().await;
     let _remotes = prepare_repo(&ts).await;
-    *fake.permission.lock().unwrap() = "read".to_string();
 
     let body = trigger_body("stranger", 5, "@loom work on this");
     let resp = post(&ts, "d-stranger", Some(sign(SECRET, &body)), &body).await;
@@ -237,17 +227,17 @@ async fn unauthorized_commenter_is_rejected() {
     );
 }
 
-/// The happy path: an authorized write/admin commenter triggers a session, and
-/// loom replies on the issue with the live session URL.
+/// The happy path: an approved loom user triggers a session, and loom replies on
+/// the issue with the live session URL.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn happy_path_creates_session_and_replies() {
     let (ts, fake) = boot().await;
     let _remotes = prepare_repo(&ts).await;
-    *fake.permission.lock().unwrap() = "admin".to_string();
     assert_eq!(session_count(&ts).await, 0);
 
-    let body = trigger_body("stranger", 42, "@loom work on this please");
+    // `rjpower` is the seeded approved user (see the fixtures' LOOM_OWNER_GITHUB).
+    let body = trigger_body("rjpower", 42, "@loom work on this please");
     let resp = post(&ts, "d-happy", Some(sign(SECRET, &body)), &body).await;
     assert_eq!(resp.status(), 200);
 
@@ -268,7 +258,7 @@ async fn happy_path_creates_session_and_replies() {
     );
     assert_eq!(
         session["created_by"].as_str(),
-        Some("github-webhook (stranger)"),
+        Some("github-webhook (rjpower)"),
         "the session is attributed to the webhook bot, annotated with the triggering login"
     );
 
@@ -300,9 +290,8 @@ async fn happy_path_creates_session_and_replies() {
 async fn replayed_delivery_is_a_noop() {
     let (ts, fake) = boot().await;
     let _remotes = prepare_repo(&ts).await;
-    *fake.permission.lock().unwrap() = "admin".to_string();
 
-    let body = trigger_body("stranger", 9, "@loom work on this");
+    let body = trigger_body("rjpower", 9, "@loom work on this");
     let sig = sign(SECRET, &body);
 
     let resp = post(&ts, "d-replay", Some(sig.clone()), &body).await;

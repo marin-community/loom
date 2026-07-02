@@ -68,9 +68,11 @@ pub async fn add(db: &Db, new: &NewIssue) -> Result<Issue> {
     .bind(&now)
     .fetch_one(db)
     .await?;
-    get(db, row.0)
+    let issue = get(db, row.0)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("issue vanished after insert"))
+        .ok_or_else(|| anyhow::anyhow!("issue vanished after insert"))?;
+    tracing::info!(issue = issue.id, title = %issue.title, "issue created");
+    Ok(issue)
 }
 
 pub async fn get(db: &Db, id: i64) -> Result<Option<Issue>> {
@@ -202,6 +204,10 @@ pub async fn set_claim(db: &Db, id: i64, claimed_branch: Option<&str>) -> Result
         .bind(id)
         .execute(db)
         .await?;
+    match claimed_branch {
+        Some(b) => tracing::info!(issue = id, branch = %b, "issue claimed"),
+        None => tracing::info!(issue = id, "issue unclaimed"),
+    }
     Ok(())
 }
 
@@ -217,7 +223,11 @@ pub async fn unclaim_branch(db: &Db, repo_root: &str, branch: &str) -> Result<u6
     .bind(branch)
     .execute(db)
     .await?;
-    Ok(res.rows_affected())
+    let n = res.rows_affected();
+    if n > 0 {
+        tracing::info!(repo_root, branch, count = n, "issues unclaimed");
+    }
+    Ok(n)
 }
 
 /// Close every open issue claimed by `branch` in `repo_root`, returning the ids
@@ -238,7 +248,11 @@ pub async fn close_for_branch(db: &Db, repo_root: &str, branch: &str) -> Result<
     .bind(branch)
     .fetch_all(db)
     .await?;
-    Ok(rows.into_iter().map(|(id,)| id).collect())
+    let ids: Vec<i64> = rows.into_iter().map(|(id,)| id).collect();
+    if !ids.is_empty() {
+        tracing::info!(repo_root, branch, count = ids.len(), "issues closed");
+    }
+    Ok(ids)
 }
 
 pub async fn close(db: &Db, id: i64) -> Result<()> {

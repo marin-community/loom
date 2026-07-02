@@ -70,6 +70,7 @@ pub async fn set(db: &Db, username: &str, token: &str) -> Result<()> {
     .execute(db)
     .await?;
     tracing::debug!(username, "user github token set");
+    tracing::info!(username, "github token set");
     Ok(())
 }
 
@@ -79,7 +80,9 @@ pub async fn remove(db: &Db, username: &str) -> Result<bool> {
         .bind(username)
         .execute(db)
         .await?;
-    Ok(res.rows_affected() > 0)
+    let removed = res.rows_affected() > 0;
+    tracing::info!(username, removed, "github token removed");
+    Ok(removed)
 }
 
 #[cfg(test)]

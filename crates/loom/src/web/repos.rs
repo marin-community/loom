@@ -12,7 +12,6 @@ use weaver_api::CreateReq;
 
 use crate::git;
 use crate::github_trigger;
-use crate::owners;
 use crate::repo;
 
 use super::auth::external_base;
@@ -65,55 +64,6 @@ pub(super) async fn register_repo(
     let managed =
         repo::register(&st.db, &slug.slug(), &remote_url, &path.to_string_lossy()).await?;
     Ok(Json(managed))
-}
-
-// ---------------------------------------------------------------------------
-// Trusted-owner allowlist — the GitHub accounts loom will act for via the
-// inbound trigger. See `crate::owners`: this is what keeps a *public* GitHub App
-// from letting a stranger's installation drive loom.
-// ---------------------------------------------------------------------------
-
-/// `GET /api/github/owners` — the trusted-owner allowlist.
-pub(super) async fn list_owners(State(st): State<AppState>) -> ApiResult<Json<Vec<owners::Owner>>> {
-    Ok(Json(owners::list(&st.db).await?))
-}
-
-/// Body for `POST /api/github/owners`: a GitHub account login (org or user) to
-/// trust.
-#[derive(Debug, Deserialize)]
-pub(super) struct AddOwnerReq {
-    login: String,
-}
-
-/// `POST /api/github/owners` — trust a GitHub account. Idempotent: re-adding an
-/// existing login (any case) returns the stored row.
-pub(super) async fn add_owner(
-    State(st): State<AppState>,
-    Json(req): Json<AddOwnerReq>,
-) -> ApiResult<Json<owners::Owner>> {
-    // A malformed login is a client error (400); a storage failure from `add`
-    // then surfaces as 500 via `?`, so operators can tell a bad request apart
-    // from a server problem.
-    if !owners::valid_login(&req.login) {
-        return Err(AppError::bad_request(format!(
-            "'{}' is not a valid GitHub login",
-            req.login.trim()
-        )));
-    }
-    let owner = owners::add(&st.db, &req.login).await?;
-    Ok(Json(owner))
-}
-
-/// `DELETE /api/github/owners/{login}` — stop trusting a GitHub account.
-pub(super) async fn remove_owner(
-    State(st): State<AppState>,
-    axum::extract::Path(login): axum::extract::Path<String>,
-) -> ApiResult<StatusCode> {
-    if owners::remove(&st.db, &login).await? {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(AppError::not_found("owner"))
-    }
 }
 
 /// `POST /api/github/webhook` — the inbound GitHub trigger (shared-loom design
@@ -225,20 +175,21 @@ pub(super) async fn github_webhook(
         return ok();
     }
 
-    // 6. Authorize the commenter (the untrusted boundary): a known loom operator,
-    //    or a write/admin collaborator on the repo. Unauthorized → silent no-op;
+    // 6. Authorize the commenter (the untrusted boundary): they must be an
+    //    approved loom user — the same allowlist that gates signing in to the app.
+    //    Repo write access is *not* itself a grant. Unauthorized → silent no-op;
     //    replying would amplify spam across a flood of comments.
-    if !github_trigger::authorize(&st.db, st.trigger.gh(), &slug.owner, &slug.name, &author).await {
+    if !github_trigger::authorize(&st.db, &author).await {
         tracing::info!(login = %author, repo = %slug.slug(), "github webhook: commenter not authorized");
         return ok();
     }
 
-    // 6a. A repo the GitHub App is installed on is implicitly authorized to
-    //     trigger (design §6.3): auto-register it into the managed allowlist so
-    //     the clone path below accepts it, *complementing* the explicitly
-    //     registered repos from #95. A no-op when the App is unconfigured, the
-    //     repo is already registered, or the App is not installed on it — so the
-    //     v1 repos-table allowlist still governs the ambient-`GH_TOKEN` flow.
+    // 6a. An approved user has been authorized above, so honor the App's
+    //     installation as the repo grant: auto-register any repo the App is
+    //     installed on into the managed allowlist, so the clone path below accepts
+    //     it, *complementing* explicitly registered repos. A no-op when the App is
+    //     unconfigured, the repo is already registered, or the App is not installed
+    //     on it (leaving the repos-table allowlist to govern).
     if let Some(app) = st.trigger.app() {
         app.ensure_installed_repo_registered(&slug).await;
     }

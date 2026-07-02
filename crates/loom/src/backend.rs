@@ -62,7 +62,10 @@ pub async fn send_enter(name: &str) -> Result<()> {
 /// Kill the session. Best-effort: a missing supervisor means already gone.
 pub async fn kill_session(name: &str) -> Result<()> {
     if let Ok(mut c) = tapestry::Client::connect(name).await {
-        let _ = c.kill().await;
+        match c.kill().await {
+            Ok(()) => tracing::info!(name = %name, "terminal killed"),
+            Err(e) => tracing::warn!(name = %name, error = %e, "failed to kill terminal"),
+        }
     }
     Ok(())
 }

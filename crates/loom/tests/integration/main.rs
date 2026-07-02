@@ -16,6 +16,7 @@ mod conversation;
 mod custom_agents;
 mod env;
 mod ide;
+mod logs;
 mod overlookers;
 mod pane;
 mod recover;

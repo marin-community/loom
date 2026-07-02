@@ -218,6 +218,7 @@ pub(super) async fn auth_login(
         .await?
         .ok_or_else(|| unauthorized("invalid username or password"))?;
     let cookie = auth::create_session(&st.db, &principal.username).await?;
+    tracing::info!(username = %principal.username, method = "password", "signed in");
     let set = session_cookie(&cookie, SESSION_MAX_AGE, cookie_secure(&st).await);
     Ok((
         [(header::SET_COOKIE, set)],
@@ -232,6 +233,9 @@ pub(super) async fn auth_logout(
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     if let Some(cookie) = cookie_value(&headers, auth::SESSION_COOKIE) {
+        if let Ok(Some(principal)) = auth::lookup_session(&st.db, &cookie).await {
+            tracing::info!(username = %principal.username, "signed out");
+        }
         auth::delete_session(&st.db, &cookie).await.ok();
     }
     let clear = session_cookie("", 0, cookie_secure(&st).await);
@@ -298,6 +302,7 @@ pub(super) async fn github_callback(
         tracing::warn!(login = %gh.login, "failed to record GitHub profile: {e}");
     }
     let cookie = auth::create_session(&st.db, &user.username).await?;
+    tracing::info!(username = %user.username, method = "github", "signed in");
     Ok(redirect_with_cookies(
         "/",
         &[
@@ -338,6 +343,7 @@ pub(super) async fn create_token(
     }
     let (token, info) =
         auth::create_token(&st.db, &principal.username, name, body.expires_in_days).await?;
+    tracing::info!(username = %principal.username, id = %info.id, name = %info.name, "api token created");
     Ok(Json(CreatedTokenView {
         token,
         info: token_view(info),
@@ -350,6 +356,7 @@ pub(super) async fn revoke_token(
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     if auth::revoke_token(&st.db, &id).await? {
+        tracing::info!(id = %id, "api token revoked");
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(AppError::not_found("token"))
@@ -466,6 +473,7 @@ pub(super) async fn add_user(
     auth::add_user(&st.db, username, github, password)
         .await
         .map_err(|e| AppError::bad_request(format!("could not add user: {e}")))?;
+    tracing::info!(username, "operator added");
     let user = auth::get_user(&st.db, username)
         .await?
         .ok_or_else(|| AppError::not_found("user"))?;
@@ -482,7 +490,10 @@ pub(super) async fn remove_user(
         return Err(AppError::bad_request("you cannot remove yourself"));
     }
     match auth::remove_user(&st.db, &username).await {
-        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(true) => {
+            tracing::info!(username = %username, "operator removed");
+            Ok(StatusCode::NO_CONTENT)
+        }
         Ok(false) => Err(AppError::not_found("user")),
         Err(e) => Err(AppError::bad_request(e.to_string())),
     }
@@ -532,6 +543,7 @@ pub(super) async fn put_github_config(
     )];
     // The secret is write-only: a value sets it, an empty string clears it, and
     // omitting the field leaves the stored secret untouched.
+    let secret_provided = body.client_secret.is_some();
     if let Some(secret) = body.client_secret {
         let secret = secret.trim().to_string();
         changes.push((
@@ -540,5 +552,6 @@ pub(super) async fn put_github_config(
         ));
     }
     config::apply(&st.db, &changes).await?;
+    tracing::info!(secret_provided, "github oauth config updated");
     Ok(Json(github_config_view(&st).await?))
 }

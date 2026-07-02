@@ -17,17 +17,9 @@
 domain = "loom.example.com"
 
 # GitHub login seeded as the first approved user on a fresh database. This is
-# the only account that can log in until it approves others.
+# the only account that can log in until it approves others. Approved users are
+# also who may drive the `@loom` trigger — add more in Settings → Approved users.
 owner_github = "your-github-login"
-
-# GitHub accounts (orgs or users) whose App installations the inbound trigger
-# will act for — the bootstrap trusted-owner allowlist, comma/space-separated.
-# `owner_github` is always trusted; add the orgs whose repos you run loom for.
-# This is what keeps a *public* GitHub App from honoring a stranger's install:
-# only repos owned by a listed account are auto-trusted. `loom setup github-app`
-# adds the account the App was created under. Extend it later in the UI
-# (Settings → Authorized GitHub owners).
-# allowed_owners = "your-org, your-other-org"
 
 # The GitHub App loom acts through (webhook receiver, REST identity, and
 # "Sign in with GitHub"). `loom setup github-app` fills these four in for

@@ -1,5 +1,5 @@
-//! The inbound GitHub trigger: a webhook that turns an `@loom work on this`
-//! issue comment into a session and replies with its URL (shared-loom design
+//! The inbound GitHub trigger: a webhook that turns an `@loom` issue comment
+//! into a session and replies with its URL (shared-loom design
 //! §6.3). This is the **untrusted-input boundary** — the receiver is exposed to
 //! the internet, so every step here is a gate:
 //!
@@ -53,7 +53,7 @@ pub async fn webhook_secret(db: &Db) -> String {
 }
 
 /// The trigger phrase a comment must begin with, from the
-/// `github.trigger_phrase` setting (default `@loom work on this`).
+/// `github.trigger_phrase` setting (default `@loom`).
 pub async fn trigger_phrase(db: &Db) -> String {
     let phrase = config::get_or(
         db,
@@ -217,53 +217,38 @@ pub async fn record_delivery(db: &Db, delivery_id: &str) -> Result<bool> {
 // Commenter authorization — the untrusted boundary.
 // ---------------------------------------------------------------------------
 
-/// A GitHub login is `[A-Za-z0-9-]` (no leading/trailing hyphen, but we only
-/// need the charset). Reject anything else before interpolating it into a
-/// `gh api` path, and treat it as unauthorized.
-fn valid_login(login: &str) -> bool {
+/// A GitHub login is `[A-Za-z0-9-]`, at most 39 chars. We only enforce the
+/// charset and length — enough to keep junk out and to reject a login before it
+/// reaches a store lookup; GitHub is the authority on whether the account exists.
+pub fn valid_login(login: &str) -> bool {
     !login.is_empty()
         && login.len() <= 39
         && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
-/// Whether `login` may trigger a session on `owner/name`. Authorized iff the
-/// login is a known loom operator (on the allowlist, checked with no GitHub
-/// call), **or** has write/admin permission on the repo (checked via the
-/// `GithubApi` gateway). Fails **closed**: a malformed login, an unknown user,
-/// read/none permission, or any gateway error all deny.
-pub async fn authorize(db: &Db, gh: &dyn GithubApi, owner: &str, name: &str, login: &str) -> bool {
+/// Whether `login` may trigger a session. Authorized iff the login is an
+/// **approved loom user** — a row in the `users` table, the *same* allowlist that
+/// gates signing in to the app (checked with no GitHub call). Fails **closed**: a
+/// malformed login, an unknown user, or a store error all deny.
+///
+/// One people-allowlist governs both surfaces: whoever may sign in to loom may
+/// also trigger a session by commenting, and no one else — in particular, having
+/// write access to the repo is *not* by itself a grant. (Extension point: a
+/// future org-scoped rule such as "admins of org X" would be evaluated here,
+/// consulting the GitHub API; deliberately not implemented yet.)
+pub async fn authorize(db: &Db, login: &str) -> bool {
     if !valid_login(login) {
         tracing::warn!(login, "rejecting trigger from a malformed GitHub login");
         return false;
     }
-    // A known loom operator (their GitHub login is on the allowlist) is trusted
-    // without spending a GitHub API call.
     match auth::user_by_github(db, login).await {
-        Ok(Some(_)) => return true,
-        Ok(None) => {}
-        Err(e) => {
-            tracing::warn!(error = %e, login, "loom-user lookup failed; falling back to repo permission")
-        }
-    }
-    // Otherwise require write/admin on the repo itself.
-    match gh.collaborator_permission(owner, name, login).await {
-        Ok(perm) => {
-            let ok = matches!(perm.as_str(), "admin" | "maintain" | "write");
-            if !ok {
-                tracing::info!(
-                    login,
-                    owner,
-                    name,
-                    perm,
-                    "trigger denied: insufficient repo permission"
-                );
-            }
-            ok
+        Ok(Some(_)) => true,
+        Ok(None) => {
+            tracing::info!(login, "trigger denied: not an approved loom user");
+            false
         }
         Err(e) => {
-            // Most often a 404 (the login is not a collaborator); also any gh
-            // failure. Either way, deny.
-            tracing::info!(error = %e, login, owner, name, "trigger denied: permission check failed");
+            tracing::warn!(error = %e, login, "trigger denied: approved-user lookup failed");
             false
         }
     }
@@ -286,17 +271,12 @@ const RATE_MAX: usize = 20;
 // The GitHub gateway — the two external operations the trigger performs.
 // ---------------------------------------------------------------------------
 
-/// The GitHub operations the trigger needs, behind a trait so the `gh`-backed
-/// implementation ([`GhCli`]) and a test fake are interchangeable. Both use the
-/// ambient `GH_TOKEN`; replacing `gh` with GitHub-App installation tokens is the
-/// planned hardening (design §6.3).
+/// The one GitHub operation the trigger performs — posting the reply — behind a
+/// trait so the `gh`-backed implementation ([`GhCli`]) and a test fake are
+/// interchangeable. The production impl is the GitHub **App** (short-lived
+/// installation tokens); the [`GhCli`] fallback uses the ambient `GH_TOKEN`.
 #[async_trait::async_trait]
 pub trait GithubApi: Send + Sync {
-    /// The permission `login` has on `owner/name` — `admin` | `maintain` |
-    /// `write` | `read` | `none`. Errors (e.g. a 404 for a non-collaborator)
-    /// propagate so the caller can fail closed.
-    async fn collaborator_permission(&self, owner: &str, name: &str, login: &str)
-        -> Result<String>;
     /// Post a comment on `issue` of `repo` (`owner/name`).
     async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<()>;
 }
@@ -307,21 +287,11 @@ pub struct GhCli;
 
 #[async_trait::async_trait]
 impl GithubApi for GhCli {
-    async fn collaborator_permission(
-        &self,
-        owner: &str,
-        name: &str,
-        login: &str,
-    ) -> Result<String> {
-        let path = format!("repos/{owner}/{name}/collaborators/{login}/permission");
-        gh_capture(&["api", &path, "-q", ".permission"]).await
-    }
-
     async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<()> {
         let number = issue.to_string();
-        gh_capture(&["issue", "comment", &number, "--repo", repo, "--body", body])
-            .await
-            .map(|_| ())
+        gh_capture(&["issue", "comment", &number, "--repo", repo, "--body", body]).await?;
+        tracing::info!(repo, issue, "posted issue comment");
+        Ok(())
     }
 }
 
@@ -524,23 +494,14 @@ mod tests {
         );
     }
 
-    /// A fake gateway recording the permission it should report and any comments
-    /// posted, for the authorization and (integration) reply paths.
+    /// A fake gateway recording any comments posted (the reply path).
     #[derive(Default)]
     struct FakeGh {
-        permission: Mutex<String>,
-        fail_permission: Mutex<bool>,
         comments: Mutex<Vec<(String, i64, String)>>,
     }
 
     #[async_trait::async_trait]
     impl GithubApi for FakeGh {
-        async fn collaborator_permission(&self, _o: &str, _n: &str, _l: &str) -> Result<String> {
-            if *self.fail_permission.lock().unwrap() {
-                bail!("simulated 404");
-            }
-            Ok(self.permission.lock().unwrap().clone())
-        }
         async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<()> {
             self.comments
                 .lock()
@@ -551,37 +512,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authorize_trusts_loom_users_and_repo_writers_only() {
+    async fn authorize_trusts_approved_users_only() {
         let db = crate::db::connect_in_memory().await.unwrap();
-        // A known loom operator is trusted with no GitHub call.
+        // An approved loom user (their GitHub login is on the `users` allowlist —
+        // the same one that gates sign-in) may trigger, with no GitHub call.
         auth::add_user(&db, "alice", Some("alice-gh"), None)
             .await
             .unwrap();
-        let gh = FakeGh::default();
-        *gh.permission.lock().unwrap() = "none".to_string();
-        assert!(authorize(&db, &gh, "acme", "widgets", "alice-gh").await);
+        assert!(authorize(&db, "alice-gh").await);
+        // Case-insensitive, like GitHub logins and the sign-in check.
+        assert!(authorize(&db, "ALICE-GH").await);
 
-        // A stranger with write/admin is allowed; with read/none is denied.
-        for (perm, allowed) in [
-            ("admin", true),
-            ("write", true),
-            ("read", false),
-            ("none", false),
-        ] {
-            *gh.permission.lock().unwrap() = perm.to_string();
-            assert_eq!(
-                authorize(&db, &gh, "acme", "widgets", "stranger").await,
-                allowed,
-                "permission {perm} should be allowed={allowed}"
-            );
-        }
-
-        // A failed permission check fails closed.
-        *gh.fail_permission.lock().unwrap() = true;
-        assert!(!authorize(&db, &gh, "acme", "widgets", "stranger").await);
-
-        // A malformed login is denied before any call.
-        assert!(!authorize(&db, &gh, "acme", "widgets", "../etc").await);
+        // Anyone not on the allowlist is denied — write access to the repo is not
+        // itself a grant.
+        assert!(!authorize(&db, "stranger").await);
+        // A malformed login is denied before any lookup.
+        assert!(!authorize(&db, "../etc").await);
     }
 
     #[test]

@@ -162,6 +162,7 @@ pub async fn ensure_excluded(repo_root: &Path, pattern: &str) -> Result<()> {
     next.push_str(pattern);
     next.push('\n');
     tokio::fs::write(&exclude, next).await?;
+    tracing::info!(repo = %repo_root.display(), pattern = %pattern, "exclude pattern added");
     Ok(())
 }
 
@@ -322,6 +323,7 @@ pub async fn worktree_remove(repo_root: &Path, path: &Path) -> Result<()> {
 /// torn down (e.g. recovering an archived session).
 pub async fn worktree_prune(repo_root: &Path) -> Result<()> {
     git(repo_root, &["worktree", "prune"]).await?;
+    tracing::info!(repo = %repo_root.display(), "worktree pruned");
     Ok(())
 }
 

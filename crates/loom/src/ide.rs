@@ -167,6 +167,7 @@ impl IdeManager {
         let cell = self.inner.lock().unwrap().remove(id);
         if let Some(cell) = cell {
             if let Some(inst) = cell.get() {
+                tracing::info!(session = id, port = inst.port, "code-server stopped");
                 inst.kill();
             }
             // A spawn still in flight has no `get()` yet; its child carries
@@ -292,6 +293,12 @@ async fn spawn(command: String, home: PathBuf, work_dir: String) -> Result<Arc<I
         .map_err(|e| format!("could not launch code-server (`{program}`): {e}"))?;
 
     let port = wait_for_port(&mut child).await?;
+    let session = home
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("?")
+        .to_string();
+    tracing::info!(session = %session, port, "code-server started");
     Ok(Arc::new(Instance {
         port,
         last_access: AtomicI64::new(now_unix()),

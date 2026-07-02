@@ -107,6 +107,7 @@ pub async fn set(db: &Db, name: &str, value: &str) -> Result<()> {
     .execute(db)
     .await?;
     tracing::debug!(name, "agent_env set");
+    tracing::info!(name, "env var set");
     Ok(())
 }
 
@@ -118,6 +119,7 @@ pub async fn remove(db: &Db, name: &str) -> Result<bool> {
         .await?;
     let removed = res.rows_affected() > 0;
     tracing::debug!(name, removed, "agent_env remove");
+    tracing::info!(name, removed, "env var deleted");
     Ok(removed)
 }
 

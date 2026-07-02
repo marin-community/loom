@@ -882,6 +882,13 @@ pub(crate) async fn create_session_core(
                     },
                 )
                 .await?;
+                tracing::info!(
+                    branch = %branch.id,
+                    session = %session.id,
+                    status = %session.status,
+                    agent = %session.agent_kind,
+                    "session created"
+                );
                 let note = outcome.summary();
                 tags::set(
                     &st.db,
@@ -1342,7 +1349,9 @@ pub(super) async fn delete_session(
         .ok();
     // Drop the branch row too — deleting a session takes its branch with it.
     branch_mod::delete(&st.db, &branch.id).await?;
-    if !warnings.is_empty() {
+    if warnings.is_empty() {
+        tracing::info!(session = %session.id, branch = %branch.id, keep_branch = q.keep_branch, "session deleted");
+    } else {
         tracing::warn!(branch = %branch.id, warnings = warnings.len(), "session removed with warnings");
     }
     Ok(Json(json!({ "deleted": true, "warnings": warnings })))
@@ -1410,7 +1419,9 @@ pub(crate) async fn archive(
     )
     .await
     .ok();
-    if !warnings.is_empty() {
+    if warnings.is_empty() {
+        tracing::info!(session = %session.id, branch = %branch.id, "session archived");
+    } else {
         tracing::warn!(branch = %branch.id, warnings = warnings.len(), "session archived with warnings");
     }
     Ok(warnings)
@@ -1703,6 +1714,7 @@ async fn resume_agent(
     )
     .await
     .ok();
+    tracing::info!(session = %session.id, branch = %branch.id, reason = %reason, "session resumed");
     Ok(())
 }
 

@@ -97,13 +97,15 @@ pub async fn fetch_issue(repo_root: &Path, number: i64) -> Result<Issue> {
 /// Open a pull request from the workspace branch; returns the PR URL.
 pub async fn create_pr(work_dir: &Path, base: &str, title: &str, body: &str) -> Result<String> {
     tracing::debug!(base, title, body_len = body.len(), "creating pull request");
-    gh(
+    let url = gh(
         work_dir,
         &[
             "pr", "create", "--base", base, "--title", title, "--body", body,
         ],
     )
-    .await
+    .await?;
+    tracing::info!(url = %url, base, "pull request created");
+    Ok(url)
 }
 
 // ---------------------------------------------------------------------------

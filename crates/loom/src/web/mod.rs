@@ -69,6 +69,7 @@ mod branches;
 mod discussion;
 mod env;
 mod issues;
+mod logview;
 mod overlookers;
 mod repo_env;
 mod repos;
@@ -83,6 +84,7 @@ use branches::*;
 use discussion::*;
 use env::*;
 use issues::*;
+use logview::*;
 use overlookers::*;
 use repo_env::*;
 use repos::*;
@@ -586,10 +588,6 @@ pub fn router(state: AppState) -> Router {
         )
         // The managed repo store + clone allowlist (register/list).
         .route("/repos", get(list_repos).post(register_repo))
-        // The trusted-owner allowlist — GitHub accounts loom will act for via the
-        // inbound trigger (keeps a public App from trusting a stranger's install).
-        .route("/github/owners", get(list_owners).post(add_owner))
-        .route("/github/owners/{login}", delete(remove_owner))
         .route("/repos/recent", get(recent_repos))
         .route("/repos/branches", get(repo_branches))
         .route(
@@ -614,6 +612,11 @@ pub fn router(state: AppState) -> Router {
         // container, for one-time setup like `gcloud auth login`.
         .route("/shell/terminal", get(crate::terminal::shell_ws))
         .route("/shell/restart", post(restart_shell))
+        // Server logs (Settings → Logs) — snapshot + live SSE tail + build status.
+        // Operator-only: server logs can carry tokens injected into agents.
+        .route("/logs", get(logs_snapshot))
+        .route("/logs/stream", get(logs_stream))
+        .route("/status", get(server_status))
         // Overlookers — periodic / triggered watch programs over the fleet.
         .route(
             "/overlookers",

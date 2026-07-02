@@ -195,6 +195,7 @@ pub(super) async fn write_artifact(
     if a.name == "goal" {
         branch_mod::sync_goal_cache(&st.db, &branch.id).await?;
     }
+    tracing::info!(artifact = %a.name, rev = a.rev, "artifact updated");
     events::record(
         &st.db,
         &st.bus,
@@ -225,6 +226,7 @@ pub(super) async fn delete_artifact(
     // the artifact's discussion threads/comments explicitly before/with it.
     discussion::delete_for_artifact(&st.db, a.id).await?;
     artifact::delete(&st.db, a.id).await?;
+    tracing::info!(artifact = %a.name, "artifact deleted");
     events::record(
         &st.db,
         &st.bus,
@@ -337,6 +339,11 @@ pub(super) async fn write_branch_artifact(
     if a.name == "goal" {
         branch_mod::sync_goal_cache(&st.db, &branch.id).await?;
     }
+    if existing.is_none() {
+        tracing::info!(artifact = %a.name, rev = a.rev, "artifact created");
+    } else {
+        tracing::info!(artifact = %a.name, rev = a.rev, "artifact updated");
+    }
     events::record(
         &st.db,
         &st.bus,
@@ -365,6 +372,7 @@ pub(super) async fn delete_branch_artifact(
     .ok_or_else(|| AppError::not_found("artifact"))?;
     discussion::delete_for_artifact(&st.db, a.id).await?;
     artifact::delete(&st.db, a.id).await?;
+    tracing::info!(artifact = %a.name, "artifact deleted");
     events::record(
         &st.db,
         &st.bus,
