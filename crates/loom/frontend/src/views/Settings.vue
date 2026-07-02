@@ -2,12 +2,13 @@
 import { ref, computed, onMounted, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { get, patch, listAgents } from '../api';
-import type { AgentMetadata, SettingView } from '../types';
+import type { AgentMetadata, CustomAgent, SettingView } from '../types';
 import ToggleSwitch from '../components/ToggleSwitch.vue';
 import TokensPanel from '../components/TokensPanel.vue';
 import AccountPanel from '../components/AccountPanel.vue';
 import EnvPanel from '../components/EnvPanel.vue';
 import AgentProfileEditor from '../components/AgentProfileEditor.vue';
+import CustomAgentsPanel from '../components/CustomAgentsPanel.vue';
 import SettingFieldRow from '../components/SettingFieldRow.vue';
 
 const route = useRoute();
@@ -132,6 +133,7 @@ function categoryFromQuery(q: unknown): Category {
 const category = ref<Category>(categoryFromQuery(route.query.tab));
 const settings = ref<SettingView[]>([]);
 const agents = ref<AgentMetadata[]>([]);
+const customAgents = ref<CustomAgent[]>([]);
 const drafts = ref<Record<string, string>>({});
 const error = ref('');
 const notice = ref('');
@@ -241,11 +243,26 @@ async function load() {
     }
     settings.value = res.settings;
     agents.value = agentRes.agents;
+    customAgents.value = agentRes.custom;
     drafts.value = Object.fromEntries(res.settings.map((s) => [s.key, s.value]));
     sanitizeAgentDrafts();
     error.value = '';
   } catch (e) {
     settings.value = [];
+    error.value = (e as Error).message;
+  }
+}
+
+// Refresh the agent lists after a custom agent is added/edited/removed, without
+// disturbing the settings drafts. A new or deleted agent changes the picker
+// (`agents`) as well as the custom list, so both are refetched.
+async function reloadAgents() {
+  try {
+    const res = await listAgents();
+    agents.value = res.agents;
+    customAgents.value = res.custom;
+    sanitizeAgentDrafts();
+  } catch (e) {
     error.value = (e as Error).message;
   }
 }
@@ -431,6 +448,7 @@ onMounted(load);
             @save="saveKeys(profileKeys(profile.id), profile.title)"
             @reset="resetKeys(profileKeys(profile.id), profile.title)"
           />
+          <CustomAgentsPanel :agents="customAgents" @reload="reloadAgents" />
         </div>
 
         <div v-else class="space-y-3">

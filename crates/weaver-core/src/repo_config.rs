@@ -89,7 +89,7 @@ impl Setup {
 /// accepts; an empty/absent value defers to the operator's global default.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct AgentDefaults {
-    /// Default agent kind (`claude`, `codex`, `shell`, …).
+    /// Default agent kind (`claude`, `codex`, or a custom agent's name).
     #[serde(default)]
     pub default: Option<String>,
     /// Default model selector for the chosen agent.

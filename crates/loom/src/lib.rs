@@ -12,6 +12,7 @@ pub mod backend;
 pub mod builtins;
 pub mod chatlog;
 pub mod client;
+pub mod custom_agents;
 pub mod db;
 pub mod endpoint;
 pub mod envfile;

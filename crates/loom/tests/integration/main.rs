@@ -13,6 +13,7 @@ mod archive;
 mod auth;
 mod branches;
 mod conversation;
+mod custom_agents;
 mod env;
 mod ide;
 mod overlookers;

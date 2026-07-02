@@ -114,8 +114,9 @@ Knobs: `WEAVER_SKIP_AGENT_LINT=1` to skip a run, `WEAVER_LINT_MIN_CONFIDENCE`
 The `e2e/` suite drives the real UI against a real server. It boots **one**
 `loom server run` per Playwright *worker* (not per test) on a random port, each with
 its own `WEAVER_HOME` / sqlite db (which also scopes the `tapestry` terminal
-sockets) and a throwaway git repo (see `e2e/fixtures/weaver.ts`),
-using the deterministic `shell` agent. The per-test `weaver` fixture wipes every
+sockets) and a throwaway git repo (see `e2e/fixtures/weaver.ts`). Sessions launch
+under a deterministic, command-less custom agent (a bare login shell) the fixture
+seeds as `shell`, so tests never spawn a real agent CLI. The per-test `weaver` fixture wipes every
 session (branch + worktree) between tests, so each starts from a clean slate and
 count-based assertions hold regardless of order. Workers are fully isolated, so
 the suite runs in parallel (`fullyParallel`, `workers > 1`) and — because every
@@ -339,8 +340,8 @@ tracking.
 **Lifecycle** is driven by the selected agent protocol. Claude Code currently
 provides lifecycle hooks, so its protocol merges a `hooks` block into the
 worktree's `.claude/settings.local.json` (see `loom::agent::install_hooks` and
-`weaver_core::agent::hooks_json`); hookless protocols such as Codex and `shell`
-start `running` immediately:
+`weaver_core::agent::hooks_json`); hookless agents — Codex, and any custom agent
+whose `reports_status` is off — start `running` immediately:
 
 | Claude hook event | shells out to |
 |---|---|

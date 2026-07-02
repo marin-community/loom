@@ -2,7 +2,7 @@
 //! headless agent** (`POST /api/agent/oneshot`) — a fresh, env-stripped agent
 //! run for a judgement call.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::future::Future;
@@ -10,23 +10,46 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use crate::backend;
+use crate::custom_agents::CustomAgent;
+use crate::db::Db;
 use weaver_core::agent::hooks_json;
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AgentChoice {
-    pub id: &'static str,
-    pub label: &'static str,
+    pub id: String,
+    pub label: String,
 }
 
+impl AgentChoice {
+    /// Materialize a builtin's static `(id, label)` table into the owned choices
+    /// the metadata carries.
+    fn list(pairs: &[(&str, &str)]) -> Vec<AgentChoice> {
+        pairs
+            .iter()
+            .map(|(id, label)| AgentChoice {
+                id: (*id).to_string(),
+                label: (*label).to_string(),
+            })
+            .collect()
+    }
+}
+
+/// What the agent picker and the settings validators need to know about one
+/// agent: its id, label, the model/effort choices it offers, and a few capability
+/// flags. Built fresh per call, so it can describe a DB-backed custom agent as
+/// easily as a builtin.
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentMetadata {
-    pub kind: &'static str,
-    pub label: &'static str,
-    pub models: &'static [AgentChoice],
-    pub efforts: &'static [AgentChoice],
+    pub kind: String,
+    pub label: String,
+    pub models: Vec<AgentChoice>,
+    pub efforts: Vec<AgentChoice>,
     pub accepts_raw_model: bool,
     pub supports_hooks: bool,
     pub supports_concierge: bool,
+    /// True for the code-shipped `claude`/`codex`; false for an operator-defined
+    /// custom agent (which the UI may edit or delete).
+    pub builtin: bool,
 }
 
 pub struct AgentInstance {
@@ -50,142 +73,134 @@ pub trait AgentType: Sync {
 
 pub struct ClaudeAgentType;
 pub struct CodexAgentType;
-pub struct ShellAgentType;
-pub struct CustomCommandAgentType {
-    command: String,
+
+/// A [`CustomAgent`] row wrapped as an [`AgentType`]: its stages drive the launch
+/// script, and its metadata is derived from the stored fields.
+pub struct CustomAgentType {
+    agent: CustomAgent,
 }
 
-impl CustomCommandAgentType {
-    pub fn new(command: impl Into<String>) -> Self {
-        Self {
-            command: command.into(),
-        }
+impl CustomAgentType {
+    pub fn new(agent: CustomAgent) -> Self {
+        Self { agent }
     }
 }
 
-const MODEL_CHOICES: &[AgentChoice] = &[
-    AgentChoice {
-        id: "haiku",
-        label: "Haiku",
-    },
-    AgentChoice {
-        id: "sonnet",
-        label: "Sonnet",
-    },
-    AgentChoice {
-        id: "opus",
-        label: "Opus",
-    },
-    AgentChoice {
-        id: "fable",
-        label: "Fable",
-    },
+const MODEL_CHOICES: &[(&str, &str)] = &[
+    ("haiku", "Haiku"),
+    ("sonnet", "Sonnet"),
+    ("opus", "Opus"),
+    ("fable", "Fable"),
 ];
 
-const CODEX_MODEL_CHOICES: &[AgentChoice] = &[
-    AgentChoice {
-        id: "gpt-5.5",
-        label: "GPT-5.5",
-    },
-    AgentChoice {
-        id: "gpt-5.4",
-        label: "GPT-5.4",
-    },
-    AgentChoice {
-        id: "gpt-5.4-mini",
-        label: "GPT-5.4 Mini",
-    },
-    AgentChoice {
-        id: "gpt-5.3-codex-spark",
-        label: "GPT-5.3 Codex Spark",
-    },
+const CODEX_MODEL_CHOICES: &[(&str, &str)] = &[
+    ("gpt-5.5", "GPT-5.5"),
+    ("gpt-5.4", "GPT-5.4"),
+    ("gpt-5.4-mini", "GPT-5.4 Mini"),
+    ("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
 ];
 
-const EFFORT_CHOICES: &[AgentChoice] = &[
-    AgentChoice {
-        id: "low",
-        label: "Low",
-    },
-    AgentChoice {
-        id: "medium",
-        label: "Medium",
-    },
-    AgentChoice {
-        id: "high",
-        label: "High",
-    },
-    AgentChoice {
-        id: "xhigh",
-        label: "X-High",
-    },
-    AgentChoice {
-        id: "max",
-        label: "Max",
-    },
+const EFFORT_CHOICES: &[(&str, &str)] = &[
+    ("low", "Low"),
+    ("medium", "Medium"),
+    ("high", "High"),
+    ("xhigh", "X-High"),
+    ("max", "Max"),
 ];
 
-const CODEX_EFFORT_CHOICES: &[AgentChoice] = &[
-    AgentChoice {
-        id: "low",
-        label: "Low",
-    },
-    AgentChoice {
-        id: "medium",
-        label: "Medium",
-    },
-    AgentChoice {
-        id: "high",
-        label: "High",
-    },
-    AgentChoice {
-        id: "xhigh",
-        label: "X-High",
-    },
+const CODEX_EFFORT_CHOICES: &[(&str, &str)] = &[
+    ("low", "Low"),
+    ("medium", "Medium"),
+    ("high", "High"),
+    ("xhigh", "X-High"),
 ];
 
 static CLAUDE_AGENT_TYPE: ClaudeAgentType = ClaudeAgentType;
 static CODEX_AGENT_TYPE: CodexAgentType = CodexAgentType;
-static SHELL_AGENT_TYPE: ShellAgentType = ShellAgentType;
 
-pub fn agent_type(kind: &str) -> Option<&'static dyn AgentType> {
+/// The builtin agent for `kind`, if it names one (`claude`/`codex`). Custom
+/// agents live in the database and are resolved by [`resolve`]; this covers only
+/// the code-shipped runtimes, which need no DB lookup.
+pub fn builtin_agent_type(kind: &str) -> Option<&'static dyn AgentType> {
     match kind {
         "claude" => Some(&CLAUDE_AGENT_TYPE),
         "codex" => Some(&CODEX_AGENT_TYPE),
-        "shell" | "none" => Some(&SHELL_AGENT_TYPE),
         _ => None,
     }
 }
 
-pub fn agent_metadata() -> Vec<AgentMetadata> {
-    [
-        &CLAUDE_AGENT_TYPE as &dyn AgentType,
-        &CODEX_AGENT_TYPE as &dyn AgentType,
-        &SHELL_AGENT_TYPE as &dyn AgentType,
-    ]
-    .into_iter()
-    .map(AgentType::metadata)
-    .collect()
+/// The builtin agents' metadata, in picker order.
+pub fn builtin_metadata() -> Vec<AgentMetadata> {
+    [&CLAUDE_AGENT_TYPE as &dyn AgentType, &CODEX_AGENT_TYPE]
+        .into_iter()
+        .map(AgentType::metadata)
+        .collect()
 }
 
-pub fn accepts_model(runtime: &str, model: &str) -> bool {
-    agent_type(runtime)
-        .map(|agent| validate_model(&agent.metadata(), model).is_ok())
-        .unwrap_or(false)
+/// A launchable agent resolved from a kind: either a builtin static type or a
+/// database-backed custom agent (owned, since it carries the row's commands).
+pub enum ResolvedAgent {
+    Builtin(&'static dyn AgentType),
+    Custom(CustomAgentType),
 }
 
-pub fn accepts_effort(runtime: &str, effort: &str) -> bool {
-    agent_type(runtime)
-        .map(|agent| validate_effort(&agent.metadata(), effort).is_ok())
-        .unwrap_or(false)
+impl ResolvedAgent {
+    pub fn as_type(&self) -> &dyn AgentType {
+        match self {
+            ResolvedAgent::Builtin(t) => *t,
+            ResolvedAgent::Custom(c) => c,
+        }
+    }
 }
 
-pub fn starts_from_hook(runtime: &str) -> bool {
-    agent_type(runtime)
-        .map(|agent| agent.metadata().supports_hooks)
-        .unwrap_or(false)
+/// Resolve `kind` to a launchable agent: a builtin first, then a custom agent
+/// from the `custom_agents` table. `Ok(None)` means no agent by that name.
+pub async fn resolve(db: &Db, kind: &str) -> Result<Option<ResolvedAgent>> {
+    if let Some(t) = builtin_agent_type(kind) {
+        return Ok(Some(ResolvedAgent::Builtin(t)));
+    }
+    Ok(crate::custom_agents::get(db, kind)
+        .await?
+        .map(|a| ResolvedAgent::Custom(CustomAgentType::new(a))))
 }
 
-fn validate_model(metadata: &AgentMetadata, model: &str) -> Result<(), String> {
+/// Every agent's metadata — the builtins followed by the operator's custom agents
+/// (name order). What `GET /api/agents` lists and the picker renders.
+pub async fn agent_metadata(db: &Db) -> Result<Vec<AgentMetadata>> {
+    let mut out = builtin_metadata();
+    for a in crate::custom_agents::list(db).await? {
+        out.push(CustomAgentType::new(a).metadata());
+    }
+    Ok(out)
+}
+
+/// The metadata for one agent kind, or `None` when it names no agent.
+pub async fn metadata_for(db: &Db, kind: &str) -> Result<Option<AgentMetadata>> {
+    Ok(resolve(db, kind).await?.map(|r| r.as_type().metadata()))
+}
+
+/// Whether `kind` names a known agent (builtin or custom).
+pub async fn exists(db: &Db, kind: &str) -> bool {
+    matches!(metadata_for(db, kind).await, Ok(Some(_)))
+}
+
+/// The lifecycle status a freshly launched session of `runtime` starts in. An
+/// agent that fires weaver's hooks starts `launching` (its SessionStart/work hook
+/// promotes it to `running`); a hookless agent (codex, most custom agents) never
+/// gets that hook, so it is `running` from the start rather than stuck
+/// `launching`. An unknown runtime is treated as hookless.
+pub async fn initial_status(db: &Db, runtime: &str) -> &'static str {
+    let hooked = matches!(metadata_for(db, runtime).await, Ok(Some(m)) if m.supports_hooks);
+    if hooked {
+        "launching"
+    } else {
+        "running"
+    }
+}
+
+/// Check that `model` is one of `metadata`'s offered choices (blank is always
+/// allowed — it means the agent's own default). A key-free reason on mismatch.
+pub fn validate_model(metadata: &AgentMetadata, model: &str) -> Result<(), String> {
     let model = model.trim();
     if model.is_empty() {
         return Ok(());
@@ -197,7 +212,9 @@ fn validate_model(metadata: &AgentMetadata, model: &str) -> Result<(), String> {
     }
 }
 
-fn validate_effort(metadata: &AgentMetadata, effort: &str) -> Result<(), String> {
+/// Check that `effort` is one of `metadata`'s offered choices (blank is always
+/// allowed — the agent's own default). A key-free reason on mismatch.
+pub fn validate_effort(metadata: &AgentMetadata, effort: &str) -> Result<(), String> {
     let effort = effort.trim();
     if effort.is_empty() {
         return Ok(());
@@ -299,15 +316,40 @@ fn codex_command(ctx: &AgentLaunchContext<'_>) -> String {
     }
 }
 
-fn shell_command(_ctx: &AgentLaunchContext<'_>) -> String {
-    String::new()
+/// The inner launch command for a custom agent: its `setup` stage (if any), then
+/// the stage command for this `mode`. Fresh runs `launch` with the goal file
+/// appended as a positional argument (mirroring the builtin runtimes); adopt runs
+/// `resume` with no goal, falling back to `launch`-with-goal when `resume` is
+/// blank. An empty result execs a bare shell — a setup-only or command-less agent.
+fn custom_command(agent: &CustomAgent, ctx: &AgentLaunchContext<'_>, mode: LaunchMode) -> String {
+    let launch_with_goal = |cmd: &str| match ctx.goal_file.or(ctx.primer_file) {
+        // The goal *content* is passed as a positional argument, mirroring the
+        // builtin runtimes (`claude "$(cat …)"`), not the file path.
+        Some(f) if !cmd.is_empty() => format!("{cmd} \"$(cat {})\"", sh_single_quote_path(f)),
+        _ => cmd.to_string(),
+    };
+    let command = match mode {
+        LaunchMode::Fresh => launch_with_goal(agent.launch.trim()),
+        LaunchMode::Adopt => {
+            let resume = agent.resume.trim();
+            if resume.is_empty() {
+                launch_with_goal(agent.launch.trim())
+            } else {
+                resume.to_string()
+            }
+        }
+    };
+    join_shell(&[agent.setup.trim(), command.as_str()])
 }
 
-fn custom_command(command: &str, ctx: &AgentLaunchContext<'_>) -> String {
-    match ctx.goal_file.or(ctx.primer_file) {
-        Some(f) => format!("{command} {}", sh_single_quote_path(f)),
-        None => command.to_string(),
-    }
+/// Join non-empty shell fragments with `; ` so they run in sequence.
+fn join_shell(parts: &[&str]) -> String {
+    parts
+        .iter()
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Whether a session's terminal is being created for the first time or
@@ -340,37 +382,28 @@ pub struct AgentLaunchContext<'a> {
 impl AgentType for ClaudeAgentType {
     fn metadata(&self) -> AgentMetadata {
         AgentMetadata {
-            kind: "claude",
-            label: "Claude",
-            models: MODEL_CHOICES,
-            efforts: EFFORT_CHOICES,
+            kind: "claude".to_string(),
+            label: "Claude".to_string(),
+            models: AgentChoice::list(MODEL_CHOICES),
+            efforts: AgentChoice::list(EFFORT_CHOICES),
             accepts_raw_model: false,
             supports_hooks: true,
             supports_concierge: true,
+            builtin: true,
         }
     }
 
     fn create<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
         Box::pin(async move {
             prepare_claude(&ctx).await;
-            start_terminal(
-                &ctx,
-                self.metadata().kind,
-                &claude_command(&ctx, LaunchMode::Fresh),
-            )
-            .await
+            start_terminal(&ctx, "claude", &claude_command(&ctx, LaunchMode::Fresh)).await
         })
     }
 
     fn adopt<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
         Box::pin(async move {
             prepare_claude(&ctx).await;
-            start_terminal(
-                &ctx,
-                self.metadata().kind,
-                &claude_command(&ctx, LaunchMode::Adopt),
-            )
-            .await
+            start_terminal(&ctx, "claude", &claude_command(&ctx, LaunchMode::Adopt)).await
         })
     }
 }
@@ -378,125 +411,54 @@ impl AgentType for ClaudeAgentType {
 impl AgentType for CodexAgentType {
     fn metadata(&self) -> AgentMetadata {
         AgentMetadata {
-            kind: "codex",
-            label: "Codex",
-            models: CODEX_MODEL_CHOICES,
-            efforts: CODEX_EFFORT_CHOICES,
+            kind: "codex".to_string(),
+            label: "Codex".to_string(),
+            models: AgentChoice::list(CODEX_MODEL_CHOICES),
+            efforts: AgentChoice::list(CODEX_EFFORT_CHOICES),
             accepts_raw_model: false,
             supports_hooks: false,
             supports_concierge: true,
+            builtin: true,
         }
     }
 
     fn create<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
-        Box::pin(
-            async move { start_terminal(&ctx, self.metadata().kind, &codex_command(&ctx)).await },
-        )
+        Box::pin(async move { start_terminal(&ctx, "codex", &codex_command(&ctx)).await })
     }
 
     fn adopt<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
-        Box::pin(
-            async move { start_terminal(&ctx, self.metadata().kind, &codex_command(&ctx)).await },
-        )
+        Box::pin(async move { start_terminal(&ctx, "codex", &codex_command(&ctx)).await })
     }
 }
 
-impl AgentType for ShellAgentType {
+impl AgentType for CustomAgentType {
     fn metadata(&self) -> AgentMetadata {
         AgentMetadata {
-            kind: "shell",
-            label: "Shell",
-            models: &[],
-            efforts: &[],
+            kind: self.agent.name.clone(),
+            label: self.agent.label.clone(),
+            // Custom agents don't expose model/effort pickers — the operator bakes
+            // any such flags into the stage commands themselves.
+            models: Vec::new(),
+            efforts: Vec::new(),
             accepts_raw_model: false,
-            supports_hooks: false,
+            supports_hooks: self.agent.reports_status,
             supports_concierge: false,
-        }
-    }
-
-    fn create<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
-        Box::pin(
-            async move { start_terminal(&ctx, self.metadata().kind, &shell_command(&ctx)).await },
-        )
-    }
-
-    fn adopt<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
-        Box::pin(
-            async move { start_terminal(&ctx, self.metadata().kind, &shell_command(&ctx)).await },
-        )
-    }
-}
-
-impl AgentType for CustomCommandAgentType {
-    fn metadata(&self) -> AgentMetadata {
-        AgentMetadata {
-            kind: "custom",
-            label: "Custom",
-            models: &[],
-            efforts: &[],
-            accepts_raw_model: false,
-            supports_hooks: false,
-            supports_concierge: false,
+            builtin: false,
         }
     }
 
     fn create<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
         Box::pin(async move {
-            start_terminal(
-                &ctx,
-                self.command.as_str(),
-                &custom_command(&self.command, &ctx),
-            )
-            .await
+            let inner = custom_command(&self.agent, &ctx, LaunchMode::Fresh);
+            start_terminal(&ctx, &self.agent.name, &inner).await
         })
     }
 
     fn adopt<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
         Box::pin(async move {
-            start_terminal(
-                &ctx,
-                self.command.as_str(),
-                &custom_command(&self.command, &ctx),
-            )
-            .await
+            let inner = custom_command(&self.agent, &ctx, LaunchMode::Adopt);
+            start_terminal(&ctx, &self.agent.name, &inner).await
         })
-    }
-}
-
-/// Build the shell command that launches one session's agent. `runtime` is the
-/// **resolved runtime** — the binary to actually run, which for the concierge
-/// role-kind is the `concierge.runtime` setting (claude|codex), and for every
-/// other kind is the kind itself.
-///
-/// `goal_file` is the **positional** opening prompt (catted in as the operator's
-/// first message); `primer_file` is system *context* appended via
-/// `--append-system-prompt-file`. They are mutually distinct: a normal session
-/// carries a `goal_file`, the concierge carries a `primer_file` (so it boots
-/// primed but idle, taking no turn until the operator speaks). At most one is set.
-fn inner_command(
-    runtime: &str,
-    goal_file: Option<&Path>,
-    primer_file: Option<&Path>,
-    mode: LaunchMode,
-    model: &str,
-    effort: &str,
-) -> String {
-    let ctx = AgentLaunchContext {
-        branch_id: "",
-        work_dir: Path::new("."),
-        term_session: "",
-        goal_file,
-        primer_file,
-        server_addr: "",
-        model,
-        effort,
-        extra_env: &[],
-    };
-    match runtime {
-        "claude" => claude_command(&ctx, mode),
-        "codex" => codex_command(&ctx),
-        "shell" | "none" => shell_command(&ctx),
-        other => custom_command(other, &ctx),
     }
 }
 
@@ -546,27 +508,12 @@ fn wrap_launch_script(inner: &str, env: &[(&str, &str)], weaver_dir: Option<&Pat
     script
 }
 
-pub struct LaunchScriptSpec<'a> {
-    pub runtime: &'a str,
-    pub goal_file: Option<&'a Path>,
-    pub primer_file: Option<&'a Path>,
-    pub env: &'a [(&'a str, &'a str)],
-    pub weaver_dir: Option<&'a Path>,
-    pub mode: LaunchMode,
-    pub model: &'a str,
-    pub effort: &'a str,
-}
-
-pub fn launch_script(spec: LaunchScriptSpec<'_>) -> String {
-    let inner = inner_command(
-        spec.runtime,
-        spec.goal_file,
-        spec.primer_file,
-        spec.mode,
-        spec.model,
-        spec.effort,
-    );
-    wrap_launch_script(&inner, spec.env, spec.weaver_dir)
+/// The launch script for a **bare login shell** — loom's `env` exported, then
+/// `exec` the shell, with no inner agent command. Used by the operator scratch
+/// shell and per-session debug shells ([`crate::shell`]); those are plain shells,
+/// not agents, so they don't go through [`launch`] or an [`AgentType`].
+pub fn bare_shell_script(env: &[(&str, &str)], weaver_dir: Option<&Path>) -> String {
+    wrap_launch_script("", env, weaver_dir)
 }
 
 /// Everything [`launch`] needs to bring up a session's terminal.
@@ -574,8 +521,8 @@ pub struct LaunchSpec<'a> {
     /// The branch id — the agent uses this to resolve "its" branch via
     /// `$WEAVER_BRANCH`.
     pub branch_id: &'a str,
-    /// The resolved **runtime** to launch — the agent binary (claude|codex|shell|
-    /// a bare command), already resolved from the stored kind (so a concierge
+    /// The resolved **runtime** to launch — a builtin (`claude`/`codex`) or a
+    /// custom agent's name, already resolved from the stored kind (so a concierge
     /// carries its `concierge.runtime`, not the literal `concierge`).
     pub runtime: &'a str,
     pub work_dir: &'a Path,
@@ -598,8 +545,11 @@ pub struct LaunchSpec<'a> {
     pub extra_env: &'a [(String, String)],
 }
 
-/// Bring up the session's terminal running the agent.
-pub async fn launch(spec: &LaunchSpec<'_>, mode: LaunchMode) -> Result<()> {
+/// Bring up the session's terminal running the agent. `spec.runtime` is resolved
+/// through [`resolve`] — a builtin (`claude`/`codex`) or a custom agent from the
+/// `custom_agents` table — so an unknown runtime is a hard error rather than a
+/// silently-mistyped bare command.
+pub async fn launch(db: &Db, spec: &LaunchSpec<'_>, mode: LaunchMode) -> Result<()> {
     let ctx = AgentLaunchContext {
         branch_id: spec.branch_id,
         work_dir: spec.work_dir,
@@ -611,18 +561,13 @@ pub async fn launch(spec: &LaunchSpec<'_>, mode: LaunchMode) -> Result<()> {
         effort: spec.effort,
         extra_env: spec.extra_env,
     };
-    let _instance = match agent_type(spec.runtime) {
-        Some(agent_type) => match mode {
-            LaunchMode::Fresh => agent_type.create(ctx).await,
-            LaunchMode::Adopt => agent_type.adopt(ctx).await,
-        },
-        None => {
-            let custom = CustomCommandAgentType::new(spec.runtime);
-            match mode {
-                LaunchMode::Fresh => custom.create(ctx).await,
-                LaunchMode::Adopt => custom.adopt(ctx).await,
-            }
-        }
+    let resolved = resolve(db, spec.runtime)
+        .await?
+        .ok_or_else(|| anyhow!("unknown agent '{}'", spec.runtime))?;
+    let agent_type = resolved.as_type();
+    let _instance = match mode {
+        LaunchMode::Fresh => agent_type.create(ctx).await,
+        LaunchMode::Adopt => agent_type.adopt(ctx).await,
     }?;
     Ok(())
 }
@@ -975,6 +920,29 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    fn test_ctx<'a>(
+        goal_file: Option<&'a Path>,
+        primer_file: Option<&'a Path>,
+        model: &'a str,
+        effort: &'a str,
+    ) -> AgentLaunchContext<'a> {
+        AgentLaunchContext {
+            branch_id: "",
+            work_dir: Path::new("."),
+            term_session: "",
+            goal_file,
+            primer_file,
+            server_addr: "",
+            model,
+            effort,
+            extra_env: &[],
+        }
+    }
+
+    /// Build a full launch script for a builtin runtime the way [`start_terminal`]
+    /// does — its inner command wrapped with the env exports — without spawning a
+    /// terminal, so the command strings can be asserted directly. `runtime`
+    /// `"shell"` means a bare login shell (no inner command).
     fn launch_script(
         runtime: &str,
         goal_file: Option<&Path>,
@@ -984,22 +952,77 @@ mod tests {
         model: &str,
         effort: &str,
     ) -> String {
-        super::launch_script(LaunchScriptSpec {
-            runtime,
-            goal_file,
-            primer_file,
-            env,
-            weaver_dir: None,
-            mode,
-            model,
-            effort,
-        })
+        let ctx = test_ctx(goal_file, primer_file, model, effort);
+        let inner = match runtime {
+            "claude" => claude_command(&ctx, mode),
+            "codex" => codex_command(&ctx),
+            "shell" => String::new(),
+            other => panic!("unexpected runtime in test helper: {other}"),
+        };
+        wrap_launch_script(&inner, env, None)
     }
 
     #[test]
-    fn shell_script_just_execs_a_shell() {
+    fn bare_shell_script_just_execs_a_shell() {
+        assert_eq!(bare_shell_script(&[], None), "exec \"${SHELL:-/bin/sh}\"");
+        // The `"shell"` runtime in the test helper builds the same bare shell.
         let script = launch_script("shell", None, None, &[], LaunchMode::Fresh, "", "");
         assert_eq!(script, "exec \"${SHELL:-/bin/sh}\"");
+    }
+
+    fn custom_agent(name: &str, setup: &str, launch: &str, resume: &str) -> CustomAgent {
+        CustomAgent {
+            name: name.to_string(),
+            label: name.to_string(),
+            setup: setup.to_string(),
+            launch: launch.to_string(),
+            resume: resume.to_string(),
+            reports_status: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn custom_agent_runs_setup_then_launch_with_the_goal() {
+        let ctx = test_ctx(Some(Path::new("/x/goal.txt")), None, "", "");
+        let a = custom_agent("aider", "printf hooks > .cfg", "aider --message", "");
+        // Fresh: setup, then the launch command with the goal content appended.
+        assert_eq!(
+            custom_command(&a, &ctx, LaunchMode::Fresh),
+            "printf hooks > .cfg; aider --message \"$(cat '/x/goal.txt')\""
+        );
+    }
+
+    #[test]
+    fn custom_agent_adopt_prefers_resume_and_drops_the_goal() {
+        let ctx = test_ctx(Some(Path::new("/x/goal.txt")), None, "", "");
+        // With a resume command, adopt runs it (setup first) and passes no goal.
+        let a = custom_agent("aider", "setup.sh", "aider --message", "aider --continue");
+        assert_eq!(
+            custom_command(&a, &ctx, LaunchMode::Adopt),
+            "setup.sh; aider --continue"
+        );
+        // Without a resume command, adopt falls back to launch-with-goal.
+        let b = custom_agent("aider", "", "aider --message", "");
+        assert_eq!(
+            custom_command(&b, &ctx, LaunchMode::Adopt),
+            "aider --message \"$(cat '/x/goal.txt')\""
+        );
+    }
+
+    #[test]
+    fn custom_agent_with_no_launch_command_execs_a_bare_shell() {
+        // A setup-only (or wholly empty) custom agent produces an empty inner
+        // command, so its session just execs the login shell — the role the old
+        // builtin "shell" agent filled, now expressible as a custom agent.
+        let ctx = test_ctx(Some(Path::new("/x/goal.txt")), None, "", "");
+        let a = custom_agent("bare", "", "", "");
+        assert_eq!(custom_command(&a, &ctx, LaunchMode::Fresh), "");
+        assert_eq!(
+            wrap_launch_script(&custom_command(&a, &ctx, LaunchMode::Fresh), &[], None),
+            "exec \"${SHELL:-/bin/sh}\""
+        );
     }
 
     #[test]
@@ -1062,10 +1085,24 @@ mod tests {
     fn concierge_kind_is_a_role_not_a_runtime() {
         // The `concierge` string marks a role; it is not a runtime, so it must be
         // resolved (to claude|codex) before launch and never reach the command
-        // builder. Hook-starting is a runtime capability, not a role property.
-        assert!(starts_from_hook("claude"));
-        assert!(!starts_from_hook(CONCIERGE_KIND));
-        assert!(!starts_from_hook("codex"));
+        // builder — it is not a builtin agent type.
+        assert!(builtin_agent_type("claude").is_some());
+        assert!(builtin_agent_type("codex").is_some());
+        assert!(builtin_agent_type(CONCIERGE_KIND).is_none());
+        // Hook-starting is a runtime capability, not a role property: only claude
+        // fires weaver's lifecycle hooks.
+        assert!(
+            builtin_agent_type("claude")
+                .unwrap()
+                .metadata()
+                .supports_hooks
+        );
+        assert!(
+            !builtin_agent_type("codex")
+                .unwrap()
+                .metadata()
+                .supports_hooks
+        );
         // The primer the concierge is seeded with is the real fleet-ops doc.
         assert!(concierge_primer().contains("fleet concierge"));
     }

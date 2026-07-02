@@ -110,6 +110,37 @@ export interface AgentMetadata {
   accepts_raw_model: boolean;
   supports_hooks: boolean;
   supports_concierge: boolean;
+  /** True for the builtin `claude`/`codex`; false for an operator-defined custom
+   *  agent (which the UI may edit or delete). */
+  builtin: boolean;
+}
+
+/** An operator-defined custom agent: the shell commands loom runs at each launch
+ *  stage. Mirrors `custom_agents::CustomAgent`. Returned by `GET /api/agents`
+ *  (the `custom` array) and round-tripped by the Agents settings editor. */
+export interface CustomAgent {
+  name: string;
+  label: string;
+  /** Shell run in the worktree before launch — e.g. installing status hooks. */
+  setup: string;
+  /** Fresh-session launch command; the goal is appended as an argument. */
+  launch: string;
+  /** Adopt/resume command (no goal). Blank reuses `launch`. */
+  resume: string;
+  /** Whether the agent fires weaver's lifecycle hooks. */
+  reports_status: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** The editable fields the Agents editor sends to create/update a custom agent. */
+export interface CustomAgentInput {
+  name: string;
+  label: string;
+  setup: string;
+  launch: string;
+  resume: string;
+  reports_status: boolean;
 }
 
 /** An issue belongs to a repo (`repo_root`). `claimed_branch` is the branch

@@ -143,14 +143,16 @@ async fn validate_agent_settings_group(
     }
 
     let agent_kind = setting_after(db, changes, group.agent_key, group.agent_default).await;
-    let Some(agent_type) = agent::agent_type(&agent_kind) else {
-        errors.insert(
-            group.agent_key.to_string(),
-            json!(format!("unknown agent '{agent_kind}'")),
-        );
-        return;
+    let metadata = match agent::metadata_for(db, &agent_kind).await {
+        Ok(Some(m)) => m,
+        _ => {
+            errors.insert(
+                group.agent_key.to_string(),
+                json!(format!("unknown agent '{agent_kind}'")),
+            );
+            return;
+        }
     };
-    let metadata = agent_type.metadata();
     if group.require_concierge && !metadata.supports_concierge {
         errors.insert(
             group.agent_key.to_string(),
@@ -166,7 +168,7 @@ async fn validate_agent_settings_group(
         group.agent_key,
         group.model_key,
         &model,
-        || agent_type.validate(&model, ""),
+        || agent::validate_model(&metadata, &model),
     );
 
     let effort = setting_after(db, changes, group.effort_key, "").await;
@@ -176,7 +178,7 @@ async fn validate_agent_settings_group(
         group.agent_key,
         group.effort_key,
         &effort,
-        || agent_type.validate("", &effort),
+        || agent::validate_effort(&metadata, &effort),
     );
 }
 

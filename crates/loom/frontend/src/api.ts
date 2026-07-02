@@ -69,6 +69,8 @@ import type {
   ArtifactWriteBody,
   IdeInfo,
   AgentMetadata,
+  CustomAgent,
+  CustomAgentInput,
   ManagedRepo,
   Thread,
   NewThreadBody,
@@ -138,10 +140,34 @@ export const deleteRepoEnv = (repoRoot: string, name: string) =>
 
 interface AgentsEnvelope {
   agents: AgentMetadata[];
+  custom: CustomAgent[];
   default_agent: string;
 }
 
 export const listAgents = () => get('/agents') as Promise<AgentsEnvelope>;
+
+interface CustomAgentsEnvelope {
+  custom: CustomAgent[];
+}
+
+/** Define a new custom agent (`POST /api/agents/custom`). Returns the refreshed
+ *  custom-agent list. */
+export const createCustomAgent = (body: CustomAgentInput) =>
+  (post('/agents/custom', body) as Promise<CustomAgentsEnvelope>).then((r) => r.custom);
+
+/** Replace an existing custom agent's definition (`PUT /api/agents/custom/:name`;
+ *  the name is immutable). Returns the refreshed list. */
+export const updateCustomAgent = (name: string, body: CustomAgentInput) =>
+  (put(`/agents/custom/${encodeURIComponent(name)}`, body) as Promise<CustomAgentsEnvelope>).then(
+    (r) => r.custom,
+  );
+
+/** Delete a custom agent (`DELETE /api/agents/custom/:name`). Returns the
+ *  refreshed list. */
+export const deleteCustomAgent = (name: string) =>
+  (del(`/agents/custom/${encodeURIComponent(name)}`) as Promise<CustomAgentsEnvelope>).then(
+    (r) => r.custom,
+  );
 
 /** Every issue across every repo — the Issues pane's cross-repo board. Pass
  *  `all` to include closed issues. */

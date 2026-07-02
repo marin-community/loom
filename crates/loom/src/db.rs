@@ -192,6 +192,28 @@ CREATE TABLE IF NOT EXISTS user_github_tokens (
     token      TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
+
+-- Operator-defined custom agents: a coding agent the user wires up by naming the
+-- shell commands loom runs at each launch stage, so it shows up in the agent list
+-- beside the builtin `claude`/`codex` without a code change. `name` is the id the
+-- agent list and a session's `agent_kind` reference; the builtin names are
+-- reserved (see `custom_agents::validate_name`). Each stage is a shell fragment:
+--   * `setup`  — run in the worktree before launch (e.g. installing status hooks);
+--   * `launch` — the fresh-session command, with the goal appended as an argument;
+--   * `resume` — the adopt/resume command (blank falls back to `launch`).
+-- `reports_status` records whether the agent fires weaver's lifecycle hooks (so a
+-- fresh session waits at `launching` for the first hook rather than going straight
+-- to `running`).
+CREATE TABLE IF NOT EXISTS custom_agents (
+    name           TEXT PRIMARY KEY,
+    label          TEXT NOT NULL,
+    setup          TEXT NOT NULL DEFAULT '',
+    launch         TEXT NOT NULL DEFAULT '',
+    resume         TEXT NOT NULL DEFAULT '',
+    reports_status INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
 "#;
 
 /// Open the shared database and apply loom's additional tables on top of the

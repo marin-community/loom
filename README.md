@@ -74,7 +74,7 @@ weaver CLI ──HTTP (REST)──▶ loom server run
                                 ├─ sqlite ─▶ ~/.weaver/weaver.db
                                 ├─ axum REST + SSE (127.0.0.1:7878)
                                 ├─ terminal supervisors + git worktree wrappers
-                                ├─ agent launcher (Claude / shell / custom command)
+                                ├─ agent launcher (Claude / Codex / custom agents)
                                 ├─ background monitor (status, orphan detection, hook ingest)
                                 ├─ background summarizer (headless agent → branch description)
                                 └─ Vue SPA at /
@@ -162,8 +162,9 @@ into parallel sub-sessions and poll or block on them the same way a human does.
 `loom session launch --model <model> --effort <effort>` (both also selectors in
 the web create form) pins the session's model selector and reasoning effort.
 The selected agent type advertises its available models/efforts and translates
-them into its own launch flags (`claude` and `codex` are built in; `shell`
-ignores them). Both are stored per session, so adopting a recovered session
+them into its own launch flags (`claude` and `codex` are built in; a custom
+agent takes no model/effort selectors). Both are stored per session, so adopting
+a recovered session
 resumes with the same settings. Omit either to use the configured default, or
 the runtime's own default when no configured default is set.
 
@@ -354,7 +355,7 @@ weaver config rm agent.default
 Notable settings:
 
 - `agent.default` — agent kind launched for a new session when `loom session
-  launch` is given no `--agent` (`claude`, `codex`, or `shell`).
+  launch` is given no `--agent` (`claude`, `codex`, or any custom agent).
 - `agent.model` / `agent.effort` — default model and reasoning effort for new
   sessions. The Settings UI populates these from the selected agent type.
 - `concierge.runtime` / `concierge.model` / `concierge.effort` — agent, model,

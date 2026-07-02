@@ -371,7 +371,7 @@ exact tech debt we're removing.
 
 - **Rust unit:** `same_origin()` cases (missing Origin → allow; matching → allow;
   cross → reject).
-- **Rust integration:** the WebSocket round-trip described in §10 (shell agent
+- **Rust integration:** the WebSocket round-trip described in §10 (a shell session
   echoes the marker; session survives disconnect).
 - **e2e (Playwright):** terminal renders; (optional) typed command echoes.
 - **Manual smoke:** launch a claude session, open the detail view, confirm the

@@ -19,7 +19,10 @@ use crate::auth::Principal;
 use crate::db::Db;
 use crate::events::Event;
 use crate::session::{self as session_mod, NewSession, Session};
-use crate::{agent, agent_env, backend, config, db, events, git, github, repo, repo_env, setup};
+use crate::{
+    agent, agent_env, backend, config, custom_agents, db, events, git, github, repo, repo_env,
+    setup,
+};
 use weaver_api::{CreateReq, PatchSessionReq, SendReq, SessionView, TagReq};
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::Branch;
@@ -35,7 +38,10 @@ const MISSING_GITHUB_TOKEN_MESSAGE: &str = "No GitHub token configured. Add your
 pub(super) async fn list_agents(State(st): State<AppState>) -> ApiResult<Json<Value>> {
     let default_agent = configured_agent(&st.db, "agent.default", config::DEFAULT_AGENT).await;
     Ok(Json(json!({
-        "agents": agent::agent_metadata(),
+        // The picker list (builtins + custom) and the full custom-agent
+        // definitions the editor round-trips.
+        "agents": agent::agent_metadata(&st.db).await?,
+        "custom": custom_agents::list(&st.db).await?,
         "default_agent": default_agent,
     })))
 }
@@ -145,7 +151,7 @@ async fn launch_runtime(db: &Db, agent_kind: &str) -> String {
 async fn configured_agent(db: &Db, key: &str, default: &str) -> String {
     let value = config::get_or(db, key, default).await;
     let value = value.trim();
-    if agent::agent_type(value).is_some() {
+    if agent::exists(db, value).await {
         value.to_string()
     } else {
         default.to_string()
@@ -153,19 +159,20 @@ async fn configured_agent(db: &Db, key: &str, default: &str) -> String {
 }
 
 /// Whether `value` is a valid model selector (or effort, when `model` is false)
-/// for `runtime`'s agent type. A custom/unknown runtime accepts no selector here.
-fn selector_valid(runtime: &str, value: &str, model: bool) -> bool {
-    match agent::agent_type(runtime) {
-        Some(agent_type) if model => agent_type.validate(value, "").is_ok(),
-        Some(agent_type) => agent_type.validate("", value).is_ok(),
-        None => false,
+/// for `runtime`'s agent type. A custom agent offers no selectors (empty choice
+/// lists), so any non-empty value is invalid for it — as is an unknown runtime.
+async fn selector_valid(db: &Db, runtime: &str, value: &str, model: bool) -> bool {
+    match agent::metadata_for(db, runtime).await {
+        Ok(Some(meta)) if model => agent::validate_model(&meta, value).is_ok(),
+        Ok(Some(meta)) => agent::validate_effort(&meta, value).is_ok(),
+        _ => false,
     }
 }
 
 async fn configured_selector(db: &Db, key: &str, runtime: &str, model: bool) -> String {
     let value = config::get_or(db, key, "").await;
     let value = value.trim();
-    if value.is_empty() || !selector_valid(runtime, value, model) {
+    if value.is_empty() || !selector_valid(db, runtime, value, model).await {
         return String::new();
     }
     value.to_string()
@@ -183,7 +190,7 @@ async fn repo_default_agent(db: &Db, cfg: &weaver_core::repo_config::RepoConfig)
         .map(str::trim)
         .filter(|k| !k.is_empty())
     {
-        if agent::agent_type(kind).is_some() {
+        if agent::exists(db, kind).await {
             return kind.to_string();
         }
     }
@@ -201,7 +208,7 @@ async fn repo_or_configured_selector(
     model: bool,
 ) -> String {
     if let Some(value) = repo_value.map(str::trim).filter(|v| !v.is_empty()) {
-        if selector_valid(runtime, value, model) {
+        if selector_valid(db, runtime, value, model).await {
             return value.to_string();
         }
     }
@@ -309,9 +316,12 @@ async fn ensure_github_token_available(
     created_by: Option<&str>,
     runtime: &str,
 ) -> ApiResult<()> {
-    // Shell sessions are explicitly allowed as empty/manual terminals; they do
-    // not need GitHub credentials to be useful.
-    if matches!(runtime, "shell" | "none") {
+    // Only the builtin PR-driving agents (claude/codex) need GitHub credentials to
+    // push as the user. A custom agent is operator-defined — it may be a manual
+    // terminal or never touch GitHub, and the operator supplies whatever
+    // credentials it needs via env — so it is exempt, as the old manual "shell"
+    // terminal was.
+    if agent::builtin_agent_type(runtime).is_none() {
         return Ok(());
     }
     let Some(username) = created_by else {
@@ -431,18 +441,6 @@ fn tail_chars(s: &str, max: usize) -> String {
     format!("…(truncated)\n{tail}")
 }
 
-/// A freshly launched session's lifecycle status. A Claude runtime starts
-/// `launching` because its `SessionStart`/work hook will promote it to `running`;
-/// a hookless runtime (shell, codex, a bare command) never gets that hook, so it
-/// is `running` from the start rather than stuck `launching`.
-fn initial_status(runtime: &str) -> &'static str {
-    if agent::starts_from_hook(runtime) {
-        "launching"
-    } else {
-        "running"
-    }
-}
-
 /// The session-creation core, shared by `POST /api/sessions` and the Chat
 /// surface's concierge get-or-create ([`get_chat`]). Returns the view directly so
 /// the caller can shape its own response.
@@ -560,14 +558,15 @@ pub(crate) async fn create_session_core(
             .await
         }
     };
-    if let Some(agent_type) = agent::agent_type(&runtime) {
-        agent_type
-            .validate(&model, &effort)
-            .map_err(AppError::bad_request)?;
-    } else if !model.is_empty() || !effort.is_empty() {
-        return Err(AppError::bad_request(format!(
-            "custom agent '{runtime}' does not accept model or effort selectors"
-        )));
+    match agent::metadata_for(&st.db, &runtime).await? {
+        // Blank model/effort means the agent's own default; a non-empty value must
+        // be one the agent offers. A custom agent offers none, so any explicit
+        // selector is rejected here.
+        Some(meta) => {
+            agent::validate_model(&meta, &model).map_err(AppError::bad_request)?;
+            agent::validate_effort(&meta, &effort).map_err(AppError::bad_request)?;
+        }
+        None => return Err(AppError::bad_request(format!("unknown agent '{runtime}'"))),
     }
     ensure_github_token_available(&st.db, &extra_env, created_by.as_deref(), &runtime).await?;
 
@@ -934,6 +933,7 @@ pub(crate) async fn create_session_core(
     }
 
     agent::launch(
+        &st.db,
         &agent::LaunchSpec {
             branch_id: &branch.id,
             runtime: &runtime,
@@ -951,9 +951,10 @@ pub(crate) async fn create_session_core(
     .await
     .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Only a Claude runtime emits the hook that promotes `launching` → `running`;
-    // a hookless runtime (shell, codex, a bare command) is live on launch.
-    let status = initial_status(&runtime);
+    // Only an agent that fires weaver's hooks starts `launching` (its hook
+    // promotes it to `running`); a hookless runtime (codex, most custom agents) is
+    // live on launch.
+    let status = agent::initial_status(&st.db, &runtime).await;
     let session = session_mod::insert(
         &st.db,
         &NewSession {
@@ -1548,6 +1549,7 @@ pub(crate) async fn create_warm_session(
     let extra_env = launch_env(&st.db, &repo_root, &repo_cfg).await;
     // A warm session never carries the concierge role, so its runtime is its kind.
     agent::launch(
+        &st.db,
         &agent::LaunchSpec {
             branch_id: &branch.id,
             runtime: &agent,
@@ -1566,7 +1568,7 @@ pub(crate) async fn create_warm_session(
     .await
     .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let status = initial_status(&agent);
+    let status = agent::initial_status(&st.db, &agent).await;
     let session = session_mod::insert(
         &st.db,
         &NewSession {
@@ -1671,6 +1673,7 @@ async fn resume_agent(
     let extra_env = launch_env(&st.db, &repo_root, &repo_cfg).await;
     let runtime = launch_runtime(&st.db, &session.agent_kind).await;
     agent::launch(
+        &st.db,
         &agent::LaunchSpec {
             branch_id: &branch.id,
             runtime: &runtime,
@@ -1687,9 +1690,9 @@ async fn resume_agent(
     )
     .await
     .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    // A hookless runtime (codex, a bare command) won't get the hook that would
+    // A hookless runtime (codex, most custom agents) won't get the hook that would
     // promote `launching` → `running`, so mark it live now rather than stranding it.
-    let status = initial_status(&runtime);
+    let status = agent::initial_status(&st.db, &runtime).await;
     session_mod::set_status(&st.db, &session.id, status).await?;
     events::record(
         &st.db,
@@ -2177,13 +2180,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shell_and_webhook_launches_do_not_require_user_github_token() {
+    async fn custom_and_webhook_launches_do_not_require_user_github_token() {
         let db = crate::db::connect_in_memory().await.unwrap();
         seed_user(&db, "alice").await;
 
-        ensure_github_token_available(&db, &[], Some("alice"), "shell")
+        // A custom (non-builtin) agent is exempt — it may never touch GitHub, and
+        // the operator supplies any credentials it needs via env.
+        ensure_github_token_available(&db, &[], Some("alice"), "my-custom-agent")
             .await
             .unwrap();
+        // A webhook launch carries an attribution string, not an approved user.
         ensure_github_token_available(&db, &[], Some("github-webhook (octo)"), "codex")
             .await
             .unwrap();

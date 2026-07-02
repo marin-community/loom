@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use weaver_core::branch::Branch;
 
-use crate::agent::{self, LaunchMode};
+use crate::agent;
 use crate::backend;
 use crate::session::Session;
 use crate::{agent_env, AppState};
@@ -51,8 +51,9 @@ fn shell_cwd() -> PathBuf {
 /// surface an agent session gets — `WEAVER_API` + `LOOM_TOKEN` so the in-place
 /// `weaver`/`loom` CLIs work, the operator-managed [`agent_env`] vars, and (for a
 /// per-session debug shell) the session's `WEAVER_BRANCH` — then `exec` the login
-/// shell. `agent_kind = "shell"` means no inner agent command; the empty
-/// args/`Adopt` mode are irrelevant for a bare shell.
+/// shell. This is a plain shell, not an agent, so it uses
+/// [`agent::bare_shell_script`] (no inner agent command) rather than going through
+/// the agent launch path.
 async fn shell_script(st: &AppState, branch_id: Option<&str>) -> String {
     let api_url = format!("http://{}", st.addr);
     let local_token = agent::read_local_token();
@@ -73,16 +74,7 @@ async fn shell_script(st: &AppState, branch_id: Option<&str>) -> String {
 
     let loom_exe = std::env::current_exe().ok();
     let weaver_dir = loom_exe.as_deref().and_then(Path::parent);
-    agent::launch_script(agent::LaunchScriptSpec {
-        runtime: "shell",
-        goal_file: None,
-        primer_file: None,
-        env: &env,
-        weaver_dir,
-        mode: LaunchMode::Adopt,
-        model: "",
-        effort: "",
-    })
+    agent::bare_shell_script(&env, weaver_dir)
 }
 
 /// Ensure the scratch-shell supervisor is up, spawning it if not. Idempotent: a

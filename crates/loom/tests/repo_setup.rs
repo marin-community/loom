@@ -93,6 +93,24 @@ async fn start_server() -> (TestHome, loom::client::Client, db::Db, String) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let pool = db::connect(&db::default_db_path()).await.unwrap();
+    // `create_shell_session` below launches with `"agent": "shell"`; `shell` is no
+    // longer a builtin, so seed it as a command-less custom agent (execs a bare
+    // login shell, hookless → `running` immediately).
+    loom::custom_agents::set(
+        &pool,
+        &loom::custom_agents::CustomAgent {
+            name: "shell".to_string(),
+            label: "Shell".to_string(),
+            setup: String::new(),
+            launch: String::new(),
+            resume: String::new(),
+            reports_status: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+    )
+    .await
+    .unwrap();
     let state = AppState {
         db: pool.clone(),
         bus: EventBus::new(),

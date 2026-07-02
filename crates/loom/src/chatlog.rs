@@ -62,18 +62,33 @@ fn branch_slug(branch: &Branch) -> String {
     }
 }
 
+/// Whether `agent_kind` produces a conversation transcript worth looking for: a
+/// builtin (claude/codex) or the concierge (which runs one of them). A custom
+/// agent or bare shell has none, so its missing transcript is expected, not a
+/// problem to warn about.
+fn produces_transcript(agent_kind: &str) -> bool {
+    crate::agent::builtin_agent_type(agent_kind).is_some()
+        || agent_kind == crate::agent::CONCIERGE_KIND
+}
+
+/// Whether `agent_kind` could have a Codex transcript — the codex runtime itself
+/// or the concierge (which may run codex). Only these are worth the `~/.codex`
+/// directory walk; every other agent skips it.
+fn maybe_codex(agent_kind: &str) -> bool {
+    agent_kind == "codex" || agent_kind == crate::agent::CONCIERGE_KIND
+}
+
 /// Locate a session's live agent transcript files (oldest first). Claude's are a
 /// cheap path lookup, so always try them; Codex needs a `~/.codex` directory
-/// walk, so only fall back to it for an agent that could be Codex — never for a
-/// plain `shell`/`none` session, which has no conversation and would pay for the
-/// scan for nothing. Empty when none are found.
+/// walk, so only fall back to it for an agent that could be Codex ([`maybe_codex`]).
+/// Empty when none are found.
 fn locate(session: &Session) -> Vec<PathBuf> {
     let work_dir = PathBuf::from(&session.work_dir);
     let files = transcript::claude_transcripts_for(&work_dir);
     if !files.is_empty() {
         return files;
     }
-    if matches!(session.agent_kind.as_str(), "shell" | "none") {
+    if !maybe_codex(&session.agent_kind) {
         return Vec::new();
     }
     transcript::codex_transcripts_for(&work_dir)
@@ -117,9 +132,9 @@ pub async fn capture(
     let mut warnings = Vec::new();
     let files = locate(session);
     if files.is_empty() {
-        // Missing transcript for a real agent is worth a warning; for a shell
-        // session it's expected, so stay quiet.
-        if !matches!(session.agent_kind.as_str(), "shell" | "none") {
+        // Missing transcript for an agent that produces one is worth a warning;
+        // for a custom agent or bare shell it's expected, so stay quiet.
+        if produces_transcript(&session.agent_kind) {
             warnings.push(format!(
                 "no agent transcript found for {}",
                 session.work_dir

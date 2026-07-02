@@ -383,6 +383,22 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       }
       if (!healthy) throw new Error(`loom /api/health never returned ok:\n${serverLog}`);
 
+      // Pin the `weaver`/`loom` CLI subprocesses (setStatus, seedConversation, the
+      // artifact helpers) at THIS server. `childEnv` spreads `process.env`, so
+      // without this override they inherit any ambient `WEAVER_API` — e.g. when the
+      // suite runs from inside a weaver session — and hit the wrong loom, 404ing on
+      // this server's branches.
+      childEnv.WEAVER_API = baseUrl;
+
+      // `shell` is no longer a builtin agent: define it as a command-less custom
+      // agent (execs a bare login shell, hookless → `running` immediately). This
+      // gives every test its cheap, deterministic no-op agent and must exist
+      // before the `agent.default` patch below validates against it.
+      await fetchJson(`${baseUrl}/api/agents/custom`, {
+        method: 'POST',
+        body: JSON.stringify({ name: 'shell', label: 'Shell' }),
+      });
+
       // UI-created sessions should use a plain shell, never the real claude CLI.
       await fetchJson(`${baseUrl}/api/settings`, {
         method: 'PATCH',

@@ -62,6 +62,7 @@
 //! through `PUT /api/sessions/{id}/tags/{key}` and cleared through `DELETE`.
 //! Absence is the calm state; there is no stored `ok` tag.
 
+mod agents;
 mod artifacts;
 mod auth;
 mod branches;
@@ -75,6 +76,7 @@ mod scratch;
 mod sessions;
 mod settings;
 
+use agents::*;
 use artifacts::*;
 use auth::*;
 use branches::*;
@@ -575,6 +577,13 @@ pub fn router(state: AppState) -> Router {
         )
         // Misc
         .route("/agents", get(list_agents))
+        // Operator-defined custom agents (create + edit/remove by name). The
+        // static `/custom` segment is registered before the `{name}` capture.
+        .route("/agents/custom", post(create_custom_agent))
+        .route(
+            "/agents/custom/{name}",
+            axum::routing::put(update_custom_agent).delete(delete_custom_agent),
+        )
         // The managed repo store + clone allowlist (register/list).
         .route("/repos", get(list_repos).post(register_repo))
         // The trusted-owner allowlist — GitHub accounts loom will act for via the
