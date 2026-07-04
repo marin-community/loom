@@ -569,7 +569,7 @@ def wait_for_https(domain: str, timeout: int = 300) -> bool:
 @click.option("--region", envvar="REGION", default="us-central1", show_default=True)
 @click.option("--zone", envvar="ZONE", default=None, help="Default: <region>-a")
 @click.option(
-    "--machine-type", envvar="MACHINE_TYPE", default="e2-standard-4", show_default=True
+    "--machine-type", envvar="MACHINE_TYPE", default="e2-highmem-4", show_default=True
 )
 @click.option(
     "--disk-size",
