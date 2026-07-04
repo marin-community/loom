@@ -23,7 +23,7 @@ every mark untouched (including ``idle``) rather than guess. Honours dry_run:
 would-be writes are logged as actions and nothing mutates.
 """
 
-from weaver_loom import IDLE_KEY, IDLE_VALUE, Round, WeaverError, parse_tag_recommendations
+from weaver_loom import IDLE_KEY, IDLE_VALUE, Round, parse_tag_recommendations
 
 #: Wake on the agent's finished-turn hook — "assess when the agent goes quiet".
 TRIGGERS = {"on": ["session.idle"]}
@@ -61,10 +61,7 @@ def judge_tags(rnd, session):
     clears the watch's marks), or ``None`` for "no judgement" (no agent, or an
     unparseable reply) so the caller leaves the session's marks untouched."""
     prompt = rnd.params.get("prompt") or DEFAULT_PROMPT
-    try:
-        screen = rnd.client.preview(session["id"], SCREEN_LINES)
-    except WeaverError:
-        screen = ""
+    screen = rnd.preview_or(session["id"], SCREEN_LINES)
     out = rnd.client.agent(f"{prompt}\n\nSession screen:\n{screen}\n", rnd.model, rnd.effort)
     if not out:
         return None

@@ -7,10 +7,7 @@ Subscribes to `pr.opened` — it wakes when a session's PR first appears, on tha
 one branch, instead of re-reading every session's labels on a timer.
 """
 
-import json
-import subprocess
-
-from weaver_loom import Round
+from weaver_loom import Round, WeaverError, gh_json
 
 DEFAULT_LABEL = "weaver"
 
@@ -19,20 +16,14 @@ TRIGGERS = {"on": ["pr.opened"]}
 
 
 def pr_labels(repo_root, pr_number):
-    """The PR's current label names via gh, or None when unreadable."""
-    try:
-        out = subprocess.run(
-            ["gh", "pr", "view", str(pr_number), "--json", "labels"],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if out.returncode != 0:
-            return None
-        reply = json.loads(out.stdout)
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return None
+    """The PR's current label names via gh.
+
+    Raises :class:`WeaverError` (from :func:`weaver_loom.gh_json`) when gh
+    itself couldn't answer — not installed, not authenticated, timed out, a
+    non-zero exit. The caller decides whether that's worth surviving; here it
+    is, but the *reason* rides along in the note instead of being discarded.
+    """
+    reply = gh_json(["pr", "view", str(pr_number), "--json", "labels"], cwd=repo_root)
     return [label.get("name", "") for label in reply.get("labels") or []]
 
 
@@ -44,15 +35,26 @@ def main(rnd):
         if github.get("pr_state") != "OPEN":
             continue
         pr = github.get("pr_number")
-        labels = pr_labels(branch.get("repo_root"), pr)
-        if labels is not None and label in labels:
+        try:
+            labels = pr_labels(branch.get("repo_root"), pr)
+        except WeaverError as e:
+            rnd.would(
+                "label",
+                session=session["id"],
+                pr=pr,
+                label=label,
+                note=f"PR #{pr}: gh unreadable — {e}",
+            )
             continue
-        note = (
-            f"PR #{pr} lacks label '{label}'"
-            if labels is not None
-            else f"PR #{pr}: labels unreadable via gh — would ensure '{label}'"
+        if label in labels:
+            continue
+        rnd.would(
+            "label",
+            session=session["id"],
+            pr=pr,
+            label=label,
+            note=f"PR #{pr} lacks label '{label}'",
         )
-        rnd.would("label", session=session["id"], pr=pr, label=label, note=note)
     rnd.finish(f"surveyed {rnd.surveyed}, {len(rnd.actions)} open PR(s) missing '{label}'")
 
 

@@ -9,6 +9,7 @@ builtin scripts against a real loom.
 """
 
 import json
+import subprocess
 
 import pytest
 from weaver_loom import (
@@ -16,6 +17,8 @@ from weaver_loom import (
     CapabilityDenied,
     Client,
     Round,
+    WeaverError,
+    gh_json,
     parse_judgement,
     parse_tag_recommendations,
 )
@@ -403,6 +406,87 @@ def test_wake_in_zero_is_emitted_to_clear_a_pending_wake(capsys):
 
 def test_state_defaults_to_empty_dict_without_config(capsys):
     assert make_round().state == {}
+
+
+# -- preview_or: the "read a screen, tolerate a dead pane" pattern -----------
+
+
+def test_preview_or_returns_the_screen():
+    rnd = make_round()
+    rnd.client.preview = lambda sid, lines=0: "hello"
+    assert rnd.preview_or("s", 10) == "hello"
+
+
+def test_preview_or_falls_back_on_weaver_error():
+    rnd = make_round()
+
+    def boom(sid, lines=0):
+        raise WeaverError("409 no live terminal")
+
+    rnd.client.preview = boom
+    assert rnd.preview_or("s", 10) == ""
+    assert rnd.preview_or("s", 10, default=None) is None
+
+
+def test_preview_or_lets_other_exceptions_propagate():
+    rnd = make_round()
+
+    def boom(sid, lines=0):
+        raise RuntimeError("not a WeaverError")
+
+    rnd.client.preview = boom
+    with pytest.raises(RuntimeError):
+        rnd.preview_or("s", 10)
+
+
+# -- gh_json: the "shell out to gh" pattern shared by gh-backed watches --------
+
+
+def _run_result(returncode=0, stdout="", stderr=""):
+    return subprocess.CompletedProcess(
+        args=["gh"], returncode=returncode, stdout=stdout, stderr=stderr
+    )
+
+
+def test_gh_json_parses_stdout(monkeypatch):
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: _run_result(stdout='{"ok": true}')
+    )
+    assert gh_json(["pr", "view"]) == {"ok": True}
+
+
+def test_gh_json_raises_weaver_error_when_gh_is_missing(monkeypatch):
+    def boom(*a, **k):
+        raise FileNotFoundError("no such file: gh")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    with pytest.raises(WeaverError, match="gh not found"):
+        gh_json(["pr", "view"])
+
+
+def test_gh_json_raises_weaver_error_on_timeout(monkeypatch):
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="gh", timeout=30)
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    with pytest.raises(WeaverError, match="timed out"):
+        gh_json(["pr", "view"])
+
+
+def test_gh_json_raises_weaver_error_with_stderr_on_nonzero_exit(monkeypatch):
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: _run_result(returncode=1, stderr="not authenticated"),
+    )
+    with pytest.raises(WeaverError, match="not authenticated"):
+        gh_json(["pr", "view"])
+
+
+def test_gh_json_raises_weaver_error_on_bad_json(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _run_result(stdout="not json"))
+    with pytest.raises(WeaverError, match="unparseable JSON"):
+        gh_json(["pr", "view"])
 
 
 def test_set_state_rejects_non_dict():

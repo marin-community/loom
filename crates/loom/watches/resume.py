@@ -29,7 +29,7 @@ it records the would-be action and moves on.
 import re
 import time
 
-from weaver_loom import Round, WeaverError
+from weaver_loom import Round
 
 #: Wake when a session goes quiet — a finished turn (idle) or no activity
 #: (stale). The watch also re-triggers itself via wake_in for backoff rechecks.
@@ -72,11 +72,8 @@ def is_stalled(rnd, sid, conf):
     Reads the live viewport (``screen_lines`` of scrollback, 0 = just what's on
     screen) so a *recovered* session — whose error has scrolled out of view —
     reads as healthy. A dead pane is treated as not-stalled (nothing to resume)."""
-    try:
-        screen = rnd.client.preview(sid, conf["lines"])
-    except WeaverError:
-        return False
-    return bool(conf["pattern"].search(screen or ""))
+    screen = rnd.preview_or(sid, conf["lines"])
+    return bool(conf["pattern"].search(screen))
 
 
 def backoff(conf, attempts):
