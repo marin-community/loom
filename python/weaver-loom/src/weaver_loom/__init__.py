@@ -183,13 +183,15 @@ def gh_json(args, cwd=None, timeout=30):
             ["gh", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout
         )
     except FileNotFoundError as e:
-        raise WeaverError(f"gh not found: {e}") from e
+        # cwd missing raises the same exception type as gh itself missing;
+        # e.filename names whichever path the OS actually failed to find.
+        what = "gh" if e.filename in (None, "gh") else e.filename
+        raise WeaverError(f"{what} not found: {e}") from e
     except subprocess.TimeoutExpired as e:
         raise WeaverError(f"gh {' '.join(args)} timed out after {timeout}s") from e
     if out.returncode != 0:
-        raise WeaverError(
-            f"gh {' '.join(args)}: exit {out.returncode}: {out.stderr.strip()}"
-        )
+        detail = out.stderr.strip() or out.stdout.strip() or "no output"
+        raise WeaverError(f"gh {' '.join(args)}: exit {out.returncode}: {detail}")
     try:
         return json.loads(out.stdout)
     except ValueError as e:

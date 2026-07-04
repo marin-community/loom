@@ -464,6 +464,18 @@ def test_gh_json_raises_weaver_error_when_gh_is_missing(monkeypatch):
         gh_json(["pr", "view"])
 
 
+def test_gh_json_names_the_missing_path_when_it_is_not_gh(monkeypatch):
+    # subprocess.run(cwd=...) raises the same FileNotFoundError type when the
+    # *cwd* doesn't exist — that must not be misreported as "gh not found".
+    def boom(*a, **k):
+        raise FileNotFoundError(2, "No such file or directory", "/gone/repo")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    with pytest.raises(WeaverError, match=r"/gone/repo not found") as exc:
+        gh_json(["pr", "view"], cwd="/gone/repo")
+    assert "gh not found" not in str(exc.value)
+
+
 def test_gh_json_raises_weaver_error_on_timeout(monkeypatch):
     def boom(*a, **k):
         raise subprocess.TimeoutExpired(cmd="gh", timeout=30)
@@ -480,6 +492,24 @@ def test_gh_json_raises_weaver_error_with_stderr_on_nonzero_exit(monkeypatch):
         lambda *a, **k: _run_result(returncode=1, stderr="not authenticated"),
     )
     with pytest.raises(WeaverError, match="not authenticated"):
+        gh_json(["pr", "view"])
+
+
+def test_gh_json_falls_back_to_stdout_when_stderr_is_empty(monkeypatch):
+    # An empty stderr on a non-zero exit must not leave the WeaverError with no
+    # diagnostic text at all — fall back to stdout, then a placeholder.
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: _run_result(returncode=1, stdout="rate limited", stderr=""),
+    )
+    with pytest.raises(WeaverError, match="rate limited"):
+        gh_json(["pr", "view"])
+
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: _run_result(returncode=1, stdout="", stderr="")
+    )
+    with pytest.raises(WeaverError, match="no output"):
         gh_json(["pr", "view"])
 
 
