@@ -68,9 +68,22 @@ RUN set -eux; \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
       > /etc/apt/sources.list.d/docker.list; \
     apt-get update; \
-    apt-get install -y --no-install-recommends nodejs git ca-certificates gh google-cloud-cli tini \
-      docker-ce-cli docker-buildx-plugin docker-compose-plugin sudo; \
-    rm -rf /var/lib/apt/lists/*
+    # Base runtime + the repo tools loom's agents shell out to. gh/gcloud/docker
+    # come from the signed repos configured above; the rest are stock bookworm.
+    # The last group is the everyday dev CLIs an agent reaches for in a checkout —
+    # jq/ripgrep/fd for search, build-essential/pkg-config for native builds, a
+    # system python3, and the usual archive/editor/pager tools. (cargo, rustc and
+    # cc already ship in the rust base image, so they are not repeated here.)
+    apt-get install -y --no-install-recommends \
+      nodejs git ca-certificates gh google-cloud-cli tini \
+      docker-ce-cli docker-buildx-plugin docker-compose-plugin sudo \
+      jq ripgrep fd-find build-essential pkg-config \
+      python3 python3-pip python3-venv \
+      unzip zip less wget vim tree; \
+    rm -rf /var/lib/apt/lists/*; \
+    # Debian ships fd as `fdfind` to avoid a name clash; expose the conventional
+    # `fd` name agents (and fd-aware tools) expect.
+    ln -s "$(command -v fdfind)" /usr/local/bin/fd
 
 # Claude Code — the agent runtime loom's sessions launch — is deliberately NOT
 # baked into the image. The container runs as a non-root user, so a Claude
