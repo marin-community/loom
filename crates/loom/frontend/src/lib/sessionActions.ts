@@ -13,8 +13,10 @@ import type { LifecycleVerb } from './sessionState';
 //   recover      — rebuild an archived session's worktree and resume its agent
 //                  (the inverse of archive — reuses the kept branch/history)
 //   remove       — delete the session entirely
-//   run(verb)    — dispatch one of the four lifecycle verbs by name, so a caller
-//                  driving a list of actions doesn't re-switch on them
+//
+// The four lifecycle verbs above are exposed as `run(verb)`, so a caller
+// rendering a list of `lifecycleActions()` can invoke whichever one was clicked
+// without re-switching on the verb.
 //
 // `reload` is called after any write that mutates server state the caller shows.
 // `removed` fires after a successful remove — the detail page routes back to the
@@ -96,8 +98,10 @@ export function useSessionActions(
       else await reload();
     });
 
-  const run = (verb: LifecycleVerb) =>
-    ({ adopt, recover, archive, remove })[verb]();
+  // The four lifecycle verbs are only ever reached by name — a caller renders a
+  // list of `LifecycleAction`s and invokes whichever one was clicked — so `run`
+  // is the whole surface and the individual verbs stay internal.
+  const run = (verb: LifecycleVerb) => ({ adopt, recover, archive, remove })[verb]();
 
-  return { busy, notice, error, rename, clearTag, adopt, archive, recover, remove, run };
+  return { busy, notice, error, rename, clearTag, run };
 }

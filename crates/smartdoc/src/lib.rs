@@ -214,15 +214,15 @@ fn checklist_item(trimmed: &str) -> Option<ChecklistItem> {
         .or_else(|| trimmed.strip_prefix("* "))
         .or_else(|| trimmed.strip_prefix("+ "))?;
     let rest = after_bullet.trim_start();
-    let (checked, body) = if let Some(b) = rest.strip_prefix("[ ]") {
-        (false, b)
-    } else if let Some(b) = rest
-        .strip_prefix("[x]")
-        .or_else(|| rest.strip_prefix("[X]"))
-    {
-        (true, b)
-    } else {
-        return None;
+    let (checked, body) = match rest.strip_prefix("[ ]") {
+        Some(b) => (false, b),
+        // Not an empty box, so the only other checklist item is a ticked one —
+        // anything else is not a checklist line at all.
+        None => (
+            true,
+            rest.strip_prefix("[x]")
+                .or_else(|| rest.strip_prefix("[X]"))?,
+        ),
     };
     let text = body.trim().to_string();
     Some(ChecklistItem {
