@@ -8,6 +8,8 @@ import IdleChip from '../components/IdleChip.vue';
 import TagPill from '../components/TagPill.vue';
 import GithubStatus from '../components/GithubStatus.vue';
 import NewSessionDrawer from '../components/NewSessionDrawer.vue';
+import SessionRowActions from '../components/SessionRowActions.vue';
+import SessionRemedyButton from '../components/SessionRemedyButton.vue';
 import { timeAgo } from '../lib/time';
 import { effectiveAttention, idleTag, lifecycleDot, messageOf, priorityRank, quietTags, signalChips } from '../lib/sessionState';
 import { useFleet } from '../lib/sessionsStore';
@@ -323,7 +325,10 @@ async function handleCreated() {
       top. The row itself stays neutral — no full-tile wash — so threading reads
       cleanly; the chip carries the signal. Stagger via --i.
     -->
-    <ul v-if="sessions.length" data-testid="session-list" class="fade-in overflow-hidden rounded-md border border-line bg-surface">
+    <!-- No `overflow-hidden` on the list: a row's ⋯ menu drops out of its row and
+         would be clipped by it. The corners the clip used to round are rounded on
+         the first/last row instead. -->
+    <ul v-if="sessions.length" data-testid="session-list" class="fade-in rounded-md border border-line bg-surface">
       <li
         v-for="{ session: s, depth, verticals, isLast } in treeRows"
         :key="s.id"
@@ -332,7 +337,7 @@ async function handleCreated() {
         :data-depth="depth"
         :class="[
           'group relative flex cursor-pointer items-start gap-2.5 border-b border-line px-3 py-2 last:border-0',
-          'min-h-11 transition-colors hover:bg-subtle',
+          'min-h-11 transition-colors hover:bg-subtle first:rounded-t-md last:rounded-b-md',
         ]"
       >
         <!-- Tree gutter: threads a child session under the one that launched it.
@@ -383,6 +388,10 @@ async function handleCreated() {
                  the running state — nearly every live row is running, so the pill
                  would just be repeated noise; only off-nominal states show one. -->
             <StatusBadge v-if="s.status !== 'running'" :status="s.status" class="shrink-0" />
+            <!-- The cure, next to the diagnosis: an ORPHANED row offers Adopt, an
+                 ARCHIVED one Recover, right where the badge announces the state.
+                 Renders nothing for a healthy session. -->
+            <SessionRemedyButton :ws="s" @changed="refresh" @error="error = $event" />
             <!-- Soothing idle mark: a calm, neutral chip when the agent is
                  resting (no loud signal). Reassures rather than alarms. -->
             <IdleChip v-if="idleTag(s)" :tag="idleTag(s)!" />
@@ -441,6 +450,16 @@ async function handleCreated() {
             {{ timeAgo(s.last_activity_at) }}
           </span>
         </div>
+
+        <!-- The row's ⋯ menu: every lifecycle verb (Adopt/Recover, Archive,
+             Remove). The fleet list is where a human surveys and tidies a fleet,
+             so it acts here rather than only from inside a session. -->
+        <SessionRowActions
+          :ws="s"
+          class="mt-0.5"
+          @changed="refresh"
+          @error="error = $event"
+        />
       </li>
     </ul>
   </div>

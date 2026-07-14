@@ -18,10 +18,10 @@ test.describe('session detail view', () => {
     // issue's body in the issues panel, so a bare getByText is ambiguous.
     await expect(page.getByTestId('session-goal')).toHaveText('Render my details');
 
-    // Identity metadata (id, branch, base) lives behind the ⌄ details popover,
-    // not cluttering the header. Scope to the popover and match exactly so the
-    // id doesn't also match the `weaver-<id>` terminal line.
-    await page.getByRole('button', { name: 'details' }).click();
+    // Identity metadata (id, branch, base) lives behind the ⋯ manage menu, under
+    // the lifecycle actions, not cluttering the header. Scope to the popover and
+    // match exactly so the id doesn't also match the `weaver-<id>` terminal line.
+    await page.getByRole('button', { name: 'manage' }).click();
     const details = page.getByTestId('details-popover');
     await expect(details.getByText(s.id, { exact: true })).toBeVisible();
     await expect(details.getByText(s.branch.branch, { exact: true })).toBeVisible();

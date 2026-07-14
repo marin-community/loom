@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { ref, computed, nextTick } from 'vue';
+import { useRouter } from 'vue-router';
 import type { Session } from '../types';
 import {
   messageOf,
   conversationState,
+  lifecycleActions,
   signalChips,
   quietTags,
   TONE_TEXT,
@@ -14,6 +16,7 @@ import StatusBadge from './StatusBadge.vue';
 import SignalChip from './SignalChip.vue';
 import TagPill from './TagPill.vue';
 import SessionDetailsPopover from './SessionDetailsPopover.vue';
+import SessionRemedyButton from './SessionRemedyButton.vue';
 import GithubStatus from './GithubStatus.vue';
 
 // The session page header — one compact chrome block shared by both the detail
@@ -33,11 +36,19 @@ import GithubStatus from './GithubStatus.vue';
 const props = defineProps<{ ws: Session }>();
 const emit = defineEmits<{ reload: [] }>();
 
+const router = useRouter();
+// The detail page's subject is the session itself, so a successful Remove has to
+// leave: route back to the fleet list rather than reload a page that is gone.
 const actions = useSessionActions(
   () => props.ws.id,
   () => emit('reload'),
+  () => router.push('/'),
 );
-const { busy, notice, error, rename, clearTag, adopt, archive, recover, remove } = actions;
+const { busy, notice, error, rename, clearTag, run } = actions;
+
+// The lifecycle verbs the ⋯ manage menu offers — the same policy the fleet
+// list's row menu renders, so the two surfaces can't drift.
+const lifecycle = computed(() => lifecycleActions(props.ws));
 
 const showDetails = ref(false);
 
@@ -144,50 +155,42 @@ const quiet = computed(() => quietTags(props.ws));
              default here just as on the fleet list. -->
         <StatusBadge v-if="ws.status !== 'running'" :status="ws.status" />
 
-        <!-- ⌄ details — identity metadata + the lifecycle actions. -->
+        <!-- The remedy, promoted out of the menu and parked against the badge
+             that announces the problem: an orphaned session offers Adopt, an
+             archived one Recover. Same component the fleet-list row uses, so the
+             cure looks and reads the same wherever you meet a stuck session. -->
+        <SessionRemedyButton :ws="ws" @changed="emit('reload')" @error="error = $event" />
+
+        <!-- ⋯ manage — the lifecycle actions, with the identity metadata under
+             them. Named for what a human comes here to *do*: it used to read
+             "⌄ details", which advertised only the metadata, so nobody looking
+             to archive or adopt a session ever thought to open it. -->
         <div class="relative">
           <button
             type="button"
+            :aria-expanded="showDetails"
             class="rounded px-1.5 py-1 text-xs text-muted hover:bg-subtle hover:text-fg"
             @click="showDetails = !showDetails"
           >
-            ⌄ details
+            ⋯ manage
           </button>
           <SessionDetailsPopover :ws="ws" v-model:open="showDetails">
             <template #actions>
-              <div class="flex flex-wrap items-center gap-2">
+              <div class="space-y-1">
                 <button
-                  v-if="ws.status === 'orphaned'"
-                  class="rounded bg-subtle px-3 py-1.5 text-xs text-accent ring-1 ring-inset ring-accent/30 hover:bg-subtle-hover"
-                  :disabled="busy === 'adopt'"
-                  @click="adopt"
+                  v-for="a in lifecycle"
+                  :key="a.verb"
+                  type="button"
+                  :data-testid="`action-${a.verb}`"
+                  :disabled="!!busy"
+                  class="block w-full rounded px-2 py-1.5 text-left transition-colors disabled:opacity-60"
+                  :class="a.danger ? 'text-block hover:bg-block-soft' : 'text-fg hover:bg-subtle'"
+                  @click="run(a.verb)"
                 >
-                  {{ busy === 'adopt' ? 'Adopting…' : 'Adopt' }}
-                </button>
-                <!-- Recover brings a torn-down (archived) session back: rebuild
-                     its worktree from the kept branch and resume the agent. -->
-                <button
-                  v-if="ws.status === 'archived'"
-                  class="rounded bg-subtle px-3 py-1.5 text-xs text-accent ring-1 ring-inset ring-accent/30 hover:bg-subtle-hover"
-                  :disabled="busy === 'recover'"
-                  @click="recover"
-                >
-                  {{ busy === 'recover' ? 'Recovering…' : 'Recover' }}
-                </button>
-                <button
-                  v-if="ws.status !== 'archived'"
-                  class="btn-secondary px-3 py-1.5 text-xs"
-                  :disabled="busy === 'archive'"
-                  @click="archive"
-                >
-                  {{ busy === 'archive' ? 'Archiving…' : 'Archive' }}
-                </button>
-                <button
-                  class="btn-danger ml-auto px-3 py-1.5 text-xs"
-                  :disabled="busy === 'remove'"
-                  @click="remove"
-                >
-                  Remove
+                  <span class="block text-xs font-medium">
+                    {{ busy === a.verb ? a.busyLabel : a.label }}
+                  </span>
+                  <span class="block text-2xs text-faint">{{ a.hint }}</span>
                 </button>
               </div>
             </template>

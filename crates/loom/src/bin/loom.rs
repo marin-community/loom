@@ -573,12 +573,14 @@ struct LaunchOpts {
     /// (see `weaver config get agent.default`).
     #[arg(long)]
     agent: Option<String>,
-    /// Repo to launch into: a path to (any directory inside) the target repo's
-    /// checkout. The new worktree is cut from this repo's mainline. Defaults to
-    /// the current directory — so without it you launch into whatever repo you
-    /// happen to be standing in, which is the wrong one when you mean another.
+    /// Repo to launch into: either a path to (any directory inside) a local
+    /// checkout, or a GitHub `owner/name` slug (or clone URL) — a repo loom
+    /// doesn't have yet is cloned into its managed repo store on first use. The
+    /// new worktree is cut from the repo's mainline. Defaults to the current
+    /// directory — so without it you launch into whatever repo you happen to be
+    /// standing in, which is the wrong one when you mean another.
     #[arg(long)]
-    repo: Option<std::path::PathBuf>,
+    repo: Option<String>,
     /// Branch to fork the new worktree from. Defaults to a freshly-fetched
     /// `origin/<default branch>` (the repo's mainline), so new work starts from
     /// the latest upstream rather than the launching checkout.
@@ -1922,7 +1924,7 @@ struct LaunchArgs {
     goal: String,
     name: Option<String>,
     agent: Option<String>,
-    repo: Option<std::path::PathBuf>,
+    repo: Option<String>,
     base: Option<String>,
     title: Option<String>,
     issue: Option<i64>,
@@ -1971,19 +1973,43 @@ const LAUNCH_HINT: &str = "nothing to do — give the agent a task or something 
   loom session launch --name <slug> --agent shell      # an empty named worktree (no task)
 See `loom session launch --help` for all options.";
 
-/// The directory a launch forks from — `--repo` if given, else the current
-/// directory. `loom session launch` has no separate repo selector beyond this:
-/// the server resolves the target repo from this path (its main worktree), so
-/// any directory inside the intended checkout works. We canonicalize, which
-/// anchors a relative `--repo` to the CLI's cwd (not the daemon's) and turns a
-/// typo into a clear error here rather than an opaque server-side failure.
-fn resolve_launch_cwd(repo: Option<&std::path::Path>) -> Result<std::path::PathBuf> {
-    match repo {
-        Some(p) => p
-            .canonicalize()
-            .with_context(|| format!("--repo path not found: {}", p.display())),
-        None => std::env::current_dir().context("could not read the current directory"),
+/// What a launch forks from, once `--repo` has been classified.
+#[derive(Debug, PartialEq, Eq)]
+enum RepoTarget {
+    /// A local checkout — any directory inside it. The server resolves the repo
+    /// from this path (its main worktree), so it travels as the request's `cwd`.
+    Local(std::path::PathBuf),
+    /// A repo loom manages for us: a GitHub `owner/name` slug or a clone URL.
+    /// Travels as the request's `repo`, which the server registers and clones
+    /// into its managed store on first use.
+    Managed(String),
+}
+
+/// Classify `--repo` (absent → the current directory). An existing path is a
+/// local checkout; anything else is a managed-repo reference if it parses as a
+/// clean `owner/name` slug or clone URL — which is what lets you launch into a
+/// repo this machine has never checked out. Neither one is a typo, and saying so
+/// here beats an opaque server-side failure.
+///
+/// A path that exists wins over a slug of the same spelling: a real directory in
+/// front of you is never a guess, so `--repo ./acme/widgets` can't be hijacked
+/// into a clone of `github.com/acme/widgets`.
+fn resolve_repo_target(repo: Option<&str>) -> Result<RepoTarget> {
+    let Some(input) = repo.map(str::trim).filter(|s| !s.is_empty()) else {
+        let cwd = std::env::current_dir().context("could not read the current directory")?;
+        return Ok(RepoTarget::Local(cwd));
+    };
+    // Canonicalizing anchors a relative path to the CLI's cwd, not the daemon's.
+    if let Ok(path) = std::path::Path::new(input).canonicalize() {
+        return Ok(RepoTarget::Local(path));
     }
+    if loom::repo::parse_slug(input).is_ok() {
+        return Ok(RepoTarget::Managed(input.to_string()));
+    }
+    bail!(
+        "--repo '{input}' is neither a local path that exists nor a repo to clone \
+         (expected `owner/name` or a clone URL)"
+    )
 }
 
 async fn cmd_launch(a: LaunchArgs) -> Result<()> {
@@ -2004,7 +2030,17 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
         effort,
     } = a;
     let client = client::default();
-    let cwd = resolve_launch_cwd(repo.as_deref())?;
+    let target = resolve_repo_target(repo.as_deref())?;
+    // A managed repo travels as `repo` (the server registers it and clones it if
+    // this is its first use); a local checkout travels as `cwd`. Exactly one is
+    // set — the server ignores `cwd` whenever `repo` is present.
+    let (cwd, managed_repo) = match &target {
+        RepoTarget::Local(path) => (path.display().to_string(), None),
+        RepoTarget::Managed(r) => (String::new(), Some(r.as_str())),
+    };
+    if let Some(r) = managed_repo {
+        println!("repo {r} — cloning it if loom doesn't have it yet...");
+    }
     // When an agent in a weaver session runs `loom session launch`,
     // `$WEAVER_BRANCH` is its own branch id — pass it so the tracking issue is
     // attributed to the launching (parent) agent. A human shell launch leaves it
@@ -2018,7 +2054,8 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
             json!({
                 "goal": goal,
                 "title": title,
-                "cwd": cwd.display().to_string(),
+                "cwd": cwd,
+                "repo": managed_repo,
                 "base": base,
                 "agent": agent,
                 "name": name,
@@ -3057,21 +3094,83 @@ mod tests {
         }
     }
 
+    // Serial: reads the process's current directory, which the precedence test
+    // below moves.
+    #[serial_test::serial]
     #[test]
-    fn resolve_launch_cwd_honors_repo_and_rejects_a_bad_path() {
+    fn resolve_repo_target_reads_a_local_checkout() {
         // No `--repo` falls back to the current directory.
         let here = std::env::current_dir().unwrap();
-        assert_eq!(resolve_launch_cwd(None).unwrap(), here);
+        assert_eq!(resolve_repo_target(None).unwrap(), RepoTarget::Local(here));
 
-        // `--repo` selects (and canonicalizes) the given checkout.
+        // A path that exists is a local checkout, canonicalized.
         let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_string_lossy().to_string();
         assert_eq!(
-            resolve_launch_cwd(Some(dir.path())).unwrap(),
-            dir.path().canonicalize().unwrap()
+            resolve_repo_target(Some(&path)).unwrap(),
+            RepoTarget::Local(dir.path().canonicalize().unwrap())
         );
+    }
 
-        // A typo'd `--repo` fails here, not as an opaque server error.
-        assert!(resolve_launch_cwd(Some(&dir.path().join("nope"))).is_err());
+    #[test]
+    fn resolve_repo_target_reads_a_repo_to_clone() {
+        // A repo this machine has never checked out: the whole point — it is
+        // handed to the server as a managed repo rather than failing as a path.
+        for input in [
+            "marin-community/vllm",
+            "https://github.com/acme/widgets.git",
+            "git@github.com:acme/widgets.git",
+        ] {
+            assert_eq!(
+                resolve_repo_target(Some(input)).unwrap(),
+                RepoTarget::Managed(input.to_string()),
+                "input: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_repo_target_rejects_what_is_neither() {
+        // A typo'd path that can't be a repo reference either fails here, not as
+        // an opaque server error.
+        let dir = tempfile::tempdir().unwrap();
+        for bad in [
+            dir.path().join("nope").to_string_lossy().to_string(),
+            "../not-a-checkout".to_string(),
+            "one-segment".to_string(),
+        ] {
+            assert!(resolve_repo_target(Some(&bad)).is_err(), "bad: {bad}");
+        }
+    }
+
+    /// A real directory in front of you is never a guess: `acme/widgets` is a
+    /// perfectly good slug, but when it also *exists* as a relative path it stays
+    /// local rather than being hijacked into a clone of the GitHub repo that
+    /// happens to share its spelling. Only a relative path can collide with a
+    /// slug like this, so the test has to work from a real cwd (hence `serial` —
+    /// it moves the process's current directory).
+    #[serial_test::serial]
+    #[test]
+    fn resolve_repo_target_prefers_an_existing_path_over_a_slug() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("acme").join("widgets");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let restore = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let resolved = resolve_repo_target(Some("acme/widgets"));
+        std::env::set_current_dir(restore).unwrap();
+
+        // Same spelling as the slug — and it resolves to the directory, not a clone.
+        assert_eq!(
+            resolved.unwrap(),
+            RepoTarget::Local(nested.canonicalize().unwrap())
+        );
+        // With no such directory around, the very same string is a repo to clone.
+        assert_eq!(
+            resolve_repo_target(Some("acme/widgets")).unwrap(),
+            RepoTarget::Managed("acme/widgets".to_string())
+        );
     }
 
     #[test]

@@ -1,10 +1,9 @@
 import { ref } from 'vue';
-import { useRouter } from 'vue-router';
 import { post, patch, del } from '../api';
+import type { LifecycleVerb } from './sessionState';
 
-// The session's write surface for the page header (hosted by SessionDetail).
-// Kept as a composable so the header's lifecycle behaviour lives in one place
-// rather than being inlined into the view.
+// The session's write surface, shared by every place that can act on a session:
+// the detail page's header and the fleet list's per-row menu.
 //
 //   rename       — the one human-authored branch field (the workstream label)
 //   clearTag     — delete any one tag, loud or quiet (a chip's × clears it);
@@ -13,13 +12,20 @@ import { post, patch, del } from '../api';
 //   archive      — tear down terminal + worktree, keep the branch/history
 //   recover      — rebuild an archived session's worktree and resume its agent
 //                  (the inverse of archive — reuses the kept branch/history)
-//   remove        — delete the session entirely, then route back to the list
+//   remove       — delete the session entirely
+//   run(verb)    — dispatch one of the four lifecycle verbs by name, so a caller
+//                  driving a list of actions doesn't re-switch on them
 //
-// `reload` is called after any write that mutates server state the page shows,
-// so the caller can re-fetch. `busy` names the in-flight action (for per-button
-// spinners); `notice`/`error` carry the last result.
-export function useSessionActions(getId: () => string, reload: () => void | Promise<void>) {
-  const router = useRouter();
+// `reload` is called after any write that mutates server state the caller shows.
+// `removed` fires after a successful remove — the detail page routes back to the
+// list (its subject is gone), the fleet list just refreshes in place. `busy`
+// names the in-flight action (for per-button spinners); `notice`/`error` carry
+// the last result.
+export function useSessionActions(
+  getId: () => string,
+  reload: () => void | Promise<void>,
+  removed?: () => void,
+) {
   const busy = ref('');
   const notice = ref('');
   const error = ref('');
@@ -86,8 +92,12 @@ export function useSessionActions(getId: () => string, reload: () => void | Prom
     act('remove', async () => {
       if (!confirm('Remove this session, its worktree and terminal session?')) return;
       await del(`/sessions/${getId()}`);
-      router.push('/');
+      if (removed) removed();
+      else await reload();
     });
 
-  return { busy, notice, error, rename, clearTag, adopt, archive, recover, remove };
+  const run = (verb: LifecycleVerb) =>
+    ({ adopt, recover, archive, remove })[verb]();
+
+  return { busy, notice, error, rename, clearTag, adopt, archive, recover, remove, run };
 }

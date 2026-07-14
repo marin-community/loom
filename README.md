@@ -93,6 +93,8 @@ loom server run                            # run the daemon (REST + UI + termina
 loom session launch "Add a /health endpoint"               # new worktree + terminal + agent, seeded with the task
 loom session launch "Refactor the parser" --name parser-refactor   # override the branch slug
 loom session launch "Big refactor" --model opus --effort high      # pick model tier + reasoning effort
+loom session launch "Fix the flaky test" --repo ~/code/other       # a local checkout other than the cwd
+loom session launch "How do I run this?" --repo acme/widgets       # a GitHub repo — cloned on first use
 loom session poll <session>           # one-shot status (lifecycle + attention)
 loom session wait <session>           # block until it finishes or needs you
 loom session send <session> "try the curl again"   # type a message + Enter (trigger an agent round)

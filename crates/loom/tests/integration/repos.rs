@@ -1,10 +1,13 @@
-//! The managed repo store over the REST API: register a repo into the allowlist,
-//! then launch a session with `{repo: "owner/name"}` so loom clones it into the
-//! managed store and forks the worktree from the clone — no `cwd`. Plus the
-//! security gates: traversal identifiers and non-allowlisted repos are rejected.
+//! The managed repo store over the REST API: launch a session with
+//! `{repo: "owner/name"}` and loom clones the repo into the managed store and
+//! forks the worktree from that clone — no `cwd`. It works whether the repo was
+//! registered up front (`POST /api/repos`) or is being named for the first time,
+//! which is what lets `loom launch --repo owner/name` reach a repo this machine
+//! has never checked out. Plus the security gate that survives: traversal
+//! identifiers are rejected.
 //!
-//! The clone source is a *local bare repo* (registered via a `file://` URL), so
-//! these tests never touch the network.
+//! The clone source is a *local bare repo* (named by a `file://` URL), so these
+//! tests never touch the network.
 
 use serde_json::json;
 use serial_test::serial;
@@ -117,11 +120,73 @@ async fn register_then_launch_clones_into_managed_store() {
         .unwrap();
 }
 
-/// Security: a traversal identifier and a non-allowlisted repo are both rejected
-/// with a 400 before any clone is attempted.
+/// Launching into a repo loom has never seen needs no separate "add the repo"
+/// step: naming it on an authenticated create registers it and clones it. This is
+/// what `loom launch --repo owner/name` and the new-session drawer both rely on.
+///
+/// (The repo is named by its `file://` URL rather than a bare slug, so the clone
+/// stays local — a bare slug would resolve to its canonical github.com remote.)
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_rejects_traversal_and_unregistered_repos() {
+async fn launching_into_an_unregistered_repo_registers_and_clones_it() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    let remotes = tempfile::tempdir().unwrap();
+    let remote_url = make_bare_remote(remotes.path());
+
+    // Nothing is registered yet.
+    assert!(client
+        .get("/api/repos")
+        .await
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // Launch straight at it — no POST /api/repos first.
+    let ws = client
+        .post(
+            "/api/sessions",
+            json!({ "goal": "first sight", "repo": remote_url, "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let id = ws["id"].as_str().unwrap().to_string();
+    let work_dir = ws["work_dir"].as_str().unwrap().to_string();
+
+    // It was cloned into the managed store and forked from there.
+    assert!(
+        work_dir.contains("/acme/widgets/.worktrees/"),
+        "worktree should live in the managed clone, got {work_dir}"
+    );
+    assert!(loom::repo::repos_dir()
+        .join("acme")
+        .join("widgets")
+        .join(".git")
+        .exists());
+
+    // And the launch registered it, so it is a known repo from now on.
+    let list = client.get("/api/repos").await.unwrap();
+    let list = list.as_array().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["slug"], "acme/widgets");
+    assert_eq!(list[0]["remote_url"], remote_url);
+
+    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+}
+
+/// Security: a traversal identifier is rejected with a 400 before any clone is
+/// attempted, on both the create and the register path.
+///
+/// Note what is *not* asserted here: an unregistered repo. Naming a repo on an
+/// authenticated create is the grant that registers it (see the test above) — the
+/// `repos` allowlist gates the *unauthenticated* GitHub webhook, which resolves
+/// its own clone through `repo::resolve_clone` before it reaches the shared
+/// create path. That gate is proven in `repo::tests::resolve_clone_enforces_allowlist_then_clones`.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_rejects_traversal_identifiers() {
     let ts = TestServer::start().await;
     let client = &ts.client;
 
@@ -137,20 +202,6 @@ async fn create_rejects_traversal_and_unregistered_repos() {
             "traversal id {bad:?} should be a 400, got {err}"
         );
     }
-
-    // A clean slug that is not registered — refused by the allowlist boundary.
-    let err = client
-        .post(
-            "/api/sessions",
-            json!({ "repo": "ghost/repo", "agent": "shell" }),
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("400") && err.contains("not registered"),
-        "unregistered repo should be a 400, got {err}"
-    );
 
     // Registration itself rejects a traversal identifier.
     let err = client

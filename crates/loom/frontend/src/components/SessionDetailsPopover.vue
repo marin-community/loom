@@ -1,13 +1,17 @@
 <script setup lang="ts">
 import type { Session } from '../types';
 
-// The "⌄ details" menu for the page header. Holds everything low-frequency so
-// it stays out of the always-visible header run, yet reachable from any scroll
+// The "⋯ manage" menu for the page header. Holds everything low-frequency so it
+// stays out of the always-visible header run, yet reachable from any scroll
 // position (the lifecycle actions used to sit at the bottom of a long Overview,
 // where they scrolled out of sight). Two stacked sections:
-//   • identity / machine metadata (id, branch, base, terminal, worktree, github)
 //   • lifecycle actions, injected by the header via the #actions slot
-// Read-only metadata; the page owns open-state.
+//   • identity / machine metadata (id, branch, base, terminal, worktree, github)
+//
+// Actions come first, under a heading: they are the reason a human opens this,
+// and burying them under a scrolling metadata list is what made adopt/archive so
+// hard to find. The metadata is reference material — it can take second place
+// and scroll.
 defineProps<{ ws: Session; open: boolean }>();
 const emit = defineEmits<{ 'update:open': [boolean] }>();
 
@@ -28,7 +32,21 @@ function close() {
       data-testid="details-popover"
       class="absolute right-0 z-20 mt-1 flex max-h-[calc(100vh-7rem)] w-80 flex-col rounded border border-line bg-surface p-3 shadow-lg"
     >
-      <dl class="min-h-0 space-y-2 overflow-y-auto text-xs">
+      <!-- Lifecycle actions (Adopt / Recover / Archive / Remove), supplied by the
+           header — first, because they are what this menu is for. -->
+      <div class="shrink-0">
+        <h3 class="mb-1 px-2 text-2xs font-semibold uppercase tracking-wider text-muted">
+          Actions
+        </h3>
+        <slot name="actions" />
+      </div>
+
+      <h3
+        class="mb-1 mt-3 shrink-0 border-t border-line px-2 pt-3 text-2xs font-semibold uppercase tracking-wider text-muted"
+      >
+        Details
+      </h3>
+      <dl class="min-h-0 space-y-2 overflow-y-auto px-2 text-xs">
         <div class="flex gap-2">
           <dt class="w-16 shrink-0 text-faint">id</dt>
           <dd class="min-w-0 break-all font-mono text-muted">{{ ws.id }}</dd>
@@ -58,12 +76,6 @@ function close() {
           <dd class="min-w-0 break-all font-mono text-muted">{{ ws.created_by }}</dd>
         </div>
       </dl>
-      <!-- Lifecycle actions (Adopt / Archive / Remove), supplied by the header.
-           Kept here so destructive, low-frequency operations live one click
-           away from anywhere on the page, not buried below a long Overview. -->
-      <div class="mt-3 shrink-0 border-t border-line pt-3">
-        <slot name="actions" />
-      </div>
     </div>
   </div>
 </template>

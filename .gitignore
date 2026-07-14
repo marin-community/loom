@@ -11,6 +11,7 @@ node_modules/
 .weaver/
 .bot/
 e2e/test-results/
+test-results/
 *.pyc
 python/weaver-loom/dist/
 __pycache__/

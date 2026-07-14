@@ -297,3 +297,69 @@ export function lifecycleDot(s: Session): string {
   if (s.status === 'running') return 'bg-ok-line';
   return 'bg-faint/50';
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle actions — which verbs apply to a session, in one place
+// ---------------------------------------------------------------------------
+
+export type LifecycleVerb = 'adopt' | 'recover' | 'archive' | 'remove';
+
+export interface LifecycleAction {
+  verb: LifecycleVerb;
+  /** Imperative label, as it appears on the button or menu item. */
+  label: string;
+  /** Present participle shown while the action is in flight. */
+  busyLabel: string;
+  /** What it does, for the menu item's second line and the button's tooltip. */
+  hint: string;
+  /** Destructive — rendered in the block (danger) tone, last. */
+  danger?: boolean;
+}
+
+const ADOPT: LifecycleAction = {
+  verb: 'adopt',
+  label: 'Adopt',
+  busyLabel: 'Adopting…',
+  hint: 'Recreate the terminal and resume the agent',
+};
+const RECOVER: LifecycleAction = {
+  verb: 'recover',
+  label: 'Recover',
+  busyLabel: 'Recovering…',
+  hint: 'Rebuild the worktree and resume the agent',
+};
+const ARCHIVE: LifecycleAction = {
+  verb: 'archive',
+  label: 'Archive',
+  busyLabel: 'Archiving…',
+  hint: 'Tear down the terminal and worktree, keep the branch',
+};
+const REMOVE: LifecycleAction = {
+  verb: 'remove',
+  label: 'Remove',
+  busyLabel: 'Removing…',
+  hint: 'Delete the session, its worktree and terminal',
+  danger: true,
+};
+
+// The one action that gets a session unstuck, when it is stuck: an orphaned
+// session (terminal gone, worktree intact) is adopted; an archived one (torn
+// down, branch kept) is recovered. Surfaced next to the status badge that
+// announces the state, so the cure sits with the diagnosis rather than behind a
+// menu. Null for every healthy session — there is nothing to fix.
+export function remedyAction(s: Session): LifecycleAction | null {
+  if (s.status === 'orphaned') return ADOPT;
+  if (s.status === 'archived') return RECOVER;
+  return null;
+}
+
+// Every lifecycle action available on a session, in menu order: its remedy (if
+// stuck), then archive (unless it already is), then the destructive remove.
+export function lifecycleActions(s: Session): LifecycleAction[] {
+  const actions: LifecycleAction[] = [];
+  const remedy = remedyAction(s);
+  if (remedy) actions.push(remedy);
+  if (s.status !== 'archived') actions.push(ARCHIVE);
+  actions.push(REMOVE);
+  return actions;
+}

@@ -63,11 +63,14 @@ operator confirm in their next message.
 
 `loom session launch` cuts the new worktree from the mainline of *one* repo,
 defaulting to whatever checkout you run it in. Say which repo explicitly: pass
-`--repo <path>` pointing at (any directory inside) the target checkout, or `cd`
-into it first. The repos live under `/home/power/code/<repo>/` — e.g. `marin`,
-`tunix`, `marin-experiments`. So for marin work:
+`--repo`, or `cd` into it first. `--repo` takes either a path to (any directory
+inside) a local checkout, or a GitHub `owner/name` slug — a repo loom doesn't
+have yet is cloned on first use, so you can launch into one that was never
+checked out here. The local repos live under `/home/power/code/<repo>/` — e.g.
+`marin`, `tunix`, `marin-experiments`. So for marin work:
 
     loom session launch --repo /home/power/code/marin "<task>"
+    loom session launch --repo marin-community/vllm "<task>"   # never cloned here
 
 The branch is always namespaced `weaver/<slug>` regardless of repo, so the
 branch name won't tell you where it landed. After launching, check the printed

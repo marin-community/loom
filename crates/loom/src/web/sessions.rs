@@ -127,6 +127,15 @@ pub(super) async fn create_session(
     Extension(principal): Extension<Principal>,
     Json(req): Json<CreateReq>,
 ) -> ApiResult<Json<SessionView>> {
+    // Naming a managed repo here registers it: a signed-in principal asking to
+    // launch into `owner/name` is the grant, so a repo loom has never seen just
+    // works (it is cloned on the way through `create_session_core`). The `repos`
+    // allowlist exists to gate the *unauthenticated* GitHub webhook, which
+    // resolves its own clone against it before it ever reaches the shared core —
+    // so admitting a repo on an authenticated launch leaves that boundary intact.
+    if let Some(input) = req.repo.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        ensure_repo_registered(&st.db, input).await?;
+    }
     // Attribute the session to whoever the auth middleware resolved: a human
     // (cookie/token) → their username; a loopback/local-token call → the owner;
     // a future webhook → its bot principal. Read from the `Principal`, never
@@ -134,6 +143,25 @@ pub(super) async fn create_session(
     Ok(Json(
         create_session_core(st, req, Some(principal.username)).await?,
     ))
+}
+
+/// Add a managed-repo reference to the registry if it isn't there yet — the same
+/// slug → (remote, managed path) mapping `POST /api/repos` writes. Idempotent: a
+/// repo already registered keeps the remote it was registered with.
+async fn ensure_repo_registered(db: &Db, input: &str) -> ApiResult<()> {
+    let slug = repo::parse_slug(input).map_err(AppError::bad_request)?;
+    if repo::get_registered(db, &slug.slug()).await?.is_some() {
+        return Ok(());
+    }
+    let path = slug.path(&repo::repos_dir());
+    repo::register(
+        db,
+        &slug.slug(),
+        &repo::remote_url_for(input, &slug),
+        &path.to_string_lossy(),
+    )
+    .await?;
+    Ok(())
 }
 
 /// Resolve the **runtime** a session of `agent_kind` launches with. Every kind is

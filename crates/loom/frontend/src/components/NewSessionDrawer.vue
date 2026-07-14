@@ -210,11 +210,10 @@ async function create() {
       model: model.value || undefined,
       effort: effort.value || undefined,
     };
+    // A remote reference travels as `repo`: the server registers it if it is new
+    // and clones it on the way, so an unknown `owner/name` needs no separate
+    // "add the repo" step here. A path travels as `cwd`.
     if (looksLikeRemoteRepo(repoInput)) {
-      if (!managedRepos.value.some((r) => r.slug === repoInput || r.remote_url === repoInput)) {
-        await registerRepo(repoInput);
-        await loadManagedRepos();
-      }
       body.repo = repoInput;
     } else {
       body.cwd = repoInput;

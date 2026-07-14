@@ -144,6 +144,9 @@ export interface WeaverFixture {
   getSession(id: string): Promise<Session>;
   /** GET /api/sessions. */
   listSessions(): Promise<Session[]>;
+  /** POST /api/sessions/{id}/archive — tear the session down (branch kept), so a
+   *  test can set up the archived state it wants to act on. */
+  archiveSession(id: string): Promise<void>;
   /** Flip a session's status by writing a hook event row via `weaver hook`. */
   hook(session: Session, event: 'working' | 'waiting' | 'idle'): Promise<void>;
   /** Declare the agent's status (level + message) via `weaver status`. It
@@ -549,6 +552,10 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
 
       async listSessions() {
         return (await fetchJson(`${baseUrl}/api/sessions`)) as Session[];
+      },
+
+      async archiveSession(id) {
+        await fetchJson(`${baseUrl}/api/sessions/${id}/archive`, { method: 'POST' });
       },
 
       async hook(session, event) {

@@ -171,6 +171,16 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
   own `WEAVER.md`.
 - **Worktrees** live under `<repo>/.worktrees/<slug>` on `weaver/<slug>`
   (unless `--branch` reused an existing branch).
+- **Which repo a session forks from** is either a local checkout (`CreateReq.cwd`
+  — the server resolves its main worktree) or a **managed repo**
+  (`CreateReq.repo`: a GitHub `owner/name` slug or clone URL). A managed repo is
+  cloned into the repo store (`$WEAVER_REPOS_DIR`, default `$WEAVER_HOME/repos`,
+  laid out `<root>/<owner>/<name>`) on first use and fetched thereafter, and the
+  worktree is cut from that clone. Naming one on an authenticated create
+  registers it in the `repos` table, so `loom launch --repo acme/widgets` works
+  against a repo this machine has never checked out. That table doubles as the
+  clone **allowlist** for the *unauthenticated* GitHub webhook, which resolves its
+  own clone through `repo::resolve_clone` and refuses a repo that is not on it.
 
 ## REST API
 

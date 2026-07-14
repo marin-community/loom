@@ -1,8 +1,9 @@
 import { test, expect } from '../fixtures/weaver';
 
-// The lifecycle actions (Archive / Remove) live in the header's ⌄ details menu —
-// reachable from any surface and scroll position, not buried at the foot of the
-// Overview tab.
+// The lifecycle actions (Adopt / Recover / Archive / Remove) are reachable from
+// two places: the detail header's ⋯ manage menu, and each fleet-list row's ⋯
+// menu. A stuck session (orphaned/archived) also carries its remedy as a plain
+// button next to the status badge, on both surfaces.
 test.describe('session lifecycle actions', () => {
   test('Remove (confirmed) deletes the session and returns to the list', async ({
     page,
@@ -13,7 +14,7 @@ test.describe('session lifecycle actions', () => {
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
     await expect(page.getByRole('heading', { name: 'remove-task' })).toBeVisible();
 
-    await page.getByRole('button', { name: 'details' }).click();
+    await page.getByRole('button', { name: 'manage' }).click();
 
     // Remove uses a native confirm() dialog — accept it.
     page.once('dialog', (dialog) => {
@@ -36,7 +37,7 @@ test.describe('session lifecycle actions', () => {
     const s = await weaver.seedSession({ goal: 'Keep me', name: 'keep-task' });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
-    await page.getByRole('button', { name: 'details' }).click();
+    await page.getByRole('button', { name: 'manage' }).click();
 
     page.once('dialog', (dialog) => dialog.dismiss());
     await page.getByRole('button', { name: 'Remove' }).click();
@@ -54,7 +55,7 @@ test.describe('session lifecycle actions', () => {
     const s = await weaver.seedSession({ goal: 'Archive me', name: 'archive-task' });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
-    await page.getByRole('button', { name: 'details' }).click();
+    await page.getByRole('button', { name: 'manage' }).click();
 
     page.once('dialog', (dialog) => {
       expect(dialog.type()).toBe('confirm');
@@ -81,7 +82,7 @@ test.describe('session lifecycle actions', () => {
 
     await page.setViewportSize({ width: 1280, height: 300 });
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
-    await page.getByRole('button', { name: 'details' }).click();
+    await page.getByRole('button', { name: 'manage' }).click();
 
     for (const name of ['Archive', 'Remove']) {
       const box = await page.getByRole('button', { name }).boundingBox();
@@ -95,5 +96,52 @@ test.describe('session lifecycle actions', () => {
     await page.getByRole('button', { name: 'Remove' }).click();
     await expect(page).toHaveURL(/\/$/);
     expect(await weaver.listSessions()).toHaveLength(0);
+  });
+
+  test('a fleet-list row can archive its session without opening it', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({ goal: 'Archive from the list', name: 'row-archive' });
+
+    await page.goto(`${weaver.baseUrl}/`);
+    const row = page.locator(`[data-session-id="${s.id}"]`);
+    await expect(row).toBeVisible();
+
+    // The ⋯ menu is revealed by hovering the row, and holds the verbs.
+    await row.hover();
+    await row.getByTestId('row-actions').click();
+    await expect(row.getByTestId('row-actions-menu')).toBeVisible();
+
+    page.once('dialog', (dialog) => {
+      expect(dialog.type()).toBe('confirm');
+      dialog.accept();
+    });
+    await row.getByTestId('row-action-archive').click();
+
+    // Archived server-side — and we never left the list.
+    await expect.poll(async () => (await weaver.getSession(s.id)).status).toBe('archived');
+    await expect(page).toHaveURL(/\/$/);
+  });
+
+  test('an archived session offers Recover next to its badge, on both surfaces', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({ goal: 'Recover me', name: 'recover-task' });
+    await weaver.archiveSession(s.id);
+
+    // On the fleet list (archived rows are behind the reveal chip), the row
+    // carries its own remedy — no need to open the session to find it. It is the
+    // same component the detail header renders, hence the same test id.
+    await page.goto(`${weaver.baseUrl}/`);
+    await page.getByRole('button', { name: /archived/ }).click();
+    const row = page.locator(`[data-session-id="${s.id}"]`);
+    await expect(row.getByTestId('remedy-recover')).toBeVisible();
+
+    // And on the detail page, sitting against the ARCHIVED badge.
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await expect(page.getByTestId('status-badge')).toHaveText(/archived/i);
+    await expect(page.getByTestId('remedy-recover')).toBeVisible();
   });
 });
