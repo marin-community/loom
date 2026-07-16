@@ -25,7 +25,7 @@ usage:
   tapestry resize  <name> <cols> <rows>    resize the session
   tapestry attach  <name>                  attach this terminal to the session
   tapestry kill    <name>                  kill the session
-  tapestry supervise <json-spec>           (internal) run a supervisor"
+  tapestry supervise -                     (internal) run a supervisor; reads its JSON spec from stdin"
     );
     std::process::exit(2);
 }
@@ -75,9 +75,22 @@ async fn main() -> Result<()> {
     let cmd = args.first().map(String::as_str).unwrap_or("");
     match cmd {
         "supervise" => {
-            let spec_json = args.get(1).context("supervise needs a JSON spec")?;
-            let spec: LaunchSpec =
-                serde_json::from_str(spec_json).context("parsing supervise spec")?;
+            // The spec normally arrives on **stdin** (`supervise -`), so its
+            // secret env values never land on argv (world-readable via `ps` /
+            // /proc/<pid>/cmdline). An explicit JSON arg is still accepted for
+            // manual poking. See [`tapestry::spawn_detached`].
+            let spec: LaunchSpec = match args.get(1).map(String::as_str) {
+                Some("-") | None => {
+                    let mut buf = String::new();
+                    std::io::stdin()
+                        .read_to_string(&mut buf)
+                        .context("reading supervise spec from stdin")?;
+                    serde_json::from_str(&buf).context("parsing supervise spec (stdin)")?
+                }
+                Some(json) => {
+                    serde_json::from_str(json).context("parsing supervise spec (argv)")?
+                }
+            };
             // This process supervises exactly one session, so make it the
             // session's subreaper: anything the agent orphans (it backgrounds
             // gh, sleep, MCP servers, … which then detach) reparents here

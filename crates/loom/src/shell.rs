@@ -47,34 +47,40 @@ fn shell_cwd() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// Build the launch script for a scratch/debug login shell: export the operator
-/// surface an agent session gets — `WEAVER_API` + `LOOM_TOKEN` so the in-place
-/// `weaver`/`loom` CLIs work, the operator-managed [`agent_env`] vars, and (for a
-/// per-session debug shell) the session's `WEAVER_BRANCH` — then `exec` the login
-/// shell. This is a plain shell, not an agent, so it uses
-/// [`agent::bare_shell_script`] (no inner agent command) rather than going through
-/// the agent launch path.
-async fn shell_script(st: &AppState, branch_id: Option<&str>) -> String {
+/// Build the launch script **and** environment for a scratch/debug login shell.
+/// The env is the operator surface an agent session gets — `WEAVER_API` +
+/// `LOOM_TOKEN` so the in-place `weaver`/`loom` CLIs work, the operator-managed
+/// [`agent_env`] vars, and (for a per-session debug shell) the session's
+/// `WEAVER_BRANCH`. The script just `exec`s the login shell via
+/// [`agent::bare_shell_script`] (no inner agent command); the env is delivered
+/// out of band by [`backend::new_session`], not `export`-ed into the script, so
+/// secrets stay off argv. This is a plain shell, not an agent, so it does not go
+/// through the agent launch path.
+async fn shell_script(st: &AppState, branch_id: Option<&str>) -> (String, Vec<(String, String)>) {
     let api_url = format!("http://{}", st.addr);
     let local_token = agent::read_local_token();
     let extra = agent_env::pairs(&st.db).await.unwrap_or_default();
 
-    let mut env: Vec<(&str, &str)> = vec![("WEAVER_API", api_url.as_str())];
+    let mut env: Vec<(String, String)> = vec![("WEAVER_API".to_string(), api_url)];
     // A debug shell is rooted in a branch's worktree, so it gets that branch; the
     // operator scratch shell has none and is deliberately left without one.
     if let Some(branch) = branch_id {
-        env.push(("WEAVER_BRANCH", branch));
+        env.push(("WEAVER_BRANCH".to_string(), branch.to_string()));
     }
-    if let Some(token) = local_token.as_deref() {
-        env.push(("LOOM_TOKEN", token));
+    if let Some(token) = local_token {
+        env.push(("LOOM_TOKEN".to_string(), token));
     }
-    for (k, v) in &extra {
-        env.push((k.as_str(), v.as_str()));
-    }
+    env.extend(extra);
 
     let loom_exe = std::env::current_exe().ok();
     let weaver_dir = loom_exe.as_deref().and_then(Path::parent);
-    agent::bare_shell_script(&env, weaver_dir)
+    (agent::bare_shell_script(weaver_dir), env)
+}
+
+/// Borrow an owned env pair list as the `&[(&str, &str)]` slice
+/// [`backend::new_session`] takes.
+fn env_refs(env: &[(String, String)]) -> Vec<(&str, &str)> {
+    env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
 }
 
 /// Ensure the scratch-shell supervisor is up, spawning it if not. Idempotent: a
@@ -84,13 +90,14 @@ pub async fn ensure(st: &AppState) -> Result<()> {
     if backend::has_session(SHELL_SESSION).await {
         return Ok(());
     }
-    let script = shell_script(st, None).await;
+    let (script, env) = shell_script(st, None).await;
     let cwd = shell_cwd();
     tracing::info!(session = SHELL_SESSION, cwd = %cwd.display(), "spawning operator scratch shell");
     backend::new_session(
         SHELL_SESSION,
         &cwd,
         &script,
+        &env_refs(&env),
         backend::memory_max_gb(&st.db).await,
     )
     .await
@@ -144,10 +151,17 @@ pub async fn ensure_debug(
     if backend::has_session(&name).await {
         return Ok(name);
     }
-    let script = shell_script(st, Some(&branch.id)).await;
+    let (script, env) = shell_script(st, Some(&branch.id)).await;
     let cwd = PathBuf::from(&session.work_dir);
     tracing::info!(session = %name, cwd = %cwd.display(), "spawning session debug shell");
-    backend::new_session(&name, &cwd, &script, backend::memory_max_gb(&st.db).await).await?;
+    backend::new_session(
+        &name,
+        &cwd,
+        &script,
+        &env_refs(&env),
+        backend::memory_max_gb(&st.db).await,
+    )
+    .await?;
     Ok(name)
 }
 

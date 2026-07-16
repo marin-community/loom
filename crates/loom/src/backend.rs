@@ -62,13 +62,18 @@ echo 'loom: warning: could not apply the {memory_max_gb}g session memory limit' 
     )
 }
 
-/// Create a detached session running `script` via `sh -c` in `cwd`. A non-zero
-/// `memory_max_gb` prepends the [`memory_prelude`] confining the session to
-/// that many GiB.
+/// Create a detached session running `script` via `sh -c` in `cwd`, with `env`
+/// applied to the child's process environment. A non-zero `memory_max_gb`
+/// prepends the [`memory_prelude`] confining the session to that many GiB.
+///
+/// `env` is delivered out of band (over stdin to the supervisor, then via
+/// `execve`), not `export`-ed into `script`, so secret values never appear on
+/// any process's argv. See [`tapestry::spawn_detached`].
 pub async fn new_session(
     name: &str,
     cwd: &std::path::Path,
     script: &str,
+    env: &[(&str, &str)],
     memory_max_gb: u64,
 ) -> Result<()> {
     tracing::info!(session = %name, cwd = %cwd.display(), memory_max_gb, "spawning terminal session");
@@ -80,9 +85,7 @@ pub async fn new_session(
         name,
         cwd,
         script: &script,
-        // The launch script already bakes the agent env in as `export`
-        // statements (see agent::launch_script).
-        env: &[],
+        env,
         cols: 80,
         rows: 24,
         supervisor_bin: tapestry_bin().as_deref(),

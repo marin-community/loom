@@ -40,6 +40,11 @@ pub struct LaunchOptions<'a> {
     pub cwd: &'a Path,
     /// The shell command the supervisor runs as `sh -c <script>`.
     pub script: &'a str,
+    /// Environment for the child, applied via the process environment (execve),
+    /// **not** by `export`-ing into [`Self::script`]. Delivered to the supervisor
+    /// over stdin (see [`spawn_detached`]) and injected with `CommandBuilder::env`,
+    /// so secret values never touch any process's argv. Inherited by the exec'd
+    /// login shell and everything it spawns, exactly as `export` would.
     pub env: &'a [(&'a str, &'a str)],
     pub cols: u16,
     pub rows: u16,
@@ -58,9 +63,12 @@ pub struct LaunchOptions<'a> {
 /// to init — so the supervisor, and the agent under it, survive a loom restart.
 /// Returns once the supervisor is accepting on its socket.
 ///
-/// The supervisor is this very binary re-executed as `tapestry supervise`; the
-/// launch parameters travel as a single JSON argument so a script with spaces or
-/// quotes needs no shell-escaping.
+/// The supervisor is this very binary re-executed as `tapestry supervise -`; the
+/// launch parameters travel as a single JSON blob **over stdin**, not on argv.
+/// That keeps the spec's secret env values (tokens, API keys) out of the
+/// supervisor's `/proc/<pid>/cmdline`, which is world-readable via `ps` for the
+/// whole life of the long-running supervisor. It also means a script with spaces
+/// or quotes needs no shell-escaping.
 pub async fn spawn_detached(opts: &LaunchOptions<'_>) -> Result<()> {
     let exe = match opts.supervisor_bin {
         Some(p) => p.to_path_buf(),
@@ -76,9 +84,11 @@ pub async fn spawn_detached(opts: &LaunchOptions<'_>) -> Result<()> {
     });
 
     let mut cmd = std::process::Command::new(&exe);
+    // `-` tells the supervisor to read its JSON spec from stdin (see below); the
+    // spec never appears on argv.
     cmd.arg("supervise")
-        .arg(spec.to_string())
-        .stdin(Stdio::null())
+        .arg("-")
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     // setsid in the child so it leads a new session with no controlling
@@ -95,7 +105,23 @@ pub async fn spawn_detached(opts: &LaunchOptions<'_>) -> Result<()> {
             Ok(())
         });
     }
-    cmd.spawn().context("spawning detached supervisor")?;
+    let mut child = cmd.spawn().context("spawning detached supervisor")?;
+
+    // Deliver the spec over the stdin pipe, then close it so the supervisor's
+    // read hits EOF. The supervisor reads stdin to completion before any PTY
+    // setup, so this small (<64 KiB) write never blocks. The child handle is
+    // dropped without waiting — the supervisor is detached (setsid) and outlives
+    // us on purpose.
+    {
+        use std::io::Write as _;
+        let mut stdin = child
+            .stdin
+            .take()
+            .context("detached supervisor stdin pipe missing")?;
+        stdin
+            .write_all(spec.to_string().as_bytes())
+            .context("writing launch spec to supervisor stdin")?;
+    }
 
     // Wait (bounded) for the socket to come up so callers can drive the session
     // as soon as this returns.

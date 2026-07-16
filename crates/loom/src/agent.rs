@@ -476,11 +476,12 @@ pub fn concierge_primer() -> &'static str {
     BUILTIN_CONCIERGE_MD
 }
 
-/// Wrap a value in single quotes for safe `export NAME=…` in the launch script,
-/// escaping any embedded single quote the POSIX way (`'\''` — close the quote,
-/// an escaped literal quote, reopen). loom's own values never contain quotes,
-/// but operator-supplied env vars ([`crate::agent_env`]) are arbitrary, so a
-/// stray `'` must not break out of the assignment.
+/// Wrap a value in single quotes for safe interpolation into the launch script —
+/// e.g. a goal/primer file path in `"$(cat '…')"` — escaping any embedded single
+/// quote the POSIX way (`'\''` — close the quote, an escaped literal quote,
+/// reopen). Paths come from the operator's filesystem and are arbitrary, so a
+/// stray `'` must not break out of the quotes. (Environment values are *not*
+/// quoted here: they no longer ride in the script — see [`wrap_launch_script`].)
 fn sh_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -489,13 +490,17 @@ fn sh_single_quote_path(path: &Path) -> String {
     sh_single_quote(&path.display().to_string())
 }
 
-fn wrap_launch_script(inner: &str, env: &[(&str, &str)], weaver_dir: Option<&Path>) -> String {
+/// Build the launch script the supervisor runs as `sh -c <script>`: prepend the
+/// weaver bin dir to `$PATH`, run the (optional) inner agent command, then `exec`
+/// the login shell. The session's environment is delivered **out of band** (via
+/// the process environment — see [`start_terminal`] / [`backend::new_session`]),
+/// not `export`-ed here, so secret values never land on the child shell's argv.
+/// The `$PATH` prepend stays in the script because it needs the shell to expand
+/// the inherited `$PATH` at runtime; it carries no secret.
+fn wrap_launch_script(inner: &str, weaver_dir: Option<&Path>) -> String {
     let mut script = String::new();
     if let Some(dir) = weaver_dir {
         script.push_str(&format!("export PATH=\"{}:$PATH\"; ", dir.display()));
-    }
-    for (k, v) in env {
-        script.push_str(&format!("export {k}={}; ", sh_single_quote(v)));
     }
     if !inner.is_empty() {
         script.push_str(inner);
@@ -505,12 +510,13 @@ fn wrap_launch_script(inner: &str, env: &[(&str, &str)], weaver_dir: Option<&Pat
     script
 }
 
-/// The launch script for a **bare login shell** — loom's `env` exported, then
+/// The launch script for a **bare login shell** — the `$PATH` prepend, then
 /// `exec` the shell, with no inner agent command. Used by the operator scratch
 /// shell and per-session debug shells ([`crate::shell`]); those are plain shells,
-/// not agents, so they don't go through [`launch`] or an [`AgentType`].
-pub fn bare_shell_script(env: &[(&str, &str)], weaver_dir: Option<&Path>) -> String {
-    wrap_launch_script("", env, weaver_dir)
+/// not agents, so they don't go through [`launch`] or an [`AgentType`]. Their
+/// environment is delivered out of band alongside this script, same as an agent's.
+pub fn bare_shell_script(weaver_dir: Option<&Path>) -> String {
+    wrap_launch_script("", weaver_dir)
 }
 
 /// Everything [`launch`] needs to bring up a session's terminal.
@@ -606,23 +612,32 @@ async fn start_terminal(
     if let Some(token) = local_token.as_deref() {
         env.push(("LOOM_TOKEN", token));
     }
-    // Operator-managed vars are exported last, so for any shared name they'd win.
+    // Operator-managed vars are applied last, so for any shared name they'd win.
     // That's safe because `agent_env::validate_name` reserves loom's own
     // WEAVER_*/LOOM_ prefixes, so a stored var can never shadow the environment
     // loom needs — everything else the agent's tools read is theirs to set.
     for (k, v) in ctx.extra_env {
         env.push((k.as_str(), v.as_str()));
     }
-    let script = wrap_launch_script(inner, &env, weaver_dir);
+    // The env is delivered to the child through the process environment (see
+    // `backend::new_session` → `tapestry::spawn_detached`), not `export`-ed into
+    // the script — so tokens/keys never appear on any process's argv.
+    let script = wrap_launch_script(inner, weaver_dir);
     tracing::debug!(
         branch = ctx.branch_id,
         runtime,
         session = ctx.term_session,
         "launching agent session"
     );
-    backend::new_session(ctx.term_session, ctx.work_dir, &script, ctx.memory_max_gb)
-        .await
-        .with_context(|| format!("terminal: launching session {}", ctx.term_session))?;
+    backend::new_session(
+        ctx.term_session,
+        ctx.work_dir,
+        &script,
+        &env,
+        ctx.memory_max_gb,
+    )
+    .await
+    .with_context(|| format!("terminal: launching session {}", ctx.term_session))?;
     tracing::info!(
         branch = ctx.branch_id,
         runtime,
@@ -946,7 +961,6 @@ mod tests {
         runtime: &str,
         goal_file: Option<&Path>,
         primer_file: Option<&Path>,
-        env: &[(&str, &str)],
         mode: LaunchMode,
         model: &str,
         effort: &str,
@@ -958,14 +972,14 @@ mod tests {
             "shell" => String::new(),
             other => panic!("unexpected runtime in test helper: {other}"),
         };
-        wrap_launch_script(&inner, env, None)
+        wrap_launch_script(&inner, None)
     }
 
     #[test]
     fn bare_shell_script_just_execs_a_shell() {
-        assert_eq!(bare_shell_script(&[], None), "exec \"${SHELL:-/bin/sh}\"");
+        assert_eq!(bare_shell_script(None), "exec \"${SHELL:-/bin/sh}\"");
         // The `"shell"` runtime in the test helper builds the same bare shell.
-        let script = launch_script("shell", None, None, &[], LaunchMode::Fresh, "", "");
+        let script = launch_script("shell", None, None, LaunchMode::Fresh, "", "");
         assert_eq!(script, "exec \"${SHELL:-/bin/sh}\"");
     }
 
@@ -1019,25 +1033,30 @@ mod tests {
         let a = custom_agent("bare", "", "", "");
         assert_eq!(custom_command(&a, &ctx, LaunchMode::Fresh), "");
         assert_eq!(
-            wrap_launch_script(&custom_command(&a, &ctx, LaunchMode::Fresh), &[], None),
+            wrap_launch_script(&custom_command(&a, &ctx, LaunchMode::Fresh), None),
             "exec \"${SHELL:-/bin/sh}\""
         );
     }
 
     #[test]
-    fn claude_script_exports_env_and_runs_claude() {
+    fn claude_script_runs_claude_and_keeps_env_off_the_script() {
         let script = launch_script(
             "claude",
             Some(Path::new("/x/goal.txt")),
             None,
-            &[("WEAVER_API", "http://h:1")],
             LaunchMode::Fresh,
             "",
             "",
         );
-        assert!(script.contains("export WEAVER_API='http://h:1'; "));
         assert!(script.contains("claude \"$(cat '/x/goal.txt')\"; "));
         assert!(script.ends_with("exec \"${SHELL:-/bin/sh}\""));
+        // Regression guard: the session environment is delivered out of band via
+        // the process environment (see `start_terminal` / `backend::new_session`),
+        // so no `export` of an env var may leak into the argv-visible script.
+        assert!(
+            !script.contains("export WEAVER_API") && !script.contains("export LOOM_TOKEN"),
+            "env must not be baked into the launch script: {script}"
+        );
     }
 
     #[test]
@@ -1049,7 +1068,6 @@ mod tests {
             "claude",
             None,
             Some(Path::new("/x/primer.txt")),
-            &[],
             LaunchMode::Fresh,
             "",
             "",
@@ -1067,7 +1085,6 @@ mod tests {
             "claude",
             None,
             Some(Path::new("/x/primer.txt")),
-            &[],
             LaunchMode::Adopt,
             "",
             "",
@@ -1114,7 +1131,6 @@ mod tests {
             "codex",
             Some(Path::new("/x/goal.txt")),
             None,
-            &[],
             LaunchMode::Fresh,
             "",
             "",
@@ -1128,7 +1144,6 @@ mod tests {
             "codex",
             Some(Path::new("/x/goal.txt")),
             None,
-            &[],
             LaunchMode::Adopt,
             "",
             "",
@@ -1149,7 +1164,6 @@ mod tests {
             "codex",
             None,
             Some(Path::new("/x/primer.txt")),
-            &[],
             LaunchMode::Fresh,
             "",
             "",
@@ -1161,22 +1175,16 @@ mod tests {
     }
 
     #[test]
-    fn env_values_with_single_quotes_are_escaped() {
-        // An operator env var whose value contains a single quote must not break
-        // out of the `export NAME='…'` assignment.
-        let script = launch_script(
-            "shell",
-            None,
-            None,
-            &[("MSG", "it's \"quoted\"")],
-            LaunchMode::Fresh,
-            "",
-            "",
-        );
-        assert!(
-            script.contains(r#"export MSG='it'\''s "quoted"'; "#),
-            "got: {script}"
-        );
+    fn operator_env_never_reaches_the_launch_script() {
+        // Operator env vars used to be shell-quoted into the script as
+        // `export NAME='…'`; they are now delivered via the process environment
+        // (`CommandBuilder::env`, off argv) instead. A value with shell
+        // metacharacters therefore needs no quoting and — crucially — must not
+        // appear in the script at all, so `ps` can't read it. The script is a
+        // pure function of the inner command, independent of the env.
+        let script = launch_script("shell", None, None, LaunchMode::Fresh, "", "");
+        assert_eq!(script, "exec \"${SHELL:-/bin/sh}\"");
+        assert!(!script.contains("export MSG"), "got: {script}");
     }
 
     #[test]
@@ -1202,7 +1210,6 @@ mod tests {
             "codex",
             Some(Path::new("/x/goal.txt")),
             None,
-            &[],
             LaunchMode::Fresh,
             "gpt-5.5",
             "xhigh",
@@ -1219,7 +1226,6 @@ mod tests {
             "claude",
             Some(Path::new("/x/goal.txt")),
             None,
-            &[],
             LaunchMode::Adopt,
             "",
             "",
