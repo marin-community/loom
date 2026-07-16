@@ -1,6 +1,8 @@
 //! Session lifecycle over the REST API: create → list → recent-repos → delete,
 //! plus adoption of an externally-killed session and the no-goal create path.
 
+use std::process::Command;
+
 use serde_json::json;
 use serial_test::serial;
 
@@ -696,4 +698,107 @@ async fn session_records_its_launcher_as_tree_parent() {
         .delete(&format!("/api/sessions/{parent_id}"))
         .await
         .unwrap();
+}
+
+/// `GET /api/sessions/{key}/url` — the link an agent hands a human. It resolves
+/// by any session key (id or branch id, the `$WEAVER_BRANCH` the agent carries),
+/// and honours the operator's public origin so the URL works off-box.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_url_resolves_by_key_and_honours_the_public_base() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    let ws = client
+        .post(
+            "/api/sessions",
+            json!({ "goal": "link me", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let id = ws["id"].as_str().unwrap().to_string();
+    let branch_id = ws["branch"]["id"].as_str().unwrap().to_string();
+
+    // With no `auth.base_url`, the origin is derived from the request's Host —
+    // for a loopback CLI that is the server it just talked to. Honest, and right
+    // for a single-machine loom where the browser is on that same box.
+    let derived = client
+        .get(&format!("/api/sessions/{id}/url"))
+        .await
+        .unwrap();
+    assert_eq!(
+        derived["url"].as_str().unwrap(),
+        format!("http://{}/s/{id}", ts.addr),
+        "derived from the request origin"
+    );
+
+    // The branch id is a session key too — that is what `$WEAVER_BRANCH` holds,
+    // so `loom session url` inside a session resolves to the same link.
+    let by_branch = client
+        .get(&format!("/api/sessions/{branch_id}/url"))
+        .await
+        .unwrap();
+    assert_eq!(
+        by_branch["url"], derived["url"],
+        "branch id and session id name the same session"
+    );
+
+    // Once the operator declares a public origin, the URL is one an off-box
+    // reader (of a PR, say) can actually open. The trailing slash is absorbed.
+    client
+        .patch(
+            "/api/settings",
+            json!({ "auth.base_url": "https://loom.example.com/" }),
+        )
+        .await
+        .unwrap();
+    let public = client
+        .get(&format!("/api/sessions/{id}/url"))
+        .await
+        .unwrap();
+    assert_eq!(
+        public["url"].as_str().unwrap(),
+        format!("https://loom.example.com/s/{id}"),
+        "the configured public origin wins, with no doubled slash"
+    );
+
+    // And the CLI an agent actually runs: no argument, `$WEAVER_BRANCH` as loom
+    // exports it into a session. It must print the bare URL and nothing else, so
+    // `$(loom session url)` drops straight into a PR body.
+    let out = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(["session", "url"])
+        .env("WEAVER_API", ts.addr.to_string())
+        .env("WEAVER_BRANCH", &branch_id)
+        .output()
+        .expect("running loom session url");
+    assert!(
+        out.status.success(),
+        "loom session url failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("https://loom.example.com/s/{id}\n"),
+        "the bare URL, ready to interpolate"
+    );
+
+    // Outside a session, with nothing to resolve, it says so rather than
+    // printing a URL for some arbitrary session.
+    let out = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(["session", "url"])
+        .env("WEAVER_API", ts.addr.to_string())
+        .env_remove("WEAVER_BRANCH")
+        .output()
+        .expect("running loom session url");
+    assert!(
+        !out.status.success(),
+        "no session key ⇒ an error, not a guess"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not inside a loom session"),
+        "names the cause: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
 }

@@ -152,6 +152,16 @@ async fn cookie_secure(st: &AppState) -> bool {
     config::get_bool(&st.db, "auth.cookie_secure", config::DEFAULT_COOKIE_SECURE).await
 }
 
+/// [`external_base`], falling back to the address we are bound to when the
+/// request carries no Host — for building a link to hand out (a webhook reply, a
+/// PR back-link, `loom session url`), where there is no "no origin" answer and
+/// the bound address is the best guess available.
+pub(crate) async fn public_base(st: &AppState, headers: &HeaderMap) -> String {
+    external_base(st, headers)
+        .await
+        .unwrap_or_else(|| format!("http://{}", st.addr))
+}
+
 /// The externally-visible base URL, for the OAuth callback. Prefers the
 /// `auth.base_url` setting; otherwise derives `{proto}://{host}` from the request
 /// (honouring `X-Forwarded-Proto` from a TLS-terminating proxy).

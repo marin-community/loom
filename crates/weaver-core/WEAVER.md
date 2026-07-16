@@ -100,6 +100,8 @@ session's terminal directly, so you can nudge it without attaching:
 - `loom session preview <session>` — print its recent terminal screen, to see what
   it's doing right now. A session key is an id, branch id, branch name, or
   `repo:branch`.
+- `loom session url [<session>]` — the dashboard URL for a session, defaulting to
+  your own. The link to hand a human (see "Finishing work").
 
 This duplicates some of a coding agent's builtin sub-agents, but a weaver
 sub-session is fully decoupled: it survives independently, has its own git
@@ -177,6 +179,26 @@ has moved on since it was set (its timestamp predates your last activity).
   set `weaver status attention "<the question>"`, then continue with your
   best assumption.
 
+## Working a GitHub issue
+
+A session often comes from a GitHub thread — someone `@loom`-mentioned an issue
+or a PR, or your goal names one. That thread is where the people who care about
+the work are: they don't read this terminal, and may not read the dashboard.
+Anything they need to know goes there.
+
+- **Read the whole thread first** — `gh issue view <n> --comments` (`gh pr view
+  <n> --comments`). Your goal is a paraphrase of it; the constraint that decides
+  the design is usually three comments down.
+- **Reply where you were asked** — a question for the issue's author is a
+  `gh issue comment <n>`. Post it, raise `weaver status attention "<question>"`
+  so the dashboard shows what you're waiting on, then continue on your best
+  assumption rather than idling.
+- **Close the issue through the PR** — write `Fixes #<n>` in the body and let the
+  merge close it. Don't `gh issue close` by hand.
+- **Say which board a number belongs to.** Weaver issues and GitHub issues number
+  separately and will collide. On a GitHub thread `#12` is theirs — a weaver
+  issue number tells a reader there nothing, so describe the work instead.
+
 ## Designing before you build
 
 When the task turns on research or a tradeoff — an architecture choice, a
@@ -223,6 +245,17 @@ the work is ready:
   unless the user has told you otherwise. Most teams gate integration on review
   and CI; respect that. Use the project's normal PR workflow (e.g. `gh pr
   create`).
+- **Link the PR back to this session** — `loom session url` prints the dashboard
+  URL for the session you are in. Put it in the PR body, so a reviewer looking at
+  the diff can reach the context behind it: the goal, your status trail, the
+  designs and reports you wrote. Build the body in one go:
+
+      loom session url                        # https://loom.example.com/s/ab12cd34
+      gh pr create --title "…" --body "$(printf 'What this does…\n\nloom: %s\n' "$(loom session url)")"
+
+  Only the server knows loom's public address, which is why this is a command and
+  not something you assemble yourself — the `$WEAVER_API` you were handed is a
+  loopback address that resolves to nothing on the reviewer's machine.
 - **Drive the PR to green — opening it is the start of integration, not the
   end.** Do not walk away the moment it's open. Watch CI to completion
   (`gh pr checks <N> --watch`) and fetch review feedback — both the top-level

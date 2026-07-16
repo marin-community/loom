@@ -540,7 +540,10 @@ async fn maybe_post_backlink(
     if base.is_empty() {
         return; // no public URL configured → a link wouldn't resolve
     }
-    let body = format!("Working on this in loom: {base}/s/{}", session.id);
+    let body = format!(
+        "Working on this in loom: {}",
+        crate::web::session_url(&base, &session.id)
+    );
     if let Err(e) = state
         .trigger
         .gh()

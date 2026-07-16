@@ -122,6 +122,25 @@ pub(super) async fn get_session(
     Ok(Json(session_view(&st.db, &session, &branch).await?))
 }
 
+/// `GET /api/sessions/{id}/url` — the dashboard URL for a session.
+///
+/// The agent inside a session can't build this itself: it only knows the
+/// loopback `$WEAVER_API` it was handed, and a `http://127.0.0.1:7878/…` link
+/// pasted into a PR is useless to whoever reads it. Only the server knows the
+/// externally-visible origin (the operator's `auth.base_url`, else the request's
+/// own Host), so resolving it is the server's job — see `loom session url`.
+pub(super) async fn session_url_route(
+    State(st): State<AppState>,
+    headers: header::HeaderMap,
+    Path(key): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let (session, _) = require_session(&st.db, &key).await?;
+    let base = super::auth::public_base(&st, &headers).await;
+    Ok(Json(
+        json!({ "url": super::session_url(&base, &session.id) }),
+    ))
+}
+
 pub(super) async fn create_session(
     State(st): State<AppState>,
     Extension(principal): Extension<Principal>,

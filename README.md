@@ -100,6 +100,7 @@ loom session wait <session>           # block until it finishes or needs you
 loom session send <session> "try the curl again"   # type a message + Enter (trigger an agent round)
 loom session break <session>          # send Escape — interrupt the current turn
 loom session preview <session>        # print the recent terminal screen
+loom session url [<session>]          # its dashboard URL (yours by default) — the link to share
 loom ps                               # list active sessions
 loom session show <branch>                    # session detail
 loom attach <branch>                  # attach your terminal to the session (or use the browser terminal)
@@ -143,6 +144,11 @@ attention, `loom session send` types a message into the agent's terminal (and
 submits it to trigger a round), `loom session break` sends Escape to interrupt
 the current turn, and `loom session preview` prints the recent terminal screen.
 Each takes a session key — an id, branch id, branch name, or `repo:branch`.
+
+`loom session url` prints a session's dashboard URL — the link to hand a person,
+resolved against loom's externally-visible address (the `auth.base_url` setting,
+else the address you reached it on). With no key it is the session you are
+running inside, which is how an agent links a PR back to the work behind it.
 
 Three flags seed the task from existing work instead of a fresh description:
 `loom session launch --issue 123` takes the branch's title / goal / description

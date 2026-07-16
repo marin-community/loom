@@ -17,7 +17,7 @@ use crate::repo;
 use crate::session::{self as session_mod, Session};
 use weaver_core::branch as branch_mod;
 
-use super::auth::external_base;
+use super::auth::public_base;
 use super::sessions::create_session_core;
 use super::{ApiResult, AppError, AppState};
 
@@ -356,12 +356,10 @@ async fn handle_trigger(
                     )
                     .await
                     .ok();
-                    let base = external_base(&st, &headers)
-                        .await
-                        .unwrap_or_else(|| format!("http://{}", st.addr));
+                    let base = public_base(&st, &headers).await;
                     let reply = format!(
-                        "Passed your note to the session already on this thread — {base}/s/{}",
-                        sess.id
+                        "Passed your note to the session already on this thread — {}",
+                        super::session_url(&base, &sess.id)
                     );
                     if let Err(e) = st
                         .trigger
@@ -407,10 +405,8 @@ async fn handle_trigger(
     };
 
     // 11. Reply on the thread with the live session URL.
-    let base = external_base(&st, &headers)
-        .await
-        .unwrap_or_else(|| format!("http://{}", st.addr));
-    let reply = format!("On it — {base}/s/{}", view.id);
+    let base = public_base(&st, &headers).await;
+    let reply = format!("On it — {}", super::session_url(&base, &view.id));
     if let Err(e) = st
         .trigger
         .gh()

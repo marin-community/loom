@@ -310,6 +310,13 @@ pub(crate) async fn require_session(db: &Db, key: &str) -> ApiResult<(Session, B
     Err(AppError::not_found("session"))
 }
 
+/// The dashboard URL for a session — the page a person opens to watch it.
+/// `base` is an origin (with or without a trailing slash); pair it with
+/// [`auth::public_base`] to build a link that resolves off-box.
+pub(crate) fn session_url(base: &str, session_id: &str) -> String {
+    format!("{}/s/{session_id}", base.trim_end_matches('/'))
+}
+
 pub(crate) async fn require_branch(db: &Db, key: &str) -> ApiResult<Branch> {
     if let Some(branch) = branch_mod::resolve_key(db, key).await? {
         return Ok(branch);
@@ -498,6 +505,8 @@ pub fn router(state: AppState) -> Router {
             "/sessions/{id}",
             get(get_session).patch(patch_session).delete(delete_session),
         )
+        // The session's own dashboard URL — the link an agent hands a human.
+        .route("/sessions/{id}/url", get(session_url_route))
         .route("/sessions/{id}/archive", post(archive_session))
         .route("/sessions/{id}/adopt", post(adopt_session))
         .route("/sessions/{id}/recover", post(recover_session))

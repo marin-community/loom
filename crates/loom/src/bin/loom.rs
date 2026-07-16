@@ -212,6 +212,22 @@ enum SessionCmd {
     /// with `--name`. To pick up existing work instead of describing a new
     /// task, use `--claim <id>`, `--issue <n>`, or `--branch <name>`.
     Launch(LaunchOpts),
+    /// Print a session's dashboard URL — the link to hand a human.
+    ///
+    /// With no argument this is *your own* session (resolved from
+    /// `$WEAVER_BRANCH`), so an agent opening a PR can link back to the session
+    /// that produced it:
+    ///
+    ///     gh pr create --body "$(printf 'Fixes #12\n\nloom: %s\n' "$(loom session url)")"
+    ///
+    /// The URL is resolved by the server, which is the only thing that knows
+    /// loom's externally-visible address — building it from `$WEAVER_API` inside
+    /// a session would yield a loopback link nobody else can open.
+    Url {
+        /// Session key: id, branch id, branch name, or `repo:branch`.
+        /// Defaults to the current session.
+        session: Option<String>,
+    },
     /// Poll a session's status: lifecycle + the agent's attention and message.
     Poll {
         /// Session key: id, branch id, branch name, or `repo:branch`.
@@ -668,6 +684,7 @@ async fn run_issue(cmd: IssueCmd) -> Result<()> {
 async fn run_session(cmd: SessionCmd) -> Result<()> {
     match cmd {
         SessionCmd::Launch(opts) => cmd_launch(opts.into()).await,
+        SessionCmd::Url { session } => cmd_session_url(session).await,
         SessionCmd::Poll { session } => cmd_session_poll(session).await,
         SessionCmd::Wait {
             session,
@@ -2118,6 +2135,37 @@ fn attention_summary(ws: &Value) -> String {
     } else {
         format!("{attention} — {message}")
     }
+}
+
+/// `loom session url` — print a session's dashboard URL, defaulting to the
+/// session we are running inside. The server resolves the URL (only it knows
+/// loom's public origin); this just prints it bare, so it composes into a
+/// `gh pr create --body "$(…)"` without any trimming.
+async fn cmd_session_url(key: Option<String>) -> Result<()> {
+    let key = match key {
+        Some(k) => k,
+        // `$WEAVER_BRANCH` is the branch id loom exports into every session it
+        // launches, and the API resolves a branch id as a session key.
+        None => std::env::var("WEAVER_BRANCH")
+            .ok()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .context(
+                "not inside a loom session ($WEAVER_BRANCH is not set) — \
+                 pass a session key explicitly: loom session url <session>",
+            )?,
+    };
+    let client = client::default();
+    let res: Value = client
+        .get(&format!("/api/sessions/{key}/url"))
+        .await
+        .with_context(|| format!("no live session for '{key}'"))?;
+    let url = res
+        .get("url")
+        .and_then(Value::as_str)
+        .context("server returned no url")?;
+    println!("{url}");
+    Ok(())
 }
 
 /// `loom session poll` — a one-shot status read: lifecycle + attention.
