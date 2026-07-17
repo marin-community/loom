@@ -485,6 +485,103 @@ async fn repeat_trigger_forwards_to_active_session() {
         .unwrap();
 }
 
+/// A follow-up @loom comment on a thread whose session is orphaned — its terminal
+/// died but the DB row still counts as active — must not be dropped. loom fails to
+/// forward into the dead terminal, retires the orphaned session, and launches a
+/// fresh one on the same branch (the trigger goal carries the comment), replying
+/// with the launch cue rather than a forward ack.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn orphaned_session_terminal_relaunches_instead_of_dropping() {
+    let (ts, fake) = boot().await;
+    let _remotes = prepare_repo(&ts).await;
+
+    // First trigger → one session with a live terminal.
+    let body = trigger_body("rjpower", 42, "@loom start");
+    assert_eq!(
+        post(&ts, "d-orphan-1", Some(sign(SECRET, &body)), &body)
+            .await
+            .status(),
+        200
+    );
+    wait_for_sessions(&ts, 1).await;
+    wait_for_comments(&fake, 1).await;
+
+    let first_id = ts.client.get("/api/sessions").await.unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Orphan it: kill the terminal but leave the DB row active, then wait until the
+    // terminal is genuinely gone so the next forward attempt deterministically fails.
+    let term = format!("weaver-{first_id}");
+    loom::backend::kill_session(&term).await.unwrap();
+    for _ in 0..200 {
+        if !loom::backend::has_session(&term).await {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        !loom::backend::has_session(&term).await,
+        "the first session's terminal is dead before the second trigger"
+    );
+
+    // A second @loom comment on the same issue: forwarding into the dead terminal
+    // fails, so loom retires the orphaned session and launches a fresh one.
+    let body2 = trigger_body("rjpower", 42, "@loom pick this back up");
+    assert_eq!(
+        post(&ts, "d-orphan-2", Some(sign(SECRET, &body2)), &body2)
+            .await
+            .status(),
+        200
+    );
+
+    // A fresh session appears (two rows now: the retired one + the new one) and a
+    // second reply lands.
+    wait_for_sessions(&ts, 2).await;
+    wait_for_comments(&fake, 2).await;
+
+    let sessions = ts.client.get("/api/sessions").await.unwrap();
+    let sessions = sessions.as_array().unwrap().clone();
+    let retired = sessions
+        .iter()
+        .find(|s| s["id"].as_str() == Some(first_id.as_str()))
+        .expect("the orphaned session is still recorded");
+    assert_eq!(
+        retired["status"].as_str(),
+        Some("error"),
+        "the unreachable session was retired to a terminal status so the branch is free"
+    );
+    let fresh_id = sessions
+        .iter()
+        .find(|s| s["id"].as_str() != Some(first_id.as_str()))
+        .expect("a fresh session was launched")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The reply is the launch cue, not a forward ack — proving a relaunch happened
+    // rather than the comment being silently swallowed by the dead terminal.
+    let comments = fake.comments.lock().unwrap().clone();
+    assert_eq!(comments.len(), 2, "one reply per trigger");
+    assert!(
+        comments[1].2.starts_with("On it — "),
+        "the follow-up trigger replies with the launch cue: {}",
+        comments[1].2
+    );
+    assert!(
+        comments[1].2.contains(&format!("/s/{fresh_id}")),
+        "the reply links the fresh session: {}",
+        comments[1].2
+    );
+
+    ts.client
+        .delete(&format!("/api/sessions/{fresh_id}"))
+        .await
+        .unwrap();
+}
+
 /// A comment on a **pull request** attaches the session's worktree to the PR's own
 /// head branch, so the agent's commits land on the PR.
 #[serial]

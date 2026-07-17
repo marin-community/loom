@@ -333,7 +333,9 @@ async fn handle_trigger(
     }
 
     // 9. If an active session already owns the target branch, forward the new
-    //    comment into it rather than spawning a duplicate.
+    //    comment into it rather than spawning a duplicate — unless its terminal is
+    //    unreachable, in which case retire it and fall through to a fresh launch
+    //    (below) so the comment isn't dropped.
     if let Some(branch) = target_branch.as_deref() {
         if let Ok(Some(b)) = branch_mod::find_by_repo_branch(&st.db, &repo_root_str, branch).await {
             if let Ok(Some(sess)) = session_mod::active_for_branch(&st.db, &b.id).await {
@@ -370,8 +372,42 @@ async fn handle_trigger(
                         tracing::warn!(error = %e, repo = %slug.slug(), "github webhook: posting forward-ack failed");
                     }
                     tracing::info!(session = %sess.id, repo = %slug.slug(), number, "github webhook: forwarded comment to active session");
+                    return Ok(None);
                 }
-                return Ok(None);
+                // The session is active in the DB but its terminal is unreachable —
+                // an orphaned session that outlived its terminal (e.g. a crash the
+                // monitor hasn't marked yet). Retire it with a terminal status so the
+                // branch is free — `error`, not `archived`, because `active_for_branch`
+                // still counts `archived` as active and `create_session_core` would
+                // then reject the branch as busy. Then fall through to launch a fresh
+                // session: the trigger goal already carries this comment and the dead
+                // session's commits are on the branch, so nothing is dropped. The
+                // fresh launch reuses the existing worktree (see `existing_branch`).
+                tracing::warn!(
+                    session = %sess.id,
+                    branch = %b.id,
+                    repo = %slug.slug(),
+                    "github webhook: session terminal unreachable; retiring it and launching a fresh session"
+                );
+                if let Err(e) = session_mod::set_status(&st.db, &sess.id, "error").await {
+                    tracing::warn!(session = %sess.id, error = %e, "github webhook: retiring unreachable session failed");
+                    return Err(format!(
+                        "retiring unreachable session {} failed: {e}",
+                        sess.id
+                    ));
+                }
+                crate::events::record(
+                    &st.db,
+                    &st.bus,
+                    &b.id,
+                    "status",
+                    serde_json::json!({
+                        "status": "error",
+                        "reason": "terminal unreachable when forwarding a new @loom comment; relaunching",
+                    }),
+                )
+                .await
+                .ok();
             }
         }
     }
