@@ -125,7 +125,7 @@ const quiet = computed(() => quietTags(props.ws));
         @blur="commit"
       />
       <div v-else class="group flex min-w-0 items-center gap-1.5">
-        <h1 class="min-w-0 truncate text-base font-semibold tracking-tight">
+        <h1 class="min-w-0 truncate font-serif text-[19px] font-semibold tracking-tight">
           {{ ws.branch.title || ws.branch.name }}
         </h1>
         <button
@@ -199,11 +199,12 @@ const quiet = computed(() => quietTags(props.ws));
       </div>
     </div>
 
-    <!-- Row 2 — the current-state headline (the agent's "where am I"). Full
-         foreground — it's the point of the page, not chrome. -->
+    <!-- Row 2 — the current-state headline (the agent's "where am I"). Set in the
+         serif annotation voice (italic), like the note on each fleet row — full
+         foreground, it's the point of the page, not chrome. -->
     <p
       v-if="statusMessage"
-      class="mt-0.5 line-clamp-2 text-xs leading-snug text-fg"
+      class="mt-0.5 line-clamp-2 font-serif text-[13px] italic leading-snug text-fg"
       data-testid="status-message"
     >
       {{ statusMessage }}

@@ -3,28 +3,42 @@
 How the loom SPA looks and why — the design system the views are built
 against. Architecture (routes, API, build) lives in
 [ARCHITECTURE.md](ARCHITECTURE.md); this file owns the visual rules. The
-direction in one line: **an instrument panel, not a website** — VS Code's
-workbench and Linear's density, not a centered bootstrap template.
+direction in one line: **a reading room, not a dashboard** — the density and
+edge-to-edge discipline of an instrument panel, dressed in the warmth of an
+academic study: warm paper, a serif prose voice, iron-gall ink for the one
+accent, and a muted naturalist's palette for signal. Not a cold VS Code
+workbench, not a centered bootstrap template.
 
 ## Principles
 
 - **Edge-to-edge workbench.** A persistent left rail, full-bleed content, a
   thin status bar. No centered `max-w` container, no tall header.
 - **Chrome recedes, content advances.** The rail and status bar sit on the
-  darkest surface and stay near-monochrome; the one saturated accent (blue) is
-  reserved for the active view, focus, links, and the primary action.
+  recessed surface and stay quiet; the one accent — iron-gall ink (a muted
+  blue-black, the colour of a fountain pen, not SaaS blue) — is reserved for the
+  active view, focus, links, and the primary action.
+- **Warm paper, not clinical gray.** Both palettes are warm: light is a
+  low-chroma stone paper (archival card stock, deliberately *not* cream) with
+  warm near-black ink; dark is a warm charcoal read by lamplight, not a neutral
+  void. The warmth is what lets a long day rest the eye.
+- **Three typographic voices.** A literary **serif** carries human prose
+  (session titles, goals, issue titles, status notes, conversation, markdown); a
+  quiet **sans** is the UI chrome (toolbars, labels, buttons); the **mono** is
+  everything machine-made. The reader always knows, by the letterforms alone,
+  whether they're reading a person, the interface, or the machine.
 - **Borders, not shadows.** Regions separate with 1px `--line` hairlines.
   Shadows belong only to true overlays (popovers, dropdowns).
 - **Mono for everything machine-made.** Ids, branch refs, paths, timestamps,
   counts, statuses — `--font-mono`, usually at 11–12px, with
   `tabular-nums` so live numbers don't jump.
-- **One loud signal, a calm spectrum below it.** Amber (attention) and red
+- **One loud signal, a calm spectrum below it.** Ochre (attention) and oxblood
   (blocked) are the only *loud* colors, reserved for the resolved attention
-  axis. Below them sits a calm semantic palette — green (`--ok`), cyan
-  (`--info`), violet (`--agent`) — each lower-saturation than the loud axis, so
-  lifecycle, PR state, idle and model-tier read with scannable color without
-  ever out-shouting a session that needs a human. Tags and free-form metadata
-  stay neutral.
+  axis — warmed toward pigment so they stay urgent without glare. Below them sits
+  a naturalist's palette — sage green (`--ok`), slate-teal (`--info`), dusk plum
+  (`--agent`) — each muted a step further than the loud axis, so lifecycle, PR
+  state, idle and model-tier read with scannable color without ever out-shouting
+  a session that needs a human, and none of it reads as crayon. Tags and
+  free-form metadata stay neutral.
 - **Instant, not animated.** An instrument panel shows content, it doesn't
   perform it in. Views are kept alive across navigation, so returning to the
   fleet or a session is instant — no remount, no refetch flash, no replayed
@@ -64,38 +78,45 @@ workbench and Linear's density, not a centered bootstrap template.
 ## Color
 
 Semantic tokens only (`bg-surface`, `text-muted`, `border-line`, …) — never
-raw Tailwind palette colors in views. Both palettes are neutral (VS Code
-Modern–derived), not blue-tinted slate:
+raw Tailwind palette colors in views. Both palettes are warm — a reading room,
+not VS Code:
 
-- **Dark**: canvas `#1f1f1f`, surface `#252526`, rail/chrome `#161616`,
-  hairline `#2b2b2b`, text `#e4e4e4` / muted `#9d9d9d` / faint `#6e6e6e`,
-  accent `#3b82f6`. The embedded terminal pane sits on `#181818` so it reads
-  as a recessed panel, not a black hole.
-- **Light**: canvas `#f5f5f5`, surface `#ffffff`, rail `#ebebeb`, hairline
-  `#e0e0e0`, text `#1f1f1f` / muted `#5a5a5a` / faint `#8c8c8c`, accent
-  `#005fb8`.
-- **Attention axis**: amber `attn-*` / red `block-*` tokens, soft row washes +
-  2px left accent line — the only loud fills.
-- **Calm semantic hues**: `ok-*` (green — healthy / live / passing), `info-*`
-  (cyan — resting / neutral-positive), `agent-*` (violet — model / AI
-  identity). Each carries the hue plus a `-soft` wash and a `-line` for
-  dots/hairlines, and each is a step softer than the loud axis. They tint the
-  list's per-row status dot, lifecycle badges, GitHub PR state, the idle chip,
-  the "▶ Working" / "all calm" cues, and the model tier — color that *means*
-  something, so the fleet reads at a glance and a raised signal still wins the
-  eye.
+- **Light** ("by daylight"): canvas `#eceadf` (warm stone paper), surface
+  `#f7f5ee`, rail `#e3e0d4`, hairline `#dbd7c9`, ink `#26221a` / muted `#5f584b`
+  / faint `#8c8574`, accent `#345b7d` (iron-gall ink).
+- **Dark** ("by lamplight"): canvas `#1b1915` (warm charcoal), surface
+  `#232019`, rail `#151310`, hairline `#332f27`, text `#e9e3d6` (warm
+  paper-white) / muted `#a49b8b` / faint `#726a5c`, accent `#7ea6c6` (lifted
+  iron-gall ink). The embedded terminal pane sits on `#141210` so it reads as a
+  recessed panel, not a black hole.
+- **Attention axis**: ochre `attn-*` / oxblood `block-*` tokens, soft row washes
+  + 2px left accent line — the only loud fills, warmed toward pigment.
+- **Calm semantic hues**: `ok-*` (sage green — healthy / live / passing),
+  `info-*` (slate-teal — resting / neutral-positive), `agent-*` (dusk plum —
+  model / AI identity). Each carries the hue plus a `-soft` wash and a `-line`
+  for dots/hairlines, and each is muted a step further than the loud axis. They
+  tint the list's per-row status dot, lifecycle badges, GitHub PR state, the idle
+  chip, the "▶ Working" / "all calm" cues, and the model tier — a naturalist's
+  plate, not a crayon box: color that *means* something, so the fleet reads at a
+  glance and a raised signal still wins the eye.
 
 ## Type & density
 
-- **Fonts**: IBM Plex Sans (UI) + IBM Plex Mono (machine text), bundled via
-  `@fontsource` — self-hosted with the app, no CDN, system stacks as
-  fallback. The xterm terminal uses the same mono so the terminal and the
-  metadata around it share one voice.
-- **Scale**: 13px is the workhorse UI size (row titles, controls); 12px
-  secondary text; 11px (`text-2xs`) for uppercase micro-labels —
-  `font-medium uppercase tracking-wider text-muted` — and all badge/chip
-  text. Page-hero type sizes don't exist; the biggest text in the app is a
-  detail-page title at 16px.
+- **Fonts** — three voices, bundled via `@fontsource` (self-hosted variable
+  woff2, no CDN, system stacks as fallback):
+  - `--font-serif` **Source Serif 4** (optical-size axis) — the app's prose
+    voice: session titles, goals, issue titles, status notes, conversation, and
+    rendered markdown. The optical axis means a 19px title and an 11px caption
+    are each cut for their size.
+  - `--font-sans` **Source Sans 3** — the quiet UI chrome: toolbars, labels,
+    buttons, micro-caps. It stays out of the serif's way.
+  - `--font-mono` **IBM Plex Mono** — every machine identifier, and the xterm
+    terminal, so the terminal and the metadata around it share one voice.
+- **Scale**: prose is set in the serif (row title 15px, detail title 19px, goal/
+  status note 13px, markdown 15px); UI chrome is 13px sans (controls), 12px
+  secondary, 11px (`text-2xs`) uppercase micro-labels
+  (`font-medium uppercase tracking-wider text-muted`) and all badge/chip text.
+  The biggest text in the app is a detail-page title at 19px.
 - **Density**: rows `px-3 py-2` (~36px), panels `p-4`, controls 28px tall,
   radius 4px on controls and 6px on panels. The 4/8/12/16 spacing grid.
 - **Numbers**: `tabular-nums` globally.

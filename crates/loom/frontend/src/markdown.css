@@ -8,8 +8,12 @@
    --------------------------------------------------------------------------- */
 .markdown-body {
   color: var(--fg);
-  font-size: 14px;
-  line-height: 1.65;
+  /* Prose is set in the serif voice (docs/loom-ui.md "Type") — rendered goals,
+     artifacts and docs read like a printed page, not a form field. Machine
+     spans (code, smartdoc chips) opt back into mono below. */
+  font-family: var(--font-serif);
+  font-size: 15px;
+  line-height: 1.7;
   word-wrap: break-word;
 }
 

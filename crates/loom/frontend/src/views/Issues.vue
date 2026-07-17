@@ -531,7 +531,7 @@ async function removeTag(i: Issue, key: string) {
           <span class="shrink-0 font-mono text-2xs text-faint">#{{ i.id }}</span>
           <button
             type="button"
-            class="min-w-0 flex-1 truncate text-left text-sm text-fg hover:text-accent"
+            class="min-w-0 flex-1 truncate text-left font-serif text-[15px] text-fg hover:text-accent"
             :class="{ 'line-through decoration-muted': i.status !== 'open' }"
             data-testid="issue-title"
             :title="editing === i.id ? 'Collapse editor' : 'Edit issue'"

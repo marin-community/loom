@@ -369,7 +369,7 @@ async function handleCreated() {
                  clickable above the overlay. -->
             <router-link
               :to="`/s/${s.id}`"
-              class="stretched-link truncate text-sm font-semibold text-fg hover:text-accent"
+              class="stretched-link truncate font-serif text-[15px] font-semibold text-fg hover:text-accent"
             >
               {{ s.branch.title || s.branch.name }}
             </router-link>
@@ -406,18 +406,20 @@ async function handleCreated() {
             />
           </div>
 
-          <!-- Current-state headline (agent's status message), else the goal.
-               On an attention row the goal steps up from faint to muted so the
-               metadata doesn't recede next to the loud chip. -->
+          <!-- Current-state headline (agent's status message), else the goal —
+               both in the serif prose voice. The status note is italic, a live
+               margin annotation; the goal is roman and quieter beneath it. On an
+               attention row the goal steps up from faint to muted so the metadata
+               doesn't recede next to the loud chip. -->
           <p
             v-if="messageOf(s)"
-            class="mt-0.5 truncate text-xs text-muted"
+            class="mt-0.5 truncate font-serif text-[13px] italic text-muted"
           >
             {{ messageOf(s) }}
           </p>
           <p
             v-if="s.branch.goal"
-            class="mt-0.5 truncate text-xs"
+            class="mt-0.5 truncate font-serif text-[13px]"
             :class="effectiveAttention(s).level === 'ok' ? 'text-faint' : 'text-muted'"
           >
             {{ s.branch.goal }}

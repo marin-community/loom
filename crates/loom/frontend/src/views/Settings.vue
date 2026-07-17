@@ -390,29 +390,14 @@ onMounted(load);
                     ? 'settings-tab-account'
                     : `settings-category-${item.id}`
             "
-            class="flex w-full items-center gap-2 border-b border-line px-3 py-2 text-left text-sm last:border-0"
+            class="flex w-full items-center gap-2 border-b border-line border-l-2 px-3 py-2 text-left text-sm last:border-b-0"
             :class="
               category === item.id
-                ? 'bg-input font-medium text-fg'
-                : 'text-muted hover:bg-subtle hover:text-fg'
+                ? 'border-l-accent bg-input font-medium text-fg'
+                : 'border-l-transparent text-muted hover:bg-subtle hover:text-fg'
             "
             @click="setCategory(item.id)"
           >
-            <span
-              class="h-1.5 w-1.5 rounded-full"
-              :class="
-                item.id === 'agents'
-                  ? 'bg-agent-line'
-                  : item.id === 'github'
-                    ? 'bg-ok-line'
-                    : item.id === 'authentication'
-                      ? 'bg-attn-line'
-                      : item.id === 'tokens'
-                        ? 'bg-info-line'
-                        : 'bg-line'
-              "
-              aria-hidden="true"
-            ></span>
             {{ item.label }}
           </button>
         </div>

@@ -63,105 +63,122 @@
   --color-block-soft: var(--block-soft);
   --color-block-line: var(--block-line);
 
-  /* Type. IBM Plex, bundled with the app via @fontsource (imported in
-     main.ts) — self-hosted woff2, no CDN, so offline still works; the system
-     stacks are the fallback while the faces stream in. Sans for prose; the
-     matching mono for identifiers, refs, ids, branch names, timestamps and
-     all metadata. */
-  --font-sans: "IBM Plex Sans Variable", ui-sans-serif, system-ui,
-    -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans",
-    sans-serif;
+  /* Type — three voices (docs/loom-ui.md "Type & density"). Bundled via
+     @fontsource (imported in main.ts) — self-hosted woff2, no CDN, so offline
+     works; system stacks fall back while faces stream in.
+
+     - `serif` (Source Serif 4, optical-size axis) carries *human prose*: session
+       titles, goals, issue titles, status notes, conversation and rendered
+       markdown. This is the app's academic voice.
+     - `sans` (Source Sans 3) is the quiet UI chrome: toolbars, labels, buttons,
+       micro-caps. It stays out of the way so the serif reads.
+     - `mono` (IBM Plex Mono) is everything machine-made: ids, refs, paths,
+       timestamps, counts, and the terminal. */
+  --font-serif: "Source Serif 4 Variable", ui-serif, Georgia, Cambria,
+    "Times New Roman", serif;
+  --font-sans: "Source Sans 3 Variable", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Code", "SF Mono",
     "JetBrains Mono", "Fira Code", Menlo, Consolas, "DejaVu Sans Mono",
     monospace;
 }
 
-/* Light palette (default). Neutral grays (VS Code Modern–derived), not
-   blue-tinted slate: the chrome recedes, the one blue accent advances. */
+/* Light palette (default) — "the reading room, by daylight". Warm stone paper,
+   not clinical VS-Code gray: a low-chroma greige canvas (archival card stock, a
+   museum wall) with warm near-black ink. Deliberately NOT cream — the warmth is
+   grey-leaning so it reads as a study, not a coffee stain. The one accent is
+   iron-gall ink: the muted blue-black of a fountain pen and old manuscripts,
+   which advances against the paper without the cold of SaaS blue. */
 :root {
-  --canvas: #f5f5f5;        /* page background */
-  --rail: #ebebeb;          /* nav rail + status bar — the recessed chrome */
-  --surface: #ffffff;       /* cards / panels */
-  --input: #efefef;         /* form fields */
-  --line: #e0e0e0;          /* hairline borders */
-  --fg: #1f1f1f;            /* primary text */
-  --muted: #5a5a5a;         /* secondary text */
-  --faint: #8c8c8c;         /* tertiary text */
-  --subtle: #e8e8e8;        /* secondary buttons / hover fills */
-  --subtle-hover: #dcdcdc;
-  --tree-line: #a3a3a3;     /* session-tree guides; well above --line
-                               so the threading connectors read clearly on white */
-  --accent: #005fb8;        /* primary action (VS Code light button blue) */
-  --accent-hover: #004c95;
-  --accent-fg: #ffffff;
-  --code: #f3f3f3;          /* preformatted blocks (diffs, prompts) */
-  --code-fg: #383838;
+  --canvas: #eceadf;        /* warm stone — page background */
+  --rail: #e3e0d4;          /* nav rail + status bar — the recessed chrome */
+  --surface: #f7f5ee;       /* cards / panels — a lighter leaf of the same paper */
+  --input: #e6e3d7;         /* form fields */
+  --line: #dbd7c9;          /* warm hairline borders */
+  --fg: #26221a;            /* primary ink — warm near-black */
+  --muted: #5f584b;         /* secondary text */
+  --faint: #8c8574;         /* tertiary text */
+  --subtle: #e4e0d3;        /* secondary buttons / hover fills */
+  --subtle-hover: #d8d3c3;
+  --tree-line: #a8a08c;     /* session-tree guides; warm and well above --line
+                               so the threading connectors read clearly */
+  --accent: #345b7d;        /* iron-gall ink blue — primary action / link */
+  --accent-hover: #274a68;
+  --accent-fg: #f7f5ee;
+  --code: #e8e5d8;          /* preformatted blocks (diffs, prompts) */
+  --code-fg: #37322a;
 
-  /* Attention (amber) + Blocked (red) — the reserved loud signal. */
-  --attn: #b45309;          /* amber-700 — loud fill */
-  --attn-fg: #fffbeb;       /* amber-50  — text on fill */
-  --attn-soft: #fef3c7;     /* amber-100 — row wash */
-  --attn-line: #f59e0b;     /* amber-500 — left accent border */
-  --block: #b91c1c;         /* red-700 */
-  --block-fg: #fef2f2;      /* red-50 */
-  --block-soft: #fee2e2;    /* red-100 */
-  --block-line: #ef4444;    /* red-500 */
+  /* Attention (ochre) + Blocked (oxblood) — the reserved loud signal, warmed
+     toward pigment so it stays urgent without the fire-engine glare. */
+  --attn: #90621a;          /* ochre — loud fill */
+  --attn-fg: #f7f0dd;       /* text on fill */
+  --attn-soft: #efe7cf;     /* ochre wash — row background */
+  --attn-line: #bf8f30;     /* ochre — left accent border / dot */
+  --block: #8f342c;         /* oxblood */
+  --block-fg: #f4e6e1;
+  --block-soft: #ecdcd4;    /* oxblood wash */
+  --block-line: #b5564a;    /* oxblood — left accent / dot */
 
-  /* Calm semantic hues — muted, a step softer than the loud amber/red so they
-     add rhythm without out-shouting the attention axis. */
-  --ok: #15803d;            /* green-700 — healthy / live / passing */
-  --ok-soft: #e8f2ec;       /* green wash */
-  --ok-line: #4ca06a;       /* green dot / hairline */
-  --info: #0e7490;          /* cyan-700 — resting / neutral-positive */
-  --info-soft: #e3f0f4;     /* cyan wash */
-  --info-line: #3a9bb5;     /* cyan dot / hairline */
-  --agent: #7c3aed;         /* violet-600 — model / AI identity accent */
-  --agent-soft: #f0eafc;    /* violet wash */
-  --agent-line: #a98ae8;    /* violet dot / hairline */
+  /* Calm semantic hues — a naturalist's plate, not a crayon box: muted sage,
+     slate-teal, dusk plum. A step softer than the loud axis so they add rhythm
+     without out-shouting attention. */
+  --ok: #59703f;            /* sage green — healthy / live / passing */
+  --ok-soft: #e6e8d5;       /* sage wash */
+  --ok-line: #7d9257;       /* sage dot / hairline */
+  --info: #3d6b76;          /* slate-teal — resting / neutral-positive */
+  --info-soft: #dde7e7;     /* slate-teal wash */
+  --info-line: #5f8b95;     /* slate-teal dot / hairline */
+  --agent: #6f5484;         /* dusk plum — model / AI identity accent */
+  --agent-soft: #e7e0e9;    /* plum wash */
+  --agent-line: #9880a8;    /* plum dot / hairline */
 }
 
-/* Dark palette — near-black neutral (VS Code Modern), not slate; surfaces
-   step up in small increments and the rail recedes below the canvas. */
+/* Dark palette — "the reading room, by lamplight". Warm charcoal, not a neutral
+   void: the canvas carries a faint brown-black warmth (aged paper under a desk
+   lamp) and the text is a warm paper-white, so a long night reads as a lit study
+   rather than a black terminal. Surfaces step up in small warm increments; the
+   accent is a lifted iron-gall ink that glows without going cold. */
 .dark {
-  --canvas: #1f1f1f;        /* editor background */
-  --rail: #161616;          /* nav rail + status bar — deepest chrome */
-  --surface: #252526;       /* cards / panels, one step up */
-  --input: #2d2d2e;         /* form fields */
-  --line: #2f2f2f;          /* hairline borders */
-  --fg: #e4e4e4;            /* primary text — just under pure white */
-  --muted: #9d9d9d;         /* secondary text */
-  --faint: #6e6e6e;         /* tertiary text */
-  --subtle: #2f2f30;        /* secondary buttons / hover fills */
-  --subtle-hover: #3a3a3c;
-  --tree-line: #6e6e6e;     /* session-tree guides; lifted off the
-                               dark canvas so the connectors read clearly */
-  --accent: #3b82f6;        /* blue-500 */
-  --accent-hover: #2563eb;  /* blue-600 */
-  --accent-fg: #ffffff;
-  --code: #181818;          /* terminal / preformatted — a recessed panel */
-  --code-fg: #c8c8c8;
+  --canvas: #1b1915;        /* warm charcoal — editor background */
+  --rail: #151310;          /* nav rail + status bar — deepest chrome */
+  --surface: #232019;       /* cards / panels, one warm step up */
+  --input: #2a271f;         /* form fields */
+  --line: #332f27;          /* warm hairline borders */
+  --fg: #e9e3d6;            /* primary text — warm paper-white */
+  --muted: #a49b8b;         /* secondary text */
+  --faint: #726a5c;         /* tertiary text */
+  --subtle: #2c2921;        /* secondary buttons / hover fills */
+  --subtle-hover: #38342a;
+  --tree-line: #726a5c;     /* session-tree guides; lifted off the
+                               warm canvas so the connectors read clearly */
+  --accent: #7ea6c6;        /* lifted iron-gall ink */
+  --accent-hover: #95b8d3;
+  --accent-fg: #16130f;
+  --code: #141210;          /* terminal / preformatted — a recessed panel */
+  --code-fg: #c7c0b0;
 
-  /* Attention (amber) + Blocked (red) — tuned for the near-black canvas. */
-  --attn: #d97706;          /* amber-600 */
-  --attn-fg: #fffbeb;       /* amber-50 */
-  --attn-soft: #78350f33;   /* amber-900 @ 20% — subtle row wash on dark */
-  --attn-line: #f59e0b;     /* amber-500 */
-  --block: #dc2626;         /* red-600 */
-  --block-fg: #fef2f2;      /* red-50 */
-  --block-soft: #7f1d1d33;  /* red-900 @ 20% */
-  --block-line: #ef4444;    /* red-500 */
+  /* Attention (ochre) + Blocked (oxblood) — tuned for the warm charcoal canvas.
+     Washes are a low-alpha pigment tint so they read as a faint glow, not a slab. */
+  --attn: #c99433;          /* lifted ochre */
+  --attn-fg: #211a0c;
+  --attn-soft: #4a350f33;   /* ochre @ ~20% — subtle row wash on dark */
+  --attn-line: #c99433;
+  --block: #c76a5c;         /* lifted oxblood */
+  --block-fg: #1f120f;
+  --block-soft: #4a231c33;  /* oxblood @ ~20% */
+  --block-line: #c76a5c;
 
-  /* Calm semantic hues — lifted for the near-black canvas; washes are a low-
-     alpha tint so they read as a faint glow, not a slab. */
-  --ok: #6cc08b;            /* green — healthy / live / passing */
-  --ok-soft: #14401f33;     /* green @ 20% — faint row wash */
-  --ok-line: #4ca06a;       /* green dot / hairline */
-  --info: #5cb8d0;          /* cyan — resting / neutral-positive */
-  --info-soft: #0e3a4533;   /* cyan @ 20% */
-  --info-line: #3a9bb5;     /* cyan dot / hairline */
-  --agent: #b89af0;         /* violet — model / AI identity accent */
-  --agent-soft: #2a1f4533;  /* violet @ 20% */
-  --agent-line: #8b6fd0;    /* violet dot / hairline */
+  /* Calm semantic hues — lifted for the warm charcoal; washes are a low-alpha
+     tint so they read as a faint glow, not a slab. */
+  --ok: #8fa877;            /* sage — healthy / live / passing */
+  --ok-soft: #33401f33;     /* sage @ ~20% — faint row wash */
+  --ok-line: #6f8557;       /* sage dot / hairline */
+  --info: #6fa0aa;          /* slate-teal — resting / neutral-positive */
+  --info-soft: #1f3a4033;   /* slate-teal @ ~20% */
+  --info-line: #5f8b95;     /* slate-teal dot / hairline */
+  --agent: #a98cc0;         /* dusk plum — model / AI identity accent */
+  --agent-soft: #2f234533;  /* plum @ ~20% */
+  --agent-line: #8b6fa8;    /* plum dot / hairline */
 }
 
 html,

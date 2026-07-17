@@ -1,8 +1,13 @@
-// Bundled fonts (self-hosted woff2 — no CDN; see docs/loom-ui.md). The
-// variable sans covers all UI weights in one file; the mono ships the three
-// weights the UI uses.
-import '@fontsource-variable/ibm-plex-sans';
-import '@fontsource-variable/ibm-plex-sans/wght-italic.css';
+// Bundled fonts (self-hosted woff2 — no CDN; see docs/loom-ui.md). Three
+// voices: a literary serif for human prose (goals, titles, conversation), a
+// quiet humanist sans for UI chrome, and the mono for machine text. Source
+// Serif carries an optical-size axis so a 19px lead and an 11px caption are
+// each cut for their size. All variable — one file per family covers every
+// weight; italics ship separately for the annotation voice.
+import '@fontsource-variable/source-serif-4/opsz.css';
+import '@fontsource-variable/source-serif-4/opsz-italic.css';
+import '@fontsource-variable/source-sans-3/wght.css';
+import '@fontsource-variable/source-sans-3/wght-italic.css';
 import '@fontsource/ibm-plex-mono/400.css';
 import '@fontsource/ibm-plex-mono/500.css';
 import '@fontsource/ibm-plex-mono/600.css';
