@@ -158,18 +158,18 @@ pub fn is_reserved_tag(key: &str) -> bool {
 }
 
 /// Parse a [`WIRED_TAG`] value — `owner/name#number` — into its slug and
-/// thread number. `None` for anything else (the tag is free-form user input).
+/// thread number. `None` for anything else (the tag is free-form user input,
+/// and the slug ends up in GitHub API paths): both segments must pass the same
+/// charset gate as [`crate::repo::parse_slug`], and only the bare documented
+/// form is accepted — a URL form parse_slug would reduce is rejected here so
+/// the stored tag, the sync's API paths, and the comment bookkeeping note all
+/// agree on one spelling.
 pub fn parse_wiring(value: &str) -> Option<(String, i64)> {
     let (slug, number) = value.trim().split_once('#')?;
     let number: i64 = number.trim().parse().ok().filter(|n| *n > 0)?;
     let slug = slug.trim();
-    let mut parts = slug.split('/');
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(o), Some(n), None) if !o.is_empty() && !n.is_empty() => {
-            Some((slug.to_string(), number))
-        }
-        _ => None,
-    }
+    let parsed = crate::repo::parse_slug(slug).ok()?;
+    (parsed.slug() == slug).then(|| (parsed.slug(), number))
 }
 
 /// One rendered bullet of the status trail: the level's dot, the time, the
@@ -225,9 +225,35 @@ pub fn render_status_card(
         .collect();
     let mut body = format!("On it — {session_url}");
     if !artifacts.is_empty() {
+        // Artifact names are agent-chosen free text: escape the Markdown label
+        // and percent-encode the URL path segment, or a bracket/paren in a name
+        // silently breaks the card's link syntax.
+        use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+        const SEG: &AsciiSet = &CONTROLS
+            .add(b' ')
+            .add(b'"')
+            .add(b'#')
+            .add(b'%')
+            .add(b'/')
+            .add(b'?')
+            .add(b'(')
+            .add(b')')
+            .add(b'<')
+            .add(b'>')
+            .add(b'[')
+            .add(b']')
+            .add(b'\\')
+            .add(b'`');
         let links: Vec<String> = artifacts
             .iter()
-            .map(|name| format!("[{name}]({session_url}/artifacts/{name})"))
+            .map(|name| {
+                let label = name
+                    .replace('\\', "\\\\")
+                    .replace('[', "\\[")
+                    .replace(']', "\\]");
+                let path = utf8_percent_encode(name, SEG);
+                format!("[{label}]({session_url}/artifacts/{path})")
+            })
             .collect();
         body.push_str(&format!("\nDocs: {}", links.join(" · ")));
     }
@@ -1377,6 +1403,13 @@ mod tests {
             "acme/widgets#-3",
             "acme/widgets#seven",
             "a/b/c#7",
+            // The slug feeds GitHub API paths: the repo charset gate applies,
+            // and only the bare documented form is a wiring (no URL forms).
+            "../evil#7",
+            "acme/..#7",
+            "acme/wid gets#7",
+            "acme/wid%2Fgets#7",
+            "https://github.com/acme/widgets#7",
         ] {
             assert_eq!(parse_wiring(bad), None, "{bad:?} must not parse");
         }
@@ -1440,6 +1473,17 @@ mod tests {
             "Docs: [design](http://loom/s/abc/artifacts/design) · [plan](http://loom/s/abc/artifacts/plan)"
         );
         assert!(lines[3].contains("drafted the design"));
+    }
+
+    #[test]
+    fn status_card_escapes_hostile_artifact_names() {
+        // Names are agent-chosen free text; brackets must not break the link
+        // Markdown and the URL segment must be percent-encoded.
+        let card = render_status_card("http://loom/s/abc", &["a](x) [b".to_string()], &[]);
+        assert_eq!(
+            card.lines().nth(1).unwrap(),
+            "Docs: [a\\](x) \\[b](http://loom/s/abc/artifacts/a%5D%28x%29%20%5Bb)"
+        );
     }
 
     #[test]
