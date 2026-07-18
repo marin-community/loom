@@ -1345,14 +1345,20 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
             // The write already succeeded — loom is definitionally reachable at
             // this point, so the dashboard link is always known now (unlike the
             // direct-db days, when it depended on `$WEAVER_API`/`loom.json`
-            // happening to be present).
+            // happening to be present). The server resolves the link so it
+            // carries its externally-visible origin (`auth.base_url`, else the
+            // request Host) — the loopback/wildcard `$WEAVER_API` we dialed
+            // (often `http://0.0.0.0:7878`) is not a URL anyone can open. If that
+            // resolution fails, fall back to the dialed base rather than lose the
+            // rev line entirely.
+            let url = client
+                .branch_artifact_url(&key, &view.meta.name)
+                .await
+                .unwrap_or_else(|_| {
+                    format!("{}/s/{key}/artifacts/{}", client.base(), view.meta.name)
+                });
             let scope = if repo { "repo-shared" } else { "this branch" };
-            println!(
-                "{}/s/{key}/artifacts/{}  (rev {}, {scope})",
-                client.base(),
-                view.meta.name,
-                view.meta.rev
-            );
+            println!("{url}  (rev {}, {scope})", view.meta.rev);
         }
         ArtifactCmd::Ls { repo } => {
             let artifacts = client.list_branch_artifacts(&key, repo).await?;

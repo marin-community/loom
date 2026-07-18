@@ -445,6 +445,25 @@ impl Client {
         .await
     }
 
+    /// The dashboard deep-link for a branch artifact, resolved server-side
+    /// (`GET /api/branches/{key}/artifacts/{name}/url`) so it carries the
+    /// externally-visible origin (`auth.base_url`, else the request Host) rather
+    /// than the loopback/wildcard address the agent dials — a `0.0.0.0` link is
+    /// useless to whoever reads it. See `loom session url` for the same pattern.
+    pub async fn branch_artifact_url(&self, key: &str, name: &str) -> Result<String> {
+        let v = self
+            .get(&format!(
+                "/api/branches/{}/artifacts/{}/url",
+                Self::seg(key),
+                Self::seg(name)
+            ))
+            .await?;
+        v.get("url")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("server returned no url"))
+    }
+
     /// Delete an artifact and its whole revision history. `repo: true` targets
     /// the repo-shared row of this name rather than the branch-scoped one
     /// (`DELETE /api/branches/{key}/artifacts/{name}`).

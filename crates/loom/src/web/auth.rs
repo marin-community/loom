@@ -154,12 +154,25 @@ async fn cookie_secure(st: &AppState) -> bool {
 
 /// [`external_base`], falling back to the address we are bound to when the
 /// request carries no Host — for building a link to hand out (a webhook reply, a
-/// PR back-link, `loom session url`), where there is no "no origin" answer and
-/// the bound address is the best guess available.
+/// PR back-link, `loom session url`, an artifact URL), where there is no "no
+/// origin" answer and the bound address is the best guess available. A wildcard
+/// host is mapped to loopback (see [`dialable_host`]) so the link resolves.
 pub(crate) async fn public_base(st: &AppState, headers: &HeaderMap) -> String {
-    external_base(st, headers)
+    let base = external_base(st, headers)
         .await
-        .unwrap_or_else(|| format!("http://{}", st.addr))
+        .unwrap_or_else(|| format!("http://{}", st.addr));
+    dialable_host(&base)
+}
+
+/// Map a wildcard host (`0.0.0.0` / `[::]`, "every interface" — not a dialable
+/// address) in a base URL to loopback, so a link we hand out actually resolves.
+/// A configured `auth.base_url` or a real browser's Host never carries a
+/// wildcard, so this only rewrites the degenerate case: a wildcard-bound server
+/// with no public origin declared, asked for a link by a caller (the `weaver`
+/// CLI) that dialed that same wildcard address.
+fn dialable_host(base: &str) -> String {
+    base.replace("://0.0.0.0", "://127.0.0.1")
+        .replace("://[::]", "://127.0.0.1")
 }
 
 /// The externally-visible base URL, for the OAuth callback. Prefers the
@@ -564,4 +577,39 @@ pub(super) async fn put_github_config(
     config::apply(&st.db, &changes).await?;
     tracing::info!(secret_provided, "github oauth config updated");
     Ok(Json(github_config_view(&st).await?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dialable_host;
+
+    #[test]
+    fn wildcard_hosts_map_to_loopback() {
+        // A wildcard bind is "every interface", not a dialable address — the
+        // link we hand out must point somewhere a browser can actually open.
+        assert_eq!(
+            dialable_host("http://0.0.0.0:7878"),
+            "http://127.0.0.1:7878"
+        );
+        assert_eq!(dialable_host("http://[::]:7878"), "http://127.0.0.1:7878");
+    }
+
+    #[test]
+    fn real_origins_pass_through_untouched() {
+        // A configured `auth.base_url` or a real browser's Host never carries a
+        // wildcard, so the common cases are left exactly as-is.
+        assert_eq!(
+            dialable_host("https://loom.example.com"),
+            "https://loom.example.com"
+        );
+        assert_eq!(
+            dialable_host("http://127.0.0.1:7878"),
+            "http://127.0.0.1:7878"
+        );
+        // `0.0.0.0` only elsewhere in the string (not as the host) is left alone.
+        assert_eq!(
+            dialable_host("https://host/p/0.0.0.0"),
+            "https://host/p/0.0.0.0"
+        );
+    }
 }

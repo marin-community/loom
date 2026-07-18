@@ -534,6 +534,51 @@ async fn artifact_write_show_ls_and_revisions() {
     assert!(!ls.contains("plan"), "rm should remove it: {ls}");
 }
 
+/// The URL printed after a write is resolved server-side, so it carries the
+/// operator's externally-visible origin — not the loopback/wildcard address the
+/// agent dialed (`http://0.0.0.0:7878`), which is useless to whoever reads it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn artifact_write_url_honours_the_public_base() {
+    let env = Env::start().await;
+
+    // With no `auth.base_url`, the origin is derived from the request's Host —
+    // here the loopback address the CLI dialed, right for a single-machine loom.
+    let derived = env.run_with_stdin(&["artifact", "write", "plan"], "# Plan\n");
+    assert!(
+        derived.contains(&format!(
+            "http://{}/s/{}/artifacts/plan",
+            env.addr, env.branch_id
+        )),
+        "derived from the request origin, keyed off $WEAVER_BRANCH: {derived}"
+    );
+
+    // Once the operator declares a public origin, the printed link is one an
+    // off-box reader (of a PR, say) can actually open — and the dialed address
+    // no longer leaks into it.
+    loom::config::apply(
+        &env.db,
+        &[(
+            "auth.base_url".to_string(),
+            Some("https://loom.example.com".to_string()),
+        )],
+    )
+    .await
+    .unwrap();
+    let public = env.run_with_stdin(&["artifact", "write", "plan"], "# Plan v2\n");
+    assert!(
+        public.contains(&format!(
+            "https://loom.example.com/s/{}/artifacts/plan  (rev 2, this branch)",
+            env.branch_id
+        )),
+        "the configured public origin wins: {public}"
+    );
+    assert!(
+        !public.contains(&env.addr.to_string()),
+        "the dialed address is not leaked into the link: {public}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn artifact_comment_thread_and_resolve_roundtrip() {

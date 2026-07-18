@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use axum::{
     extract::{Path, Query, State},
+    http::header,
     Json,
 };
 use serde::Deserialize;
@@ -355,6 +356,30 @@ pub(super) async fn write_branch_artifact(
     .ok();
     Ok(Json(
         artifact_view(&st.db, &branch.repo_root, &a, None).await?,
+    ))
+}
+
+/// `GET /api/branches/{key}/artifacts/{name}/url` — the dashboard deep-link for
+/// an artifact.
+///
+/// The twin of `session_url_route`: the agent that just wrote the artifact holds
+/// only the loopback (or wildcard) `$WEAVER_API` it was handed, and a
+/// `http://0.0.0.0:7878/…` link printed after a write is useless to whoever
+/// reads it. Only the server knows the externally-visible origin (the operator's
+/// `auth.base_url`, else the request's own Host), so resolving it is the
+/// server's job — see `weaver artifact write`.
+pub(super) async fn branch_artifact_url_route(
+    State(st): State<AppState>,
+    headers: header::HeaderMap,
+    Path((key, name)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    // Resolve the branch so a bad key 404s rather than minting a link to
+    // nothing; the URL itself keys off the caller's `key` (the `$WEAVER_BRANCH`
+    // the SPA router resolves), exactly as the write output always has.
+    require_branch(&st.db, &key).await?;
+    let base = super::auth::public_base(&st, &headers).await;
+    Ok(Json(
+        json!({ "url": super::artifact_url(&base, &key, &name) }),
     ))
 }
 

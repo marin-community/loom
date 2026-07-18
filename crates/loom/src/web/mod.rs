@@ -319,6 +319,14 @@ pub(crate) fn session_url(base: &str, session_id: &str) -> String {
     format!("{}/s/{session_id}", base.trim_end_matches('/'))
 }
 
+/// The dashboard deep-link for an artifact — the page a person opens to read it
+/// (`/s/:id/artifacts/:name` in the SPA router). `key` is any session key (the
+/// `$WEAVER_BRANCH` an agent carries resolves fine); pair `base` with
+/// [`auth::public_base`] so the link resolves off-box.
+pub(crate) fn artifact_url(base: &str, key: &str, name: &str) -> String {
+    format!("{}/s/{key}/artifacts/{name}", base.trim_end_matches('/'))
+}
+
 pub(crate) async fn require_branch(db: &Db, key: &str) -> ApiResult<Branch> {
     if let Some(branch) = branch_mod::resolve_key(db, key).await? {
         return Ok(branch);
@@ -597,6 +605,10 @@ pub fn router(state: AppState) -> Router {
             get(get_branch_artifact)
                 .put(write_branch_artifact)
                 .delete(delete_branch_artifact),
+        )
+        .route(
+            "/branches/{id}/artifacts/{name}/url",
+            get(branch_artifact_url_route),
         )
         .route(
             "/branches/{id}/artifacts/{name}/threads",
