@@ -112,15 +112,32 @@ pub(super) async fn set_branch_status(
         level.clone()
     };
     tracing::info!(branch = %branch.id, level = %level, "branch status set");
+    // The message rides the event as its note, so the event log carries the
+    // full trail of status reports — the progress log the activity feed and a
+    // wired GitHub thread render — not just the level transitions.
+    // Propagated, not swallowed: the event log is the source of truth for the
+    // status trail (the activity feed and a wired GitHub card render from it),
+    // so a dropped insert must fail the write loudly enough to be retried.
     events::record(
         &st.db,
         &st.bus,
         &branch.id,
         "tag",
-        json!({ "key": tags::ATTENTION_KEY, "value": value, "note": "", "by": "agent" }),
+        json!({
+            "key": tags::ATTENTION_KEY,
+            "value": value,
+            "note": message.unwrap_or_default(),
+            "by": "agent",
+        }),
     )
-    .await
-    .ok();
+    .await?;
+    // Mirror the trail onto the branch's wired GitHub thread (a no-op when the
+    // `github` tag is absent) — detached, so a GitHub hiccup never slows or
+    // fails the status write.
+    tokio::spawn(crate::github::sync_status_comment(
+        st.clone(),
+        branch.id.clone(),
+    ));
     let branch = branch_mod::get(&st.db, &branch.id)
         .await?
         .ok_or_else(|| AppError::not_found("branch"))?;
@@ -157,6 +174,19 @@ pub(super) async fn set_branch_tag(
 ) -> ApiResult<Json<BranchView>> {
     let branch = require_branch(&st.db, &key).await?;
     let value = req.value.trim();
+    if crate::github::is_reserved_tag(&tag_key) {
+        return Err(AppError::bad_request(format!(
+            "'{tag_key}' is loom-internal bookkeeping — it can be cleared, not set by hand"
+        )));
+    }
+    // The `github` wiring is consumed by the status-card mirror; a typo'd
+    // value would silently mirror nothing, so it fails here where the setter
+    // can see it.
+    if tag_key == tags::GITHUB_KEY && crate::github::parse_wiring(value).is_none() {
+        return Err(AppError::bad_request(format!(
+            "invalid value '{value}' for '{tag_key}' — expected owner/name#number"
+        )));
+    }
     if !tags::is_valid_value(&tag_key, value) {
         return Err(AppError::bad_request(if tags::is_loud(&tag_key) {
             format!(

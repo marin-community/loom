@@ -568,7 +568,7 @@ pub type Change = (String, Option<String>);
 /// Callers are expected to [`validate`] each value first; `apply` itself only
 /// touches the database.
 pub async fn apply(db: &Db, changes: &[Change]) -> Result<()> {
-    let mut tx = db.begin().await?;
+    let mut tx = crate::db::begin_immediate(db).await?;
     let now = now_iso();
     for (key, value) in changes {
         match value {

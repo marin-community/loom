@@ -358,18 +358,37 @@ async fn handle_trigger(
                     )
                     .await
                     .ok();
-                    let base = public_base(&st, &headers).await;
-                    let reply = format!(
-                        "Passed your note to the session already on this thread — {}",
-                        super::session_url(&base, &sess.id)
-                    );
-                    if let Err(e) = st
-                        .trigger
-                        .gh()
-                        .post_issue_comment(&slug.slug(), number, &reply)
-                        .await
-                    {
-                        tracing::warn!(error = %e, repo = %slug.slug(), "github webhook: posting forward-ack failed");
+                    // Acknowledge quietly: a 👀 reaction on the triggering
+                    // comment says "seen, forwarded" right where it was typed,
+                    // without an ack comment per mention piling up on the
+                    // thread. Fall back to the old ack comment if the reaction
+                    // can't land (no comment id, or an App installation that
+                    // predates the reactions permission grant) — feedback that
+                    // the note reached the session matters more than quiet.
+                    let reacted = event.comment.id > 0
+                        && st
+                            .trigger
+                            .gh()
+                            .react_to_comment(&slug.slug(), event.comment.id, "eyes")
+                            .await
+                            .map_err(|e| {
+                                tracing::warn!(error = %e, repo = %slug.slug(), "github webhook: reacting to forwarded comment failed");
+                            })
+                            .is_ok();
+                    if !reacted {
+                        let base = public_base(&st, &headers).await;
+                        let reply = format!(
+                            "Passed your note to the session already on this thread — {}",
+                            super::session_url(&base, &sess.id)
+                        );
+                        if let Err(e) = st
+                            .trigger
+                            .gh()
+                            .post_issue_comment(&slug.slug(), number, &reply)
+                            .await
+                        {
+                            tracing::warn!(error = %e, repo = %slug.slug(), "github webhook: posting forward-ack failed");
+                        }
                     }
                     tracing::info!(session = %sess.id, repo = %slug.slug(), number, "github webhook: forwarded comment to active session");
                     return Ok(None);
@@ -423,6 +442,10 @@ async fn handle_trigger(
         repo: Some(slug.slug()),
         title: Some(event.issue.title.clone()),
         goal: Some(trigger_goal(&slug.slug(), is_pr, number, &event, &author)),
+        // Record the thread on the tracking issue too (issues only — a PR
+        // number in the issue link would read as the wrong thing), so the
+        // weaver ledger and the `github` wiring tag agree from birth.
+        github_issue: (!is_pr).then_some(number),
         ..Default::default()
     };
     if let Some(branch) = target_branch {
@@ -440,16 +463,87 @@ async fn handle_trigger(
         }
     };
 
-    // 11. Reply on the thread with the live session URL.
+    // 11. Wire the branch to the thread: the `github` tag is what
+    //     `github::sync_status_comment` reads to mirror every `weaver status`
+    //     write back here. Stamped before the reply so a failed reply still
+    //     wires — the first status write then posts the card instead. Left
+    //     untouched when already wired to this thread (a relaunch): the tag's
+    //     `set_at` scopes the mirrored trail, and re-stamping would truncate it.
+    let wired_to = format!("{}#{number}", slug.slug());
+    let already_wired = matches!(
+        weaver_core::tags::get(&st.db, &view.branch.id, crate::github::WIRED_TAG).await,
+        Ok(Some(ref t)) if t.value == wired_to
+    );
+    if !already_wired {
+        weaver_core::tags::set(
+            &st.db,
+            &view.branch.id,
+            crate::github::WIRED_TAG,
+            &wired_to,
+            "wired by the @loom trigger",
+            "loom",
+        )
+        .await
+        .ok();
+    }
+
+    // 12. Reply on the thread with the live session URL. The reply is the
+    //     session's **status card**: its comment id is recorded so later status
+    //     writes edit it in place into the live trail.
     let base = public_base(&st, &headers).await;
     let reply = format!("On it — {}", super::session_url(&base, &view.id));
-    if let Err(e) = st
+    match st
         .trigger
         .gh()
         .post_issue_comment(&slug.slug(), number, &reply)
         .await
     {
-        tracing::warn!(error = %e, repo = %slug.slug(), "github webhook: posting reply failed");
+        Ok(comment_id) => {
+            // A relaunch on an already-wired thread leaves the previous card
+            // frozen mid-arc — point its readers at the live one. The full
+            // trail re-renders onto the new card (the wiring's `set_at`
+            // predates it), so nothing is lost.
+            if let Ok(Some(prev)) =
+                weaver_core::tags::get(&st.db, &view.branch.id, crate::github::STATUS_COMMENT_TAG)
+                    .await
+            {
+                if prev.note == wired_to {
+                    if let Ok(prev_id) = prev.value.parse::<i64>() {
+                        if prev_id != comment_id {
+                            st.trigger
+                                .gh()
+                                .update_issue_comment(
+                                    &slug.slug(),
+                                    prev_id,
+                                    "~~On it~~ — this session was relaunched; the live status card is below.",
+                                )
+                                .await
+                                .ok();
+                        }
+                    }
+                }
+            }
+            crate::github::record_status_comment(
+                &st.db,
+                &view.branch.id,
+                &slug.slug(),
+                number,
+                comment_id,
+            )
+            .await;
+            // On a relaunch, render the card now (it re-reads the trail), so
+            // the new card doesn't sit bare until the next status write. A
+            // fresh launch has no trail yet — the reply already is the card.
+            if already_wired {
+                tokio::spawn(crate::github::sync_status_comment(
+                    st.clone(),
+                    view.branch.id.clone(),
+                ));
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, repo = %slug.slug(), "github webhook: posting reply failed");
+        }
     }
     tracing::info!(
         session = %view.id,
@@ -508,17 +602,17 @@ fn trigger_goal(
         .map(str::trim)
         .filter(|b| !b.is_empty())
         .unwrap_or("(no description)");
-    let respond = if is_pr {
-        format!(
-            "- This worktree is checked out on the PR's own branch — commit and `git push` here to update pull request #{number} directly.\n\
-             - Reply on the thread when you have something to report: `gh pr comment {number} --repo {repo} --body \"…\"`."
-        )
+    let work = if is_pr {
+        format!("- This worktree is checked out on the PR's own branch — commit and `git push` here to update pull request #{number} directly.")
     } else {
-        format!(
-            "- Do the work on this branch and open a pull request against the default branch when it's ready.\n\
-             - Reply on the thread when you have something to report: `gh issue comment {number} --repo {repo} --body \"…\"`."
-        )
+        "- Do the work on this branch and open a pull request against the default branch when it's ready.".to_string()
     };
+    let comment_cmd = if is_pr { "pr" } else { "issue" };
+    let respond = format!(
+        "{work}\n\
+         - Your `weaver status` messages are mirrored onto this thread (loom edits its \"On it\" comment into a live status trail), so progress reporting is automatic — write status messages for that audience.\n\
+         - Comment on the thread only when you need a person there — a question, a design to review, the finished result: `gh {comment_cmd} comment {number} --repo {repo} --body \"…\"`."
+    );
     format!(
         "You've been tagged into GitHub {kind} #{number} of {repo} ({url}) via a comment.\n\n\
          ## {title_kind}\n{}\n\n{body}\n\n\

@@ -651,6 +651,16 @@ async function handleCreated() {
           <span v-if="s.last_activity_at" class="mt-0.5 block font-mono text-2xs text-faint">
             {{ timeAgo(s.last_activity_at) }}
           </span>
+          <!-- The session brief: catch up without opening the terminal. The
+               row's stretched link stays the shell — this is the side door. -->
+          <router-link
+            :to="`/s/${s.id}?tab=overview`"
+            data-testid="row-overview"
+            class="relative z-10 mt-0.5 block font-mono text-2xs text-faint hover:text-accent"
+            @click.stop
+          >
+            overview →
+          </router-link>
         </div>
 
         <!-- The row's ⋯ menu: park, then every lifecycle verb (Adopt/Recover,
@@ -744,6 +754,16 @@ async function handleCreated() {
             <span v-if="s.last_activity_at" class="mt-0.5 block font-mono text-2xs text-faint">
               {{ timeAgo(s.last_activity_at) }}
             </span>
+            <!-- A resting session is exactly the one you catch up on via the
+                 brief rather than by waking its terminal. -->
+            <router-link
+              :to="`/s/${s.id}?tab=overview`"
+              data-testid="row-overview"
+              class="relative z-10 mt-0.5 block font-mono text-2xs text-faint hover:text-accent"
+              @click.stop
+            >
+              overview →
+            </router-link>
           </div>
 
           <button

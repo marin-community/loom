@@ -121,7 +121,29 @@ pub(super) async fn get_issue(
     let issue = weaver_core::issue::get(&st.db, id)
         .await?
         .ok_or_else(|| AppError::not_found("issue"))?;
-    Ok(Json(issue_view(&st.db, issue).await?))
+    let mut view = issue_view(&st.db, issue).await?;
+    // Best-effort live snapshot of the linked GitHub thread, so `weaver issue
+    // show` surfaces "closed / re-titled while you worked". Single-issue reads
+    // only (lists would fan out), bounded so a slow GitHub can't hang the CLI,
+    // and a failure just leaves the field absent — the ledger still stands.
+    if let (Some(repo), Some(number)) = (view.github_repo.clone(), view.github_issue) {
+        view.github_state = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            st.trigger.gh().issue_state(&repo, number),
+        )
+        .await
+        .ok()
+        .and_then(|r| {
+            r.map_err(|e| tracing::debug!(repo, number, error = %e, "live issue state unavailable"))
+                .ok()
+        })
+        .map(|s| weaver_api::GithubThreadState {
+            state: s.state,
+            title: s.title,
+            updated_at: s.updated_at,
+        });
+    }
+    Ok(Json(view))
 }
 
 pub(super) async fn patch_issue(

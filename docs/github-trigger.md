@@ -4,9 +4,11 @@ loom turns an issue or PR comment into a session. Comment **`@loom`** on a GitHu
 issue or pull request and loom launches a session against that repo — attached to
 the PR's own branch (so the agent's commits land on the PR) or, for an issue, a
 stable `weaver/issue-<n>` branch — seeded with the thread's context, and replies
-with a link to the live session (`On it — {base}/s/{id}`). A follow-up `@loom` on
-a thread that already has a running session is handed to that session instead of
-starting a second one.
+with a link to the live session (`On it — {base}/s/{id}`). That reply is the
+session's **status card**: as the agent reports progress with `weaver status`,
+loom edits the comment in place into a live trail (see [The status
+card](#the-status-card)). A follow-up `@loom` on a thread that already has a
+running session is handed to that session instead of starting a second one.
 
 This is an internet-exposed, untrusted-input endpoint. Two gates protect it:
 every delivery is verified cryptographically (HMAC), and the commenter is
@@ -51,8 +53,11 @@ receiver, in order:
    duplicate. Otherwise loom creates the session, seeded with the issue/PR title,
    body, and the triggering comment, plus a primer on how to respond — push to the
    PR branch (or open a PR for an issue) and reply on the thread with `gh`.
-8. **Replies** on the thread with the session URL (or, for a forwarded comment,
-   that it was passed to the running session).
+8. **Replies** on the thread with the session URL. A forwarded comment is
+   acknowledged with a 👀 **reaction** on the triggering comment instead — seen,
+   passed along, no ack comment accumulating on an active thread. When the
+   reaction can't land (no comment id in the delivery, or a token that can't
+   react), loom falls back to the ack comment so the feedback isn't lost.
 
 Steps 6–8 (clone, create-or-forward, reply) run in a **detached task**: the
 handler returns `200` as soon as the gates pass. Cloning a large repo can outlast
@@ -68,6 +73,41 @@ falling back to the ambient `GH_TOKEN` when they have none — so its pushes and
 `gh` replies are attributed to them. Separately, the poll loop posts a one-time
 back-link comment (`Working on this in loom: {base}/s/{id}`) on a session's open
 PR when one isn't already linked, so a reader of the PR can jump to the session.
+
+## The status card
+
+The "On it" reply doubles as the thread's live view of the session. At launch
+the trigger **wires** the branch to the thread — a quiet `github` tag whose
+value is `owner/name#number` — and records the reply's comment id. From then
+on, every `weaver status <level> "<message>"` the agent writes re-renders that
+comment:
+
+> On it — {base}/s/{id}
+> Docs: [design]({base}/s/{id}/artifacts/design)
+>
+> - 🟢 `Jul 18 21:04Z` reading the thread; mapping the code
+> - 🟠 `Jul 18 22:15Z` **attention** — ready for review
+
+One comment, edited in place — comment edits notify no one, so subscribers are
+never spammed; a reader opening the thread sees the whole arc, plus links to
+the documents the agent has published (the dashboard's artifact viewer). The
+agent still posts real comments when it needs a person — a question, a design
+review, the result — and those do notify.
+
+The mirroring works on any session, not just triggered ones: `weaver tag set
+github owner/name#123` wires a session by hand (the card appears on its next
+status report), and `weaver tag rm github` stops the mirroring, freezing the
+comment. The card requires a configured `auth.base_url` (the session link must
+resolve for a GitHub reader) and posts through the same App-token/`gh`
+credential ladder as the reply. Two loom-internal tags do the bookkeeping —
+`github.status_comment` (the comment id the card lives in) and `github.linked`
+(the PR back-link dedupe); both are machine-owned, hidden from the dashboard's
+pill row, and refused by the tag-set routes (clearing one is harmless: loom
+re-creates its state).
+
+If a follow-up `@loom` lands on a thread whose session's terminal is gone, the
+relaunch posts a fresh "On it" card, marks the old one *superseded*, and — the
+wiring survives the relaunch — the new card carries the full trail.
 
 Everything past the signature check returns **200** whether or not it launched a
 session (a non-trigger comment, a replay, an unregistered or rate-limited repo,

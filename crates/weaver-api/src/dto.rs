@@ -168,6 +168,24 @@ pub struct IssueView {
     /// Empty when the issue carries none. Unlike branch tags these never carry
     /// the loud `attention`/`triage` ladder.
     pub tags: Vec<TagView>,
+    /// Live state of the linked GitHub thread, fetched at read time by the
+    /// single-issue endpoint when the issue carries a `github_repo` +
+    /// `github_issue` link. Absent on list endpoints (no fan-out of GitHub
+    /// calls) and when the fetch fails — the ledger fields above still stand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_state: Option<GithubThreadState>,
+}
+
+/// The minimal live snapshot of a GitHub thread `weaver issue show` renders
+/// beside the weaver ledger: enough to notice "this was closed / re-titled
+/// while I worked". An agent that needs the discussion reads it with `gh`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GithubThreadState {
+    /// `open` | `closed`.
+    pub state: String,
+    pub title: String,
+    /// ISO time of the thread's last touch, as GitHub reports it.
+    pub updated_at: String,
 }
 
 impl IssueView {
@@ -187,6 +205,7 @@ impl IssueView {
             updated_at: i.updated_at,
             closed_at: i.closed_at,
             tags: tags.iter().map(TagView::from).collect(),
+            github_state: None,
         }
     }
 }
@@ -508,6 +527,12 @@ pub struct CreateReq {
     pub name: Option<String>,
     #[serde(default)]
     pub issue: Option<i64>,
+    /// A GitHub issue number the caller already holds the content of (the
+    /// `@loom` trigger, whose webhook payload carries the thread): recorded on
+    /// the tracking issue as its GitHub link, with none of `issue`'s
+    /// fetch-and-seed. Ignored when `issue` is set.
+    #[serde(default)]
+    pub github_issue: Option<i64>,
     /// A pre-existing weaver issue id to claim for this session (fan-out
     /// pickup). Seeds title/goal/description and stamps `claimed_branch`.
     #[serde(default)]

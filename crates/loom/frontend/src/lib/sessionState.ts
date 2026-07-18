@@ -31,6 +31,11 @@ function parkOf(value: string | undefined): number {
 // loud status. Mirrors weaver-core's `IDLE_KEY`.
 export const IDLE_KEY = 'idle';
 
+// Loom's machine bookkeeping for its GitHub side-effects (the PR back-link
+// mark, the status-card comment id). Not user-meaningful, so the pill row
+// hides them; the `github` wiring tag itself stays visible.
+const BOOKKEEPING_KEYS = ['github.linked', 'github.status_comment'];
+
 // Severity of a tag value: 0 is quiet (a pill), >0 is loud (a badge).
 function severityOf(value: string | undefined): number {
   return (value && SEVERITY[value]) || 0;
@@ -278,7 +283,10 @@ export function signalChips(s: Session): SignalChip[] {
 export function quietTags(s: Session): Tag[] {
   if (s.status === 'archived') return [];
   return (s.branch.tags ?? []).filter(
-    (t) => severityOf(t.value) === 0 && t.key !== IDLE_KEY,
+    (t) =>
+      severityOf(t.value) === 0 &&
+      t.key !== IDLE_KEY &&
+      !BOOKKEEPING_KEYS.includes(t.key),
   );
 }
 

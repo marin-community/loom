@@ -670,6 +670,15 @@ pub(crate) async fn create_session_core(
         github_issue = Some(number);
         github_repo = github::repo_slug(&repo_root).await.ok();
         tracing::debug!(issue = number, github_repo = ?github_repo, "seeded session fields from github issue");
+    } else if let Some(number) = req.github_issue {
+        // The caller already holds the thread (the `@loom` trigger): record the
+        // GitHub link on the tracking issue without the fetch-and-seed above.
+        github_issue = Some(number);
+        github_repo = req
+            .repo
+            .as_deref()
+            .and_then(|r| crate::repo::parse_slug(r).ok())
+            .map(|s| s.slug());
     }
 
     // Claiming an existing weaver issue seeds the same three fields from it.
@@ -889,13 +898,22 @@ pub(crate) async fn create_session_core(
     } else {
         let mut prompt_parts: Vec<String> = Vec::new();
         if !goal.is_empty() {
-            prompt_parts.push(goal.clone());
+            // A hookless runtime (Codex, custom) never receives the WEAVER.md
+            // primer, so the launch prompt is its entire orientation — those
+            // still get the goal pasted. Hook-capable agents get a pointer
+            // instead: the goal lives once, as the `goal` artifact.
+            let hookless = !agent::metadata_for(&st.db, &runtime)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|m| m.supports_hooks);
+            if hookless {
+                prompt_parts.push(goal.clone());
+            }
+            prompt_parts.push(entrance_note(&title, tracking_issue));
         }
         if let Some(note) = scratch_note(&scratch_names) {
             prompt_parts.push(note);
-        }
-        if let Some(id) = tracking_issue {
-            prompt_parts.push(tracking_note(id));
         }
         let launch_prompt = prompt_parts.join("\n\n");
         let goal_file = if launch_prompt.is_empty() {
@@ -1208,17 +1226,29 @@ pub(super) async fn reset_chat(State(st): State<AppState>) -> ApiResult<Json<Ses
     Ok(Json(create_concierge(st).await?))
 }
 
-/// A line appended to a session's launch prompt telling the agent which weaver
-/// issue tracks its task, so it keeps the issue up to date and closes it when
-/// done. Mirrors [`scratch_note`]: it rides on the prompt only, never the
-/// stored goal.
-fn tracking_note(issue_id: i64) -> String {
-    format!(
-        "This session is tracked as weaver issue #{issue_id}. Keep your status \
-         current with `weaver status <level> \"<message>\"` as you work, and \
-         run `weaver issue close {issue_id}` once the task is complete (e.g. the \
-         PR is open) so whoever launched you knows you are done."
-    )
+/// The session's launch prompt: a pointer to the goal rather than a copy of
+/// it. The goal lives once, as the `goal` artifact (`weaver summary` opens
+/// with it) — pasting it here made a second copy that drifted the moment the
+/// agent revved the artifact. The pointer routes through the `weaver` CLI so
+/// it orients hookless agents (Codex, custom) too, which never receive the
+/// WEAVER.md primer. Mirrors [`scratch_note`]: it rides on the prompt only
+/// (goal.txt), never the stored goal.
+fn entrance_note(title: &str, tracking_issue: Option<i64>) -> String {
+    let mut note = format!(
+        "Your task: {title}.\n\n\
+         Run `weaver summary` first — it prints the full goal, your current \
+         status, and the open tasks. `weaver readme` prints the complete \
+         workflow guide when it is not already in your context."
+    );
+    if let Some(id) = tracking_issue {
+        note.push_str(&format!(
+            " This session is tracked as weaver issue #{id}: keep `weaver \
+             status <level> \"<message>\"` honest as you work, and run `weaver \
+             issue close {id}` once the task is complete (e.g. the PR is open) \
+             so whoever launched you knows you are done."
+        ));
+    }
+    note
 }
 
 /// Open (or adopt) the tracking issue for a freshly-launched session: the one
@@ -1335,6 +1365,18 @@ pub(super) async fn set_session_tag(
 ) -> ApiResult<Json<SessionView>> {
     let (session, branch) = require_session(&st.db, &key).await?;
     let value = req.value.trim();
+    if crate::github::is_reserved_tag(&tag_key) {
+        return Err(AppError::bad_request(format!(
+            "'{tag_key}' is loom-internal bookkeeping — it can be cleared, not set by hand"
+        )));
+    }
+    // Same wiring-format gate as the branch-scoped route: the status-card
+    // mirror consumes this value, so a typo must fail loudly at set time.
+    if tag_key == tags::GITHUB_KEY && crate::github::parse_wiring(value).is_none() {
+        return Err(AppError::bad_request(format!(
+            "invalid value '{value}' for '{tag_key}' — expected owner/name#number"
+        )));
+    }
     if !tags::is_valid_value(&tag_key, value) {
         return Err(AppError::bad_request(if tags::is_loud(&tag_key) {
             format!(
@@ -2438,11 +2480,18 @@ mod tests {
     }
 
     #[test]
-    fn tracking_note_names_the_issue_and_how_to_close_it() {
-        let note = tracking_note(42);
-        assert!(note.contains("weaver issue #42"));
+    fn entrance_note_points_at_the_goal_instead_of_pasting_it() {
+        let note = entrance_note("Wire the flux capacitor", Some(42));
+        assert!(note.contains("Wire the flux capacitor"));
+        // The orientation is a pointer, not a copy: the goal is fetched.
+        assert!(note.contains("weaver summary"));
         // It tells the agent exactly how to signal "done".
+        assert!(note.contains("weaver issue #42"));
         assert!(note.contains("weaver issue close 42"));
         assert!(note.contains("weaver status"));
+        // Untracked sessions get the orientation with no issue contract.
+        let untracked = entrance_note("Poke around", None);
+        assert!(untracked.contains("weaver summary"));
+        assert!(!untracked.contains("issue"));
     }
 }

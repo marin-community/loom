@@ -77,7 +77,11 @@ pub async fn connect(path: &Path) -> Result<Db> {
     let options = SqliteConnectOptions::from_str(&format!("sqlite:{}", path.display()))
         .with_context(|| format!("invalid database path {}", path.display()))?
         .create_if_missing(true)
-        .journal_mode(SqliteJournalMode::Wal);
+        .journal_mode(SqliteJournalMode::Wal)
+        // A writer that loses the lock race waits its turn instead of failing
+        // with SQLITE_BUSY "database is locked". Only effective for writes that
+        // take the lock up front — see [`begin_immediate`].
+        .busy_timeout(std::time::Duration::from_secs(5));
 
     // Apply migrations on a dedicated single connection, then close it, *before*
     // the shared read/write pool opens. A column-adding migration (`ALTER TABLE
@@ -110,13 +114,23 @@ pub async fn connect_in_memory() -> Result<Db> {
     tracing::info!("opening in-memory database");
     let options = SqliteConnectOptions::new()
         .in_memory(true)
-        .journal_mode(SqliteJournalMode::Wal);
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_secs(5));
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(options)
         .await?;
     migrate(&pool).await?;
     Ok(pool)
+}
+
+/// Open a write transaction that takes SQLite's write lock up front
+/// (`BEGIN IMMEDIATE`). A default deferred transaction starts as a reader and
+/// upgrades on its first write — and an upgrade that loses the race fails with
+/// SQLITE_BUSY *immediately*, bypassing the connection's `busy_timeout`. Every
+/// multi-statement write path begins here so it waits its turn instead.
+pub async fn begin_immediate(db: &Db) -> sqlx::Result<sqlx::Transaction<'_, sqlx::Sqlite>> {
+    db.begin_with("BEGIN IMMEDIATE").await
 }
 
 /// Apply pending schema migrations. The migration framework (ordered SQL files

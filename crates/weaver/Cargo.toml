@@ -12,6 +12,7 @@ weaver-core = { path = "../weaver-core" }
 weaver-api = { path = "../weaver-api" }
 anyhow = "1"
 base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 serde = { version = "1", features = ["derive"] }

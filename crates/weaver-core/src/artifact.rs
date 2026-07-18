@@ -89,7 +89,7 @@ pub async fn write(db: &Db, new: &NewRevision<'_>) -> Result<Artifact> {
         author,
     } = *new;
     let now = now_iso();
-    let mut tx = db.begin().await?;
+    let mut tx = crate::db::begin_immediate(db).await?;
 
     // Find (or create) the envelope. The lookup is exact on (repo, branch, name)
     // — a write targets one specific scope, it never resolves shared-vs-scoped.
@@ -303,7 +303,7 @@ pub async fn list_for_repo(db: &Db, repo_root: &str) -> Result<Vec<Artifact>> {
 /// Foreign keys aren't enabled on the pool, so the `artifact_versions` cascade
 /// won't fire — clear the versions explicitly before dropping the envelope.
 pub async fn delete(db: &Db, id: i64) -> Result<()> {
-    let mut tx = db.begin().await?;
+    let mut tx = crate::db::begin_immediate(db).await?;
     sqlx::query("DELETE FROM artifact_versions WHERE artifact_id = ?")
         .bind(id)
         .execute(&mut *tx)

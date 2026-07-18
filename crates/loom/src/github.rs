@@ -126,6 +126,317 @@ const POLL_TICK: Duration = Duration::from_secs(30);
 /// Shared with [`crate::web`] (the trigger reply path).
 pub const LINKED_TAG: &str = "github.linked";
 
+// ---------------------------------------------------------------------------
+// The status card
+//
+// A branch wired to a GitHub thread mirrors its `weaver status` trail onto one
+// comment there — the trigger's "On it" reply, edited in place — so the people
+// watching the issue or PR see the agent's progress without opening the
+// dashboard. Edits notify no one: the card is the quiet channel; the agent
+// still posts real comments when it needs a human.
+// ---------------------------------------------------------------------------
+
+/// Branch tag wiring a session to a GitHub thread — see
+/// [`tags::GITHUB_KEY`] (the registry entry) for the contract.
+pub const WIRED_TAG: &str = tags::GITHUB_KEY;
+
+/// Branch tag holding the GitHub comment id of the status card — loom's
+/// bookkeeping, the same shape as [`LINKED_TAG`] (the value is the handle).
+/// See [`tags::GITHUB_COMMENT_KEY`].
+pub const STATUS_COMMENT_TAG: &str = tags::GITHUB_COMMENT_KEY;
+
+/// How many trail bullets the status card shows; older entries collapse into a
+/// count line so a long session never turns the comment into a scroll.
+const STATUS_CARD_CAP: usize = 15;
+
+/// Keys loom stamps mechanically to track its own GitHub side-effects. The
+/// generic tag routes refuse to *set* them — a forged comment id would aim
+/// loom's edits at someone else's comment. Clearing stays allowed (harmless:
+/// loom re-creates its bookkeeping on the next pass).
+pub fn is_reserved_tag(key: &str) -> bool {
+    key == LINKED_TAG || key == STATUS_COMMENT_TAG
+}
+
+/// Parse a [`WIRED_TAG`] value — `owner/name#number` — into its slug and
+/// thread number. `None` for anything else (the tag is free-form user input,
+/// and the slug ends up in GitHub API paths): both segments must pass the same
+/// charset gate as [`crate::repo::parse_slug`], and only the bare documented
+/// form is accepted — a URL form parse_slug would reduce is rejected here so
+/// the stored tag, the sync's API paths, and the comment bookkeeping note all
+/// agree on one spelling.
+pub fn parse_wiring(value: &str) -> Option<(String, i64)> {
+    let (slug, number) = value.trim().split_once('#')?;
+    let number: i64 = number.trim().parse().ok().filter(|n| *n > 0)?;
+    let slug = slug.trim();
+    let parsed = crate::repo::parse_slug(slug).ok()?;
+    (parsed.slug() == slug).then(|| (parsed.slug(), number))
+}
+
+/// One rendered bullet of the status trail: the level's dot, the time, the
+/// level name when loud, and the message. Events with nothing to say (a bare
+/// `weaver status ok`) render `None`.
+fn status_bullet(event: &weaver_core::events::Event) -> Option<String> {
+    let value = event.data["value"].as_str().unwrap_or_default();
+    let note = event.data["note"].as_str().unwrap_or_default().trim();
+    let loud = !value.is_empty();
+    if note.is_empty() && !loud {
+        return None;
+    }
+    let icon = match value {
+        "blocked" => "\u{1f534}",   // red circle
+        "attention" => "\u{1f7e0}", // orange circle
+        _ => "\u{1f7e2}",           // green circle
+    };
+    let when = chrono::DateTime::parse_from_rfc3339(&event.created_at)
+        .map(|t| t.format("%b %e %H:%M").to_string())
+        .unwrap_or_default();
+    let mut line = format!("- {icon} `{when}Z`");
+    if loud {
+        line.push_str(&format!(" **{value}**"));
+        if !note.is_empty() {
+            line.push_str(" —");
+        }
+    }
+    if !note.is_empty() {
+        line.push_str(&format!(" {note}"));
+    }
+    Some(line)
+}
+
+/// Render the status card: the "On it" header linking the session, the
+/// documents the agent has published (linked into the dashboard's artifact
+/// viewer), then the trail of `weaver status` reports (oldest first, capped at
+/// [`STATUS_CARD_CAP`]). Pure, so the format is unit-testable; `events` is the
+/// branch's history oldest-first, filtered here to the agent's own attention
+/// reports.
+pub fn render_status_card(
+    session_url: &str,
+    artifacts: &[String],
+    events: &[weaver_core::events::Event],
+) -> String {
+    let bullets: Vec<String> = events
+        .iter()
+        // The agent's own reports only: a manual tag edit in the UI records the
+        // same event shape but must never read as agent progress on GitHub.
+        .filter(|e| {
+            e.kind == "tag" && e.data["key"] == tags::ATTENTION_KEY && e.data["by"] == "agent"
+        })
+        .filter_map(status_bullet)
+        .collect();
+    let mut body = format!("On it — {session_url}");
+    if !artifacts.is_empty() {
+        // Artifact names are agent-chosen free text: escape the Markdown label
+        // and percent-encode the URL path segment, or a bracket/paren in a name
+        // silently breaks the card's link syntax.
+        use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+        const SEG: &AsciiSet = &CONTROLS
+            .add(b' ')
+            .add(b'"')
+            .add(b'#')
+            .add(b'%')
+            .add(b'/')
+            .add(b'?')
+            .add(b'(')
+            .add(b')')
+            .add(b'<')
+            .add(b'>')
+            .add(b'[')
+            .add(b']')
+            .add(b'\\')
+            .add(b'`');
+        let links: Vec<String> = artifacts
+            .iter()
+            .map(|name| {
+                let label = name
+                    .replace('\\', "\\\\")
+                    .replace('[', "\\[")
+                    .replace(']', "\\]");
+                let path = utf8_percent_encode(name, SEG);
+                format!("[{label}]({session_url}/artifacts/{path})")
+            })
+            .collect();
+        body.push_str(&format!("\nDocs: {}", links.join(" · ")));
+    }
+    if bullets.is_empty() {
+        return body;
+    }
+    body.push_str("\n\n");
+    if bullets.len() > STATUS_CARD_CAP {
+        let hidden = bullets.len() - STATUS_CARD_CAP;
+        body.push_str(&format!("…{hidden} earlier updates\n"));
+    }
+    let shown = &bullets[bullets.len().saturating_sub(STATUS_CARD_CAP)..];
+    body.push_str(&shown.join("\n"));
+    body
+}
+
+/// One card sync at a time, process-wide: two racing status writes must never
+/// both see "no tracked comment" and double-post. Coarse — every branch shares
+/// it — which costs nothing at this fleet's write rate; each sync re-reads the
+/// event history inside the lock, so whichever runs last renders the full
+/// trail and stale renders can't stick.
+static SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Mirror a wired branch's status trail onto its GitHub thread: render the
+/// card and edit the tracked comment in place — posting a fresh one the first
+/// time, or again when someone deleted it. A no-op for unwired branches, and
+/// best-effort everywhere: a GitHub hiccup logs and never surfaces to the
+/// status write that spawned this. Transient failures retry — a terminal
+/// status ("ready for review", a final `blocked`) has no later write to
+/// self-heal through, so it must not be lost to one flaky call.
+pub async fn sync_status_comment(state: AppState, branch_id: String) {
+    for attempt in 0..3u32 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(5 * 4u64.pow(attempt - 1))).await;
+        }
+        if sync_status_comment_once(&state, &branch_id).await {
+            return;
+        }
+    }
+    tracing::warn!(branch = %branch_id, "status card: giving up after retries");
+}
+
+/// One sync attempt. `true` means done — synced, or nothing to do (unwired, no
+/// live session, no public base); `false` is a transient GitHub failure worth
+/// retrying.
+async fn sync_status_comment_once(state: &AppState, branch_id: &str) -> bool {
+    let wired = match tags::get(&state.db, branch_id, WIRED_TAG).await {
+        Ok(Some(tag)) => tag,
+        Ok(None) => return true,
+        Err(e) => {
+            tracing::warn!(branch = %branch_id, error = %e, "status card: reading wiring tag failed");
+            return true;
+        }
+    };
+    let Some((slug, number)) = parse_wiring(&wired.value) else {
+        tracing::warn!(branch = %branch_id, value = %wired.value, "status card: unparsable `github` tag; expected owner/name#number");
+        return true;
+    };
+    // Only a public base yields a link a GitHub reader can follow — same guard
+    // as the PR back-link. Without one the card would advertise a loopback URL.
+    let base = config::get(&state.db, "auth.base_url")
+        .await
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    if base.is_empty() {
+        tracing::debug!(branch = %branch_id, "status card: no auth.base_url; skipping");
+        return true;
+    }
+    let session = match session_mod::active_for_branch(&state.db, branch_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return true, // no live session — nothing is reporting status
+        Err(e) => {
+            tracing::warn!(branch = %branch_id, error = %e, "status card: session lookup failed");
+            return true;
+        }
+    };
+
+    let _guard = SYNC_LOCK.lock().await;
+    let mut events = match events::history(&state.db, branch_id, 500).await {
+        Ok(ev) => ev,
+        Err(e) => {
+            tracing::warn!(branch = %branch_id, error = %e, "status card: reading event history failed");
+            return true;
+        }
+    };
+    // The trail starts when the wiring did: statuses written before the agent
+    // was told they'd be public stay private (hand-wiring an old session must
+    // not retroactively publish its history).
+    events.retain(|e| e.created_at >= wired.set_at);
+    // The card links the agent's published documents (`goal` excluded — it
+    // paraphrases the thread itself). Names only: full contents stay a
+    // deliberate `gh` comment, posting one is the "please read this" act.
+    let artifacts: Vec<String> = match branch_mod::get(&state.db, branch_id).await {
+        Ok(Some(branch)) => {
+            weaver_core::artifact::list_for_session(&state.db, &branch.repo_root, branch_id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| a.name)
+                .filter(|n| n != "goal")
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    let body = render_status_card(
+        &crate::web::session_url(&base, &session.id),
+        &artifacts,
+        &events,
+    );
+
+    // The tracked comment counts only while its note still names the current
+    // wiring: a re-pointed `github` tag must get a fresh comment on the new
+    // thread, never a PATCH of the old one.
+    let wired_to = format!("{slug}#{number}");
+    let tracked: Option<i64> = match tags::get(&state.db, branch_id, STATUS_COMMENT_TAG).await {
+        Ok(tag) => tag
+            .filter(|t| t.note == wired_to)
+            .and_then(|t| t.value.parse().ok()),
+        Err(e) => {
+            tracing::warn!(branch = %branch_id, error = %e, "status card: reading comment tag failed");
+            return true;
+        }
+    };
+    if let Some(comment_id) = tracked {
+        match state
+            .trigger
+            .gh()
+            .update_issue_comment(&slug, comment_id, &body)
+            .await
+        {
+            Ok(true) => return true,
+            Ok(false) => {
+                tracing::info!(repo = %slug, comment = comment_id, "status card: comment gone; posting a fresh one");
+            }
+            Err(e) => {
+                tracing::warn!(repo = %slug, comment = comment_id, error = %e, "status card: comment update failed");
+                return false;
+            }
+        }
+    }
+    match state
+        .trigger
+        .gh()
+        .post_issue_comment(&slug, number, &body)
+        .await
+    {
+        Ok(comment_id) => {
+            record_status_comment(&state.db, branch_id, &slug, number, comment_id).await;
+            true
+        }
+        Err(e) => {
+            tracing::warn!(repo = %slug, number, error = %e, "status card: posting comment failed");
+            false
+        }
+    }
+}
+
+/// Stamp the [`STATUS_COMMENT_TAG`] bookkeeping tag after a card lands. The
+/// note records the wiring the comment belongs to — [`sync_status_comment`]
+/// trusts the comment id only while that note matches the current `github`
+/// tag. Shared with the trigger reply path, which posts the card's first
+/// revision.
+pub async fn record_status_comment(
+    db: &Db,
+    branch_id: &str,
+    slug: &str,
+    number: i64,
+    comment_id: i64,
+) {
+    tags::set(
+        db,
+        branch_id,
+        STATUS_COMMENT_TAG,
+        &comment_id.to_string(),
+        &format!("{slug}#{number}"),
+        "loom",
+    )
+    .await
+    .ok();
+}
+
 /// The fields requested from `gh pr view --json`. Kept in one place so the parse
 /// struct and the query can't drift.
 const PR_FIELDS: &str =
@@ -1069,5 +1380,120 @@ mod tests {
             .unwrap();
         assert_eq!(session.status, "running");
         assert!(f.work_dir.exists());
+    }
+
+    // -- the status card ----------------------------------------------------
+
+    #[test]
+    fn parse_wiring_accepts_a_thread_and_rejects_noise() {
+        assert_eq!(
+            parse_wiring("acme/widgets#87"),
+            Some(("acme/widgets".to_string(), 87))
+        );
+        assert_eq!(
+            parse_wiring("  acme/widgets#87  "),
+            Some(("acme/widgets".to_string(), 87))
+        );
+        for bad in [
+            "",
+            "acme/widgets",
+            "#87",
+            "acme#87",
+            "acme/widgets#0",
+            "acme/widgets#-3",
+            "acme/widgets#seven",
+            "a/b/c#7",
+            // The slug feeds GitHub API paths: the repo charset gate applies,
+            // and only the bare documented form is a wiring (no URL forms).
+            "../evil#7",
+            "acme/..#7",
+            "acme/wid gets#7",
+            "acme/wid%2Fgets#7",
+            "https://github.com/acme/widgets#7",
+        ] {
+            assert_eq!(parse_wiring(bad), None, "{bad:?} must not parse");
+        }
+    }
+
+    fn status_event(value: &str, note: &str, by: &str) -> weaver_core::events::Event {
+        weaver_core::events::Event {
+            id: 0,
+            branch_id: "b".to_string(),
+            kind: "tag".to_string(),
+            data: json!({ "key": "attention", "value": value, "note": note, "by": by }),
+            created_at: "2026-07-18T21:04:05.000Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn status_card_renders_the_trail_oldest_first() {
+        let events = vec![
+            status_event("", "mapping the code", "agent"),
+            // A manual UI edit must never read as agent progress.
+            status_event("attention", "operator note", "manual"),
+            // An unrelated tag event is not part of the trail.
+            weaver_core::events::Event {
+                id: 0,
+                branch_id: "b".to_string(),
+                kind: "tag".to_string(),
+                data: json!({ "key": "idle", "value": "idle", "note": "", "by": "loom" }),
+                created_at: "2026-07-18T21:05:00.000Z".to_string(),
+            },
+            // A bare `weaver status ok` (no message) says nothing new.
+            status_event("", "", "agent"),
+            status_event("blocked", "build broken", "agent"),
+        ];
+        let card = render_status_card("http://loom/s/abc", &[], &events);
+        let lines: Vec<&str> = card.lines().collect();
+        assert_eq!(lines[0], "On it — http://loom/s/abc");
+        assert_eq!(lines[1], "");
+        assert!(lines[2].contains("mapping the code") && lines[2].contains("\u{1f7e2}"));
+        assert!(lines[3].contains("**blocked** — build broken") && lines[3].contains("\u{1f534}"));
+        assert_eq!(lines.len(), 4, "manual/idle/silent events render nothing");
+    }
+
+    #[test]
+    fn status_card_with_no_trail_is_just_the_header() {
+        assert_eq!(
+            render_status_card("http://loom/s/abc", &[], &[]),
+            "On it — http://loom/s/abc"
+        );
+    }
+
+    #[test]
+    fn status_card_links_published_artifacts() {
+        let card = render_status_card(
+            "http://loom/s/abc",
+            &["design".to_string(), "plan".to_string()],
+            &[status_event("", "drafted the design", "agent")],
+        );
+        let lines: Vec<&str> = card.lines().collect();
+        assert_eq!(
+            lines[1],
+            "Docs: [design](http://loom/s/abc/artifacts/design) · [plan](http://loom/s/abc/artifacts/plan)"
+        );
+        assert!(lines[3].contains("drafted the design"));
+    }
+
+    #[test]
+    fn status_card_escapes_hostile_artifact_names() {
+        // Names are agent-chosen free text; brackets must not break the link
+        // Markdown and the URL segment must be percent-encoded.
+        let card = render_status_card("http://loom/s/abc", &["a](x) [b".to_string()], &[]);
+        assert_eq!(
+            card.lines().nth(1).unwrap(),
+            "Docs: [a\\](x) \\[b](http://loom/s/abc/artifacts/a%5D%28x%29%20%5Bb)"
+        );
+    }
+
+    #[test]
+    fn status_card_collapses_a_long_trail() {
+        let events: Vec<_> = (0..20)
+            .map(|i| status_event("", &format!("step {i}"), "agent"))
+            .collect();
+        let card = render_status_card("http://loom/s/abc", &[], &events);
+        assert!(card.contains("…5 earlier updates"));
+        assert!(!card.contains("step 4"), "collapsed entries are dropped");
+        assert!(card.contains("step 5") && card.contains("step 19"));
     }
 }
