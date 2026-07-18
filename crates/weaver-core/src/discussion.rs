@@ -114,7 +114,7 @@ pub async fn create_thread(db: &Db, new: &NewThread<'_>) -> Result<Thread> {
         body,
     } = *new;
     let now = now_iso();
-    let mut tx = db.begin().await?;
+    let mut tx = crate::db::begin_immediate(db).await?;
 
     let (thread_id,): (i64,) = sqlx::query_as(
         "INSERT INTO artifact_threads
@@ -152,7 +152,7 @@ pub async fn create_thread(db: &Db, new: &NewThread<'_>) -> Result<Thread> {
 /// (unexpectedly) empty thread). Returns the new comment.
 pub async fn add_comment(db: &Db, thread_id: i64, author: &str, body: &str) -> Result<Comment> {
     let now = now_iso();
-    let mut tx = db.begin().await?;
+    let mut tx = crate::db::begin_immediate(db).await?;
 
     let next_seq: i64 = {
         let max: Option<i64> =
@@ -282,7 +282,7 @@ pub async fn list_for_artifact(
 /// artifact. Foreign keys aren't enabled on the pool, so the `ON DELETE
 /// CASCADE` in the schema won't fire — clear comments before threads.
 pub async fn delete_for_artifact(db: &Db, artifact_id: i64) -> Result<()> {
-    let mut tx = db.begin().await?;
+    let mut tx = crate::db::begin_immediate(db).await?;
     sqlx::query(
         "DELETE FROM artifact_comments WHERE thread_id IN
             (SELECT id FROM artifact_threads WHERE artifact_id = ?)",

@@ -28,11 +28,15 @@ fn sign(secret: &str, body: &[u8]) -> String {
     format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
 }
 
-/// A recording GitHub gateway standing in for `gh`: it captures every reply
-/// posted and answers `pr_head` with a value a PR-flow test can pin.
+/// A recording GitHub gateway standing in for `gh`: it captures every comment
+/// posted or edited and answers `pr_head` with a value a PR-flow test can pin.
+/// Posted comments get ids 1, 2, … in order, so a test can follow an edit back
+/// to the post it targets.
 #[derive(Default)]
 struct FakeGithub {
     comments: Mutex<Vec<(String, i64, String)>>,
+    /// Every `update_issue_comment` call as `(repo, comment_id, body)`.
+    updates: Mutex<Vec<(String, i64, String)>>,
     /// What `pr_head` returns; a PR-flow test sets this to a branch it created in
     /// the fixture remote. `None` → a plain same-repo head named `feature`.
     pr_head: Mutex<Option<loom::github_trigger::PrHead>>,
@@ -40,12 +44,23 @@ struct FakeGithub {
 
 #[async_trait::async_trait]
 impl loom::github_trigger::GithubApi for FakeGithub {
-    async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> anyhow::Result<()> {
-        self.comments
+    async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> anyhow::Result<i64> {
+        let mut comments = self.comments.lock().unwrap();
+        comments.push((repo.to_string(), issue, body.to_string()));
+        Ok(comments.len() as i64)
+    }
+
+    async fn update_issue_comment(
+        &self,
+        repo: &str,
+        comment_id: i64,
+        body: &str,
+    ) -> anyhow::Result<bool> {
+        self.updates
             .lock()
             .unwrap()
-            .push((repo.to_string(), issue, body.to_string()));
-        Ok(())
+            .push((repo.to_string(), comment_id, body.to_string()));
+        Ok(true)
     }
 
     async fn pr_head(
@@ -386,6 +401,110 @@ async fn happy_path_creates_session_and_replies() {
 
     ts.client
         .delete(&format!("/api/sessions/{id}"))
+        .await
+        .unwrap();
+}
+
+/// An issue trigger wires the branch to the thread (the `github` tag) and
+/// records the "On it" reply's comment id; a `weaver status` write then edits
+/// that same comment into the status card, and a later write re-renders it
+/// with the whole trail.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_writes_mirror_onto_the_on_it_comment() {
+    let (ts, fake) = boot().await;
+    let _remotes = prepare_repo(&ts).await;
+    // The card links sessions through the configured public base; without one
+    // the mirror deliberately stays quiet.
+    ts.client
+        .patch(
+            "/api/settings",
+            json!({ "auth.base_url": "http://loom.test" }),
+        )
+        .await
+        .unwrap();
+
+    let body = trigger_body("rjpower", 42, "@loom work on this please");
+    let resp = post(&ts, "d-mirror", Some(sign(SECRET, &body)), &body).await;
+    assert_eq!(resp.status(), 200);
+    wait_for_sessions(&ts, 1).await;
+    wait_for_comments(&fake, 1).await;
+
+    let sessions = ts.client.get("/api/sessions").await.unwrap();
+    let session = &sessions.as_array().unwrap()[0];
+    let session_id = session["id"].as_str().unwrap().to_string();
+    let branch_id = session["branch"]["id"].as_str().unwrap().to_string();
+    let tags = session["branch"]["tags"].as_array().unwrap();
+    let tag = |key: &str| {
+        tags.iter()
+            .find(|t| t["key"] == key)
+            .unwrap_or_else(|| panic!("missing tag {key} in {tags:?}"))
+    };
+    assert_eq!(
+        tag("github")["value"].as_str(),
+        Some("acme/widgets#42"),
+        "the trigger wires the branch to the thread"
+    );
+    assert_eq!(
+        tag("github.status_comment")["value"].as_str(),
+        Some("1"),
+        "the On-it reply's comment id is recorded"
+    );
+
+    // First status report → the reply is edited in place into the card.
+    ts.client
+        .post(
+            &format!("/api/branches/{branch_id}/status"),
+            json!({ "level": "ok", "message": "wired the gateway" }),
+        )
+        .await
+        .unwrap();
+    for _ in 0..200 {
+        if !fake.updates.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let updates = fake.updates.lock().unwrap().clone();
+    assert_eq!(updates.len(), 1, "one edit per status write: {updates:?}");
+    let (repo, comment_id, card) = &updates[0];
+    assert_eq!(repo, "acme/widgets");
+    assert_eq!(*comment_id, 1, "the edit targets the On-it reply");
+    assert!(
+        card.starts_with(&format!("On it — http://loom.test/s/{session_id}")),
+        "the card keeps the session link: {card}"
+    );
+    assert!(card.contains("wired the gateway"), "trail bullet: {card}");
+
+    // A second report re-renders the card with the whole trail.
+    ts.client
+        .post(
+            &format!("/api/branches/{branch_id}/status"),
+            json!({ "level": "attention", "message": "ready for review" }),
+        )
+        .await
+        .unwrap();
+    for _ in 0..200 {
+        if fake.updates.lock().unwrap().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let updates = fake.updates.lock().unwrap().clone();
+    assert_eq!(updates.len(), 2, "a second edit landed: {updates:?}");
+    let card = &updates[1].2;
+    assert!(
+        card.contains("wired the gateway") && card.contains("**attention** — ready for review"),
+        "the whole trail renders: {card}"
+    );
+    assert_eq!(
+        fake.comments.lock().unwrap().len(),
+        1,
+        "status mirroring edits the one comment, never posts new ones"
+    );
+
+    ts.client
+        .delete(&format!("/api/sessions/{session_id}"))
         .await
         .unwrap();
 }

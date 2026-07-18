@@ -72,6 +72,20 @@ pub const RECOVERED_KEY: &str = "recovered";
 /// The fixed value the [`RECOVERED_KEY`] tag carries.
 pub const RECOVERED_VALUE: &str = "true";
 
+/// Branch tag wiring a session to a GitHub thread; the value is
+/// `owner/name#number` (an issue or a PR — GitHub comments treat them alike).
+/// Quiet. While present, loom mirrors every `weaver status` write onto one
+/// comment on that thread — the "On it" status card, edited in place. The
+/// `@loom` trigger stamps it at launch; `weaver tag set github owner/name#123`
+/// wires a session by hand; clearing it stops the mirroring.
+pub const GITHUB_KEY: &str = "github";
+
+/// Loom's bookkeeping for the status card: the GitHub comment id it edits,
+/// with the wiring it belongs to in the note. Machine-owned — the tag routes
+/// refuse to set it by hand (a forged id would aim loom's edits at someone
+/// else's comment); clearing it just makes the next status write post afresh.
+pub const GITHUB_COMMENT_KEY: &str = "github.status_comment";
+
 /// The loud keys: those that raise an attention signal on the dashboard. Any
 /// other key is quiet (a deletable pill) — including the soothing [`IDLE_KEY`].
 pub const LOUD_KEYS: &[&str] = &[ATTENTION_KEY, TRIAGE_KEY];

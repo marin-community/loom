@@ -416,15 +416,24 @@ pub struct PrHead {
     pub cross_repo: bool,
 }
 
-/// The GitHub operations the trigger performs — posting a reply and resolving a
-/// PR's head branch — behind a trait so the `gh`-backed implementation
-/// ([`GhCli`]) and a test fake are interchangeable. The production impl is the
-/// GitHub **App** (short-lived installation tokens); the [`GhCli`] fallback uses
-/// the ambient `GH_TOKEN`.
+/// The GitHub operations loom performs against a thread — posting and editing
+/// comments, resolving a PR's head branch — behind a trait so the `gh`-backed
+/// implementation ([`GhCli`]) and a test fake are interchangeable. The
+/// production impl is the GitHub **App** (short-lived installation tokens); the
+/// [`GhCli`] fallback uses the ambient `GH_TOKEN`.
 #[async_trait::async_trait]
 pub trait GithubApi: Send + Sync {
-    /// Post a comment on `issue` of `repo` (`owner/name`).
-    async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<()>;
+    /// Post a comment on `issue` of `repo` (`owner/name`), returning the new
+    /// comment's id — the handle
+    /// [`update_issue_comment`](Self::update_issue_comment) edits it by.
+    async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<i64>;
+
+    /// Replace the body of comment `comment_id` of `repo` (an id
+    /// [`post_issue_comment`](Self::post_issue_comment) returned). `Ok(false)`
+    /// means the comment no longer exists (someone deleted it) — the caller may
+    /// post a fresh one; transient failures stay `Err` so they are never
+    /// answered by a duplicate comment.
+    async fn update_issue_comment(&self, repo: &str, comment_id: i64, body: &str) -> Result<bool>;
 
     /// Resolve pull request `number` of `repo` (`owner/name`) to its head branch.
     async fn pr_head(&self, repo: &str, number: i64) -> Result<PrHead>;
@@ -436,11 +445,34 @@ pub struct GhCli;
 
 #[async_trait::async_trait]
 impl GithubApi for GhCli {
-    async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<()> {
-        let number = issue.to_string();
-        gh_capture(&["issue", "comment", &number, "--repo", repo, "--body", body]).await?;
-        tracing::info!(repo, issue, "posted issue comment");
-        Ok(())
+    async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<i64> {
+        // `gh api` rather than the `gh issue comment` porcelain: the raw REST
+        // response carries the comment id (porcelain prints only an HTML URL),
+        // and the same route serves issues and pull requests alike.
+        let path = format!("repos/{repo}/issues/{issue}/comments");
+        let field = format!("body={body}");
+        let out = gh_capture(&["api", &path, "-f", &field]).await?;
+        let v: serde_json::Value =
+            serde_json::from_str(&out).context("parsing created-comment json")?;
+        let id = v["id"]
+            .as_i64()
+            .context("created-comment json carries no id")?;
+        tracing::info!(repo, issue, comment = id, "posted issue comment");
+        Ok(id)
+    }
+
+    async fn update_issue_comment(&self, repo: &str, comment_id: i64, body: &str) -> Result<bool> {
+        let path = format!("repos/{repo}/issues/comments/{comment_id}");
+        let field = format!("body={body}");
+        match gh_capture(&["api", "-X", "PATCH", &path, "-f", &field]).await {
+            Ok(_) => {
+                tracing::info!(repo, comment = comment_id, "updated issue comment");
+                Ok(true)
+            }
+            // `gh api` reports "gh: Not Found (HTTP 404)" on stderr.
+            Err(e) if e.to_string().contains("HTTP 404") => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     async fn pr_head(&self, repo: &str, number: i64) -> Result<PrHead> {
@@ -730,12 +762,19 @@ mod tests {
 
     #[async_trait::async_trait]
     impl GithubApi for FakeGh {
-        async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<()> {
-            self.comments
-                .lock()
-                .unwrap()
-                .push((repo.to_string(), issue, body.to_string()));
-            Ok(())
+        async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<i64> {
+            let mut comments = self.comments.lock().unwrap();
+            comments.push((repo.to_string(), issue, body.to_string()));
+            Ok(comments.len() as i64)
+        }
+
+        async fn update_issue_comment(
+            &self,
+            _repo: &str,
+            _comment_id: i64,
+            _body: &str,
+        ) -> Result<bool> {
+            Ok(true)
         }
 
         async fn pr_head(&self, _repo: &str, _number: i64) -> Result<PrHead> {

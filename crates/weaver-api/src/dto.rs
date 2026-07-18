@@ -508,6 +508,12 @@ pub struct CreateReq {
     pub name: Option<String>,
     #[serde(default)]
     pub issue: Option<i64>,
+    /// A GitHub issue number the caller already holds the content of (the
+    /// `@loom` trigger, whose webhook payload carries the thread): recorded on
+    /// the tracking issue as its GitHub link, with none of `issue`'s
+    /// fetch-and-seed. Ignored when `issue` is set.
+    #[serde(default)]
+    pub github_issue: Option<i64>,
     /// A pre-existing weaver issue id to claim for this session (fan-out
     /// pickup). Seeds title/goal/description and stamps `claimed_branch`.
     #[serde(default)]

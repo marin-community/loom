@@ -391,7 +391,7 @@ impl GithubApp {
 
 #[async_trait::async_trait]
 impl GithubApi for GithubApp {
-    async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<()> {
+    async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<i64> {
         if !self.is_configured().await {
             tracing::debug!(
                 repo,
@@ -416,9 +416,50 @@ impl GithubApi for GithubApp {
             .send()
             .await
             .context("posting the issue comment")?;
-        check_status(resp, "posting the issue comment").await?;
-        tracing::info!(repo, issue, "posted issue comment");
-        Ok(())
+        let resp = check_status(resp, "posting the issue comment").await?;
+        let created: serde_json::Value =
+            resp.json().await.context("parsing created-comment json")?;
+        let id = created["id"]
+            .as_i64()
+            .ok_or_else(|| anyhow!("created-comment json carries no id"))?;
+        tracing::info!(repo, issue, comment = id, "posted issue comment");
+        Ok(id)
+    }
+
+    async fn update_issue_comment(&self, repo: &str, comment_id: i64, body: &str) -> Result<bool> {
+        if !self.is_configured().await {
+            tracing::debug!(
+                repo,
+                comment_id,
+                "app not configured; updating comment via gh fallback"
+            );
+            return self
+                .fallback
+                .update_issue_comment(repo, comment_id, body)
+                .await;
+        }
+        let slug = crate::repo::parse_slug(repo).map_err(|e| anyhow!(e))?;
+        let token = self.token_for_repo(&slug.owner, &slug.name).await?;
+        let url = format!(
+            "{}/repos/{}/{}/issues/comments/{comment_id}",
+            self.api_base, slug.owner, slug.name
+        );
+        let resp = self
+            .http
+            .patch(&url)
+            .header(reqwest::header::ACCEPT, GH_ACCEPT)
+            .header("X-GitHub-Api-Version", GH_API_VERSION)
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "body": body }))
+            .send()
+            .await
+            .context("updating the issue comment")?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        check_status(resp, "updating the issue comment").await?;
+        tracing::info!(repo, comment = comment_id, "updated issue comment");
+        Ok(true)
     }
 
     async fn pr_head(&self, repo: &str, number: i64) -> Result<PrHead> {
@@ -520,7 +561,7 @@ mod tests {
 
     use axum::extract::{Json, Path, State};
     use axum::http::{HeaderMap, StatusCode};
-    use axum::routing::{get, post};
+    use axum::routing::{get, patch, post};
     use axum::Router;
     use jsonwebtoken::{decode, DecodingKey, Validation};
     use serde_json::{json, Value};
@@ -625,6 +666,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         /// → already expired, to exercise refresh.
         expiry_offset_secs: i64,
         comments: Mutex<Vec<Value>>,
+        updates: Mutex<Vec<Value>>,
         last_comment_auth: Mutex<Option<String>>,
     }
 
@@ -634,10 +676,17 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
                 token_mints: AtomicUsize::new(0),
                 expiry_offset_secs,
                 comments: Mutex::new(Vec::new()),
+                updates: Mutex::new(Vec::new()),
                 last_comment_auth: Mutex::new(None),
             })
         }
     }
+
+    /// The id the mock stamps on every created comment.
+    const MOCK_COMMENT_ID: i64 = 4242;
+    /// A comment id the mock's PATCH route answers with 404, standing in for a
+    /// comment a human deleted.
+    const MOCK_DELETED_COMMENT_ID: i64 = 404_404;
 
     async fn mock_access_tokens(State(s): State<Arc<MockState>>) -> Json<Value> {
         s.token_mints.fetch_add(1, Ordering::SeqCst);
@@ -660,7 +709,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         Path((owner, name, issue)): Path<(String, String, i64)>,
         headers: HeaderMap,
         Json(body): Json<Value>,
-    ) -> StatusCode {
+    ) -> (StatusCode, Json<Value>) {
         *s.last_comment_auth.lock().unwrap() = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
@@ -670,7 +719,28 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
             "issue": issue,
             "body": body["body"],
         }));
-        StatusCode::CREATED
+        (StatusCode::CREATED, Json(json!({ "id": MOCK_COMMENT_ID })))
+    }
+
+    async fn mock_update_comment(
+        State(s): State<Arc<MockState>>,
+        Path((owner, name, comment_id)): Path<(String, String, i64)>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> StatusCode {
+        if comment_id == MOCK_DELETED_COMMENT_ID {
+            return StatusCode::NOT_FOUND;
+        }
+        *s.last_comment_auth.lock().unwrap() = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        s.updates.lock().unwrap().push(json!({
+            "repo": format!("{owner}/{name}"),
+            "comment": comment_id,
+            "body": body["body"],
+        }));
+        StatusCode::OK
     }
 
     /// Spawn the mock GitHub REST server on a random port; returns its base URL.
@@ -684,6 +754,10 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
             .route(
                 "/repos/{owner}/{name}/issues/{issue}/comments",
                 post(mock_comments),
+            )
+            .route(
+                "/repos/{owner}/{name}/issues/comments/{comment_id}",
+                patch(mock_update_comment),
             )
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -703,12 +777,21 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
 
     #[async_trait::async_trait]
     impl GithubApi for RecordingFallback {
-        async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<()> {
+        async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<i64> {
             self.comment_calls
                 .lock()
                 .unwrap()
                 .push((repo.to_string(), issue, body.to_string()));
-            Ok(())
+            Ok(7)
+        }
+
+        async fn update_issue_comment(
+            &self,
+            _repo: &str,
+            _comment_id: i64,
+            _body: &str,
+        ) -> Result<bool> {
+            Ok(true)
         }
 
         async fn pr_head(&self, _repo: &str, _number: i64) -> Result<PrHead> {
@@ -786,9 +869,11 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         let base = spawn_mock(mock.clone()).await;
         let app = configured_app(base, Arc::new(RecordingFallback::default())).await;
 
-        app.post_issue_comment("acme/widgets", 7, "On it — http://loom/s/abc")
+        let id = app
+            .post_issue_comment("acme/widgets", 7, "On it — http://loom/s/abc")
             .await
             .unwrap();
+        assert_eq!(id, MOCK_COMMENT_ID, "the created comment's id comes back");
 
         let comments = mock.comments.lock().unwrap().clone();
         assert_eq!(comments.len(), 1);
@@ -800,6 +885,35 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
             mock.last_comment_auth.lock().unwrap().clone(),
             Some("Bearer ghs_installation_token".to_string()),
         );
+    }
+
+    #[tokio::test]
+    async fn update_issue_comment_edits_in_place_and_flags_a_deleted_comment() {
+        let mock = MockState::new(3600);
+        let base = spawn_mock(mock.clone()).await;
+        let app = configured_app(base, Arc::new(RecordingFallback::default())).await;
+
+        let updated = app
+            .update_issue_comment("acme/widgets", MOCK_COMMENT_ID, "On it — now with a trail")
+            .await
+            .unwrap();
+        assert!(updated);
+        let updates = mock.updates.lock().unwrap().clone();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0]["comment"], MOCK_COMMENT_ID);
+        assert_eq!(updates[0]["body"], "On it — now with a trail");
+        assert_eq!(
+            mock.last_comment_auth.lock().unwrap().clone(),
+            Some("Bearer ghs_installation_token".to_string()),
+        );
+
+        // A 404 (the comment was deleted) is a clean `false`, not an error —
+        // the caller reposts instead of retry-spamming.
+        let updated = app
+            .update_issue_comment("acme/widgets", MOCK_DELETED_COMMENT_ID, "orphaned edit")
+            .await
+            .unwrap();
+        assert!(!updated);
     }
 
     // -- installation as the allowlist (§6.3) -------------------------------

@@ -225,7 +225,14 @@ function eventLine(ev: WeaverEvent): string {
   if (ev.kind === 'status') return `status → ${d.status ?? '?'}`;
   if (ev.kind === 'tag') {
     // `{ key, value, note, by }`; an empty value means the tag was cleared.
+    // The agent's own `attention` events carry the status message as `note` —
+    // rendered message-first, they make the feed the session's progress log
+    // (an empty attention value is the calm `ok`, not a bare "cleared").
     const key = (d.key as string) ?? 'tag';
+    if (key === 'attention' && d.by === 'agent') {
+      const level = (d.value as string) || 'ok';
+      return d.note ? `${level} — ${d.note}` : `status → ${level}`;
+    }
     const note = d.note ? ` (${d.note})` : '';
     return d.value ? `${key} → ${d.value}${note}` : `${key} cleared`;
   }

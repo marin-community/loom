@@ -384,7 +384,11 @@ The **`attention` tag** is otherwise the agent's own call, set via `weaver
 status <level> ["<message>"]`. That calls `POST /api/branches/{key}/status`,
 which writes the tag (and, when a message is given, the `description`) and
 records a `tag` event the monitor re-broadcasts over SSE, atomically in one
-request — `ok` clears the tag, the two loud levels upsert it. A bare `weaver
+request — `ok` clears the tag, the two loud levels upsert it. The message rides
+the event as its `note`, so the event log carries the full **status trail** —
+the progress log the dashboard's activity feed renders, `weaver log` prints,
+and a GitHub-wired session mirrors publicly (see [GitHub
+integration](#github-integration)). A bare `weaver
 status <level>` changes only the level and keeps the last message. Last write
 wins, so an explicit declaration overrides the hook-inferred default. The
 general `weaver tag set|rm|ls` group writes any key the same way, over the
@@ -465,6 +469,23 @@ JSON parse + check rollup), `refresh` (fetch → store → announce → maybe
 archive, behind both the poller and the refresh endpoint), and `poll` (the
 loop). The merge-archive decision is split into `apply_snapshot` so it is
 testable without invoking `gh`.
+
+**The status card.** A branch carrying the quiet `github` tag
+(`owner/name#number` — stamped by the `@loom` trigger, or set by hand with
+`weaver tag set github …`, format-validated at set time) mirrors its status
+trail onto that GitHub thread: `github::sync_status_comment`, spawned detached
+by the status endpoint and by artifact writes, renders one comment — the
+session link, links to the branch's artifacts, and the trail of the agent's
+own `attention` events since wiring — and edits it in place through the
+trigger's `GithubApi` gateway (`post_issue_comment` returns the comment id;
+`update_issue_comment` PATCHes it, reporting a deleted comment as `Ok(false)`
+so the card is reposted, while transient errors retry). A process-wide lock
+serializes syncs so racing writes can't double-post. The comment id lives in
+the machine-owned `github.status_comment` tag (note = the wiring it belongs
+to, so re-pointing the `github` tag posts fresh instead of editing the old
+thread); it and `github.linked` are refused by the tag-set routes and hidden
+from the dashboard's pill row. See
+[github-trigger.md "The status card"](github-trigger.md#the-status-card).
 
 ## Authentication
 

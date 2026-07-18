@@ -564,6 +564,12 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
         format!("{attention} — {}", b.description)
     };
     let _ = writeln!(out, "Status:  {status}  (weaver status)");
+    if let Some(wiring) = github_wiring_of(b) {
+        let _ = writeln!(
+            out,
+            "GitHub:  status messages mirror publicly to {wiring}  (weaver tag rm github stops it)"
+        );
+    }
 
     // Artifacts visible from this branch (its own + repo-shared) — the documents
     // the agent has written to weaver (designs, reports, the `plan`).
@@ -791,6 +797,23 @@ async fn cmd_log(limit: i64) -> Result<()> {
             s.to_string()
         } else if let Some(s) = ev.data.get("status").and_then(Value::as_str) {
             s.to_string()
+        } else if let Some(key) = ev.data.get("key").and_then(Value::as_str) {
+            // A tag event. For the agent's own `attention` reports this is the
+            // status trail: `level — message`; an empty value is the calm `ok`
+            // (any other key cleared reads as "cleared").
+            let value = ev.data.get("value").and_then(Value::as_str).unwrap_or("");
+            let note = ev.data.get("note").and_then(Value::as_str).unwrap_or("");
+            let shown = match (key, value) {
+                (k, "") if k == tags::ATTENTION_KEY => "ok".to_string(),
+                (k, "") => format!("{k} cleared"),
+                (k, v) if k == tags::ATTENTION_KEY => v.to_string(),
+                (k, v) => format!("{k}: {v}"),
+            };
+            if note.is_empty() {
+                shown
+            } else {
+                format!("{shown} — {note}")
+            }
         } else if let Some(level) = ev.data.get("level").and_then(Value::as_str) {
             match ev.data.get("note").and_then(Value::as_str) {
                 Some(n) if !n.is_empty() => format!("{level} — {n}"),
@@ -837,8 +860,21 @@ async fn cmd_status(level: Option<String>, message: String) -> Result<()> {
         format!("{attention} — {}", b.description)
     };
     println!("status:      {status}");
+    if let Some(wiring) = github_wiring_of(&b) {
+        println!("github:      status messages mirror publicly to {wiring}");
+    }
     println!("open issues: {}", b.open_issue_count);
     Ok(())
+}
+
+/// The branch's GitHub wiring — the `github` tag's `owner/name#number` — when
+/// the session mirrors its status trail onto a GitHub thread.
+fn github_wiring_of(b: &BranchView) -> Option<&str> {
+    b.tags
+        .iter()
+        .find(|t| t.key == tags::GITHUB_KEY)
+        .map(|t| t.value.as_str())
+        .filter(|v| !v.is_empty())
 }
 
 /// Report the agent's status: set the attention level and, when a message is
