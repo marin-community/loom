@@ -35,18 +35,23 @@ test.describe('parking sessions', () => {
     await expect.poll(async () => (await parkView(weaver.baseUrl, s.id)).park).toBe('active');
   });
 
-  test('a session awaiting external review rests on the shelf, labelled', async ({ page, weaver }) => {
+  test('a session awaiting external review stays live (sunk, not shelved)', async ({ page, weaver }) => {
+    // A review-wait mark sinks a row below the calm default but must NOT hide it
+    // on the shelf — an open PR awaiting review is still yours to glance at.
     const live = await weaver.seedSession({ goal: 'Add a health endpoint', name: 'health' });
     const review = await weaver.seedSession({ goal: 'Wire the readiness probe', name: 'probe' });
-    await weaver.setTag(review, 'review', 'review'); // PARKED ladder value → shelf
+    await weaver.setTag(review, 'awaiting', 'review'); // PARKED sort ladder value
 
     await page.goto(weaver.baseUrl);
-    await page.getByTestId('parked-toggle').click();
 
-    const onShelf = page.getByTestId('parked-shelf').locator(`[data-session-id="${review.id}"]`);
-    await expect(onShelf).toBeVisible();
-    await expect(onShelf).toContainText('in review');
-    // The live one stays live.
+    // The review row stays in the live list — never banished to the shelf.
+    await expect(
+      page.getByTestId('session-list').locator(`[data-session-id="${review.id}"]`),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId('parked-shelf').locator(`[data-session-id="${review.id}"]`),
+    ).toHaveCount(0);
+    // The calm one stays live too.
     await expect(
       page.getByTestId('session-list').locator(`[data-session-id="${live.id}"]`),
     ).toBeVisible();

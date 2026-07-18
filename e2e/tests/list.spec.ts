@@ -136,17 +136,18 @@ test.describe('session list view', () => {
     expect(updated.branch.tags.find((t) => t.key === 'priority')).toBeUndefined();
   });
 
-  test('a session awaiting external review rests on the Parked shelf', async ({
+  test('a session awaiting external review sinks in the live list, not the shelf', async ({
     page,
     weaver,
   }) => {
-    // Three sessions, created oldest→newest: a parked one (its PR awaits an
-    // external reviewer), a plainly-calm one, and one the agent raised. The
-    // review watch parks the first by stamping the quiet `awaiting: review` mark.
-    const parked = await weaver.seedSession({ goal: 'Awaiting review', name: 'parked-low' });
+    // Three sessions, created oldest→newest: one whose PR awaits an external
+    // reviewer, a plainly-calm one, and one the agent raised. The review-wait
+    // mark sinks the first below the calm rows but must NOT hide it on the shelf —
+    // an open PR awaiting review is still yours to glance at.
+    const review = await weaver.seedSession({ goal: 'Awaiting review', name: 'review-low' });
     const calm = await weaver.seedSession({ goal: 'Quietly working', name: 'calm-mid' });
     const attn = await weaver.seedSession({ goal: 'Needs a decision', name: 'top-attn' });
-    await weaver.setTag(parked, 'awaiting', 'review', {
+    await weaver.setTag(review, 'awaiting', 'review', {
       note: 'PR #7 review required — waiting on an external reviewer',
       by: 'review-wait',
     });
@@ -154,22 +155,20 @@ test.describe('session list view', () => {
 
     await page.goto(weaver.baseUrl);
 
-    // The live list holds only what a scanning user should look at: the raised row
-    // floats up, then the calm one. The "nothing to do, waiting on a reviewer" row
-    // is collapsed onto the resting shelf, out of the flow.
+    // All three stay live: the raised row floats to the top, the calm one next,
+    // and the review-waiting row sinks to the bottom — sunk, but never hidden.
     const liveIds = await page
       .getByTestId('session-list')
       .getByTestId('session-card')
       .evaluateAll((els) => els.map((e) => e.getAttribute('data-session-id')));
-    expect(liveIds).toEqual([attn.id, calm.id]);
+    expect(liveIds).toEqual([attn.id, calm.id, review.id]);
 
-    // The parked row rests on the shelf, labelled why it's resting, and still does
+    // The review-waiting row carries no loud signal (its mark is quiet) and does
     // not count toward "needs attention" — the user has no action there.
-    await page.getByTestId('parked-toggle').click();
-    const shelfCard = page.getByTestId('parked-shelf').locator(`[data-session-id="${parked.id}"]`);
-    await expect(shelfCard).toBeVisible();
-    await expect(shelfCard).toContainText('in review');
-    await expect(shelfCard.getByTestId('signal-chip')).toHaveCount(0);
+    const reviewCard = page
+      .getByTestId('session-list')
+      .locator(`[data-session-id="${review.id}"]`);
+    await expect(reviewCard.getByTestId('signal-chip')).toHaveCount(0);
     await expect(page.getByTestId('filter-attention')).toContainText('1');
   });
 

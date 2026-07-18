@@ -137,11 +137,13 @@ export function effectiveAttention(s: Session): EffectiveAttention {
   return { ...markOf(s, top), stale };
 }
 
-// Whether a session is *parked*: calm (no loud signal) yet carrying a tag whose
-// value is on the PARKED ladder — work waiting on an external actor (a human PR
-// reviewer, …) that needs nothing from the user. A loud signal always wins: a
-// session that needs a human is never parked, however else it's tagged. Archived
-// sessions are never parked (they read through their own terminal badge).
+// Whether a session sits on the PARKED sort ladder: calm (no loud signal) yet
+// carrying a tag whose value parks — work waiting on an external actor (a human
+// PR reviewer, …) that needs nothing from the user. This only *sinks* the row
+// below the calm default in the fleet sort (`priorityRank`); it does not shelve
+// it (see `parkReason`). A loud signal always wins: a session that needs a human
+// never sinks, however else it's tagged. Archived sessions never sink (they read
+// through their own terminal badge).
 export function isParked(s: Session): boolean {
   if (s.status === 'archived') return false;
   if (loudTags(s).length > 0) return false;
@@ -164,11 +166,14 @@ export function priorityRank(s: Session): number {
 // The resting shelf ("Parked") + manual order
 // ---------------------------------------------------------------------------
 
-// How long an agent may rest before the fleet list quietly shelves its row. The
-// list is a projection of REST state (docs/loom-ui.md): this threshold is a pure
-// view concern, applied client-side over the row's `last_activity_at`, never a
-// stored flag — only the *manual* park override (`park`) is persisted.
-export const IDLE_PARK_DAYS = 3;
+// How long an agent may rest before the fleet list quietly shelves its row —
+// long enough that a finished turn (idle in minutes) never parks a conversation,
+// only a genuinely abandoned one does. The list is a projection of REST state
+// (docs/loom-ui.md): this threshold is a pure view concern, applied client-side
+// over the row's `last_activity_at`, never a stored flag — only the *manual*
+// park override (`park`) is persisted.
+export const IDLE_PARK_HOURS = 8;
+const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
 
 // Milliseconds since the agent last did anything (its `last_activity_at`, or the
@@ -180,13 +185,16 @@ export function idleMs(s: Session): number {
   return Math.max(0, Date.now() - last);
 }
 
-export type ParkReason = 'manual' | 'review' | 'idle';
+export type ParkReason = 'manual' | 'idle';
 
 // Why a session rests on the shelf, or `null` if it belongs in the live list.
-// A session is shelved when it needs nothing from you *and* one of:
-//   • you parked it by hand              → 'manual'  (park === 'parked')
-//   • it's waiting on an external review  → 'review'  (the PARKED tag, isParked)
-//   • the agent has rested past the idle threshold → 'idle'
+// The shelf hides only what genuinely needs nothing from you *and* one of:
+//   • you parked it by hand                        → 'manual'  (park === 'parked')
+//   • the agent has rested past the idle threshold → 'idle'    (IDLE_PARK_HOURS)
+// A review-wait mark deliberately does NOT shelve: an open PR awaiting an
+// external reviewer is still yours to glance at, so it stays in the live list —
+// sunk below the calm rows by `priorityRank` and labelled with its quiet
+// `awaiting: review` pill — rather than hidden away the instant a turn ends.
 // A loud signal always keeps a row live (you need to see it), and an explicit
 // 'active' override pins a row live even when idle.
 export function parkReason(s: Session): ParkReason | null {
@@ -194,8 +202,7 @@ export function parkReason(s: Session): ParkReason | null {
   if (effectiveAttention(s).level !== 'ok') return null; // needs a human → live
   if (s.park === 'active') return null; // kept live by hand
   if (s.park === 'parked') return 'manual';
-  if (isParked(s)) return 'review';
-  if (idleMs(s) >= IDLE_PARK_DAYS * DAY_MS) return 'idle';
+  if (idleMs(s) >= IDLE_PARK_HOURS * HOUR_MS) return 'idle';
   return null;
 }
 
@@ -206,10 +213,12 @@ export function shelved(s: Session): boolean {
 // A short mono label for the shelf badge — what kind of rest this is.
 export function parkLabel(s: Session): string {
   const reason = parkReason(s);
-  if (reason === 'review') return 'in review';
   if (reason === 'idle') {
-    const days = Math.floor(idleMs(s) / DAY_MS);
-    return days >= 1 ? `idle ${days}d` : 'idle';
+    const ms = idleMs(s);
+    // Shelved rows have rested at least IDLE_PARK_HOURS, so hours reads first;
+    // multi-day rests round up to days ("idle 6d").
+    if (ms >= DAY_MS) return `idle ${Math.floor(ms / DAY_MS)}d`;
+    return `idle ${Math.floor(ms / HOUR_MS)}h`;
   }
   return 'parked';
 }

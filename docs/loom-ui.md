@@ -127,13 +127,17 @@ The fleet list is where a long day's fatigue accumulates, so two controls keep i
 from becoming a wall of stale rows:
 
 - **The resting shelf ("Parked").** Below the live list sits a collapsed shelf
-  for threads that need nothing from you right now — hand-parked, waiting on an
-  external reviewer, or simply long idle (the agent has rested past
-  `IDLE_PARK_DAYS`). Shelf rows are dimmed, labelled with *why* they rest (`in
-  review` / `idle 6d` / `parked`), and one click (or a drag) away from live. A
-  loud signal always keeps a thread live — a session that needs a human never
-  hides. The idle threshold is a pure client view over `last_activity_at`; only
-  the manual override (`park`: `'parked'` / `'active'`) is persisted.
+  for threads that need nothing from you right now — hand-parked, or simply long
+  idle (the agent has rested past `IDLE_PARK_HOURS` — hours, not minutes, so a
+  finished turn never parks a conversation, only an abandoned one). Shelf rows
+  are dimmed, labelled with *why* they rest (`idle 12h` / `idle 6d` / `parked`),
+  and one click (or a drag) away from live. A loud signal always keeps a thread
+  live — a session that needs a human never hides. A session merely *awaiting an
+  external reviewer* is **not** shelved: its `awaiting: review` mark sinks it
+  below the calm rows in the live list (it's still yours to glance at) but never
+  hides it away. The idle threshold is a pure client view over
+  `last_activity_at`; only the manual override (`park`: `'parked'` / `'active'`)
+  is persisted.
 - **Manual order.** A hover-revealed grip (`⠿`) drags a top-level thread to
   reorder it, or onto the shelf to rest it (drag back out, or "Keep live", to
   return it). A drag persists one midpoint `sort_order`; placed and untouched

@@ -119,8 +119,8 @@ interface TreeRow {
 // out of the visible set (or was never tracked) drops its orphaned children up.
 // The shared tree build. Groups visible sessions into threads, ranks each
 // thread by its loudest member, then splits the top-level threads two ways: the
-// live list, and the resting "Parked" shelf (long-idle / in-review / hand-parked
-// threads that need nothing from you). Live threads carry the manual drag order;
+// live list, and the resting "Parked" shelf (long-idle or hand-parked threads
+// that need nothing from you). Live threads carry the manual drag order;
 // the shelf sorts by most-recent activity. Exposes the ordered live roots so the
 // drop math can find a dragged row's new neighbours.
 const partitioned = computed(() => {
@@ -666,8 +666,8 @@ async function handleCreated() {
       </li>
     </ul>
 
-    <!-- The Parked shelf — resting threads (long idle, in review, or parked by
-         hand) collapsed out of the live list so a stale fleet doesn't drag the
+    <!-- The Parked shelf — resting threads (long idle or parked by hand)
+         collapsed out of the live list so a stale fleet doesn't drag the
          eye. Also a drop target: drag a live row here to rest it; the "Keep live"
          verb (and dragging a row back out) returns it. Shown while empty only
          mid-drag, so there's always somewhere to drop. -->
