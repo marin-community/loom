@@ -16,11 +16,6 @@ use crate::db::{now_iso, Db};
 pub const DEFAULT_AGENT: &str = "claude";
 pub const DEFAULT_AGENT_MODEL: &str = "";
 pub const DEFAULT_AGENT_EFFORT: &str = "";
-/// The agent that backs the fleet Chat concierge when `concierge.runtime` is
-/// unset. Claude is the default because only it fires weaver's lifecycle hooks.
-pub const DEFAULT_CONCIERGE_RUNTIME: &str = "claude";
-pub const DEFAULT_CONCIERGE_MODEL: &str = "";
-pub const DEFAULT_CONCIERGE_EFFORT: &str = "";
 /// Whether the server adopts orphaned sessions on startup. Off by default:
 /// the operator opts in via `weaver config set server.auto_adopt true`.
 pub const DEFAULT_AUTO_ADOPT: bool = false;

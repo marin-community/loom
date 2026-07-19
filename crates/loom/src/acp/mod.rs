@@ -185,6 +185,19 @@ impl AcpHandle {
             .map_err(|_| anyhow!("acp task dropped the reply"))?
     }
 
+    /// Promote the current durable next-turn queue into the live turn. The task
+    /// reads the queue itself so the browser cannot accidentally steer stale or
+    /// partial text, and consumes it only after the adapter accepts the request.
+    pub async fn force_pending(&self, by: Option<String>) -> Result<PromptAck> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::ForcePending { by, reply: tx })
+            .await
+            .map_err(|_| anyhow!("acp task is gone"))?;
+        rx.await
+            .map_err(|_| anyhow!("acp task dropped the reply"))?
+    }
+
     /// Interrupt the in-flight turn (`session/cancel`).
     pub async fn cancel(&self) -> Result<()> {
         let (tx, rx) = oneshot::channel();
@@ -434,6 +447,10 @@ enum Command {
         resources: Vec<Value>,
         reply: oneshot::Sender<Result<PromptAck>>,
     },
+    ForcePending {
+        by: Option<String>,
+        reply: oneshot::Sender<Result<PromptAck>>,
+    },
     Cancel {
         reply: oneshot::Sender<Result<()>>,
     },
@@ -603,6 +620,9 @@ struct PendingSteer {
     by: Option<String>,
     turn: i64,
     forced: bool,
+    /// Exact durable queue prefix promoted by this request. Consumed only after
+    /// the adapter accepts steering, preserving messages appended behind it.
+    promoted_queue: Option<String>,
     resources: Vec<Value>,
     reply: oneshot::Sender<Result<PromptAck>>,
 }
@@ -1331,6 +1351,7 @@ impl Task {
             .map(|r| r.outcome);
         match (outcome, error) {
             (Some(wire::SteeringOutcome::Injected), None) => {
+                self.consume_promoted_queue(&pending).await;
                 // A steer belongs to the live turn rather than opening another
                 // item in the turn index. Journal it only after the adapter has
                 // accepted it; a rejected extension falls back without leaving
@@ -1357,6 +1378,7 @@ impl Task {
                 }
             }
             (Some(wire::SteeringOutcome::StartedNewTurn), None) => {
+                self.consume_promoted_queue(&pending).await;
                 if self.turn_live {
                     // codex-acp waits for its old prompt to settle before taking
                     // this branch. Keep the request until loom consumes that
@@ -1384,6 +1406,24 @@ impl Task {
                     self.fallback_prompt(pending).await;
                 }
             }
+        }
+    }
+
+    async fn consume_promoted_queue(&self, pending: &PendingSteer) {
+        let Some(promoted) = pending.promoted_queue.as_deref() else {
+            return;
+        };
+        if let Err(error) =
+            session::consume_pending_prompt(&self.db, &self.session_id, promoted).await
+        {
+            // The adapter has already accepted the feedback, so continue the
+            // turn and make the durability failure loud. A healthy database
+            // preserves any messages appended behind the promoted prefix.
+            tracing::error!(
+                session = %self.session_id,
+                %error,
+                "steered queued feedback but could not consume its durable copy"
+            );
         }
     }
 
@@ -1645,6 +1685,7 @@ impl Task {
                                         by,
                                         turn: self.current_turn,
                                         forced: force_steer,
+                                        promoted_queue: None,
                                         resources,
                                         reply,
                                     },
@@ -1667,6 +1708,53 @@ impl Task {
                 } else {
                     let ack = self.start_prompt(text, by, resources).await;
                     let _ = reply.send(ack);
+                }
+            }
+            Command::ForcePending { by, reply } => {
+                if !self.turn_live {
+                    let _ = reply.send(Err(anyhow!("there is no running turn to steer")));
+                } else if !self.pending_steers.is_empty() || self.pending_external.is_some() {
+                    let _ = reply.send(Err(anyhow!(
+                        "another steer is still pending; retry when it settles"
+                    )));
+                } else {
+                    let queued =
+                        match session::read_pending_prompt(&self.db, &self.session_id).await {
+                            Ok(queued) => queued,
+                            Err(error) => {
+                                let _ = reply.send(Err(error));
+                                return;
+                            }
+                        };
+                    if queued.trim().is_empty() {
+                        let _ = reply.send(Err(anyhow!("there is no queued feedback to steer")));
+                    } else {
+                        let id = self.next_id();
+                        let request = wire::request_line(
+                            id,
+                            method::SESSION_STEERING,
+                            wire::steering_params(&self.acp_session_id, &queued, &[]),
+                        );
+                        match self.stream.write(&request).await {
+                            Ok(()) => {
+                                self.pending_steers.insert(
+                                    id,
+                                    PendingSteer {
+                                        text: queued.clone(),
+                                        by,
+                                        turn: self.current_turn,
+                                        forced: true,
+                                        promoted_queue: Some(queued),
+                                        resources: Vec::new(),
+                                        reply,
+                                    },
+                                );
+                            }
+                            Err(error) => {
+                                let _ = reply.send(Err(error));
+                            }
+                        }
+                    }
                 }
             }
             Command::Cancel { reply } => {

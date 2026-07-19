@@ -350,6 +350,40 @@ test.describe('acp conversation', () => {
     ).toBeVisible({ timeout: 20_000 });
   });
 
+  test('ordinary feedback says when the running agent has not seen it yet', async ({ page, weaver }) => {
+    await openAcp(page, weaver, {
+      goal: 'say:ready',
+      name: 'acp-queue-ui',
+      steering: false,
+    });
+    const input = page.getByTestId('acp-composer-input');
+    await input.fill('wait:5000|say:first turn done');
+    await page.getByTestId('acp-composer-send').click();
+    await expect(page.getByTestId('acp-working')).toBeVisible({ timeout: 15_000 });
+
+    await input.fill('say:queued feedback');
+    await page.getByTestId('acp-composer-send').click();
+    await expect(page.getByTestId('acp-queued')).toHaveText(
+      'queued · agent hasn’t seen this yet',
+    );
+    await page.reload();
+    await expect(page.getByTestId('acp-queued')).toHaveText(
+      'queued · agent hasn’t seen this yet',
+    );
+    const forceNow = page.getByTestId('acp-force-queued').last();
+    await expect(forceNow).toBeEnabled();
+    await page.screenshot({ path: test.info().outputPath('acp-queued-feedback.png') });
+    await forceNow.click();
+
+    await expect(page.getByTestId('acp-queued')).toBeHidden();
+    await expect(page.getByTestId('acp-steered')).toBeVisible({ timeout: 15_000 });
+    await expect(
+      page
+        .getByTestId('acp-conversation')
+        .getByText('queued feedbackfirst turn done', { exact: true }),
+    ).toBeVisible({ timeout: 20_000 });
+  });
+
   test('@file completion resolves server files and sends an ACP resource', async ({ page, weaver }) => {
     await openAcp(page, weaver, {
       goal: 'say:ready',

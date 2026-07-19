@@ -133,8 +133,8 @@ pub struct SessionView {
     /// dashboard's session tree — or `null` for a top-level session.
     pub parent_id: Option<String>,
     /// The principal (username) that launched this session — attribution for the
-    /// shared team board. `null` for engine-created sessions (the concierge, warm
-    /// watch sessions) and rows that predate the column. A tracking/UX field,
+    /// shared team board. `null` for engine-created warm watch sessions and rows
+    /// that predate the column. A tracking/UX field,
     /// not a security boundary: the fleet stays co-owned by everyone authenticated.
     pub created_by: Option<String>,
     /// The tracking issue opened for this session's task at launch (the handle

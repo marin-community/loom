@@ -13,6 +13,7 @@ import {
 import {
   getSessionChat,
   promptSession,
+  forceQueuedSession,
   interruptSession,
   answerPermission,
   setSessionMode,
@@ -79,6 +80,12 @@ const liveTools = reactive(new Map<string, SseTool>());
 const turnLive = ref(false);
 const liveTurnNo = ref<number | null>(null);
 const optimistic = ref<{ key: number; text: string; state: 'sent' | 'steered' | 'queued' }[]>([]);
+const forceQueueKey = computed(() => {
+  for (let index = optimistic.value.length - 1; index >= 0; index -= 1) {
+    if (optimistic.value[index].state === 'queued') return optimistic.value[index].key;
+  }
+  return null;
+});
 let nextOptimisticKey = 0;
 const metadata = ref<AcpMetadata>({ commands: [], config_options: [], modes: [] });
 
@@ -116,6 +123,14 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
     liveTools.clear();
     liveTurnNo.value = snap.live_turn;
     turnLive.value = snap.live_turn != null;
+    optimistic.value = optimistic.value.filter((item) => item.state !== 'queued');
+    if (snap.pending_prompt?.trim()) {
+      optimistic.value.push({
+        key: nextOptimisticKey++,
+        text: snap.pending_prompt,
+        state: 'queued',
+      });
+    }
     metadata.value = snap.metadata ?? { commands: [], config_options: [], modes: [] };
     state.value = 'ready';
   } catch (e) {
@@ -279,9 +294,24 @@ async function submitPrompt(forceSteer = false) {
   }
 }
 
+async function forceQueued() {
+  if (sending.value) return;
+  sending.value = true;
+  sendError.value = '';
+  try {
+    await forceQueuedSession(id.value);
+    optimistic.value = optimistic.value.filter((item) => item.state !== 'queued');
+    autoFollow();
+  } catch (e) {
+    sendError.value = (e as Error).message ?? 'Failed to steer queued feedback';
+  } finally {
+    sending.value = false;
+  }
+}
+
 // ── Agent-owned slash commands ---------------------------------------------
 // The adapter replaces its command catalogue at runtime. Local surface hooks
-// win on a duplicate name (`/clear` in fleet Chat), then the remainder is
+// win on a duplicate name, then the remainder is
 // filtered as the user types. Selecting a command with input leaves a trailing
 // space and exposes the adapter's hint in the composer placeholder.
 const commands = computed<AcpCommand[]>(() => {
@@ -1131,9 +1161,22 @@ function goTo(anchor: string) {
           >
             <header class="acp-rule">
               <span class="acp-label text-accent">You</span>
-              <span v-if="o.state === 'queued'" class="acp-prompt-state" data-testid="acp-queued"
-                >queued for next turn</span
-              >
+              <template v-if="o.state === 'queued'">
+                <span class="acp-prompt-state" data-testid="acp-queued"
+                  >queued · agent hasn’t seen this yet</span
+                >
+                <button
+                  v-if="o.key === forceQueueKey"
+                  type="button"
+                  class="acp-prompt-action"
+                  data-testid="acp-force-queued"
+                  :disabled="sending || !turnLive"
+                  title="Inject all queued feedback into the running turn now"
+                  @click="forceQueued"
+                >
+                  Force now
+                </button>
+              </template>
               <span
                 v-else-if="o.state === 'steered'"
                 class="acp-prompt-state"
@@ -1349,7 +1392,7 @@ function goTo(anchor: string) {
             title="Inject this feedback into the running turn even if the agent did not advertise steering"
             @click="submitPrompt(true)"
           >
-            Steer now
+            Force steer
           </button>
           <button
             v-if="turnLive"
@@ -1424,6 +1467,16 @@ function goTo(anchor: string) {
   font-family: var(--font-mono);
   font-size: 0.6875rem;
   color: var(--attn);
+}
+.acp-prompt-action {
+  border-bottom: 1px solid currentColor;
+  color: var(--accent);
+  font-family: var(--font-sans);
+  font-size: 0.6875rem;
+}
+.acp-prompt-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 /* Empty state — a dashed card, not a bare void. */

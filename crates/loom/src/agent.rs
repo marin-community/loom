@@ -584,23 +584,6 @@ impl AgentType for CustomAgentType {
     }
 }
 
-/// The agent kind that marks a session as the fleet **concierge** — seeded with
-/// the [`concierge_primer`] instead of a workstream goal, hidden from the fleet
-/// list, and resolved as a singleton by the Chat surface. This is the session's
-/// *role*; the runtime it actually launches (claude|codex) is the separate
-/// `concierge.runtime` setting, resolved before launch.
-pub const CONCIERGE_KIND: &str = "concierge";
-
-/// The builtin concierge primer — how the fleet concierge explores and acts on
-/// the fleet. Catted in at build time like [`weaver_core::agent::builtin_weaver_md`],
-/// and used as a concierge session's opening prompt.
-const BUILTIN_CONCIERGE_MD: &str = include_str!("../CONCIERGE.md");
-
-/// The concierge primer text, seeded as a concierge session's opening prompt.
-pub fn concierge_primer() -> &'static str {
-    BUILTIN_CONCIERGE_MD
-}
-
 /// Wrap a value in single quotes for safe interpolation into the launch script —
 /// e.g. a goal/primer file path in `"$(cat '…')"` — escaping any embedded single
 /// quote the POSIX way (`'\''` — close the quote, an escaped literal quote,
@@ -649,20 +632,16 @@ pub struct LaunchSpec<'a> {
     /// The branch id — the agent uses this to resolve "its" branch via
     /// `$WEAVER_BRANCH`.
     pub branch_id: &'a str,
-    /// The resolved **runtime** to launch — a builtin (`claude`/`codex`) or a
-    /// custom agent's name, already resolved from the stored kind (so a concierge
-    /// carries its `concierge.runtime`, not the literal `concierge`).
+    /// The runtime to launch — a builtin (`claude`/`codex`) or a custom agent's
+    /// name.
     pub runtime: &'a str,
     pub work_dir: &'a Path,
     pub term_session: &'a str,
     /// The **positional** opening prompt catted in as the operator's first
-    /// message. A normal session carries this; the concierge does not (it uses
-    /// [`Self::primer_file`] instead, so it boots idle).
+    /// message.
     pub goal_file: Option<&'a Path>,
-    /// System *context* appended via `--append-system-prompt-file` (claude
-    /// runtime). The concierge's fleet-ops primer rides in here so it boots primed
-    /// but takes no turn until the operator speaks. Distinct from `goal_file`;
-    /// at most one is set.
+    /// Optional system context appended via `--append-system-prompt-file` for
+    /// runtimes that support it.
     pub primer_file: Option<&'a Path>,
     pub server_addr: &'a str,
     pub model: &'a str,
@@ -812,8 +791,8 @@ fn weaver_bin_path() -> String {
 // then brings up. See docs/plans/acp.md "Launch mapping".
 // ---------------------------------------------------------------------------
 
-/// The permission posture every ACP session boots in — the concierge and
-/// detached workstreams alike — when the create request names none. `auto` is
+/// The permission posture every ACP session boots in when the create request
+/// names none. `auto` is
 /// Claude Code's background-classifier posture: a safety model vets each tool
 /// call, executing routine work on its own and escalating only genuinely risky
 /// actions as an interactive permission card (surfaced in the conversation with a
@@ -943,8 +922,8 @@ pub async fn build_acp_launch(
     let primer_text = read_opt(spec.primer_file).await;
     let mut goal_text = read_opt(spec.goal_file).await;
     if is_codex && goal_text.is_none() {
-        // No appendSystemPrompt analogue: a primer-only launch (the concierge
-        // shape) seeds the primer positionally, mirroring the terminal path's
+        // No appendSystemPrompt analogue: a primer-only launch seeds the primer
+        // positionally, mirroring the terminal path's
         // `goal_file.or(primer_file)`.
         goal_text = primer_text.clone();
     }
@@ -1603,10 +1582,9 @@ mod tests {
     }
 
     #[test]
-    fn concierge_primer_rides_in_as_system_prompt_not_a_positional() {
-        // A concierge launches with its primer as appended system context and NO
-        // positional prompt, so it boots primed but idle (takes no turn until the
-        // operator speaks). Fresh and adopt both append the primer.
+    fn claude_primer_rides_in_as_system_prompt_not_a_positional() {
+        // A primer launches as appended system context and not as a positional
+        // prompt. Fresh and adopt both append it.
         let fresh = launch_script(
             "claude",
             None,
@@ -1641,35 +1619,8 @@ mod tests {
     }
 
     #[test]
-    fn concierge_kind_is_a_role_not_a_runtime() {
-        // The `concierge` string marks a role; it is not a runtime, so it must be
-        // resolved (to claude|codex) before launch and never reach the command
-        // builder — it is not a builtin agent type.
-        assert!(builtin_agent_type("claude").is_some());
-        assert!(builtin_agent_type("codex").is_some());
-        assert!(builtin_agent_type(CONCIERGE_KIND).is_none());
-        // Hook-starting is a runtime capability, not a role property: only claude
-        // fires weaver's lifecycle hooks.
-        assert!(
-            builtin_agent_type("claude")
-                .unwrap()
-                .metadata()
-                .supports_hooks
-        );
-        assert!(
-            !builtin_agent_type("codex")
-                .unwrap()
-                .metadata()
-                .supports_hooks
-        );
-        // The primer the concierge is seeded with is the real fleet-ops doc.
-        assert!(concierge_primer().contains("fleet concierge"));
-    }
-
-    #[test]
     fn codex_runtime_runs_codex_with_its_prompt() {
-        // A concierge resolved to the codex runtime launches `codex "$(cat …)"`,
-        // seeding the primer as codex's opening prompt.
+        // Codex launches with the goal as its opening prompt.
         let fresh = launch_script(
             "codex",
             Some(Path::new("/x/goal.txt")),
@@ -1698,11 +1649,9 @@ mod tests {
     }
 
     #[test]
-    fn codex_concierge_still_seeds_the_primer_positionally() {
-        // Codex has no `--append-system-prompt-file`, so a codex concierge (primer
-        // in `primer_file`, no `goal_file`) falls back to seeding the primer as a
-        // positional prompt — it still takes a turn on boot. Making codex boot idle
-        // is a documented follow-up.
+    fn codex_primer_is_seeded_positionally() {
+        // Codex has no `--append-system-prompt-file`, so a primer with no goal
+        // falls back to a positional prompt.
         let fresh = launch_script(
             "codex",
             None,
@@ -1969,8 +1918,8 @@ mod tests {
 
     #[test]
     fn sessions_boot_in_auto_by_default() {
-        // Every ACP session (concierge and detached workstream alike) boots in
-        // Claude Code's background-classifier `auto` posture unless overridden;
+        // Every ACP session boots in Claude Code's background-classifier `auto`
+        // posture unless overridden;
         // for a codex session that maps to codex's workspace-write `agent` mode.
         assert_eq!(DEFAULT_ACP_MODE, "auto");
         assert_eq!(codex_acp_mode(DEFAULT_ACP_MODE), "agent");

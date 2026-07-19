@@ -189,15 +189,17 @@ async fn launch_a_session_with_a_custom_agent() {
     // A hookless custom agent is live on launch, not stuck at `launching`.
     assert_eq!(session["status"], "running");
 
-    // A session requesting an unknown agent is rejected.
-    assert!(
-        client
-            .post(
-                "/api/sessions",
-                json!({ "goal": "hi", "cwd": ts.cwd(), "agent": "ghost" }),
-            )
-            .await
-            .is_err(),
-        "an unknown agent must be rejected at create time"
-    );
+    // Unknown agents and the retired concierge role are rejected.
+    for agent in ["ghost", "concierge"] {
+        assert!(
+            client
+                .post(
+                    "/api/sessions",
+                    json!({ "goal": "hi", "cwd": ts.cwd(), "agent": agent }),
+                )
+                .await
+                .is_err(),
+            "agent '{agent}' must be rejected at create time"
+        );
+    }
 }

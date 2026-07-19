@@ -249,9 +249,8 @@ things `claude_command` passes as argv today. The mapping:
   object merged into the Codex session config: `model`,
   `model_reasoning_effort`) for codex-acp.
 - **System primer**: the worktree path keeps riding the `SessionStart`
-  settings hook exactly as today; the paths that use
-  `--append-system-prompt-file` (concierge, adopt re-orientation) map to the
-  Claude adapter's `appendSystemPrompt` option. Codex has no analogue, so a
+  settings hook exactly as today; paths that need explicit runtime context map
+  to the Claude adapter's `appendSystemPrompt` option. Codex has no analogue, so a
   primer-only codex launch seeds the primer positionally, as its terminal
   path does.
 - **Permission posture** → the session's launch mode (below). The Claude
@@ -312,10 +311,8 @@ column holds messages for adapters that do not advertise steering (each send is
 audited as a `nudge` event); it dispatches as one `session/prompt` at the next
 turn boundary. Cancel stops the in-flight turn and leaves the queue.
 `SessionView` grows `protocol: "terminal" | "acp"`, `acp_session_id`,
-`current_mode`, `usage`. Note the session-scoped `/chat` routes are distinct
-from the fleet-level concierge `/api/chat` (`docs/plans/meta-chat.md`) — and
-the UI keeps the *Conversation* name precisely so the concierge keeps
-"Chat".
+`current_mode`, `usage`. The UI calls the session-scoped surface
+*Conversation* to match the existing transcript view.
 
 ### Lifecycle & status
 
@@ -405,8 +402,7 @@ ACP's update types need: serif = someone said this, mono = the machine did
 this, sans = the interface is asking you something.
 
 The pane keeps the name **Conversation** — it *is* today's Conversation tab
-with a live spine, and the "Chat" name stays reserved for the fleet-level
-concierge. For an ACP session the work-area tabs become **Conversation ·
+with a live spine. For an ACP session the work-area tabs become **Conversation ·
 Overview · Shells · Artifacts**, with Conversation first and default —
 promoting shells to a slim top-level tab is deliberate IA: the Terminal tab's
 reason to be first-class (the agent lived there) is gone, and what remains
@@ -584,8 +580,7 @@ throughout:
   blocks). ACP is that work, shared with the ecosystem, behind a stable
   contract.
 - **MCP as the integration seam.** MCP points the wrong way — it gives an
-  agent tools (and `docs/plans/meta-chat.md` already proposes a `loom mcp`
-  server for fleet control). It has no notion of prompting an agent,
+  agent tools for external systems. It has no notion of prompting an agent,
   streaming its turns, or answering its permissions. The two are
   complementary, not alternatives.
 - **Keep the PTY, improve the scraper.** The Conversation tab already mines

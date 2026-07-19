@@ -751,12 +751,12 @@ async fn prompt_steers_a_live_turn_when_advertised() {
     }));
 }
 
-/// A person can explicitly try the steering extension even when an adapter did
-/// not advertise it. This covers adapters that implement the extension but
-/// omit the capability bit; the ordinary Send path still queues for them.
+/// A person can promote already-queued feedback into the running turn even when
+/// an adapter did not advertise steering. The durable copy is consumed only
+/// after the adapter accepts it, so it cannot replay as another turn.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn prompt_force_steers_without_advertised_capability() {
+async fn prompt_promotes_queued_feedback_without_advertised_capability() {
     let ts = TestServer::start().await;
     start_new(&ts, "acp-force-steer", None, None).await;
 
@@ -767,11 +767,21 @@ async fn prompt_force_steers_without_advertised_capability() {
         )
         .await
         .unwrap();
+    let queued = ts
+        .client
+        .post(
+            "/api/sessions/acp-force-steer/prompt",
+            json!({ "text": "say:feedback" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(queued["queued"], true, "response: {queued}");
+
     let steered = ts
         .client
         .post(
             "/api/sessions/acp-force-steer/prompt",
-            json!({ "text": "say:feedback", "force_steer": true }),
+            json!({ "text": "", "force_queued": true }),
         )
         .await
         .unwrap();

@@ -24,9 +24,10 @@ use sqlx::Row;
 
 use crate::db::{now_iso, Db};
 
-/// The builtin agent names a custom agent may not shadow: the two real runtimes
-/// plus the `concierge` role-kind. `shell` is deliberately *not* reserved — it is
-/// no longer a builtin, so a user may define it themselves.
+/// The builtin agent names a custom agent may not shadow. The retired
+/// `concierge` name stays reserved because legacy session rows use it. `shell` is
+/// deliberately *not* reserved — it is no longer a builtin, so a user may define
+/// it themselves.
 pub const RESERVED_NAMES: &[&str] = &["claude", "codex", "concierge"];
 
 /// The execution backends a custom agent may declare (the `protocol` column).
@@ -238,7 +239,7 @@ mod tests {
         assert!(validate_name("2fast").is_err());
         assert!(validate_name("has space").is_err());
         assert!(validate_name("dots.dots").is_err());
-        // Builtin runtimes and the concierge role-kind are reserved.
+        // Builtin runtimes and retired role names are reserved.
         assert!(validate_name("claude").is_err());
         assert!(validate_name("codex").is_err());
         assert!(validate_name("concierge").is_err());

@@ -298,6 +298,16 @@ export const promptSession = (
     files,
   }) as Promise<PromptAck>;
 
+/** Promote all durable next-turn feedback into the currently running turn. */
+export const forceQueuedSession = (id: string, by?: string) =>
+  post(`/sessions/${id}/prompt`, {
+    text: '',
+    by,
+    force_steer: true,
+    force_queued: true,
+    files: [],
+  }) as Promise<PromptAck>;
+
 /** Worktree-backed completion for `@file` mentions in the ACP composer. */
 export const listSessionFiles = (id: string, query: string) =>
   get(`/sessions/${id}/files?q=${encodeURIComponent(query)}`) as Promise<{ files: string[] }>;

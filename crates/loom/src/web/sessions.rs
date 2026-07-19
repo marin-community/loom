@@ -62,8 +62,7 @@ pub(super) struct ListSessionsQuery {
     #[serde(default)]
     archived: bool,
     /// Case-insensitive substring filter over a session's title, branch name,
-    /// and goal — so the concierge can narrow a large fleet to the one it wants
-    /// (`loom session ls --search auth`). Absent/blank matches everything.
+    /// and goal (`loom session ls --search auth`). Absent/blank matches everything.
     #[serde(default)]
     q: Option<String>,
 }
@@ -183,18 +182,6 @@ async fn ensure_repo_registered(db: &Db, input: &str) -> ApiResult<()> {
     )
     .await?;
     Ok(())
-}
-
-/// Resolve the **runtime** a session of `agent_kind` launches with. Every kind is
-/// its own runtime, except the concierge role-kind, which launches whatever
-/// `concierge.runtime` names (claude|codex). Keeps the stored kind (the role)
-/// separate from the binary that runs.
-async fn launch_runtime(db: &Db, agent_kind: &str) -> String {
-    if agent_kind == agent::CONCIERGE_KIND {
-        configured_agent(db, "concierge.runtime", config::DEFAULT_CONCIERGE_RUNTIME).await
-    } else {
-        agent_kind.to_string()
-    }
 }
 
 async fn configured_agent(db: &Db, key: &str, default: &str) -> String {
@@ -504,12 +491,11 @@ fn tail_chars(s: &str, max: usize) -> String {
     format!("…(truncated)\n{tail}")
 }
 
-/// The session-creation core, shared by `POST /api/sessions` and the Chat
-/// surface's concierge get-or-create ([`get_chat`]). Returns the view directly so
-/// the caller can shape its own response.
+/// The session-creation core shared by interactive and webhook launches. Returns
+/// the view directly so each caller can shape its own response.
 ///
 /// `created_by` is the launching principal's username (attribution for the shared
-/// board), or `None` for a system launch with no user behind it (the concierge).
+/// board), or `None` for a system launch with no user behind it.
 pub(crate) async fn create_session_core(
     st: AppState,
     req: CreateReq,
@@ -573,12 +559,8 @@ pub(crate) async fn create_session_core(
         Some(a) => a.trim().to_string(),
         None => repo_default_agent(&st.db, &repo_cfg).await,
     };
-    // The concierge is the fleet Chat agent, not a workstream: it gets the
-    // fleet-ops primer as its opening prompt and no tracking issue (it has no
-    // deliverable to track), and is hidden from the fleet list by its kind.
-    let is_concierge = agent == agent::CONCIERGE_KIND;
-    let runtime = launch_runtime(&st.db, &agent).await;
-    tracing::debug!(agent = %agent, runtime = %runtime, is_concierge, "resolved agent runtime");
+    let runtime = agent.clone();
+    tracing::debug!(agent = %agent, runtime = %runtime, "resolved agent runtime");
     // The resolved launch environment: global agent_env < per-repo repo_env < the
     // repo file's [env]. It is needed before provisioning so a real agent launch
     // can stop cleanly when neither the user nor the deployment provides GH_TOKEN.
@@ -592,16 +574,6 @@ pub(crate) async fn create_session_core(
 
     // Normalize and validate the model / effort selections through the resolved
     // agent type. Blank means the agent's own default.
-    let configured_model_key = if is_concierge {
-        "concierge.model"
-    } else {
-        "agent.model"
-    };
-    let configured_effort_key = if is_concierge {
-        "concierge.effort"
-    } else {
-        "agent.effort"
-    };
     let model = match req.model.as_deref().map(str::trim) {
         Some(model) if !model.is_empty() => model.to_string(),
         Some(_) => String::new(),
@@ -609,7 +581,7 @@ pub(crate) async fn create_session_core(
             repo_or_configured_selector(
                 &st.db,
                 repo_cfg.agent.model.as_deref(),
-                configured_model_key,
+                "agent.model",
                 &runtime,
                 true,
             )
@@ -623,7 +595,7 @@ pub(crate) async fn create_session_core(
             repo_or_configured_selector(
                 &st.db,
                 repo_cfg.agent.effort.as_deref(),
-                configured_effort_key,
+                "agent.effort",
                 &runtime,
                 false,
             )
@@ -871,23 +843,19 @@ pub(crate) async fn create_session_core(
     // Open this session's tracking issue before the launch prompt is written,
     // so the agent can be told its issue number. When an agent delegated this
     // work (`parent_branch`), the parent becomes the issue's `source_branch`.
-    let tracking_issue = if is_concierge {
-        None
-    } else {
-        tracing::debug!(branch = %branch.id, "opening tracking issue for session");
-        create_tracking_issue(
-            &st,
-            &branch,
-            parent_branch_name.as_deref(),
-            &title,
-            &goal,
-            &description,
-            github_repo.as_deref(),
-            github_issue,
-            claimed_issue_id,
-        )
-        .await?
-    };
+    tracing::debug!(branch = %branch.id, "opening tracking issue for session");
+    let tracking_issue = create_tracking_issue(
+        &st,
+        &branch,
+        parent_branch_name.as_deref(),
+        &title,
+        &goal,
+        &description,
+        github_repo.as_deref(),
+        github_issue,
+        claimed_issue_id,
+    )
+    .await?;
     tracing::debug!(branch = %branch.id, tracking_issue = ?tracking_issue, "tracking issue resolved");
 
     let session_id = branch_mod::new_id();
@@ -902,17 +870,9 @@ pub(crate) async fn create_session_core(
     // the dashboard.
     let scratch_names = write_initial_scratch(&work_dir, &req.scratch).await?;
     tracing::debug!(session = %session_id, scratch_files = scratch_names.len(), "wrote initial scratch files");
-    // The concierge boots primed-but-idle: its fleet-ops primer is injected as
-    // system *context* (primer.txt → `--append-system-prompt-file`), not as a
-    // positional opening prompt, so it takes no turn until the operator sends the
-    // first message. A normal session's goal/scratch/tracking note ride in as the
-    // positional prompt (goal.txt) that seeds its first turn.
-    let (goal_file, primer_file) = if is_concierge {
-        let f = run_dir.join("primer.txt");
-        tokio::fs::write(&f, agent::concierge_primer()).await?;
-        tracing::debug!(session = %session_id, "wrote concierge primer file");
-        (None, Some(f))
-    } else {
+    // Goal, scratch, and tracking context ride in as the positional prompt that
+    // seeds the session's first turn.
+    let goal_file = {
         let mut prompt_parts: Vec<String> = Vec::new();
         if !goal.is_empty() {
             // A hookless runtime (Codex, custom) never receives the WEAVER.md
@@ -933,15 +893,14 @@ pub(crate) async fn create_session_core(
             prompt_parts.push(note);
         }
         let launch_prompt = prompt_parts.join("\n\n");
-        let goal_file = if launch_prompt.is_empty() {
+        if launch_prompt.is_empty() {
             None
         } else {
             let f = run_dir.join("goal.txt");
             tokio::fs::write(&f, &launch_prompt).await?;
             tracing::debug!(session = %session_id, "wrote goal file for launch prompt");
             Some(f)
-        };
-        (goal_file, None)
+        }
     };
 
     let term_session = format!("weaver-{session_id}");
@@ -1114,7 +1073,7 @@ pub(crate) async fn create_session_core(
                 model: &model,
                 effort: &effort,
                 goal_file: goal_file.as_deref(),
-                primer_file: primer_file.as_deref(),
+                primer_file: None,
                 extra_env: &extra_env,
                 mode: &mode,
                 custom: custom.as_ref(),
@@ -1160,7 +1119,7 @@ pub(crate) async fn create_session_core(
                 work_dir: &work_dir,
                 term_session: &term_session,
                 goal_file: goal_file.as_deref(),
-                primer_file: primer_file.as_deref(),
+                primer_file: None,
                 server_addr: &st.addr,
                 model: &model,
                 effort: &effort,
@@ -1187,43 +1146,6 @@ pub(crate) async fn create_session_core(
     )
     .await
     .ok();
-
-    // The concierge boots primed-but-idle: with no positional prompt it takes no
-    // turn on launch, so claude's `Stop`/`Notification` hooks never fire and the
-    // soothing `idle` mark that those hooks stamp is never set — leaving a freshly
-    // booted concierge reading "Working…" forever though it is doing nothing.
-    // Stamp the mark ourselves at creation so it reads the calm "Idle" it actually
-    // is. The lifecycle then self-heals: the operator's first message fires the
-    // `working` hook (which clears this), and each finished turn re-stamps it. A
-    // normal session seeds a positional prompt and runs a turn on launch, so its
-    // own hooks drive this mark — only the idle-booting concierge needs the seed.
-    if is_concierge {
-        tracing::debug!(branch = %branch.id, "stamping concierge idle mark");
-        if let Err(e) = tags::set(
-            &st.db,
-            &branch.id,
-            tags::IDLE_KEY,
-            tags::IDLE_VALUE,
-            "",
-            "agent",
-        )
-        .await
-        {
-            tracing::warn!(branch = %branch.id, error = %e, "failed to stamp concierge idle mark");
-        } else {
-            events::record_tag(
-                &st.db,
-                &st.bus,
-                &branch.id,
-                tags::IDLE_KEY,
-                tags::IDLE_VALUE,
-                "",
-                "agent",
-            )
-            .await
-            .ok();
-        }
-    }
 
     tracing::info!(
         branch = %branch.id,
@@ -1805,7 +1727,6 @@ pub(crate) async fn create_warm_session(
     let term_session = format!("weaver-{session_id}");
     let repo_cfg = repo_cfg_or_default(&repo_root);
     let extra_env = launch_env(&st.db, &repo_root, &repo_cfg).await;
-    // A warm session never carries the concierge role, so its runtime is its kind.
     tracing::info!(watch = %watch.id, session = %session_id, agent = %agent, work_dir = %work_dir.display(), "launching warm session agent terminal");
     agent::launch(
         &st.db,
@@ -1815,7 +1736,6 @@ pub(crate) async fn create_warm_session(
             work_dir: &work_dir,
             term_session: &term_session,
             goal_file: goal_file.as_deref(),
-            // A warm watch session is never the concierge, so no primer.
             primer_file: None,
             server_addr: &st.addr,
             model: &watch.model,
@@ -1894,7 +1814,7 @@ pub(crate) async fn adopt(
     // claude's ids); codex — which never had a scoped terminal resume — starts
     // fresh from the goal file. Custom agents and any runtime still declaring
     // terminal keep the PTY relaunch.
-    let runtime = launch_runtime(&st.db, &session.agent_kind).await;
+    let runtime = session.agent_kind.clone();
     let declares_acp = matches!(
         agent::metadata_for(&st.db, &runtime).await?,
         Some(meta) if meta.builtin && meta.protocol == "acp"
@@ -2017,7 +1937,7 @@ async fn adopt_acp(st: &AppState, session: &Session, branch: &Branch) -> Result<
         let repo_root = PathBuf::from(&branch.repo_root);
         let repo_cfg = repo_cfg_or_default(&repo_root);
         let extra_env = launch_env(&st.db, &repo_root, &repo_cfg).await;
-        let runtime = launch_runtime(&st.db, &session.agent_kind).await;
+        let runtime = session.agent_kind.clone();
         let custom = if agent::builtin_agent_type(&runtime).is_some() {
             None
         } else {
@@ -2103,9 +2023,7 @@ async fn resume_agent(
 ) -> Result<(), AppError> {
     tracing::info!(session = %session.id, branch = %branch.id, reason = %reason, "resuming agent");
     let work_dir = PathBuf::from(&session.work_dir);
-    // A normal session persists its positional prompt in goal.txt; the concierge
-    // persists its primer in primer.txt instead (re-appended as system context so
-    // it stays primed-but-idle across adopt). Each session carries exactly one.
+    // Restore the persisted positional prompt and any optional system primer.
     let run_dir = db::run_dir(&session.id);
     let primer_file = {
         let f = run_dir.join("primer.txt");
@@ -2140,7 +2058,7 @@ async fn resume_agent(
     let repo_root = PathBuf::from(&branch.repo_root);
     let repo_cfg = repo_cfg_or_default(&repo_root);
     let extra_env = launch_env(&st.db, &repo_root, &repo_cfg).await;
-    let runtime = launch_runtime(&st.db, &session.agent_kind).await;
+    let runtime = session.agent_kind.clone();
     tracing::info!(session = %session.id, branch = %branch.id, runtime = %runtime, work_dir = %work_dir.display(), "relaunching agent terminal for resume");
     agent::launch(
         &st.db,
@@ -2574,7 +2492,7 @@ pub(super) async fn handoff_session(
             session.id, session.status
         )));
     }
-    if session.agent_kind == agent::CONCIERGE_KIND || session.managed_by.is_some() {
+    if session.managed_by.is_some() {
         return Err(AppError::conflict(
             "engine-managed sessions cannot be handed off manually",
         ));
@@ -2584,7 +2502,7 @@ pub(super) async fn handoff_session(
     if target.is_empty() {
         return Err(AppError::bad_request("handoff agent is required"));
     }
-    let runtime = launch_runtime(&st.db, target).await;
+    let runtime = target.to_string();
     let metadata = agent::metadata_for(&st.db, &runtime)
         .await?
         .ok_or_else(|| AppError::bad_request(format!("unknown agent '{runtime}'")))?;
@@ -2722,6 +2640,7 @@ pub(super) async fn get_session_chat(
     Ok(Json(json!({
         "blocks": blocks,
         "live_turn": live_turn(&session),
+        "pending_prompt": session.pending_prompt,
         "metadata": metadata,
     })))
 }
@@ -2760,6 +2679,10 @@ pub(super) struct PromptBody {
     pub by: Option<String>,
     #[serde(default)]
     pub force_steer: bool,
+    /// Promote the server's durable next-turn queue instead of sending `text`.
+    /// This keeps the action race-free when the browser is showing queued copy.
+    #[serde(default)]
+    pub force_queued: bool,
     /// Worktree-relative files selected by the composer. The server resolves
     /// and validates them, then forwards ACP resource-link blocks.
     #[serde(default)]
@@ -2884,22 +2807,31 @@ pub(super) async fn prompt_session(
     require_acp(&session)?;
     let handle = require_acp_task(&st, &session)?;
     let by = author_or_manual(req.by.as_deref());
-    let resources = prompt_resources(&session.work_dir, &req.files).await?;
-    let ack = handle
-        .prompt(
-            req.text.clone(),
-            Some(by.clone()),
-            req.force_steer,
-            resources,
-        )
-        .await
-        .map_err(|e| AppError::conflict(e.to_string()))?;
+    let audit_text = if req.force_queued {
+        session_mod::read_pending_prompt(&st.db, &session.id).await?
+    } else {
+        req.text.clone()
+    };
+    let ack = if req.force_queued {
+        handle.force_pending(Some(by.clone())).await
+    } else {
+        let resources = prompt_resources(&session.work_dir, &req.files).await?;
+        handle
+            .prompt(
+                req.text.clone(),
+                Some(by.clone()),
+                req.force_steer,
+                resources,
+            )
+            .await
+    }
+    .map_err(|e| AppError::conflict(e.to_string()))?;
     events::record(
         &st.db,
         &st.bus,
         &branch.id,
         "nudge",
-        json!({ "by": by, "text": req.text }),
+        json!({ "by": by, "text": audit_text, "promoted_queue": req.force_queued }),
     )
     .await
     .ok();

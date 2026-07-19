@@ -2477,8 +2477,8 @@ async fn cmd_show(key: String) -> Result<()> {
 }
 
 /// `loom session rename` — set a session's one-line dashboard title via
-/// `PATCH /api/sessions/{key}`. The agent's parity with the dashboard's inline
-/// title edit: anything the operator can do from the UI, the concierge can do too.
+/// `PATCH /api/sessions/{key}`. This keeps the CLI at parity with the dashboard's
+/// inline title editor.
 async fn cmd_session_rename(key: String, title: String) -> Result<()> {
     let title = title.trim();
     if title.is_empty() {

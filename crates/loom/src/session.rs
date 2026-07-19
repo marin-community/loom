@@ -1,7 +1,7 @@
 //! Orchestrator-owned session rows. One *active* session per branch — terminal
 //! sessions stay in history.
 
-use anyhow::Result;
+use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
@@ -206,37 +206,18 @@ pub async fn list(db: &Db) -> Result<Vec<Session>> {
     Ok(rows)
 }
 
-/// The **fleet** sessions only — ordinary work, with infrastructure sessions
-/// excluded: engine-managed (warm) watch sessions, and the fleet
-/// **concierge** (the Chat agent, which watches the fleet rather than being part
-/// of it). Neither is work to show or survey, so the dashboard `/sessions`
-/// listing and a watch round's scope survey both read this list.
+/// The **fleet** sessions only — ordinary work, with engine-managed (warm) watch
+/// sessions excluded. Rows from the removed concierge experiment stay hidden so
+/// upgrading does not suddenly surface its infrastructure session as user work.
 pub async fn list_visible(db: &Db) -> Result<Vec<Session>> {
     let rows = sqlx::query_as::<_, Session>(
         "SELECT * FROM sessions
-         WHERE managed_by IS NULL AND agent_kind != ?
+         WHERE managed_by IS NULL AND agent_kind != 'concierge'
          ORDER BY created_at DESC",
     )
-    .bind(crate::agent::CONCIERGE_KIND)
     .fetch_all(db)
     .await?;
     Ok(rows)
-}
-
-/// The live fleet **concierge** session, if one exists and is not terminal. The
-/// Chat surface resolves its singleton through this — find the running concierge,
-/// else create one. Hidden from [`list_visible`], so it never shows in the fleet.
-pub async fn active_concierge(db: &Db) -> Result<Option<Session>> {
-    let row = sqlx::query_as::<_, Session>(
-        "SELECT * FROM sessions
-         WHERE agent_kind = ? AND status NOT IN ('done', 'error', 'archived')
-         ORDER BY created_at DESC
-         LIMIT 1",
-    )
-    .bind(crate::agent::CONCIERGE_KIND)
-    .fetch_optional(db)
-    .await?;
-    Ok(row)
 }
 
 /// Every engine-managed (warm) session — those owned by a watch. The
@@ -454,6 +435,28 @@ pub async fn clear_pending_prompt(db: &Db, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Remove a promoted prefix from the durable queue without dropping messages
+/// appended behind it while the steering request was in flight.
+pub async fn consume_pending_prompt(db: &Db, id: &str, promoted: &str) -> Result<()> {
+    let current = read_pending_prompt(db, id).await?;
+    let remaining = if current == promoted {
+        None
+    } else if let Some(rest) = current.strip_prefix(promoted) {
+        Some(
+            rest.strip_prefix("\n\n")
+                .ok_or_else(|| anyhow!("queued prompt changed while it was being steered"))?,
+        )
+    } else {
+        bail!("queued prompt changed while it was being steered");
+    };
+    sqlx::query("UPDATE sessions SET pending_prompt = ? WHERE id = ?")
+        .bind(remaining)
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
 pub async fn delete(db: &Db, id: &str) -> Result<()> {
     sqlx::query("DELETE FROM sessions WHERE id = ?")
         .bind(id)
@@ -534,6 +537,21 @@ mod tests {
             active_managed_by(&db, "ov-other").await.unwrap().is_none(),
             "no warm session for a watch that owns none"
         );
+    }
+
+    #[tokio::test]
+    async fn consuming_a_promoted_prompt_preserves_later_queue_entries() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let branch = branch_id(&db, "weaver/queue").await;
+        insert(&db, &new_session("queue", &branch, None))
+            .await
+            .unwrap();
+        append_pending_prompt(&db, "queue", "first").await.unwrap();
+        append_pending_prompt(&db, "queue", "second").await.unwrap();
+
+        consume_pending_prompt(&db, "queue", "first").await.unwrap();
+
+        assert_eq!(read_pending_prompt(&db, "queue").await.unwrap(), "second");
     }
 
     #[tokio::test]

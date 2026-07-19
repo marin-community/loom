@@ -65,20 +65,17 @@ fn branch_slug(branch: &Branch) -> String {
     }
 }
 
-/// Whether `agent_kind` produces a conversation transcript worth looking for: a
-/// builtin (claude/codex) or the concierge (which runs one of them). A custom
-/// agent or bare shell has none, so its missing transcript is expected, not a
-/// problem to warn about.
+/// Whether `agent_kind` produces a conversation transcript worth looking for.
+/// A custom agent or bare shell has none, so its missing transcript is expected,
+/// not a problem to warn about.
 fn produces_transcript(agent_kind: &str) -> bool {
     crate::agent::builtin_agent_type(agent_kind).is_some()
-        || agent_kind == crate::agent::CONCIERGE_KIND
 }
 
-/// Whether `agent_kind` could have a Codex transcript — the codex runtime itself
-/// or the concierge (which may run codex). Only these are worth the `~/.codex`
-/// directory walk; every other agent skips it.
+/// Whether `agent_kind` could have a Codex transcript. Only Codex is worth the
+/// `~/.codex` directory walk; every other agent skips it.
 fn maybe_codex(agent_kind: &str) -> bool {
-    agent_kind == "codex" || agent_kind == crate::agent::CONCIERGE_KIND
+    agent_kind == "codex"
 }
 
 /// Locate a session's live agent transcript files (oldest first). Claude's are a
