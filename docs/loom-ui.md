@@ -161,6 +161,25 @@ from becoming a wall of stale rows:
   hover/focus-revealed ghost buttons, not an always-on button row.
 - Empty states: a bordered dashed card with one muted line and, where
   sensible, the CTA; never a bare floating sentence.
+- **The ACP Conversation surface** (`AcpConversation.vue`, for
+  `protocol='acp'` sessions) is typeset dialogue, not chat bubbles: each turn
+  opens with a hairline speaker rule — a micro-caps sans label (`YOU`
+  accent-coloured / `AGENT`) + a mono timestamp — over serif prose (the shared
+  `MarkdownView`); no avatars, no left/right alternation. The machine's
+  apparatus sets apart as mono between the prose: a run of quiet tool calls
+  (read/search/fetch/think, completed) collapses to one census line (`▸ 9 calls
+  — 7 read · 2 search`); a consequential call (edit/execute/delete, or failed)
+  stands alone as a card — mono header (kind glyph, title, status) over a
+  payload on the recessed `--code` tone (diffs as ±lines, command output as a
+  mono block), a failed card carrying the oxblood left rule. The one
+  interactive block is the permission card (ochre `--attn-line` rule +
+  `--attn-soft` wash, sans option buttons, collapsing to a mono receipt once
+  answered). Turns close with a dashed hairline (`turn N · stop_reason · NNk
+  ctx`); a live turn shows the sage mono `▶ working` cue. The right rail carries
+  the user-turn jump list plus the current `plan` checklist (✓/▸/○ in
+  ok/agent/faint), folding away at narrow widths. The composer is a serif input
+  with a mono mode chip (`bypass ▾` → `session/set_mode`) on the left and
+  Stop/Send on the right.
 
 ## Follow-ups (not yet done)
 

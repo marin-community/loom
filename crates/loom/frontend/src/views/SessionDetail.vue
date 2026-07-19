@@ -34,39 +34,60 @@ const backlog = ref<Issue[]>([]);
 const error = ref('');
 
 // --- Work-area tabs --------------------------------------------------------
-// Terminal/Overview/Conversation are local panes the parent flips under v-show
-// (never v-if for the terminal — tearing down the WebSocket/xterm is the worst
-// thing on a terminal-first page). Artifacts is route-backed (`/s/:id/artifacts`
-// is this same component) so it stays deep-linkable and refresh-stable, and its
-// heavy viewer lazily mounts only once opened.
-type LocalTab = 'terminal' | 'overview' | 'conversation';
+// The local panes the parent flips under v-show (never v-if for a live terminal
+// — tearing down the WebSocket/xterm is the worst thing on a terminal-first
+// page). Artifacts is route-backed (`/s/:id/artifacts` is this same component) so
+// it stays deep-linkable and refresh-stable, and its heavy viewer lazily mounts
+// only once opened.
+//
+// The set + order depend on the backend: a terminal session leads with Terminal
+// (the live agent's TUI); an ACP session is headless, so it leads with
+// Conversation and demotes the worktree shells to a slim Shells tab. `defaultTab`
+// resolves whichever leads when the user hasn't picked one.
+type LocalTab = 'terminal' | 'overview' | 'conversation' | 'shells';
 type WorkTab = LocalTab | 'artifacts';
+const isAcp = computed(() => ws.value?.protocol === 'acp');
+const defaultTab = computed<LocalTab>(() => (isAcp.value ? 'conversation' : 'terminal'));
+
+const VALID_LOCAL = ['terminal', 'overview', 'conversation', 'shells'];
 const initialTab = route.query.tab;
-const localTab = ref<LocalTab>(
-  initialTab === 'overview' || initialTab === 'conversation' ? initialTab : 'terminal',
+// `null` means "follow the backend's default tab"; a real value is an explicit
+// pick (from the URL or a click) that sticks.
+const localTab = ref<LocalTab | null>(
+  typeof initialTab === 'string' && VALID_LOCAL.includes(initialTab) ? (initialTab as LocalTab) : null,
 );
+const effectiveLocalTab = computed<LocalTab>(() => localTab.value ?? defaultTab.value);
 
 // The artifacts surface is open whenever the path is under `…/artifacts`.
 const artifactsActive = computed(() => route.path.startsWith(`/s/${props.id}/artifacts`));
 
-// Popped out into the rail beside the terminal vs docked as the work-area tab.
+// Popped out into the rail beside the work area vs docked as the work-area tab.
 // Transient (defaults docked on a fresh open); only the rail *width* persists.
 const poppedOut = ref(false);
 const artifactsDocked = computed(() => artifactsActive.value && !poppedOut.value);
 const railOpen = computed(() => artifactsActive.value && poppedOut.value);
 
-// The pane the work area shows: the artifacts panel when docked, else the last
-// local tab (so a popped-out artifact leaves the terminal in the work area).
-const workTab = computed<WorkTab>(() => (artifactsDocked.value ? 'artifacts' : localTab.value));
+// The pane the work area shows: the artifacts panel when docked, else the
+// effective local tab (so a popped-out artifact leaves the work pane in place).
+const workTab = computed<WorkTab>(() => (artifactsDocked.value ? 'artifacts' : effectiveLocalTab.value));
 
 // Lazy-mount panes on first visit, then keep them (v-show) so re-selecting is
 // instant. The terminal is always mounted; the rest start cold so a session-open
-// stays cheap (the artifact viewer only loads once its tab is opened).
+// stays cheap. A watch mounts whichever pane becomes the effective tab — so an
+// ACP session, whose default *is* Conversation, mounts it without a click.
 const mounted = reactive({
-  overview: localTab.value === 'overview',
-  conversation: localTab.value === 'conversation',
+  overview: false,
+  conversation: false,
+  shells: false,
   artifacts: artifactsActive.value,
 });
+watch(
+  effectiveLocalTab,
+  (t) => {
+    if (t === 'overview' || t === 'conversation' || t === 'shells') mounted[t] = true;
+  },
+  { immediate: true },
+);
 watch(
   artifactsActive,
   (on) => {
@@ -83,7 +104,7 @@ function selectTab(t: WorkTab) {
     if (!artifactsActive.value) router.push(`/s/${props.id}/artifacts`);
     return;
   }
-  if (t === 'overview' || t === 'conversation') mounted[t] = true;
+  if (t === 'overview' || t === 'conversation' || t === 'shells') mounted[t] = true;
   localTab.value = t;
   // Leaving a docked artifacts surface for a local tab closes it (back to the
   // plain session URL); when it's popped out the rail stays and we just swap the
@@ -289,6 +310,7 @@ onUnmounted(() => {
         :id="props.id"
         :issue-count="issueCount"
         :artifacts-popped="railOpen"
+        :protocol="ws.protocol"
         @select="selectTab"
       >
         <!-- Scratch attachments ride the tab row's spare right side (drop a file
@@ -302,11 +324,19 @@ onUnmounted(() => {
       <p v-if="error" class="mb-3 text-sm text-block">{{ error }}</p>
 
       <div class="min-h-0 flex-1">
-        <!-- Terminal (default) — the working zone: the live agent, plus on-demand
-             worktree debug shells in an inner tab strip. v-show, NEVER v-if. -->
-        <section v-show="workTab === 'terminal'" class="h-full">
+        <!-- Terminal (terminal sessions) — the working zone: the live agent, plus
+             on-demand worktree debug shells in an inner tab strip. v-show, NEVER
+             v-if. An ACP session is headless, so it has no Terminal pane. -->
+        <section v-if="!isAcp" v-show="workTab === 'terminal'" class="h-full">
           <SessionTerminals :id="props.id" />
         </section>
+
+        <!-- Shells (ACP sessions) — the worktree escape hatch: the same terminal
+             area with the Agent inner tab dropped. Lazily mounted on first open,
+             then kept (v-show) so re-selecting is instant. -->
+        <div v-if="isAcp && mounted.shells" v-show="workTab === 'shells'" class="h-full">
+          <SessionTerminals :id="props.id" shells-only />
+        </div>
 
         <!-- Overview — read-only context (goal, issues, activity). Mounted on
              first visit, then kept (v-show) so re-selecting it is instant. -->

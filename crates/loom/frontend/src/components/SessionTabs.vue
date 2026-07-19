@@ -1,35 +1,44 @@
 <script setup lang="ts">
-// Work-area sub-nav. Every tab is a local flip the parent (SessionDetail) acts
-// on: Terminal/Overview/Conversation v-show their kept-alive panes; Artifacts
-// drives the route (and the lazy artifacts panel) and can be popped out into a
-// rail beside the terminal. Neutral underline indicator — no loud fills; only
-// the active tab gets text-fg + an accent underline.
-//
-// Terminal is the working zone (the live agent); Overview is the read-only
-// context (goal, claimed issues, activity) — the issue count rides on the
-// Overview tab as a quiet pill. Artifacts is the agent's out-of-repo documents
-// (designs, reports, the plan). The worktree files live in the embedded editor
-// (the side panel), not a tab.
-type Tab = 'terminal' | 'overview' | 'conversation' | 'artifacts';
+import { computed } from 'vue';
 
-defineProps<{
+// Work-area sub-nav. Every tab is a local flip the parent (SessionDetail) acts
+// on: the panes v-show their kept-alive selves; Artifacts drives the route (and
+// the lazy artifacts panel) and can be popped out into a rail. Neutral underline
+// indicator — no loud fills; only the active tab gets text-fg + an accent
+// underline.
+//
+// The set depends on the execution backend. A *terminal* session leads with
+// Terminal (the live agent's TUI): Terminal · Overview · Conversation ·
+// Artifacts. An *ACP* session has no agent TUI — its Conversation is the working
+// surface, so it leads: Conversation · Overview · Shells · Artifacts, where
+// Shells is the worktree escape hatch (the old Terminal tab's reason to be
+// first-class — the agent lived there — is gone).
+type Tab = 'terminal' | 'overview' | 'conversation' | 'artifacts' | 'shells';
+
+const props = defineProps<{
   tab: Tab;
   id: string;
   issueCount: number;
   /** Artifacts is open in the rail (popped out) rather than the work area. */
   artifactsPopped?: boolean;
+  /** Execution backend — selects the tab set + order. */
+  protocol?: 'terminal' | 'acp';
 }>();
 defineEmits<{ select: [Tab] }>();
 
-const TABS: { key: Tab; label: string }[] = [
+const TERMINAL_TABS: { key: Tab; label: string }[] = [
   { key: 'terminal', label: 'Terminal' },
   { key: 'overview', label: 'Overview' },
-  // The agent's chat with the model — live, and (via the archive capture) still
-  // here to review after the terminal is gone.
   { key: 'conversation', label: 'Conversation' },
-  // The agent's out-of-repo documents; lazily mounts its (heavy) viewer.
   { key: 'artifacts', label: 'Artifacts' },
 ];
+const ACP_TABS: { key: Tab; label: string }[] = [
+  { key: 'conversation', label: 'Conversation' },
+  { key: 'overview', label: 'Overview' },
+  { key: 'shells', label: 'Shells' },
+  { key: 'artifacts', label: 'Artifacts' },
+];
+const tabs = computed(() => (props.protocol === 'acp' ? ACP_TABS : TERMINAL_TABS));
 </script>
 
 <template>
@@ -37,7 +46,7 @@ const TABS: { key: Tab; label: string }[] = [
        with the title above. -->
   <nav class="mb-1.5 flex items-center gap-0.5 border-b border-line pl-0.5 text-xs">
     <button
-      v-for="t in TABS"
+      v-for="t in tabs"
       :key="t.key"
       type="button"
       :data-tab="t.key"
