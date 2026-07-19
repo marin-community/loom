@@ -1844,8 +1844,9 @@ pub(crate) async fn create_warm_session(
             managed_by: Some(watch.id.clone()),
             // Engine-created infrastructure, no user behind it.
             created_by: None,
-            // Warm sessions stay on the terminal backend (the watch judging
-            // agent is `claude`, terminal by default this phase).
+            // Warm sessions stay on the terminal backend: the watch engine
+            // drives the judge by typing into its PTY, a flow the acp prompt
+            // queue does not replace yet.
             protocol: "terminal".to_string(),
         },
     )

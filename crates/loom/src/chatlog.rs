@@ -25,6 +25,7 @@ use weaver_core::branch::Branch;
 use weaver_core::transcript;
 use weaver_core::transcript::iris::{Block, Log, Message, Role};
 
+use crate::chat::kind;
 use crate::db::Db;
 use crate::session::Session;
 
@@ -159,22 +160,22 @@ pub async fn journal_to_log(db: &Db, session: &Session) -> Option<Log> {
                 .to_string()
         };
         match b.kind.as_str() {
-            "user_message" => messages.push(Message::new(
+            kind::USER_MESSAGE => messages.push(Message::new(
                 Role::User,
                 ts,
                 vec![Block::text(text("text"))],
             )),
-            "agent_message" => messages.push(Message::new(
+            kind::AGENT_MESSAGE => messages.push(Message::new(
                 Role::Assistant,
                 ts,
                 vec![Block::text(text("text"))],
             )),
-            "thought" => messages.push(Message::new(
+            kind::THOUGHT => messages.push(Message::new(
                 Role::Assistant,
                 ts,
                 vec![Block::thinking(text("text"))],
             )),
-            "tool_call" => {
+            kind::TOOL_CALL => {
                 let name = match p.get("title").and_then(Value::as_str) {
                     Some(t) if !t.is_empty() => t.to_string(),
                     _ => p
@@ -199,7 +200,7 @@ pub async fn journal_to_log(db: &Db, session: &Session) -> Option<Log> {
                     ],
                 ));
             }
-            "plan" | "permission_request" | "mode_change" | "usage" => {
+            kind::PLAN | kind::PERMISSION_REQUEST | kind::MODE_CHANGE | kind::USAGE => {
                 messages.push(Message::new(
                     Role::Context,
                     ts,
@@ -249,7 +250,7 @@ fn tool_content_text(content: Option<&Value>) -> String {
 /// export as injected context.
 fn context_note(kind: &str, p: &Value) -> String {
     match kind {
-        "plan" => {
+        kind::PLAN => {
             let entries = p.get("entries").and_then(Value::as_array);
             let lines: Vec<String> = entries
                 .into_iter()
@@ -262,7 +263,7 @@ fn context_note(kind: &str, p: &Value) -> String {
                 .collect();
             format!("plan:\n{}", lines.join("\n"))
         }
-        "permission_request" => {
+        kind::PERMISSION_REQUEST => {
             let title = p.get("title").and_then(Value::as_str).unwrap_or("");
             let outcome = p
                 .get("outcome")
@@ -271,11 +272,11 @@ fn context_note(kind: &str, p: &Value) -> String {
                 .unwrap_or("pending");
             format!("permission: {title} ({outcome})")
         }
-        "mode_change" => {
+        kind::MODE_CHANGE => {
             let mode = p.get("mode_id").and_then(Value::as_str).unwrap_or("");
             format!("mode changed to {mode}")
         }
-        "usage" => {
+        kind::USAGE => {
             let used = p.get("used").and_then(Value::as_i64).unwrap_or(0);
             let size = p.get("size").and_then(Value::as_i64).unwrap_or(0);
             format!("context usage: {used}/{size}")

@@ -371,3 +371,27 @@ pub async fn drain_until(ws: &mut TermWs, marker: &str, timeout: Duration) -> St
     }
     String::from_utf8_lossy(&buf).to_string()
 }
+
+/// The command that runs the scripted fake ACP agent
+/// (`tests/fixtures/fake-acp-agent.mjs`) over stdio.
+pub fn fake_acp_agent_cmd() -> String {
+    format!(
+        "node {}/tests/fixtures/fake-acp-agent.mjs",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
+/// Pin both builtin ACP adapter commands to the fake agent, so a test that
+/// launches `claude`/`codex` (directly or via the concierge) never fetches or
+/// runs a real adapter.
+pub async fn pin_fake_acp_adapters(ts: &TestServer) {
+    loom::config::apply(
+        &ts.state.db,
+        &[
+            ("acp.claude_cmd".to_string(), Some(fake_acp_agent_cmd())),
+            ("acp.codex_cmd".to_string(), Some(fake_acp_agent_cmd())),
+        ],
+    )
+    .await
+    .expect("pinning the fake acp adapters");
+}

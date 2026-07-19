@@ -8,7 +8,7 @@ use serial_test::serial;
 
 use loom::backend;
 
-use crate::fixtures::{sh, HomeGuard, TestServer};
+use crate::fixtures::{pin_fake_acp_adapters, sh, HomeGuard, TestServer};
 
 struct EnvVarGuard {
     name: &'static str,
@@ -192,6 +192,7 @@ async fn launch_forks_from_fresh_origin_default() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_get_or_creates_a_hidden_singleton_concierge() {
     let ts = TestServer::start().await;
+    pin_fake_acp_adapters(&ts).await;
     let client = &ts.client;
     // The concierge runs the Claude launch path (hooks + first-run gates), which
     // writes under $HOME — isolate it so the test can't touch the real home.
@@ -269,6 +270,7 @@ async fn chat_get_or_creates_a_hidden_singleton_concierge() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concierge_runtime_codex_launches_hookless() {
     let ts = TestServer::start().await;
+    pin_fake_acp_adapters(&ts).await;
     let client = &ts.client;
     let home = tempfile::tempdir().unwrap();
     let _home = HomeGuard::set(home.path());
@@ -446,6 +448,7 @@ async fn list_hides_archived_by_default_and_searches() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_reset_archives_and_starts_fresh() {
     let ts = TestServer::start().await;
+    pin_fake_acp_adapters(&ts).await;
     let client = &ts.client;
     // The concierge runs the Claude launch path (writes under $HOME) — isolate it.
     let home = tempfile::tempdir().unwrap();

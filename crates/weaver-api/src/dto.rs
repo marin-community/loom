@@ -577,10 +577,10 @@ pub struct CreateReq {
     /// before the agent launches. Empty/absent for a plain session.
     #[serde(default)]
     pub scratch: Vec<ScratchUpload>,
-    /// Execution-backend override: `"acp"` opts a builtin `claude` into the Agent
-    /// Client Protocol backend; `"terminal"` forces the PTY fallback. Blank/absent
-    /// uses the agent's declared default (terminal for the builtins this phase).
-    /// Rejected for agents that don't support the requested backend.
+    /// Execution-backend override: `"terminal"` forces the PTY fallback for a
+    /// builtin; `"acp"` opts in explicitly. Blank/absent uses the agent's
+    /// declared default (acp for the builtins). Rejected for agents that don't
+    /// support the requested backend.
     #[serde(default)]
     pub protocol: Option<String>,
     /// The ACP launch permission posture (`bypassPermissions` | `acceptEdits` |

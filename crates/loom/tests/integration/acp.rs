@@ -20,10 +20,28 @@ use crate::fixtures::{branch_tag_value, TestServer};
 
 /// The relay command that launches the scripted fake ACP agent over stdio.
 fn agent_cmd() -> String {
-    format!(
-        "node {}/tests/fixtures/fake-acp-agent.mjs",
-        env!("CARGO_MANIFEST_DIR")
-    )
+    crate::fixtures::fake_acp_agent_cmd()
+}
+
+/// Set an env var for the test's duration, restoring the prior value on drop.
+struct EnvVarSet {
+    name: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+impl EnvVarSet {
+    fn set(name: &'static str, value: &str) -> Self {
+        let prev = std::env::var_os(name);
+        std::env::set_var(name, value);
+        Self { name, prev }
+    }
+}
+impl Drop for EnvVarSet {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(v) => std::env::set_var(self.name, v),
+            None => std::env::remove_var(self.name),
+        }
+    }
 }
 
 /// Insert a fresh (branch, session) pair directly — the session row `acp::start`
@@ -1052,6 +1070,8 @@ async fn preview_renders_the_journal_tail_as_text() {
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn builtin_codex_launches_over_codex_acp() {
+    // A builtin launch passes the GitHub-token gate; CI has no ambient token.
+    let _token = EnvVarSet::set("GH_TOKEN", "test-token");
     let ts = TestServer::start().await;
     loom::config::apply(
         &ts.state.db,

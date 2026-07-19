@@ -631,9 +631,9 @@ struct LaunchOpts {
     /// selected agent's default.
     #[arg(long)]
     effort: Option<String>,
-    /// Execution backend: `acp` opts the builtin `claude` into the Agent Client
-    /// Protocol backend; `terminal` forces the PTY fallback. Omit to use the
-    /// agent's default (terminal for the builtins this phase).
+    /// Execution backend: `terminal` forces the PTY fallback for a builtin;
+    /// `acp` opts in explicitly. Omit to use the agent's default (acp for the
+    /// builtins).
     #[arg(long)]
     protocol: Option<String>,
     /// ACP launch permission posture: `bypassPermissions` (the default),

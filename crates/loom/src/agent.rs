@@ -51,10 +51,10 @@ pub struct AgentMetadata {
     /// True for the code-shipped `claude`/`codex`; false for an operator-defined
     /// custom agent (which the UI may edit or delete).
     pub builtin: bool,
-    /// The agent's declared execution backend: `"terminal"` or `"acp"`. Builtins
-    /// report `"terminal"` this phase (the ACP default flip is phase 7); a custom
-    /// agent reports its stored `protocol`. A create request may override a
-    /// builtin's default (`claude` → `acp`); see [`resolve_protocol`].
+    /// The agent's declared execution backend: `"terminal"` or `"acp"`. The
+    /// builtins declare `"acp"`; a custom agent reports its stored `protocol`.
+    /// A create request may override a builtin's default (`--protocol
+    /// terminal` keeps the PTY); see [`resolve_protocol`].
     pub protocol: String,
 }
 
