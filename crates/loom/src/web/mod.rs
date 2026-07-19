@@ -456,7 +456,10 @@ async fn static_cache_middleware(request: Request<axum::body::Body>, next: Next)
 
     // API responses have their own ETag/no-cache policy. This layer is mounted
     // on the whole application router, so leave that policy intact.
-    if path == "/api" || path.starts_with("/api/") || response.status() != StatusCode::OK {
+    if path == "/api"
+        || path.starts_with("/api/")
+        || !matches!(response.status(), StatusCode::OK | StatusCode::NOT_MODIFIED)
+    {
         return response;
     }
 

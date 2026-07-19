@@ -1398,17 +1398,7 @@ impl Task {
     }
 
     async fn queue_prompt(&self, text: &str, resources: &[Value]) -> Result<PromptAck> {
-        let mut queued = text.to_string();
-        if !resources.is_empty() {
-            queued.push_str("\n\nReferenced files:\n");
-            for resource in resources {
-                if let Some(uri) = resource.get("uri").and_then(Value::as_str) {
-                    queued.push_str("- ");
-                    queued.push_str(uri);
-                    queued.push('\n');
-                }
-            }
-        }
+        let queued = queued_prompt_text(text, resources);
         session::append_pending_prompt(&self.db, &self.session_id, &queued).await?;
         Ok(PromptAck {
             queued: true,
@@ -1905,5 +1895,51 @@ fn id_key(id: &Value) -> String {
     match id {
         Value::String(s) => s.clone(),
         other => other.to_string(),
+    }
+}
+
+/// Render ACP resources into the durable text-only pending queue. Prefer the
+/// worktree-relative display name so queued prompts stay readable and do not
+/// expose the server's absolute filesystem layout.
+fn queued_prompt_text(text: &str, resources: &[Value]) -> String {
+    let references: Vec<&str> = resources
+        .iter()
+        .filter_map(|resource| {
+            resource
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .or_else(|| resource.get("uri").and_then(Value::as_str))
+        })
+        .collect();
+    if references.is_empty() {
+        return text.to_string();
+    }
+
+    let mut queued = format!("{text}\n\nReferenced files:\n");
+    for reference in references {
+        queued.push_str("- ");
+        queued.push_str(reference);
+        queued.push('\n');
+    }
+    queued
+}
+
+#[cfg(test)]
+mod tests {
+    use super::queued_prompt_text;
+    use serde_json::json;
+
+    #[test]
+    fn queued_resources_prefer_relative_names_over_server_uris() {
+        let resources = [
+            json!({"name": "src/main.rs", "uri": "file:///server/worktree/src/main.rs"}),
+            json!({"uri": "https://example.test/context"}),
+        ];
+
+        assert_eq!(
+            queued_prompt_text("review", &resources),
+            "review\n\nReferenced files:\n- src/main.rs\n- https://example.test/context\n"
+        );
     }
 }

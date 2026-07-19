@@ -317,19 +317,30 @@ const fileQuery = computed(() => draft.value.match(/(?:^|[\s|])@([^\s@]*)$/)?.[1
 const fileMatches = ref<string[]>([]);
 const fileIndex = ref(0);
 let fileSearchSeq = 0;
-watch(fileQuery, async (query) => {
+let fileSearchTimer: ReturnType<typeof setTimeout> | null = null;
+watch(fileQuery, (query) => {
   fileIndex.value = 0;
   const seq = ++fileSearchSeq;
+  if (fileSearchTimer) {
+    clearTimeout(fileSearchTimer);
+    fileSearchTimer = null;
+  }
   if (query == null) {
     fileMatches.value = [];
     return;
   }
-  try {
-    const result = await listSessionFiles(id.value, query);
-    if (seq === fileSearchSeq) fileMatches.value = result.files;
-  } catch {
-    if (seq === fileSearchSeq) fileMatches.value = [];
-  }
+  fileSearchTimer = setTimeout(async () => {
+    fileSearchTimer = null;
+    try {
+      const result = await listSessionFiles(id.value, query);
+      if (seq === fileSearchSeq) fileMatches.value = result.files;
+    } catch {
+      if (seq === fileSearchSeq) fileMatches.value = [];
+    }
+  }, 150);
+});
+onUnmounted(() => {
+  if (fileSearchTimer) clearTimeout(fileSearchTimer);
 });
 const activeFile = computed(() => fileMatches.value[fileIndex.value] ?? null);
 
