@@ -92,6 +92,28 @@ async function openAcp(
 }
 
 test.describe('acp conversation', () => {
+  // A chat opens at its newest exchange: the transcript scrolls to its foot on
+  // load and stays there while the async markdown paint grows the content.
+  test('opens scrolled to the foot of a long transcript', async ({ page, weaver }) => {
+    // Interleave tool calls so each say stays its own speaker block (consecutive
+    // message chunks would otherwise consolidate into one short message).
+    const goal = Array.from(
+      { length: 15 },
+      (_, i) => `say:Paragraph ${i + 1} of a long transcript.|tool:read:Read file ${i + 1}`,
+    ).join('|');
+    await openAcp(page, weaver, { goal, name: 'acp-foot' });
+    const conv = page.getByTestId('acp-conversation');
+    // The turn has settled — its closing rule renders after the prose.
+    await expect(page.getByTestId('acp-turn-rule')).toBeVisible({ timeout: 20_000 });
+
+    // The transcript genuinely overflows…
+    await expect.poll(() => conv.evaluate((el) => el.scrollHeight - el.clientHeight)).toBeGreaterThan(300);
+    // …and the view rests pinned at its foot, where the newest prose reads.
+    await expect
+      .poll(() => conv.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight))
+      .toBeLessThan(120);
+  });
+
   test('renders the journaled transcript — user, agent, tool blocks', async ({ page, weaver }) => {
     await openAcp(page, weaver, {
       goal: 'say:The route resolves against auth.base_url now.|tool:edit:Edit web.rs',

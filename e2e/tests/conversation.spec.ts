@@ -41,9 +41,21 @@ function demoLog() {
   };
 }
 
-async function openConversation(page: Page, weaver: WeaverFixture) {
-  const s = await weaver.seedSession({ goal: 'demo', name: 'conv' });
-  await weaver.seedConversation(s, demoLog());
+/** demoLog grown past a 900px viewport: forty extra assistant paragraphs, so
+ *  scroll behaviour (open-at-the-foot, pin release) has real overflow to bite. */
+function longLog() {
+  const base = demoLog();
+  const notes = Array.from({ length: 40 }, (_, i) => ({
+    role: 'assistant',
+    timestamp: `2026-06-21T10:${String(10 + Math.floor(i / 10)).padStart(2, '0')}:00.000Z`,
+    blocks: [{ kind: 'text', text: `Progress note ${i + 1}: the change builds and the suite stays green.` }],
+  }));
+  return { ...base, messages: [...base.messages, ...notes] };
+}
+
+async function openConversation(page: Page, weaver: WeaverFixture, opts?: { name: string; log: unknown }) {
+  const s = await weaver.seedSession({ goal: 'demo', name: opts?.name ?? 'conv' });
+  await weaver.seedConversation(s, opts?.log ?? demoLog());
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(`${weaver.baseUrl}/s/${s.id}`);
   await page.locator('[data-tab="conversation"]').click();
@@ -51,7 +63,58 @@ async function openConversation(page: Page, weaver: WeaverFixture) {
   return s;
 }
 
+/** px between the scroll position and the transcript's foot. */
+function footDistance(conv: ReturnType<Page['getByTestId']>) {
+  return conv.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
+}
+
 test.describe('conversation view', () => {
+  // A chat opens at its newest exchange — the transcript scrolls to its foot on
+  // load (waiting out the async markdown paint), not to turn one.
+  test('opens scrolled to the foot — the newest exchange shows first', async ({ page, weaver }) => {
+    await openConversation(page, weaver, { name: 'conv-foot', log: longLog() });
+    const conv = page.getByTestId('conversation');
+
+    // The transcript genuinely overflows…
+    await expect.poll(() => conv.evaluate((el) => el.scrollHeight - el.clientHeight)).toBeGreaterThan(300);
+    // …and the view rests at its foot, where the newest reply reads.
+    await expect.poll(() => footDistance(conv)).toBeLessThan(120);
+    await expect(page.getByText('Progress note 40', { exact: false })).toBeVisible();
+  });
+
+  // Scrolling up releases the pin: content growing underneath (an auto-refresh
+  // landing a new reply) must not yank the reader back down out of the history.
+  test('scrolling up releases the pin — a refresh keeps the reader in place', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await openConversation(page, weaver, { name: 'conv-pin', log: longLog() });
+    const conv = page.getByTestId('conversation');
+    await expect.poll(() => footDistance(conv)).toBeLessThan(120);
+
+    // The reader scrolls up into the history — the pin releases…
+    await conv.evaluate((el) => {
+      el.scrollTop = 0;
+    });
+    // …so a new reply arriving on a lifecycle edge renders without a yank.
+    const base = longLog();
+    const grown = {
+      ...base,
+      messages: [
+        ...base.messages,
+        {
+          role: 'assistant',
+          timestamp: '2026-06-21T10:59:00.000Z',
+          blocks: [{ kind: 'text', text: 'A fresh reply just landed.' }],
+        },
+      ],
+    };
+    await weaver.seedConversation(s, grown);
+    await weaver.hook(s, 'idle');
+    await expect(page.getByText('A fresh reply just landed.')).toBeAttached({ timeout: 15_000 });
+    expect(await conv.evaluate((el) => el.scrollTop)).toBeLessThan(300);
+  });
+
   test('folds tool activity and run-length collapses repeated calls', async ({ page, weaver }) => {
     await openConversation(page, weaver);
     const conv = page.getByTestId('conversation');

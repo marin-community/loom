@@ -87,10 +87,11 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
     // Fold keys are per-render row indices (`ctx-0`, `tg-1-0`) and the highlight
     // tracks this session's turns — so reset both on a fresh load, or the next
     // session would inherit the previous one's open folds and active anchor.
+    // The pin resets too: a chat opens at its newest exchange.
     open.value = new Set();
     activeAnchor.value = '';
+    pinned.value = true;
   }
-  const stick = preserve && nearBottom();
   try {
     const data = (await get(`/sessions/${id.value}/conversation`)) as IrisLog;
     if (seq !== loadSeq) return;
@@ -110,9 +111,10 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
   }
   await nextTick();
   if (seq !== loadSeq) return;
-  // Chat behaviour: only follow the conversation to the newest message when the
-  // reader was already at the foot — never yank them down out of the history.
-  if (stick) scrollToBottom();
+  // Chat behaviour: follow to the foot while pinned — a fresh load opens at the
+  // newest message, and an auto-refresh follows only when the reader was already
+  // there — never yank them down out of the history.
+  if (pinned.value) scrollToBottom();
   updateActive();
 }
 
@@ -383,13 +385,19 @@ function toggleAll() {
   open.value = allOpen.value ? new Set() : new Set(model.value.foldKeys);
 }
 
-// ── Prompt jump-list (scroll-spy) ───────────────────────────────────────────
+// ── Follow-the-foot scroll ──────────────────────────────────────────────────
+// The chat opens at its newest exchange and stays *pinned* there while content
+// grows; scrolling up releases the pin, scrolling back to the foot re-arms it.
+// Growth lands asynchronously — markdown parses off-tick, images load, the pane
+// un-hides from a v-show tab — so a ResizeObserver on the transcript body does
+// the following; a one-shot scroll after nextTick would race the paint and
+// strand the view mid-history.
 const convScroll = ref<HTMLElement | null>(null);
-const activeAnchor = ref('');
+const convBody = ref<HTMLElement | null>(null);
+const pinned = ref(true);
 
-// Whether the stream is scrolled to (near) its foot — the cue for whether an
-// auto-refresh should follow new content down. A missing scroll root counts as
-// "at the bottom" (nothing scrolled yet).
+// Whether the stream is scrolled to (near) its foot. A missing scroll root
+// counts as "at the bottom" (nothing scrolled yet).
 function nearBottom(): boolean {
   const el = convScroll.value;
   if (!el) return true;
@@ -399,6 +407,26 @@ function scrollToBottom() {
   const el = convScroll.value;
   if (el) el.scrollTop = el.scrollHeight;
 }
+function onScroll() {
+  pinned.value = nearBottom();
+  updateActive();
+}
+let bodyRO: ResizeObserver | null = null;
+watch(convBody, (el) => {
+  bodyRO?.disconnect();
+  if (!el) return;
+  bodyRO ??= new ResizeObserver(() => {
+    if (pinned.value) scrollToBottom();
+  });
+  bodyRO.observe(el);
+});
+onUnmounted(() => {
+  bodyRO?.disconnect();
+  bodyRO = null;
+});
+
+// ── Prompt jump-list (scroll-spy) ───────────────────────────────────────────
+const activeAnchor = ref('');
 
 // The "current" prompt is the last user turn scrolled to (or past) the top of
 // the viewport — so the index highlight tracks the turn you're reading.
@@ -542,116 +570,118 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
       <div
         ref="convScroll"
         data-testid="conversation"
-        class="conv-scroll min-h-0 flex-1 space-y-3 overflow-auto pb-8 pr-1"
-        @scroll.passive="updateActive"
+        class="conv-scroll min-h-0 flex-1 overflow-auto pb-6 pr-1"
+        @scroll.passive="onScroll"
       >
-        <template v-for="row in visibleRows" :key="row.key">
-          <!-- Injected context (primers, system/permissions) — folded away. -->
-          <div v-if="row.type === 'context'" class="overflow-hidden rounded border border-line bg-subtle/30">
-            <button
-              type="button"
-              class="fold-head text-muted"
-              :aria-expanded="isOpen('ctx-' + row.key)"
-              :aria-controls="'ctx-' + row.key + '-panel'"
-              @click="toggle('ctx-' + row.key)"
-            >
-              <span class="chev" :class="{ open: isOpen('ctx-' + row.key) }">▸</span>
-              <span>📎 Context</span>
-            </button>
-            <pre
-              v-if="isOpen('ctx-' + row.key)"
-              :id="'ctx-' + row.key + '-panel'"
-              class="conv-pre border-t border-line text-muted"
-              >{{ row.text }}</pre>
-          </div>
-
-          <!-- User turn — the anchor for the jump list; always shown in full. -->
-          <section
-            v-else-if="row.type === 'user'"
-            :id="row.anchor"
-            :data-anchor="row.anchor"
-            class="conv-anchor rounded-md border-l-2 border-accent bg-subtle/40 px-3 py-2"
-          >
-            <header class="mb-1 flex items-center gap-2 text-xs font-medium text-accent">
-              <span class="turn-badge">{{ row.n }}</span>
-              <span>▍ You</span>
-              <span v-if="row.time" class="font-normal text-muted">{{ shortTime(row.time) }}</span>
-            </header>
-            <template v-for="(b, j) in row.blocks" :key="j">
-              <MarkdownView v-if="b.kind === 'text'" :id="id" path="" :source="b.text" />
-              <p v-else-if="b.kind === 'image'" class="text-xs italic text-muted">[image]</p>
-            </template>
-          </section>
-
-          <!-- Assistant prose. No role heading — the boxed/accented user turns
-               are the dividers, so the agent's replies just flow as plain text. -->
-          <div v-else-if="row.type === 'text'" class="px-3">
-            <MarkdownView :id="id" path="" :source="row.text" />
-          </div>
-
-          <!-- Thinking — folded. -->
-          <div v-else-if="row.type === 'thinking'" class="overflow-hidden rounded border border-line bg-subtle/30">
-            <button
-              type="button"
-              class="fold-head text-muted"
-              :aria-expanded="isOpen('think-' + row.key)"
-              :aria-controls="'think-' + row.key + '-panel'"
-              @click="toggle('think-' + row.key)"
-            >
-              <span class="chev" :class="{ open: isOpen('think-' + row.key) }">▸</span>
-              <span>💭 Thinking</span>
-            </button>
-            <pre
-              v-if="isOpen('think-' + row.key)"
-              :id="'think-' + row.key + '-panel'"
-              class="conv-pre border-t border-line text-muted"
-              >{{ row.text }}</pre>
-          </div>
-
-          <!-- Tool activity — each run-length group a compact, collapsed strip. -->
-          <div v-else-if="row.type === 'tools'" class="space-y-1">
-            <div
-              v-for="(g, gi) in row.groups"
-              :key="gi"
-              class="overflow-hidden rounded border border-line bg-subtle/30"
-              data-testid="tool-fold"
-            >
+        <div ref="convBody" class="space-y-2">
+          <template v-for="row in visibleRows" :key="row.key">
+            <!-- Injected context (primers, system/permissions) — folded away. -->
+            <div v-if="row.type === 'context'" class="overflow-hidden rounded border border-line bg-subtle/30">
               <button
                 type="button"
-                class="fold-head"
-                :aria-expanded="isOpen(`tg-${row.key}-${gi}`)"
-                :aria-controls="`tg-${row.key}-${gi}-panel`"
-                @click="toggle(`tg-${row.key}-${gi}`)"
+                class="fold-head text-muted"
+                :aria-expanded="isOpen('ctx-' + row.key)"
+                :aria-controls="'ctx-' + row.key + '-panel'"
+                @click="toggle('ctx-' + row.key)"
               >
-                <span class="chev" :class="{ open: isOpen(`tg-${row.key}-${gi}`) }">▸</span>
-                <span class="shrink-0">🔧</span>
-                <span class="shrink-0 font-mono text-fg">{{ g.name }}</span>
-                <span v-if="g.items.length > 1" class="rle-badge" data-testid="rle-count">{{ g.items.length }}×</span>
-                <span v-else class="min-w-0 truncate font-mono text-faint">{{ preview(g.items[0]) }}</span>
-                <span v-if="groupHasError(g)" class="ml-auto shrink-0 text-2xs font-medium text-block">error</span>
+                <span class="chev" :class="{ open: isOpen('ctx-' + row.key) }">▸</span>
+                <span>📎 Context</span>
               </button>
-              <div v-if="isOpen(`tg-${row.key}-${gi}`)" :id="`tg-${row.key}-${gi}-panel`" class="border-t border-line">
-                <div
-                  v-for="(it, ii) in g.items"
-                  :key="ii"
-                  :class="ii > 0 ? 'border-t border-line/60' : ''"
+              <pre
+                v-if="isOpen('ctx-' + row.key)"
+                :id="'ctx-' + row.key + '-panel'"
+                class="conv-pre border-t border-line text-muted"
+                >{{ row.text }}</pre>
+            </div>
+
+            <!-- User turn — the anchor for the jump list; always shown in full. -->
+            <section
+              v-else-if="row.type === 'user'"
+              :id="row.anchor"
+              :data-anchor="row.anchor"
+              class="conv-anchor rounded-md border-l-2 border-accent bg-subtle/40 px-3 py-2"
+            >
+              <header class="mb-1 flex items-center gap-2 text-xs font-medium text-accent">
+                <span class="turn-badge">{{ row.n }}</span>
+                <span>▍ You</span>
+                <span v-if="row.time" class="font-normal text-muted">{{ shortTime(row.time) }}</span>
+              </header>
+              <template v-for="(b, j) in row.blocks" :key="j">
+                <MarkdownView v-if="b.kind === 'text'" :id="id" path="" :source="b.text" />
+                <p v-else-if="b.kind === 'image'" class="text-xs italic text-muted">[image]</p>
+              </template>
+            </section>
+
+            <!-- Assistant prose. No role heading — the boxed/accented user turns
+                 are the dividers, so the agent's replies just flow as plain text. -->
+            <div v-else-if="row.type === 'text'" class="px-3">
+              <MarkdownView :id="id" path="" :source="row.text" />
+            </div>
+
+            <!-- Thinking — folded. -->
+            <div v-else-if="row.type === 'thinking'" class="overflow-hidden rounded border border-line bg-subtle/30">
+              <button
+                type="button"
+                class="fold-head text-muted"
+                :aria-expanded="isOpen('think-' + row.key)"
+                :aria-controls="'think-' + row.key + '-panel'"
+                @click="toggle('think-' + row.key)"
+              >
+                <span class="chev" :class="{ open: isOpen('think-' + row.key) }">▸</span>
+                <span>💭 Thinking</span>
+              </button>
+              <pre
+                v-if="isOpen('think-' + row.key)"
+                :id="'think-' + row.key + '-panel'"
+                class="conv-pre border-t border-line text-muted"
+                >{{ row.text }}</pre>
+            </div>
+
+            <!-- Tool activity — each run-length group a compact, collapsed strip. -->
+            <div v-else-if="row.type === 'tools'" class="space-y-1">
+              <div
+                v-for="(g, gi) in row.groups"
+                :key="gi"
+                class="overflow-hidden rounded border border-line bg-subtle/30"
+                data-testid="tool-fold"
+              >
+                <button
+                  type="button"
+                  class="fold-head"
+                  :aria-expanded="isOpen(`tg-${row.key}-${gi}`)"
+                  :aria-controls="`tg-${row.key}-${gi}-panel`"
+                  @click="toggle(`tg-${row.key}-${gi}`)"
                 >
-                  <div v-if="g.items.length > 1" class="px-3 pt-1.5 font-mono text-2xs text-faint">
-                    #{{ ii + 1 }} · {{ it.name }}
+                  <span class="chev" :class="{ open: isOpen(`tg-${row.key}-${gi}`) }">▸</span>
+                  <span class="shrink-0">🔧</span>
+                  <span class="shrink-0 font-mono text-fg">{{ g.name }}</span>
+                  <span v-if="g.items.length > 1" class="rle-badge" data-testid="rle-count">{{ g.items.length }}×</span>
+                  <span v-else class="min-w-0 truncate font-mono text-faint">{{ preview(g.items[0]) }}</span>
+                  <span v-if="groupHasError(g)" class="ml-auto shrink-0 text-2xs font-medium text-block">error</span>
+                </button>
+                <div v-if="isOpen(`tg-${row.key}-${gi}`)" :id="`tg-${row.key}-${gi}-panel`" class="border-t border-line">
+                  <div
+                    v-for="(it, ii) in g.items"
+                    :key="ii"
+                    :class="ii > 0 ? 'border-t border-line/60' : ''"
+                  >
+                    <div v-if="g.items.length > 1" class="px-3 pt-1.5 font-mono text-2xs text-faint">
+                      #{{ ii + 1 }} · {{ it.name }}
+                    </div>
+                    <pre v-if="inputText(it)" class="conv-pre text-fg">{{ inputText(it) }}</pre>
+                    <pre
+                      v-if="it.result && it.result.output.trim()"
+                      class="conv-pre conv-result"
+                      :class="it.result.is_error ? 'text-block' : 'text-muted'"
+                      >{{ it.result.output }}</pre>
                   </div>
-                  <pre v-if="inputText(it)" class="conv-pre text-fg">{{ inputText(it) }}</pre>
-                  <pre
-                    v-if="it.result && it.result.output.trim()"
-                    class="conv-pre conv-result"
-                    :class="it.result.is_error ? 'text-block' : 'text-muted'"
-                    >{{ it.result.output }}</pre>
                 </div>
               </div>
             </div>
-          </div>
 
-          <p v-else-if="row.type === 'image'" class="text-xs italic text-muted">[image]</p>
-        </template>
+            <p v-else-if="row.type === 'image'" class="text-xs italic text-muted">[image]</p>
+          </template>
+        </div>
       </div>
 
       <!-- Prompt jump-list: one entry per user turn, with scroll-spy highlight. -->
@@ -686,7 +716,7 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
          operator. Hidden while the agent rests, so it only ever signals. -->
     <div
       v-if="showAgentStatus"
-      class="mt-3 flex shrink-0 items-center gap-1.5 text-xs font-medium"
+      class="mt-2 flex shrink-0 items-center gap-1.5 text-xs font-medium"
       :class="TONE_TEXT[convState.tone]"
       data-testid="agent-status"
       role="status"
@@ -703,7 +733,7 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
          a torn-down session stays a read-only log. -->
     <form
       v-if="composerVisible"
-      class="mt-3 shrink-0 border-t border-line pt-3"
+      class="mt-2 shrink-0 border-t border-line pt-2.5"
       data-testid="conversation-composer"
       @submit.prevent="submitPrompt"
     >
@@ -776,6 +806,29 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
   max-width: none;
   margin: 0;
   padding: 0.125rem 0;
+  line-height: 1.55;
+}
+.conv-scroll :deep(.markdown-body p),
+.conv-scroll :deep(.markdown-body blockquote),
+.conv-scroll :deep(.markdown-body ul),
+.conv-scroll :deep(.markdown-body ol),
+.conv-scroll :deep(.markdown-body dl),
+.conv-scroll :deep(.markdown-body table),
+.conv-scroll :deep(.markdown-body pre),
+.conv-scroll :deep(.markdown-body details) {
+  margin-bottom: 0.6em;
+}
+.conv-scroll :deep(.markdown-body h1),
+.conv-scroll :deep(.markdown-body h2),
+.conv-scroll :deep(.markdown-body h3),
+.conv-scroll :deep(.markdown-body h4),
+.conv-scroll :deep(.markdown-body h5),
+.conv-scroll :deep(.markdown-body h6) {
+  margin: 1em 0 0.4em;
+}
+.conv-scroll :deep(.markdown-body ul),
+.conv-scroll :deep(.markdown-body ol) {
+  padding-left: 1.5em;
 }
 
 /* The clickable header of any fold (context, thinking, a tool group). */

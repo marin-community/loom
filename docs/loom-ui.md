@@ -183,7 +183,12 @@ from becoming a wall of stale rows:
   streams — set in a soft text shimmer (the one licensed animation beyond
   `fade-in`, stilled under `prefers-reduced-motion`) beside a mono
   `turn N · M:SS` elapsed count. An empty conversation states itself: a dashed
-  card ("No conversation yet") instead of a bare canvas. The right rail
+  card ("No conversation yet") instead of a bare canvas. Both conversation
+  surfaces (ACP and the terminal-log tab) open **pinned to the foot** — the
+  newest exchange — and follow growth while the reader stays there; scrolling
+  up releases the pin, scrolling back to the foot re-arms it (a ResizeObserver
+  on the transcript body, so async markdown paints can't strand the view
+  mid-history). The right rail
   carries the user-turn jump list plus the current `plan` checklist (✓/▸/○ in
   ok/agent/faint), folding away at narrow widths. The composer is a serif
   input with a mono mode chip (`bypass ▾` → `session/set_mode`) on the left
