@@ -102,10 +102,98 @@ test.describe('acp conversation', () => {
     await expect(
       conv.getByText('The route resolves against auth.base_url now.', { exact: true }),
     ).toBeVisible();
-    // An `edit` is consequential — a standalone card, not a census line.
-    await expect(page.getByTestId('acp-card').filter({ hasText: 'Edit web.rs' })).toBeVisible();
-    // The card carries the diff the adapter streamed as ±lines.
+    // The edit folds into an activity line, closed by default — no output visible.
+    const head = page.getByTestId('acp-activity-head').filter({ hasText: 'Edit web.rs' });
+    await expect(head).toBeVisible();
+    await expect(page.getByTestId('acp-diff')).toBeHidden();
+    // Opening the group lists the call; opening the call reveals its diff as ±lines.
+    await head.click();
+    const item = page.getByTestId('acp-activity-item').filter({ hasText: 'Edit web.rs' });
+    await expect(item).toBeVisible();
+    await item.getByRole('button').click();
     await expect(page.getByTestId('acp-diff')).toContainText('new line');
+  });
+
+  test('adapter user echoes do not duplicate the visible history', async ({ page, weaver }) => {
+    // `echo:` re-streams a user turn from the adapter (what claude does after
+    // /compact). It must not paint a second "You" message.
+    await openAcp(page, weaver, { goal: 'echo:hello from the echo|say:done' });
+    const conv = page.getByTestId('acp-conversation');
+
+    await expect(conv.getByText('done', { exact: true })).toBeVisible();
+    // The echoed text never renders as its own user message; the one user turn
+    // is the dispatched prompt (whose text is the whole script).
+    await expect(conv.getByText('hello from the echo', { exact: true })).toHaveCount(0);
+    await expect(conv.locator('.acp-label', { hasText: 'You' })).toHaveCount(1);
+  });
+
+  test('a run of tool calls folds to one collapsed activity line', async ({ page, weaver }) => {
+    await openAcp(page, weaver, {
+      goal: 'tool:read:Read config|tool:search:Grep routes|say:surveyed',
+    });
+    const conv = page.getByTestId('acp-conversation');
+    await expect(conv.getByText('surveyed', { exact: true })).toBeVisible();
+
+    // One group line for the whole run, closed by default.
+    const head = page.getByTestId('acp-activity-head');
+    await expect(head).toHaveCount(1);
+    await expect(head).toContainText('2 steps');
+    await expect(head).toContainText('1 read');
+    await expect(head).toContainText('1 search');
+    await expect(page.getByTestId('acp-activity-item')).toHaveCount(0);
+
+    await head.click();
+    await expect(page.getByTestId('acp-activity-item')).toHaveCount(2);
+  });
+
+  test('a failed call opens its group and shows the failure', async ({ page, weaver }) => {
+    await openAcp(page, weaver, { goal: 'tool:read:Read config|toolfail:cargo test|say:after' });
+    const conv = page.getByTestId('acp-conversation');
+    await expect(conv.getByText('after', { exact: true })).toBeVisible();
+
+    // The failure re-opens the fold by default: the badge, the failed line, and
+    // its output are all visible without a click.
+    await expect(page.getByTestId('acp-activity-failed')).toContainText('1 failed');
+    await expect(page.getByTestId('acp-activity-item').filter({ hasText: 'cargo test' })).toContainText(
+      'failed',
+    );
+    await expect(page.getByTestId('acp-detail')).toContainText('exit 1: boom');
+  });
+
+  test('an empty conversation shows a styled empty state, not a blank canvas', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await launchAcpSession(weaver, { goal: 'say:ready', name: 'acp-empty' });
+    test.skip(s === null, SKIP_MSG);
+    // Serve an empty journal so the surface renders its fresh-session state.
+    await page.route(`**/api/sessions/${s!.id}/chat`, (route) =>
+      route.fulfill({ json: { blocks: [], live_turn: null } }),
+    );
+    await page.route(`**/api/sessions/${s!.id}/chat/stream`, (route) =>
+      route.fulfill({ status: 200, headers: { 'content-type': 'text/event-stream' }, body: '' }),
+    );
+    await page.goto(`${weaver.baseUrl}/s/${s!.id}`);
+    const empty = page.getByTestId('acp-empty');
+    await expect(empty).toBeVisible();
+    await expect(empty).toContainText('No conversation yet');
+    await page.screenshot({ path: test.info().outputPath('acp-empty-state.png') });
+  });
+
+  test('a live turn shows a status line naming the activity', async ({ page, weaver }) => {
+    await openAcp(page, weaver, { goal: 'say:ready' });
+    const input = page.getByTestId('acp-composer-input');
+    await input.fill('wait:2500|say:done');
+    await page.getByTestId('acp-composer-send').click();
+
+    // The status line sits at the transcript tail, names the activity, and
+    // carries the turn + elapsed meta; it clears when the turn ends.
+    const status = page.getByTestId('acp-working');
+    await expect(status).toBeVisible({ timeout: 15_000 });
+    await expect(status).toContainText('Working…');
+    await expect(status).toContainText('turn 2');
+    await page.screenshot({ path: test.info().outputPath('acp-live-status.png') });
+    await expect(status).toBeHidden({ timeout: 15_000 });
   });
 
   test('streaming deltas appear, then consolidate into one message', async ({ page, weaver }) => {
@@ -168,9 +256,18 @@ test.describe('acp conversation', () => {
 
   test('renders in both themes', async ({ page, weaver }) => {
     await openAcp(page, weaver, {
-      goal: 'think:reasoning|tool:read:Read config|say:All wired up.|tool:edit:Edit web.rs|plan|usage:41000:200000',
+      goal: 'think:reasoning|tool:read:Read config|tool:search:Grep routes|tool:edit:Edit web.rs|say:All wired up.|toolfail:cargo test|plan|usage:41000:200000',
     });
-    await expect(page.getByTestId('acp-card').first()).toBeVisible();
+    // The grouped run + the auto-opened failure are both on screen; expand the
+    // group and one diff so the screenshot shows every fold state.
+    await expect(page.getByTestId('acp-detail')).toBeVisible();
+    await page.getByTestId('acp-activity-head').first().click();
+    await page
+      .getByTestId('acp-activity-item')
+      .filter({ hasText: 'Edit web.rs' })
+      .getByRole('button')
+      .click();
+    await expect(page.getByTestId('acp-diff')).toBeVisible();
 
     for (const theme of ['light', 'dark'] as const) {
       await page.evaluate((t) => {

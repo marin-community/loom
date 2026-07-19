@@ -620,6 +620,48 @@ async fn crash_recovery_replays_without_duplicates() {
     );
 }
 
+/// 5b. Adapter user echoes never re-journal: a `user_message_chunk` streamed
+///    mid-turn (claude re-streams retained user turns after `/compact`) must not
+///    duplicate the history — the prompt loom journaled at dispatch is the only
+///    `user_message` block.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn user_echo_chunks_do_not_duplicate_history() {
+    let ts = TestServer::start().await;
+    start_new(&ts, "acp-echo", None, None).await;
+
+    // The adapter echoes two user turns (as after a /compact replay), then replies.
+    let script = "echo:what is the PR status|echo:/compact|say:done";
+    ts.client
+        .post("/api/sessions/acp-echo/prompt", json!({ "text": script }))
+        .await
+        .unwrap();
+
+    let chat = poll_chat(&ts, "acp-echo", Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|b| b["kind"] == "turn_end")
+    })
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+
+    assert_eq!(
+        count_kind(blocks, "user_message"),
+        1,
+        "only the dispatched prompt is a user_message: {blocks:?}"
+    );
+    assert!(
+        blocks
+            .iter()
+            .any(|b| b["kind"] == "user_message" && b["payload"]["text"] == script),
+        "and it is the prompt loom journaled at dispatch"
+    );
+    assert!(
+        blocks
+            .iter()
+            .any(|b| b["kind"] == "agent_message" && b["payload"]["text"] == "done"),
+        "the agent reply still journals"
+    );
+}
+
 /// 6. Interrupt: cancelling a waiting turn ends it with stop reason `cancelled`.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

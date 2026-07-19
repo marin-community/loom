@@ -125,10 +125,12 @@ pub struct SessionNotification {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "sessionUpdate", rename_all = "snake_case")]
 pub enum SessionUpdate {
-    /// A chunk of the user's message (replayed by `session/load`). The upstream
-    /// `messageId` is ignored (unknown fields are dropped) — consolidation keys
-    /// on the turn, not the message id.
-    UserMessageChunk { content: ContentBlock },
+    /// A chunk of the user's message — the adapter echoing or replaying a user
+    /// turn (`session/load`, post-compact context replay). Recognized so it never
+    /// falls into [`SessionUpdate::Other`], but its payload is deliberately
+    /// dropped: loom journals every prompt itself at dispatch, so user chunks
+    /// carry nothing new (see `crate::acp`).
+    UserMessageChunk,
     /// A chunk of the agent's streamed reply.
     AgentMessageChunk { content: ContentBlock },
     /// A chunk of the agent's streamed reasoning.

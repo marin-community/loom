@@ -14,7 +14,11 @@
 //! The task consolidates streaming chunks in memory and writes one journal block
 //! per *block* boundary; live updates ride SSE only. Block `kind`s + payloads:
 //!
-//! - `user_message`   `{ text, by }` — a dispatched prompt (or replayed user turn).
+//! - `user_message`   `{ text, by }` — a dispatched prompt, journaled once at
+//!   dispatch ([`Task::start_turn`]). Adapter-streamed `user_message_chunk`s are
+//!   never journaled: loom is the only prompt source, so every user chunk is an
+//!   echo or a history replay (`session/load`, post-`/compact` context replay)
+//!   and journaling it would duplicate the transcript.
 //! - `agent_message`  `{ text }` — a whole consolidated agent message.
 //! - `thought`        `{ text, ms }` — a whole consolidated reasoning passage.
 //! - `tool_call`      `{ tool_call_id, title, tool_kind, status, content, locations }`
@@ -817,20 +821,21 @@ impl Task {
     async fn handle_notification(&mut self, seq: u64, params: Value) -> Result<()> {
         let notif: SessionNotification = serde_json::from_value(params)?;
         match notif.update {
-            SessionUpdate::UserMessageChunk { content } => {
-                if let Some(t) = content.text().map(str::to_string) {
-                    self.on_chunk(kind::USER_MESSAGE, None, &t, seq).await;
-                }
+            SessionUpdate::UserMessageChunk => {
+                // Never journaled: loom writes the `user_message` block itself at
+                // dispatch (`start_turn`), so an adapter-streamed user chunk is
+                // always an echo or a history replay — e.g. claude re-streams the
+                // retained user turns after a `/compact` — and journaling it here
+                // duplicated the visible chat history.
             }
             SessionUpdate::AgentMessageChunk { content } => {
                 if let Some(t) = content.text().map(str::to_string) {
-                    self.on_chunk(kind::AGENT_MESSAGE, Some("agent_message"), &t, seq)
-                        .await;
+                    self.on_chunk(kind::AGENT_MESSAGE, &t, seq).await;
                 }
             }
             SessionUpdate::AgentThoughtChunk { content } => {
                 if let Some(t) = content.text().map(str::to_string) {
-                    self.on_chunk(kind::THOUGHT, Some("thought"), &t, seq).await;
+                    self.on_chunk(kind::THOUGHT, &t, seq).await;
                 }
             }
             SessionUpdate::ToolCall(tc) | SessionUpdate::ToolCallUpdate(tc) => {
@@ -870,13 +875,7 @@ impl Task {
         Ok(())
     }
 
-    async fn on_chunk(
-        &mut self,
-        kind: &'static str,
-        sse_kind: Option<&'static str>,
-        text: &str,
-        seq: u64,
-    ) {
+    async fn on_chunk(&mut self, kind: &'static str, text: &str, seq: u64) {
         let need_flush = self.buf.as_ref().map(|b| b.kind != kind).unwrap_or(false);
         if need_flush {
             self.flush_buf().await;
@@ -887,12 +886,10 @@ impl Task {
             first_seq: seq,
         });
         b.text.push_str(text);
-        if let Some(sk) = sse_kind {
-            self.emit(
-                "delta",
-                json!({ "turn": self.current_turn, "kind": sk, "text": text }),
-            );
-        }
+        self.emit(
+            "delta",
+            json!({ "turn": self.current_turn, "kind": kind, "text": text }),
+        );
     }
 
     async fn flush_buf(&mut self) {
@@ -900,10 +897,6 @@ impl Task {
         let (kind, payload) = match b.kind {
             kind::AGENT_MESSAGE => (kind::AGENT_MESSAGE, json!({ "text": b.text })),
             kind::THOUGHT => (kind::THOUGHT, json!({ "text": b.text, "ms": Value::Null })),
-            kind::USER_MESSAGE => (
-                kind::USER_MESSAGE,
-                json!({ "text": b.text, "by": Value::Null }),
-            ),
             _ => return,
         };
         self.journal_block(kind, payload).await;

@@ -166,20 +166,28 @@ from becoming a wall of stale rows:
   opens with a hairline speaker rule — a micro-caps sans label (`YOU`
   accent-coloured / `AGENT`) + a mono timestamp — over serif prose (the shared
   `MarkdownView`); no avatars, no left/right alternation. The machine's
-  apparatus sets apart as mono between the prose: a run of quiet tool calls
-  (read/search/fetch/think, completed) collapses to one census line (`▸ 9 calls
-  — 7 read · 2 search`); a consequential call (edit/execute/delete, or failed)
-  stands alone as a card — mono header (kind glyph, title, status) over a
-  payload on the recessed `--code` tone (diffs as ±lines, command output as a
-  mono block), a failed card carrying the oxblood left rule. The one
-  interactive block is the permission card (ochre `--attn-line` rule +
-  `--attn-soft` wash, sans option buttons, collapsing to a mono receipt once
-  answered). Turns close with a dashed hairline (`turn N · stop_reason · NNk
-  ctx`); a live turn shows the sage mono `▶ working` cue. The right rail carries
-  the user-turn jump list plus the current `plan` checklist (✓/▸/○ in
-  ok/agent/faint), folding away at narrow widths. The composer is a serif input
-  with a mono mode chip (`bypass ▾` → `session/set_mode`) on the left and
-  Stop/Send on the right.
+  apparatus recedes into folds: *every* run of consecutive tool calls — quiet
+  reads and consequential edits alike — collapses to one mono activity line
+  (`▸ ✎ Edit web.rs`, or `▸ 5 steps — 3 read · 1 edit · 1 execute` for a run),
+  closed by default; opening it lists the calls, and a call with output opens
+  further to its payload on the recessed `--code` tone (diffs as ±lines,
+  command output as a clamped mono block). A failed call is the exception that
+  announces itself: its group opens by default with an oxblood `N failed`
+  badge and the failing call's output showing. The one interactive block is
+  the permission card (ochre `--attn-line` rule + `--attn-soft` wash, sans
+  option buttons, collapsing to a mono receipt once answered). Turns close
+  with a dashed hairline (`turn N · stop_reason · NNk ctx`). A live turn ends
+  the transcript with a status line naming what the agent is doing right now —
+  the running tool's title, `Thinking…` while reasoning streams (its live tail
+  showing above, top-faded, before folding away), `Writing…` while prose
+  streams — set in a soft text shimmer (the one licensed animation beyond
+  `fade-in`, stilled under `prefers-reduced-motion`) beside a mono
+  `turn N · M:SS` elapsed count. An empty conversation states itself: a dashed
+  card ("No conversation yet") instead of a bare canvas. The right rail
+  carries the user-turn jump list plus the current `plan` checklist (✓/▸/○ in
+  ok/agent/faint), folding away at narrow widths. The composer is a serif
+  input with a mono mode chip (`bypass ▾` → `session/set_mode`) on the left
+  and Stop/Send on the right.
 
 ## Follow-ups (not yet done)
 

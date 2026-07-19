@@ -10,8 +10,11 @@
 //
 //   say:hello            two agent_message_chunks that consolidate to "hello"
 //   think:reasoning      one agent_thought_chunk
+//   echo:text            a user_message_chunk — the adapter re-streaming a user
+//                        turn (what claude does after /compact); must NOT re-journal
 //   tool:edit[:title]    a tool_call (in_progress) then tool_call_update (completed);
 //                        an `edit` kind carries a diff, others a text content block
+//   toolfail[:title]     a tool_call that ends with status `failed`
 //   plan                 a plan update with two entries
 //   usage:USED:SIZE      a usage_update
 //   wait:MS              sleep MS ms (cancellable) — for queueing/interrupt/crash tests
@@ -85,6 +88,21 @@ async function runToken(tok) {
     notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: text.slice(half) } });
   } else if (tok.startsWith("think:")) {
     notify({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: tok.slice(6) } });
+  } else if (tok.startsWith("echo:")) {
+    notify({ sessionUpdate: "user_message_chunk", content: { type: "text", text: tok.slice(5) } });
+  } else if (tok.startsWith("toolfail")) {
+    const title = tok.includes(":") ? tok.slice(tok.indexOf(":") + 1) : "Failing tool";
+    const toolCallId = "call-fail-" + Math.floor(Math.random() * 100000);
+    notify({
+      sessionUpdate: "tool_call",
+      toolCallId,
+      title,
+      kind: "execute",
+      status: "in_progress",
+      content: [{ type: "content", content: { type: "text", text: "exit 1: boom" } }],
+    });
+    await sleep(10);
+    notify({ sessionUpdate: "tool_call_update", toolCallId, status: "failed" });
   } else if (tok.startsWith("tool:")) {
     const rest = tok.slice(5);
     const [kind, title] = rest.split(":");

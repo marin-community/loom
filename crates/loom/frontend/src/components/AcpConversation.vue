@@ -38,16 +38,18 @@ import { canSend } from '../lib/sessionState';
 import MarkdownView from './MarkdownView.vue';
 
 // The Conversation surface for an *ACP* session (`protocol='acp'`): typeset
-// dialogue, not chat bubbles. Serif prose for the humans and the agent, the
-// machine's apparatus (tool calls, diffs, command output) set as indented mono
-// blocks between the prose — a scholarly edition, footnotes apart from text.
+// dialogue, not chat bubbles. Serif prose for the humans and the agent; the
+// machine's apparatus recedes — every run of tool calls folds to one quiet
+// activity line (closed by default, a failure re-opens it), and the in-flight
+// turn reads as a live status line at the transcript's tail (the current tool,
+// "Thinking…" while reasoning streams) rather than bare card churn.
 //
 // Its data source is the durable chat journal: it paints the `GET /chat`
 // snapshot, then applies the `/chat/stream` SSE tail in place — `block` upserts
 // by (turn, seq), `delta` streams into a shadow message/thought, `tool` tracks
-// live tool state, `turn` drives the working indicator. The composer posts to
-// `/prompt`; Stop posts `/interrupt`; permission cards answer via
-// `/permissions/{id}`; the mode chip drives `/mode`.
+// live tool state (feeding the status line), `turn` drives the live-turn state.
+// The composer posts to `/prompt`; Stop posts `/interrupt`; permission cards
+// answer via `/permissions/{id}`; the mode chip drives `/mode`.
 const props = defineProps<{ session: Session }>();
 const id = computed(() => props.session.id);
 
@@ -146,6 +148,7 @@ function onTurn(ev: SseTurn) {
   if (ev.state === 'started') {
     turnLive.value = true;
     liveTurnNo.value = ev.turn;
+    autoFollow();
   } else {
     turnLive.value = false;
     liveTurnNo.value = null;
@@ -271,12 +274,15 @@ async function answer(perm: PermissionPayload, optionId: string) {
 }
 
 // ── The render model ─────────────────────────────────────────────────────────
-// Consecutive *quiet* tool calls (read/search/fetch/think/other, completed)
-// collapse to one census line; consequential calls (edit/execute/delete/move, or
-// failed, or still live) stand alone as cards.
-const QUIET_KINDS = new Set(['read', 'search', 'fetch', 'think', 'other']);
-function isQuiet(t: ToolCallPayload): boolean {
-  return t.status === 'completed' && QUIET_KINDS.has(t.tool_kind || 'other');
+// Every run of consecutive tool calls — quiet reads and consequential edits
+// alike — folds into one *activity* group, closed by default; a group holding a
+// failed call opens by default (and the failed call's output with it). A live
+// (non-terminal) tool never renders as a row: it drives the status line until
+// its terminal block journals into the group.
+
+interface ActivityItem {
+  tool: ToolCallPayload;
+  failed: boolean;
 }
 
 type Row =
@@ -284,8 +290,7 @@ type Row =
   | { type: 'user'; key: string; anchor: string; n: number; time: string; text: string }
   | { type: 'agent'; key: string; time: string; text: string; streaming: boolean }
   | { type: 'thought'; key: string; text: string; streaming: boolean }
-  | { type: 'census'; key: string; items: ToolCallPayload[] }
-  | { type: 'card'; key: string; tool: ToolCallPayload; live: boolean }
+  | { type: 'activity'; key: string; items: ActivityItem[]; failures: number }
   | { type: 'permission'; key: string; perm: PermissionPayload }
   | { type: 'mode'; key: string; mode: string };
 
@@ -331,18 +336,24 @@ const model = computed<{ rows: Row[]; toc: TocItem[] }>(() => {
     return used;
   };
 
-  let census: ToolCallPayload[] = [];
-  const flushCensus = () => {
-    if (!census.length) return;
-    rows.push({ type: 'census', key: `census-${census[0].tool_call_id}`, items: census });
-    census = [];
+  let activity: ActivityItem[] = [];
+  let activityKey = '';
+  const flushActivity = () => {
+    if (!activity.length) return;
+    rows.push({
+      type: 'activity',
+      key: activityKey,
+      items: activity,
+      failures: activity.filter((i) => i.failed).length,
+    });
+    activity = [];
   };
 
   for (const b of sorted) {
     const k = blockKey(b.turn, b.seq);
     switch (b.kind) {
       case 'user_message': {
-        flushCensus();
+        flushActivity();
         n += 1;
         const anchor = `acp-turn-${b.turn}`;
         const text = (b.payload as unknown as UserMessagePayload).text ?? '';
@@ -351,7 +362,7 @@ const model = computed<{ rows: Row[]; toc: TocItem[] }>(() => {
         break;
       }
       case 'agent_message':
-        flushCensus();
+        flushActivity();
         rows.push({
           type: 'agent',
           key: k,
@@ -361,7 +372,7 @@ const model = computed<{ rows: Row[]; toc: TocItem[] }>(() => {
         });
         break;
       case 'thought':
-        flushCensus();
+        flushActivity();
         rows.push({
           type: 'thought',
           key: k,
@@ -371,24 +382,20 @@ const model = computed<{ rows: Row[]; toc: TocItem[] }>(() => {
         break;
       case 'tool_call': {
         const tool = b.payload as unknown as ToolCallPayload;
-        if (isQuiet(tool)) {
-          census.push(tool);
-        } else {
-          flushCensus();
-          rows.push({ type: 'card', key: k, tool, live: false });
-        }
+        if (!activity.length) activityKey = `act-${k}`;
+        activity.push({ tool, failed: tool.status === 'failed' });
         break;
       }
       case 'permission_request':
-        flushCensus();
+        flushActivity();
         rows.push({ type: 'permission', key: k, perm: b.payload as unknown as PermissionPayload });
         break;
       case 'mode_change':
-        flushCensus();
+        flushActivity();
         rows.push({ type: 'mode', key: k, mode: (b.payload as { mode_id?: string }).mode_id ?? '' });
         break;
       case 'turn_end': {
-        flushCensus();
+        flushActivity();
         const stop = (b.payload as unknown as TurnEndPayload).stop_reason ?? 'end_turn';
         rows.push({
           type: 'turnRule',
@@ -403,9 +410,11 @@ const model = computed<{ rows: Row[]; toc: TocItem[] }>(() => {
       // plan / usage: not rendered inline.
     }
   }
-  flushCensus();
+  flushActivity();
 
-  // Trailing live content of the in-flight turn.
+  // Trailing live prose of the in-flight turn. A streaming thought renders open
+  // (its tail visible); a streaming message renders as ordinary prose growing in
+  // place. Live tools stay out of the flow — the status line carries them.
   const lt = liveTurnNo.value;
   if (lt != null) {
     const thought = shadows.get(`${lt}:thought`);
@@ -416,13 +425,31 @@ const model = computed<{ rows: Row[]; toc: TocItem[] }>(() => {
     if (msg && msg.text) {
       rows.push({ type: 'agent', key: `shadow-${lt}-agent`, time: '', text: msg.text, streaming: true });
     }
-    for (const t of liveTools.values()) {
-      if (t.turn !== lt) continue;
-      rows.push({ type: 'card', key: `live-${t.tool_call_id}`, tool: t as unknown as ToolCallPayload, live: true });
-    }
   }
 
   return { rows, toc };
+});
+
+// The empty conversation, styled on purpose — a fresh session has no journal
+// yet, and a bare canvas reads as breakage.
+const isEmpty = computed(
+  () => state.value === 'ready' && !model.value.rows.length && !optimistic.value.length && !turnLive.value,
+);
+
+// ── Live status line ─────────────────────────────────────────────────────────
+// What the agent is doing right now, named: the newest live tool's title, else
+// "Thinking…" / "Writing…" while a thought / message streams, else "Working…".
+const statusLabel = computed(() => {
+  const lt = liveTurnNo.value;
+  if (lt == null) return 'Working';
+  let tool: SseTool | null = null;
+  for (const t of liveTools.values()) {
+    if (t.turn === lt) tool = t;
+  }
+  if (tool) return tool.title || tool.tool_kind;
+  if (shadows.get(`${lt}:agent_message`)?.text) return 'Writing';
+  if (shadows.get(`${lt}:thought`)?.text) return 'Thinking';
+  return 'Working';
 });
 
 // ── Presentational helpers ───────────────────────────────────────────────────
@@ -434,14 +461,21 @@ function toolGlyph(kind: string): string {
     >
   )[kind] ?? '•';
 }
-// The kind census on a collapsed run: `7 read · 2 search`, commonest first.
-function censusBreakdown(items: ToolCallPayload[]): string {
+// The kind census on a collapsed group: `7 read · 2 search`, commonest first.
+function activityBreakdown(items: ActivityItem[]): string {
   const counts = new Map<string, number>();
-  for (const it of items) counts.set(it.tool_kind || 'other', (counts.get(it.tool_kind || 'other') ?? 0) + 1);
+  for (const it of items) {
+    const kind = it.tool.tool_kind || 'other';
+    counts.set(kind, (counts.get(kind) ?? 0) + 1);
+  }
   return [...counts.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([kind, c]) => `${c} ${kind}`)
     .join(' · ');
+}
+// Whether a call carries anything worth expanding (a diff or non-empty text).
+function hasDetail(t: ToolCallPayload): boolean {
+  return (t.content ?? []).some((c) => c.type === 'diff' || (c.type === 'text' && !!c.text));
 }
 interface DiffLine {
   sign: '-' | '+';
@@ -468,15 +502,19 @@ function isAllow(kind: string): boolean {
 }
 
 // ── Folds ────────────────────────────────────────────────────────────────────
-const open = ref<Set<string>>(new Set());
-const isOpen = (k: string) => open.value.has(k);
-function toggle(k: string) {
-  const s = new Set(open.value);
-  s.has(k) ? s.delete(k) : s.add(k);
-  open.value = s;
+// A fold's default is contextual (a failed activity group / failed call opens by
+// default; everything else closes); an explicit toggle overrides the default.
+const folds = ref(new Map<string, boolean>());
+function foldOpen(key: string, dflt = false): boolean {
+  return folds.value.get(key) ?? dflt;
+}
+function toggleFold(key: string, dflt = false) {
+  const m = new Map(folds.value);
+  m.set(key, !foldOpen(key, dflt));
+  folds.value = m;
 }
 
-// ── Working indicator (elapsed) ──────────────────────────────────────────────
+// ── Working timer (elapsed) ──────────────────────────────────────────────────
 const elapsed = ref(0);
 let elapsedTimer: ReturnType<typeof setInterval> | null = null;
 watch(turnLive, (live) => {
@@ -550,6 +588,18 @@ function goTo(anchor: string) {
         class="acp-scroll min-h-0 flex-1 overflow-auto pb-8 pr-1"
         @scroll.passive="updateActive"
       >
+        <!-- A fresh session: say so, instead of a blank canvas. -->
+        <div v-if="isEmpty" class="acp-empty" data-testid="acp-empty">
+          <p class="acp-empty-lede">No conversation yet</p>
+          <p class="acp-empty-hint">
+            {{
+              composerVisible
+                ? 'The transcript appears when the agent takes its first turn — or start one with a message below.'
+                : 'The transcript appears when the agent takes its first turn.'
+            }}
+          </p>
+        </div>
+
         <template v-for="row in model.rows" :key="row.key">
           <!-- Turn rule — dashed hairline between turns. -->
           <div
@@ -587,59 +637,78 @@ function goTo(anchor: string) {
             <MarkdownView :id="id" path="" :source="row.text" />
           </section>
 
-          <!-- Thinking — a faint italic-serif fold. -->
+          <!-- Thinking — streaming shows its live tail (the status line below
+               names it); settled folds away. -->
           <div v-else-if="row.type === 'thought'" class="acp-thought" data-testid="acp-thought">
-            <button type="button" class="acp-fold-head" @click="toggle(row.key)">
-              <span class="chev" :class="{ open: isOpen(row.key) }">▸</span>
-              <span>thinking</span>
-            </button>
-            <p v-if="isOpen(row.key)" class="acp-thought-body">{{ row.text }}</p>
+            <template v-if="row.streaming">
+              <div class="acp-thought-live-clip">
+                <p class="acp-thought-body">{{ row.text }}</p>
+              </div>
+            </template>
+            <template v-else>
+              <button type="button" class="acp-fold-head" @click="toggleFold(row.key)">
+                <span class="chev" :class="{ open: foldOpen(row.key) }">▸</span>
+                <span>thinking</span>
+              </button>
+              <p v-if="foldOpen(row.key)" class="acp-thought-body">{{ row.text }}</p>
+            </template>
           </div>
 
-          <!-- Apparatus: a collapsed census of quiet calls. -->
-          <div v-else-if="row.type === 'census'" class="acp-census" data-testid="acp-census">
-            <button type="button" class="acp-fold-head" @click="toggle(row.key)">
-              <span class="chev" :class="{ open: isOpen(row.key) }">▸</span>
-              <span
-                >{{ row.items.length }} {{ row.items.length === 1 ? 'call' : 'calls' }} —
-                {{ censusBreakdown(row.items) }}</span
+          <!-- Apparatus: one folded activity line per run of tool calls. -->
+          <div v-else-if="row.type === 'activity'" class="acp-activity" data-testid="acp-activity">
+            <button
+              type="button"
+              class="acp-fold-head"
+              data-testid="acp-activity-head"
+              @click="toggleFold(row.key, row.failures > 0)"
+            >
+              <span class="chev" :class="{ open: foldOpen(row.key, row.failures > 0) }">▸</span>
+              <span v-if="row.items.length === 1" class="acp-activity-solo">
+                <span class="acp-tool-glyph">{{ toolGlyph(row.items[0].tool.tool_kind) }}</span>
+                <span class="truncate">{{ row.items[0].tool.title || row.items[0].tool.tool_kind }}</span>
+              </span>
+              <span v-else
+                >{{ row.items.length }} steps — {{ activityBreakdown(row.items) }}</span
+              >
+              <span v-if="row.failures" class="acp-activity-failbadge" data-testid="acp-activity-failed"
+                >{{ row.failures }} failed</span
               >
             </button>
-            <ul v-if="isOpen(row.key)" class="acp-census-list">
-              <li v-for="(it, i) in row.items" :key="i">
-                <span class="acp-tool-glyph">{{ toolGlyph(it.tool_kind) }}</span>
-                <span class="truncate">{{ it.title || it.tool_kind }}</span>
+            <ul v-if="foldOpen(row.key, row.failures > 0)" class="acp-activity-list">
+              <li v-for="it in row.items" :key="it.tool.tool_call_id" data-testid="acp-activity-item">
+                <button
+                  type="button"
+                  class="acp-activity-line"
+                  :disabled="!hasDetail(it.tool)"
+                  @click="toggleFold(`tool-${it.tool.tool_call_id}`, it.failed)"
+                >
+                  <span class="acp-tool-glyph">{{ toolGlyph(it.tool.tool_kind) }}</span>
+                  <span class="truncate">{{ it.tool.title || it.tool.tool_kind }}</span>
+                  <span v-if="it.failed" class="acp-activity-status text-block">failed</span>
+                  <span v-else-if="hasDetail(it.tool)" class="chev sm" :class="{ open: foldOpen(`tool-${it.tool.tool_call_id}`, it.failed) }"
+                    >▸</span
+                  >
+                </button>
+                <div
+                  v-if="hasDetail(it.tool) && foldOpen(`tool-${it.tool.tool_call_id}`, it.failed)"
+                  class="acp-detail"
+                  data-testid="acp-detail"
+                >
+                  <template v-for="(c, ci) in it.tool.content" :key="ci">
+                    <!-- A diff renders as real ±diff lines. -->
+                    <pre v-if="c.type === 'diff'" class="acp-diff" data-testid="acp-diff"><code
+                      v-for="(l, li) in diffLines(c)"
+                      :key="li"
+                      class="acp-diff-line"
+                      :class="l.sign === '-' ? 'acp-diff-del' : 'acp-diff-add'"
+                    >{{ l.sign }} {{ l.text }}
+</code></pre>
+                    <!-- Text / command output on the recessed panel tone. -->
+                    <pre v-else-if="c.type === 'text' && c.text" class="acp-payload">{{ c.text }}</pre>
+                  </template>
+                </div>
               </li>
             </ul>
-          </div>
-
-          <!-- A consequential tool call — a standalone card. -->
-          <div
-            v-else-if="row.type === 'card'"
-            class="acp-card"
-            :class="{ 'acp-card-failed': row.tool.status === 'failed' }"
-            data-testid="acp-card"
-          >
-            <div class="acp-card-head">
-              <span class="acp-tool-glyph">{{ toolGlyph(row.tool.tool_kind) }}</span>
-              <span class="acp-tool-title">{{ row.tool.title || row.tool.tool_kind }}</span>
-              <span v-if="row.live" class="acp-live" data-testid="acp-card-live">▸ live</span>
-              <span v-else class="acp-tool-status" :class="{ 'text-block': row.tool.status === 'failed' }">{{
-                row.tool.status
-              }}</span>
-            </div>
-            <div v-for="(c, ci) in row.tool.content" :key="ci" class="acp-payload-wrap">
-              <!-- A diff renders as real ±diff lines. -->
-              <pre v-if="c.type === 'diff'" class="acp-diff" data-testid="acp-diff"><code
-                v-for="(l, li) in diffLines(c)"
-                :key="li"
-                class="acp-diff-line"
-                :class="l.sign === '-' ? 'acp-diff-del' : 'acp-diff-add'"
-              >{{ l.sign }} {{ l.text }}
-</code></pre>
-              <!-- Text / command output on the recessed panel tone. -->
-              <pre v-else-if="c.type === 'text' && c.text" class="acp-payload">{{ c.text }}</pre>
-            </div>
           </div>
 
           <!-- Permission — the one interactive block. -->
@@ -682,6 +751,14 @@ function goTo(anchor: string) {
           </header>
           <MarkdownView :id="id" path="" :source="o.text" />
         </section>
+
+        <!-- Live status — what the agent is doing right now, at the tail. -->
+        <div v-if="turnLive" class="acp-status" data-testid="acp-working" role="status" aria-live="polite">
+          <span class="acp-live-label">{{ statusLabel }}…</span>
+          <span class="acp-status-meta"
+            >turn {{ (liveTurnNo ?? 0) + 1 }} · {{ elapsedLabel }}</span
+          >
+        </div>
       </div>
 
       <!-- Right rail: user-turn jump list + the current plan. -->
@@ -718,12 +795,6 @@ function goTo(anchor: string) {
           </ul>
         </template>
       </nav>
-    </div>
-
-    <!-- Working indicator — a sage cue while a turn runs. -->
-    <div v-if="turnLive" class="acp-working" data-testid="acp-working" role="status" aria-live="polite">
-      <span>▶ working</span>
-      <span v-if="liveTurnNo != null" class="acp-working-meta">· turn {{ liveTurnNo + 1 }} · {{ elapsedLabel }}</span>
     </div>
 
     <!-- Composer. -->
@@ -845,15 +916,39 @@ function goTo(anchor: string) {
   color: var(--attn);
 }
 
-/* Thought fold. */
+/* Empty state — a dashed card, not a bare void. */
+.acp-empty {
+  margin-top: 0.75rem;
+  max-width: 46rem;
+  border: 1px dashed var(--line);
+  border-radius: 0.375rem;
+  padding: 1.5rem 1.25rem;
+  text-align: center;
+}
+.acp-empty-lede {
+  font-family: var(--font-serif);
+  font-size: 0.9375rem;
+  color: var(--muted);
+}
+.acp-empty-hint {
+  margin-top: 0.35rem;
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  color: var(--faint);
+}
+
+/* Fold heads — one quiet mono voice for thinking + activity. */
 .acp-thought,
-.acp-census {
+.acp-activity {
   margin-top: 0.625rem;
+  max-width: 46rem;
 }
 .acp-fold-head {
   display: flex;
   align-items: center;
   gap: 0.45rem;
+  min-width: 0;
+  max-width: 100%;
   font-family: var(--font-mono);
   font-size: 0.75rem;
   color: var(--faint);
@@ -864,10 +959,15 @@ function goTo(anchor: string) {
 }
 .chev {
   display: inline-block;
+  flex: none;
   transition: transform 0.12s ease;
 }
 .chev.open {
   transform: rotate(90deg);
+}
+.chev.sm {
+  margin-left: auto;
+  color: var(--faint);
 }
 .acp-thought-body {
   margin: 0.3rem 0 0 1.15rem;
@@ -879,62 +979,72 @@ function goTo(anchor: string) {
   white-space: pre-wrap;
 }
 
-/* Census expansion. */
-.acp-census-list {
+/* A streaming thought shows only its live tail, faded in at the top. */
+.acp-thought-live-clip {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  max-height: 7.5rem;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, transparent 0, black 2.25rem);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, black 2.25rem);
+}
+
+/* Activity group — a run of tool calls folded to one line. */
+.acp-activity-solo {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+}
+.acp-activity-failbadge {
+  flex: none;
+  color: var(--block);
+}
+.acp-activity-list {
   margin: 0.3rem 0 0 1.15rem;
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
+  gap: 0.15rem;
+  border-left: 1px solid var(--line);
+  padding-left: 0.6rem;
 }
-.acp-census-list li {
+.acp-activity-line {
   display: flex;
   align-items: center;
   gap: 0.45rem;
+  width: 100%;
+  min-width: 0;
+  padding: 0.1rem 0.25rem;
+  border-radius: 0.2rem;
   font-family: var(--font-mono);
   font-size: 0.75rem;
   color: var(--muted);
-  min-width: 0;
+  text-align: left;
 }
-
-/* Consequential tool card. */
-.acp-card {
-  margin-top: 0.75rem;
-  border: 1px solid var(--line);
-  border-radius: 0.375rem;
-  overflow: hidden;
+.acp-activity-line:not(:disabled) {
+  cursor: pointer;
 }
-.acp-card-failed {
-  border-left: 2px solid var(--block-line);
+.acp-activity-line:not(:disabled):hover {
+  background: color-mix(in srgb, var(--subtle) 55%, transparent);
+  color: var(--fg);
 }
-.acp-card-head {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.4rem 0.65rem;
-  background: var(--surface);
+.acp-activity-status {
+  margin-left: auto;
+  flex: none;
   font-family: var(--font-mono);
-  font-size: 0.75rem;
+  font-size: 0.6875rem;
 }
 .acp-tool-glyph {
   flex: none;
   color: var(--muted);
 }
-.acp-tool-title {
-  color: var(--fg);
-  min-width: 0;
+
+/* Expanded call detail — recessed mono, clamped so output can't swallow the page. */
+.acp-detail {
+  margin: 0.2rem 0 0.35rem 0.25rem;
+  border-radius: 0.25rem;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.acp-tool-status {
-  margin-left: auto;
-  flex: none;
-  color: var(--faint);
-}
-.acp-live {
-  margin-left: auto;
-  flex: none;
-  color: var(--ok);
 }
 .acp-payload {
   margin: 0;
@@ -945,11 +1055,10 @@ function goTo(anchor: string) {
   font-size: 0.75rem;
   line-height: 1.2rem;
   white-space: pre-wrap;
-  overflow-x: auto;
-  max-height: 22rem;
+  overflow: auto;
+  max-height: 16rem;
 }
-.acp-payload-wrap + .acp-payload-wrap .acp-payload,
-.acp-payload-wrap + .acp-payload-wrap .acp-diff {
+.acp-detail > * + * {
   border-top: 1px solid var(--line);
 }
 
@@ -958,7 +1067,8 @@ function goTo(anchor: string) {
   margin: 0;
   padding: 0.4rem 0;
   background: var(--code);
-  overflow-x: auto;
+  overflow: auto;
+  max-height: 16rem;
   font-family: var(--font-mono);
   font-size: 0.75rem;
   line-height: 1.2rem;
@@ -980,6 +1090,7 @@ function goTo(anchor: string) {
 /* Permission card — ochre rule + attention wash; the interface asking (sans). */
 .acp-perm {
   margin-top: 0.85rem;
+  max-width: 46rem;
   border: 1px solid var(--line);
   border-left: 2px solid var(--attn-line);
   border-radius: 0.375rem;
@@ -1028,6 +1139,7 @@ function goTo(anchor: string) {
   align-items: center;
   justify-content: center;
   margin: 1.5rem 0 0.25rem;
+  max-width: 46rem;
   border-top: 1px dashed var(--line);
   padding-top: 0.55rem;
   font-family: var(--font-mono);
@@ -1043,19 +1155,47 @@ function goTo(anchor: string) {
   margin-top: 0.25rem;
 }
 
-/* Working indicator. */
-.acp-working {
-  margin-top: 0.6rem;
+/* Live status — the one animated element: a soft shimmer naming the agent's
+   current activity while a turn runs. */
+.acp-status {
+  margin-top: 1rem;
   display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-family: var(--font-mono);
-  font-size: 0.75rem;
-  color: var(--ok);
-  font-variant-numeric: tabular-nums;
+  align-items: baseline;
+  gap: 0.6rem;
+  font-size: 0.8125rem;
 }
-.acp-working-meta {
+.acp-live-label {
+  font-family: var(--font-sans);
+  font-size: 0.8125rem;
+  color: var(--muted);
+  background: linear-gradient(90deg, var(--muted) 30%, var(--fg) 50%, var(--muted) 70%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: acp-shimmer 2.2s linear infinite;
+}
+@keyframes acp-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .acp-live-label {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: currentColor;
+    color: var(--muted);
+  }
+}
+.acp-status-meta {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
   color: var(--faint);
+  font-variant-numeric: tabular-nums;
 }
 
 /* Composer. */
