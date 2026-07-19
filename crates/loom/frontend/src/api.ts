@@ -265,7 +265,7 @@ export const handoffSession = (
 
 // --- ACP conversation (protocol='acp' sessions) ----------------------------
 
-import type { ChatSnapshot, PromptAck } from './types';
+import type { AcpMetadata, ChatSnapshot, PromptAck } from './types';
 
 /** The journaled conversation snapshot for an ACP session — the transcript a
  *  client paints before tailing `/chat/stream` (`GET /sessions/{id}/chat`). A
@@ -294,6 +294,15 @@ export const answerPermission = (id: string, requestId: string, optionId: string
 /** Change an ACP session's mode (`session/set_mode`). */
 export const setSessionMode = (id: string, modeId: string, by?: string) =>
   put(`/sessions/${id}/mode`, { mode_id: modeId, by }) as Promise<{ mode_id: string }>;
+
+/** Change an agent-owned ACP session configuration selector (model, reasoning
+ * effort, or an adapter-specific option). */
+export const setSessionConfigOption = (id: string, configId: string, value: string | boolean) =>
+  put(`/sessions/${id}/config/${encodeURIComponent(configId)}`, { value }) as Promise<{
+    config_id: string;
+    value: string | boolean;
+    metadata: AcpMetadata;
+  }>;
 
 /** Set a session's park override — the fleet list's resting shelf. `'parked'`
  *  pins it to the shelf, `'active'` keeps it live even when idle, `'auto'` clears

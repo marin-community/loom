@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { getChat, resetChat } from '../api';
-import type { Session } from '../types';
+import type { Session, AcpCommand } from '../types';
 import SessionConversation from '../components/SessionConversation.vue';
 
 // The Chat surface: a conversation with the fleet **concierge** — an agent that
@@ -15,6 +15,13 @@ type LoadState = 'loading' | 'ready' | 'error';
 const state = ref<LoadState>('loading');
 const session = ref<Session | null>(null);
 const errorMsg = ref('');
+const localCommands: AcpCommand[] = [
+  {
+    name: 'clear',
+    description: 'Start a fresh concierge conversation',
+    input: null,
+  },
+];
 
 async function load() {
   state.value = 'loading';
@@ -42,11 +49,8 @@ function armReset() {
   disarmTimer = setTimeout(() => (armed.value = false), 4000);
 }
 
-async function reset() {
-  if (!armed.value) {
-    armReset();
-    return;
-  }
+async function startFresh() {
+  if (resetting.value) return;
   if (disarmTimer) clearTimeout(disarmTimer);
   armed.value = false;
   resetting.value = true;
@@ -60,6 +64,18 @@ async function reset() {
   } finally {
     resetting.value = false;
   }
+}
+
+async function reset() {
+  if (!armed.value) {
+    armReset();
+    return;
+  }
+  await startFresh();
+}
+
+function handleCommand(name: string) {
+  if (name === 'clear') startFresh();
 }
 
 onMounted(load);
@@ -91,7 +107,7 @@ onMounted(load);
         data-testid="chat-reset"
         @click="reset"
       >
-        {{ resetting ? 'Resetting…' : armed ? 'Confirm reset' : 'Reset' }}
+        {{ resetting ? 'Starting…' : armed ? 'Confirm new chat' : 'New chat' }}
       </button>
     </header>
 
@@ -110,7 +126,9 @@ onMounted(load);
       v-else-if="session"
       :key="session.id"
       :session="session"
+      :local-commands="localCommands"
       class="min-h-0 flex-1"
+      @command="handleCommand"
     />
   </div>
 </template>

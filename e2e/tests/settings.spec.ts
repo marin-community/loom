@@ -2,6 +2,10 @@ import { test, expect } from '../fixtures/weaver';
 
 test.describe('settings · agent defaults', () => {
   test('agent settings use registry-backed model and effort choices', async ({ page, weaver }) => {
+    const registry = (await (await fetch(`${weaver.baseUrl}/api/agents`)).json()) as {
+      agents: { kind: string; models: { label: string }[]; efforts: { label: string }[] }[];
+    };
+    const codex = registry.agents.find((agent) => agent.kind === 'codex')!;
     await page.goto(`${weaver.baseUrl}/settings`);
 
     const session = page.locator('section').filter({
@@ -16,12 +20,13 @@ test.describe('settings · agent defaults', () => {
     await expect(session.getByRole('radio', { name: /Shell/ })).toBeVisible();
 
     await session.getByRole('radio', { name: /Codex/ }).click();
-    await expect(session.getByRole('button', { name: 'GPT-5.5' })).toBeVisible();
-    await expect(session.getByRole('button', { name: 'GPT-5.4', exact: true })).toBeVisible();
-    await expect(session.getByRole('button', { name: 'GPT-5.4 Mini' })).toBeVisible();
-    await expect(session.getByRole('button', { name: 'GPT-5.3 Codex Spark' })).toBeVisible();
+    for (const model of codex.models) {
+      await expect(session.getByRole('button', { name: model.label, exact: true })).toBeVisible();
+    }
+    for (const effort of codex.efforts) {
+      await expect(session.getByRole('button', { name: effort.label, exact: true })).toBeVisible();
+    }
     await expect(session.getByRole('button', { name: 'Haiku' })).toHaveCount(0);
-    await expect(session.getByRole('button', { name: 'Max' })).toHaveCount(0);
 
     await session.getByRole('radio', { name: /Claude/ }).click();
     await expect(session.getByRole('button', { name: 'Haiku' })).toBeVisible();
@@ -35,10 +40,11 @@ test.describe('settings · agent defaults', () => {
     await expect(concierge.getByRole('radio', { name: /Shell/ })).toHaveCount(0);
 
     await concierge.getByRole('radio', { name: /Codex/ }).click();
-    await expect(concierge.getByRole('button', { name: 'GPT-5.5' })).toBeVisible();
-    await expect(concierge.getByRole('button', { name: 'GPT-5.4', exact: true })).toBeVisible();
-    await expect(concierge.getByRole('button', { name: 'GPT-5.4 Mini' })).toBeVisible();
-    await expect(concierge.getByRole('button', { name: 'GPT-5.3 Codex Spark' })).toBeVisible();
-    await expect(concierge.getByRole('button', { name: 'Max' })).toHaveCount(0);
+    for (const model of codex.models) {
+      await expect(concierge.getByRole('button', { name: model.label, exact: true })).toBeVisible();
+    }
+    for (const effort of codex.efforts) {
+      await expect(concierge.getByRole('button', { name: effort.label, exact: true })).toBeVisible();
+    }
   });
 });

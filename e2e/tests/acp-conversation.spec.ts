@@ -306,6 +306,92 @@ test.describe('acp conversation', () => {
     });
   });
 
+  test('discovers slash commands from the agent and forwards them', async ({ page, weaver }) => {
+    await openAcp(page, weaver, { goal: 'say:ready' });
+    const input = page.getByTestId('acp-composer-input');
+
+    await input.fill('/');
+    const menu = page.getByTestId('acp-command-menu');
+    await expect(menu.getByText('/resume', { exact: true })).toBeVisible();
+    await expect(menu.getByText('/review', { exact: true })).toBeVisible();
+    await menu.getByText('/review', { exact: true }).click();
+    await expect(input).toHaveValue('/review ');
+    await expect(input).toHaveAttribute('placeholder', 'instructions');
+
+    // `/resume` belongs to the adapter, not loom: it is sent as a real prompt
+    // and appears once in the durable transcript.
+    await input.fill('/resume');
+    await page.getByTestId('acp-composer-send').click();
+    await expect(page.getByTestId('acp-conversation').getByText('/resume', { exact: true })).toBeVisible();
+  });
+
+  test('permission, model, and effort pills change the live agent config', async ({ page, weaver }) => {
+    await openAcp(page, weaver, { goal: 'say:ready' });
+
+    const permissions = page.getByTestId('acp-config-mode');
+    await expect(permissions).toContainText('Permissions');
+    await expect(permissions).toContainText('Default');
+    await permissions.getByRole('button').first().click();
+    await page.getByTestId('acp-config-menu').getByText('Accept edits', { exact: true }).click();
+    await expect(permissions).toContainText('Accept edits');
+
+    const model = page.getByTestId('acp-config-model');
+    await expect(model).toContainText('Fake fast');
+    await model.getByRole('button').first().click();
+    await page.getByTestId('acp-config-menu').getByText('Fake deep', { exact: true }).click();
+    await expect(model).toContainText('Fake deep');
+
+    const effort = page.getByTestId('acp-config-thought_level');
+    await expect(effort).toContainText('Medium');
+    await effort.getByRole('button').first().click();
+    await page.getByTestId('acp-config-menu').getByText('High', { exact: true }).click();
+    await expect(effort).toContainText('High');
+
+    const fast = page.getByTestId('acp-config-fast-mode');
+    await expect(fast).toContainText('Off');
+    await fast.getByRole('button').click();
+    await expect(fast).toContainText('On');
+  });
+
+  test('/clear is a local Chat hook that starts with a clean transcript', async ({ page, weaver }) => {
+    const s = await launchAcpSession(weaver, { goal: 'say:old concierge context', name: 'chat-clear' });
+    test.skip(s === null, SKIP_MSG);
+    const fresh = { ...s!, id: 'fresh-concierge', term_session: 'fresh-concierge' };
+    let resetCalls = 0;
+    await page.route('**/api/chat', (route) => route.fulfill({ json: s }));
+    await page.route('**/api/chat/reset', (route) => {
+      resetCalls += 1;
+      return route.fulfill({ json: fresh });
+    });
+    await page.route('**/api/sessions/fresh-concierge/chat', (route) =>
+      route.fulfill({
+        json: {
+          blocks: [],
+          live_turn: null,
+          metadata: { commands: [], config_options: [], modes: [] },
+        },
+      }),
+    );
+    await page.route('**/api/sessions/fresh-concierge/chat/stream', (route) =>
+      route.fulfill({
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+        body: '',
+      }),
+    );
+
+    await page.goto(`${weaver.baseUrl}/chat`);
+    await expect(page.getByText('old concierge context', { exact: true })).toBeVisible();
+    const input = page.getByTestId('acp-composer-input');
+    await input.fill('/');
+    await page.getByTestId('acp-command-menu').getByText('/clear', { exact: true }).click();
+    await page.getByTestId('acp-composer-send').click();
+
+    await expect(page.getByTestId('acp-empty')).toBeVisible();
+    await expect(page.getByText('old concierge context', { exact: true })).toHaveCount(0);
+    expect(resetCalls).toBe(1);
+  });
+
   test('a permission card answers and collapses to a receipt', async ({ page, weaver }) => {
     // A supervised mode surfaces the request as an interactive card (bypass mode
     // would auto-answer it).

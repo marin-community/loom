@@ -82,6 +82,10 @@ test.describe('creating a session via the UI form', () => {
   });
 
   test('agent selection drives model and effort choices', async ({ page, weaver }) => {
+    const registry = (await (await fetch(`${weaver.baseUrl}/api/agents`)).json()) as {
+      agents: { kind: string; models: { label: string }[]; efforts: { label: string }[] }[];
+    };
+    const codex = registry.agents.find((agent) => agent.kind === 'codex')!;
     await page.goto(weaver.baseUrl);
     await page.getByRole('button', { name: 'New session' }).click();
 
@@ -99,15 +103,16 @@ test.describe('creating a session via the UI form', () => {
     await expect(form.getByRole('button', { name: 'Max' })).toBeVisible();
 
     await form.getByRole('radio', { name: /Codex/ }).click();
-    await expect(form.getByRole('button', { name: 'GPT-5.5' })).toBeVisible();
-    await expect(form.getByRole('button', { name: 'GPT-5.4', exact: true })).toBeVisible();
-    await expect(form.getByRole('button', { name: 'GPT-5.4 Mini' })).toBeVisible();
-    await expect(form.getByRole('button', { name: 'GPT-5.3 Codex Spark' })).toBeVisible();
+    for (const model of codex.models) {
+      await expect(form.getByRole('button', { name: model.label, exact: true })).toBeVisible();
+    }
+    for (const effort of codex.efforts) {
+      await expect(form.getByRole('button', { name: effort.label, exact: true })).toBeVisible();
+    }
     await expect(form.getByRole('button', { name: 'Haiku' })).toHaveCount(0);
     await expect(form.getByRole('button', { name: 'Sonnet' })).toHaveCount(0);
     await expect(form.getByRole('button', { name: 'Opus' })).toHaveCount(0);
     await expect(form.getByRole('button', { name: 'Fable' })).toHaveCount(0);
-    await expect(form.getByRole('button', { name: 'Max' })).toHaveCount(0);
   });
 
   test('Cancel hides the form again', async ({ page, weaver }) => {

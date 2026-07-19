@@ -156,6 +156,124 @@ fn count_kind(blocks: &[Value], kind: &str) -> usize {
     blocks.iter().filter(|b| b["kind"] == kind).count()
 }
 
+async fn poll_metadata(ts: &TestServer, id: &str, timeout: Duration) -> Value {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let chat = ts
+            .client
+            .get(&format!("/api/sessions/{id}/chat"))
+            .await
+            .unwrap();
+        if chat["metadata"]["commands"]
+            .as_array()
+            .is_some_and(|commands| !commands.is_empty())
+        {
+            return chat["metadata"].clone();
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("ACP metadata was never advertised; last: {chat}");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// The adapter owns command discovery and live permission/model/reasoning
+/// controls. The `/chat` snapshot exposes the initial state, a config write
+/// waits for the ACP response, and the refreshed full option set is returned
+/// and broadcast over SSE.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn composer_metadata_and_config_options_round_trip() {
+    let ts = TestServer::start().await;
+    start_new(&ts, "acp-meta", None, None).await;
+
+    let metadata = poll_metadata(&ts, "acp-meta", Duration::from_secs(5)).await;
+    let commands = metadata["commands"].as_array().unwrap();
+    assert!(commands.iter().any(|command| command["name"] == "resume"));
+    assert!(commands.iter().any(|command| {
+        command["name"] == "review" && command["input"]["hint"] == "instructions"
+    }));
+    let options = metadata["config_options"].as_array().unwrap();
+    assert!(options
+        .iter()
+        .any(|option| { option["id"] == "model" && option["currentValue"] == "fake-fast" }));
+    assert!(options.iter().any(|option| {
+        option["category"] == "thought_level" && option["currentValue"] == "medium"
+    }));
+    assert!(options
+        .iter()
+        .any(|option| { option["category"] == "mode" && option["currentValue"] == "default" }));
+    assert!(options
+        .iter()
+        .any(|option| { option["id"] == "fast-mode" && option["currentValue"] == false }));
+
+    let mut rx = ts
+        .state
+        .acp
+        .get("acp-meta")
+        .expect("task registered")
+        .subscribe();
+    let changed = ts
+        .client
+        .put(
+            "/api/sessions/acp-meta/config/model",
+            json!({ "value": "fake-deep" }),
+        )
+        .await
+        .expect("model config changes");
+    assert_eq!(changed["value"], "fake-deep");
+    assert!(changed["metadata"]["config_options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|option| option["id"] == "model" && option["currentValue"] == "fake-deep"));
+
+    let events = drain_events(&mut rx, Duration::from_secs(5), |event| {
+        event.event == "metadata"
+            && event.data["config_options"]
+                .as_array()
+                .is_some_and(|options| {
+                    options.iter().any(|option| {
+                        option["id"] == "model" && option["currentValue"] == "fake-deep"
+                    })
+                })
+    })
+    .await;
+    assert!(
+        events.iter().any(|event| event.event == "metadata"),
+        "the refreshed option set was broadcast: {events:?}"
+    );
+
+    let changed = ts
+        .client
+        .put(
+            "/api/sessions/acp-meta/config/mode",
+            json!({ "value": "acceptEdits" }),
+        )
+        .await
+        .expect("permission posture changes");
+    assert!(changed["metadata"]["config_options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|option| option["id"] == "mode" && option["currentValue"] == "acceptEdits"));
+    let session = session_mod::get(&ts.state.db, "acp-meta")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.current_mode.as_deref(), Some("acceptEdits"));
+
+    let changed = ts
+        .client
+        .put(
+            "/api/sessions/acp-meta/config/fast-mode",
+            json!({ "value": true }),
+        )
+        .await
+        .expect("boolean config changes");
+    assert_eq!(changed["value"], true);
+}
+
 /// 1. New session end to end: prompt → journal has user_message + agent_message +
 ///    turn_end; SSE delivered delta + block + turn events.
 #[serial]

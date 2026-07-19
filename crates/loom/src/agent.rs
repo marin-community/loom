@@ -3,11 +3,13 @@
 //! run for a judgement call.
 
 use anyhow::{anyhow, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::time::Duration;
 
 use crate::acp::{AcpLaunch, NewOrLoad};
 use crate::backend;
@@ -103,6 +105,9 @@ const MODEL_CHOICES: &[(&str, &str)] = &[
 ];
 
 const CODEX_MODEL_CHOICES: &[(&str, &str)] = &[
+    ("gpt-5.6-sol", "GPT-5.6 Sol"),
+    ("gpt-5.6-terra", "GPT-5.6 Terra"),
+    ("gpt-5.6-luna", "GPT-5.6 Luna"),
     ("gpt-5.5", "GPT-5.5"),
     ("gpt-5.4", "GPT-5.4"),
     ("gpt-5.4-mini", "GPT-5.4 Mini"),
@@ -146,6 +151,97 @@ pub fn builtin_metadata() -> Vec<AgentMetadata> {
         .collect()
 }
 
+#[derive(Debug, Deserialize)]
+struct CodexModelCatalog {
+    #[serde(default)]
+    models: Vec<CodexCatalogModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexCatalogModel {
+    slug: String,
+    display_name: String,
+    #[serde(default)]
+    visibility: String,
+    #[serde(default)]
+    supported_reasoning_levels: Vec<CodexReasoningLevel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexReasoningLevel {
+    effort: String,
+}
+
+/// Ask the installed Codex binary for its bundled model catalogue. This is a
+/// stateless local query (`--bundled` forbids a network refresh), so Settings
+/// reflects the version actually installed on the loom host without launching
+/// a throwaway agent session. Older CLIs without `debug models` and malformed
+/// catalogues simply retain the code-shipped fallback above.
+async fn refresh_codex_metadata(metadata: &mut AgentMetadata) {
+    let output = tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::process::Command::new("codex")
+            .args(["debug", "models", "--bundled"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    let Ok(Ok(output)) = output else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    apply_codex_catalog(metadata, &output.stdout);
+}
+
+fn apply_codex_catalog(metadata: &mut AgentMetadata, bytes: &[u8]) {
+    let Ok(catalog) = serde_json::from_slice::<CodexModelCatalog>(bytes) else {
+        return;
+    };
+
+    let mut models = Vec::new();
+    let mut efforts = Vec::new();
+    let mut seen_models = HashSet::new();
+    let mut seen_efforts = HashSet::new();
+    for model in catalog.models {
+        if model.visibility != "list" || !seen_models.insert(model.slug.clone()) {
+            continue;
+        }
+        models.push(AgentChoice {
+            id: model.slug,
+            label: model.display_name,
+        });
+        for level in model.supported_reasoning_levels {
+            if seen_efforts.insert(level.effort.clone()) {
+                efforts.push(AgentChoice {
+                    label: effort_label(&level.effort),
+                    id: level.effort,
+                });
+            }
+        }
+    }
+    if !models.is_empty() {
+        metadata.models = models;
+    }
+    if !efforts.is_empty() {
+        metadata.efforts = efforts;
+    }
+}
+
+fn effort_label(effort: &str) -> String {
+    match effort {
+        "xhigh" => "X-High".to_string(),
+        other => {
+            let mut chars = other.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
+        }
+    }
+}
+
 /// A launchable agent resolved from a kind: either a builtin static type or a
 /// database-backed custom agent (owned, since it carries the row's commands).
 pub enum ResolvedAgent {
@@ -177,6 +273,9 @@ pub async fn resolve(db: &Db, kind: &str) -> Result<Option<ResolvedAgent>> {
 /// (name order). What `GET /api/agents` lists and the picker renders.
 pub async fn agent_metadata(db: &Db) -> Result<Vec<AgentMetadata>> {
     let mut out = builtin_metadata();
+    if let Some(codex) = out.iter_mut().find(|meta| meta.kind == "codex") {
+        refresh_codex_metadata(codex).await;
+    }
     for a in crate::custom_agents::list(db).await? {
         out.push(CustomAgentType::new(a).metadata());
     }
@@ -185,7 +284,14 @@ pub async fn agent_metadata(db: &Db) -> Result<Vec<AgentMetadata>> {
 
 /// The metadata for one agent kind, or `None` when it names no agent.
 pub async fn metadata_for(db: &Db, kind: &str) -> Result<Option<AgentMetadata>> {
-    Ok(resolve(db, kind).await?.map(|r| r.as_type().metadata()))
+    let Some(resolved) = resolve(db, kind).await? else {
+        return Ok(None);
+    };
+    let mut metadata = resolved.as_type().metadata();
+    if metadata.kind == "codex" {
+        refresh_codex_metadata(&mut metadata).await;
+    }
+    Ok(Some(metadata))
 }
 
 /// Whether `kind` names a known agent (builtin or custom).
@@ -1380,6 +1486,36 @@ mod tests {
         // The `"shell"` runtime in the test helper builds the same bare shell.
         let script = launch_script("shell", None, None, LaunchMode::Fresh, "", "");
         assert_eq!(script, "exec \"${SHELL:-/bin/sh}\"");
+    }
+
+    #[test]
+    fn codex_catalog_replaces_stale_fallback_choices() {
+        let mut metadata = CODEX_AGENT_TYPE.metadata();
+        apply_codex_catalog(
+            &mut metadata,
+            br#"{"models":[
+                {"slug":"gpt-next","display_name":"GPT Next","visibility":"list",
+                 "supported_reasoning_levels":[{"effort":"low"},{"effort":"ultra"}]},
+                {"slug":"hidden","display_name":"Hidden","visibility":"hide",
+                 "supported_reasoning_levels":[{"effort":"medium"}]}
+            ]}"#,
+        );
+        assert_eq!(
+            metadata
+                .models
+                .iter()
+                .map(|choice| choice.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-next"]
+        );
+        assert_eq!(
+            metadata
+                .efforts
+                .iter()
+                .map(|choice| (choice.id.as_str(), choice.label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("low", "Low"), ("ultra", "Ultra")]
+        );
     }
 
     /// A nested headless agent must not carry `$WEAVER_BRANCH`, or it fires the

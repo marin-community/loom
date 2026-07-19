@@ -16,6 +16,7 @@ import {
   interruptSession,
   answerPermission,
   setSessionMode,
+  setSessionConfigOption,
 } from '../api';
 import type {
   Session,
@@ -33,6 +34,10 @@ import type {
   PermissionPayload,
   UsagePayload,
   TurnEndPayload,
+  AcpMetadata,
+  AcpCommand,
+  AcpConfigOption,
+  AcpConfigChoice,
   HandoffPayload,
 } from '../types';
 import { canSend } from '../lib/sessionState';
@@ -52,7 +57,16 @@ import MarkdownView from './MarkdownView.vue';
 // live tool state (feeding the status line), `turn` drives the live-turn state.
 // The composer posts to `/prompt`; Stop posts `/interrupt`; permission cards
 // answer via `/permissions/{id}`; the mode chip drives `/mode`.
-const props = defineProps<{ session: Session }>();
+const props = withDefaults(
+  defineProps<{
+    session: Session;
+    /** Client-local commands owned by the embedding surface (Chat supplies
+     * `/clear`; everything else comes from the ACP agent). */
+    localCommands?: AcpCommand[];
+  }>(),
+  { localCommands: () => [] },
+);
+const emit = defineEmits<{ command: [name: string, args: string] }>();
 const id = computed(() => props.session.id);
 
 // ── The render state the stream feeds ────────────────────────────────────────
@@ -64,6 +78,7 @@ const liveTools = reactive(new Map<string, SseTool>());
 const turnLive = ref(false);
 const liveTurnNo = ref<number | null>(null);
 const optimistic = ref<{ text: string; queued: boolean }[]>([]);
+const metadata = ref<AcpMetadata>({ commands: [], config_options: [], modes: [] });
 
 // The live mode, seeded from the session and advanced by `mode_change` blocks or
 // a local set — so the composer chip reads true without a refetch.
@@ -99,6 +114,7 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
     liveTools.clear();
     liveTurnNo.value = snap.live_turn;
     turnLive.value = snap.live_turn != null;
+    metadata.value = snap.metadata ?? { commands: [], config_options: [], modes: [] };
     state.value = 'ready';
   } catch (e) {
     if (seq !== loadSeq) return;
@@ -176,6 +192,9 @@ function openStream() {
   );
   stream.addEventListener('tool', (e) => onTool(JSON.parse((e as MessageEvent).data) as SseTool));
   stream.addEventListener('turn', (e) => onTurn(JSON.parse((e as MessageEvent).data) as SseTurn));
+  stream.addEventListener('metadata', (e) => {
+    metadata.value = JSON.parse((e as MessageEvent).data) as AcpMetadata;
+  });
   // Once the server has installed the subscription, reconcile from the durable
   // journal. Subscribing first avoids a snapshot-to-stream gap during handoff.
   stream.addEventListener('open', () => load({ preserve: true }));
@@ -219,12 +238,19 @@ watch(id, () => {
 
 // ── Composer ─────────────────────────────────────────────────────────────────
 const draft = ref('');
+const composerInput = ref<HTMLTextAreaElement | null>(null);
 const sending = ref(false);
 const sendError = ref('');
 const composerVisible = computed(() => canSend(props.session));
 
 async function submitPrompt() {
   if (!draft.value.trim() || sending.value) return;
+  const local = localCommand(draft.value);
+  if (local) {
+    draft.value = '';
+    emit('command', local.name, local.args);
+    return;
+  }
   sending.value = true;
   sendError.value = '';
   const text = draft.value;
@@ -237,6 +263,72 @@ async function submitPrompt() {
     sendError.value = (e as Error).message ?? 'Failed to send';
   } finally {
     sending.value = false;
+  }
+}
+
+// ── Agent-owned slash commands ---------------------------------------------
+// The adapter replaces its command catalogue at runtime. Local surface hooks
+// win on a duplicate name (`/clear` in fleet Chat), then the remainder is
+// filtered as the user types. Selecting a command with input leaves a trailing
+// space and exposes the adapter's hint in the composer placeholder.
+const commands = computed<AcpCommand[]>(() => {
+  const seen = new Set<string>();
+  const out: AcpCommand[] = [];
+  for (const command of [...props.localCommands, ...metadata.value.commands]) {
+    if (!command.name || seen.has(command.name)) continue;
+    seen.add(command.name);
+    out.push(command);
+  }
+  return out;
+});
+const slashQuery = computed(() => draft.value.match(/^\/([^\s/]*)$/)?.[1] ?? null);
+const commandMatches = computed(() => {
+  if (slashQuery.value == null) return [];
+  const q = slashQuery.value.toLowerCase();
+  return commands.value.filter((command) => command.name.toLowerCase().includes(q)).slice(0, 10);
+});
+const commandIndex = ref(0);
+watch(slashQuery, () => (commandIndex.value = 0));
+const activeCommand = computed(() => commandMatches.value[commandIndex.value] ?? null);
+const commandHint = computed(() => {
+  const match = draft.value.match(/^\/([^\s]+)\s*$/);
+  if (!match) return '';
+  return commands.value.find((command) => command.name === match[1])?.input?.hint ?? '';
+});
+
+function chooseCommand(command: AcpCommand) {
+  // Keep a trailing space even for argument-less commands. It closes the
+  // autocomplete so the next Enter submits instead of selecting forever.
+  draft.value = `/${command.name} `;
+  nextTick(() => composerInput.value?.focus());
+}
+function showCommands() {
+  draft.value = '/';
+  nextTick(() => composerInput.value?.focus());
+}
+function localCommand(text: string): { name: string; args: string } | null {
+  const match = text.trim().match(/^\/([^\s]+)(?:\s+(.*))?$/s);
+  if (!match || !props.localCommands.some((command) => command.name === match[1])) return null;
+  return { name: match[1], args: match[2] ?? '' };
+}
+function onComposerKeydown(e: KeyboardEvent) {
+  if (commandMatches.value.length) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const d = e.key === 'ArrowDown' ? 1 : -1;
+      commandIndex.value =
+        (commandIndex.value + d + commandMatches.value.length) % commandMatches.value.length;
+      return;
+    }
+    if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+      e.preventDefault();
+      if (activeCommand.value) chooseCommand(activeCommand.value);
+      return;
+    }
+  }
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    submitPrompt();
   }
 }
 
@@ -254,9 +346,8 @@ async function stopTurn() {
 }
 
 // ── Mode chip ────────────────────────────────────────────────────────────────
-// The well-known claude/codex ACP modes, used when the session doesn't expose an
-// explicit `available_modes` list (SessionView carries only `current_mode`
-// today). Wire the chip to `session.available_modes` the moment the server adds it.
+// The well-known claude/codex ACP modes, used until the adapter advertises its
+// live mode catalogue through the conversation metadata.
 const KNOWN_MODES = ['auto', 'default', 'acceptEdits', 'plan', 'bypassPermissions'];
 const MODE_LABEL: Record<string, string> = {
   auto: 'auto',
@@ -265,28 +356,103 @@ const MODE_LABEL: Record<string, string> = {
   plan: 'plan',
   bypassPermissions: 'bypass',
 };
-const modeOptions = computed(() => props.session.available_modes ?? KNOWN_MODES);
-const modeLabel = (m: string | null) => (m ? (MODE_LABEL[m] ?? m) : 'mode');
+const modeOptions = computed(() =>
+  metadata.value.modes.length ? metadata.value.modes.map((mode) => mode.id) : KNOWN_MODES,
+);
+const modeLabel = (m: string | null) => {
+  if (!m) return 'mode';
+  return metadata.value.modes.find((mode) => mode.id === m)?.name ?? MODE_LABEL[m] ?? m;
+};
 const modeInteractive = computed(() => canSend(props.session) && modeOptions.value.length > 1);
+const legacyModeVisible = computed(() => !metadata.value.config_options.some(isModeOption));
 const modeOpen = ref(false);
 async function pickMode(m: string) {
   modeOpen.value = false;
   if (m === currentMode.value) return;
-  const prev = currentMode.value;
-  currentMode.value = m; // optimistic
   try {
     await setSessionMode(id.value, m);
-  } catch {
-    currentMode.value = prev; // the adapter refused it
+    currentMode.value = m;
+  } catch (e) {
+    sendError.value = (e as Error).message ?? 'Failed to change agent permissions';
   }
 }
 function onDocClick(e: MouseEvent) {
   if (modeOpen.value && !(e.target as HTMLElement).closest('[data-testid="acp-mode-chip"]')) {
     modeOpen.value = false;
   }
+  if (configOpen.value && !(e.target as HTMLElement).closest('[data-acp-config]')) {
+    configOpen.value = '';
+  }
 }
 onMounted(() => document.addEventListener('click', onDocClick));
 onUnmounted(() => document.removeEventListener('click', onDocClick));
+
+// ── Agent-owned model / reasoning / config controls -------------------------
+const configOpen = ref('');
+const configBusy = ref('');
+const configOptions = computed(() =>
+  metadata.value.config_options
+    .filter(
+      (option) =>
+        (option.type === 'select' && typeof option.currentValue === 'string') ||
+        (option.type === 'boolean' && typeof option.currentValue === 'boolean'),
+    )
+    .sort((a, b) => configRank(a) - configRank(b)),
+);
+function configRank(option: AcpConfigOption): number {
+  if (isModeOption(option)) return 0;
+  if (option.category === 'model' || option.id === 'model') return 1;
+  if (option.category === 'thought_level' || option.id.includes('reasoning')) return 2;
+  return 3;
+}
+function configName(option: AcpConfigOption): string {
+  if (isModeOption(option)) return 'Permissions';
+  if (option.category === 'thought_level') return 'Effort';
+  return option.name;
+}
+function configTone(option: AcpConfigOption): string {
+  if (!isModeOption(option)) return '';
+  return option.currentValue === 'agent-full-access' || option.currentValue === 'bypassPermissions'
+    ? 'acp-config-danger'
+    : 'acp-config-permission';
+}
+function configChoices(option: AcpConfigOption): AcpConfigChoice[] {
+  const choices = option.options ?? [];
+  if (!choices.length) return [];
+  if ('value' in choices[0]) return choices as AcpConfigChoice[];
+  return (choices as { options: AcpConfigChoice[] }[]).flatMap((group) => group.options ?? []);
+}
+function configValueLabel(option: AcpConfigOption): string {
+  if (typeof option.currentValue === 'boolean') return option.currentValue ? 'On' : 'Off';
+  const current = String(option.currentValue);
+  return configChoices(option).find((choice) => choice.value === current)?.name ?? current;
+}
+async function pickConfig(option: AcpConfigOption, value: string | boolean) {
+  configOpen.value = '';
+  if (value === option.currentValue || configBusy.value) return;
+  configBusy.value = option.id;
+  try {
+    const response = await setSessionConfigOption(id.value, option.id, value);
+    // Clear the write lock before publishing the acknowledged value. Vue can
+    // paint that value before this async function's `finally` runs; keeping the
+    // lock through that paint makes an immediate click on the next pill vanish.
+    configBusy.value = '';
+    // The response is the full state acknowledged by the agent. This matters
+    // when changing one value also changes another control's choices (a model
+    // switch can alter its supported reasoning efforts).
+    metadata.value = response.metadata;
+    const mode = response.metadata.config_options.find(isModeOption)?.currentValue;
+    if (typeof mode === 'string') currentMode.value = mode;
+  } catch (e) {
+    sendError.value = (e as Error).message ?? 'Failed to change agent configuration';
+  } finally {
+    configBusy.value = '';
+  }
+}
+
+function isModeOption(option: AcpConfigOption): boolean {
+  return option.category === 'mode' || option.id === 'mode';
+}
 
 // ── Permission answering ─────────────────────────────────────────────────────
 const answering = ref<Set<string>>(new Set());
@@ -398,16 +564,19 @@ const model = computed<{ rows: Row[]; toc: TocItem[] }>(() => {
         toc.push({ anchor, n, title: titleOf(text) });
         break;
       }
-      case 'agent_message':
+      case 'agent_message': {
         flushActivity();
+        const text = (b.payload as unknown as AgentMessagePayload).text ?? '';
+        if (!text.trim()) break;
         rows.push({
           type: 'agent',
           key: k,
           time: shortTime(b.created_at),
-          text: (b.payload as unknown as AgentMessagePayload).text ?? '',
+          text,
           streaming: false,
         });
         break;
+      }
       case 'thought':
         flushActivity();
         rows.push({
@@ -931,18 +1100,79 @@ function goTo(anchor: string) {
         {{ sendError }}
       </p>
       <textarea
+        ref="composerInput"
         v-model="draft"
         rows="2"
         :disabled="sending"
-        placeholder="Message the agent…"
+        :placeholder="commandHint || 'Message the agent…'"
         data-testid="acp-composer-input"
         class="acp-input"
-        @keydown.enter.exact.prevent="submitPrompt"
+        @keydown="onComposerKeydown"
       ></textarea>
+      <ul
+        v-if="commandMatches.length"
+        class="acp-command-menu"
+        data-testid="acp-command-menu"
+        role="listbox"
+        aria-label="Agent commands"
+      >
+        <li v-for="(command, index) in commandMatches" :key="command.name">
+          <button
+            type="button"
+            class="acp-command-item"
+            :data-active="index === commandIndex"
+            :aria-selected="index === commandIndex"
+            role="option"
+            @click="chooseCommand(command)"
+          >
+            <code>/{{ command.name }}</code>
+            <span>{{ command.description }}</span>
+            <kbd v-if="command.input?.hint">{{ command.input.hint }}</kbd>
+          </button>
+        </li>
+      </ul>
       <div class="acp-composer-actions">
-        <!-- Mode chip + slash hint on the left. -->
+        <!-- Agent-owned config selectors + slash discovery on the left. -->
         <div class="acp-composer-left">
-          <div class="acp-mode-wrap" data-testid="acp-mode-chip">
+          <div
+            v-for="option in configOptions"
+            :key="option.id"
+            class="acp-mode-wrap"
+            data-acp-config
+            :data-testid="`acp-config-${option.id}`"
+          >
+            <button
+              type="button"
+              class="acp-mode-chip"
+              :class="configTone(option)"
+              :disabled="configBusy === option.id"
+              :title="option.description ?? option.name"
+              :aria-pressed="option.type === 'boolean' ? Boolean(option.currentValue) : undefined"
+              @click.stop="
+                option.type === 'boolean'
+                  ? pickConfig(option, !option.currentValue)
+                  : (configOpen = configOpen === option.id ? '' : option.id)
+              "
+            >
+              <span class="acp-config-name">{{ configName(option) }}</span>
+              {{ configValueLabel(option)
+              }}<span v-if="option.type === 'select'" class="acp-mode-caret">▾</span>
+            </button>
+            <ul v-if="configOpen === option.id" class="acp-mode-menu" data-testid="acp-config-menu">
+              <li v-for="choice in configChoices(option)" :key="choice.value">
+                <button
+                  type="button"
+                  class="acp-mode-item"
+                  :data-active="choice.value === option.currentValue"
+                  :title="choice.description ?? undefined"
+                  @click="pickConfig(option, choice.value)"
+                >
+                  {{ choice.name }}
+                </button>
+              </li>
+            </ul>
+          </div>
+          <div v-if="legacyModeVisible" class="acp-mode-wrap" data-testid="acp-mode-chip">
             <button
               type="button"
               class="acp-mode-chip"
@@ -950,6 +1180,7 @@ function goTo(anchor: string) {
               :disabled="!modeInteractive"
               @click.stop="modeOpen = !modeOpen"
             >
+              <span class="acp-config-name">Permissions</span>
               {{ modeLabel(currentMode)
               }}<span v-if="modeInteractive" class="acp-mode-caret">▾</span>
             </button>
@@ -966,7 +1197,16 @@ function goTo(anchor: string) {
               </li>
             </ul>
           </div>
-          <span class="acp-slash-hint" aria-hidden="true">/ commands</span>
+          <button
+            v-if="commands.length"
+            type="button"
+            class="acp-slash-hint"
+            data-testid="acp-command-hint"
+            title="Show commands"
+            @click="showCommands"
+          >
+            / {{ commands.length }} commands
+          </button>
         </div>
         <div class="acp-composer-right">
           <button
@@ -1356,9 +1596,49 @@ function goTo(anchor: string) {
 }
 .acp-composer-left {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.65rem;
   min-width: 0;
+}
+
+/* Slash-command autocomplete, populated by ACP `available_commands_update`. */
+.acp-command-menu {
+  max-height: 16rem;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-top: 0;
+  border-radius: 0 0 0.375rem 0.375rem;
+  background: var(--surface);
+  box-shadow: 0 8px 20px rgb(0 0 0 / 0.12);
+  padding: 0.2rem;
+}
+.acp-command-item {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(8rem, auto) minmax(10rem, 1fr) auto;
+  align-items: baseline;
+  gap: 0.75rem;
+  border-radius: 0.25rem;
+  padding: 0.4rem 0.55rem;
+  text-align: left;
+  color: var(--muted);
+}
+.acp-command-item[data-active='true'],
+.acp-command-item:hover {
+  background: var(--subtle);
+  color: var(--fg);
+}
+.acp-command-item code,
+.acp-command-item kbd {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+.acp-command-item code {
+  color: var(--accent);
+}
+.acp-command-item kbd {
+  color: var(--faint);
 }
 .acp-composer-right {
   display: flex;
@@ -1394,6 +1674,16 @@ function goTo(anchor: string) {
 .acp-mode-caret {
   color: var(--faint);
 }
+.acp-config-name {
+  color: var(--faint);
+}
+.acp-config-permission {
+  border-color: color-mix(in srgb, var(--attn) 40%, var(--line));
+}
+.acp-config-danger {
+  border-color: color-mix(in srgb, var(--block) 55%, var(--line));
+  color: var(--block);
+}
 .acp-mode-menu {
   position: absolute;
   bottom: calc(100% + 0.3rem);
@@ -1428,6 +1718,10 @@ function goTo(anchor: string) {
   font-family: var(--font-mono);
   font-size: 0.6875rem;
   color: var(--faint);
+  cursor: pointer;
+}
+.acp-slash-hint:hover {
+  color: var(--fg);
 }
 
 /* Right rail. */

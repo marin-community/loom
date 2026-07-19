@@ -59,6 +59,70 @@ const MODES = [
   { id: "bypassPermissions", name: "Bypass permissions" },
   { id: "plan", name: "Plan" },
 ];
+let currentModel = "fake-fast";
+let currentEffort = "medium";
+let currentMode = "default";
+let fastMode = false;
+
+function configOptions() {
+  return [
+    {
+      id: "mode",
+      name: "Mode",
+      description: "Approval and sandboxing preset for the session",
+      category: "mode",
+      type: "select",
+      currentValue: currentMode,
+      options: MODES.map((mode) => ({ value: mode.id, name: mode.name })),
+    },
+    {
+      id: "model",
+      name: "Model",
+      description: "Model used for the next turn",
+      category: "model",
+      type: "select",
+      currentValue: currentModel,
+      options: [
+        { value: "fake-fast", name: "Fake fast" },
+        { value: "fake-deep", name: "Fake deep" },
+      ],
+    },
+    {
+      id: "thought_level",
+      name: "Reasoning",
+      description: "Reasoning effort",
+      category: "thought_level",
+      type: "select",
+      currentValue: currentEffort,
+      options: [
+        { value: "low", name: "Low" },
+        { value: "medium", name: "Medium" },
+        { value: "high", name: "High" },
+      ],
+    },
+    {
+      id: "fast-mode",
+      name: "Fast",
+      description: "Use the faster service tier",
+      type: "boolean",
+      currentValue: fastMode,
+    },
+  ];
+}
+
+function advertiseCommands() {
+  notify({
+    sessionUpdate: "available_commands_update",
+    availableCommands: [
+      { name: "resume", description: "Resume a previous conversation" },
+      {
+        name: "review",
+        description: "Review the current changes",
+        input: { hint: "instructions" },
+      },
+    ],
+  });
+}
 
 function askPermission(name) {
   const reqId = 10000 + pending.size + Math.floor(Math.random() * 1000);
@@ -182,19 +246,33 @@ function handleMessage(msg) {
       sessionId = "fake-session-" + ++sessionCounter;
       respond(msg.id, {
         sessionId,
-        modes: { currentModeId: "default", availableModes: MODES },
+        modes: { currentModeId: currentMode, availableModes: MODES },
+        configOptions: configOptions(),
       });
+      advertiseCommands();
       break;
     case "session/load":
       sessionId = msg.params.sessionId;
       // Replay a tiny scripted history as the spec's load notifications.
       notify({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "earlier question" } });
       notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "earlier answer" } });
-      respond(msg.id, { modes: { currentModeId: "default", availableModes: MODES } });
+      respond(msg.id, {
+        modes: { currentModeId: currentMode, availableModes: MODES },
+        configOptions: configOptions(),
+      });
+      advertiseCommands();
       break;
     case "session/set_mode":
+      currentMode = msg.params.modeId;
       notify({ sessionUpdate: "current_mode_update", currentModeId: msg.params.modeId });
       respond(msg.id, {});
+      break;
+    case "session/set_config_option":
+      if (msg.params.configId === "model") currentModel = msg.params.value;
+      if (msg.params.configId === "thought_level") currentEffort = msg.params.value;
+      if (msg.params.configId === "mode") currentMode = msg.params.value;
+      if (msg.params.configId === "fast-mode") fastMode = msg.params.value;
+      respond(msg.id, { configOptions: configOptions() });
       break;
     case "session/prompt":
       handlePrompt(msg.id, msg.params);

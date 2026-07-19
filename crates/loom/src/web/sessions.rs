@@ -2701,8 +2701,9 @@ fn live_turn(session: &Session) -> Option<i64> {
         .and_then(|v| v.get("turn").and_then(Value::as_i64))
 }
 
-/// The journaled conversation: `{ blocks: [...], live_turn }`. Works whether or
-/// not a task is currently running (it reads the durable journal).
+/// The journaled conversation plus the agent-owned composer metadata. The
+/// journal works without a live task; metadata is empty until an adapter is
+/// attached and advertises its commands/configuration controls.
 pub(super) async fn get_session_chat(
     State(st): State<AppState>,
     Path(key): Path<String>,
@@ -2710,9 +2711,16 @@ pub(super) async fn get_session_chat(
     let (session, _) = require_session(&st.db, &key).await?;
     require_acp(&session)?;
     let blocks = crate::chat::list(&st.db, &session.id).await?;
-    Ok(Json(
-        json!({ "blocks": blocks, "live_turn": live_turn(&session) }),
-    ))
+    let metadata = st
+        .acp
+        .get(&session.id)
+        .map(|handle| handle.metadata())
+        .unwrap_or_default();
+    Ok(Json(json!({
+        "blocks": blocks,
+        "live_turn": live_turn(&session),
+        "metadata": metadata,
+    })))
 }
 
 /// The live SSE tail of the conversation — `block` / `delta` / `tool` / `turn`
@@ -2778,6 +2786,33 @@ pub(super) async fn prompt_session(
         StatusCode::ACCEPTED,
         Json(json!({ "queued": ack.queued, "turn": ack.turn })),
     ))
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ConfigOptionBody {
+    pub value: Value,
+}
+
+/// Change one agent-owned session configuration selector. This waits for the
+/// adapter's response, whose full refreshed option list is broadcast to chat
+/// clients as a `metadata` event.
+pub(super) async fn set_config_option(
+    State(st): State<AppState>,
+    Path((key, config_id)): Path<(String, String)>,
+    Json(req): Json<ConfigOptionBody>,
+) -> ApiResult<Json<Value>> {
+    let (session, _) = require_session(&st.db, &key).await?;
+    require_acp(&session)?;
+    let handle = require_acp_task(&st, &session)?;
+    let metadata = handle
+        .set_config_option(config_id.clone(), req.value.clone())
+        .await
+        .map_err(|e| AppError::conflict(e.to_string()))?;
+    Ok(Json(json!({
+        "config_id": config_id,
+        "value": req.value,
+        "metadata": metadata,
+    })))
 }
 
 #[derive(Debug, Deserialize)]

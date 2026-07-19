@@ -119,11 +119,22 @@ pub enum PermAnswer {
 }
 
 /// One SSE event the `/chat/stream` route emits: an event name (`block`, `delta`,
-/// `tool`, `turn`) and its JSON data.
+/// `tool`, `turn`, `metadata`) and its JSON data.
 #[derive(Debug, Clone, Serialize)]
 pub struct SseEvent {
     pub event: String,
     pub data: Value,
+}
+
+/// Agent-owned controls for the conversation composer. These are deliberately
+/// kept as ACP-shaped JSON: command inputs and session config options are an
+/// extensible protocol surface, and loom forwards fields it does not yet render
+/// instead of narrowing the wire contract and making adapters stale again.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AcpMetadata {
+    pub commands: Vec<Value>,
+    pub config_options: Vec<Value>,
+    pub modes: Vec<Value>,
 }
 
 /// A live session's control surface, held in the [`AcpRegistry`]: send commands
@@ -132,12 +143,19 @@ pub struct SseEvent {
 pub struct AcpHandle {
     cmd_tx: mpsc::Sender<Command>,
     events_tx: broadcast::Sender<SseEvent>,
+    metadata: Arc<Mutex<AcpMetadata>>,
 }
 
 impl AcpHandle {
     /// Subscribe to the session's SSE broadcast.
     pub fn subscribe(&self) -> broadcast::Receiver<SseEvent> {
         self.events_tx.subscribe()
+    }
+
+    /// Snapshot the latest agent-owned composer metadata. The `/chat` snapshot
+    /// carries this before the browser tails updates over SSE.
+    pub fn metadata(&self) -> AcpMetadata {
+        self.metadata.lock().unwrap().clone()
     }
 
     /// Send a user message: dispatched as a `session/prompt` when idle, appended
@@ -194,6 +212,23 @@ impl AcpHandle {
             .send(Command::SetMode {
                 mode_id,
                 by,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| anyhow!("acp task is gone"))?;
+        rx.await
+            .map_err(|_| anyhow!("acp task dropped the reply"))?
+    }
+    /// Change an ACP session configuration option (`model`, reasoning effort,
+    /// mode, or another adapter-defined value). The task waits for the agent's
+    /// full refreshed option set before acknowledging the REST write and returns
+    /// that authoritative state to the caller.
+    pub async fn set_config_option(&self, config_id: String, value: Value) -> Result<AcpMetadata> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::SetConfigOption {
+                config_id,
+                value,
                 reply: tx,
             })
             .await
@@ -321,9 +356,14 @@ async fn start_inner(
     task.handshake(&launch, handoff).await?;
 
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
-    task.generation = state
-        .acp
-        .register(session_id, AcpHandle { cmd_tx, events_tx });
+    task.generation = state.acp.register(
+        session_id,
+        AcpHandle {
+            cmd_tx,
+            events_tx,
+            metadata: task.metadata.clone(),
+        },
+    );
     tokio::spawn(async move { task.run(cmd_rx).await });
     Ok(())
 }
@@ -359,9 +399,14 @@ pub async fn attach(state: &AppState, session_id: &str) -> Result<()> {
     .await?;
 
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
-    task.generation = state
-        .acp
-        .register(session_id, AcpHandle { cmd_tx, events_tx });
+    task.generation = state.acp.register(
+        session_id,
+        AcpHandle {
+            cmd_tx,
+            events_tx,
+            metadata: task.metadata.clone(),
+        },
+    );
     tokio::spawn(async move { task.run(cmd_rx).await });
     Ok(())
 }
@@ -390,9 +435,20 @@ enum Command {
         by: Option<String>,
         reply: oneshot::Sender<Result<()>>,
     },
+    SetConfigOption {
+        config_id: String,
+        value: Value,
+        reply: oneshot::Sender<Result<AcpMetadata>>,
+    },
     PrepareHandoff {
         reply: oneshot::Sender<Result<()>>,
     },
+}
+
+struct PendingMode {
+    mode_id: String,
+    by: Option<String>,
+    reply: oneshot::Sender<Result<()>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -559,6 +615,9 @@ struct Task {
     pending_perms: HashMap<String, PendingPerm>,
 
     current_mode: Option<String>,
+    metadata: Arc<Mutex<AcpMetadata>>,
+    pending_mode: HashMap<u64, PendingMode>,
+    pending_config: HashMap<u64, oneshot::Sender<Result<AcpMetadata>>>,
     #[allow(dead_code)]
     load_session_cap: bool,
     /// Latched for the duration of a `session/load` replay: the adapter re-streams
@@ -607,6 +666,9 @@ impl Task {
             tools: HashMap::new(),
             pending_perms: HashMap::new(),
             current_mode: None,
+            metadata: Arc::new(Mutex::new(AcpMetadata::default())),
+            pending_mode: HashMap::new(),
+            pending_config: HashMap::new(),
             load_session_cap: false,
             suppress_journal: false,
             highest_seq: 0,
@@ -657,6 +719,9 @@ impl Task {
             tools: HashMap::new(),
             pending_perms: HashMap::new(),
             current_mode: session.current_mode.clone(),
+            metadata: Arc::new(Mutex::new(AcpMetadata::default())),
+            pending_mode: HashMap::new(),
+            pending_config: HashMap::new(),
             load_session_cap: false,
             suppress_journal: false,
             highest_seq: session.acp_ack_seq.max(0) as u64,
@@ -675,6 +740,46 @@ impl Task {
             event: event.to_string(),
             data,
         });
+    }
+
+    fn emit_metadata(&self) {
+        let metadata = self.metadata.lock().unwrap().clone();
+        self.emit(
+            "metadata",
+            serde_json::to_value(metadata).unwrap_or(Value::Null),
+        );
+    }
+
+    fn replace_commands(&self, commands: Vec<Value>, emit: bool) {
+        self.metadata.lock().unwrap().commands = commands;
+        if emit {
+            self.emit_metadata();
+        }
+    }
+
+    fn replace_config_options(&mut self, config_options: Vec<Value>, emit: bool) {
+        if let Some(mode) = config_options.iter().find_map(|option| {
+            let is_mode = option.get("category").and_then(Value::as_str) == Some("mode")
+                || option.get("id").and_then(Value::as_str) == Some("mode");
+            is_mode
+                .then(|| option.get("currentValue").and_then(Value::as_str))
+                .flatten()
+                .map(str::to_string)
+        }) {
+            self.current_mode = Some(mode);
+        }
+        self.metadata.lock().unwrap().config_options = config_options;
+        if emit {
+            self.emit_metadata();
+        }
+    }
+
+    fn replace_modes(&mut self, modes: wire::SessionModeState, emit: bool) {
+        self.current_mode = Some(modes.current_mode_id.clone());
+        self.metadata.lock().unwrap().modes = modes.available_modes;
+        if emit {
+            self.emit_metadata();
+        }
     }
 
     // -- handshake ----------------------------------------------------------
@@ -706,7 +811,10 @@ impl Task {
                 let ns: wire::NewSessionResult = serde_json::from_value(res)?;
                 self.acp_session_id = ns.session_id.clone();
                 if let Some(m) = ns.modes {
-                    self.current_mode = Some(m.current_mode_id);
+                    self.replace_modes(m, false);
+                }
+                if let Some(options) = ns.config_options {
+                    self.replace_config_options(options, false);
                 }
             }
             NewOrLoad::Load { acp_session_id } => {
@@ -741,11 +849,15 @@ impl Task {
                 if res.is_none() {
                     bail!("session/load failed: {err:?}");
                 }
-                if let Some(m) = res
-                    .and_then(|r| serde_json::from_value::<wire::LoadSessionResult>(r).ok())
-                    .and_then(|l| l.modes)
+                if let Some(load) =
+                    res.and_then(|r| serde_json::from_value::<wire::LoadSessionResult>(r).ok())
                 {
-                    self.current_mode = Some(m.current_mode_id);
+                    if let Some(m) = load.modes {
+                        self.replace_modes(m, false);
+                    }
+                    if let Some(options) = load.config_options {
+                        self.replace_config_options(options, false);
+                    }
                 }
             }
         }
@@ -760,6 +872,10 @@ impl Task {
                     wire::set_mode_params(&self.acp_session_id, mode),
                 ))
                 .await?;
+            let (result, error) = self.recv_until_response(id).await?;
+            if result.is_none() {
+                bail!("session/set_mode failed: {error:?}");
+            }
             self.current_mode = Some(mode.clone());
         }
         if let Some(mode) = &self.current_mode {
@@ -932,6 +1048,15 @@ impl Task {
                 self.journal_block(kind::USAGE, json!({ "used": used, "size": size }))
                     .await;
             }
+            SessionUpdate::AvailableCommandsUpdate { available_commands } => {
+                self.replace_commands(available_commands, true);
+            }
+            SessionUpdate::ConfigOptionUpdate { config_options } => {
+                self.replace_config_options(config_options, true);
+                if let Some(mode) = &self.current_mode {
+                    let _ = session::set_current_mode(&self.db, &self.session_id, mode).await;
+                }
+            }
             SessionUpdate::Other => {}
         }
         Ok(())
@@ -991,12 +1116,56 @@ impl Task {
         let Some(id) = inc.id.as_ref().and_then(Value::as_u64) else {
             return;
         };
+        if let Some(pending) = self.pending_mode.remove(&id) {
+            let result = if let Some(error) = inc.error {
+                Err(anyhow!("session/set_mode failed: {error}"))
+            } else {
+                if self.current_mode.as_deref() != Some(pending.mode_id.as_str()) {
+                    self.current_mode = Some(pending.mode_id.clone());
+                    let _ = session::set_current_mode(&self.db, &self.session_id, &pending.mode_id)
+                        .await;
+                    let by = pending.by.map(Value::from).unwrap_or(Value::Null);
+                    self.journal_block(
+                        kind::MODE_CHANGE,
+                        json!({ "mode_id": pending.mode_id, "by": by }),
+                    )
+                    .await;
+                }
+                Ok(())
+            };
+            let _ = pending.reply.send(result);
+            return;
+        }
+        if let Some(reply) = self.pending_config.remove(&id) {
+            let result = if let Some(error) = inc.error {
+                Err(anyhow!("session/set_config_option failed: {error}"))
+            } else {
+                match inc
+                    .result
+                    .and_then(|v| serde_json::from_value::<wire::SetConfigOptionResult>(v).ok())
+                {
+                    Some(updated) => {
+                        self.replace_config_options(updated.config_options, true);
+                        if let Some(mode) = &self.current_mode {
+                            let _ =
+                                session::set_current_mode(&self.db, &self.session_id, mode).await;
+                        }
+                        Ok(self.metadata.lock().unwrap().clone())
+                    }
+                    None => Err(anyhow!(
+                        "session/set_config_option returned an invalid response"
+                    )),
+                }
+            };
+            let _ = reply.send(result);
+            return;
+        }
         if let Some((pid, turn)) = self.inflight_prompt {
             if id == pid {
                 self.on_turn_end(turn, inc.result, inc.error).await;
             }
         }
-        // Other responses (set_mode, …) need no follow-up.
+        // Other responses need no follow-up.
     }
 
     async fn on_turn_end(&mut self, turn: i64, result: Option<Value>, error: Option<Value>) {
@@ -1254,7 +1423,7 @@ impl Task {
             }
             Command::SetMode { mode_id, by, reply } => {
                 let id = self.next_id();
-                let r = self
+                let write = self
                     .stream
                     .write(&wire::request_line(
                         id,
@@ -1262,12 +1431,42 @@ impl Task {
                         wire::set_mode_params(&self.acp_session_id, &mode_id),
                     ))
                     .await;
-                self.current_mode = Some(mode_id.clone());
-                let _ = session::set_current_mode(&self.db, &self.session_id, &mode_id).await;
-                let by_v = by.map(Value::from).unwrap_or(Value::Null);
-                self.journal_block(kind::MODE_CHANGE, json!({ "mode_id": mode_id, "by": by_v }))
+                match write {
+                    Ok(()) => {
+                        self.pending_mode
+                            .insert(id, PendingMode { mode_id, by, reply });
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
+            }
+            Command::SetConfigOption {
+                config_id,
+                value,
+                reply,
+            } => {
+                let id = self.next_id();
+                let write = self
+                    .stream
+                    .write(&wire::request_line(
+                        id,
+                        method::SESSION_SET_CONFIG_OPTION,
+                        wire::set_config_option_params(
+                            self.acp_session_id.as_str(),
+                            &config_id,
+                            value,
+                        ),
+                    ))
                     .await;
-                let _ = reply.send(r);
+                match write {
+                    Ok(()) => {
+                        self.pending_config.insert(id, reply);
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
             }
             // The run loop intercepts this variant so it can acknowledge only
             // after registry removal. Keep the match exhaustive defensively.

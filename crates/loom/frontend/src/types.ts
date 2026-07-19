@@ -162,6 +162,43 @@ export interface ChatBlock {
 export interface ChatSnapshot {
   blocks: ChatBlock[];
   live_turn: number | null;
+  metadata: AcpMetadata;
+}
+
+/** Agent-owned command/configuration metadata for a live ACP conversation. */
+export interface AcpCommand {
+  name: string;
+  description: string;
+  input?: { type?: string; hint?: string } | null;
+}
+export interface AcpConfigChoice {
+  value: string;
+  name: string;
+  description?: string | null;
+}
+export interface AcpConfigGroup {
+  group: string;
+  name: string;
+  options: AcpConfigChoice[];
+}
+export interface AcpConfigOption {
+  id: string;
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  type: string;
+  currentValue: string | boolean;
+  options?: AcpConfigChoice[] | AcpConfigGroup[];
+}
+export interface AcpMode {
+  id: string;
+  name: string;
+  description?: string | null;
+}
+export interface AcpMetadata {
+  commands: AcpCommand[];
+  config_options: AcpConfigOption[];
+  modes: AcpMode[];
 }
 
 // -- block payloads (by kind) --

@@ -611,6 +611,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/sessions/{id}/mode", axum::routing::put(set_mode))
         .route(
+            "/sessions/{id}/config/{config_id}",
+            axum::routing::put(set_config_option),
+        )
+        .route(
             "/sessions/{id}/tags/{key}",
             axum::routing::put(set_session_tag).delete(clear_session_tag),
         )
