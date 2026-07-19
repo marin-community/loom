@@ -645,7 +645,8 @@ pub(crate) async fn create_session_core(
         None => return Err(AppError::bad_request(format!("unknown agent '{runtime}'"))),
     };
     // The ACP launch permission posture (ignored for a terminal launch): the
-    // request's mode, else the bypass default (the retired pre-seeded gates).
+    // request's mode, else the `auto` default — a background classifier vets each
+    // tool call and escalates only risky actions as a permission card.
     let mode = req
         .mode
         .as_deref()
@@ -1963,8 +1964,7 @@ async fn adopt_terminal_into_acp(
             goal_file: goal_file.as_deref(),
             primer_file: primer_file.as_deref(),
             extra_env: &extra_env,
-            // Terminal rows carry no mode; the seeded-gates posture they ran
-            // under matches the acp default.
+            // Terminal rows carry no mode; on adoption they take the acp default.
             mode: agent::DEFAULT_ACP_MODE,
             custom: None,
         },

@@ -227,8 +227,9 @@ async function stopTurn() {
 // The well-known claude/codex ACP modes, used when the session doesn't expose an
 // explicit `available_modes` list (SessionView carries only `current_mode`
 // today). Wire the chip to `session.available_modes` the moment the server adds it.
-const KNOWN_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
+const KNOWN_MODES = ['auto', 'default', 'acceptEdits', 'plan', 'bypassPermissions'];
 const MODE_LABEL: Record<string, string> = {
+  auto: 'auto',
   default: 'default',
   acceptEdits: 'accept edits',
   plan: 'plan',

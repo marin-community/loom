@@ -110,8 +110,9 @@ export interface Session {
   protocol: 'terminal' | 'acp';
   /** The agent's own on-disk ACP session id for an `acp` session, or null. */
   acp_session_id: string | null;
-  /** The current ACP mode id (gating posture: `bypassPermissions`, `acceptEdits`,
-   *  `default`, `plan`), or null for a terminal session / before one is set. */
+  /** The current ACP mode id (gating posture: `bypassPermissions`, `auto`,
+   *  `acceptEdits`, `default`, `plan`), or null for a terminal session / before
+   *  one is set. */
   current_mode: string | null;
   /** The latest context-window usage an ACP agent reported, or null. */
   usage: AcpUsage | null;

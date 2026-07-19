@@ -704,9 +704,16 @@ fn weaver_bin_path() -> String {
 // then brings up. See docs/plans/acp.md "Launch mapping".
 // ---------------------------------------------------------------------------
 
-/// The permission posture an ACP session boots in when the create request names
-/// none — the moral equivalent of the retired pre-seeded launch gates.
-pub const DEFAULT_ACP_MODE: &str = "bypassPermissions";
+/// The permission posture every ACP session boots in — the concierge and
+/// detached workstreams alike — when the create request names none. `auto` is
+/// Claude Code's background-classifier posture: a safety model vets each tool
+/// call, executing routine work on its own and escalating only genuinely risky
+/// actions as an interactive permission card (surfaced in the conversation with a
+/// loud `attention` tag, answerable from the dashboard). An explicit request
+/// `mode` / `--mode` still overrides — e.g. `bypassPermissions` for a fully
+/// unattended run. (For a codex session this maps to codex's `agent` mode; see
+/// [`codex_acp_mode`].)
+pub const DEFAULT_ACP_MODE: &str = "auto";
 
 /// Resolve the execution backend for a launch: the agent's declared `protocol`
 /// unless the create request overrides it. A blank/absent override keeps the
@@ -992,7 +999,9 @@ fn codex_acp_config(model: &str, effort: &str) -> Option<String> {
 fn codex_acp_mode(mode: &str) -> String {
     match mode.trim() {
         "bypassPermissions" => "agent-full-access".to_string(),
-        "acceptEdits" | "default" | "" => "agent".to_string(),
+        // `auto` (claude's background-classifier posture) has no codex equivalent;
+        // the closest is `agent` — workspace-write that escalates on risk.
+        "acceptEdits" | "default" | "auto" | "" => "agent".to_string(),
         "plan" => "read-only".to_string(),
         other => other.to_string(),
     }
@@ -1821,10 +1830,21 @@ mod tests {
     }
 
     #[test]
+    fn sessions_boot_in_auto_by_default() {
+        // Every ACP session (concierge and detached workstream alike) boots in
+        // Claude Code's background-classifier `auto` posture unless overridden;
+        // for a codex session that maps to codex's workspace-write `agent` mode.
+        assert_eq!(DEFAULT_ACP_MODE, "auto");
+        assert_eq!(codex_acp_mode(DEFAULT_ACP_MODE), "agent");
+    }
+
+    #[test]
     fn codex_acp_mode_maps_the_claude_vocabulary_and_passes_codex_ids_through() {
         assert_eq!(codex_acp_mode("bypassPermissions"), "agent-full-access");
         assert_eq!(codex_acp_mode("acceptEdits"), "agent");
         assert_eq!(codex_acp_mode("default"), "agent");
+        // `auto` has no codex analogue → the workspace-write `agent` mode.
+        assert_eq!(codex_acp_mode("auto"), "agent");
         assert_eq!(codex_acp_mode(""), "agent");
         assert_eq!(codex_acp_mode("plan"), "read-only");
         // Codex's own ids are honoured verbatim.

@@ -152,8 +152,9 @@ pub struct SessionView {
     /// The agent's own on-disk ACP session id for an `acp` session, or `null`.
     #[serde(default)]
     pub acp_session_id: Option<String>,
-    /// The current ACP mode id (gating posture: `bypassPermissions`, `acceptEdits`,
-    /// `default`, `plan`), or `null` for a terminal session / before one is set.
+    /// The current ACP mode id (gating posture: `bypassPermissions`, `auto`,
+    /// `acceptEdits`, `default`, `plan`), or `null` for a terminal session /
+    /// before one is set.
     #[serde(default)]
     pub current_mode: Option<String>,
     /// The latest context-window usage (`{used, size}`) reported by an ACP agent,
@@ -583,9 +584,10 @@ pub struct CreateReq {
     /// support the requested backend.
     #[serde(default)]
     pub protocol: Option<String>,
-    /// The ACP launch permission posture (`bypassPermissions` | `acceptEdits` |
-    /// `default` | `plan`). Blank/absent defaults to `bypassPermissions` (the
-    /// detached autonomous posture). Ignored for a terminal launch.
+    /// The ACP launch permission posture (`auto` | `bypassPermissions` |
+    /// `acceptEdits` | `default` | `plan`). Blank/absent defaults to `auto` — a
+    /// background classifier vets each tool call, escalating only risky actions as
+    /// a permission card. Ignored for a terminal launch.
     #[serde(default)]
     pub mode: Option<String>,
 }

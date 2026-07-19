@@ -636,7 +636,7 @@ struct LaunchOpts {
     /// builtins).
     #[arg(long)]
     protocol: Option<String>,
-    /// ACP launch permission posture: `bypassPermissions` (the default),
+    /// ACP launch permission posture: `auto` (the default), `bypassPermissions`,
     /// `acceptEdits`, `default`, or `plan`. Ignored for a terminal launch.
     #[arg(long)]
     mode: Option<String>,
