@@ -24,9 +24,7 @@ const emit = defineEmits<{
   reset: [];
 }>();
 
-const selectedAgent = computed(() =>
-  props.agents.find((agent) => agent.kind === props.agentKind),
-);
+const selectedAgent = computed(() => props.agents.find((agent) => agent.kind === props.agentKind));
 
 function agentLabel(kind: string): string {
   return props.agents.find((agent) => agent.kind === kind)?.label ?? kind;
@@ -34,7 +32,8 @@ function agentLabel(kind: string): string {
 
 function choiceLabel(kind: 'model' | 'effort', value: string): string {
   if (!value) return 'Default';
-  const choices = kind === 'model' ? selectedAgent.value?.models ?? [] : selectedAgent.value?.efforts ?? [];
+  const choices =
+    kind === 'model' ? (selectedAgent.value?.models ?? []) : (selectedAgent.value?.efforts ?? []);
   return choices.find((choice) => choice.id === value)?.label ?? value;
 }
 </script>

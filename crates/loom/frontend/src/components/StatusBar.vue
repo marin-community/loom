@@ -39,7 +39,11 @@ onUnmounted(() => clearInterval(clockTimer));
   >
     <!-- Counts dim while the server is unreachable — they're the last good
          snapshot, not live truth, and the offline dot on the right says why. -->
-    <span class="flex items-center gap-4" :class="online ? '' : 'opacity-50'" :title="online ? '' : 'Last known counts — server unreachable'">
+    <span
+      class="flex items-center gap-4"
+      :class="online ? '' : 'opacity-50'"
+      :title="online ? '' : 'Last known counts — server unreachable'"
+    >
       <router-link to="/" class="hover:text-fg" data-testid="status-bar-sessions">
         {{ live.length }} session{{ live.length === 1 ? '' : 's' }}
       </router-link>
@@ -58,7 +62,10 @@ onUnmounted(() => clearInterval(clockTimer));
       </span>
     </span>
 
-    <span class="ml-auto flex items-center gap-1.5" :title="online ? 'Connected' : 'Server unreachable'">
+    <span
+      class="ml-auto flex items-center gap-1.5"
+      :title="online ? 'Connected' : 'Server unreachable'"
+    >
       <span
         class="h-1.5 w-1.5 rounded-full"
         :class="online ? 'bg-accent' : 'bg-block-line'"

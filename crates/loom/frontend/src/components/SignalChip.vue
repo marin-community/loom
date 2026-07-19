@@ -17,9 +17,7 @@ const emit = defineEmits<{ clear: [key: string] }>();
 
 // The chip's label is its tag key, humanized — the type of attention it names.
 const label = computed(() =>
-  props.chip.key
-    .replace(/[-_]/g, ' ')
-    .replace(/\b\w/g, (c) => c.toUpperCase()),
+  props.chip.key.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
 );
 const cls = computed(() =>
   props.chip.level === 'blocked' ? 'bg-block text-block-fg' : 'bg-attn text-attn-fg',
@@ -29,9 +27,7 @@ const fromWatch = computed(() => props.chip.raisedBy === 'watch');
 const tooltip = computed(() => {
   if (fromWatch.value) {
     const who = props.chip.by && props.chip.by !== 'manual' ? ` (${props.chip.by})` : '';
-    const base = props.chip.note
-      ? `Watch${who}: ${props.chip.note}`
-      : `Raised by watch${who}`;
+    const base = props.chip.note ? `Watch${who}: ${props.chip.note}` : `Raised by watch${who}`;
     return props.chip.stale ? `${base} — stale, session has moved on` : base;
   }
   return props.chip.note || label.value;

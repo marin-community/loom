@@ -164,8 +164,12 @@ function onTurn(ev: SseTurn) {
 let source: EventSource | null = null;
 function openStream() {
   source = new EventSource(`/api/sessions/${id.value}/chat/stream`);
-  source.addEventListener('block', (e) => onBlock(JSON.parse((e as MessageEvent).data) as ChatBlock));
-  source.addEventListener('delta', (e) => onDelta(JSON.parse((e as MessageEvent).data) as SseDelta));
+  source.addEventListener('block', (e) =>
+    onBlock(JSON.parse((e as MessageEvent).data) as ChatBlock),
+  );
+  source.addEventListener('delta', (e) =>
+    onDelta(JSON.parse((e as MessageEvent).data) as SseDelta),
+  );
   source.addEventListener('tool', (e) => onTool(JSON.parse((e as MessageEvent).data) as SseTool));
   source.addEventListener('turn', (e) => onTurn(JSON.parse((e as MessageEvent).data) as SseTurn));
 }
@@ -306,7 +310,12 @@ interface TocItem {
 }
 
 function firstLine(s: string): string {
-  return s.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+  return (
+    s
+      .split('\n')
+      .map((l) => l.trim())
+      .find(Boolean) ?? ''
+  );
 }
 function titleOf(text: string): string {
   const f = firstLine(text) || '(no text)';
@@ -397,7 +406,11 @@ const model = computed<{ rows: Row[]; toc: TocItem[] }>(() => {
         break;
       case 'mode_change':
         flushActivity();
-        rows.push({ type: 'mode', key: k, mode: (b.payload as { mode_id?: string }).mode_id ?? '' });
+        rows.push({
+          type: 'mode',
+          key: k,
+          mode: (b.payload as { mode_id?: string }).mode_id ?? '',
+        });
         break;
       case 'turn_end': {
         flushActivity();
@@ -424,11 +437,22 @@ const model = computed<{ rows: Row[]; toc: TocItem[] }>(() => {
   if (lt != null) {
     const thought = shadows.get(`${lt}:thought`);
     if (thought && thought.text) {
-      rows.push({ type: 'thought', key: `shadow-${lt}-thought`, text: thought.text, streaming: true });
+      rows.push({
+        type: 'thought',
+        key: `shadow-${lt}-thought`,
+        text: thought.text,
+        streaming: true,
+      });
     }
     const msg = shadows.get(`${lt}:agent_message`);
     if (msg && msg.text) {
-      rows.push({ type: 'agent', key: `shadow-${lt}-agent`, time: '', text: msg.text, streaming: true });
+      rows.push({
+        type: 'agent',
+        key: `shadow-${lt}-agent`,
+        time: '',
+        text: msg.text,
+        streaming: true,
+      });
     }
   }
 
@@ -438,7 +462,11 @@ const model = computed<{ rows: Row[]; toc: TocItem[] }>(() => {
 // The empty conversation, styled on purpose — a fresh session has no journal
 // yet, and a bare canvas reads as breakage.
 const isEmpty = computed(
-  () => state.value === 'ready' && !model.value.rows.length && !optimistic.value.length && !turnLive.value,
+  () =>
+    state.value === 'ready' &&
+    !model.value.rows.length &&
+    !optimistic.value.length &&
+    !turnLive.value,
 );
 
 // ── Live status line ─────────────────────────────────────────────────────────
@@ -460,11 +488,19 @@ const statusLabel = computed(() => {
 // ── Presentational helpers ───────────────────────────────────────────────────
 function toolGlyph(kind: string): string {
   return (
-    { edit: '✎', execute: '⌗', delete: '✕', move: '⇄', read: '❏', search: '⌕', fetch: '⤓', think: '✳' } as Record<
-      string,
-      string
-    >
-  )[kind] ?? '•';
+    (
+      {
+        edit: '✎',
+        execute: '⌗',
+        delete: '✕',
+        move: '⇄',
+        read: '❏',
+        search: '⌕',
+        fetch: '⤓',
+        think: '✳',
+      } as Record<string, string>
+    )[kind] ?? '•'
+  );
 }
 // The kind census on a collapsed group: `7 read · 2 search`, commonest first.
 function activityBreakdown(items: ActivityItem[]): string {
@@ -500,7 +536,11 @@ function planGlyph(status: string): string {
   return status === 'completed' ? '✓' : status === 'in_progress' ? '▸' : '○';
 }
 function planTone(status: string): string {
-  return status === 'completed' ? 'text-ok' : status === 'in_progress' ? 'text-agent' : 'text-faint';
+  return status === 'completed'
+    ? 'text-ok'
+    : status === 'in_progress'
+      ? 'text-agent'
+      : 'text-faint';
 }
 function isAllow(kind: string): boolean {
   return kind.startsWith('allow');
@@ -643,7 +683,9 @@ function goTo(anchor: string) {
             >
               <span
                 >turn {{ row.turn + 1 }} · {{ row.stop
-                }}<template v-if="row.ctx != null"> · {{ Math.round(row.ctx / 1000) }}k ctx</template></span
+                }}<template v-if="row.ctx != null">
+                  · {{ Math.round(row.ctx / 1000) }}k ctx</template
+                ></span
               >
             </div>
 
@@ -688,7 +730,11 @@ function goTo(anchor: string) {
             </div>
 
             <!-- Apparatus: one folded activity line per run of tool calls. -->
-            <div v-else-if="row.type === 'activity'" class="acp-activity" data-testid="acp-activity">
+            <div
+              v-else-if="row.type === 'activity'"
+              class="acp-activity"
+              data-testid="acp-activity"
+            >
               <button
                 type="button"
                 class="acp-fold-head"
@@ -698,17 +744,26 @@ function goTo(anchor: string) {
                 <span class="chev" :class="{ open: foldOpen(row.key, row.failures > 0) }">▸</span>
                 <span v-if="row.items.length === 1" class="acp-activity-solo">
                   <span class="acp-tool-glyph">{{ toolGlyph(row.items[0].tool.tool_kind) }}</span>
-                  <span class="truncate">{{ row.items[0].tool.title || row.items[0].tool.tool_kind }}</span>
+                  <span class="truncate">{{
+                    row.items[0].tool.title || row.items[0].tool.tool_kind
+                  }}</span>
                 </span>
                 <span v-else
                   >{{ row.items.length }} steps — {{ activityBreakdown(row.items) }}</span
                 >
-                <span v-if="row.failures" class="acp-activity-failbadge" data-testid="acp-activity-failed"
+                <span
+                  v-if="row.failures"
+                  class="acp-activity-failbadge"
+                  data-testid="acp-activity-failed"
                   >{{ row.failures }} failed</span
                 >
               </button>
               <ul v-if="foldOpen(row.key, row.failures > 0)" class="acp-activity-list">
-                <li v-for="it in row.items" :key="it.tool.tool_call_id" data-testid="acp-activity-item">
+                <li
+                  v-for="it in row.items"
+                  :key="it.tool.tool_call_id"
+                  data-testid="acp-activity-item"
+                >
                   <button
                     type="button"
                     class="acp-activity-line"
@@ -718,7 +773,10 @@ function goTo(anchor: string) {
                     <span class="acp-tool-glyph">{{ toolGlyph(it.tool.tool_kind) }}</span>
                     <span class="truncate">{{ it.tool.title || it.tool.tool_kind }}</span>
                     <span v-if="it.failed" class="acp-activity-status text-block">failed</span>
-                    <span v-else-if="hasDetail(it.tool)" class="chev sm" :class="{ open: foldOpen(`tool-${it.tool.tool_call_id}`, it.failed) }"
+                    <span
+                      v-else-if="hasDetail(it.tool)"
+                      class="chev sm"
+                      :class="{ open: foldOpen(`tool-${it.tool.tool_call_id}`, it.failed) }"
                       >▸</span
                     >
                   </button>
@@ -737,7 +795,9 @@ function goTo(anchor: string) {
                       >{{ l.sign }} {{ l.text }}
   </code></pre>
                       <!-- Text / command output on the recessed panel tone. -->
-                      <pre v-else-if="c.type === 'text' && c.text" class="acp-payload">{{ c.text }}</pre>
+                      <pre v-else-if="c.type === 'text' && c.text" class="acp-payload">{{
+                        c.text
+                      }}</pre>
                     </template>
                   </div>
                 </li>
@@ -745,10 +805,18 @@ function goTo(anchor: string) {
             </div>
 
             <!-- Permission — the one interactive block. -->
-            <div v-else-if="row.type === 'permission'" class="acp-perm" data-testid="acp-permission">
+            <div
+              v-else-if="row.type === 'permission'"
+              class="acp-perm"
+              data-testid="acp-permission"
+            >
               <div class="acp-perm-label">Permission</div>
               <p class="acp-perm-title">{{ row.perm.title }}</p>
-              <div v-if="row.perm.outcome" class="acp-perm-receipt" data-testid="acp-permission-receipt">
+              <div
+                v-if="row.perm.outcome"
+                class="acp-perm-receipt"
+                data-testid="acp-permission-receipt"
+              >
                 {{ row.perm.outcome.option_id }} · {{ shortTime(row.perm.outcome.at) }}
               </div>
               <div v-else class="acp-perm-options">
@@ -768,7 +836,9 @@ function goTo(anchor: string) {
             </div>
 
             <!-- Mode change — a quiet centred marker. -->
-            <div v-else-if="row.type === 'mode'" class="acp-mode-note">mode → {{ modeLabel(row.mode) }}</div>
+            <div v-else-if="row.type === 'mode'" class="acp-mode-note">
+              mode → {{ modeLabel(row.mode) }}
+            </div>
           </template>
 
           <!-- Optimistic (in-flight / queued) user messages. -->
@@ -780,13 +850,21 @@ function goTo(anchor: string) {
           >
             <header class="acp-rule">
               <span class="acp-label text-accent">You</span>
-              <span v-if="o.queued" class="acp-queued" data-testid="acp-queued">queued for next turn</span>
+              <span v-if="o.queued" class="acp-queued" data-testid="acp-queued"
+                >queued for next turn</span
+              >
             </header>
             <MarkdownView :id="id" path="" :source="o.text" />
           </section>
 
           <!-- Live status — what the agent is doing right now, at the tail. -->
-          <div v-if="turnLive" class="acp-status" data-testid="acp-working" role="status" aria-live="polite">
+          <div
+            v-if="turnLive"
+            class="acp-status"
+            data-testid="acp-working"
+            role="status"
+            aria-live="polite"
+          >
             <span class="acp-live-label">{{ statusLabel }}…</span>
             <span class="acp-status-meta"
               >turn {{ (liveTurnNo ?? 0) + 1 }} · {{ elapsedLabel }}</span
@@ -823,8 +901,12 @@ function goTo(anchor: string) {
           <p class="acp-rail-head">Plan</p>
           <ul class="space-y-1" data-testid="acp-plan">
             <li v-for="(e, i) in latestPlan" :key="i" class="acp-plan-item">
-              <span class="acp-plan-glyph" :class="planTone(e.status)">{{ planGlyph(e.status) }}</span>
-              <span :class="e.status === 'pending' ? 'text-faint' : 'text-muted'">{{ e.content }}</span>
+              <span class="acp-plan-glyph" :class="planTone(e.status)">{{
+                planGlyph(e.status)
+              }}</span>
+              <span :class="e.status === 'pending' ? 'text-faint' : 'text-muted'">{{
+                e.content
+              }}</span>
             </li>
           </ul>
         </template>
@@ -838,7 +920,9 @@ function goTo(anchor: string) {
       data-testid="acp-composer"
       @submit.prevent="submitPrompt"
     >
-      <p v-if="sendError" class="mb-1.5 text-xs text-block" data-testid="acp-composer-error">{{ sendError }}</p>
+      <p v-if="sendError" class="mb-1.5 text-xs text-block" data-testid="acp-composer-error">
+        {{ sendError }}
+      </p>
       <textarea
         v-model="draft"
         rows="2"
@@ -859,7 +943,8 @@ function goTo(anchor: string) {
               :disabled="!modeInteractive"
               @click.stop="modeOpen = !modeOpen"
             >
-              {{ modeLabel(currentMode) }}<span v-if="modeInteractive" class="acp-mode-caret">▾</span>
+              {{ modeLabel(currentMode)
+              }}<span v-if="modeInteractive" class="acp-mode-caret">▾</span>
             </button>
             <ul v-if="modeOpen" class="acp-mode-menu" data-testid="acp-mode-menu">
               <li v-for="m in modeOptions" :key="m">

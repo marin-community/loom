@@ -60,7 +60,9 @@ watch(
     <span
       class="inline-flex h-4 shrink-0 items-center rounded-full px-1.5 text-2xs font-medium"
       :class="
-        lastComment(thread)?.author === 'agent' ? 'bg-agent-soft text-agent' : 'bg-surface text-muted'
+        lastComment(thread)?.author === 'agent'
+          ? 'bg-agent-soft text-agent'
+          : 'bg-surface text-muted'
       "
     >
       {{ authorLabel(lastComment(thread)?.author ?? 'user') }}

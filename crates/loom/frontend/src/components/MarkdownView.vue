@@ -38,8 +38,7 @@ const { body, error, tokens, ctx } = useMarkdownDoc(props, (el) => emit('rendere
 // The vnode body, recreated on every render so no vnode is ever reused across
 // renders (fresh nodes; Vue keeps child component state via keys). Reads the
 // reactive `tokens`/`ctx`, so it re-renders when a build lands.
-const RenderedBody = () =>
-  ctx.value ? h(Fragment, renderTokens(tokens.value, ctx.value)) : null;
+const RenderedBody = () => (ctx.value ? h(Fragment, renderTokens(tokens.value, ctx.value)) : null);
 
 function onClick(e: MouseEvent) {
   routeDocLink(e, router, body.value);
@@ -51,7 +50,10 @@ defineExpose({ body });
 
 <template>
   <div class="h-full w-full overflow-auto bg-surface">
-    <p v-if="error" class="m-4 rounded border border-block-line bg-block-soft p-3 text-sm text-block">
+    <p
+      v-if="error"
+      class="m-4 rounded border border-block-line bg-block-soft p-3 text-sm text-block"
+    >
       {{ error }}
     </p>
     <article ref="body" class="markdown-body mx-auto max-w-3xl px-6 py-5" @click="onClick">

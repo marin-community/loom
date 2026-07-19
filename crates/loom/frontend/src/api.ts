@@ -86,8 +86,7 @@ export const listRepos = () => get('/repos') as Promise<ManagedRepo[]>;
 
 /** Register a repo (a GitHub `owner/name` slug or clone URL) in the managed
  *  store / allowlist (`POST /api/repos`). Returns the stored mapping. */
-export const registerRepo = (repo: string) =>
-  post('/repos', { repo }) as Promise<ManagedRepo>;
+export const registerRepo = (repo: string) => post('/repos', { repo }) as Promise<ManagedRepo>;
 
 // --- Your GitHub token (per-user) ------------------------------------------
 
@@ -99,8 +98,7 @@ export interface GithubTokenStatus {
 }
 
 /** Whether you've set a personal GitHub token (`GET /api/auth/github-token`). */
-export const getMyGithubToken = () =>
-  get('/auth/github-token') as Promise<GithubTokenStatus>;
+export const getMyGithubToken = () => get('/auth/github-token') as Promise<GithubTokenStatus>;
 
 /** Set/replace your personal GitHub token, injected as GH_TOKEN into the
  *  sessions you launch so your agents act as you (`PUT /api/auth/github-token`).
@@ -247,7 +245,10 @@ export const addComment = (id: string, name: string, tid: number, body: NewComme
 
 /** Mark a thread resolved. */
 export const resolveThread = (id: string, name: string, tid: number) =>
-  post(`/sessions/${id}/artifacts/${encodeURIComponent(name)}/threads/${tid}/resolve`, {}) as Promise<Thread>;
+  post(
+    `/sessions/${id}/artifacts/${encodeURIComponent(name)}/threads/${tid}/resolve`,
+    {},
+  ) as Promise<Thread>;
 
 /** Type a message into the session's agent pane and, by default, submit it with
  *  Enter to trigger a round (the same primitive the `loom` CLI's `send` wraps).
@@ -262,8 +263,7 @@ import type { ChatSnapshot, PromptAck } from './types';
 /** The journaled conversation snapshot for an ACP session — the transcript a
  *  client paints before tailing `/chat/stream` (`GET /sessions/{id}/chat`). A
  *  terminal session 409s (it has no chat journal). */
-export const getSessionChat = (id: string) =>
-  get(`/sessions/${id}/chat`) as Promise<ChatSnapshot>;
+export const getSessionChat = (id: string) => get(`/sessions/${id}/chat`) as Promise<ChatSnapshot>;
 
 /** Send a user message to an ACP session (`session/prompt`). Returns 202 with
  *  `{ queued, turn }` — `queued` when a turn was already in flight (the message

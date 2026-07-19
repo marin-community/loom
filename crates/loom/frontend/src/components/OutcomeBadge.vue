@@ -23,7 +23,9 @@ const styles: Record<string, Style> = {
 
 const style = computed<Style>(() => {
   if (!props.outcome) return { label: 'never run', cls: 'text-faint ring-1 ring-inset ring-line' };
-  return styles[props.outcome] ?? { label: props.outcome, cls: 'text-muted ring-1 ring-inset ring-line' };
+  return (
+    styles[props.outcome] ?? { label: props.outcome, cls: 'text-muted ring-1 ring-inset ring-line' }
+  );
 });
 </script>
 

@@ -102,7 +102,8 @@ const categories: CategoryItem[] = [
   {
     id: 'logs',
     label: 'Debug',
-    summary: 'Background tasks, live server logs, and build status for debugging this loom deployment.',
+    summary:
+      'Background tasks, live server logs, and build status for debugging this loom deployment.',
   },
 ];
 
@@ -298,7 +299,7 @@ function adopt(res: SettingsEnvelope, changedKeys: string[]) {
 }
 
 function patchBody(keys: string[], reset = false): Record<string, string | null> {
-  return Object.fromEntries(keys.map((key) => [key, reset ? null : drafts.value[key] ?? '']));
+  return Object.fromEntries(keys.map((key) => [key, reset ? null : (drafts.value[key] ?? '')]));
 }
 
 async function saveKeys(keys: string[], label: string) {

@@ -231,7 +231,10 @@ const quiet = computed(() => quietTags(props.ws));
       </span>
       <span class="text-faint">·</span>
       <span class="shrink-0 text-muted">
-        {{ ws.agent_kind }}<template v-if="ws.model"> · <span :class="modelTint" class="font-medium">{{ ws.model }}</span></template>
+        {{ ws.agent_kind
+        }}<template v-if="ws.model">
+          · <span :class="modelTint" class="font-medium">{{ ws.model }}</span></template
+        >
       </span>
       <!-- The branch's PR, surfaced inline as a small link — the one place you
            already look — rather than buried in the Overview tab. Compact mode is

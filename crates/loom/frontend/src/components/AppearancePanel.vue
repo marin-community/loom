@@ -261,7 +261,9 @@ onUnmounted(() => {
       <div class="grid gap-3 border-t border-line pt-4 md:grid-cols-[10rem_minmax(0,1fr)]">
         <div class="min-w-0">
           <div class="text-sm font-medium">Size</div>
-          <p class="mt-0.5 text-xs text-muted">Pixel size, {{ MIN_FONT_SIZE }}–{{ MAX_FONT_SIZE }}.</p>
+          <p class="mt-0.5 text-xs text-muted">
+            Pixel size, {{ MIN_FONT_SIZE }}–{{ MAX_FONT_SIZE }}.
+          </p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
           <button
@@ -327,7 +329,9 @@ onUnmounted(() => {
         >
           Reset to defaults
         </button>
-        <span v-if="dirty" class="text-2xs text-faint">Unsaved changes — applies to terminals opened after saving.</span>
+        <span v-if="dirty" class="text-2xs text-faint"
+          >Unsaved changes — applies to terminals opened after saving.</span
+        >
       </div>
     </section>
   </div>

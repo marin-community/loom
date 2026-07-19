@@ -71,8 +71,8 @@ onMounted(load);
       <div class="min-w-0 flex-1">
         <h1 class="text-sm font-semibold text-fg">Chat</h1>
         <p class="text-xs text-muted">
-          Ask the concierge about your fleet — stale sessions, what needs you — and
-          have it act on your behalf.
+          Ask the concierge about your fleet — stale sessions, what needs you — and have it act on
+          your behalf.
         </p>
       </div>
       <!-- Reset: archive this concierge (its transcript is kept) and start a
@@ -83,7 +83,11 @@ onMounted(load);
         class="btn-secondary shrink-0 px-2 py-0.5 text-xs"
         :class="{ 'text-block': armed }"
         :disabled="resetting"
-        :title="armed ? 'Click again to confirm — the current conversation is archived' : 'Start a fresh conversation'"
+        :title="
+          armed
+            ? 'Click again to confirm — the current conversation is archived'
+            : 'Start a fresh conversation'
+        "
         data-testid="chat-reset"
         @click="reset"
       >

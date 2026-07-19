@@ -274,7 +274,8 @@ loadAgents();
           <h3 class="text-2xs font-semibold uppercase tracking-wider text-muted">Repository</h3>
           <div class="relative">
             <label class="block text-xs text-muted mb-1">
-              Repository - a server path, or a GitHub <span class="font-mono">owner/name</span> to clone
+              Repository - a server path, or a GitHub <span class="font-mono">owner/name</span> to
+              clone
               <span v-if="recentRepos.length" class="text-faint">- or pick a recent one</span>
             </label>
             <input
@@ -301,8 +302,12 @@ loadAgents();
                   @mousedown.prevent="addAndCloneRepo"
                 >
                   <span class="shrink-0 text-sm">+ Clone new repo</span>
-                  <span class="min-w-0 truncate font-mono text-xs text-muted">{{ cloneCandidate }}</span>
-                  <span v-if="cloningRepo" class="ml-auto shrink-0 text-2xs text-faint">adding...</span>
+                  <span class="min-w-0 truncate font-mono text-xs text-muted">{{
+                    cloneCandidate
+                  }}</span>
+                  <span v-if="cloningRepo" class="ml-auto shrink-0 text-2xs text-faint"
+                    >adding...</span
+                  >
                 </button>
               </li>
               <li v-for="r in repoMatches" :key="r.repo_root">
@@ -314,7 +319,9 @@ loadAgents();
                 >
                   <span class="min-w-0">
                     <span class="block truncate text-sm">{{ repoName(r.repo_root) }}</span>
-                    <span class="block truncate text-xs text-muted font-mono">{{ r.repo_root }}</span>
+                    <span class="block truncate text-xs text-muted font-mono">{{
+                      r.repo_root
+                    }}</span>
                   </span>
                   <span
                     v-if="r.active_branches"
@@ -362,7 +369,9 @@ loadAgents();
                 type="button"
                 :class="[
                   'px-3 py-1',
-                  branchMode === 'new' ? 'bg-accent text-accent-fg' : 'bg-input text-muted hover:bg-subtle',
+                  branchMode === 'new'
+                    ? 'bg-accent text-accent-fg'
+                    : 'bg-input text-muted hover:bg-subtle',
                 ]"
                 @click="branchMode = 'new'"
               >
@@ -372,7 +381,9 @@ loadAgents();
                 type="button"
                 :class="[
                   'px-3 py-1 border-l border-line',
-                  branchMode === 'existing' ? 'bg-accent text-accent-fg' : 'bg-input text-muted hover:bg-subtle',
+                  branchMode === 'existing'
+                    ? 'bg-accent text-accent-fg'
+                    : 'bg-input text-muted hover:bg-subtle',
                 ]"
                 @click="branchMode = 'existing'"
               >
@@ -443,10 +454,9 @@ loadAgents();
                         {{ b.name }}
                         <span v-if="b.current" class="ml-1 text-xs text-accent">(current)</span>
                       </span>
-                      <span
-                        v-if="b.worktree"
-                        class="block truncate text-xs text-muted font-mono"
-                      >-&gt; {{ b.worktree }}</span>
+                      <span v-if="b.worktree" class="block truncate text-xs text-muted font-mono"
+                        >-&gt; {{ b.worktree }}</span
+                      >
                     </span>
                   </button>
                 </li>
@@ -464,8 +474,12 @@ loadAgents();
       <aside class="space-y-4 border-t border-line pt-4 lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0">
         <section class="space-y-3">
           <div>
-            <h3 class="text-2xs font-semibold uppercase tracking-wider text-muted">Runtime profile</h3>
-            <p class="mt-1 text-xs text-faint">Agent runtime, model selector, and reasoning effort.</p>
+            <h3 class="text-2xs font-semibold uppercase tracking-wider text-muted">
+              Runtime profile
+            </h3>
+            <p class="mt-1 text-xs text-faint">
+              Agent runtime, model selector, and reasoning effort.
+            </p>
           </div>
 
           <AgentRuntimePicker
@@ -497,17 +511,14 @@ loadAgents();
       >
         {{ creating ? 'Creating...' : 'Create' }}
       </button>
-      <button
-        type="button"
-        class="btn-secondary px-3 py-1.5 text-sm font-medium"
-        @click="cancel"
-      >
+      <button type="button" class="btn-secondary px-3 py-1.5 text-sm font-medium" @click="cancel">
         Cancel
       </button>
       <!-- Keyboard affordance: submit from anywhere in the form (the goal
            textarea swallows a plain Enter) without reaching for the mouse. -->
       <span class="ml-auto text-2xs text-faint">
-        <kbd class="font-mono">{{ metaKeyLabel }}</kbd> + <kbd class="font-mono">Enter</kbd> to create
+        <kbd class="font-mono">{{ metaKeyLabel }}</kbd> + <kbd class="font-mono">Enter</kbd> to
+        create
       </span>
     </div>
   </form>

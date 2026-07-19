@@ -400,7 +400,10 @@ onUnmounted(() => {
   <div class="group relative h-full min-h-0">
     <!-- FitAddon subtracts the host's padding when sizing, so the p-2 gives the
          grid breathing room inside the framed panel. -->
-    <div ref="host" class="h-full w-full overflow-hidden rounded bg-code p-2 text-code-fg ring-1 ring-line"></div>
+    <div
+      ref="host"
+      class="h-full w-full overflow-hidden rounded bg-code p-2 text-code-fg ring-1 ring-line"
+    ></div>
 
     <!-- Find bar (Ctrl/Cmd+F). Top-left so it never collides with the
          connection-status badge in the top-right corner. -->
@@ -418,10 +421,30 @@ onUnmounted(() => {
         @keydown.enter.prevent="(e: KeyboardEvent) => (e.shiftKey ? findPrev() : findNext())"
         @keydown.esc.prevent="closeSearch"
       />
-      <span class="min-w-[2.75rem] text-center text-xs tabular-nums text-muted">{{ matchCount ? `${matchIndex}/${matchCount}` : '0/0' }}</span>
-      <button class="rounded px-1.5 py-1 text-xs text-muted hover:bg-block-soft hover:text-fg" title="Previous (Shift+Enter)" @click="findPrev">↑</button>
-      <button class="rounded px-1.5 py-1 text-xs text-muted hover:bg-block-soft hover:text-fg" title="Next (Enter)" @click="findNext">↓</button>
-      <button class="rounded px-1.5 py-1 text-xs text-muted hover:bg-block-soft hover:text-fg" title="Close (Esc)" @click="closeSearch">✕</button>
+      <span class="min-w-[2.75rem] text-center text-xs tabular-nums text-muted">{{
+        matchCount ? `${matchIndex}/${matchCount}` : '0/0'
+      }}</span>
+      <button
+        class="rounded px-1.5 py-1 text-xs text-muted hover:bg-block-soft hover:text-fg"
+        title="Previous (Shift+Enter)"
+        @click="findPrev"
+      >
+        ↑
+      </button>
+      <button
+        class="rounded px-1.5 py-1 text-xs text-muted hover:bg-block-soft hover:text-fg"
+        title="Next (Enter)"
+        @click="findNext"
+      >
+        ↓
+      </button>
+      <button
+        class="rounded px-1.5 py-1 text-xs text-muted hover:bg-block-soft hover:text-fg"
+        title="Close (Esc)"
+        @click="closeSearch"
+      >
+        ✕
+      </button>
     </div>
 
     <!-- Hover-revealed actions. Bottom-right keeps them out of the way of the
@@ -453,9 +476,11 @@ onUnmounted(() => {
       v-if="state !== 'open' && statusVisible"
       data-testid="term-status"
       class="absolute right-2 top-2 rounded px-2 py-1 text-xs font-medium ring-1"
-      :class="state === 'error'
-        ? 'bg-block text-block-fg ring-block-line'
-        : 'bg-surface/95 text-muted ring-line'"
+      :class="
+        state === 'error'
+          ? 'bg-block text-block-fg ring-block-line'
+          : 'bg-surface/95 text-muted ring-line'
+      "
     >
       <span v-if="state === 'connecting'">connecting…</span>
       <span v-else-if="state === 'reconnecting'">reconnecting…</span>

@@ -235,7 +235,12 @@ async function remove(agent: CustomAgent) {
         >
           {{ isNew ? 'Add agent' : 'Save' }}
         </button>
-        <button type="button" class="btn-secondary px-2.5 py-1 text-xs" :disabled="busy" @click="cancel">
+        <button
+          type="button"
+          class="btn-secondary px-2.5 py-1 text-xs"
+          :disabled="busy"
+          @click="cancel"
+        >
           Cancel
         </button>
       </div>

@@ -190,12 +190,7 @@ const visible = computed(() => {
     if (!showClosed.value && i.status !== 'open') return false;
     if (repoFilter.value && i.repo_root !== repoFilter.value) return false;
     if (!q) return true;
-    const hay = [
-      `#${i.id}`,
-      i.title,
-      i.body,
-      ...i.tags.map((t) => `${t.key} ${t.value}`),
-    ]
+    const hay = [`#${i.id}`, i.title, i.body, ...i.tags.map((t) => `${t.key} ${t.value}`)]
       .join(' ')
       .toLowerCase();
     return hay.includes(q);
@@ -368,7 +363,12 @@ async function removeTag(i: Issue, key: string) {
           <option v-for="r in repos" :key="r" :value="r">{{ repoName(r) }}</option>
         </select>
         <label class="flex items-center gap-1.5 text-xs text-muted">
-          <input v-model="showClosed" type="checkbox" class="accent-accent" data-testid="issues-show-closed" />
+          <input
+            v-model="showClosed"
+            type="checkbox"
+            class="accent-accent"
+            data-testid="issues-show-closed"
+          />
           Show closed
         </label>
         <button
@@ -396,7 +396,9 @@ async function removeTag(i: Issue, key: string) {
       <!-- Repository: the backlog this lands in. A static label when one repo is
            in play, a picker when several, a free path when the board is empty. -->
       <div>
-        <span class="mb-1 block text-2xs font-semibold uppercase tracking-wider text-muted">Repository</span>
+        <span class="mb-1 block text-2xs font-semibold uppercase tracking-wider text-muted"
+          >Repository</span
+        >
         <select
           v-if="repoChoices.length > 1"
           v-model="createRepo"
@@ -410,7 +412,9 @@ async function removeTag(i: Issue, key: string) {
           class="font-mono text-sm text-muted"
           :title="createRepo"
           data-testid="issue-create-repo"
-        >{{ repoName(createRepo) }}</p>
+        >
+          {{ repoName(createRepo) }}
+        </p>
         <input
           v-else
           v-model="createRepo"
@@ -422,7 +426,9 @@ async function removeTag(i: Issue, key: string) {
       </div>
 
       <label class="block">
-        <span class="mb-1 block text-2xs font-semibold uppercase tracking-wider text-muted">Title</span>
+        <span class="mb-1 block text-2xs font-semibold uppercase tracking-wider text-muted"
+          >Title</span
+        >
         <input
           ref="createTitleInput"
           v-model="createDraft.title"
@@ -434,7 +440,9 @@ async function removeTag(i: Issue, key: string) {
       </label>
 
       <label class="block">
-        <span class="mb-1 block text-2xs font-semibold uppercase tracking-wider text-muted">Body</span>
+        <span class="mb-1 block text-2xs font-semibold uppercase tracking-wider text-muted"
+          >Body</span
+        >
         <textarea
           v-model="createDraft.body"
           rows="4"
@@ -445,14 +453,11 @@ async function removeTag(i: Issue, key: string) {
       </label>
 
       <div>
-        <span class="mb-1 block text-2xs font-semibold uppercase tracking-wider text-muted">Tags</span>
+        <span class="mb-1 block text-2xs font-semibold uppercase tracking-wider text-muted"
+          >Tags</span
+        >
         <div class="flex flex-wrap items-center gap-1.5">
-          <TagPill
-            v-for="t in createTags"
-            :key="t.key"
-            :tag="t"
-            @clear="removeCreateTag"
-          />
+          <TagPill v-for="t in createTags" :key="t.key" :tag="t" @clear="removeCreateTag" />
           <span class="flex items-center gap-1">
             <input
               v-model="createTagInput"
@@ -467,12 +472,16 @@ async function removeTag(i: Issue, key: string) {
               class="btn-secondary px-2 py-0.5 text-xs"
               data-testid="issue-create-tag-add"
               @click="addCreateTag"
-            >Add</button>
+            >
+              Add
+            </button>
           </span>
         </div>
       </div>
 
-      <p v-if="createError" class="text-sm text-block" data-testid="issue-create-error">{{ createError }}</p>
+      <p v-if="createError" class="text-sm text-block" data-testid="issue-create-error">
+        {{ createError }}
+      </p>
 
       <div class="flex items-center gap-2">
         <button
@@ -480,13 +489,17 @@ async function removeTag(i: Issue, key: string) {
           class="btn-primary px-2.5 py-1 text-xs font-medium"
           data-testid="issue-create-submit"
           :disabled="creating"
-        >{{ creating ? 'Creating…' : 'Create issue' }}</button>
+        >
+          {{ creating ? 'Creating…' : 'Create issue' }}
+        </button>
         <button
           type="button"
           class="btn-secondary px-2.5 py-1 text-xs font-medium"
           :disabled="creating"
           @click="cancelCreate"
-        >Cancel</button>
+        >
+          Cancel
+        </button>
       </div>
     </form>
 
@@ -504,7 +517,11 @@ async function removeTag(i: Issue, key: string) {
     <!-- One bordered board, hairline-divided rows (the fleet-list anatomy).
          Per-row actions are ghost buttons revealed on hover/focus, so the
          board reads as data, not as a wall of buttons. -->
-    <ul v-else class="overflow-hidden rounded-md border border-line bg-surface" data-testid="issues-list">
+    <ul
+      v-else
+      class="overflow-hidden rounded-md border border-line bg-surface"
+      data-testid="issues-list"
+    >
       <li
         v-for="i in visible"
         :key="i.id"
@@ -539,11 +556,9 @@ async function removeTag(i: Issue, key: string) {
           >
             {{ i.title }}
           </button>
-          <span
-            v-if="multiRepo"
-            class="pill shrink-0 font-mono"
-            :title="i.repo_root"
-          >{{ repoName(i.repo_root) }}</span>
+          <span v-if="multiRepo" class="pill shrink-0 font-mono" :title="i.repo_root">{{
+            repoName(i.repo_root)
+          }}</span>
           <a
             v-if="i.github_issue && i.github_repo"
             :href="`https://github.com/${i.github_repo}/issues/${i.github_issue}`"
@@ -551,7 +566,8 @@ async function removeTag(i: Issue, key: string) {
             rel="noopener"
             class="shrink-0 font-mono text-2xs text-muted hover:text-accent"
             @click.stop
-          >gh #{{ i.github_issue }}</a>
+            >gh #{{ i.github_issue }}</a
+          >
 
           <div
             class="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100"
@@ -567,7 +583,9 @@ async function removeTag(i: Issue, key: string) {
               :disabled="busy[i.id] || launching === i.id"
               :title="`Launch a session to work issue #${i.id}`"
               @click="launch(i)"
-            >{{ launching === i.id ? 'Launching…' : 'Launch' }}</button>
+            >
+              {{ launching === i.id ? 'Launching…' : 'Launch' }}
+            </button>
             <button
               v-if="i.status === 'open'"
               type="button"
@@ -575,7 +593,9 @@ async function removeTag(i: Issue, key: string) {
               data-testid="issue-close"
               :disabled="busy[i.id]"
               @click="setStatus(i, 'closed')"
-            >Close</button>
+            >
+              Close
+            </button>
             <button
               v-else
               type="button"
@@ -583,27 +603,34 @@ async function removeTag(i: Issue, key: string) {
               data-testid="issue-reopen"
               :disabled="busy[i.id]"
               @click="setStatus(i, 'open')"
-            >Reopen</button>
+            >
+              Reopen
+            </button>
             <button
               type="button"
               class="rounded px-1.5 py-0.5 text-2xs text-muted hover:bg-subtle hover:text-fg"
               data-testid="issue-edit"
               :disabled="busy[i.id]"
               @click="startEdit(i)"
-            >{{ editing === i.id ? 'Cancel' : 'Edit' }}</button>
+            >
+              {{ editing === i.id ? 'Cancel' : 'Edit' }}
+            </button>
             <button
               type="button"
               class="rounded px-1.5 py-0.5 text-2xs text-muted hover:bg-block-soft hover:text-block"
               data-testid="issue-delete"
               :disabled="busy[i.id]"
               @click="remove(i)"
-            >Delete</button>
+            >
+              Delete
+            </button>
           </div>
 
           <span
             class="shrink-0 font-mono text-2xs text-faint"
             :title="`updated ${i.updated_at} · created ${i.created_at}`"
-          >{{ timeAgo(i.updated_at) }}</span>
+            >{{ timeAgo(i.updated_at) }}</span
+          >
         </div>
 
         <!-- Row 2 (only when there's something): tag pills + referencing sessions -->
@@ -628,7 +655,8 @@ async function removeTag(i: Issue, key: string) {
                 :to="`/s/${r.session.id}`"
                 class="font-mono text-accent hover:underline"
                 data-testid="issue-session-ref"
-              >{{ r.rel }}: {{ r.session.branch.name }}</router-link>
+                >{{ r.rel }}: {{ r.session.branch.name }}</router-link
+              >
             </template>
           </div>
           <span
@@ -636,7 +664,11 @@ async function removeTag(i: Issue, key: string) {
             class="font-mono text-faint"
             data-testid="issue-branch-ref"
           >
-            {{ i.claimed_branch ? `claimed: ${branchLabel(i.claimed_branch)}` : `from: ${branchLabel(i.source_branch!)}` }}
+            {{
+              i.claimed_branch
+                ? `claimed: ${branchLabel(i.claimed_branch)}`
+                : `from: ${branchLabel(i.source_branch!)}`
+            }}
           </span>
         </div>
 
@@ -688,7 +720,9 @@ async function removeTag(i: Issue, key: string) {
                   class="btn-secondary px-2 py-0.5 text-xs"
                   data-testid="issue-tag-add"
                   :disabled="busy[i.id]"
-                >Add</button>
+                >
+                  Add
+                </button>
               </form>
             </div>
           </div>
@@ -700,13 +734,17 @@ async function removeTag(i: Issue, key: string) {
               data-testid="issue-save"
               :disabled="busy[i.id]"
               @click="saveEdit(i)"
-            >Save</button>
+            >
+              Save
+            </button>
             <button
               type="button"
               class="btn-secondary px-3 py-1 text-xs"
               :disabled="busy[i.id]"
               @click="editing = null"
-            >Cancel</button>
+            >
+              Cancel
+            </button>
           </div>
         </div>
       </li>

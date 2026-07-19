@@ -3,7 +3,14 @@ import type { Watch, WatchTrigger, WatchScope } from '../types';
 // The intervention ladder, calm → loud (mirrors weaver-core's CAPABILITIES).
 // `observe` is implicit — always granted — so the create/edit forms only offer
 // the explicit grants below it.
-export const CAPABILITIES = ['observe', 'mark', 'escalate', 'nudge', 'interrupt', 'launch'] as const;
+export const CAPABILITIES = [
+  'observe',
+  'mark',
+  'escalate',
+  'nudge',
+  'interrupt',
+  'launch',
+] as const;
 export const GRANTABLE_CAPABILITIES = ['mark', 'escalate', 'nudge', 'interrupt', 'launch'] as const;
 
 // Final path segment of a repo root, for a short chip label.

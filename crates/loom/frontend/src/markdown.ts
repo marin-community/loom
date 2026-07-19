@@ -155,8 +155,7 @@ async function getMarkdownIt(): Promise<MarkdownIt> {
 
 /** A reference smartdoc recognises inside running prose. */
 type SmartRef =
-  | { kind: 'issue'; raw: string; id: number }
-  | { kind: 'artifact'; raw: string; name: string };
+  { kind: 'issue'; raw: string; id: number } | { kind: 'artifact'; raw: string; name: string };
 
 // `#123` (issue) or `artifact:<name>`. The issue form requires a non-word char
 // (or string start) before the `#` so `foo#3` / `abc#1` (anchors, fragments)
@@ -181,11 +180,7 @@ function issueChipLabel(s: IssueRefStatus): string {
  *  rendering context (for the artifact deep-link base). Returns null when the
  *  reference can't be projected (unknown issue, no session) — the caller then
  *  leaves the raw text in place. `esc` is markdown-it's HTML escaper. */
-function refHtml(
-  ref: SmartRef,
-  ctx: RenderContext,
-  esc: (s: string) => string,
-): string | null {
+function refHtml(ref: SmartRef, ctx: RenderContext, esc: (s: string) => string): string | null {
   if (ref.kind === 'issue') {
     const status = ctx.refs?.[String(ref.id)];
     if (!status) return null;
@@ -230,20 +225,12 @@ function installSmartdoc(md: MarkdownIt): void {
 /** Split one `text` token into a run of `text`/`html_inline` tokens, replacing
  *  recognised references with chip/link HTML. Tokens that aren't projectable are
  *  left as text so nothing is lost. */
-function splitTextToken(
-  md: MarkdownIt,
-  tok: Token,
-  ctx: RenderContext,
-): Token[] {
+function splitTextToken(md: MarkdownIt, tok: Token, ctx: RenderContext): Token[] {
   const text = tok.content;
   const esc = md.utils.escapeHtml;
   // markdown-it doesn't export Token as a value here; reuse the token ctor via
   // the live token's prototype so we don't need the class import.
-  const TokenCtor = tok.constructor as new (
-    type: string,
-    tag: string,
-    nesting: number,
-  ) => Token;
+  const TokenCtor = tok.constructor as new (type: string, tag: string, nesting: number) => Token;
   SMARTDOC_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   let last = 0;

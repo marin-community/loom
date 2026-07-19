@@ -28,7 +28,11 @@ const MAIN: RailItem[] = [
     label: 'Sessions',
     match: (p) => p === '/' || p.startsWith('/s/'),
     // square-terminal — a session is a live agent terminal.
-    paths: ['m7 11 2-2-2-2', 'M13 15h4', 'M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z'],
+    paths: [
+      'm7 11 2-2-2-2',
+      'M13 15h4',
+      'M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z',
+    ],
   },
   {
     to: '/issues',
@@ -94,8 +98,16 @@ const active = computed(() => (item: RailItem) => item.match(route.path));
       title="loom — agent sessions"
       aria-label="loom home"
     >
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-        stroke-width="1.75" stroke-linecap="round" aria-hidden="true">
+      <svg
+        width="22"
+        height="22"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.75"
+        stroke-linecap="round"
+        aria-hidden="true"
+      >
         <path d="M4 9h16M4 15h16M9 4v16M15 4v16" />
       </svg>
     </router-link>
@@ -115,8 +127,17 @@ const active = computed(() => (item: RailItem) => item.match(route.path));
         class="absolute inset-y-1.5 left-0 w-0.5 rounded-r bg-accent"
         aria-hidden="true"
       ></span>
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-        stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <svg
+        width="22"
+        height="22"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
         <path v-for="(d, i) in item.paths" :key="i" :d="d" />
       </svg>
       <span class="text-[10px] leading-3">{{ item.label }}</span>
@@ -131,13 +152,34 @@ const active = computed(() => (item: RailItem) => item.match(route.path));
         aria-label="Toggle color theme"
         @click="toggleTheme"
       >
-        <svg v-if="theme === 'dark'" width="20" height="20" viewBox="0 0 24 24" fill="none"
-          stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+        <svg
+          v-if="theme === 'dark'"
+          width="20"
+          height="20"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          aria-hidden="true"
+        >
           <circle cx="12" cy="12" r="4" />
-          <path d="M12 2v2M12 20v2m-7.07-2.93 1.41-1.41m11.32 0 1.41 1.41M2 12h2m16 0h2M4.93 4.93l1.41 1.41m11.32 0 1.41-1.41" />
+          <path
+            d="M12 2v2M12 20v2m-7.07-2.93 1.41-1.41m11.32 0 1.41 1.41M2 12h2m16 0h2M4.93 4.93l1.41 1.41m11.32 0 1.41-1.41"
+          />
         </svg>
-        <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-          stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <svg
+          v-else
+          width="20"
+          height="20"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
           <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
         </svg>
       </button>
@@ -154,8 +196,17 @@ const active = computed(() => (item: RailItem) => item.match(route.path));
           class="absolute inset-y-1.5 left-0 w-0.5 rounded-r bg-accent"
           aria-hidden="true"
         ></span>
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-          stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <svg
+          width="20"
+          height="20"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
           <path v-for="(d, i) in SETTINGS.paths" :key="i" :d="d" />
         </svg>
       </router-link>

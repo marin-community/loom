@@ -123,7 +123,10 @@ onMounted(loadShells);
       <!-- Debug shells: mounted when opened and kept mounted (v-show) so switching
            tabs never drops the PTY; unmounted only when the tab is closed. -->
       <section v-for="idx in shells" v-show="active === idx" :key="idx" class="h-full">
-        <AgentTerminal :ws-path="`/api/sessions/${props.id}/shell/${idx}/terminal`" class="h-full" />
+        <AgentTerminal
+          :ws-path="`/api/sessions/${props.id}/shell/${idx}/terminal`"
+          class="h-full"
+        />
       </section>
       <!-- A headless session with no shells open yet: a quiet invitation, so the
            tab isn't a blank void. -->

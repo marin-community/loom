@@ -62,7 +62,8 @@ const agentWorking = computed(() => convState.value.label === 'Working');
 // the resolved attention level, not the tone, so the calm-state hues (Idle cyan,
 // Working green) don't accidentally force the cue on.
 const showAgentStatus = computed(
-  () => canSend(live.value) && (agentWorking.value || effectiveAttention(live.value).level !== 'ok'),
+  () =>
+    canSend(live.value) && (agentWorking.value || effectiveAttention(live.value).level !== 'ok'),
 );
 
 type LoadState = 'loading' | 'ready' | 'empty' | 'error';
@@ -262,7 +263,12 @@ function rle(items: ToolItem[]): ToolGroup[] {
 
 /** The first non-blank line of a string, trimmed (`''` if there is none). */
 function firstLine(s: string): string {
-  return s.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+  return (
+    s
+      .split('\n')
+      .map((l) => l.trim())
+      .find(Boolean) ?? ''
+  );
 }
 
 /** A user prompt's jump-list label: the first non-empty line, lightly de-marked. */
@@ -294,7 +300,10 @@ const model = computed<Model>(() => {
     if (msg.role === 'context') {
       flushTools();
       const text = msg.blocks
-        .filter((b): b is { kind: 'text' | 'thinking'; text: string } => b.kind === 'text' || b.kind === 'thinking')
+        .filter(
+          (b): b is { kind: 'text' | 'thinking'; text: string } =>
+            b.kind === 'text' || b.kind === 'thinking',
+        )
         .map((b) => b.text)
         .join('\n\n')
         .trim();
@@ -310,7 +319,14 @@ const model = computed<Model>(() => {
       flushTools();
       turn++;
       const anchor = `conv-turn-${turn}`;
-      rows.push({ type: 'user', key: key++, anchor, n: turn, time: msg.timestamp, blocks: msg.blocks });
+      rows.push({
+        type: 'user',
+        key: key++,
+        anchor,
+        n: turn,
+        time: msg.timestamp,
+        blocks: msg.blocks,
+      });
       toc.push({ anchor, n: turn, title: userTitle(msg.blocks) });
       continue;
     }
@@ -338,7 +354,12 @@ const model = computed<Model>(() => {
         case 'tool_result': {
           const last = toolBuf[toolBuf.length - 1];
           if (last && !last.result) last.result = { output: b.output, is_error: b.is_error };
-          else toolBuf.push({ name: '↳ result', input: undefined, result: { output: b.output, is_error: b.is_error } });
+          else
+            toolBuf.push({
+              name: '↳ result',
+              input: undefined,
+              result: { output: b.output, is_error: b.is_error },
+            });
           break;
         }
         case 'image':
@@ -507,7 +528,11 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
     <div class="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
       <p class="min-w-0 flex-1 truncate text-xs text-muted">{{ banner }}</p>
 
-      <div v-if="state === 'ready'" class="flex items-center gap-1" data-testid="conversation-filters">
+      <div
+        v-if="state === 'ready'"
+        class="flex items-center gap-1"
+        data-testid="conversation-filters"
+      >
         <button
           type="button"
           class="chip"
@@ -524,7 +549,9 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
           aria-label="Toggle thinking"
           @click="show.thinking = !show.thinking"
         >
-          Thinking<span v-if="model.counts.thinking" class="chip-n">{{ model.counts.thinking }}</span>
+          Thinking<span v-if="model.counts.thinking" class="chip-n">{{
+            model.counts.thinking
+          }}</span>
         </button>
         <button
           v-if="model.counts.context"
@@ -537,12 +564,7 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
           Context<span class="chip-n">{{ model.counts.context }}</span>
         </button>
         <span class="mx-0.5 h-3.5 w-px bg-line"></span>
-        <button
-          type="button"
-          class="chip"
-          :disabled="!model.foldKeys.length"
-          @click="toggleAll"
-        >
+        <button type="button" class="chip" :disabled="!model.foldKeys.length" @click="toggleAll">
           {{ allOpen ? 'Collapse all' : 'Expand all' }}
         </button>
       </div>
@@ -576,7 +598,10 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
         <div ref="convBody" class="space-y-2">
           <template v-for="row in visibleRows" :key="row.key">
             <!-- Injected context (primers, system/permissions) — folded away. -->
-            <div v-if="row.type === 'context'" class="overflow-hidden rounded border border-line bg-subtle/30">
+            <div
+              v-if="row.type === 'context'"
+              class="overflow-hidden rounded border border-line bg-subtle/30"
+            >
               <button
                 type="button"
                 class="fold-head text-muted"
@@ -604,7 +629,9 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
               <header class="mb-1 flex items-center gap-2 text-xs font-medium text-accent">
                 <span class="turn-badge">{{ row.n }}</span>
                 <span>▍ You</span>
-                <span v-if="row.time" class="font-normal text-muted">{{ shortTime(row.time) }}</span>
+                <span v-if="row.time" class="font-normal text-muted">{{
+                  shortTime(row.time)
+                }}</span>
               </header>
               <template v-for="(b, j) in row.blocks" :key="j">
                 <MarkdownView v-if="b.kind === 'text'" :id="id" path="" :source="b.text" />
@@ -619,7 +646,10 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
             </div>
 
             <!-- Thinking — folded. -->
-            <div v-else-if="row.type === 'thinking'" class="overflow-hidden rounded border border-line bg-subtle/30">
+            <div
+              v-else-if="row.type === 'thinking'"
+              class="overflow-hidden rounded border border-line bg-subtle/30"
+            >
               <button
                 type="button"
                 class="fold-head text-muted"
@@ -655,17 +685,32 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
                   <span class="chev" :class="{ open: isOpen(`tg-${row.key}-${gi}`) }">▸</span>
                   <span class="shrink-0">🔧</span>
                   <span class="shrink-0 font-mono text-fg">{{ g.name }}</span>
-                  <span v-if="g.items.length > 1" class="rle-badge" data-testid="rle-count">{{ g.items.length }}×</span>
-                  <span v-else class="min-w-0 truncate font-mono text-faint">{{ preview(g.items[0]) }}</span>
-                  <span v-if="groupHasError(g)" class="ml-auto shrink-0 text-2xs font-medium text-block">error</span>
+                  <span v-if="g.items.length > 1" class="rle-badge" data-testid="rle-count"
+                    >{{ g.items.length }}×</span
+                  >
+                  <span v-else class="min-w-0 truncate font-mono text-faint">{{
+                    preview(g.items[0])
+                  }}</span>
+                  <span
+                    v-if="groupHasError(g)"
+                    class="ml-auto shrink-0 text-2xs font-medium text-block"
+                    >error</span
+                  >
                 </button>
-                <div v-if="isOpen(`tg-${row.key}-${gi}`)" :id="`tg-${row.key}-${gi}-panel`" class="border-t border-line">
+                <div
+                  v-if="isOpen(`tg-${row.key}-${gi}`)"
+                  :id="`tg-${row.key}-${gi}-panel`"
+                  class="border-t border-line"
+                >
                   <div
                     v-for="(it, ii) in g.items"
                     :key="ii"
                     :class="ii > 0 ? 'border-t border-line/60' : ''"
                   >
-                    <div v-if="g.items.length > 1" class="px-3 pt-1.5 font-mono text-2xs text-faint">
+                    <div
+                      v-if="g.items.length > 1"
+                      class="px-3 pt-1.5 font-mono text-2xs text-faint"
+                    >
                       #{{ ii + 1 }} · {{ it.name }}
                     </div>
                     <pre v-if="inputText(it)" class="conv-pre text-fg">{{ inputText(it) }}</pre>
@@ -911,7 +956,9 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
   font-weight: 500;
   color: var(--faint);
   cursor: pointer;
-  transition: color 0.12s ease, background-color 0.12s ease;
+  transition:
+    color 0.12s ease,
+    background-color 0.12s ease;
   display: inline-flex;
   align-items: center;
   gap: 0.3125rem;
@@ -948,7 +995,9 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
   line-height: 1.1rem;
   color: var(--muted);
   cursor: pointer;
-  transition: color 0.12s ease, background-color 0.12s ease;
+  transition:
+    color 0.12s ease,
+    background-color 0.12s ease;
 }
 .toc-item:hover {
   background: color-mix(in srgb, var(--subtle) 55%, transparent);

@@ -62,7 +62,12 @@ const tabs = computed(() => (props.protocol === 'acp' ? ACP_TABS : TERMINAL_TABS
       <span v-if="t.key === 'overview' && issueCount" class="pill ml-1">{{ issueCount }}</span>
       <!-- When popped out, the Artifacts surface lives in the rail, not here —
            a small glyph marks it open without claiming the work area. -->
-      <span v-if="t.key === 'artifacts' && artifactsPopped" class="ml-1 text-faint" title="Open in the side panel">⤢</span>
+      <span
+        v-if="t.key === 'artifacts' && artifactsPopped"
+        class="ml-1 text-faint"
+        title="Open in the side panel"
+        >⤢</span
+      >
     </button>
     <!-- The tab row's right side is otherwise dead space — hosts compact,
          always-relevant extras (the scratch attach strip on the detail page). -->

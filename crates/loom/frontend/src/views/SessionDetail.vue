@@ -1,5 +1,14 @@
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, onActivated, onDeactivated, onUnmounted } from 'vue';
+import {
+  ref,
+  reactive,
+  computed,
+  watch,
+  onMounted,
+  onActivated,
+  onDeactivated,
+  onUnmounted,
+} from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { get, ideInfo } from '../api';
 import type { Session, WeaverEvent, Issue } from '../types';
@@ -54,7 +63,9 @@ const initialTab = route.query.tab;
 // `null` means "follow the backend's default tab"; a real value is an explicit
 // pick (from the URL or a click) that sticks.
 const localTab = ref<LocalTab | null>(
-  typeof initialTab === 'string' && VALID_LOCAL.includes(initialTab) ? (initialTab as LocalTab) : null,
+  typeof initialTab === 'string' && VALID_LOCAL.includes(initialTab)
+    ? (initialTab as LocalTab)
+    : null,
 );
 const effectiveLocalTab = computed<LocalTab>(() => localTab.value ?? defaultTab.value);
 
@@ -69,7 +80,9 @@ const railOpen = computed(() => artifactsActive.value && poppedOut.value);
 
 // The pane the work area shows: the artifacts panel when docked, else the
 // effective local tab (so a popped-out artifact leaves the work pane in place).
-const workTab = computed<WorkTab>(() => (artifactsDocked.value ? 'artifacts' : effectiveLocalTab.value));
+const workTab = computed<WorkTab>(() =>
+  artifactsDocked.value ? 'artifacts' : effectiveLocalTab.value,
+);
 
 // Lazy-mount panes on first visit, then keep them (v-show) so re-selecting is
 // instant. The terminal is always mounted; the rest start cold so a session-open

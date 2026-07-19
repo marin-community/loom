@@ -10,9 +10,7 @@ import type { Tag } from '../types';
 // the status watch manages it, so there is no × to clear by hand.
 const props = defineProps<{ tag: Tag }>();
 
-const tooltip = computed(
-  () => props.tag.note || 'Idle — the agent is resting; no one is needed.',
-);
+const tooltip = computed(() => props.tag.note || 'Idle — the agent is resting; no one is needed.');
 </script>
 
 <template>

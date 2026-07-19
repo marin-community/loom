@@ -47,12 +47,18 @@ function remove(name: string) {
   <div data-testid="scratch-picker">
     <div class="flex items-center justify-between mb-1">
       <label class="text-xs text-muted">Scratch files — optional</label>
-      <span class="text-xs text-faint">dropped into <code>scratch/</code>; the agent is told they're there</span>
+      <span class="text-xs text-faint"
+        >dropped into <code>scratch/</code>; the agent is told they're there</span
+      >
     </div>
 
     <div
       class="rounded border border-dashed px-3 py-5 text-center text-sm transition-colors cursor-pointer"
-      :class="dragging ? 'border-accent bg-accent/10 text-fg' : 'border-line text-muted hover:border-accent'"
+      :class="
+        dragging
+          ? 'border-accent bg-accent/10 text-fg'
+          : 'border-line text-muted hover:border-accent'
+      "
       data-testid="scratch-picker-dropzone"
       @dragover.prevent="dragging = true"
       @dragleave.prevent="dragging = false"

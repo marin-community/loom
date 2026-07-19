@@ -140,14 +140,29 @@ onUnmounted(() => {
     <button
       type="button"
       class="flex shrink-0 cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 text-faint hover:bg-subtle hover:text-fg focus:outline-none focus-visible:ring-1 focus-visible:ring-accent disabled:cursor-wait disabled:opacity-60"
-      :title="busy ? 'Uploading scratch file(s)…' : 'Attach a file — the agent sees it as scratch/<name> (or drop one anywhere on the page)'"
+      :title="
+        busy
+          ? 'Uploading scratch file(s)…'
+          : 'Attach a file — the agent sees it as scratch/<name> (or drop one anywhere on the page)'
+      "
       :aria-label="busy ? 'Uploading scratch file(s)' : 'Attach a scratch file'"
       :disabled="busy"
       @click="fileInput?.click()"
     >
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-        stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+      <svg
+        width="13"
+        height="13"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path
+          d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"
+        />
       </svg>
       <span v-if="busy" class="text-2xs text-faint">Uploading…</span>
       <span v-else-if="files.length" class="pill">{{ files.length }}</span>

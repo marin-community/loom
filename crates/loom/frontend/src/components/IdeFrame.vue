@@ -80,8 +80,8 @@ onMounted(probe);
         <template v-else-if="state === 'unavailable'">
           <p class="font-medium text-fg">code-server isn't installed</p>
           <p class="max-w-sm text-muted">
-            The embedded editor needs <code class="font-mono text-fg">code-server</code> on the
-            loom host. Install it and reopen this panel.
+            The embedded editor needs <code class="font-mono text-fg">code-server</code> on the loom
+            host. Install it and reopen this panel.
           </p>
           <code class="rounded bg-subtle px-2 py-1 font-mono text-xs text-muted"
             >curl -fsSL https://code-server.dev/install.sh | sh</code

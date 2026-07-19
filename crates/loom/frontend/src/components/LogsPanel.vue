@@ -229,9 +229,15 @@ onUnmounted(() => {
       v-if="status"
       class="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border border-line bg-surface px-3 py-2 font-mono text-2xs text-muted"
     >
-      <span>v<span class="text-accent">{{ status.version }}</span></span>
-      <span>pid <span class="text-accent">{{ status.pid }}</span></span>
-      <span>up <span class="text-accent">{{ uptime }}</span></span>
+      <span
+        >v<span class="text-accent">{{ status.version }}</span></span
+      >
+      <span
+        >pid <span class="text-accent">{{ status.pid }}</span></span
+      >
+      <span
+        >up <span class="text-accent">{{ uptime }}</span></span
+      >
       <span :title="status.started_at">started {{ shortTime(status.started_at) }}</span>
     </div>
 
@@ -260,14 +266,13 @@ onUnmounted(() => {
               <td colspan="5" class="px-2 py-2 text-muted">No background tasks yet.</td>
             </tr>
             <tr v-for="t in tasks" :key="t.id" class="border-t border-line/40 align-top">
-              <td class="px-2 py-1 font-semibold" :class="taskStateClass(t.state)">{{ t.state }}</td>
+              <td class="px-2 py-1 font-semibold" :class="taskStateClass(t.state)">
+                {{ t.state }}
+              </td>
               <td class="whitespace-nowrap px-2 py-1 text-muted">{{ t.kind }}</td>
               <td class="px-2 py-1 break-all">{{ t.label }}</td>
               <td class="px-2 py-1 break-all text-muted">{{ t.detail || '—' }}</td>
-              <td
-                class="whitespace-nowrap px-2 py-1 text-faint"
-                :title="t.started_at"
-              >
+              <td class="whitespace-nowrap px-2 py-1 text-faint" :title="t.started_at">
                 {{ shortTime(t.started_at) }}
               </td>
             </tr>
@@ -280,8 +285,8 @@ onUnmounted(() => {
     <h2 class="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">Server logs</h2>
     <p class="mb-3 text-xs text-faint">
       The running server's log stream, live. The same lines go to
-      <code>docker compose logs</code>; this is a read-only mirror so you can debug from the browser.
-      May contain secrets — visible to approved operators only.
+      <code>docker compose logs</code>; this is a read-only mirror so you can debug from the
+      browser. May contain secrets — visible to approved operators only.
     </p>
 
     <!-- Controls -->

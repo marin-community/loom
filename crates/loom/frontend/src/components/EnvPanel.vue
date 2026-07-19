@@ -21,8 +21,7 @@ const newValue = ref('');
 // server enforces, mirrored here so the Add button can disable on an obviously
 // bad name (bad shape, or a name that would shadow loom's WEAVER_*/LOOM_ env)
 // before the round-trip.
-const nameOk = (n: string) =>
-  /^[A-Za-z_][A-Za-z0-9_]*$/.test(n) && !/^(WEAVER_|LOOM_)/.test(n);
+const nameOk = (n: string) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(n) && !/^(WEAVER_|LOOM_)/.test(n);
 const newNameValid = computed(() => nameOk(newName.value.trim()));
 
 function sync(list: EnvVar[]) {
@@ -141,7 +140,10 @@ const add = () =>
           </button>
         </div>
       </div>
-      <p v-if="newName.trim() && !newNameValid" class="border-b border-line px-3 py-2 text-2xs text-block">
+      <p
+        v-if="newName.trim() && !newNameValid"
+        class="border-b border-line px-3 py-2 text-2xs text-block"
+      >
         A name must start with a letter or underscore and contain only letters, digits, and
         underscores, and cannot start with <code>WEAVER_</code> or <code>LOOM_</code>.
       </p>

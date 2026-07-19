@@ -1,6 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted } from 'vue';
-import type { Session, WeaverEvent, Issue, IssueRefStatus, ArtifactView, ArtifactMeta } from '../types';
+import type {
+  Session,
+  WeaverEvent,
+  Issue,
+  IssueRefStatus,
+  ArtifactView,
+  ArtifactMeta,
+} from '../types';
 import { getArtifact, getArtifacts } from '../api';
 import { timeAgo } from '../lib/time';
 import { effectiveAttention, lifecycleDot, messageOf } from '../lib/sessionState';
@@ -152,10 +159,7 @@ watch(
   <div class="space-y-5">
     <!-- State — the synopsis: what the agent last said, when, at what level.
          The one line to read when coming back to a session. -->
-    <section
-      class="rounded border border-line bg-surface px-4 py-3"
-      data-testid="session-state"
-    >
+    <section class="rounded border border-line bg-surface px-4 py-3" data-testid="session-state">
       <div class="flex items-baseline gap-2">
         <span
           class="h-2 w-2 shrink-0 self-center rounded-full"
@@ -214,7 +218,8 @@ watch(
             target="_blank"
             rel="noopener"
             class="min-w-0 truncate text-sm text-accent hover:underline"
-          >{{ l.label }}</a>
+            >{{ l.label }}</a
+          >
           <span class="ml-auto shrink-0 text-2xs text-faint">{{ l.source }}</span>
         </li>
       </ul>
@@ -238,23 +243,14 @@ watch(
         </router-link>
       </header>
       <div data-testid="session-goal" class="px-1 py-1">
-        <MarkdownView
-          :id="ws.id"
-          path="goal.md"
-          :source="ws.branch.goal"
-          :refs="goalRefs"
-        />
+        <MarkdownView :id="ws.id" path="goal.md" :source="ws.branch.goal" :refs="goalRefs" />
       </div>
     </section>
 
     <!-- Plan — the pinned well-known `plan` artifact. Markdown renders through
          MarkdownView (projection included); a non-markdown plan shows its
          source. Absent → nothing. -->
-    <section
-      v-if="plan"
-      class="rounded border border-line bg-surface"
-      data-testid="session-plan"
-    >
+    <section v-if="plan" class="rounded border border-line bg-surface" data-testid="session-plan">
       <header class="flex flex-wrap items-center gap-2 border-b border-line px-4 py-2.5">
         <div class="text-2xs font-semibold uppercase tracking-wider text-muted">Plan</div>
         <span class="text-sm font-medium text-fg">{{ plan.meta.title || 'plan' }}</span>
@@ -273,7 +269,9 @@ watch(
         :source="plan.content"
         :refs="plan.refs.issues"
       />
-      <pre v-else class="m-4 overflow-auto rounded bg-code p-3 text-xs text-code-fg">{{ plan.content }}</pre>
+      <pre v-else class="m-4 overflow-auto rounded bg-code p-3 text-xs text-code-fg">{{
+        plan.content
+      }}</pre>
     </section>
 
     <!-- The PR snapshot lives as a small link in the session header now (one

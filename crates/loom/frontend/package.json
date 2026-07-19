@@ -3,7 +3,9 @@
   "scripts": {
     "build": "rspack build --mode production",
     "dev": "rspack serve --mode development",
-    "typecheck": "vue-tsc --noEmit"
+    "typecheck": "vue-tsc --noEmit",
+    "format": "prettier --write src",
+    "format:check": "prettier --check src"
   },
   "dependencies": {
     "@fontsource-variable/ibm-plex-sans": "^5.2.8",
@@ -36,6 +38,7 @@
     "@types/markdown-it": "^14.1.2",
     "postcss": "^8.5.15",
     "postcss-loader": "^8.2.1",
+    "prettier": "^3.9.5",
     "rspack-vue-loader": "^17.5.0",
     "tailwindcss": "^4.2.1",
     "typescript": "^5.9.3",

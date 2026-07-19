@@ -204,7 +204,9 @@ onMounted(() => {
     <!-- Identity -->
     <section>
       <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-1.5">Signed in</h2>
-      <div class="flex items-center justify-between rounded-md border border-line bg-surface px-3 py-2.5">
+      <div
+        class="flex items-center justify-between rounded-md border border-line bg-surface px-3 py-2.5"
+      >
         <div>
           <p class="text-sm font-medium">{{ me.username }}</p>
           <p class="text-2xs text-faint">
@@ -259,7 +261,8 @@ onMounted(() => {
           A fine-grained token your sessions use for <code class="font-mono">git push</code> and
           <code class="font-mono">gh</code>, so your agents act as you.
           <a class="text-accent underline" :href="PAT_CREATE_URL" target="_blank" rel="noopener">
-            Create one</a>
+            Create one</a
+          >
           with <span class="font-medium">Contents</span> and
           <span class="font-medium">Pull requests</span> read/write on the repos you work in.
           <span :class="ghTokenStatus?.set ? 'text-accent' : 'text-faint'">
@@ -296,9 +299,7 @@ onMounted(() => {
 
     <!-- GitHub App -->
     <section>
-      <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-1.5">
-        GitHub App
-      </h2>
+      <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-1.5">GitHub App</h2>
       <div class="rounded-md border border-line bg-surface px-3 py-2.5">
         <!-- App identity: one App powers both sign-in and the @loom trigger. -->
         <div v-if="gh?.app_configured" class="mb-2">
@@ -316,8 +317,8 @@ onMounted(() => {
             <span class="text-faint"> · App ID {{ gh.app_id }}</span>
           </p>
           <p class="text-xs text-muted mt-0.5">
-            One GitHub App powers both sign-in and the <code class="font-mono">@loom</code>
-            trigger. Manage it with <code class="font-mono">loom setup github-app</code>.
+            One GitHub App powers both sign-in and the <code class="font-mono">@loom</code> trigger.
+            Manage it with <code class="font-mono">loom setup github-app</code>.
           </p>
         </div>
         <p v-else class="text-xs text-muted mb-2">
@@ -336,7 +337,8 @@ onMounted(() => {
           <template v-if="gh?.app_configured">The same App's</template>
           <template v-else>The</template>
           OAuth client, with callback
-          <code class="font-mono">{{ gh?.callback_path }}</code>. Powers "Continue with GitHub".
+          <code class="font-mono">{{ gh?.callback_path }}</code
+          >. Powers "Continue with GitHub".
           <span :class="gh?.configured ? 'text-accent' : 'text-faint'">
             {{ gh?.configured ? 'Configured.' : 'Not configured.' }}
           </span>
@@ -370,8 +372,8 @@ onMounted(() => {
         Approved users
       </h2>
       <p class="text-2xs text-faint mb-1.5">
-        Everyone allowed near loom. An approved user can sign in here, and — if their
-        GitHub login is on file — trigger a session by commenting
+        Everyone allowed near loom. An approved user can sign in here, and — if their GitHub login
+        is on file — trigger a session by commenting
         <code class="font-mono">@loom</code> on a GitHub PR or issue.
       </p>
       <div class="overflow-hidden rounded-md border border-line bg-surface">

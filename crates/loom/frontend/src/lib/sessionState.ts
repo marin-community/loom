@@ -283,10 +283,7 @@ export function signalChips(s: Session): SignalChip[] {
 export function quietTags(s: Session): Tag[] {
   if (s.status === 'archived') return [];
   return (s.branch.tags ?? []).filter(
-    (t) =>
-      severityOf(t.value) === 0 &&
-      t.key !== IDLE_KEY &&
-      !BOOKKEEPING_KEYS.includes(t.key),
+    (t) => severityOf(t.value) === 0 && t.key !== IDLE_KEY && !BOOKKEEPING_KEYS.includes(t.key),
   );
 }
 
@@ -329,9 +326,9 @@ export function idleTag(s: Session): Tag | null {
 // "Waiting for input" slab. Returns a glyph + short label; glyphs are plain
 // unicode (offline-safe, no icon dependency).
 export interface ConvState {
-  glyph: string;   // ● / ▶ / ✓ / ◦ — BMP geometric chars only (emoji like the
-                   // hourglass render as tofu in the system sans/mono stacks)
-  label: string;   // e.g. "Blocked — needs input"
+  glyph: string; // ● / ▶ / ✓ / ◦ — BMP geometric chars only (emoji like the
+  // hourglass render as tofu in the system sans/mono stacks)
+  label: string; // e.g. "Blocked — needs input"
   tone: 'block' | 'attn' | 'ok' | 'info' | 'muted'; // which token family colors it
 }
 

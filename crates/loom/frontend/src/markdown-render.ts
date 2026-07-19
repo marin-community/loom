@@ -116,7 +116,11 @@ function walk(tokens: Token[], ctx: RenderCtx): Child[] {
     // strong, em, link, …).
     if (tok.nesting === 1) {
       const hidden = tok.hidden === true;
-      stack.push({ tag: hidden ? null : tok.tag, props: hidden ? {} : elementProps(tok), children: [] });
+      stack.push({
+        tag: hidden ? null : tok.tag,
+        props: hidden ? {} : elementProps(tok),
+        children: [],
+      });
     } else if (tok.nesting === -1) {
       const frame = stack.pop();
       if (!frame) continue;

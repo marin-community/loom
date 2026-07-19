@@ -20,7 +20,10 @@ const MEANINGFUL = new Set([
 
 const showAll = ref(false);
 const meaningfulEvents = computed(() =>
-  props.events.filter((e) => MEANINGFUL.has(e.kind)).slice().reverse(),
+  props.events
+    .filter((e) => MEANINGFUL.has(e.kind))
+    .slice()
+    .reverse(),
 );
 const visibleEvents = computed(() =>
   showAll.value ? meaningfulEvents.value : meaningfulEvents.value.slice(0, 6),
@@ -29,13 +32,11 @@ const visibleEvents = computed(() =>
 
 <template>
   <div>
-    <div class="mb-2 text-2xs font-semibold uppercase tracking-wider text-muted">Recent activity</div>
+    <div class="mb-2 text-2xs font-semibold uppercase tracking-wider text-muted">
+      Recent activity
+    </div>
     <ul class="fade-in space-y-1 text-sm">
-      <li
-        v-for="ev in visibleEvents"
-        :key="ev.id"
-        class="flex gap-2"
-      >
+      <li v-for="ev in visibleEvents" :key="ev.id" class="flex gap-2">
         <span class="shrink-0 font-mono text-xs text-faint">{{ ev.created_at.slice(11, 19) }}</span>
         <span class="text-muted">{{ format(ev) }}</span>
       </li>

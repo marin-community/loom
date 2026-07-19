@@ -56,15 +56,22 @@ const conflicting = computed(() => props.gh.mergeable === 'CONFLICTING');
 
 <template>
   <!-- Compact: a single tight line for the dashboard's far-right column. -->
-  <span v-if="compact" class="inline-flex items-center gap-1.5 text-xs" data-testid="github-compact">
+  <span
+    v-if="compact"
+    class="inline-flex items-center gap-1.5 text-xs"
+    data-testid="github-compact"
+  >
     <a
       :href="gh.pr_url"
       target="_blank"
       rel="noopener"
       class="font-mono text-accent hover:underline"
       @click.stop
-    >PR #{{ gh.pr_number }}</a>
-    <span :class="stateChip.cls" class="font-mono uppercase tracking-wide">{{ stateChip.label }}</span>
+      >PR #{{ gh.pr_number }}</a
+    >
+    <span :class="stateChip.cls" class="font-mono uppercase tracking-wide">{{
+      stateChip.label
+    }}</span>
     <span v-if="checksChip" :class="checksChip.cls" class="font-mono" title="CI checks">●</span>
   </span>
 

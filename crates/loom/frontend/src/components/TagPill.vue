@@ -22,12 +22,7 @@ const tooltip = computed(() => {
 </script>
 
 <template>
-  <span
-    class="tag-pill"
-    data-testid="tag-pill"
-    :data-tag-key="tag.key"
-    :title="tooltip"
-  >
+  <span class="tag-pill" data-testid="tag-pill" :data-tag-key="tag.key" :title="tooltip">
     <span class="truncate">{{ label }}</span>
     <button
       v-if="!readonly"

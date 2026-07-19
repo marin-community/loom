@@ -1,5 +1,14 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onActivated, onDeactivated, onUnmounted, nextTick } from 'vue';
+import {
+  ref,
+  computed,
+  watch,
+  onMounted,
+  onActivated,
+  onDeactivated,
+  onUnmounted,
+  nextTick,
+} from 'vue';
 import { useRouter } from 'vue-router';
 import { getArtifacts, getArtifact, putArtifact, deleteArtifact } from '../api';
 import type { ArtifactMeta, ArtifactView } from '../types';
@@ -251,7 +260,8 @@ function openStream() {
       // and snap a reader out of Source back to Preview. Only a genuinely newer
       // revision refreshes, and it keeps the current preview/source choice.
       if (d.rev != null && onLatest.value && view.value && d.rev <= view.value.meta.rev) return;
-      if (isActive.value) openArtifact(selected.value, undefined, { keepMode: true }).catch(() => {});
+      if (isActive.value)
+        openArtifact(selected.value, undefined, { keepMode: true }).catch(() => {});
       else pendingRefresh.value = true;
     }
   });
@@ -331,10 +341,7 @@ onUnmounted(() => {
 
     <div class="flex min-h-0 flex-1" :class="compact ? 'flex-col' : ''">
       <!-- List — a sidebar at full width, a dropdown in the narrow rail. -->
-      <div
-        v-if="!compact"
-        class="flex w-72 shrink-0 flex-col border-r border-line"
-      >
+      <div v-if="!compact" class="flex w-72 shrink-0 flex-col border-r border-line">
         <div
           class="border-b border-line px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-faint"
         >
@@ -371,10 +378,7 @@ onUnmounted(() => {
       </div>
 
       <!-- Compact list: a dropdown header for the rail. -->
-      <div
-        v-else
-        class="flex shrink-0 items-center gap-2 border-b border-line px-2 py-1.5 text-xs"
-      >
+      <div v-else class="flex shrink-0 items-center gap-2 border-b border-line px-2 py-1.5 text-xs">
         <span class="text-faint">Artifact</span>
         <select
           class="min-w-0 flex-1 rounded border border-line bg-surface px-1.5 py-0.5 text-xs text-fg"
@@ -423,7 +427,7 @@ onUnmounted(() => {
                 class="flex items-center overflow-hidden rounded border border-line"
               >
                 <button
-                  v-for="m in (['preview', 'source'] as const)"
+                  v-for="m in ['preview', 'source'] as const"
                   :key="m"
                   class="px-2 py-0.5"
                   :class="viewMode === m ? 'bg-subtle text-fg' : 'text-muted hover:bg-subtle/60'"

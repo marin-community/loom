@@ -66,9 +66,7 @@ function setFilter(f: AttentionFilter) {
 // so the list never reads as empty while archived rows exist.
 const showArchived = ref(false);
 
-const archivedCount = computed(
-  () => sessions.value.filter((s) => s.status === 'archived').length,
-);
+const archivedCount = computed(() => sessions.value.filter((s) => s.status === 'archived').length);
 
 // The archived-aware, filtered set to display (membership only — the tree below
 // imposes the order). Archived rows are hidden by default; a reveal chip brings
@@ -262,7 +260,7 @@ function onRowDragOver(rowId: string, e: DragEvent) {
   if (idx === -1) return;
   const anchor = below ? roots[idx + 1] : roots[idx];
   dropAtEnd.value = below && idx === roots.length - 1;
-  dropBeforeId.value = dropAtEnd.value ? '' : anchor?.id ?? '';
+  dropBeforeId.value = dropAtEnd.value ? '' : (anchor?.id ?? '');
 }
 
 function neighbourKey(root: Session | undefined): number | null {
@@ -289,10 +287,13 @@ async function commitReorder() {
   const kb = neighbourKey(below);
   // Midpoint, with a wide gap when dropping past an end so there's room to spare.
   const key =
-    ka !== null && kb !== null ? (ka + kb) / 2
-    : ka !== null ? ka + 1e9
-    : kb !== null ? kb - 1e9
-    : 0;
+    ka !== null && kb !== null
+      ? (ka + kb) / 2
+      : ka !== null
+        ? ka + 1e9
+        : kb !== null
+          ? kb - 1e9
+          : 0;
   const dragged = sessions.value.find((s) => s.id === id);
   const wasShelved = dragged ? shelved(dragged) : false;
   // Optimistic: reflect immediately, then persist.
@@ -390,9 +391,12 @@ async function handleCreated() {
       <!-- Attention filter: jump straight to the sessions that need a human.
            Each segment pairs a label with its count in a small pill so the
            number reads as a count, not a suffix glued to the word. -->
-      <div v-if="sessions.length" class="inline-flex overflow-hidden rounded border border-line text-xs">
+      <div
+        v-if="sessions.length"
+        class="inline-flex overflow-hidden rounded border border-line text-xs"
+      >
         <button
-          v-for="opt in (['all', 'attention', 'ok'] as const)"
+          v-for="opt in ['all', 'attention', 'ok'] as const"
           :key="opt"
           type="button"
           :data-testid="`filter-${opt}`"
@@ -410,7 +414,8 @@ async function handleCreated() {
               'rounded-full px-1.5 text-2xs leading-4',
               filter === opt ? 'bg-accent-fg/20 text-accent-fg' : 'bg-subtle text-faint',
             ]"
-          >{{ counts[opt] }}</span>
+            >{{ counts[opt] }}</span
+          >
         </button>
       </div>
 
@@ -442,12 +447,7 @@ async function handleCreated() {
       </button>
     </div>
 
-
-    <NewSessionDrawer
-      v-if="showForm"
-      @close="closeForm"
-      @created="handleCreated"
-    />
+    <NewSessionDrawer v-if="showForm" @close="closeForm" @created="handleCreated" />
 
     <div v-if="error" class="mb-4 text-sm text-block">
       <template v-if="tokenConfigWarning">
@@ -455,12 +455,12 @@ async function handleCreated() {
         <RouterLink
           class="text-accent underline"
           :to="{ path: '/settings', query: { tab: 'account' } }"
-        >Add your GitHub token</RouterLink>
+          >Add your GitHub token</RouterLink
+        >
         or configure
-        <RouterLink
-          class="text-accent underline"
-          :to="{ path: '/settings', query: { tab: 'env' } }"
-        >GH_TOKEN</RouterLink>
+        <RouterLink class="text-accent underline" :to="{ path: '/settings', query: { tab: 'env' } }"
+          >GH_TOKEN</RouterLink
+        >
         before creating an agent session.
       </template>
       <template v-else>{{ error }}</template>
@@ -537,7 +537,9 @@ async function handleCreated() {
           @dragstart="onDragStart(s.id, $event)"
           @dragend="onDragEnd"
           @click.prevent
-        >⠿</button>
+        >
+          ⠿
+        </button>
         <span v-else class="-ml-1 w-3 shrink-0" aria-hidden="true"></span>
 
         <!-- Tree gutter: threads a child session under the one that launched it.
@@ -611,10 +613,7 @@ async function handleCreated() {
                margin annotation; the goal is roman and quieter beneath it. On an
                attention row the goal steps up from faint to muted so the metadata
                doesn't recede next to the loud chip. -->
-          <p
-            v-if="messageOf(s)"
-            class="mt-0.5 truncate font-serif text-[13px] italic text-muted"
-          >
+          <p v-if="messageOf(s)" class="mt-0.5 truncate font-serif text-[13px] italic text-muted">
             {{ messageOf(s) }}
           </p>
           <p
@@ -639,14 +638,21 @@ async function handleCreated() {
             by <span class="font-mono">{{ s.created_by }}</span>
           </span>
           <!-- PR snapshot (if any) — a quiet link straight to the GitHub PR. -->
-          <GithubStatus v-if="s.branch.github" :gh="s.branch.github" compact class="relative z-10 mt-0.5 justify-end" />
+          <GithubStatus
+            v-if="s.branch.github"
+            :gh="s.branch.github"
+            compact
+            class="relative z-10 mt-0.5 justify-end"
+          />
           <router-link
             v-if="s.branch.open_issue_count"
             :to="`/s/${s.id}?tab=overview`"
             class="relative z-10 block font-mono text-2xs text-muted hover:text-accent"
             @click.stop
           >
-            {{ s.branch.open_issue_count }} open issue{{ s.branch.open_issue_count === 1 ? '' : 's' }}
+            {{ s.branch.open_issue_count }} open issue{{
+              s.branch.open_issue_count === 1 ? '' : 's'
+            }}
           </router-link>
           <span v-if="s.last_activity_at" class="mt-0.5 block font-mono text-2xs text-faint">
             {{ timeAgo(s.last_activity_at) }}
@@ -696,9 +702,15 @@ async function handleCreated() {
         class="flex w-full items-center gap-2 px-1 py-1.5 text-2xs font-medium uppercase tracking-wider text-faint transition-colors hover:text-muted"
         @click="parkedOpen = !parkedOpen"
       >
-        <span class="inline-block w-2 transition-transform" :class="parkedOpen || draggingId ? 'rotate-90' : ''">▸</span>
+        <span
+          class="inline-block w-2 transition-transform"
+          :class="parkedOpen || draggingId ? 'rotate-90' : ''"
+          >▸</span
+        >
         Parked
-        <span class="font-serif text-[11px] normal-case italic tracking-normal text-faint">resting — nothing for you</span>
+        <span class="font-serif text-[11px] normal-case italic tracking-normal text-faint"
+          >resting — nothing for you</span
+        >
         <span class="h-px flex-1 bg-line"></span>
         <span class="font-mono lowercase tracking-normal">{{ shelfCount }}</span>
       </button>
@@ -725,7 +737,9 @@ async function handleCreated() {
             @dragstart="onDragStart(s.id, $event)"
             @dragend="onDragEnd"
             @click.prevent
-          >⠿</button>
+          >
+            ⠿
+          </button>
           <span v-else class="-ml-1 w-3 shrink-0" aria-hidden="true"></span>
 
           <span
@@ -742,7 +756,9 @@ async function handleCreated() {
               >
                 {{ s.branch.title || s.branch.name }}
               </router-link>
-              <span class="meta-chip !text-[10px] uppercase tracking-wide text-info">{{ parkLabel(s) }}</span>
+              <span class="meta-chip !text-[10px] uppercase tracking-wide text-info">{{
+                parkLabel(s)
+              }}</span>
             </div>
             <p v-if="s.branch.goal" class="mt-0.5 truncate font-serif text-[13px] text-faint">
               {{ s.branch.goal }}
@@ -773,10 +789,15 @@ async function handleCreated() {
             class="relative z-10 mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-2xs text-muted opacity-0 transition-opacity hover:bg-subtle hover:text-fg focus-visible:opacity-100 group-hover:opacity-100"
             title="Return this session to the live list"
             @click.stop="setPark(s.id, 'active')"
-          >Keep live</button>
+          >
+            Keep live
+          </button>
         </li>
 
-        <li v-if="!shelfRows.length" class="px-3 py-4 text-center font-serif text-[13px] italic text-faint">
+        <li
+          v-if="!shelfRows.length"
+          class="px-3 py-4 text-center font-serif text-[13px] italic text-faint"
+        >
           Drop a session here to rest it.
         </li>
       </ul>

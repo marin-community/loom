@@ -101,7 +101,9 @@ function valueOf(settings: SettingView[], key: string, fallback: string): string
 export function resolveTerminalConfig(settings: SettingView[]): TerminalConfig {
   const themeToken = valueOf(settings, 'terminal.theme', DEFAULT_THEME);
   const fontToken = valueOf(settings, 'terminal.font', DEFAULT_FONT);
-  const fontSize = clampFontSize(Number(valueOf(settings, 'terminal.font_size', String(DEFAULT_FONT_SIZE))));
+  const fontSize = clampFontSize(
+    Number(valueOf(settings, 'terminal.font_size', String(DEFAULT_FONT_SIZE))),
+  );
   return {
     themeToken,
     theme: themeFor(themeToken),

@@ -433,7 +433,11 @@ function renderComposer(): VNode {
         ),
         h(
           'button',
-          { type: 'button', class: 'btn-secondary px-2 py-1 text-2xs', onClick: withStop(onCancel) },
+          {
+            type: 'button',
+            class: 'btn-secondary px-2 py-1 text-2xs',
+            onClick: withStop(onCancel),
+          },
           'Cancel',
         ),
       ]),
@@ -471,19 +475,27 @@ function renderOrphaned(): VNode {
             'div',
             { class: 'mt-1.5 space-y-2' },
             orphaned.value.map((t) =>
-              h('div', { key: t.id, class: 'rounded border border-line bg-subtle/40 p-2 text-xs' }, [
-                h('div', { class: 'truncate italic text-faint' }, `“${t.anchor.quote}”`),
-                h('div', { class: 'mt-0.5 truncate text-fg' }, t.comments[t.comments.length - 1]?.body),
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    class: 'btn-secondary mt-1 px-2 py-0.5 text-2xs',
-                    onClick: withStop(() => onResolve(t.id)),
-                  },
-                  'Resolve',
-                ),
-              ]),
+              h(
+                'div',
+                { key: t.id, class: 'rounded border border-line bg-subtle/40 p-2 text-xs' },
+                [
+                  h('div', { class: 'truncate italic text-faint' }, `“${t.anchor.quote}”`),
+                  h(
+                    'div',
+                    { class: 'mt-0.5 truncate text-fg' },
+                    t.comments[t.comments.length - 1]?.body,
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      class: 'btn-secondary mt-1 px-2 py-0.5 text-2xs',
+                      onClick: withStop(() => onResolve(t.id)),
+                    },
+                    'Resolve',
+                  ),
+                ],
+              ),
             ),
           )
         : null,

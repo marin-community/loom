@@ -79,9 +79,7 @@ async function invoke(verb: Parameters<typeof run>[0]) {
       >
         <span class="block text-xs font-medium">{{ isShelved ? 'Keep live' : 'Park' }}</span>
         <span class="block text-2xs text-faint">{{
-          isShelved
-            ? 'Return it to the live list'
-            : 'Rest it on the shelf — kept, not archived'
+          isShelved ? 'Return it to the live list' : 'Rest it on the shelf — kept, not archived'
         }}</span>
       </button>
       <button

@@ -35,9 +35,7 @@ const emit = defineEmits<{
   'update:effort': [string];
 }>();
 
-const selectedAgent = computed(() =>
-  props.agents.find((agent) => agent.kind === props.agentKind),
-);
+const selectedAgent = computed(() => props.agents.find((agent) => agent.kind === props.agentKind));
 
 function updateRawModel(e: Event) {
   emit('update:model', (e.target as HTMLInputElement).value);
@@ -83,8 +81,12 @@ function updateRawModel(e: Event) {
           </span>
         </span>
         <span v-if="showAgentCounts" class="mt-0.5 block text-xs text-faint">
-          {{ agentOption.models.length || 'Default' }} model{{ agentOption.models.length === 1 ? '' : 's' }}
-          <template v-if="agentOption.efforts.length">, {{ agentOption.efforts.length }} effort levels</template>
+          {{ agentOption.models.length || 'Default' }} model{{
+            agentOption.models.length === 1 ? '' : 's'
+          }}
+          <template v-if="agentOption.efforts.length"
+            >, {{ agentOption.efforts.length }} effort levels</template
+          >
         </span>
       </button>
     </div>
@@ -92,9 +94,7 @@ function updateRawModel(e: Event) {
     <div :class="choiceGridClass">
       <div>
         <div class="mb-1 flex items-center justify-between gap-2">
-          <label class="text-2xs font-semibold uppercase tracking-wider text-muted">
-            Model
-          </label>
+          <label class="text-2xs font-semibold uppercase tracking-wider text-muted"> Model </label>
           <code v-if="modelKey" class="truncate font-mono text-2xs text-faint">{{ modelKey }}</code>
         </div>
         <div class="flex flex-wrap gap-1.5">
@@ -138,10 +138,10 @@ function updateRawModel(e: Event) {
 
       <div>
         <div class="mb-1 flex items-center justify-between gap-2">
-          <label class="text-2xs font-semibold uppercase tracking-wider text-muted">
-            Effort
-          </label>
-          <code v-if="effortKey" class="truncate font-mono text-2xs text-faint">{{ effortKey }}</code>
+          <label class="text-2xs font-semibold uppercase tracking-wider text-muted"> Effort </label>
+          <code v-if="effortKey" class="truncate font-mono text-2xs text-faint">{{
+            effortKey
+          }}</code>
         </div>
         <div class="flex flex-wrap gap-1.5">
           <button

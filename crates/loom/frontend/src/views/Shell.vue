@@ -38,8 +38,8 @@ async function restart() {
         <h1 class="text-sm font-semibold text-fg">Shell</h1>
         <p class="text-xs text-muted">
           A login shell inside the container — for one-time setup like
-          <code class="rounded bg-code px-1 py-0.5 text-[11px]">gcloud auth login</code>.
-          It persists across restarts.
+          <code class="rounded bg-code px-1 py-0.5 text-[11px]">gcloud auth login</code>. It
+          persists across restarts.
         </p>
       </div>
       <button

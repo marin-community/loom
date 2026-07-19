@@ -87,14 +87,19 @@ onMounted(load);
     <p v-if="error" class="mb-3 text-sm text-block">{{ error }}</p>
 
     <!-- One-time secret: shown once, right after creation. -->
-    <div v-if="created" class="mb-3 rounded-md border border-accent bg-surface p-2.5" data-testid="new-token">
+    <div
+      v-if="created"
+      class="mb-3 rounded-md border border-accent bg-surface p-2.5"
+      data-testid="new-token"
+    >
       <p class="mb-2 text-xs font-medium text-accent">
         Copy this token now. It will not be shown again.
       </p>
       <div class="flex items-center gap-2">
-        <code class="min-w-0 flex-1 select-all break-all rounded bg-input px-2 py-1 font-mono text-xs">{{
-          created.token
-        }}</code>
+        <code
+          class="min-w-0 flex-1 select-all break-all rounded bg-input px-2 py-1 font-mono text-xs"
+          >{{ created.token }}</code
+        >
         <button class="btn-secondary px-2.5 py-1 text-xs" @click="copy">
           {{ copied ? 'Copied' : 'Copy' }}
         </button>
@@ -103,7 +108,9 @@ onMounted(load);
 
     <!-- Create form. -->
     <div class="mb-4 overflow-hidden rounded-md border border-line bg-surface">
-      <div class="grid grid-cols-1 gap-2 border-b border-line px-3 py-2.5 md:grid-cols-[minmax(0,1.4fr)_minmax(12rem,0.95fr)_auto] md:items-end">
+      <div
+        class="grid grid-cols-1 gap-2 border-b border-line px-3 py-2.5 md:grid-cols-[minmax(0,1.4fr)_minmax(12rem,0.95fr)_auto] md:items-end"
+      >
         <label class="flex flex-col gap-1 md:min-w-0">
           <span class="text-2xs text-muted">Name</span>
           <input

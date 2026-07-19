@@ -42,8 +42,14 @@ if command -v npm >/dev/null 2>&1; then
     npm --prefix "$frontend" install
   fi
   npm --prefix "$frontend" run typecheck
-  echo "✓ fmt + clippy + typecheck clean"
+  echo "▶ prettier --check ($frontend/src)"
+  if ! npm --prefix "$frontend" run format:check; then
+    echo >&2
+    echo "✗ frontend formatting check failed — run \`npm --prefix $frontend run format\`, then re-stage and commit." >&2
+    exit 1
+  fi
+  echo "✓ fmt + clippy + typecheck + prettier clean"
 else
-  echo "▶ vue-tsc typecheck — skipped (npm not found)"
+  echo "▶ vue-tsc typecheck + prettier — skipped (npm not found)"
   echo "✓ fmt + clippy clean"
 fi

@@ -138,7 +138,9 @@ async function run(dry: boolean) {
   busy.value = true;
   error.value = '';
   try {
-    const res = (await post(`/watches/${selected.value.id}/run`, { dry_run: dry })) as WatchRunResult;
+    const res = (await post(`/watches/${selected.value.id}/run`, {
+      dry_run: dry,
+    })) as WatchRunResult;
     lastRun.value = { outcome: res.outcome, summary: res.summary, dry };
     tab.value = 'activity';
     adopt((await get(`/watches/${selected.value.id}`)) as Watch);
@@ -241,7 +243,13 @@ const form = reactive({
   prompt: '',
   scopeAttention: '',
   repo: '',
-  capabilities: { mark: true, escalate: true, nudge: false, interrupt: false, launch: false } as Record<string, boolean>,
+  capabilities: {
+    mark: true,
+    escalate: true,
+    nudge: false,
+    interrupt: false,
+    launch: false,
+  } as Record<string, boolean>,
 });
 
 function resetForm() {
@@ -416,8 +424,7 @@ onActivated(() => {
         >
           <p class="mb-1 text-sm text-muted">No watches yet.</p>
           <p class="text-xs text-faint">
-            Builtins are seeded when the daemon starts; add a custom one with
-            “New watch”.
+            Builtins are seeded when the daemon starts; add a custom one with “New watch”.
           </p>
         </div>
         <ul v-else class="fade-in" data-testid="watch-list">
@@ -445,7 +452,9 @@ onActivated(() => {
                   data-testid="watch-active-dot"
                   :data-active="w.enabled ? 'true' : 'false'"
                 ></span>
-                <span class="min-w-0 flex-1 truncate text-sm font-semibold text-fg">{{ w.name }}</span>
+                <span class="min-w-0 flex-1 truncate text-sm font-semibold text-fg">{{
+                  w.name
+                }}</span>
                 <OutcomeBadge :outcome="w.last_outcome" />
               </span>
               <span class="mt-1 flex items-baseline gap-2 pl-4">
@@ -522,19 +531,31 @@ onActivated(() => {
             <label class="mb-1 block text-xs text-muted">Trigger — what wakes a round</label>
             <div class="mb-2 inline-flex overflow-hidden rounded border border-line text-xs">
               <button
-                v-for="k in (['auto', 'cron', 'every', 'on'] as const)"
+                v-for="k in ['auto', 'cron', 'every', 'on'] as const"
                 :key="k"
                 type="button"
                 class="border-l border-line px-3 py-1 first:border-l-0"
-                :class="form.triggerKind === k ? 'bg-accent text-accent-fg' : 'bg-input text-muted hover:bg-subtle'"
+                :class="
+                  form.triggerKind === k
+                    ? 'bg-accent text-accent-fg'
+                    : 'bg-input text-muted hover:bg-subtle'
+                "
                 @click="form.triggerKind = k"
               >
-                {{ k === 'auto' ? 'From script' : k === 'cron' ? 'Cron' : k === 'every' ? 'Every' : 'On events' }}
+                {{
+                  k === 'auto'
+                    ? 'From script'
+                    : k === 'cron'
+                      ? 'Cron'
+                      : k === 'every'
+                        ? 'Every'
+                        : 'On events'
+                }}
               </button>
             </div>
             <p v-if="form.triggerKind === 'auto'" class="text-xs text-faint">
-              Wakes on the events the script subscribes to (its manifest) — the
-              recommended default, so the script decides what it reacts to.
+              Wakes on the events the script subscribes to (its manifest) — the recommended default,
+              so the script decides what it reacts to.
             </p>
             <input
               v-else-if="form.triggerKind === 'cron'"
@@ -564,8 +585,8 @@ onActivated(() => {
                 Comma-separated trigger events:
                 <code>session.started/idle/exited/attention/stale</code>,
                 <code>triage.changed</code>,
-                <code>pr.opened/checks_red/checks_green/merged/review_changed</code>.
-                Append <code>=level</code> to filter (e.g. <code>session.attention=blocked</code>).
+                <code>pr.opened/checks_red/checks_green/merged/review_changed</code>. Append
+                <code>=level</code> to filter (e.g. <code>session.attention=blocked</code>).
               </p>
             </div>
           </div>
@@ -647,7 +668,8 @@ onActivated(() => {
                 v-if="isBuiltin(selected)"
                 class="meta-chip"
                 title="A stock program shipped with loom — disable it rather than delete it"
-              >builtin</span>
+                >builtin</span
+              >
               <OutcomeBadge :outcome="selected.last_outcome" />
               <div class="ml-auto flex items-center gap-2">
                 <label class="mr-1 flex items-center gap-2 text-xs text-muted">
@@ -687,12 +709,19 @@ onActivated(() => {
                 v-if="selected.trigger.repo || selected.scope.repo"
                 :title="selected.trigger.repo || selected.scope.repo"
                 class="meta-chip"
-              >📁 {{ repoLabel(selected.trigger.repo || selected.scope.repo || '') }}</span>
+                >📁 {{ repoLabel(selected.trigger.repo || selected.scope.repo || '') }}</span
+              >
               <span class="ml-auto font-mono text-2xs text-faint">
-                <span v-if="selected.last_run_at">last run {{ timeAgo(selected.last_run_at) }}</span>
+                <span v-if="selected.last_run_at"
+                  >last run {{ timeAgo(selected.last_run_at) }}</span
+                >
                 <span v-else>never run</span>
-                <span v-if="selected.enabled && selected.next_run_at"> · next {{ timeAgo(selected.next_run_at) }}</span>
-                <span v-if="selected.enabled && selected.wake_at"> · recheck {{ timeAgo(selected.wake_at) }}</span>
+                <span v-if="selected.enabled && selected.next_run_at">
+                  · next {{ timeAgo(selected.next_run_at) }}</span
+                >
+                <span v-if="selected.enabled && selected.wake_at">
+                  · recheck {{ timeAgo(selected.wake_at) }}</span
+                >
               </span>
             </div>
             <p v-if="programInfo" class="mt-2 max-w-3xl text-xs leading-relaxed text-faint">
@@ -702,14 +731,20 @@ onActivated(() => {
             <!-- Tabs. -->
             <div class="mt-3 flex gap-1" role="tablist">
               <button
-                v-for="t in ([['activity', 'Activity'], ['script', 'Script'], ['config', 'Config']] as const)"
+                v-for="t in [
+                  ['activity', 'Activity'],
+                  ['script', 'Script'],
+                  ['config', 'Config'],
+                ] as const"
                 :key="t[0]"
                 type="button"
                 role="tab"
                 :aria-selected="tab === t[0]"
                 :data-testid="`watch-tab-${t[0]}`"
                 class="rounded px-2.5 py-1 text-xs font-medium"
-                :class="tab === t[0] ? 'bg-subtle text-fg' : 'text-muted hover:bg-subtle/60 hover:text-fg'"
+                :class="
+                  tab === t[0] ? 'bg-subtle text-fg' : 'text-muted hover:bg-subtle/60 hover:text-fg'
+                "
                 @click="tab = t[0]"
               >
                 {{ t[1] }}
@@ -739,7 +774,9 @@ onActivated(() => {
               class="rounded border border-dashed border-line bg-surface p-6 text-center"
             >
               <p class="text-sm text-muted">No rounds yet.</p>
-              <p class="mt-1 text-xs text-faint">Run one now (or dry-run it) to populate the log.</p>
+              <p class="mt-1 text-xs text-faint">
+                Run one now (or dry-run it) to populate the log.
+              </p>
             </div>
 
             <ul v-else data-testid="watch-runs" class="space-y-2">
@@ -758,16 +795,24 @@ onActivated(() => {
                   <div class="flex flex-wrap items-center gap-2">
                     <OutcomeBadge :outcome="r.outcome" />
                     <span class="text-sm text-muted">{{ r.summary || 'No summary.' }}</span>
-                    <span class="ml-auto font-mono text-xs text-faint">{{ timeAgo(r.started_at) }}</span>
+                    <span class="ml-auto font-mono text-xs text-faint">{{
+                      timeAgo(r.started_at)
+                    }}</span>
                   </div>
                   <div class="mt-1 flex flex-wrap items-center gap-2 text-xs text-faint">
-                    <span class="meta-chip">{{ r.trigger_reason || r.trigger_event || 'manual' }}</span>
-                    <span v-if="r.duration_ms != null" class="meta-chip">{{ formatMs(r.duration_ms) }}</span>
+                    <span class="meta-chip">{{
+                      r.trigger_reason || r.trigger_event || 'manual'
+                    }}</span>
+                    <span v-if="r.duration_ms != null" class="meta-chip">{{
+                      formatMs(r.duration_ms)
+                    }}</span>
                     <span v-if="r.exit_code != null" class="meta-chip">exit {{ r.exit_code }}</span>
                     <span v-if="r.actions && r.actions.length">
                       {{ r.actions.length }} action{{ r.actions.length === 1 ? '' : 's' }}
                     </span>
-                    <span class="ml-auto text-accent">{{ expanded[r.id] ? 'Hide' : 'Details' }}</span>
+                    <span class="ml-auto text-accent">{{
+                      expanded[r.id] ? 'Hide' : 'Details'
+                    }}</span>
                   </div>
                 </button>
 
@@ -783,27 +828,34 @@ onActivated(() => {
                   >
                     <li v-for="(a, j) in r.actions" :key="j" class="flex items-start gap-2 text-xs">
                       <span class="meta-chip shrink-0">
-                        <span v-if="a.would" class="text-faint">would </span>{{ a.action || a.would || 'action' }}
+                        <span v-if="a.would" class="text-faint">would </span
+                        >{{ a.action || a.would || 'action' }}
                         <span v-if="a.level" class="text-faint">={{ a.level }}</span>
                       </span>
-                      <span v-if="a.session" class="shrink-0 font-mono text-faint">{{ a.session }}</span>
+                      <span v-if="a.session" class="shrink-0 font-mono text-faint">{{
+                        a.session
+                      }}</span>
                       <span class="min-w-0 text-muted">{{ a.note || a.text || '' }}</span>
                     </li>
                   </ul>
 
                   <div v-if="r.stdout">
-                    <h3 class="mb-1 text-2xs font-semibold uppercase tracking-wider text-faint">stdout</h3>
+                    <h3 class="mb-1 text-2xs font-semibold uppercase tracking-wider text-faint">
+                      stdout
+                    </h3>
                     <pre
                       data-testid="watch-run-stdout"
                       class="max-h-64 overflow-auto whitespace-pre-wrap rounded bg-input p-2 font-mono text-xs"
-                    >{{ r.stdout }}</pre>
+                      >{{ r.stdout }}</pre>
                   </div>
                   <div v-if="r.stderr">
-                    <h3 class="mb-1 text-2xs font-semibold uppercase tracking-wider text-faint">stderr</h3>
+                    <h3 class="mb-1 text-2xs font-semibold uppercase tracking-wider text-faint">
+                      stderr
+                    </h3>
                     <pre
                       data-testid="watch-run-stderr"
                       class="max-h-64 overflow-auto whitespace-pre-wrap rounded bg-input p-2 font-mono text-xs text-block"
-                    >{{ r.stderr }}</pre>
+                      >{{ r.stderr }}</pre>
                   </div>
 
                   <p
@@ -821,26 +873,22 @@ onActivated(() => {
           <div v-else-if="tab === 'script'" class="p-5">
             <template v-if="programInfo">
               <p class="mb-2 text-xs text-faint">
-                <span class="font-mono">{{ programInfo.program }}</span> —
-                {{ programInfo.title }}. A stock script shipped inside loom; the
-                source is read-only. Start a custom watch from a copy with
-                <code>loom watch new &lt;name&gt;</code>.
+                <span class="font-mono">{{ programInfo.program }}</span> — {{ programInfo.title }}.
+                A stock script shipped inside loom; the source is read-only. Start a custom watch
+                from a copy with <code>loom watch new &lt;name&gt;</code>.
               </p>
               <pre
                 data-testid="watch-script"
                 class="overflow-auto rounded border border-line bg-input p-3 font-mono text-xs leading-relaxed"
-              >{{ programInfo.source }}</pre>
+                >{{ programInfo.source }}</pre>
             </template>
-            <div
-              v-else
-              class="rounded border border-dashed border-line bg-surface p-6 text-center"
-            >
+            <div v-else class="rounded border border-dashed border-line bg-surface p-6 text-center">
               <p class="text-sm text-muted">
                 Custom program: <span class="font-mono">{{ selected.program }}</span>
               </p>
               <p class="mt-1 text-xs text-faint">
-                The script lives on the server's disk; edit it there — each round
-                runs the file as it is on disk.
+                The script lives on the server's disk; edit it there — each round runs the file as
+                it is on disk.
               </p>
             </div>
           </div>
@@ -892,7 +940,9 @@ onActivated(() => {
                 <dt class="pt-1 text-faint">Capabilities</dt>
                 <dd>
                   <div v-if="!editing" class="flex flex-wrap gap-1.5">
-                    <span v-for="c in selected.capabilities" :key="c" class="meta-chip">{{ c }}</span>
+                    <span v-for="c in selected.capabilities" :key="c" class="meta-chip">{{
+                      c
+                    }}</span>
                   </div>
                   <div v-else class="flex flex-wrap gap-3">
                     <label
@@ -963,20 +1013,22 @@ onActivated(() => {
 
             <!-- Warm session: its live terminal when warm mode is on. -->
             <section v-if="selected.warm_session_id" class="mt-5" data-testid="watch-warm-terminal">
-              <h3 class="mb-2 text-2xs font-semibold uppercase tracking-wider text-muted">Warm session</h3>
+              <h3 class="mb-2 text-2xs font-semibold uppercase tracking-wider text-muted">
+                Warm session
+              </h3>
               <AgentTerminal :id="selected.warm_session_id" />
             </section>
             <section v-else class="mt-5 rounded border border-dashed border-line bg-surface p-4">
-              <h3 class="mb-1 text-2xs font-semibold uppercase tracking-wider text-muted">Warm session</h3>
+              <h3 class="mb-1 text-2xs font-semibold uppercase tracking-wider text-muted">
+                Warm session
+              </h3>
               <p v-if="selected.warm" class="text-xs text-faint" data-testid="watch-warm-pending">
-                Warm mode is on. The engine brings up a persistent session on the
-                next round; its live terminal appears here, and it carries memory
-                from one round to the next.
+                Warm mode is on. The engine brings up a persistent session on the next round; its
+                live terminal appears here, and it carries memory from one round to the next.
               </p>
               <p v-else class="text-xs text-faint" data-testid="watch-warm-off">
-                Each round runs fresh. Turn on warm mode (set <code>params.warm</code>)
-                to keep one persistent session with across-round memory — its
-                terminal lives here.
+                Each round runs fresh. Turn on warm mode (set <code>params.warm</code>) to keep one
+                persistent session with across-round memory — its terminal lives here.
               </p>
             </section>
 
