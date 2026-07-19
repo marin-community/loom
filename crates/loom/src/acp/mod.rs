@@ -58,7 +58,7 @@ use wire::{
 };
 
 // ---------------------------------------------------------------------------
-// Public surface (phase 4 builds on this)
+// Public surface
 // ---------------------------------------------------------------------------
 
 /// How to open the ACP session at [`start`]: a fresh `session/new`, or a
@@ -146,7 +146,8 @@ impl AcpHandle {
             })
             .await
             .map_err(|_| anyhow!("acp task is gone"))?;
-        rx.await.map_err(|_| anyhow!("acp task dropped the reply"))
+        rx.await
+            .map_err(|_| anyhow!("acp task dropped the reply"))?
     }
 
     /// Interrupt the in-flight turn (`session/cancel`).
@@ -333,7 +334,7 @@ enum Command {
     Prompt {
         text: String,
         by: Option<String>,
-        reply: oneshot::Sender<PromptAck>,
+        reply: oneshot::Sender<Result<PromptAck>>,
     },
     Cancel {
         reply: oneshot::Sender<Result<()>>,
@@ -516,6 +517,9 @@ struct Task {
 
     highest_seq: u64,
     acked: u64,
+    /// Latched when a journal write fails: the ack watermark freezes (so the
+    /// un-journaled frames replay after a restart) and the failure is logged.
+    journal_failed: bool,
 }
 
 impl Task {
@@ -548,6 +552,7 @@ impl Task {
             load_session_cap: false,
             highest_seq: 0,
             acked: 0,
+            journal_failed: false,
         }
     }
 
@@ -595,6 +600,7 @@ impl Task {
             load_session_cap: false,
             highest_seq: session.acp_ack_seq.max(0) as u64,
             acked: session.acp_ack_seq.max(0) as u64,
+            journal_failed: false,
         })
     }
 
@@ -1041,7 +1047,8 @@ impl Task {
             }
         }
 
-        // Policy: auto-answer under bypass mode (or when there is a lone default).
+        // Policy: auto-answer under bypass mode; every other mode leaves the
+        // request pending for the REST route.
         let bypass = self.current_mode.as_deref() == Some("bypassPermissions");
         if bypass {
             if let Some(opt) = auto_choice(&params.options) {
@@ -1087,17 +1094,21 @@ impl Task {
         match cmd {
             Command::Prompt { text, by, reply } => {
                 if self.turn_live {
-                    let _ = session::append_pending_prompt(&self.db, &self.session_id, &text).await;
-                    let _ = reply.send(PromptAck {
-                        queued: true,
-                        turn: Some(self.current_turn),
-                    });
+                    // A failed queue write must surface — a 202 that silently
+                    // dropped the prompt would be worse than an error.
+                    let ack = session::append_pending_prompt(&self.db, &self.session_id, &text)
+                        .await
+                        .map(|_| PromptAck {
+                            queued: true,
+                            turn: Some(self.current_turn),
+                        });
+                    let _ = reply.send(ack);
                 } else {
-                    let _ = self.start_turn(text, by).await;
-                    let _ = reply.send(PromptAck {
+                    let ack = self.start_turn(text, by).await.map(|_| PromptAck {
                         queued: false,
                         turn: Some(self.current_turn),
                     });
+                    let _ = reply.send(ack);
                 }
             }
             Command::Cancel { reply } => {
@@ -1178,7 +1189,7 @@ impl Task {
         let turn = self.current_turn;
         let seq = self.next_seq;
         self.next_seq += 1;
-        let _ = chat::insert(&self.db, &self.session_id, turn, seq, kind, &payload).await;
+        let inserted = chat::insert(&self.db, &self.session_id, turn, seq, kind, &payload).await;
         let view = ChatBlockView {
             turn,
             seq,
@@ -1186,6 +1197,14 @@ impl Task {
             payload,
             created_at: now_iso(),
         };
+        if let Err(e) = inserted {
+            // The block never became durable: freeze the ack watermark (its
+            // frames must replay after a restart) and don't announce it.
+            tracing::error!(session = %self.session_id, turn, seq, kind, error = %e,
+                "chat journal write failed; freezing ack watermark");
+            self.journal_failed = true;
+            return view;
+        }
         self.emit("block", serde_json::to_value(&view).unwrap_or(Value::Null));
         view
     }
@@ -1214,6 +1233,9 @@ impl Task {
     }
 
     async fn maybe_ack(&mut self) -> Result<()> {
+        if self.journal_failed {
+            return Ok(());
+        }
         let w = self.safe_watermark();
         if w > self.acked {
             self.stream.ack(w).await?;
