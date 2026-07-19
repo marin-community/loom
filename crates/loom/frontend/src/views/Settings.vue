@@ -88,23 +88,8 @@ const categories: CategoryItem[] = [
   },
 ];
 
-type AgentSettingGroup = 'session';
-
-const agentGroups: Record<AgentSettingGroup, { agent: string; model: string; effort: string }> = {
-  session: { agent: 'agent.default', model: 'agent.model', effort: 'agent.effort' },
-};
-
-const agentProfiles: {
-  id: AgentSettingGroup;
-  title: string;
-  note: string;
-}[] = [
-  {
-    id: 'session',
-    title: 'Session default runtime',
-    note: 'Used when a new work session does not specify an agent.',
-  },
-];
+const agentKeys = { agent: 'agent.default', model: 'agent.model', effort: 'agent.effort' };
+const agentProfileTitle = 'Session default runtime';
 
 function categoryFromQuery(q: unknown): Category {
   return categories.some((item) => item.id === q) ? (q as Category) : 'agents';
@@ -176,38 +161,32 @@ function availableAgents(): AgentMetadata[] {
   return agents.value;
 }
 
-function selectedAgent(group: AgentSettingGroup): AgentMetadata | undefined {
-  const keys = agentGroups[group];
-  const kind = drafts.value[keys.agent];
+function selectedAgent(): AgentMetadata | undefined {
+  const kind = drafts.value[agentKeys.agent];
   return availableAgents().find((agent) => agent.kind === kind);
 }
 
-function sanitizeAgentDraft(group: AgentSettingGroup) {
-  const keys = agentGroups[group];
+function sanitizeAgentDraft() {
   const choices = availableAgents();
   if (!choices.length) return;
-  if (!choices.some((agent) => agent.kind === drafts.value[keys.agent])) {
-    drafts.value[keys.agent] = choices[0].kind;
+  if (!choices.some((agent) => agent.kind === drafts.value[agentKeys.agent])) {
+    drafts.value[agentKeys.agent] = choices[0].kind;
   }
-  const agent = selectedAgent(group);
+  const agent = selectedAgent();
   if (!agent) return;
   if (
-    drafts.value[keys.model] &&
+    drafts.value[agentKeys.model] &&
     !agent.accepts_raw_model &&
-    !agent.models.some((choice) => choice.id === drafts.value[keys.model])
+    !agent.models.some((choice) => choice.id === drafts.value[agentKeys.model])
   ) {
-    drafts.value[keys.model] = '';
+    drafts.value[agentKeys.model] = '';
   }
   if (
-    drafts.value[keys.effort] &&
-    !agent.efforts.some((choice) => choice.id === drafts.value[keys.effort])
+    drafts.value[agentKeys.effort] &&
+    !agent.efforts.some((choice) => choice.id === drafts.value[agentKeys.effort])
   ) {
-    drafts.value[keys.effort] = '';
+    drafts.value[agentKeys.effort] = '';
   }
-}
-
-function sanitizeAgentDrafts() {
-  sanitizeAgentDraft('session');
 }
 
 async function load() {
@@ -223,7 +202,7 @@ async function load() {
     agents.value = agentRes.agents;
     customAgents.value = agentRes.custom;
     drafts.value = Object.fromEntries(res.settings.map((s) => [s.key, s.value]));
-    sanitizeAgentDrafts();
+    sanitizeAgentDraft();
     error.value = '';
   } catch (e) {
     settings.value = [];
@@ -239,7 +218,7 @@ async function reloadAgents() {
     const res = await listAgents();
     agents.value = res.agents;
     customAgents.value = res.custom;
-    sanitizeAgentDrafts();
+    sanitizeAgentDraft();
   } catch (e) {
     error.value = (e as Error).message;
   }
@@ -264,7 +243,7 @@ function adopt(res: SettingsEnvelope, changedKeys: string[]) {
     const changed = res.settings.find((s) => s.key === changedKey);
     if (changed) drafts.value[changedKey] = changed.value;
   }
-  sanitizeAgentDrafts();
+  sanitizeAgentDraft();
 }
 
 function patchBody(keys: string[], reset = false): Record<string, string | null> {
@@ -292,22 +271,22 @@ async function resetKeys(keys: string[], label: string) {
 const saveSetting = (s: SettingView) => saveKeys([s.key], s.label);
 const resetSetting = (s: SettingView) => resetKeys([s.key], s.label);
 
-function profileKeys(group: AgentSettingGroup): string[] {
-  return Object.values(agentGroups[group]);
+function profileKeys(): string[] {
+  return Object.values(agentKeys);
 }
 
-function setAgent(group: AgentSettingGroup, kind: string) {
-  drafts.value[agentGroups[group].agent] = kind;
-  sanitizeAgentDraft(group);
+function setAgent(kind: string) {
+  drafts.value[agentKeys.agent] = kind;
+  sanitizeAgentDraft();
 }
 
-function setProfileChoice(group: AgentSettingGroup, key: 'model' | 'effort', value: string) {
-  drafts.value[agentGroups[group][key]] = value;
-  sanitizeAgentDraft(group);
+function setProfileChoice(key: 'model' | 'effort', value: string) {
+  drafts.value[agentKeys[key]] = value;
+  sanitizeAgentDraft();
 }
 
-function profileIsDefault(group: AgentSettingGroup): boolean {
-  return profileKeys(group).every((key) => setting(key)?.is_default);
+function profileIsDefault(): boolean {
+  return profileKeys().every((key) => setting(key)?.is_default);
 }
 
 function durationOptions(s: SettingView): { label: string; value: string }[] {
@@ -328,7 +307,7 @@ function durationOptions(s: SettingView): { label: string; value: string }[] {
   ];
 }
 
-watch(() => [drafts.value['agent.default'], agents.value.length], sanitizeAgentDrafts);
+watch(() => [drafts.value['agent.default'], agents.value.length], sanitizeAgentDraft);
 
 onMounted(load);
 </script>
@@ -387,23 +366,21 @@ onMounted(load);
 
         <div v-else-if="category === 'agents'" class="space-y-4">
           <AgentProfileEditor
-            v-for="profile in agentProfiles"
-            :key="profile.id"
-            :title="profile.title"
-            :note="profile.note"
-            :keys="agentGroups[profile.id]"
+            :title="agentProfileTitle"
+            note="Used when a new work session does not specify an agent."
+            :keys="agentKeys"
             :agents="availableAgents()"
-            :agent-kind="drafts[agentGroups[profile.id].agent] ?? ''"
-            :model="drafts[agentGroups[profile.id].model] ?? ''"
-            :effort="drafts[agentGroups[profile.id].effort] ?? ''"
-            :dirty="dirtyKeys(profileKeys(profile.id)).length > 0"
-            :is-default="profileIsDefault(profile.id)"
-            :busy="busy === profile.title"
-            @update-agent="(kind) => setAgent(profile.id, kind)"
-            @update-model="(value) => setProfileChoice(profile.id, 'model', value)"
-            @update-effort="(value) => setProfileChoice(profile.id, 'effort', value)"
-            @save="saveKeys(profileKeys(profile.id), profile.title)"
-            @reset="resetKeys(profileKeys(profile.id), profile.title)"
+            :agent-kind="drafts[agentKeys.agent] ?? ''"
+            :model="drafts[agentKeys.model] ?? ''"
+            :effort="drafts[agentKeys.effort] ?? ''"
+            :dirty="dirtyKeys(profileKeys()).length > 0"
+            :is-default="profileIsDefault()"
+            :busy="busy === agentProfileTitle"
+            @update-agent="setAgent"
+            @update-model="(value) => setProfileChoice('model', value)"
+            @update-effort="(value) => setProfileChoice('effort', value)"
+            @save="saveKeys(profileKeys(), agentProfileTitle)"
+            @reset="resetKeys(profileKeys(), agentProfileTitle)"
           />
           <CustomAgentsPanel :agents="customAgents" @reload="reloadAgents" />
         </div>
