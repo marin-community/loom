@@ -25,13 +25,28 @@ pub mod paths;
 pub mod protocol;
 pub mod supervisor;
 
-pub use client::{Attach, AttachInput, AttachOutput, Client};
+pub use client::{Attach, AttachInput, AttachOutput, Client, RelayEvent, RelayStream};
 pub use supervisor::{run as supervise, SupervisorConfig};
 
 use anyhow::{Context, Result};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Stdio;
+
+/// Which backend a supervisor runs. `Pty` is the historical terminal supervisor
+/// (a PTY + vt100 screen, raw-byte attach); `Relay` is the ACP frame relay
+/// (piped stdio, a durable on-disk frame spool, subscribe/ack/write). The two
+/// share the process scaffolding — detached spawn, spec over stdin, control
+/// socket, process-group kill — and differ only in what the core task owns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// PTY + vt100 screen (the default; what an omitted `mode` in the spec means).
+    #[default]
+    Pty,
+    /// Piped stdio + frame spool (ACP agents).
+    Relay,
+}
 
 /// Options for launching a session. Mirrors what loom passes to
 /// `backend::new_session` plus the agent environment.
@@ -48,6 +63,13 @@ pub struct LaunchOptions<'a> {
     pub env: &'a [(&'a str, &'a str)],
     pub cols: u16,
     pub rows: u16,
+    /// Which backend to run. [`Mode::Pty`] (the default) keeps the historical
+    /// terminal supervisor; [`Mode::Relay`] runs the ACP frame relay.
+    pub mode: Mode,
+    /// (Relay) Roll to a fresh spool segment once the active one exceeds this
+    /// many bytes. `None` uses the supervisor default (a few MiB). Exposed mainly
+    /// so tests can force rotation with a tiny value; ignored in PTY mode.
+    pub segment_max_bytes: Option<u64>,
     /// The supervisor binary to re-exec as `<bin> supervise <spec>`. `None` uses
     /// the current executable — correct when the caller *is* the `tapestry`
     /// binary (the standalone CLI). A host like loom, whose `current_exe` is
@@ -81,6 +103,8 @@ pub async fn spawn_detached(opts: &LaunchOptions<'_>) -> Result<()> {
         "env": opts.env,
         "cols": opts.cols,
         "rows": opts.rows,
+        "mode": opts.mode,
+        "segment_max_bytes": opts.segment_max_bytes,
     });
 
     let mut cmd = std::process::Command::new(&exe);
@@ -145,6 +169,14 @@ pub struct LaunchSpec {
     pub env: Vec<(String, String)>,
     pub cols: u16,
     pub rows: u16,
+    /// Backend mode. Absent in specs written before relay mode existed, so it
+    /// defaults to [`Mode::Pty`] — the historical behaviour, preserved for
+    /// back-compat.
+    #[serde(default)]
+    pub mode: Mode,
+    /// (Relay) Spool segment-rotation threshold in bytes; `None` = default.
+    #[serde(default)]
+    pub segment_max_bytes: Option<u64>,
 }
 
 impl From<LaunchSpec> for SupervisorConfig {
@@ -156,6 +188,8 @@ impl From<LaunchSpec> for SupervisorConfig {
             env: s.env,
             cols: s.cols,
             rows: s.rows,
+            mode: s.mode,
+            segment_max_bytes: s.segment_max_bytes,
         }
     }
 }

@@ -88,6 +88,8 @@ pub async fn new_session(
         env,
         cols: 80,
         rows: 24,
+        mode: tapestry::Mode::Pty,
+        segment_max_bytes: None,
         supervisor_bin: tapestry_bin().as_deref(),
     })
     .await;
@@ -96,6 +98,66 @@ pub async fn new_session(
         Err(e) => tracing::warn!(session = %name, error = %e, "failed to spawn terminal session"),
     }
     result
+}
+
+/// Create a detached **relay** session: the supervisor spawns `script` via
+/// `sh -c` in `cwd` over plain pipes (no PTY), spooling the child's stdout as
+/// newline-delimited frames for a subscriber to replay/stream. The seam for ACP
+/// agents; PTY sessions keep [`new_session`].
+///
+/// `env` is delivered out of band exactly as [`new_session`] does it, so secret
+/// values never touch argv. [`has_session`]/[`kill_session`] work unchanged for
+/// relay sessions (the control socket is the same).
+pub async fn new_relay_session(
+    name: &str,
+    script: &str,
+    env: &[(&str, &str)],
+    cwd: &std::path::Path,
+) -> Result<()> {
+    tracing::info!(session = %name, cwd = %cwd.display(), "spawning relay session");
+    let result = tapestry::spawn_detached(&tapestry::LaunchOptions {
+        name,
+        cwd,
+        script,
+        env,
+        cols: 80,
+        rows: 24,
+        mode: tapestry::Mode::Relay,
+        segment_max_bytes: None,
+        supervisor_bin: tapestry_bin().as_deref(),
+    })
+    .await;
+    match &result {
+        Ok(()) => tracing::info!(session = %name, "relay session spawned"),
+        Err(e) => tracing::warn!(session = %name, error = %e, "failed to spawn relay session"),
+    }
+    result
+}
+
+/// Subscribe to a relay session's frame stream from `cursor`: the returned
+/// [`tapestry::RelayStream`] replays every spooled frame with `seq > cursor`,
+/// then streams live frames, then a terminal `Exit`. Only one subscriber exists
+/// at a time — this evicts any previous one.
+pub async fn subscribe_relay(name: &str, cursor: u64) -> Result<tapestry::RelayStream> {
+    tapestry::Client::connect(name)
+        .await?
+        .subscribe(cursor)
+        .await
+}
+
+/// Append raw bytes to a relay session's child stdin (complete newline-terminated
+/// frames; the relay writes them through untouched).
+pub async fn relay_write(name: &str, bytes: &[u8]) -> Result<()> {
+    let mut c = tapestry::Client::connect(name).await?;
+    c.relay_write(bytes).await
+}
+
+/// Advance a relay session's retention watermark to `seq` — everything up to and
+/// including it has been durably processed, so fully-acked spool segments can be
+/// dropped.
+pub async fn relay_ack(name: &str, seq: u64) -> Result<()> {
+    let mut c = tapestry::Client::connect(name).await?;
+    c.relay_ack(seq).await
 }
 
 /// Render the session's screen to text; `history` extra scrollback lines.

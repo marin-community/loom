@@ -30,6 +30,8 @@ impl Harness {
             env: vec![],
             cols: 80,
             rows: 24,
+            mode: tapestry::Mode::Pty,
+            segment_max_bytes: None,
         };
         tokio::spawn(async move {
             let _ = tapestry::supervise(cfg).await;

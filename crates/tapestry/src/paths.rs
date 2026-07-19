@@ -27,6 +27,20 @@ pub fn socket_path(name: &str) -> PathBuf {
     run_dir().join(format!("{}.sock", sanitize(name)))
 }
 
+/// The relay frame-spool directory for a session — a directory of segment files
+/// (`<first-seq>.seg`) living beside the control socket. Only relay-mode
+/// supervisors create it; it outlives *client* restarts (not supervisor
+/// restarts), so the frames a dead subscriber missed can be replayed.
+pub fn spool_dir(name: &str) -> PathBuf {
+    run_dir().join(format!("{}.spool", sanitize(name)))
+}
+
+/// The relay stderr log for a session — the child's stderr, appended verbatim,
+/// beside the control socket.
+pub fn stderr_log_path(name: &str) -> PathBuf {
+    run_dir().join(format!("{}.stderr.log", sanitize(name)))
+}
+
 /// Reduce a session name to a single safe filename component: ASCII
 /// alphanumerics plus `-`/`_` survive, everything else (path separators, `.`,
 /// NUL, …) becomes `_`. This forecloses `../` traversal and absolute-path

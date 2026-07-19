@@ -86,6 +86,68 @@ impl Client {
         self.expect_ok().await
     }
 
+    /// (Relay) Append raw bytes to the child's stdin — a one-shot `WRITE` outside
+    /// a subscribe (the streaming equivalent is [`RelayStream::write`]). The
+    /// caller sends complete newline-terminated frames; the relay writes bytes
+    /// through untouched.
+    pub async fn relay_write(&mut self, bytes: &[u8]) -> Result<()> {
+        protocol::write_frame(&mut self.stream, &req::write(bytes.to_vec())).await?;
+        self.expect_ok().await
+    }
+
+    /// (Relay) Advance the retention watermark — everything up to and including
+    /// `seq` has been durably processed. A one-shot `ACK` outside a subscribe (the
+    /// streaming equivalent is [`RelayStream::ack`]).
+    pub async fn relay_ack(&mut self, seq: u64) -> Result<()> {
+        protocol::write_frame(&mut self.stream, &req::ack(seq)).await?;
+        self.expect_ok().await
+    }
+
+    /// (Relay) Switch this connection into a subscribe: the returned
+    /// [`RelayStream`] first replays every spooled frame with `seq > cursor`, then
+    /// streams live frames, and finally an [`RelayEvent::Exit`] once the child has
+    /// exited. Only one subscriber exists at a time — this evicts any previous one.
+    pub async fn subscribe(self, cursor: u64) -> Result<RelayStream> {
+        let mut stream = self.stream;
+        protocol::write_frame(&mut stream, &req::subscribe(cursor)).await?;
+        let (rd, wr) = stream.into_split();
+
+        // A background reader decodes FRAME/EXIT frames into a bounded channel;
+        // `send().await` back-pressures the socket (and thus the supervisor) when
+        // the consumer is slow, mirroring the attach path.
+        let (ev_tx, ev_rx) = mpsc::channel::<RelayEvent>(ATTACH_BUFFER);
+        tokio::spawn(async move {
+            let mut rd = rd;
+            loop {
+                match protocol::read_frame(&mut rd).await {
+                    Ok(Some(frame)) if frame.op == op::FRAME => {
+                        let Some((seq, body)) = frame.as_relay_frame() else {
+                            continue;
+                        };
+                        let ev = RelayEvent::Frame {
+                            seq,
+                            payload: body.to_vec(),
+                        };
+                        if ev_tx.send(ev).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Some(frame)) if frame.op == op::EXIT => {
+                        let status =
+                            serde_json::from_slice::<Option<i32>>(&frame.payload).unwrap_or(None);
+                        let _ = ev_tx.send(RelayEvent::Exit { status }).await;
+                        // EXIT is terminal for the stream; nothing follows it.
+                        break;
+                    }
+                    Ok(Some(_)) => {} // ignore stray frames
+                    Ok(None) | Err(_) => break,
+                }
+            }
+        });
+
+        Ok(RelayStream { wr, ev_rx })
+    }
+
     /// Switch this connection into an interactive attach at the given size. The
     /// returned [`Attach`] streams PTY output and accepts input/resize; the
     /// first output chunk is a full repaint of the current screen.
@@ -198,5 +260,45 @@ impl AttachOutput {
     /// The next chunk of PTY output, or `None` once the stream ends.
     pub async fn recv(&mut self) -> Option<Vec<u8>> {
         self.out_rx.recv().await
+    }
+}
+
+/// One event from a relay [`RelayStream`]: a relayed child-stdout frame, or the
+/// child's exit. `Exit` is terminal — no event follows it.
+#[derive(Debug, Clone)]
+pub enum RelayEvent {
+    /// A relayed child-stdout frame with its spool sequence number.
+    Frame { seq: u64, payload: Vec<u8> },
+    /// The child exited. `status` is its code (a signal death is `128 + signal`),
+    /// or `None` if unknown.
+    Exit { status: Option<i32> },
+}
+
+/// A live relay subscription: receive [`RelayEvent`]s (replayed then live frames,
+/// then a terminal `Exit`), and send `ACK`/`WRITE` back to the supervisor.
+/// Dropping it closes the connection, which the supervisor sees as an
+/// unsubscribe (the child keeps running).
+pub struct RelayStream {
+    wr: OwnedWriteHalf,
+    ev_rx: mpsc::Receiver<RelayEvent>,
+}
+
+impl RelayStream {
+    /// The next relay event, or `None` once the stream ends (the socket closed).
+    pub async fn recv(&mut self) -> Option<RelayEvent> {
+        self.ev_rx.recv().await
+    }
+
+    /// Advance the retention watermark: everything up to and including `seq` has
+    /// been durably processed, so the supervisor may drop fully-acked spool
+    /// segments.
+    pub async fn ack(&mut self, seq: u64) -> Result<()> {
+        protocol::write_frame(&mut self.wr, &req::ack(seq)).await
+    }
+
+    /// Append raw bytes to the child's stdin (send complete newline-terminated
+    /// frames; the relay writes them through untouched).
+    pub async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        protocol::write_frame(&mut self.wr, &req::write(bytes.to_vec())).await
     }
 }

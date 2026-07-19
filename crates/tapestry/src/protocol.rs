@@ -17,9 +17,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// Opcodes. Client→server requests are the low range; server→client replies are
 /// the high range; the two attach-stream opcodes (`INPUT`/`RESIZE`) are shared
 /// with the terminal.rs bridge shape (`0x00`/`0x01`).
+///
+/// The relay-mode opcodes ([`SUBSCRIBE`](op::SUBSCRIBE)/[`FRAME`](op::FRAME)/
+/// [`ACK`](op::ACK)/[`WRITE`](op::WRITE)/[`EXIT`](op::EXIT)) are purely additive:
+/// they sit beside the PTY set (`SUBSCRIBE` next to `ATTACH`, `FRAME`/`EXIT` next
+/// to `OUTPUT`), so an older peer that never sends them is unaffected, and a PTY
+/// session never emits them.
 pub mod op {
     // Client → server, one-shot requests.
     /// Render the current screen to text. Payload: `u32` scrollback rows.
+    /// (Relay mode: returns a short UTF-8 status summary instead of a screen.)
     pub const CAPTURE: u8 = 0x10;
     /// Write bytes to the PTY verbatim (the `send-keys -l` analogue). Payload: raw bytes.
     pub const SEND: u8 = 0x11;
@@ -32,16 +39,28 @@ pub mod op {
     /// Switch this connection to the live terminal stream. Payload: `u16` cols,
     /// `u16` rows (the attaching client's initial size).
     pub const ATTACH: u8 = 0x20;
+    /// (Relay) Switch this connection to the live frame stream, replaying every
+    /// spooled frame with `seq > cursor` first. Payload: `u64` cursor.
+    pub const SUBSCRIBE: u8 = 0x21;
+    /// (Relay) Advance the retention watermark — the client has durably processed
+    /// everything up to and including this seq. Payload: `u64` seq. Valid both
+    /// one-shot and in-stream (after a [`SUBSCRIBE`]).
+    pub const ACK: u8 = 0x22;
+    /// (Relay) Append raw bytes to the child's stdin. Payload: raw bytes. Valid
+    /// both one-shot and in-stream (after a [`SUBSCRIBE`]).
+    pub const WRITE: u8 = 0x23;
 
     // During an attach, client → server.
     /// Keystrokes to forward to the PTY. Payload: raw bytes.
     pub const INPUT: u8 = 0x00;
     // RESIZE (0x12) is reused for in-stream resizes.
+    // ACK (0x22) / WRITE (0x23) double as the in-stream client→server ops for a
+    // relay subscribe (the INPUT/RESIZE analogues).
 
     // Server → client.
     /// Reply to [`CAPTURE`]. Payload: UTF-8 screen text.
     pub const CAPTURE_RESP: u8 = 0x80;
-    /// Generic success for [`SEND`]/[`RESIZE`]/[`KILL`]. No payload.
+    /// Generic success for [`SEND`]/[`RESIZE`]/[`KILL`]/[`ACK`]/[`WRITE`]. No payload.
     pub const OK: u8 = 0x81;
     /// Reply to [`PING`]. Payload: JSON [`PongInfo`].
     pub const PONG: u8 = 0x82;
@@ -49,16 +68,44 @@ pub mod op {
     pub const ERR: u8 = 0x83;
     /// A chunk of PTY output during an attach. Payload: raw bytes.
     pub const OUTPUT: u8 = 0x90;
+    /// (Relay) One relayed child-stdout frame. Payload: `u64` seq + frame bytes.
+    pub const FRAME: u8 = 0x91;
+    /// (Relay) The child exited. Payload: JSON `Option<i32>` exit code (a
+    /// signal death maps to `128 + signal`). Sent once to the live subscriber.
+    pub const EXIT: u8 = 0x92;
 }
 
 /// Reply to a [`PING`](op::PING): whether the child is alive plus a little info.
+///
+/// The relay-mode fields (`relay`, `exited`, `spooled`, `acked`) all carry
+/// `#[serde(default)]`, so a PONG from an older PTY-only supervisor still decodes
+/// and a PTY session simply reports the defaults (`relay = false`, no `exited`,
+/// zero seqs).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PongInfo {
+    /// Whether the *supervisor* is serving. For a PTY session this always means
+    /// the child runs too (the supervisor tears down on child exit); a relay
+    /// supervisor outlives its child, so `alive` stays true after exit — read
+    /// [`Self::exited`] for the child's state.
     pub alive: bool,
     pub pid: Option<u32>,
     pub cols: u16,
     pub rows: u16,
     pub alternate_screen: bool,
+    /// Relay mode (piped stdio + frame spool) rather than a PTY.
+    #[serde(default)]
+    pub relay: bool,
+    /// (Relay) The child's exit code once it has exited, else `None` while it
+    /// still runs. A signal death is reported as `128 + signal`.
+    #[serde(default)]
+    pub exited: Option<i32>,
+    /// (Relay) The highest sequence number assigned to a spooled frame (0 before
+    /// the first frame).
+    #[serde(default)]
+    pub spooled: u64,
+    /// (Relay) The retention watermark — the highest acked seq.
+    #[serde(default)]
+    pub acked: u64,
 }
 
 /// Cap on a single inbound frame body (16 MiB). Bounds a hostile or buggy peer's
@@ -108,6 +155,42 @@ impl Frame {
         } else {
             0
         }
+    }
+
+    /// A frame whose whole payload is a single big-endian `u64` (subscribe
+    /// cursor / ack seq).
+    pub fn u64(op: u8, v: u64) -> Self {
+        Self::new(op, v.to_be_bytes().to_vec())
+    }
+
+    /// Decode a leading big-endian `u64` from the payload, defaulting to 0.
+    pub fn as_u64(&self) -> u64 {
+        if self.payload.len() >= 8 {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&self.payload[..8]);
+            u64::from_be_bytes(b)
+        } else {
+            0
+        }
+    }
+
+    /// A [`FRAME`](op::FRAME): an 8-byte big-endian seq followed by the frame bytes.
+    pub fn relay_frame(seq: u64, body: &[u8]) -> Self {
+        let mut p = Vec::with_capacity(8 + body.len());
+        p.extend_from_slice(&seq.to_be_bytes());
+        p.extend_from_slice(body);
+        Self::new(op::FRAME, p)
+    }
+
+    /// Decode a [`FRAME`](op::FRAME) payload into `(seq, body)`, or `None` if it
+    /// is too short to carry a seq.
+    pub fn as_relay_frame(&self) -> Option<(u64, &[u8])> {
+        if self.payload.len() < 8 {
+            return None;
+        }
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&self.payload[..8]);
+        Some((u64::from_be_bytes(b), &self.payload[8..]))
     }
 }
 
@@ -169,5 +252,14 @@ pub mod req {
     }
     pub fn input(data: Vec<u8>) -> Frame {
         Frame::new(op::INPUT, data)
+    }
+    pub fn subscribe(cursor: u64) -> Frame {
+        Frame::u64(op::SUBSCRIBE, cursor)
+    }
+    pub fn ack(seq: u64) -> Frame {
+        Frame::u64(op::ACK, seq)
+    }
+    pub fn write(data: Vec<u8>) -> Frame {
+        Frame::new(op::WRITE, data)
     }
 }
