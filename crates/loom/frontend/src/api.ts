@@ -272,9 +272,9 @@ import type { AcpMetadata, ChatSnapshot, PromptAck } from './types';
  *  terminal session 409s (it has no chat journal). */
 export const getSessionChat = (id: string) => get(`/sessions/${id}/chat`) as Promise<ChatSnapshot>;
 
-/** Send a user message to an ACP session (`session/prompt`). Returns 202 with
- *  `{ queued, turn }` — `queued` when a turn was already in flight (the message
- *  joins the durable queue for the next turn). */
+/** Send a user message to an ACP session. Returns 202 with
+ *  `{ queued, steered, turn }`: a live turn is steered when the adapter supports
+ *  it, with the durable next-turn queue retained as the fallback. */
 export const promptSession = (id: string, text: string, by?: string) =>
   post(`/sessions/${id}/prompt`, { text, by }) as Promise<PromptAck>;
 

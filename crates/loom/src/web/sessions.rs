@@ -2422,9 +2422,9 @@ pub(super) async fn send_session(
     Json(req): Json<SendReq>,
 ) -> ApiResult<Json<Value>> {
     let (session, branch) = require_session(&st.db, &key).await?;
-    // For an ACP session a send *is* a `session/prompt` (queued when a turn is in
-    // flight): delegate to the prompt queue, keeping the same `nudge` audit. This
-    // is what makes `loom session send` work uniformly across both backends.
+    // For an ACP session a send is a prompt (steered into a supported live turn,
+    // otherwise queued): delegate to the ACP task while keeping the same `nudge`
+    // audit. This makes `loom session send` uniform across both backends.
     if session.protocol == "acp" {
         let handle = require_acp_task(&st, &session)?;
         let by = author_or_manual(req.by.as_deref());
@@ -2441,9 +2441,13 @@ pub(super) async fn send_session(
         )
         .await
         .ok();
-        return Ok(Json(
-            json!({ "sent": true, "submitted": true, "queued": ack.queued, "turn": ack.turn }),
-        ));
+        return Ok(Json(json!({
+            "sent": true,
+            "submitted": true,
+            "queued": ack.queued,
+            "steered": ack.steered,
+            "turn": ack.turn,
+        })));
     }
     require_live_terminal(&session).await?;
     backend::paste(&session.term_session, &req.text)
@@ -2528,7 +2532,7 @@ pub(super) async fn preview_session(
 //
 // The conversation-first surface for ACP sessions: the journaled transcript
 // (`/chat`), its live delta stream (`/chat/stream`), and the drive routes a
-// person or watch uses — a `session/prompt` queueing send (`/prompt`), a
+// person or watch uses — a steering/queueing send (`/prompt`), a
 // permission answer (`/permissions/{request_id}`), and a mode change (`/mode`).
 // ---------------------------------------------------------------------------
 
@@ -2758,8 +2762,9 @@ pub(super) struct PromptBody {
 }
 
 /// Send a user message to an ACP session: dispatched as a `session/prompt` when
-/// idle, appended to the durable queue when a turn is in flight. Returns 202
-/// `{ queued, turn }`. Every send records a `nudge` event (the audit rule).
+/// idle, steered into a live turn when supported, or appended to the durable
+/// queue otherwise. Returns 202 `{ queued, steered, turn }`. Every send records
+/// a `nudge` event (the audit rule).
 pub(super) async fn prompt_session(
     State(st): State<AppState>,
     Path(key): Path<String>,
@@ -2784,7 +2789,11 @@ pub(super) async fn prompt_session(
     .ok();
     Ok((
         StatusCode::ACCEPTED,
-        Json(json!({ "queued": ack.queued, "turn": ack.turn })),
+        Json(json!({
+            "queued": ack.queued,
+            "steered": ack.steered,
+            "turn": ack.turn,
+        })),
     ))
 }
 

@@ -205,6 +205,7 @@ export interface AcpMetadata {
 export interface UserMessagePayload {
   text: string;
   by: string | null;
+  steered?: boolean;
 }
 export interface AgentMessagePayload {
   text: string;
@@ -303,10 +304,11 @@ export interface SseTurn {
   stop_reason?: string;
 }
 
-/** `POST /sessions/{id}/prompt` 202 body: whether the message queued behind a
- *  live turn, and the turn it belongs to. */
+/** `POST /sessions/{id}/prompt` 202 body: whether the message steered the live
+ *  turn, queued behind it, or started normally, plus the turn it belongs to. */
 export interface PromptAck {
   queued: boolean;
+  steered: boolean;
   turn: number | null;
 }
 

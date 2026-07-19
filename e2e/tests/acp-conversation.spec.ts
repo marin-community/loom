@@ -32,7 +32,12 @@ const FAKE_AGENT = join(__dirname, '..', '..', 'crates', 'loom', 'tests', 'fixtu
 const HEADERS = { 'content-type': 'application/json' };
 const SKIP_MSG = 'ACP lifecycle backend (weaver #508) not merged: the server does not launch acp sessions over REST yet';
 
-async function defineFakeAcpAgent(weaver: WeaverFixture, name: string, label: string): Promise<void> {
+async function defineFakeAcpAgent(
+  weaver: WeaverFixture,
+  name: string,
+  label: string,
+  steering = false,
+): Promise<void> {
   const res = await fetch(`${weaver.baseUrl}/api/agents/custom`, {
     method: 'POST',
     headers: HEADERS,
@@ -40,7 +45,7 @@ async function defineFakeAcpAgent(weaver: WeaverFixture, name: string, label: st
       name,
       label,
       setup: '',
-      launch: `node ${FAKE_AGENT}`,
+      launch: `${steering ? 'FAKE_ACP_STEERING=1 ' : ''}node ${FAKE_AGENT}`,
       resume: '',
       reports_status: false,
       protocol: 'acp',
@@ -61,7 +66,7 @@ async function launchAcpSession(
   // `protocol` axis marks it ACP rather than a PTY TUI (added by the lifecycle
   // phase; ignored by the current backend, which is exactly why the probe below
   // detects support).
-  await defineFakeAcpAgent(weaver, 'acp-fake', 'ACP fake');
+  await defineFakeAcpAgent(weaver, 'acp-fake', 'ACP fake', true);
 
   const res = await fetch(`${weaver.baseUrl}/api/sessions`, {
     method: 'POST',
@@ -286,7 +291,7 @@ test.describe('acp conversation', () => {
     await expect(conv.getByText('streamed reply lands here', { exact: true })).toHaveCount(1);
   });
 
-  test('the composer sends a prompt and queues one behind a live turn', async ({ page, weaver }) => {
+  test('the composer steers a prompt into a live turn', async ({ page, weaver }) => {
     await openAcp(page, weaver, { goal: 'say:ready' });
     const input = page.getByTestId('acp-composer-input');
 
@@ -295,15 +300,20 @@ test.describe('acp conversation', () => {
     await page.getByTestId('acp-composer-send').click();
     await expect(page.getByTestId('acp-working')).toBeVisible({ timeout: 15_000 });
 
-    // A second prompt sent mid-turn queues visibly rather than starting a turn.
+    // A second prompt sent mid-turn is injected into the active turn.
     await input.fill('say:second turn');
     await page.getByTestId('acp-composer-send').click();
-    await expect(page.getByTestId('acp-queued')).toBeVisible({ timeout: 15_000 });
-
-    // It dispatches once the first turn ends.
-    await expect(page.getByTestId('acp-conversation').getByText('second turn')).toBeVisible({
-      timeout: 20_000,
+    await expect(page.getByTestId('acp-steered').filter({ hasText: /^steered turn/ })).toBeVisible({
+      timeout: 15_000,
     });
+
+    // The steer is handled before that same turn ends.
+    await expect(
+      page.getByTestId('acp-conversation').getByText('second turnfirst turn done', { exact: true }),
+    ).toBeVisible({ timeout: 20_000 });
+    // One rule for the launch goal and one for this interaction: the steer did
+    // not create a third turn.
+    await expect(page.getByTestId('acp-turn-rule')).toHaveCount(2, { timeout: 20_000 });
   });
 
   test('discovers slash commands from the agent and forwards them', async ({ page, weaver }) => {

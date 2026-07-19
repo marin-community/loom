@@ -300,18 +300,18 @@ the fallback for terminal-backend sessions.
 
 | Route | Purpose |
 |---|---|
-| `POST /api/sessions/{id}/prompt` | send a user message (`session/prompt`); queues when a turn is in flight — `loom session send` maps here for ACP sessions |
+| `POST /api/sessions/{id}/prompt` | send a user message (`session/prompt`); steers a supported live turn and otherwise queues — `loom session send` maps here for ACP sessions |
 | `POST /api/sessions/{id}/interrupt` | unchanged route, now `session/cancel` |
 | `GET /api/sessions/{id}/chat` + `/chat/stream` | journal + SSE deltas |
 | `POST /api/sessions/{id}/permissions/{request_id}` | answer `{option_id}` — also grantable to watches as a capability |
 | `PUT /api/sessions/{id}/mode` | `session/set_mode` |
 | `GET /api/sessions/{id}/preview` | ACP sessions: last N journal blocks as plain text — CLI convenience, nothing more |
 
-Queued prompts are durable and simple: the existing `pending_prompt` column
-holds the queue (sends during a turn append as paragraphs, each audited as a
-`nudge` event, clearable from the UI); it dispatches as one `session/prompt`
-at the next turn boundary. Cancel stops the in-flight turn and leaves the
-queue. `SessionView` grows `protocol: "terminal" | "acp"`, `acp_session_id`,
+The fallback prompt queue is durable and simple: the existing `pending_prompt`
+column holds messages for adapters that do not advertise steering (each send is
+audited as a `nudge` event); it dispatches as one `session/prompt` at the next
+turn boundary. Cancel stops the in-flight turn and leaves the queue.
+`SessionView` grows `protocol: "terminal" | "acp"`, `acp_session_id`,
 `current_mode`, `usage`. Note the session-scoped `/chat` routes are distinct
 from the fleet-level concierge `/api/chat` (`docs/plans/meta-chat.md`) — and
 the UI keeps the *Conversation* name precisely so the concierge keeps
@@ -348,7 +348,7 @@ sub-session's approach becomes possible from the couch. (One container
 detail: the Claude adapter refuses `bypassPermissions` when running as root;
 the deploy's `app` user is fine.)
 
-Watch parity: `send`→prompt-queue and `interrupt`→cancel remain
+Watch parity: `send`→prompt steering/queue and `interrupt`→cancel remain
 watch-drivable through the same routes and capability gates as today's nudge
 audit; answering permissions becomes its own grantable capability.
 
@@ -482,9 +482,9 @@ Anatomy, in the order a reader meets it:
   (`session/prompt`), Shift+Enter breaks. Left: the mode chip (`bypass ▾` →
   `session/set_mode`) and slash-command autocomplete fed by
   `available_commands_update`. Right: **Stop** (`session/cancel`, shown
-  while a turn runs) and **Send**. Sending mid-turn queues visibly
-  ("queued for next turn"), which the protocol makes exact rather than
-  hopeful. While the agent works, the turn shows the existing sage
+  while a turn runs) and **Send**. Sending mid-turn steers visibly when the
+  adapter advertises support; other adapters retain the explicit "queued for
+  next turn" fallback. While the agent works, the turn shows the existing sage
   `▶ working` cue; instant, not animated.
 - **Streaming.** First journal fetch paints the transcript; the SSE tail
   appends in place. Kept-alive view discipline applies: pause the stream on

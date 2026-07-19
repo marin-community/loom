@@ -236,6 +236,9 @@ re-poll on demand.
 Every session detail has a **Conversation** tab that renders the agent's chat
 with the model — user turns, replies, thinking, and tool calls — live and
 (via the archive capture below) still there to review after the terminal is gone.
+For ACP sessions, a prompt submitted while the agent is working steers the live
+turn when the adapter supports steering; otherwise loom safely queues it as the
+next turn.
 
 Whenever a session is archived — by the Archive button or automatically on merge
 — loom first captures that conversation to disk: it finds the agent's transcript

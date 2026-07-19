@@ -209,12 +209,12 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `GET /api/sessions/{id}/{diff,log,events}` | reads + SSE stream |
 | `GET /api/sessions/{id}/conversation` | the agent conversation as a normalized iris log (live transcript, else the archive capture); 404 when there is none — backs the Conversation tab |
 | `GET /api/sessions/{id}/terminal` | WebSocket: xterm.js ⇄ the session's tapestry PTY (the interaction surface) |
-| `POST /api/sessions/{id}/send` | type `{text}` into the agent's terminal (`submit`, default true, follows it with Enter); for an `acp` session it delegates to the prompt queue (a `session/prompt`), keeping the same `nudge` audit |
+| `POST /api/sessions/{id}/send` | type `{text}` into the agent's terminal (`submit`, default true, follows it with Enter); for an `acp` session it delegates to the prompt path (steering a supported live turn, otherwise queueing), keeping the same `nudge` audit |
 | `POST /api/sessions/{id}/interrupt` | stop the current turn — a break (Escape) to the terminal for a `terminal` session, `session/cancel` for an `acp` one |
 | `GET /api/sessions/{id}/preview?lines=N` | capture the screen as `{screen}`; `lines` adds scrollback above the visible screen (for an `acp` session, `{screen}` is the last `lines` journal blocks rendered as compact text) |
 | `GET /api/sessions/{id}/chat` | `{blocks: [ChatBlockView], live_turn}` — the ACP session's journal snapshot (per-block conversation record) plus the in-flight turn, if any |
 | `GET /api/sessions/{id}/chat/stream` | SSE tail of the live journal: `block` (a committed block), `delta` (a streaming message/thought chunk), `tool` (a live tool-call update), `turn` (started / ended) |
-| `POST /api/sessions/{id}/prompt` | `{text}` → 202 `{queued, turn}` — dispatch a user message as a `session/prompt`, or append it to the durable queue when a turn is already in flight |
+| `POST /api/sessions/{id}/prompt` | `{text}` → 202 `{queued, steered, turn}` — dispatch a user message as a `session/prompt`; a live turn uses the advertised codex-acp steering extension, with the durable next-turn queue as fallback |
 | `POST /api/sessions/{id}/permissions/{request_id}` | `{option_id}` → answer an open permission request (200 / 404 unknown / 409 already resolved) |
 | `PUT /api/sessions/{id}/mode` | `{mode_id}` → change the ACP session's permission mode (`session/set_mode`), journaled as a `mode_change` |
 | `GET /api/branches` / `GET PATCH /api/branches/{id}` | list / inspect / edit tracked branches |
@@ -307,8 +307,8 @@ let an agent or script type into, interrupt, or read back a child session
 uniformly. For a `terminal` session each requires a live terminal (else 409). An
 `acp` session has no PTY, so the same verbs map onto the protocol — keeping the
 CLI (`loom session {send,break,preview}`) and its `nudge` audit uniform across
-backends: `send` delegates to the prompt queue (a `session/prompt`, queued when a
-turn is in flight), `interrupt` is a `session/cancel`, and `preview` renders the
+backends: `send` delegates to the prompt path (steered when supported, otherwise
+queued while a turn is live), `interrupt` is a `session/cancel`, and `preview` renders the
 last journal blocks as compact plain text instead of a vt100 screen capture.
 
 ## Runtime conventions

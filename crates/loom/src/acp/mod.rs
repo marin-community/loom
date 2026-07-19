@@ -99,11 +99,13 @@ pub struct AcpLaunch {
     pub goal: Option<String>,
 }
 
-/// Whether a prompt was queued (a turn was already in flight) plus the turn it
-/// belongs to — the `POST /prompt` 202 body.
+/// How a prompt was accepted plus the turn it belongs to — the `POST /prompt`
+/// 202 body. `steered` is true only when the adapter injected it into the
+/// already-running turn; unsupported adapters retain the durable queue.
 #[derive(Debug, Clone, Serialize)]
 pub struct PromptAck {
     pub queued: bool,
+    pub steered: bool,
     pub turn: Option<i64>,
 }
 
@@ -158,8 +160,9 @@ impl AcpHandle {
         self.metadata.lock().unwrap().clone()
     }
 
-    /// Send a user message: dispatched as a `session/prompt` when idle, appended
-    /// to the durable queue when a turn is in flight.
+    /// Send a user message: dispatched as a `session/prompt` when idle, steered
+    /// into a live turn when the adapter advertises support, or appended to the
+    /// durable queue otherwise.
     pub async fn prompt(&self, text: String, by: Option<String>) -> Result<PromptAck> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -584,6 +587,14 @@ struct PendingPerm {
     frame_seq: u64,
 }
 
+/// A `_session/steering` request waiting for the adapter's acceptance response.
+struct PendingSteer {
+    text: String,
+    by: Option<String>,
+    turn: i64,
+    reply: oneshot::Sender<Result<PromptAck>>,
+}
+
 struct Task {
     db: Db,
     /// The loom event bus — used to drive the turn-boundary status/idle lifecycle
@@ -620,6 +631,15 @@ struct Task {
     pending_config: HashMap<u64, oneshot::Sender<Result<AcpMetadata>>>,
     #[allow(dead_code)]
     load_session_cap: bool,
+    /// codex-acp advertises this experimental extension in
+    /// `_meta.steering.supported`; other adapters keep queue semantics.
+    steering_cap: bool,
+    pending_steers: HashMap<u64, PendingSteer>,
+    /// A turn started internally by the steering extension after the previous
+    /// turn raced to completion. It has no `session/prompt` response id, so its
+    /// end is taken from codex-acp's `session_info_update` idle edge.
+    external_turn: bool,
+    pending_external: Option<PendingSteer>,
     /// Latched for the duration of a `session/load` replay: the adapter re-streams
     /// the whole conversation as `session/update` notifications, but we already
     /// hold it in the journal, so journal writes are suppressed (and the seq
@@ -670,6 +690,10 @@ impl Task {
             pending_mode: HashMap::new(),
             pending_config: HashMap::new(),
             load_session_cap: false,
+            steering_cap: false,
+            pending_steers: HashMap::new(),
+            external_turn: false,
+            pending_external: None,
             suppress_journal: false,
             highest_seq: 0,
             acked: 0,
@@ -688,12 +712,23 @@ impl Task {
         let (max_turn, max_seq) = chat::max_turn_seq(&state.db, &session.id)
             .await?
             .unwrap_or((0, -1));
-        let inflight = session
+        let inflight_value = session
             .acp_inflight
             .as_deref()
-            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .and_then(|s| serde_json::from_str::<Value>(s).ok());
+        let live_turn = inflight_value
+            .as_ref()
+            .and_then(|v| v.get("turn"))
+            .and_then(Value::as_i64);
+        let external_turn = inflight_value
+            .as_ref()
+            .and_then(|v| v.get("external"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let inflight = inflight_value
+            .as_ref()
             .and_then(|v| Some((v.get("prompt_id")?.as_u64()?, v.get("turn")?.as_i64()?)));
-        let current_turn = inflight.map(|(_, t)| t).unwrap_or(max_turn);
+        let current_turn = live_turn.unwrap_or(max_turn);
         // The journal always holds at least this turn's `user_message`, so
         // `max_seq + 1` continues the turn without colliding.
         let next_seq = max_seq + 1;
@@ -714,7 +749,7 @@ impl Task {
             current_turn,
             next_seq,
             turns_dispatched,
-            turn_live: inflight.is_some(),
+            turn_live: live_turn.is_some(),
             buf: None,
             tools: HashMap::new(),
             pending_perms: HashMap::new(),
@@ -723,6 +758,10 @@ impl Task {
             pending_mode: HashMap::new(),
             pending_config: HashMap::new(),
             load_session_cap: false,
+            steering_cap: false,
+            pending_steers: HashMap::new(),
+            external_turn,
+            pending_external: None,
             suppress_journal: false,
             highest_seq: session.acp_ack_seq.max(0) as u64,
             acked: session.acp_ack_seq.max(0) as u64,
@@ -797,6 +836,7 @@ impl Task {
         let res = res.ok_or_else(|| anyhow!("initialize failed: {err:?}"))?;
         if let Ok(init) = serde_json::from_value::<wire::InitializeResult>(res) {
             self.load_session_cap = init.agent_capabilities.load_session;
+            self.steering_cap = init.meta.steering.supported;
         }
 
         match &launch.new_or_load {
@@ -1048,6 +1088,26 @@ impl Task {
                 self.journal_block(kind::USAGE, json!({ "used": used, "size": size }))
                     .await;
             }
+            SessionUpdate::SessionInfoUpdate { meta } => {
+                let status = meta
+                    .codex
+                    .and_then(|codex| codex.thread_status)
+                    .map(|s| s.kind);
+                if self.external_turn && matches!(status.as_deref(), Some("idle" | "systemError")) {
+                    self.external_turn = false;
+                    let reason = if status.as_deref() == Some("systemError") {
+                        "error"
+                    } else {
+                        "end_turn"
+                    };
+                    self.on_turn_end(
+                        self.current_turn,
+                        Some(json!({ "stopReason": reason })),
+                        None,
+                    )
+                    .await;
+                }
+            }
             SessionUpdate::AvailableCommandsUpdate { available_commands } => {
                 self.replace_commands(available_commands, true);
             }
@@ -1116,6 +1176,11 @@ impl Task {
         let Some(id) = inc.id.as_ref().and_then(Value::as_u64) else {
             return;
         };
+        if let Some(pending) = self.pending_steers.remove(&id) {
+            self.on_steering_response(pending, inc.result, inc.error)
+                .await;
+            return;
+        }
         if let Some(pending) = self.pending_mode.remove(&id) {
             let result = if let Some(error) = inc.error {
                 Err(anyhow!("session/set_mode failed: {error}"))
@@ -1213,6 +1278,25 @@ impl Task {
         // "resting, no one needed" state). Mirrors the terminal path's `Stop` hook.
         crate::monitor::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "idle").await;
 
+        // The steering extension may have raced this boundary and started the
+        // user's message as a fresh adapter-owned turn. Adopt it before the
+        // ordinary durable queue so prompts retain their arrival order.
+        if let Some(pending) = self.pending_external.take() {
+            self.begin_external_turn(pending).await;
+            return;
+        }
+
+        // A steering request can finish just after the original prompt. Let its
+        // response decide whether the adapter already started the next turn
+        // before dispatching any later, durably queued message.
+        if !self.pending_steers.is_empty() {
+            return;
+        }
+
+        self.dispatch_pending_prompt().await;
+    }
+
+    async fn dispatch_pending_prompt(&mut self) {
         // Dispatch the durable queue as the next turn, if non-empty.
         let pending = session::read_pending_prompt(&self.db, &self.session_id)
             .await
@@ -1221,6 +1305,122 @@ impl Task {
             let _ = session::clear_pending_prompt(&self.db, &self.session_id).await;
             let _ = self.start_turn(pending, None).await;
         }
+    }
+
+    async fn on_steering_response(
+        &mut self,
+        pending: PendingSteer,
+        result: Option<Value>,
+        error: Option<Value>,
+    ) {
+        let outcome = result
+            .and_then(|v| serde_json::from_value::<wire::SteeringResult>(v).ok())
+            .map(|r| r.outcome);
+        match (outcome, error) {
+            (Some(wire::SteeringOutcome::Injected), None) => {
+                // A steer belongs to the live turn rather than opening another
+                // item in the turn index. Journal it only after the adapter has
+                // accepted it; a rejected extension falls back without leaving
+                // a phantom message in the transcript.
+                self.current_turn = pending.turn;
+                let by = pending.by.map(Value::from).unwrap_or(Value::Null);
+                self.journal_block(
+                    kind::USER_MESSAGE,
+                    json!({ "text": pending.text, "by": by, "steered": true }),
+                )
+                .await;
+                let _ = pending.reply.send(Ok(PromptAck {
+                    queued: false,
+                    steered: true,
+                    turn: Some(pending.turn),
+                }));
+                if !self.turn_live {
+                    self.dispatch_pending_prompt().await;
+                }
+            }
+            (Some(wire::SteeringOutcome::StartedNewTurn), None) => {
+                if self.turn_live {
+                    // codex-acp waits for its old prompt to settle before taking
+                    // this branch. Keep the request until loom consumes that
+                    // prompt response, then adopt the already-started turn.
+                    self.pending_external = Some(pending);
+                } else {
+                    self.begin_external_turn(pending).await;
+                }
+            }
+            (outcome, error) => {
+                tracing::warn!(
+                    session = %self.session_id,
+                    ?outcome,
+                    ?error,
+                    "steering failed; falling back to ordinary prompt handling"
+                );
+                self.fallback_prompt(pending).await;
+            }
+        }
+    }
+
+    async fn fallback_prompt(&mut self, pending: PendingSteer) {
+        let ack = if self.turn_live {
+            self.queue_prompt(&pending.text).await
+        } else {
+            self.start_prompt(pending.text, pending.by).await
+        };
+        let _ = pending.reply.send(ack);
+    }
+
+    async fn queue_prompt(&self, text: &str) -> Result<PromptAck> {
+        session::append_pending_prompt(&self.db, &self.session_id, text).await?;
+        Ok(PromptAck {
+            queued: true,
+            steered: false,
+            turn: Some(self.current_turn),
+        })
+    }
+
+    async fn start_prompt(&mut self, text: String, by: Option<String>) -> Result<PromptAck> {
+        self.start_turn(text, by).await?;
+        Ok(PromptAck {
+            queued: false,
+            steered: false,
+            turn: Some(self.current_turn),
+        })
+    }
+
+    async fn begin_external_turn(&mut self, pending: PendingSteer) {
+        let turn = if self.turns_dispatched > 0 {
+            self.current_turn + 1
+        } else {
+            self.current_turn
+        };
+        let inflight = json!({ "turn": turn, "external": true }).to_string();
+        let persisted = session::set_inflight(&self.db, &self.session_id, Some(&inflight)).await;
+        if let Err(e) = persisted {
+            let _ = pending.reply.send(Err(e));
+            return;
+        }
+        self.current_turn = turn;
+        self.next_seq = 0;
+        self.turns_dispatched += 1;
+        self.turn_live = true;
+        self.external_turn = true;
+        self.emit(
+            "turn",
+            json!({ "turn": self.current_turn, "state": "started" }),
+        );
+        let by = pending.by.map(Value::from).unwrap_or(Value::Null);
+        self.journal_block(
+            kind::USER_MESSAGE,
+            json!({ "text": pending.text, "by": by, "steered": false }),
+        )
+        .await;
+        crate::monitor::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "working")
+            .await;
+        let _ = pending.reply.send(Ok(PromptAck {
+            queued: false,
+            steered: false,
+            turn: Some(self.current_turn),
+        }));
     }
 
     async fn start_turn(&mut self, text: String, by: Option<String>) -> Result<()> {
@@ -1374,20 +1574,40 @@ impl Task {
         match cmd {
             Command::Prompt { text, by, reply } => {
                 if self.turn_live {
-                    // A failed queue write must surface — a 202 that silently
-                    // dropped the prompt would be worse than an error.
-                    let ack = session::append_pending_prompt(&self.db, &self.session_id, &text)
-                        .await
-                        .map(|_| PromptAck {
-                            queued: true,
-                            turn: Some(self.current_turn),
-                        });
-                    let _ = reply.send(ack);
+                    if self.steering_cap
+                        && self.pending_steers.is_empty()
+                        && self.pending_external.is_none()
+                    {
+                        let id = self.next_id();
+                        let request = wire::request_line(
+                            id,
+                            method::SESSION_STEERING,
+                            wire::steering_params(&self.acp_session_id, &text),
+                        );
+                        match self.stream.write(&request).await {
+                            Ok(()) => {
+                                self.pending_steers.insert(
+                                    id,
+                                    PendingSteer {
+                                        text,
+                                        by,
+                                        turn: self.current_turn,
+                                        reply,
+                                    },
+                                );
+                            }
+                            Err(e) => {
+                                let _ = reply.send(Err(e));
+                            }
+                        }
+                    } else {
+                        // A failed queue write must surface — a 202 that silently
+                        // dropped the prompt would be worse than an error.
+                        let ack = self.queue_prompt(&text).await;
+                        let _ = reply.send(ack);
+                    }
                 } else {
-                    let ack = self.start_turn(text, by).await.map(|_| PromptAck {
-                        queued: false,
-                        turn: Some(self.current_turn),
-                    });
+                    let ack = self.start_prompt(text, by).await;
                     let _ = reply.send(ack);
                 }
             }
@@ -1480,7 +1700,12 @@ impl Task {
 
     async fn on_exit(&mut self, status: Option<i32>) {
         tracing::warn!(session = %self.session_id, ?status, "acp agent exited");
-        if let Some((_, turn)) = self.inflight_prompt.take() {
+        let ending_turn = self
+            .inflight_prompt
+            .take()
+            .map(|(_, turn)| turn)
+            .or_else(|| self.external_turn.then_some(self.current_turn));
+        if let Some(turn) = ending_turn {
             self.flush_buf().await;
             if !chat::has_turn_end(&self.db, &self.session_id, turn)
                 .await
@@ -1494,6 +1719,7 @@ impl Task {
                 json!({ "turn": turn, "state": "ended", "stop_reason": "error" }),
             );
             self.turn_live = false;
+            self.external_turn = false;
             let _ = session::set_inflight(&self.db, &self.session_id, None).await;
         }
     }

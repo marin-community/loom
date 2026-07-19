@@ -30,6 +30,11 @@ const JSONRPC = "2.0";
 let sessionId = null;
 let sessionCounter = 0;
 let cancelled = false;
+const steeringSupported = process.env.FAKE_ACP_STEERING === "1";
+const forceSteeringNewTurn = process.env.FAKE_ACP_STEERING_FORCE_NEW_TURN === "1";
+let promptActive = false;
+const steeringQueue = [];
+let deferredSteering = null;
 const pending = new Map(); // our request id -> resolver awaiting the client's response
 
 function send(obj) {
@@ -209,6 +214,13 @@ async function runToken(tok) {
 
 async function handlePrompt(id, params) {
   cancelled = false;
+  promptActive = true;
+  if (steeringSupported) {
+    notify({
+      sessionUpdate: "session_info_update",
+      _meta: { codex: { threadStatus: { type: "active" } } },
+    });
+  }
   // The script is the prompt's first paragraph only. A real launch prompt
   // appends orientation prose (the entrance note, which echoes the session
   // title — i.e. the script itself) after a blank line; parsing past it would
@@ -221,8 +233,43 @@ async function handlePrompt(id, params) {
     if (cancelled) break;
     if (tok.length === 0) continue;
     await runToken(tok);
+    while (steeringQueue.length > 0 && !cancelled) {
+      const steering = steeringQueue.shift();
+      for (const steeringToken of steering.split("|")) {
+        if (steeringToken.length > 0) await runToken(steeringToken);
+      }
+    }
   }
-  respond(id, { stopReason: cancelled ? "cancelled" : "end_turn" });
+  promptActive = false;
+  if (id !== null) respond(id, { stopReason: cancelled ? "cancelled" : "end_turn" });
+  if (steeringSupported) {
+    notify({
+      sessionUpdate: "session_info_update",
+      _meta: { codex: { threadStatus: { type: "idle" } } },
+    });
+  }
+  if (deferredSteering !== null) {
+    const next = deferredSteering;
+    deferredSteering = null;
+    void handlePrompt(null, next.params);
+    respond(next.id, { outcome: "startedNewTurn" });
+  }
+}
+
+function handleSteering(id, params) {
+  const text = (params.prompt || []).map((b) => b.text || "").join("");
+  if (!promptActive || forceSteeringNewTurn) {
+    if (promptActive) {
+      deferredSteering = { id, params };
+    } else {
+      void handlePrompt(null, params);
+      respond(id, { outcome: "startedNewTurn" });
+    }
+    return;
+  }
+  notify({ sessionUpdate: "user_message_chunk", content: { type: "text", text } });
+  steeringQueue.push(text);
+  respond(id, { outcome: "injected" });
 }
 
 function handleMessage(msg) {
@@ -240,6 +287,7 @@ function handleMessage(msg) {
       respond(msg.id, {
         protocolVersion: 1,
         agentCapabilities: { loadSession: true, promptCapabilities: {} },
+        ...(steeringSupported ? { _meta: { steering: { supported: true } } } : {}),
       });
       break;
     case "session/new":
@@ -275,7 +323,10 @@ function handleMessage(msg) {
       respond(msg.id, { configOptions: configOptions() });
       break;
     case "session/prompt":
-      handlePrompt(msg.id, msg.params);
+      void handlePrompt(msg.id, msg.params);
+      break;
+    case "_session/steering":
+      handleSteering(msg.id, msg.params);
       break;
     case "session/cancel":
       cancelled = true;
