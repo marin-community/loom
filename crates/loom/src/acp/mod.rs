@@ -29,6 +29,8 @@
 //! - `mode_change`    `{ mode_id, by }`.
 //! - `usage`          `{ used, size }`.
 //! - `turn_end`       `{ stop_reason }`.
+//! - `handoff`        `{ from, to, model, effort }` — the provider boundary
+//!   that replaces the synthetic bootstrap prompt in the visible journal.
 //!
 //! ## Acking
 //!
@@ -199,6 +201,19 @@ impl AcpHandle {
         rx.await
             .map_err(|_| anyhow!("acp task dropped the reply"))?
     }
+
+    /// Atomically quiesce an idle task for provider replacement. The command is
+    /// ordered with prompts on the same channel; acknowledgement arrives only
+    /// after the task has removed its registry slot and will accept no more work.
+    pub async fn prepare_handoff(&self) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::PrepareHandoff { reply: tx })
+            .await
+            .map_err(|_| anyhow!("acp task is gone"))?;
+        rx.await
+            .map_err(|_| anyhow!("acp task dropped the handoff reply"))?
+    }
 }
 
 /// The registry of live ACP session tasks, held on [`AppState`]. Clone-cheap
@@ -267,6 +282,27 @@ impl AcpRegistry {
 /// `initialize`, open (or load) the ACP session, store its id on the session row,
 /// send the goal as the first prompt when present, then run the session task.
 pub async fn start(state: &AppState, session_id: &str, launch: AcpLaunch) -> Result<()> {
+    start_inner(state, session_id, launch, None).await
+}
+
+/// Start a fresh provider against an existing loom session. The opening prompt
+/// carries the provider-neutral history to the adapter, while `handoff` is the
+/// compact block journaled in its place.
+pub async fn start_handoff(
+    state: &AppState,
+    session_id: &str,
+    launch: AcpLaunch,
+    handoff: Value,
+) -> Result<()> {
+    start_inner(state, session_id, launch, Some(handoff)).await
+}
+
+async fn start_inner(
+    state: &AppState,
+    session_id: &str,
+    launch: AcpLaunch,
+    handoff: Option<Value>,
+) -> Result<()> {
     let session = session::get(&state.db, session_id)
         .await?
         .ok_or_else(|| anyhow!("session {session_id} not found"))?;
@@ -281,8 +317,8 @@ pub async fn start(state: &AppState, session_id: &str, launch: AcpLaunch) -> Res
     let stream = crate::backend::subscribe_relay(&relay_name, 0).await?;
 
     let (events_tx, _) = broadcast::channel(256);
-    let mut task = Task::fresh(state, &session, relay_name, stream, events_tx.clone());
-    task.handshake(&launch).await?;
+    let mut task = Task::fresh(state, &session, relay_name, stream, events_tx.clone()).await?;
+    task.handshake(&launch, handoff).await?;
 
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     task.generation = state
@@ -352,6 +388,9 @@ enum Command {
     SetMode {
         mode_id: String,
         by: Option<String>,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    PrepareHandoff {
         reply: oneshot::Sender<Result<()>>,
     },
 }
@@ -536,14 +575,19 @@ struct Task {
 }
 
 impl Task {
-    fn fresh(
+    async fn fresh(
         state: &AppState,
         session: &session::Session,
         relay_name: String,
         stream: tapestry::RelayStream,
         events_tx: broadcast::Sender<SseEvent>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let cursor = chat::max_turn_seq(&state.db, &session.id).await?;
+        let (current_turn, next_seq, turns_dispatched) = match cursor {
+            Some((turn, seq)) => (turn, seq + 1, turn + 1),
+            None => (0, 0, 0),
+        };
+        Ok(Self {
             db: state.db.clone(),
             bus: state.bus.clone(),
             registry: state.acp.clone(),
@@ -555,9 +599,9 @@ impl Task {
             stream,
             next_req_id: 0,
             inflight_prompt: None,
-            current_turn: 0,
-            next_seq: 0,
-            turns_dispatched: 0,
+            current_turn,
+            next_seq,
+            turns_dispatched,
             turn_live: false,
             buf: None,
             tools: HashMap::new(),
@@ -568,7 +612,7 @@ impl Task {
             highest_seq: 0,
             acked: 0,
             journal_failed: false,
-        }
+        })
     }
 
     async fn recover(
@@ -635,7 +679,7 @@ impl Task {
 
     // -- handshake ----------------------------------------------------------
 
-    async fn handshake(&mut self, launch: &AcpLaunch) -> Result<()> {
+    async fn handshake(&mut self, launch: &AcpLaunch, handoff: Option<Value>) -> Result<()> {
         let id = self.next_id();
         self.stream
             .write(&wire::request_line(
@@ -723,7 +767,10 @@ impl Task {
         }
 
         if let Some(goal) = &launch.goal {
-            self.start_turn(goal.clone(), None).await?;
+            match handoff {
+                Some(payload) => self.start_handoff_turn(goal.clone(), payload).await?,
+                None => self.start_turn(goal.clone(), None).await?,
+            }
         }
         Ok(())
     }
@@ -762,6 +809,7 @@ impl Task {
     // -- main loop ----------------------------------------------------------
 
     async fn run(mut self, mut cmd_rx: mpsc::Receiver<Command>) {
+        let mut handoff_reply = None;
         loop {
             tokio::select! {
                 ev = self.stream.recv() => match ev {
@@ -782,12 +830,26 @@ impl Task {
                     None => break,
                 },
                 cmd = cmd_rx.recv() => match cmd {
+                    Some(Command::PrepareHandoff { reply }) => {
+                        let pending = session::read_pending_prompt(&self.db, &self.session_id)
+                            .await
+                            .unwrap_or_default();
+                        if self.turn_live || !pending.trim().is_empty() {
+                            let _ = reply.send(Err(anyhow!("cannot hand off while a turn or queued prompt is active")));
+                        } else {
+                            handoff_reply = Some(reply);
+                            break;
+                        }
+                    }
                     Some(c) => self.on_command(c).await,
                     None => break,
                 },
             }
         }
         self.registry.remove_own(&self.session_id, self.generation);
+        if let Some(reply) = handoff_reply {
+            let _ = reply.send(Ok(()));
+        }
         tracing::info!(session = %self.session_id, "acp task stopped");
     }
 
@@ -993,6 +1055,26 @@ impl Task {
     }
 
     async fn start_turn(&mut self, text: String, by: Option<String>) -> Result<()> {
+        let by_v = by.map(Value::from).unwrap_or(Value::Null);
+        self.start_turn_with_block(
+            text.clone(),
+            kind::USER_MESSAGE,
+            json!({ "text": text, "by": by_v }),
+        )
+        .await
+    }
+
+    async fn start_handoff_turn(&mut self, text: String, payload: Value) -> Result<()> {
+        self.start_turn_with_block(text, kind::HANDOFF, payload)
+            .await
+    }
+
+    async fn start_turn_with_block(
+        &mut self,
+        text: String,
+        opening_kind: &str,
+        opening_payload: Value,
+    ) -> Result<()> {
         if self.turns_dispatched > 0 {
             self.current_turn += 1;
             self.next_seq = 0;
@@ -1004,12 +1086,7 @@ impl Task {
             "turn",
             json!({ "turn": self.current_turn, "state": "started" }),
         );
-        let by_v = by.map(Value::from).unwrap_or(Value::Null);
-        self.journal_block(
-            kind::USER_MESSAGE,
-            json!({ "text": text.clone(), "by": by_v }),
-        )
-        .await;
+        self.journal_block(opening_kind, opening_payload).await;
 
         let id = self.next_id();
         self.inflight_prompt = Some((id, self.current_turn));
@@ -1191,6 +1268,11 @@ impl Task {
                 self.journal_block(kind::MODE_CHANGE, json!({ "mode_id": mode_id, "by": by_v }))
                     .await;
                 let _ = reply.send(r);
+            }
+            // The run loop intercepts this variant so it can acknowledge only
+            // after registry removal. Keep the match exhaustive defensively.
+            Command::PrepareHandoff { reply } => {
+                let _ = reply.send(Err(anyhow!("handoff command reached the task dispatcher")));
             }
         }
     }

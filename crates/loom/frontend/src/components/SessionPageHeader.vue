@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, nextTick } from 'vue';
 import { useRouter } from 'vue-router';
-import type { Session } from '../types';
+import type { AgentMetadata, Session } from '../types';
+import { handoffSession, listAgents } from '../api';
 import {
   messageOf,
   conversationState,
@@ -108,6 +109,75 @@ const lastActivity = computed(() => timeAgo(props.ws.last_activity_at));
 // means here; clearing a chip DELETEs that tag (there is no "Mark OK" verb).
 const signals = computed(() => signalChips(props.ws));
 const quiet = computed(() => quietTags(props.ws));
+
+// Provider handoff is an ACP-only, between-turn server operation. The manage
+// menu exposes the profile picker for a live ACP fleet session; the endpoint is
+// still authoritative when a turn starts between paint and submit.
+const handoffOpen = ref(false);
+const handoffAgents = ref<AgentMetadata[]>([]);
+const handoffAgent = ref('');
+const handoffModel = ref('');
+const handoffEffort = ref('');
+const handoffBusy = ref(false);
+const handoffError = ref('');
+const canHandoff = computed(() => props.ws.protocol === 'acp' && props.ws.status === 'running');
+const unchangedHandoff = computed(
+  () =>
+    handoffAgent.value === props.ws.agent_kind &&
+    handoffModel.value === props.ws.model &&
+    handoffEffort.value === props.ws.effort,
+);
+const handoffMetadata = computed(() =>
+  handoffAgents.value.find((a) => a.kind === handoffAgent.value),
+);
+
+async function toggleHandoff() {
+  handoffOpen.value = !handoffOpen.value;
+  handoffError.value = '';
+  if (!handoffOpen.value) return;
+  handoffAgent.value = props.ws.agent_kind;
+  handoffModel.value = props.ws.model;
+  handoffEffort.value = props.ws.effort;
+  if (!handoffAgents.value.length) {
+    try {
+      handoffAgents.value = (await listAgents()).agents.filter((a) => a.supports_acp);
+    } catch (e) {
+      handoffError.value = (e as Error).message;
+    }
+  }
+}
+
+function chooseHandoffAgent(kind: string) {
+  if (kind === handoffAgent.value) return;
+  handoffAgent.value = kind;
+  handoffModel.value = '';
+  handoffEffort.value = '';
+}
+
+function chooseHandoffAgentFromEvent(event: Event) {
+  chooseHandoffAgent((event.target as HTMLSelectElement).value);
+}
+
+async function submitHandoff() {
+  if (handoffBusy.value || unchangedHandoff.value) return;
+  handoffBusy.value = true;
+  handoffError.value = '';
+  try {
+    await handoffSession(props.ws.id, {
+      agent: handoffAgent.value,
+      model: handoffModel.value,
+      effort: handoffEffort.value,
+    });
+    handoffOpen.value = false;
+    showDetails.value = false;
+    notice.value = `Handed off to ${handoffAgent.value}.`;
+    await emit('reload');
+  } catch (e) {
+    handoffError.value = (e as Error).message;
+  } finally {
+    handoffBusy.value = false;
+  }
+}
 </script>
 
 <template>
@@ -177,6 +247,72 @@ const quiet = computed(() => quietTags(props.ws));
           <SessionDetailsPopover :ws="ws" v-model:open="showDetails">
             <template #actions>
               <div class="space-y-1">
+                <button
+                  v-if="canHandoff"
+                  type="button"
+                  data-testid="action-handoff"
+                  class="block w-full rounded px-2 py-1.5 text-left text-fg transition-colors hover:bg-subtle"
+                  @click="toggleHandoff"
+                >
+                  <span class="block text-xs font-medium">Hand off</span>
+                  <span class="block text-2xs text-faint"
+                    >Replace the provider; keep work and conversation.</span
+                  >
+                </button>
+                <form
+                  v-if="handoffOpen"
+                  class="space-y-3 rounded border border-line bg-input p-2"
+                  data-testid="handoff-form"
+                  @submit.prevent="submitHandoff"
+                >
+                  <label class="block text-2xs font-semibold uppercase tracking-wider text-muted">
+                    Provider
+                    <select
+                      :value="handoffAgent"
+                      class="mt-1 block w-full rounded bg-surface px-2 py-1.5 text-xs font-normal normal-case tracking-normal text-fg"
+                      @change="chooseHandoffAgentFromEvent"
+                    >
+                      <option v-for="a in handoffAgents" :key="a.kind" :value="a.kind">
+                        {{ a.label }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="block text-2xs font-semibold uppercase tracking-wider text-muted">
+                    Model
+                    <select
+                      v-model="handoffModel"
+                      class="mt-1 block w-full rounded bg-surface px-2 py-1.5 text-xs font-normal normal-case tracking-normal text-fg"
+                    >
+                      <option value="">Default</option>
+                      <option v-for="m in handoffMetadata?.models ?? []" :key="m.id" :value="m.id">
+                        {{ m.label }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="block text-2xs font-semibold uppercase tracking-wider text-muted">
+                    Effort
+                    <select
+                      v-model="handoffEffort"
+                      class="mt-1 block w-full rounded bg-surface px-2 py-1.5 text-xs font-normal normal-case tracking-normal text-fg"
+                    >
+                      <option value="">Default</option>
+                      <option v-for="e in handoffMetadata?.efforts ?? []" :key="e.id" :value="e.id">
+                        {{ e.label }}
+                      </option>
+                    </select>
+                  </label>
+                  <p class="text-2xs text-faint">
+                    Starts the replacement with this session's goal and conversation history.
+                  </p>
+                  <p v-if="handoffError" class="text-xs text-block">{{ handoffError }}</p>
+                  <button
+                    type="submit"
+                    class="btn-primary px-2.5 py-1 text-xs"
+                    :disabled="handoffBusy || unchangedHandoff || !handoffAgent"
+                  >
+                    {{ handoffBusy ? 'Handing off…' : 'Hand off now' }}
+                  </button>
+                </form>
                 <button
                   v-for="a in lifecycle"
                   :key="a.verb"

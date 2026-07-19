@@ -32,6 +32,58 @@ pub mod kind {
     pub const MODE_CHANGE: &str = "mode_change";
     pub const USAGE: &str = "usage";
     pub const TURN_END: &str = "turn_end";
+    pub const HANDOFF: &str = "handoff";
+}
+
+/// Build the provider-neutral bootstrap given to a replacement agent. Only the
+/// authored dialogue is replayed: the worktree already carries tool effects,
+/// while thoughts and raw tool output are noisy, provider-specific machinery.
+/// Keep a bounded tail so a long-running session cannot consume the target's
+/// whole context window before it starts useful work.
+pub fn handoff_prompt(goal: &str, blocks: &[ChatBlockView], max_chars: usize) -> String {
+    let mut dialogue = String::new();
+    for block in blocks {
+        let speaker = match block.kind.as_str() {
+            kind::USER_MESSAGE => "User",
+            kind::AGENT_MESSAGE => "Agent",
+            _ => continue,
+        };
+        let text = block
+            .payload
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if text.is_empty() {
+            continue;
+        }
+        dialogue.push_str(speaker);
+        dialogue.push_str(":\n");
+        dialogue.push_str(text);
+        dialogue.push_str("\n\n");
+    }
+
+    let (dialogue, omitted) = tail_chars(&dialogue, max_chars);
+    let omission = omitted.then_some(
+        "Earlier dialogue was omitted to fit the handoff context; the canonical journal remains in loom.\n\n",
+    );
+    format!(
+        "You are taking over an existing coding session from another agent provider. Continue the work in the current worktree; do not restart completed work.\n\nGoal:\n{}\n\nPrior conversation:\n{}{}",
+        goal.trim(),
+        omission.unwrap_or(""),
+        dialogue.trim()
+    )
+}
+
+fn tail_chars(text: &str, max_chars: usize) -> (String, bool) {
+    let count = text.chars().count();
+    if count <= max_chars {
+        return (text.to_string(), false);
+    }
+    (
+        text.chars().skip(count.saturating_sub(max_chars)).collect(),
+        true,
+    )
 }
 
 /// One journaled block as the `/chat` routes expose it. `payload` is passed
@@ -316,6 +368,11 @@ fn preview_line(b: &ChatBlockView) -> String {
             let reason = p.get("stop_reason").and_then(Value::as_str).unwrap_or("");
             format!("— turn {} · {reason} —", b.turn)
         }
+        kind::HANDOFF => {
+            let from = p.get("from").and_then(Value::as_str).unwrap_or("agent");
+            let to = p.get("to").and_then(Value::as_str).unwrap_or("agent");
+            format!("[handoff] {from} → {to}")
+        }
         _ => String::new(),
     }
 }
@@ -506,5 +563,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(latest_usage(&db, &s).await.unwrap().unwrap()["used"], 150);
+    }
+
+    #[test]
+    fn handoff_prompt_replays_only_dialogue_and_bounds_the_tail() {
+        let block = |kind: &str, text: &str| ChatBlockView {
+            turn: 0,
+            seq: 0,
+            kind: kind.to_string(),
+            payload: json!({"text": text}),
+            created_at: String::new(),
+        };
+        let blocks = vec![
+            block(kind::USER_MESSAGE, "old user context"),
+            block(kind::THOUGHT, "private reasoning"),
+            block(kind::AGENT_MESSAGE, "recent answer"),
+            block(kind::TOOL_CALL, "large tool output"),
+        ];
+        let prompt = handoff_prompt("finish it", &blocks, 20);
+        assert!(prompt.contains("Goal:\nfinish it"));
+        assert!(prompt.contains("recent answer"));
+        assert!(prompt.contains("Earlier dialogue was omitted"));
+        assert!(!prompt.contains("private reasoning"));
+        assert!(!prompt.contains("large tool output"));
     }
 }

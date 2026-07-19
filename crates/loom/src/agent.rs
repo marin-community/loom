@@ -51,6 +51,9 @@ pub struct AgentMetadata {
     /// True for the code-shipped `claude`/`codex`; false for an operator-defined
     /// custom agent (which the UI may edit or delete).
     pub builtin: bool,
+    /// Whether this runtime can be driven through ACP. Kept separate from its
+    /// declared/default protocol so callers test a capability, not a default.
+    pub supports_acp: bool,
     /// The agent's declared execution backend: `"terminal"` or `"acp"`. The
     /// builtins declare `"acp"`; a custom agent reports its stored `protocol`.
     /// A create request may override a builtin's default (`--protocol
@@ -393,6 +396,7 @@ impl AgentType for ClaudeAgentType {
             supports_hooks: true,
             supports_concierge: true,
             builtin: true,
+            supports_acp: true,
             // ACP is the builtin default; `--protocol terminal` keeps the PTY
             // fallback.
             protocol: "acp".to_string(),
@@ -425,6 +429,7 @@ impl AgentType for CodexAgentType {
             supports_hooks: false,
             supports_concierge: true,
             builtin: true,
+            supports_acp: true,
             // ACP is the builtin default; `--protocol terminal` keeps the PTY
             // fallback.
             protocol: "acp".to_string(),
@@ -453,6 +458,7 @@ impl AgentType for CustomAgentType {
             supports_hooks: self.agent.reports_status,
             supports_concierge: false,
             builtin: false,
+            supports_acp: self.agent.protocol == "acp",
             protocol: if self.agent.protocol.is_empty() {
                 "terminal".to_string()
             } else {
@@ -1750,6 +1756,7 @@ mod tests {
             supports_hooks: false,
             supports_concierge: false,
             builtin,
+            supports_acp: builtin || protocol == "acp",
             protocol: protocol.to_string(),
         }
     }

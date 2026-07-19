@@ -33,6 +33,7 @@ import type {
   PermissionPayload,
   UsagePayload,
   TurnEndPayload,
+  HandoffPayload,
 } from '../types';
 import { canSend } from '../lib/sessionState';
 import { useFollowFoot } from '../lib/followFoot';
@@ -163,18 +164,38 @@ function onTurn(ev: SseTurn) {
 
 // ── SSE lifecycle (kept-alive discipline) ────────────────────────────────────
 let source: EventSource | null = null;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 function openStream() {
-  source = new EventSource(`/api/sessions/${id.value}/chat/stream`);
-  source.addEventListener('block', (e) =>
+  const stream = new EventSource(`/api/sessions/${id.value}/chat/stream`);
+  source = stream;
+  stream.addEventListener('block', (e) =>
     onBlock(JSON.parse((e as MessageEvent).data) as ChatBlock),
   );
-  source.addEventListener('delta', (e) =>
+  stream.addEventListener('delta', (e) =>
     onDelta(JSON.parse((e as MessageEvent).data) as SseDelta),
   );
-  source.addEventListener('tool', (e) => onTool(JSON.parse((e as MessageEvent).data) as SseTool));
-  source.addEventListener('turn', (e) => onTurn(JSON.parse((e as MessageEvent).data) as SseTurn));
+  stream.addEventListener('tool', (e) => onTool(JSON.parse((e as MessageEvent).data) as SseTool));
+  stream.addEventListener('turn', (e) => onTurn(JSON.parse((e as MessageEvent).data) as SseTurn));
+  // Once the server has installed the subscription, reconcile from the durable
+  // journal. Subscribing first avoids a snapshot-to-stream gap during handoff.
+  stream.addEventListener('open', () => load({ preserve: true }));
+  // A provider handoff cleanly closes the old task's broadcast. Browsers do not
+  // consistently reconnect an EventSource after a clean EOF, so explicitly
+  // replace it and refetch the durable snapshot before tailing the new task.
+  stream.onerror = () => {
+    if (source !== stream) return;
+    stream.close();
+    source = null;
+    if (reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (!source) openStream();
+    }, 100);
+  };
 }
 function closeStream() {
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = null;
   source?.close();
   source = null;
 }
@@ -302,7 +323,8 @@ type Row =
   | { type: 'thought'; key: string; text: string; streaming: boolean }
   | { type: 'activity'; key: string; items: ActivityItem[]; failures: number }
   | { type: 'permission'; key: string; perm: PermissionPayload }
-  | { type: 'mode'; key: string; mode: string };
+  | { type: 'mode'; key: string; mode: string }
+  | { type: 'handoff'; key: string; handoff: HandoffPayload };
 
 interface TocItem {
   anchor: string;
@@ -411,6 +433,14 @@ const model = computed<{ rows: Row[]; toc: TocItem[] }>(() => {
           type: 'mode',
           key: k,
           mode: (b.payload as { mode_id?: string }).mode_id ?? '',
+        });
+        break;
+      case 'handoff':
+        flushActivity();
+        rows.push({
+          type: 'handoff',
+          key: k,
+          handoff: b.payload as unknown as HandoffPayload,
         });
         break;
       case 'turn_end': {
@@ -808,6 +838,13 @@ function goTo(anchor: string) {
             <!-- Mode change — a quiet centred marker. -->
             <div v-else-if="row.type === 'mode'" class="acp-mode-note">
               mode → {{ modeLabel(row.mode) }}
+            </div>
+
+            <!-- Provider boundary — the injected bootstrap stays hidden; this
+                 compact receipt is the honest journal provenance. -->
+            <div v-else-if="row.type === 'handoff'" class="acp-mode-note" data-testid="acp-handoff">
+              handoff · {{ row.handoff.from }} → {{ row.handoff.to
+              }}<template v-if="row.handoff.model"> · {{ row.handoff.model }}</template>
             </div>
           </template>
 

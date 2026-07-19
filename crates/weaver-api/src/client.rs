@@ -13,9 +13,9 @@ use serde_json::Value;
 use crate::dto::{
     AnchorDto, ArtifactMeta, ArtifactUpsertReq, ArtifactView, BranchStatusReq, BranchView,
     CommentDto, CreateEventReq, CreateIssueReq, CreateRepoIssueReq, CreateReq, CreateTokenReq,
-    CreateWatchReq, CreatedTokenView, IssueView, NewCommentBody, NewThreadBody, PatchIssueReq,
-    PatchSessionReq, PatchWatchReq, RunWatchReq, SendReq, SessionView, SettingsEnvelope, TagReq,
-    ThreadDto, TokenView, WatchView,
+    CreateWatchReq, CreatedTokenView, HandoffReq, IssueView, NewCommentBody, NewThreadBody,
+    PatchIssueReq, PatchSessionReq, PatchWatchReq, RunWatchReq, SendReq, SessionView,
+    SettingsEnvelope, TagReq, ThreadDto, TokenView, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -167,6 +167,17 @@ impl Client {
         self.send_typed(
             Method::PATCH,
             &format!("/api/sessions/{}", Self::seg(key)),
+            Some(req),
+        )
+        .await
+    }
+
+    /// Replace the provider behind a live ACP session while preserving the
+    /// loom session, worktree, branch, and canonical journal.
+    pub async fn handoff_session(&self, key: &str, req: &HandoffReq) -> Result<SessionView> {
+        self.send_typed(
+            Method::POST,
+            &format!("/api/sessions/{}/handoff", Self::seg(key)),
             Some(req),
         )
         .await

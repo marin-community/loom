@@ -32,6 +32,24 @@ const FAKE_AGENT = join(__dirname, '..', '..', 'crates', 'loom', 'tests', 'fixtu
 const HEADERS = { 'content-type': 'application/json' };
 const SKIP_MSG = 'ACP lifecycle backend (weaver #508) not merged: the server does not launch acp sessions over REST yet';
 
+async function defineFakeAcpAgent(weaver: WeaverFixture, name: string, label: string): Promise<void> {
+  const res = await fetch(`${weaver.baseUrl}/api/agents/custom`, {
+    method: 'POST',
+    headers: HEADERS,
+    body: JSON.stringify({
+      name,
+      label,
+      setup: '',
+      launch: `node ${FAKE_AGENT}`,
+      resume: '',
+      reports_status: false,
+      protocol: 'acp',
+    }),
+  });
+  // Tests sharing a worker can race to define the common source adapter.
+  if (!res.ok && res.status !== 409) throw new Error(`defining ${name} failed: ${await res.text()}`);
+}
+
 /** Define (idempotently) a custom agent that runs the fake ACP adapter over
  *  stdio, then create a session with it. Returns the session when the backend
  *  brought it up as `protocol='acp'`, else null (the acp axis isn't wired yet). */
@@ -43,21 +61,7 @@ async function launchAcpSession(
   // `protocol` axis marks it ACP rather than a PTY TUI (added by the lifecycle
   // phase; ignored by the current backend, which is exactly why the probe below
   // detects support).
-  await fetch(`${weaver.baseUrl}/api/agents/custom`, {
-    method: 'POST',
-    headers: HEADERS,
-    body: JSON.stringify({
-      name: 'acp-fake',
-      label: 'ACP fake',
-      setup: '',
-      launch: `node ${FAKE_AGENT}`,
-      resume: '',
-      reports_status: false,
-      protocol: 'acp',
-    }),
-  }).catch(() => {
-    /* already defined by an earlier test in this worker — fine */
-  });
+  await defineFakeAcpAgent(weaver, 'acp-fake', 'ACP fake');
 
   const res = await fetch(`${weaver.baseUrl}/api/sessions`, {
     method: 'POST',
@@ -152,6 +156,50 @@ test.describe('acp conversation', () => {
     // is the dispatched prompt (whose text is the whole script).
     await expect(conv.getByText('hello from the echo', { exact: true })).toHaveCount(0);
     await expect(conv.locator('.acp-label', { hasText: 'You' })).toHaveCount(1);
+  });
+
+  test('hands an idle conversation to another ACP provider in place', async ({ page, weaver }) => {
+    const s = await openAcp(page, weaver, {
+      goal: 'say:before handoff',
+      name: 'acp-handoff',
+    });
+    const conv = page.getByTestId('acp-conversation');
+    await expect(conv.getByText('before handoff', { exact: true })).toBeVisible();
+    await expect(page.getByTestId('acp-turn-rule')).toBeVisible();
+    await defineFakeAcpAgent(weaver, 'acp-fake-next', 'ACP fake next');
+
+    await page.getByRole('button', { name: 'manage' }).click();
+    await page.getByTestId('action-handoff').click();
+    const form = page.getByTestId('handoff-form');
+    await form.getByLabel('Provider').selectOption('acp-fake-next');
+    await form.getByRole('button', { name: 'Hand off now' }).click();
+
+    // The stable session URL and earlier prose survive; only the provider and
+    // its private ACP connection change. The journal makes that boundary clear.
+    await expect(page).toHaveURL(new RegExp(`/s/${s.id}$`));
+    await expect.poll(async () => (await weaver.getSession(s.id)).agent_kind).toBe('acp-fake-next');
+    await expect(page.getByText('acp-fake-next', { exact: true })).toBeVisible();
+    await expect(conv.getByText('before handoff', { exact: true })).toBeVisible();
+    await expect(page.getByTestId('acp-handoff')).toContainText('acp-fake → acp-fake-next');
+
+    const input = page.getByTestId('acp-composer-input');
+    await input.fill('say:after');
+    await page.getByTestId('acp-composer-send').click();
+    await expect
+      .poll(
+        async () => {
+          const res = await fetch(`${weaver.baseUrl}/api/sessions/${s.id}/chat`);
+          const chat = (await res.json()) as {
+            blocks: Array<{ kind: string; payload: { text?: string } }>;
+          };
+          return chat.blocks.some((b) => b.kind === 'agent_message' && b.payload.text === 'after');
+        },
+        { timeout: 15_000 },
+      )
+      .toBe(true);
+    await expect(conv.getByText('after', { exact: true })).toBeVisible({
+      timeout: 15_000,
+    });
   });
 
   test('a run of tool calls folds to one collapsed activity line', async ({ page, weaver }) => {

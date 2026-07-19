@@ -315,6 +315,24 @@ enum SessionCmd {
     Adopt { branch: String },
     /// Recover an archived session: rebuild its worktree and resume the agent.
     Recover { branch: String },
+    /// Replace the provider behind a live ACP session, preserving its worktree
+    /// and canonical conversation journal.
+    Handoff {
+        /// Session key: id, branch id, branch name, or `repo:branch`.
+        session: String,
+        /// Target ACP agent runtime (for example `claude` or `codex`).
+        #[arg(long)]
+        agent: String,
+        /// Target model selector; omit for the runtime default.
+        #[arg(long)]
+        model: Option<String>,
+        /// Target reasoning effort; omit for the runtime default.
+        #[arg(long)]
+        effort: Option<String>,
+        /// Target ACP permission posture; omit for `auto`.
+        #[arg(long)]
+        mode: Option<String>,
+    },
     /// Remove a session (worktree + terminal + DB row).
     Rm {
         branch: String,
@@ -720,6 +738,13 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
         SessionCmd::Archive { branch } => cmd_archive(branch).await,
         SessionCmd::Adopt { branch } => cmd_adopt(branch).await,
         SessionCmd::Recover { branch } => cmd_recover(branch).await,
+        SessionCmd::Handoff {
+            session,
+            agent,
+            model,
+            effort,
+            mode,
+        } => cmd_handoff(session, agent, model, effort, mode).await,
         SessionCmd::Rm {
             branch,
             keep_branch,
@@ -2622,6 +2647,36 @@ async fn cmd_recover(key: String) -> Result<()> {
     println!("  status:  {}", str_field(&ws, "status"));
     println!("  session: {}", str_field(&ws, "term_session"));
     println!("  attach:  loom attach {}", str_field(&ws, "id"));
+    Ok(())
+}
+
+async fn cmd_handoff(
+    key: String,
+    agent: String,
+    model: Option<String>,
+    effort: Option<String>,
+    mode: Option<String>,
+) -> Result<()> {
+    let client = client::default();
+    let ws = client
+        .handoff_session(
+            &key,
+            &weaver_api::HandoffReq {
+                agent,
+                model,
+                effort,
+                mode,
+            },
+        )
+        .await?;
+    println!("handed off session {} to {}", ws.id, ws.agent_kind);
+    if !ws.model.is_empty() {
+        println!("  model:   {}", ws.model);
+    }
+    if !ws.effort.is_empty() {
+        println!("  effort:  {}", ws.effort);
+    }
+    println!("  session: {}", ws.term_session);
     Ok(())
 }
 

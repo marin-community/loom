@@ -894,6 +894,172 @@ async fn rest_create_drives_the_turn_lifecycle() {
     assert_eq!(nudges, 1, "the send recorded exactly one nudge audit event");
 }
 
+/// A provider handoff keeps loom's identity and canonical journal, records one
+/// compact boundary instead of the synthetic bootstrap prompt, and continues at
+/// the next turn under the replacement adapter.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handoff_replaces_provider_and_continues_the_journal() {
+    let ts = TestServer::start().await;
+    seed_acp_agent(&ts, "fake-a").await;
+    seed_acp_agent(&ts, "fake-b").await;
+
+    let created = rest_create(&ts, "fake-a", "say:before").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let branch_id = created["branch"]["id"].clone();
+    let work_dir = created["work_dir"].clone();
+    poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
+        blocks.iter().any(|b| b["kind"] == "turn_end")
+    })
+    .await;
+
+    let handed = ts
+        .client
+        .post(
+            &format!("/api/sessions/{id}/handoff"),
+            json!({ "agent": "fake-b" }),
+        )
+        .await
+        .expect("handoff succeeds");
+    assert_eq!(handed["id"], id, "loom session id stays stable");
+    assert_eq!(handed["branch"]["id"], branch_id);
+    assert_eq!(handed["work_dir"], work_dir);
+    assert_eq!(handed["agent_kind"], "fake-b");
+    assert!(handed["acp_session_id"].as_str().is_some());
+
+    let chat = poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
+        blocks.iter().filter(|b| b["kind"] == "turn_end").count() >= 2
+    })
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+    let handoffs: Vec<&Value> = blocks.iter().filter(|b| b["kind"] == "handoff").collect();
+    assert_eq!(handoffs.len(), 1, "one durable provider boundary");
+    assert_eq!(handoffs[0]["turn"], 1);
+    assert_eq!(handoffs[0]["seq"], 0);
+    assert_eq!(handoffs[0]["payload"]["from"], "fake-a");
+    assert_eq!(handoffs[0]["payload"]["to"], "fake-b");
+    assert_eq!(
+        count_kind(blocks, "user_message"),
+        1,
+        "the synthetic handoff bootstrap is not shown as a human message"
+    );
+    assert!(blocks
+        .iter()
+        .any(|b| { b["kind"] == "agent_message" && b["payload"]["text"] == "before" }));
+
+    ts.client
+        .post(
+            &format!("/api/sessions/{id}/prompt"),
+            json!({ "text": "say:after" }),
+        )
+        .await
+        .expect("replacement accepts later work");
+    let chat = poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
+        blocks
+            .iter()
+            .any(|b| b["kind"] == "agent_message" && b["payload"]["text"] == "after")
+    })
+    .await;
+    assert!(chat["blocks"].as_array().unwrap().iter().any(|b| {
+        b["kind"] == "user_message" && b["turn"] == 2 && b["payload"]["text"] == "say:after"
+    }));
+}
+
+/// Handoff is ordered with prompts on the task command channel: a turn that
+/// starts first wins and the provider remains untouched.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handoff_rejects_an_inflight_turn_without_stopping_it() {
+    let ts = TestServer::start().await;
+    seed_acp_agent(&ts, "fake-a").await;
+    seed_acp_agent(&ts, "fake-b").await;
+    let created = rest_create(&ts, "fake-a", "say:ready").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
+        blocks.iter().any(|b| b["kind"] == "turn_end")
+    })
+    .await;
+
+    ts.client
+        .post(
+            &format!("/api/sessions/{id}/send"),
+            json!({ "text": "wait:500|say:finished" }),
+        )
+        .await
+        .unwrap();
+    let err = ts
+        .client
+        .post(
+            &format!("/api/sessions/{id}/handoff"),
+            json!({ "agent": "fake-b" }),
+        )
+        .await
+        .expect_err("live turn blocks handoff");
+    assert!(
+        err.to_string().contains("cannot hand off while a turn"),
+        "{err}"
+    );
+    let view = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    assert_eq!(view["agent_kind"], "fake-a", "old provider stays live");
+    poll_chat(&ts, &id, Duration::from_secs(10), |blocks| {
+        blocks
+            .iter()
+            .any(|b| b["kind"] == "agent_message" && b["payload"]["text"] == "finished")
+    })
+    .await;
+}
+
+/// Once the old provider is quiesced, a replacement handshake failure leaves a
+/// coherent visible error and no leaked relay/task.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handoff_failure_cleans_up_the_replacement() {
+    let ts = TestServer::start().await;
+    seed_acp_agent(&ts, "fake-a").await;
+    loom::custom_agents::set(
+        &ts.state.db,
+        &loom::custom_agents::CustomAgent {
+            name: "broken-acp".to_string(),
+            label: "Broken ACP".to_string(),
+            setup: String::new(),
+            launch: "exit 7".to_string(),
+            resume: String::new(),
+            reports_status: false,
+            protocol: "acp".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let created = rest_create(&ts, "fake-a", "say:ready").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let relay = created["term_session"].as_str().unwrap().to_string();
+    poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
+        blocks.iter().any(|b| b["kind"] == "turn_end")
+    })
+    .await;
+
+    let err = ts
+        .client
+        .post(
+            &format!("/api/sessions/{id}/handoff"),
+            json!({ "agent": "broken-acp" }),
+        )
+        .await
+        .expect_err("broken replacement fails");
+    assert!(err.to_string().contains("agent handoff failed"), "{err}");
+    let view = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    assert_eq!(view["status"], "error");
+    assert_eq!(view["agent_kind"], "broken-acp");
+    assert_eq!(view["acp_session_id"], Value::Null);
+    assert!(!ts.state.acp.is_live(&id), "replacement task is gone");
+    assert!(
+        !backend::has_session(&relay).await,
+        "replacement relay is gone"
+    );
+}
+
 /// B. Adopt after a full crash (task + relay gone): the monitor orphans the row,
 ///    `/adopt` respawns the relay and reopens via `session/load`, and the journal
 ///    continues without duplicating the replayed history.

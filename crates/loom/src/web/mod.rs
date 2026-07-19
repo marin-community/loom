@@ -537,6 +537,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/url", get(session_url_route))
         .route("/sessions/{id}/archive", post(archive_session))
         .route("/sessions/{id}/adopt", post(adopt_session))
+        .route("/sessions/{id}/handoff", post(handoff_session))
         .route("/sessions/{id}/recover", post(recover_session))
         .route("/sessions/{id}/github", post(refresh_github_session))
         .route("/sessions/{id}/raw", get(raw_session))

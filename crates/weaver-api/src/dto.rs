@@ -592,6 +592,22 @@ pub struct CreateReq {
     pub mode: Option<String>,
 }
 
+/// Body for `POST /api/sessions/{id}/handoff`: replace the live ACP runtime
+/// while keeping the loom session, worktree, and canonical chat journal.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HandoffReq {
+    pub agent: String,
+    /// Blank/absent uses the target runtime's default.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Blank/absent uses the target runtime's default.
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// ACP permission posture. Blank/absent uses loom's ACP default.
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
 /// Body for `PATCH /api/sessions/{id}`. Branch-level fields (goal/title/
 /// description) are forwarded to the underlying branch row. The attention *level*
 /// is set through the tags endpoints (`PUT/DELETE /sessions/{id}/tags/{key}`),

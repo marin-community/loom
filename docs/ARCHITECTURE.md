@@ -200,6 +200,7 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `PUT DELETE /api/sessions/{id}/tags/{key}` | set (upsert) / clear a branch tag — the well-known `attention` and `triage` keys plus any free-form key |
 | `GET /api/sessions/{id}/url` | the session's dashboard URL as `{url}`, built from the externally-visible origin (`auth.base_url`, else the request's own Host) — what `loom session url` prints, so an agent can link a PR back to its session without inventing a loopback link |
 | `POST /api/sessions/{id}/{archive,adopt}` | actions |
+| `POST /api/sessions/{id}/handoff` | replace an idle ACP session's agent runtime/profile while preserving its loom session, worktree, branch, and canonical chat journal; the new provider receives a bounded dialogue replay and the journal records a compact handoff boundary |
 | `POST /api/sessions/{id}/github` | re-poll the branch's GitHub PR now and return the updated session |
 | `GET POST DELETE /api/sessions/{id}/scratch` | list / drop / remove worktree `scratch/` reference files |
 | `PUT /api/sessions/{id}/file?path=…` | write raw bytes to a worktree file (the editor save primitive) |

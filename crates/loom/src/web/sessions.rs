@@ -24,7 +24,7 @@ use crate::{
     agent, agent_env, backend, config, custom_agents, db, events, git, github, repo, repo_env,
     setup,
 };
-use weaver_api::{CreateReq, PatchSessionReq, SendReq, SessionView, TagReq};
+use weaver_api::{CreateReq, HandoffReq, PatchSessionReq, SendReq, SessionView, TagReq};
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::Branch;
 use weaver_core::tags;
@@ -35,6 +35,7 @@ use super::{author_or_manual, require_branch, require_session, session_view};
 use super::{ApiResult, AppError, AppState};
 
 const MISSING_GITHUB_TOKEN_MESSAGE: &str = "No GitHub token configured. Add your personal GitHub token in Settings > Account, or configure GH_TOKEN in Settings > Environment.";
+const HANDOFF_HISTORY_CHARS: usize = 64 * 1024;
 
 pub(super) async fn list_agents(State(st): State<AppState>) -> ApiResult<Json<Value>> {
     let default_agent = configured_agent(&st.db, "agent.default", config::DEFAULT_AGENT).await;
@@ -2553,6 +2554,142 @@ fn require_acp_task(st: &AppState, session: &Session) -> ApiResult<crate::acp::A
             session.id
         ))
     })
+}
+
+/// Replace the provider behind an idle ACP work session while preserving loom's
+/// stable session/branch/worktree identity and canonical journal.
+pub(super) async fn handoff_session(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Json(req): Json<HandoffReq>,
+) -> ApiResult<Json<SessionView>> {
+    let (session, branch) = require_session(&st.db, &key).await?;
+    require_acp(&session)?;
+    if session.status != "running" {
+        return Err(AppError::conflict(format!(
+            "session '{}' is {}, not running",
+            session.id, session.status
+        )));
+    }
+    if session.agent_kind == agent::CONCIERGE_KIND || session.managed_by.is_some() {
+        return Err(AppError::conflict(
+            "engine-managed sessions cannot be handed off manually",
+        ));
+    }
+
+    let target = req.agent.trim();
+    if target.is_empty() {
+        return Err(AppError::bad_request("handoff agent is required"));
+    }
+    let runtime = launch_runtime(&st.db, target).await;
+    let metadata = agent::metadata_for(&st.db, &runtime)
+        .await?
+        .ok_or_else(|| AppError::bad_request(format!("unknown agent '{runtime}'")))?;
+    if !metadata.supports_acp {
+        return Err(AppError::bad_request(format!(
+            "agent '{runtime}' does not support ACP handoff"
+        )));
+    }
+    let model = req.model.as_deref().unwrap_or("").trim().to_string();
+    let effort = req.effort.as_deref().unwrap_or("").trim().to_string();
+    agent::validate_model(&metadata, &model).map_err(AppError::bad_request)?;
+    agent::validate_effort(&metadata, &effort).map_err(AppError::bad_request)?;
+    if target == session.agent_kind && model == session.model && effort == session.effort {
+        return Err(AppError::bad_request(
+            "handoff target matches the current runtime profile",
+        ));
+    }
+    let mode = req
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .unwrap_or(agent::DEFAULT_ACP_MODE)
+        .to_string();
+
+    // Resolve every fallible launch input before quiescing the current task.
+    let repo_root = PathBuf::from(&branch.repo_root);
+    let work_dir = PathBuf::from(&session.work_dir);
+    let repo_cfg = repo_cfg_or_default(&repo_root);
+    let mut extra_env = launch_env(&st.db, &repo_root, &repo_cfg).await;
+    apply_user_github_token(&st.db, &mut extra_env, session.created_by.as_deref()).await;
+    ensure_github_token_available(&st.db, &extra_env, session.created_by.as_deref(), &runtime)
+        .await?;
+    let blocks = crate::chat::list(&st.db, &session.id).await?;
+    let prompt = crate::chat::handoff_prompt(&branch.goal, &blocks, HANDOFF_HISTORY_CHARS);
+    let prompt_file = db::run_dir(&session.id).join("handoff.txt");
+    tokio::fs::write(&prompt_file, prompt).await?;
+    let custom = if agent::builtin_agent_type(&runtime).is_some() {
+        None
+    } else {
+        custom_agents::get(&st.db, &runtime).await?
+    };
+    let launch = agent::build_acp_launch(
+        &st.db,
+        &agent::AcpLaunchSpec {
+            branch_id: &branch.id,
+            runtime: &runtime,
+            work_dir: &work_dir,
+            server_addr: &st.addr,
+            model: &model,
+            effort: &effort,
+            goal_file: Some(&prompt_file),
+            primer_file: None,
+            extra_env: &extra_env,
+            mode: &mode,
+            custom: custom.as_ref(),
+        },
+        agent::AcpOpen::Fresh,
+    )
+    .await
+    .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let handle = require_acp_task(&st, &session)?;
+    handle
+        .prepare_handoff()
+        .await
+        .map_err(|e| AppError::conflict(e.to_string()))?;
+    backend::kill_session_and_wait(&session.term_session).await?;
+    session_mod::prepare_handoff(&st.db, &session.id, target, &model, &effort, "running").await?;
+
+    let boundary = json!({
+        "from": session.agent_kind,
+        "to": target,
+        "model": model,
+        "effort": effort,
+    });
+    if let Err(e) = crate::acp::start_handoff(&st, &session.id, launch, boundary).await {
+        st.acp.stop(&session.id);
+        backend::kill_session(&session.term_session).await.ok();
+        session_mod::prepare_handoff(&st.db, &session.id, target, &model, &effort, "error")
+            .await
+            .ok();
+        events::record(
+            &st.db,
+            &st.bus,
+            &branch.id,
+            "status",
+            json!({ "status": "error", "reason": "agent handoff failed" }),
+        )
+        .await
+        .ok();
+        return Err(AppError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("agent handoff failed: {e}"),
+        ));
+    }
+
+    events::record(
+        &st.db,
+        &st.bus,
+        &branch.id,
+        "handoff",
+        json!({ "from": session.agent_kind, "to": target, "model": model, "effort": effort }),
+    )
+    .await
+    .ok();
+    let (session, branch) = require_session(&st.db, &session.id).await?;
+    Ok(Json(session_view(&st.db, &session, &branch).await?))
 }
 
 /// The in-flight turn number from a session's persisted `acp_inflight`, or `None`.

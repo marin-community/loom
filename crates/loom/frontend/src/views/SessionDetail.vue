@@ -234,7 +234,7 @@ function openStream() {
   // `tag` covers every status axis (the agent's attention, a watch's
   // triage, any free-form key); a tag write re-fetches the session so the
   // resolved badge and the pill row refresh.
-  for (const kind of ['status', 'tag', 'github']) {
+  for (const kind of ['status', 'tag', 'github', 'handoff']) {
     source.addEventListener(kind, (e) => {
       const ev = JSON.parse((e as MessageEvent).data) as WeaverEvent;
       events.value.push(ev);

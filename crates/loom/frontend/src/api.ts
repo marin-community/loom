@@ -256,6 +256,13 @@ export const resolveThread = (id: string, name: string, tid: number) =>
 export const sendMessage = (id: string, text: string, submit = true) =>
   post(`/sessions/${id}/send`, { text, submit });
 
+/** Replace the provider behind an idle ACP session while preserving its stable
+ * loom session, worktree, branch, and canonical conversation journal. */
+export const handoffSession = (
+  id: string,
+  body: { agent: string; model?: string; effort?: string; mode?: string },
+) => post(`/sessions/${id}/handoff`, body) as Promise<Session>;
+
 // --- ACP conversation (protocol='acp' sessions) ----------------------------
 
 import type { ChatSnapshot, PromptAck } from './types';

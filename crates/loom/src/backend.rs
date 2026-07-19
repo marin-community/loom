@@ -12,7 +12,7 @@
 //! restart leaves running terminals untouched — the recovery property that keeps
 //! agents alive across restarts.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 use crate::db::Db;
 
@@ -233,6 +233,23 @@ pub async fn kill_session(name: &str) -> Result<()> {
             Ok(()) => tracing::info!(name = %name, "terminal killed"),
             Err(e) => tracing::warn!(name = %name, error = %e, "failed to kill terminal"),
         }
+    }
+    Ok(())
+}
+
+/// Kill a session and wait until its supervisor has released the control socket.
+///
+/// A kill request is acknowledged before the supervisor finishes teardown. A
+/// caller that immediately reuses the same name (provider handoff does this)
+/// must wait, or the replacement can connect to the dying supervisor.
+pub async fn kill_session_and_wait(name: &str) -> Result<()> {
+    kill_session(name).await?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while has_session(name).await {
+        if tokio::time::Instant::now() >= deadline {
+            bail!("terminal {name} did not stop within 5 seconds");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     Ok(())
 }

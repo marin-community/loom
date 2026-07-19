@@ -382,6 +382,35 @@ pub async fn set_current_mode(db: &Db, id: &str, mode_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Replace an ACP session's runtime profile and clear every piece of
+/// provider-private relay/session state. The journal is deliberately untouched:
+/// it is keyed by loom's stable session id and continues across the handoff.
+pub async fn prepare_handoff(
+    db: &Db,
+    id: &str,
+    agent_kind: &str,
+    model: &str,
+    effort: &str,
+    status: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE sessions
+         SET agent_kind = ?, model = ?, effort = ?, status = ?,
+             acp_session_id = NULL, acp_ack_seq = 0, acp_inflight = NULL,
+             current_mode = NULL, pending_prompt = NULL
+         WHERE id = ?",
+    )
+    .bind(agent_kind)
+    .bind(model)
+    .bind(effort)
+    .bind(status)
+    .bind(id)
+    .execute(db)
+    .await?;
+    tracing::info!(session = %id, agent_kind, model, effort, status, "session runtime handed off");
+    Ok(())
+}
+
 /// Append `text` to the durable prompt queue as a new paragraph (the queue holds
 /// sends that arrived while a turn was in flight; it dispatches as one prompt at
 /// the next turn boundary). Returns the full queued text after the append.
@@ -505,5 +534,40 @@ mod tests {
             active_managed_by(&db, "ov-other").await.unwrap().is_none(),
             "no warm session for a watch that owns none"
         );
+    }
+
+    #[tokio::test]
+    async fn handoff_replaces_profile_and_clears_provider_state() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let branch = branch_id(&db, "weaver/handoff").await;
+        let mut input = new_session("handoff", &branch, None);
+        input.agent_kind = "claude".to_string();
+        input.protocol = "acp".to_string();
+        insert(&db, &input).await.unwrap();
+        set_acp(&db, "handoff", "claude-private").await.unwrap();
+        set_ack_seq(&db, "handoff", 99).await.unwrap();
+        set_inflight(&db, "handoff", Some(r#"{"prompt_id":4,"turn":2}"#))
+            .await
+            .unwrap();
+        set_current_mode(&db, "handoff", "acceptEdits")
+            .await
+            .unwrap();
+        append_pending_prompt(&db, "handoff", "queued")
+            .await
+            .unwrap();
+
+        prepare_handoff(&db, "handoff", "codex", "gpt-5.4", "high", "running")
+            .await
+            .unwrap();
+        let session = get(&db, "handoff").await.unwrap().unwrap();
+        assert_eq!(session.agent_kind, "codex");
+        assert_eq!(session.model, "gpt-5.4");
+        assert_eq!(session.effort, "high");
+        assert_eq!(session.status, "running");
+        assert!(session.acp_session_id.is_none());
+        assert_eq!(session.acp_ack_seq, 0);
+        assert!(session.acp_inflight.is_none());
+        assert!(session.current_mode.is_none());
+        assert!(session.pending_prompt.is_none());
     }
 }

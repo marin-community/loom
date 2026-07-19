@@ -144,7 +144,8 @@ export type ChatBlockKind =
   | 'permission_request'
   | 'mode_change'
   | 'usage'
-  | 'turn_end';
+  | 'turn_end'
+  | 'handoff';
 
 /** One journaled block. `payload` is opaque JSON keyed by `kind` (the payload
  *  interfaces below). Addressed by `(turn, seq)`. Mirrors `chat::ChatBlockView`. */
@@ -229,6 +230,12 @@ export interface UsagePayload {
 export interface TurnEndPayload {
   stop_reason: string;
 }
+export interface HandoffPayload {
+  from: string;
+  to: string;
+  model: string;
+  effort: string;
+}
 
 // -- `/chat/stream` SSE events --
 /** `block` — a whole journaled block (upsert by `(turn, seq)`). Same shape as a
@@ -282,6 +289,10 @@ export interface AgentMetadata {
   /** True for the builtin `claude`/`codex`; false for an operator-defined custom
    *  agent (which the UI may edit or delete). */
   builtin: boolean;
+  /** Whether this runtime can replace another live ACP provider. */
+  supports_acp: boolean;
+  /** The runtime's declared/default execution backend. */
+  protocol: 'terminal' | 'acp';
 }
 
 /** An operator-defined custom agent: the shell commands loom runs at each launch

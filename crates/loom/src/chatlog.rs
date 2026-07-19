@@ -141,7 +141,7 @@ pub async fn conversation(db: &Db, session: &Session, branch: &Branch) -> Option
 /// export and the Conversation viewer speak. `user_message` → User/Text,
 /// `agent_message` → Assistant/Text, `thought` → Assistant/Thinking, `tool_call`
 /// → Assistant ToolUse+ToolResult; the ACP-only kinds (`plan`, `permission_
-/// request`, `mode_change`, `usage`) flatten to Context notes; `turn_end` is a
+/// request`, `mode_change`, `usage`, `handoff`) flatten to Context notes; `turn_end` is a
 /// boundary marker with no conversational content, so it is dropped. `None` when
 /// the journal is empty.
 pub async fn journal_to_log(db: &Db, session: &Session) -> Option<Log> {
@@ -200,7 +200,11 @@ pub async fn journal_to_log(db: &Db, session: &Session) -> Option<Log> {
                     ],
                 ));
             }
-            kind::PLAN | kind::PERMISSION_REQUEST | kind::MODE_CHANGE | kind::USAGE => {
+            kind::PLAN
+            | kind::PERMISSION_REQUEST
+            | kind::MODE_CHANGE
+            | kind::USAGE
+            | kind::HANDOFF => {
                 messages.push(Message::new(
                     Role::Context,
                     ts,
@@ -280,6 +284,11 @@ fn context_note(kind: &str, p: &Value) -> String {
             let used = p.get("used").and_then(Value::as_i64).unwrap_or(0);
             let size = p.get("size").and_then(Value::as_i64).unwrap_or(0);
             format!("context usage: {used}/{size}")
+        }
+        kind::HANDOFF => {
+            let from = p.get("from").and_then(Value::as_str).unwrap_or("agent");
+            let to = p.get("to").and_then(Value::as_str).unwrap_or("agent");
+            format!("agent handoff: {from} -> {to}")
         }
         _ => kind.to_string(),
     }
