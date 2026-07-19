@@ -2793,9 +2793,9 @@ pub(super) struct ConfigOptionBody {
     pub value: Value,
 }
 
-/// Change one agent-owned session configuration selector. Unlike the legacy
-/// mode route this waits for the adapter's response, whose full refreshed
-/// option list is broadcast to chat clients as a `metadata` event.
+/// Change one agent-owned session configuration selector. This waits for the
+/// adapter's response, whose full refreshed option list is broadcast to chat
+/// clients as a `metadata` event.
 pub(super) async fn set_config_option(
     State(st): State<AppState>,
     Path((key, config_id)): Path<(String, String)>,

@@ -346,9 +346,8 @@ async function stopTurn() {
 }
 
 // ── Mode chip ────────────────────────────────────────────────────────────────
-// The well-known claude/codex ACP modes, used when the session doesn't expose an
-// explicit `available_modes` list (SessionView carries only `current_mode`
-// today). Wire the chip to `session.available_modes` the moment the server adds it.
+// The well-known claude/codex ACP modes, used until the adapter advertises its
+// live mode catalogue through the conversation metadata.
 const KNOWN_MODES = ['auto', 'default', 'acceptEdits', 'plan', 'bypassPermissions'];
 const MODE_LABEL: Record<string, string> = {
   auto: 'auto',
@@ -365,12 +364,7 @@ const modeLabel = (m: string | null) => {
   return metadata.value.modes.find((mode) => mode.id === m)?.name ?? MODE_LABEL[m] ?? m;
 };
 const modeInteractive = computed(() => canSend(props.session) && modeOptions.value.length > 1);
-const legacyModeVisible = computed(
-  () =>
-    !metadata.value.config_options.some(
-      (option) => option.category === 'mode' || option.id === 'mode',
-    ),
-);
+const legacyModeVisible = computed(() => !metadata.value.config_options.some(isModeOption));
 const modeOpen = ref(false);
 async function pickMode(m: string) {
   modeOpen.value = false;
@@ -406,18 +400,18 @@ const configOptions = computed(() =>
     .sort((a, b) => configRank(a) - configRank(b)),
 );
 function configRank(option: AcpConfigOption): number {
-  if (option.category === 'mode' || option.id === 'mode') return 0;
+  if (isModeOption(option)) return 0;
   if (option.category === 'model' || option.id === 'model') return 1;
   if (option.category === 'thought_level' || option.id.includes('reasoning')) return 2;
   return 3;
 }
 function configName(option: AcpConfigOption): string {
-  if (option.category === 'mode' || option.id === 'mode') return 'Permissions';
+  if (isModeOption(option)) return 'Permissions';
   if (option.category === 'thought_level') return 'Effort';
   return option.name;
 }
 function configTone(option: AcpConfigOption): string {
-  if (option.category !== 'mode' && option.id !== 'mode') return '';
+  if (!isModeOption(option)) return '';
   return option.currentValue === 'agent-full-access' || option.currentValue === 'bypassPermissions'
     ? 'acp-config-danger'
     : 'acp-config-permission';
@@ -447,15 +441,17 @@ async function pickConfig(option: AcpConfigOption, value: string | boolean) {
     // when changing one value also changes another control's choices (a model
     // switch can alter its supported reasoning efforts).
     metadata.value = response.metadata;
-    const mode = response.metadata.config_options.find(
-      (item) => item.category === 'mode' || item.id === 'mode',
-    )?.currentValue;
+    const mode = response.metadata.config_options.find(isModeOption)?.currentValue;
     if (typeof mode === 'string') currentMode.value = mode;
   } catch (e) {
     sendError.value = (e as Error).message ?? 'Failed to change agent configuration';
   } finally {
     configBusy.value = '';
   }
+}
+
+function isModeOption(option: AcpConfigOption): boolean {
+  return option.category === 'mode' || option.id === 'mode';
 }
 
 // ── Permission answering ─────────────────────────────────────────────────────
