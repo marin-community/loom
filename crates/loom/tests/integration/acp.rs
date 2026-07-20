@@ -621,6 +621,94 @@ async fn permission_answered_over_rest() {
     );
 }
 
+/// A permission-mode change during a live turn applies to the next turn. The
+/// running turn keeps its captured posture, so selecting full access cannot
+/// auto-approve a request raised by an older restricted turn.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn permission_policy_uses_the_turn_start_mode() {
+    let ts = TestServer::start().await;
+    start_new(&ts, "acp-turn-mode", Some("default"), None).await;
+
+    ts.client
+        .post(
+            "/api/sessions/acp-turn-mode/prompt",
+            json!({ "text": "wait:250|permission:old-turn|say:old-done" }),
+        )
+        .await
+        .unwrap();
+    let live = ts
+        .client
+        .get("/api/sessions/acp-turn-mode/chat")
+        .await
+        .unwrap();
+    assert_eq!(live["effective_mode"], "default");
+
+    ts.client
+        .put(
+            "/api/sessions/acp-turn-mode/config/mode",
+            json!({ "value": "bypassPermissions" }),
+        )
+        .await
+        .expect("next-turn mode changes while the turn is live");
+
+    let blocked = poll_chat(&ts, "acp-turn-mode", Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|b| b["kind"] == "permission_request")
+    })
+    .await;
+    assert_eq!(blocked["effective_mode"], "default");
+    let old_permission = blocked["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["kind"] == "permission_request")
+        .unwrap();
+    assert_eq!(old_permission["payload"]["effective_mode"], "default");
+    assert!(
+        old_permission["payload"]["outcome"].is_null(),
+        "the next-turn full-access selection must not approve the old turn"
+    );
+    let request_id = old_permission["payload"]["request_id"].as_str().unwrap();
+    ts.client
+        .post(
+            &format!("/api/sessions/acp-turn-mode/permissions/{request_id}"),
+            json!({ "option_id": "allow-once" }),
+        )
+        .await
+        .unwrap();
+    poll_chat(&ts, "acp-turn-mode", Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|b| b["kind"] == "turn_end")
+    })
+    .await;
+
+    // A fresh turn captures the selected full-access posture and can apply the
+    // explicit no-prompt policy safely.
+    ts.client
+        .post(
+            "/api/sessions/acp-turn-mode/prompt",
+            json!({ "text": "permission:new-turn|say:new-done" }),
+        )
+        .await
+        .unwrap();
+    let completed = poll_chat(&ts, "acp-turn-mode", Duration::from_secs(10), |blocks| {
+        blocks
+            .iter()
+            .any(|b| b["kind"] == "agent_message" && b["payload"]["text"] == "new-done")
+    })
+    .await;
+    let new_permission = completed["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|b| b["kind"] == "permission_request")
+        .unwrap();
+    assert_eq!(
+        new_permission["payload"]["effective_mode"],
+        "bypassPermissions"
+    );
+    assert_eq!(new_permission["payload"]["outcome"]["by"], "policy");
+}
+
 /// 4. Prompt queueing: a send during a live turn queues, sets `pending_prompt`,
 ///    and dispatches as a second turn once the first ends.
 #[serial]
@@ -789,8 +877,8 @@ async fn queue_consume_failure_does_not_dispatch_or_replay() {
     );
 }
 
-/// 4b. A steering-capable adapter injects a mid-turn prompt into the active
-/// turn instead of writing the durable next-turn queue.
+/// 4b. A steering-capable adapter durably queues a mid-turn prompt, acknowledges
+/// it immediately, then consumes the queue after the adapter accepts injection.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn prompt_steers_a_live_turn_when_advertised() {
@@ -828,18 +916,9 @@ async fn prompt_steers_a_live_turn_when_advertised() {
         )
         .await
         .unwrap();
-    assert_eq!(second["queued"], false);
-    assert_eq!(second["steered"], true, "response: {second}");
+    assert_eq!(second["queued"], true);
+    assert_eq!(second["steered"], false, "response: {second}");
     assert_eq!(second["turn"], 0);
-
-    let session = session_mod::get(&ts.state.db, "acp-steer")
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        session.pending_prompt.as_deref().unwrap_or("").is_empty(),
-        "a successful steer must not touch the next-turn queue"
-    );
 
     let chat = poll_chat(&ts, "acp-steer", Duration::from_secs(10), |blocks| {
         count_kind(blocks, "turn_end") >= 1
@@ -856,6 +935,69 @@ async fn prompt_steers_a_live_turn_when_advertised() {
             && b["payload"]["text"] == "say:changed course"
             && b["payload"]["steered"] == true
     }));
+    let session = session_mod::get(&ts.state.db, "acp-steer")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        session.pending_prompt.as_deref().unwrap_or("").is_empty(),
+        "a successful steer consumes its durable queue copy"
+    );
+}
+
+/// Ordinary sends must not hold the HTTP response (and browser composer) behind
+/// a delayed private steering RPC. The queue is the immediate durable receipt;
+/// adapter acceptance later promotes it into the live turn.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prompt_ack_does_not_wait_for_steering() {
+    let ts = TestServer::start().await;
+    start_new_with_env(
+        &ts,
+        "acp-steer-delay",
+        None,
+        None,
+        vec![
+            ("FAKE_ACP_STEERING".to_string(), "1".to_string()),
+            ("FAKE_ACP_STEERING_DELAY_MS".to_string(), "1000".to_string()),
+        ],
+    )
+    .await;
+    ts.client
+        .post(
+            "/api/sessions/acp-steer-delay/prompt",
+            json!({ "text": "wait:1800|say:first" }),
+        )
+        .await
+        .unwrap();
+
+    let ack = tokio::time::timeout(
+        Duration::from_millis(300),
+        ts.client.post(
+            "/api/sessions/acp-steer-delay/prompt",
+            json!({ "text": "say:feedback" }),
+        ),
+    )
+    .await
+    .expect("the send acknowledgement must not wait for steering")
+    .unwrap();
+    assert_eq!(ack["queued"], true);
+    let queued = ts
+        .client
+        .get("/api/sessions/acp-steer-delay/chat")
+        .await
+        .unwrap();
+    assert_eq!(queued["pending_prompt"], "say:feedback");
+
+    poll_chat_state(&ts, "acp-steer-delay", Duration::from_secs(10), |chat| {
+        chat["pending_prompt"].is_null()
+            && chat["blocks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b["kind"] == "user_message" && b["payload"]["steered"] == true)
+    })
+    .await;
 }
 
 /// An adapter that does not advertise steering must never be probed with the
@@ -985,9 +1127,9 @@ async fn prompt_adopts_a_turn_started_by_steering() {
         )
         .await
         .unwrap();
-    assert_eq!(second["queued"], false);
+    assert_eq!(second["queued"], true);
     assert_eq!(second["steered"], false);
-    assert_eq!(second["turn"], 1);
+    assert_eq!(second["turn"], 0);
 
     let chat = poll_chat_state(&ts, "acp-steer-race", Duration::from_secs(10), |chat| {
         chat["live_turn"].is_null()
@@ -1236,9 +1378,9 @@ async fn interrupt_leaves_queued_feedback_idle_until_sent() {
         })
     })
     .await;
-    // Drained queue is the canonical empty string, never NULL (see
-    // `session::take_pending_prompt`); the frontend treats '' and null alike.
-    assert_eq!(chat["pending_prompt"], "");
+    // Storage keeps its canonical empty-string sentinel, while the public chat
+    // contract normalizes an empty queue to null.
+    assert_eq!(chat["pending_prompt"], Value::Null);
     assert!(chat["blocks"].as_array().unwrap().iter().any(|block| {
         block["kind"] == "user_message"
             && block["turn"] == 1
@@ -1771,6 +1913,61 @@ async fn conversation_is_live_and_archive_captures_it() {
         chat_json.contains("say:archived"),
         "the goal survived the capture"
     );
+}
+
+/// Archived ACP sessions must recover through the relay/adapter path. A terminal
+/// resume leaves `protocol='acp'` on the row but registers no ACP task, making
+/// every conversation control fail with "no live ACP task to drive".
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archive_recover_restores_the_acp_driver() {
+    let ts = TestServer::start().await;
+    seed_acp_agent(&ts, "fakeacp").await;
+
+    let created = rest_create(&ts, "fakeacp", "say:before-archive").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let relay = created["term_session"].as_str().unwrap().to_string();
+    poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
+        blocks.iter().any(|b| b["kind"] == "turn_end")
+    })
+    .await;
+
+    ts.client
+        .post(&format!("/api/sessions/{id}/archive"), json!({}))
+        .await
+        .expect("archive succeeds");
+    assert!(!ts.state.acp.is_live(&id), "archive removes the ACP task");
+    assert!(
+        !backend::has_session(&relay).await,
+        "archive removes the relay supervisor"
+    );
+
+    let recovered = ts
+        .client
+        .post(&format!("/api/sessions/{id}/recover"), json!({}))
+        .await
+        .expect("ACP recovery succeeds");
+    assert_eq!(recovered["protocol"], "acp");
+    assert!(ts.state.acp.is_live(&id), "recovery registers an ACP task");
+    assert!(
+        backend::has_session(&relay).await,
+        "recovery recreates the relay supervisor"
+    );
+    poll_metadata(&ts, &id, Duration::from_secs(10)).await;
+
+    ts.client
+        .post(
+            &format!("/api/sessions/{id}/prompt"),
+            json!({ "text": "say:after-recovery" }),
+        )
+        .await
+        .expect("the recovered ACP task accepts a prompt");
+    poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
+        blocks
+            .iter()
+            .any(|b| b["kind"] == "agent_message" && b["payload"]["text"] == "after-recovery")
+    })
+    .await;
 }
 
 /// D. `/preview` renders the last journal blocks as compact plain text — the CLI's

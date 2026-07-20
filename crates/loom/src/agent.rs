@@ -1094,14 +1094,16 @@ fn codex_acp_mode(mode: &str) -> String {
     }
 }
 
-/// Whether an ACP mode id is a "full access" posture — the user asked never to
-/// be prompted, so loom auto-answers every permission request the adapter sends.
+/// Whether an ACP mode id is a "full access" posture — the user asked not to be
+/// prompted, so loom may auto-answer a one-shot permission request from a turn
+/// that started in this mode.
 /// Each provider vocabulary spells it differently: claude's `bypassPermissions`
 /// and codex's `agent-full-access` (the id [`codex_acp_mode`] maps the former to,
 /// and the id a codex session reports as its `current_mode`). This is the single
-/// source of truth for the auto-approve gate in [`crate::acp`]; adding a mode id
-/// here is how "full access" starts silencing prompts for a new provider. No
-/// other posture (`auto`, `acceptEdits`, `default`, `plan`) auto-approves.
+/// source of truth for the turn-scoped auto-approve gate in [`crate::acp`]; adding
+/// a mode id here is how "full access" starts silencing one-shot prompts for a
+/// new provider. No other posture (`auto`, `acceptEdits`, `default`, `plan`)
+/// auto-approves.
 pub fn is_full_access_mode(mode: &str) -> bool {
     matches!(mode.trim(), "bypassPermissions" | "agent-full-access")
 }

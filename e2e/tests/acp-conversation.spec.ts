@@ -494,6 +494,27 @@ test.describe('acp conversation', () => {
     await expect(fast).toContainText('On');
   });
 
+  test('a live permission change is labelled for the next turn', async ({ page, weaver }) => {
+    await openAcp(page, weaver, { goal: 'say:ready', mode: 'default' });
+    const input = page.getByTestId('acp-composer-input');
+    await input.fill('wait:5000|say:done');
+    await page.getByTestId('acp-composer-send').click();
+    await expect(page.getByTestId('acp-working')).toBeVisible({ timeout: 15_000 });
+
+    const permissions = page.getByTestId('acp-config-mode');
+    await permissions.getByRole('button').first().click();
+    await page
+      .getByTestId('acp-config-menu')
+      .getByText('Bypass permissions', { exact: true })
+      .click();
+    await expect(permissions).toContainText('Bypass permissions');
+    await expect(permissions).toContainText('next turn');
+
+    await page.getByTestId('acp-composer-stop').click();
+    await expect(page.getByTestId('acp-working')).toBeHidden({ timeout: 5_000 });
+    await expect(permissions).not.toContainText('next turn');
+  });
+
   test('a permission card answers and collapses to a receipt', async ({ page, weaver }) => {
     // A supervised mode surfaces the request as an interactive card (bypass mode
     // would auto-answer it).

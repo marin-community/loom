@@ -629,7 +629,10 @@ struct PendingSteer {
     /// the adapter accepts steering, preserving messages appended behind it.
     promoted_queue: Option<String>,
     resources: Vec<Value>,
-    reply: oneshot::Sender<Result<PromptAck>>,
+    /// Forced steering waits for the adapter's final answer. An ordinary send is
+    /// acknowledged as durably queued before steering starts, so it carries no
+    /// waiting HTTP reply and cannot lock the composer behind a private RPC.
+    reply: Option<oneshot::Sender<Result<PromptAck>>>,
 }
 
 struct Task {
@@ -662,6 +665,10 @@ struct Task {
     tools: HashMap<String, LiveTool>,
     pending_perms: HashMap<String, PendingPerm>,
 
+    /// Permission posture captured when the active turn started. `current_mode`
+    /// may advance while that turn is running, but a provider cannot retroactively
+    /// rebuild the turn's approval policy or sandbox.
+    effective_mode: Option<String>,
     current_mode: Option<String>,
     metadata: Arc<Mutex<AcpMetadata>>,
     pending_mode: HashMap<u64, PendingMode>,
@@ -722,6 +729,7 @@ impl Task {
             buf: None,
             tools: HashMap::new(),
             pending_perms: HashMap::new(),
+            effective_mode: None,
             current_mode: None,
             metadata: Arc::new(Mutex::new(AcpMetadata::default())),
             pending_mode: HashMap::new(),
@@ -765,6 +773,11 @@ impl Task {
         let inflight = inflight_value
             .as_ref()
             .and_then(|v| Some((v.get("prompt_id")?.as_u64()?, v.get("turn")?.as_i64()?)));
+        let effective_mode = inflight_value
+            .as_ref()
+            .and_then(|v| v.get("mode"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let current_turn = live_turn.unwrap_or(max_turn);
         // The journal always holds at least this turn's `user_message`, so
         // `max_seq + 1` continues the turn without colliding.
@@ -790,6 +803,9 @@ impl Task {
             buf: None,
             tools: HashMap::new(),
             pending_perms: HashMap::new(),
+            // Old in-flight records have no mode. Keep that unknown rather than
+            // applying a newer session selection to an older turn.
+            effective_mode,
             current_mode: session.current_mode.clone(),
             metadata: Arc::new(Mutex::new(AcpMetadata::default())),
             pending_mode: HashMap::new(),
@@ -1311,6 +1327,7 @@ impl Task {
         // client that reacts to the event sees a consistent `live_turn`.
         self.turn_live = false;
         self.inflight_prompt = None;
+        self.effective_mode = None;
         let _ = session::set_inflight(&self.db, &self.session_id, None).await;
         self.emit(
             "turn",
@@ -1400,11 +1417,13 @@ impl Task {
                     }),
                 )
                 .await;
-                let _ = pending.reply.send(Ok(PromptAck {
-                    queued: false,
-                    steered: true,
-                    turn: Some(pending.turn),
-                }));
+                if let Some(reply) = pending.reply {
+                    let _ = reply.send(Ok(PromptAck {
+                        queued: false,
+                        steered: true,
+                        turn: Some(pending.turn),
+                    }));
+                }
                 if !self.turn_live {
                     self.dispatch_pending_prompt().await;
                 }
@@ -1431,9 +1450,9 @@ impl Task {
                     let detail = error
                         .map(|e| e.to_string())
                         .unwrap_or_else(|| format!("adapter returned {outcome:?}"));
-                    let _ = pending
-                        .reply
-                        .send(Err(anyhow!("adapter rejected forced steer: {detail}")));
+                    if let Some(reply) = pending.reply {
+                        let _ = reply.send(Err(anyhow!("adapter rejected forced steer: {detail}")));
+                    }
                 } else {
                     self.fallback_prompt(pending).await;
                 }
@@ -1471,24 +1490,49 @@ impl Task {
     }
 
     async fn fallback_prompt(&mut self, pending: PendingSteer) {
-        let ack = if self.turn_live {
+        let ack = if pending.promoted_queue.is_some() {
+            if self.turn_live {
+                Ok(PromptAck {
+                    queued: true,
+                    steered: false,
+                    turn: Some(self.current_turn),
+                })
+            } else {
+                self.start_pending_prompt(pending.by).await
+            }
+        } else if self.turn_live {
             self.queue_prompt(&pending.text, &pending.resources).await
         } else {
             self.start_prompt(pending.text, pending.by, pending.resources)
                 .await
         };
-        let _ = pending.reply.send(ack);
+        if let Some(reply) = pending.reply {
+            let _ = reply.send(ack);
+        }
     }
 
     async fn queue_prompt(&self, text: &str, resources: &[Value]) -> Result<PromptAck> {
+        self.queue_prompt_with_value(text, resources)
+            .await
+            .map(|(ack, _)| ack)
+    }
+
+    async fn queue_prompt_with_value(
+        &self,
+        text: &str,
+        resources: &[Value],
+    ) -> Result<(PromptAck, String)> {
         let queued = queued_prompt_text(text, resources);
         let pending = session::append_pending_prompt(&self.db, &self.session_id, &queued).await?;
         self.emit_queue(Some(&pending));
-        Ok(PromptAck {
-            queued: true,
-            steered: false,
-            turn: Some(self.current_turn),
-        })
+        Ok((
+            PromptAck {
+                queued: true,
+                steered: false,
+                turn: Some(self.current_turn),
+            },
+            pending,
+        ))
     }
 
     async fn start_pending_prompt(&mut self, by: Option<String>) -> Result<PromptAck> {
@@ -1519,10 +1563,18 @@ impl Task {
         } else {
             self.current_turn
         };
-        let inflight = json!({ "turn": turn, "external": true }).to_string();
+        self.effective_mode = self.current_mode.clone();
+        let inflight = json!({
+            "turn": turn,
+            "external": true,
+            "mode": self.effective_mode,
+        })
+        .to_string();
         let persisted = session::set_inflight(&self.db, &self.session_id, Some(&inflight)).await;
         if let Err(e) = persisted {
-            let _ = pending.reply.send(Err(e));
+            if let Some(reply) = pending.reply {
+                let _ = reply.send(Err(e));
+            }
             return;
         }
         self.current_turn = turn;
@@ -1532,7 +1584,11 @@ impl Task {
         self.external_turn = true;
         self.emit(
             "turn",
-            json!({ "turn": self.current_turn, "state": "started" }),
+            json!({
+                "turn": self.current_turn,
+                "state": "started",
+                "effective_mode": self.effective_mode,
+            }),
         );
         let by = pending.by.map(Value::from).unwrap_or(Value::Null);
         self.journal_block(
@@ -1547,11 +1603,13 @@ impl Task {
         .await;
         crate::monitor::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "working")
             .await;
-        let _ = pending.reply.send(Ok(PromptAck {
-            queued: false,
-            steered: false,
-            turn: Some(self.current_turn),
-        }));
+        if let Some(reply) = pending.reply {
+            let _ = reply.send(Ok(PromptAck {
+                queued: false,
+                steered: false,
+                turn: Some(self.current_turn),
+            }));
+        }
     }
 
     async fn start_turn(
@@ -1588,16 +1646,26 @@ impl Task {
         }
         self.turns_dispatched += 1;
         self.turn_live = true;
+        self.effective_mode = self.current_mode.clone();
 
         self.emit(
             "turn",
-            json!({ "turn": self.current_turn, "state": "started" }),
+            json!({
+                "turn": self.current_turn,
+                "state": "started",
+                "effective_mode": self.effective_mode,
+            }),
         );
         self.journal_block(opening_kind, opening_payload).await;
 
         let id = self.next_id();
         self.inflight_prompt = Some((id, self.current_turn));
-        let inflight = json!({ "prompt_id": id, "turn": self.current_turn }).to_string();
+        let inflight = json!({
+            "prompt_id": id,
+            "turn": self.current_turn,
+            "mode": self.effective_mode,
+        })
+        .to_string();
         session::set_inflight(&self.db, &self.session_id, Some(&inflight)).await?;
         self.stream
             .write(&wire::request_line(
@@ -1652,6 +1720,7 @@ impl Task {
                     "tool_call_id": params.tool_call.tool_call_id.clone(),
                     "title": params.tool_call.title.clone().unwrap_or_default(),
                     "options": options,
+                    "effective_mode": self.effective_mode,
                     "outcome": Value::Null,
                 });
                 self.journal_block(kind::PERMISSION_REQUEST, payload).await;
@@ -1665,13 +1734,11 @@ impl Task {
             }
         }
 
-        // Policy: auto-answer under a full-access mode; every other mode leaves
-        // the request pending for the REST route. Recognizing both provider
-        // spellings (claude's `bypassPermissions`, codex's `agent-full-access`)
-        // is what makes "full access" mean "never prompt me" regardless of
-        // provider — see [`crate::agent::is_full_access_mode`].
+        // Policy follows the mode captured when this turn started. A config write
+        // during the turn changes `current_mode` for the next prompt only; using it
+        // here would auto-approve a request raised by an older, restricted turn.
         let bypass = self
-            .current_mode
+            .effective_mode
             .as_deref()
             .is_some_and(crate::agent::is_full_access_mode);
         if bypass {
@@ -1724,10 +1791,14 @@ impl Task {
             .await;
         if result.is_ok() && self.turn_live {
             for (_, pending) in self.pending_steers.drain() {
-                let _ = pending.reply.send(Err(anyhow!("turn was cancelled")));
+                if let Some(reply) = pending.reply {
+                    let _ = reply.send(Err(anyhow!("turn was cancelled")));
+                }
             }
             if let Some(pending) = self.pending_external.take() {
-                let _ = pending.reply.send(Err(anyhow!("turn was cancelled")));
+                if let Some(reply) = pending.reply {
+                    let _ = reply.send(Err(anyhow!("turn was cancelled")));
+                }
             }
             // Cancellation is a client-owned boundary. Some adapters do not
             // answer the cancelled prompt, so settle loom's journal and
@@ -1773,23 +1844,62 @@ impl Task {
                             method::SESSION_STEERING,
                             wire::steering_params(&self.acp_session_id, &text, &resources),
                         );
-                        match self.stream.write(&request).await {
-                            Ok(()) => {
-                                self.pending_steers.insert(
-                                    id,
-                                    PendingSteer {
-                                        text,
-                                        by,
-                                        turn: self.current_turn,
-                                        forced: force_steer,
-                                        promoted_queue: None,
-                                        resources,
-                                        reply,
-                                    },
-                                );
+                        if force_steer {
+                            // Explicit steering reports the adapter's real answer
+                            // and does not also leave a queued copy behind if the
+                            // private extension is rejected.
+                            match self.stream.write(&request).await {
+                                Ok(()) => {
+                                    self.pending_steers.insert(
+                                        id,
+                                        PendingSteer {
+                                            text,
+                                            by,
+                                            turn: self.current_turn,
+                                            forced: true,
+                                            promoted_queue: None,
+                                            resources,
+                                            reply: Some(reply),
+                                        },
+                                    );
+                                }
+                                Err(error) => {
+                                    let _ = reply.send(Err(error));
+                                }
                             }
-                            Err(e) => {
-                                let _ = reply.send(Err(e));
+                        } else {
+                            // Durability and the HTTP acknowledgement come before
+                            // the private steering RPC. If the adapter hangs,
+                            // rejects, or disappears, the message remains visibly
+                            // queued and the browser can keep accepting feedback.
+                            match self.queue_prompt_with_value(&text, &resources).await {
+                                Ok((queued_ack, promoted_queue)) => {
+                                    match self.stream.write(&request).await {
+                                        Ok(()) => {
+                                            let _ = reply.send(Ok(queued_ack));
+                                            self.pending_steers.insert(
+                                                id,
+                                                PendingSteer {
+                                                    text,
+                                                    by,
+                                                    turn: self.current_turn,
+                                                    forced: false,
+                                                    promoted_queue: Some(promoted_queue),
+                                                    resources,
+                                                    reply: None,
+                                                },
+                                            );
+                                        }
+                                        Err(error) => {
+                                            tracing::warn!(session = %self.session_id, %error,
+                                                "steering write failed; feedback remains queued");
+                                            let _ = reply.send(Ok(queued_ack));
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    let _ = reply.send(Err(error));
+                                }
                             }
                         }
                     } else if force_steer {
@@ -1853,7 +1963,7 @@ impl Task {
                                         forced: true,
                                         promoted_queue: Some(queued),
                                         resources: Vec::new(),
-                                        reply,
+                                        reply: Some(reply),
                                     },
                                 );
                             }
@@ -1955,6 +2065,7 @@ impl Task {
             );
             self.turn_live = false;
             self.external_turn = false;
+            self.effective_mode = None;
             let _ = session::set_inflight(&self.db, &self.session_id, None).await;
         }
     }
@@ -2033,12 +2144,14 @@ impl Task {
     }
 }
 
-/// The option an auto-answer picks: the first allow-ish option, else the first.
+/// The one-shot grant an auto-answer may select, if the adapter offers one.
 fn auto_choice(options: &[PermissionOption]) -> Option<String> {
     options
         .iter()
-        .find(|o| o.is_allow())
-        .or_else(|| options.first())
+        // Never turn a no-prompt posture into a persisted policy mutation. If
+        // the adapter offers no one-shot grant, surface the request for an
+        // explicit answer instead of guessing.
+        .find(|o| o.kind == "allow_once")
         .map(|o| o.option_id.clone())
 }
 
@@ -2093,7 +2206,7 @@ fn queued_prompt_text(text: &str, resources: &[Value]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::queued_prompt_text;
+    use super::{auto_choice, queued_prompt_text, PermissionOption};
     use serde_json::json;
 
     #[test]
@@ -2107,5 +2220,23 @@ mod tests {
             queued_prompt_text("review", &resources),
             "review\n\nReferenced files:\n- src/main.rs\n- https://example.test/context\n"
         );
+    }
+
+    #[test]
+    fn automatic_permission_choice_never_persists_policy() {
+        let options = [
+            PermissionOption {
+                option_id: "persist".to_string(),
+                name: "Always allow".to_string(),
+                kind: "allow_always".to_string(),
+            },
+            PermissionOption {
+                option_id: "once".to_string(),
+                name: "Allow once".to_string(),
+                kind: "allow_once".to_string(),
+            },
+        ];
+        assert_eq!(auto_choice(&options).as_deref(), Some("once"));
+        assert_eq!(auto_choice(&options[..1]), None);
     }
 }

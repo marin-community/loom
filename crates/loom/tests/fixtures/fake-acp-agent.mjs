@@ -33,6 +33,7 @@ let sessionCounter = 0;
 let cancelled = false;
 const steeringSupported = process.env.FAKE_ACP_STEERING === "1";
 const forceSteeringNewTurn = process.env.FAKE_ACP_STEERING_FORCE_NEW_TURN === "1";
+const steeringDelayMs = Number(process.env.FAKE_ACP_STEERING_DELAY_MS || "0");
 let promptActive = false;
 let promptResources = [];
 const steeringQueue = [];
@@ -271,7 +272,8 @@ async function handlePrompt(id, params) {
   }
 }
 
-function handleSteering(id, params) {
+async function handleSteering(id, params) {
+  if (steeringDelayMs > 0) await sleep(steeringDelayMs);
   const text = (params.prompt || []).map((b) => b.text || "").join("");
   if (!promptActive || forceSteeringNewTurn) {
     if (promptActive) {
@@ -341,7 +343,7 @@ function handleMessage(msg) {
       void handlePrompt(msg.id, msg.params);
       break;
     case "_session/steering":
-      if (steeringSupported) handleSteering(msg.id, msg.params);
+      if (steeringSupported) void handleSteering(msg.id, msg.params);
       else rejectMethod(msg.id, msg.method);
       break;
     case "session/cancel":

@@ -305,14 +305,6 @@ pub struct PermissionOption {
     pub kind: String,
 }
 
-impl PermissionOption {
-    /// Whether this option grants the action (an `allow_*` kind) — used to pick a
-    /// default when auto-answering.
-    pub fn is_allow(&self) -> bool {
-        self.kind.starts_with("allow")
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Response bodies loom parses
 // ---------------------------------------------------------------------------
@@ -699,8 +691,8 @@ mod tests {
         .unwrap();
         assert_eq!(p.tool_call.tool_call_id, "call_9");
         assert_eq!(p.options.len(), 2);
-        assert!(p.options[0].is_allow());
-        assert!(!p.options[1].is_allow());
+        assert_eq!(p.options[0].kind, "allow_once");
+        assert_eq!(p.options[1].kind, "reject_once");
     }
 
     #[test]

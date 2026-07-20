@@ -99,6 +99,7 @@ const steeringSupported = computed(() => metadata.value.steering_supported);
 // The live mode, seeded from the session and advanced by `mode_change` blocks or
 // a local set — so the composer chip reads true without a refetch.
 const currentMode = ref<string | null>(props.session.current_mode);
+const effectiveMode = ref<string | null>(null);
 watch(
   () => props.session.current_mode,
   (m) => {
@@ -138,6 +139,7 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
     liveTools.clear();
     liveTurnNo.value = snap.live_turn;
     turnLive.value = snap.live_turn != null;
+    effectiveMode.value = snap.effective_mode ?? null;
     pendingPrompt.value = snap.pending_prompt?.trim() ? snap.pending_prompt : null;
     applyMetadata(snap.metadata ?? emptyMetadata());
     state.value = 'ready';
@@ -195,10 +197,12 @@ function onTurn(ev: SseTurn) {
   if (ev.state === 'started') {
     turnLive.value = true;
     liveTurnNo.value = ev.turn;
+    effectiveMode.value = ev.effective_mode ?? null;
     autoFollow();
   } else {
     turnLive.value = false;
     liveTurnNo.value = null;
+    effectiveMode.value = null;
   }
 }
 
@@ -541,6 +545,18 @@ function configValueLabel(option: AcpConfigOption): string {
   const current = String(option.currentValue);
   return configChoices(option).find((choice) => choice.value === current)?.name ?? current;
 }
+function selectionAppliesNextTurn(value: unknown): boolean {
+  return (
+    turnLive.value &&
+    effectiveMode.value !== null &&
+    typeof value === 'string' &&
+    value !== effectiveMode.value
+  );
+}
+function configAppliesNextTurn(option: AcpConfigOption): boolean {
+  return isModeOption(option) && selectionAppliesNextTurn(option.currentValue);
+}
+const permissionModeAppliesNextTurn = computed(() => selectionAppliesNextTurn(currentMode.value));
 async function pickConfig(option: AcpConfigOption, value: string | boolean) {
   configOpen.value = '';
   if (value === option.currentValue || configBusy.value) return;
@@ -1352,7 +1368,8 @@ function goTo(anchor: string) {
             >
               <span class="acp-config-name">{{ configName(option) }}</span>
               {{ configValueLabel(option)
-              }}<span v-if="option.type === 'select'" class="acp-mode-caret">▾</span>
+              }}<span v-if="configAppliesNextTurn(option)" class="acp-config-timing">next turn</span
+              ><span v-if="option.type === 'select'" class="acp-mode-caret">▾</span>
             </button>
             <ul v-if="configOpen === option.id" class="acp-mode-menu" data-testid="acp-config-menu">
               <li v-for="choice in configChoices(option)" :key="choice.value">
@@ -1378,7 +1395,8 @@ function goTo(anchor: string) {
             >
               <span class="acp-config-name">Permissions</span>
               {{ modeLabel(currentMode)
-              }}<span v-if="modeInteractive" class="acp-mode-caret">▾</span>
+              }}<span v-if="permissionModeAppliesNextTurn" class="acp-config-timing">next turn</span
+              ><span v-if="modeInteractive" class="acp-mode-caret">▾</span>
             </button>
             <ul v-if="modeOpen" class="acp-mode-menu" data-testid="acp-mode-menu">
               <li v-for="m in modeOptions" :key="m">
@@ -1893,6 +1911,10 @@ function goTo(anchor: string) {
 }
 .acp-config-name {
   color: var(--faint);
+}
+.acp-config-timing {
+  color: var(--attn);
+  font-size: 0.625rem;
 }
 .acp-config-permission {
   border-color: color-mix(in srgb, var(--attn) 40%, var(--line));

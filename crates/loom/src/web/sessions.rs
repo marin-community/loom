@@ -1792,7 +1792,7 @@ pub(crate) async fn adopt(
     branch: &Branch,
 ) -> Result<(), AppError> {
     if session.protocol == "acp" {
-        return adopt_acp(st, session, branch).await;
+        return adopt_acp(st, session, branch, "session adopted").await;
     }
     tracing::info!(session = %session.id, branch = %branch.id, "adopting orphaned session");
     if backend::has_session(&session.term_session).await {
@@ -1913,7 +1913,12 @@ async fn adopt_terminal_into_acp(
 /// task), just re-attach ([`crate::acp::attach`]). When the relay is gone, respawn
 /// it and reopen via `session/load` (the adapter advertised `loadSession` and we
 /// have its id), falling back to a fresh session re-oriented from the goal file.
-async fn adopt_acp(st: &AppState, session: &Session, branch: &Branch) -> Result<(), AppError> {
+async fn adopt_acp(
+    st: &AppState,
+    session: &Session,
+    branch: &Branch,
+    reason: &str,
+) -> Result<(), AppError> {
     tracing::info!(session = %session.id, branch = %branch.id, "adopting acp session");
     if st.acp.is_live(&session.id) {
         return Err(AppError::conflict("session already has a live ACP task"));
@@ -1943,15 +1948,7 @@ async fn adopt_acp(st: &AppState, session: &Session, branch: &Branch) -> Result<
         } else {
             custom_agents::get(&st.db, &runtime).await?
         };
-        let run_dir = db::run_dir(&session.id);
-        let primer_file = {
-            let f = run_dir.join("primer.txt");
-            f.exists().then_some(f)
-        };
-        let goal_file = {
-            let f = run_dir.join("goal.txt");
-            f.exists().then_some(f)
-        };
+        let (primer_file, goal_file) = resume_prompt_files(st, session, branch).await;
         let mode = session
             .current_mode
             .clone()
@@ -2001,12 +1998,46 @@ async fn adopt_acp(st: &AppState, session: &Session, branch: &Branch) -> Result<
         &st.bus,
         &branch.id,
         "status",
-        json!({ "status": status, "reason": "session adopted" }),
+        json!({ "status": status, "reason": reason }),
     )
     .await
     .ok();
     tracing::info!(session = %session.id, branch = %branch.id, "acp session adopted");
     Ok(())
+}
+
+/// Resolve the persisted primer/goal files used to resume either backend. Refresh
+/// the positional goal from the authoritative branch artifact first: an ACP
+/// adapter that cannot load its old provider session falls back to this prompt in
+/// exactly the same way as a native terminal resume.
+async fn resume_prompt_files(
+    st: &AppState,
+    session: &Session,
+    branch: &Branch,
+) -> (Option<PathBuf>, Option<PathBuf>) {
+    let run_dir = db::run_dir(&session.id);
+    let primer_file = {
+        let f = run_dir.join("primer.txt");
+        f.exists().then_some(f)
+    };
+    let goal_file = {
+        let f = run_dir.join("goal.txt");
+        if f.exists() {
+            match branch_mod::current_goal(&st.db, branch).await {
+                Ok(goal) => {
+                    if let Err(e) = tokio::fs::write(&f, &goal).await {
+                        tracing::warn!(error = %e, "failed to refresh goal.txt on resume");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "failed to read goal for resume refresh"),
+            }
+            tracing::debug!(session = %session.id, "refreshed goal file for resume");
+            Some(f)
+        } else {
+            None
+        }
+    };
+    (primer_file, goal_file)
 }
 
 /// Re-launch a session's agent in a worktree that already exists on disk: the
@@ -2024,33 +2055,7 @@ async fn resume_agent(
     tracing::info!(session = %session.id, branch = %branch.id, reason = %reason, "resuming agent");
     let work_dir = PathBuf::from(&session.work_dir);
     // Restore the persisted positional prompt and any optional system primer.
-    let run_dir = db::run_dir(&session.id);
-    let primer_file = {
-        let f = run_dir.join("primer.txt");
-        f.exists().then_some(f)
-    };
-    let goal_file = {
-        let f = run_dir.join("goal.txt");
-        if f.exists() {
-            // Refresh from the authoritative goal artifact before the spawned
-            // shell cats this file in as the opening prompt, so a restart picks
-            // up the newest goal rather than reseeding a stale on-disk copy. A
-            // failure here is non-fatal — the existing goal.txt is still a valid
-            // prompt — but log it so a silently-stale goal is diagnosable.
-            match branch_mod::current_goal(&st.db, branch).await {
-                Ok(goal) => {
-                    if let Err(e) = tokio::fs::write(&f, &goal).await {
-                        tracing::warn!(error = %e, "failed to refresh goal.txt on adopt");
-                    }
-                }
-                Err(e) => tracing::warn!(error = %e, "failed to read goal for adopt refresh"),
-            }
-            tracing::debug!(session = %session.id, "refreshed goal file for resume");
-            Some(f)
-        } else {
-            None
-        }
-    };
+    let (primer_file, goal_file) = resume_prompt_files(st, session, branch).await;
     // Re-launch with the same layered env the session started with, so a resumed
     // session keeps its per-repo / config-file environment (not just the global
     // agent_env). Setup is NOT re-run on adopt — the worktree is already
@@ -2166,8 +2171,12 @@ async fn recover(st: &AppState, session: &Session, branch: &Branch) -> Result<()
     )
     .await
     .ok();
-    tracing::debug!(session = %session.id, branch = %branch.id, "marked session recovered, resuming agent");
-    resume_agent(st, session, branch, "session recovered").await?;
+    tracing::debug!(session = %session.id, branch = %branch.id, protocol = %session.protocol, "marked session recovered, resuming agent");
+    if session.protocol == "acp" {
+        adopt_acp(st, session, branch, "session recovered").await?;
+    } else {
+        resume_agent(st, session, branch, "session recovered").await?;
+    }
     Ok(())
 }
 
@@ -2622,6 +2631,17 @@ fn live_turn(session: &Session) -> Option<i64> {
         .and_then(|v| v.get("turn").and_then(Value::as_i64))
 }
 
+/// Permission posture captured when the persisted in-flight turn started. This
+/// differs from `Session.current_mode` after a live config change: that selection
+/// applies to the next prompt.
+fn effective_turn_mode(session: &Session) -> Option<String> {
+    session
+        .acp_inflight
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .and_then(|v| v.get("mode").and_then(Value::as_str).map(str::to_string))
+}
+
 /// The journaled conversation plus the agent-owned composer metadata. The
 /// journal works without a live task; metadata is empty until an adapter is
 /// attached and advertises its commands/configuration controls.
@@ -2637,10 +2657,17 @@ pub(super) async fn get_session_chat(
         .get(&session.id)
         .map(|handle| handle.metadata())
         .unwrap_or_default();
+    // Storage uses '' for compatibility with long-lived NOT NULL databases;
+    // keep that sentinel out of the public conversation contract.
+    let pending_prompt = session
+        .pending_prompt
+        .as_deref()
+        .filter(|pending| !pending.trim().is_empty());
     Ok(Json(json!({
         "blocks": blocks,
         "live_turn": live_turn(&session),
-        "pending_prompt": session.pending_prompt,
+        "effective_mode": effective_turn_mode(&session),
+        "pending_prompt": pending_prompt,
         "metadata": metadata,
     })))
 }

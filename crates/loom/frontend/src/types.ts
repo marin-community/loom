@@ -164,6 +164,9 @@ export interface ChatBlock {
 export interface ChatSnapshot {
   blocks: ChatBlock[];
   live_turn: number | null;
+  /** Permission posture captured when the live turn started. A different selected
+   *  mode is queued for the next turn. */
+  effective_mode: string | null;
   pending_prompt: string | null;
   metadata: AcpMetadata;
 }
@@ -264,6 +267,7 @@ export interface PermissionPayload {
   tool_call_id: string | null;
   title: string;
   options: PermissionOption[];
+  effective_mode?: string | null;
   outcome: PermissionOutcome | null;
 }
 export interface UsagePayload {
@@ -306,6 +310,7 @@ export interface SseTool {
 export interface SseTurn {
   turn: number;
   state: 'started' | 'ended';
+  effective_mode?: string | null;
   stop_reason?: string;
 }
 
