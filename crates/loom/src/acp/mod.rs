@@ -1665,9 +1665,15 @@ impl Task {
             }
         }
 
-        // Policy: auto-answer under bypass mode; every other mode leaves the
-        // request pending for the REST route.
-        let bypass = self.current_mode.as_deref() == Some("bypassPermissions");
+        // Policy: auto-answer under a full-access mode; every other mode leaves
+        // the request pending for the REST route. Recognizing both provider
+        // spellings (claude's `bypassPermissions`, codex's `agent-full-access`)
+        // is what makes "full access" mean "never prompt me" regardless of
+        // provider — see [`crate::agent::is_full_access_mode`].
+        let bypass = self
+            .current_mode
+            .as_deref()
+            .is_some_and(crate::agent::is_full_access_mode);
         if bypass {
             if let Some(opt) = auto_choice(&params.options) {
                 let _ = self.answer_permission(&req_key, &opt, "policy").await;

@@ -1094,6 +1094,18 @@ fn codex_acp_mode(mode: &str) -> String {
     }
 }
 
+/// Whether an ACP mode id is a "full access" posture — the user asked never to
+/// be prompted, so loom auto-answers every permission request the adapter sends.
+/// Each provider vocabulary spells it differently: claude's `bypassPermissions`
+/// and codex's `agent-full-access` (the id [`codex_acp_mode`] maps the former to,
+/// and the id a codex session reports as its `current_mode`). This is the single
+/// source of truth for the auto-approve gate in [`crate::acp`]; adding a mode id
+/// here is how "full access" starts silencing prompts for a new provider. No
+/// other posture (`auto`, `acceptEdits`, `default`, `plan`) auto-approves.
+pub fn is_full_access_mode(mode: &str) -> bool {
+    matches!(mode.trim(), "bypassPermissions" | "agent-full-access")
+}
+
 /// The `_meta.claudeCode.options` object for the claude adapter — only the fields
 /// that are actually configured (model, the primer as `appendSystemPrompt`, the
 /// permission mode). `None` when nothing is set.
@@ -1937,6 +1949,31 @@ mod tests {
         // Codex's own ids are honoured verbatim.
         assert_eq!(codex_acp_mode("read-only"), "read-only");
         assert_eq!(codex_acp_mode("agent-full-access"), "agent-full-access");
+    }
+
+    #[test]
+    fn full_access_mode_covers_both_provider_spellings() {
+        // The two "never prompt me" postures — claude's and the id a codex
+        // full-access session reports as its current mode. Both must gate the
+        // auto-approve path, or "full access" silently keeps prompting.
+        assert!(is_full_access_mode("bypassPermissions"));
+        assert!(is_full_access_mode("agent-full-access"));
+        assert!(is_full_access_mode("  agent-full-access  "));
+        // codex full access round-trips through the launch mapping into the id
+        // the gate recognizes.
+        assert!(is_full_access_mode(&codex_acp_mode("bypassPermissions")));
+        // Everything else must still prompt.
+        for mode in [
+            "auto",
+            "acceptEdits",
+            "default",
+            "plan",
+            "agent",
+            "read-only",
+            "",
+        ] {
+            assert!(!is_full_access_mode(mode), "{mode} must not auto-approve");
+        }
     }
 
     #[test]
