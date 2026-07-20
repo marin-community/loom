@@ -298,7 +298,8 @@ export const promptSession = (
     files,
   }) as Promise<PromptAck>;
 
-/** Promote all durable next-turn feedback into the currently running turn. */
+/** Send all durable next-turn feedback now, steering a live turn or starting an
+ * idle session after cancellation. */
 export const forceQueuedSession = (id: string, by?: string) =>
   post(`/sessions/${id}/prompt`, {
     text: '',

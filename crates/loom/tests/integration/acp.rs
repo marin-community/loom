@@ -1057,6 +1057,76 @@ async fn interrupt_cancels_the_turn() {
     );
 }
 
+/// Stop is a user-owned boundary: unseen feedback stays queued instead of
+/// immediately making the session work again, and can be sent explicitly from
+/// the idle state.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupt_leaves_queued_feedback_idle_until_sent() {
+    let ts = TestServer::start().await;
+    start_new(&ts, "acp-stop-queue", None, None).await;
+
+    ts.client
+        .post(
+            "/api/sessions/acp-stop-queue/prompt",
+            json!({ "text": "wait:3000|say:unreached" }),
+        )
+        .await
+        .unwrap();
+    let queued = ts
+        .client
+        .post(
+            "/api/sessions/acp-stop-queue/prompt",
+            json!({ "text": "say:after stop" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(queued["queued"], true);
+
+    ts.client
+        .post("/api/sessions/acp-stop-queue/interrupt", json!({}))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let stopped = ts
+        .client
+        .get("/api/sessions/acp-stop-queue/chat")
+        .await
+        .unwrap();
+    assert_eq!(stopped["live_turn"], Value::Null);
+    assert_eq!(stopped["pending_prompt"], "say:after stop");
+    assert_eq!(
+        count_kind(stopped["blocks"].as_array().unwrap(), "user_message"),
+        1,
+        "queued feedback must remain unseen after Stop"
+    );
+
+    let sent = ts
+        .client
+        .post(
+            "/api/sessions/acp-stop-queue/prompt",
+            json!({ "text": "", "force_queued": true }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent["queued"], false);
+    assert_eq!(sent["steered"], false);
+
+    let chat = poll_chat(&ts, "acp-stop-queue", Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|block| {
+            block["kind"] == "agent_message" && block["payload"]["text"] == "after stop"
+        })
+    })
+    .await;
+    assert_eq!(chat["pending_prompt"], Value::Null);
+    assert!(chat["blocks"].as_array().unwrap().iter().any(|block| {
+        block["kind"] == "user_message"
+            && block["turn"] == 1
+            && block["payload"]["text"] == "say:after stop"
+    }));
+}
+
 /// The `/chat` routes reject a terminal-backend session with 409.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

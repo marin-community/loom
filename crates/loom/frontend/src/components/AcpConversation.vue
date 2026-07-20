@@ -1170,11 +1170,15 @@ function goTo(anchor: string) {
                   type="button"
                   class="acp-prompt-action"
                   data-testid="acp-force-queued"
-                  :disabled="sending || !turnLive"
-                  title="Inject all queued feedback into the running turn now"
+                  :disabled="sending"
+                  :title="
+                    turnLive
+                      ? 'Inject all queued feedback into the running turn now'
+                      : 'Start a new turn with all queued feedback'
+                  "
                   @click="forceQueued"
                 >
-                  Force now
+                  {{ turnLive ? 'Force now' : 'Send now' }}
                 </button>
               </template>
               <span

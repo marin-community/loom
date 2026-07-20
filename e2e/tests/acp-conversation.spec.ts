@@ -310,21 +310,36 @@ test.describe('acp conversation', () => {
     await expect(conv.locator('.acp-label', { hasText: 'Agent' })).toHaveCount(1);
   });
 
-  test('stop immediately settles the live working state', async ({ page, weaver }) => {
+  test('stop settles working and leaves unseen feedback idle until sent', async ({ page, weaver }) => {
     await openAcp(page, weaver, {
       goal: 'say:ready',
       name: 'acp-stop-settles',
+      steering: false,
     });
     const input = page.getByTestId('acp-composer-input');
     await input.fill('wait:5000|say:unreached');
     await page.getByTestId('acp-composer-send').click();
     await expect(page.getByTestId('acp-working')).toBeVisible({ timeout: 15_000 });
 
+    await input.fill('say:after stop');
+    await page.getByTestId('acp-composer-send').click();
+    await expect(page.getByTestId('acp-queued')).toHaveText(
+      'queued · agent hasn’t seen this yet',
+    );
+
     await page.getByTestId('acp-composer-stop').click();
     await expect(page.getByTestId('acp-working')).toBeHidden({
       timeout: 2_000,
     });
     await expect(page.getByTestId('acp-turn-rule').last()).toContainText('cancelled');
+    await expect(page.getByTestId('acp-queued')).toBeVisible();
+
+    const sendNow = page.getByTestId('acp-force-queued');
+    await expect(sendNow).toBeEnabled();
+    await expect(sendNow).toHaveText('Send now');
+    await sendNow.click();
+    await expect(page.getByTestId('acp-queued')).toBeHidden();
+    await expect(page.getByText('after stop', { exact: true })).toBeVisible({ timeout: 15_000 });
   });
 
   test('force steer injects feedback when the agent omitted its capability bit', async ({ page, weaver }) => {

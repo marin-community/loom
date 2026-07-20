@@ -185,9 +185,10 @@ impl AcpHandle {
             .map_err(|_| anyhow!("acp task dropped the reply"))?
     }
 
-    /// Promote the current durable next-turn queue into the live turn. The task
-    /// reads the queue itself so the browser cannot accidentally steer stale or
-    /// partial text, and consumes it only after the adapter accepts the request.
+    /// Send the current durable next-turn queue now: promote it into a live turn,
+    /// or start it as a normal turn when the session is idle after cancellation.
+    /// The task reads the queue itself so the browser cannot accidentally send
+    /// stale or partial text.
     pub async fn force_pending(&self, by: Option<String>) -> Result<PromptAck> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -1311,6 +1312,13 @@ impl Task {
         // "resting, no one needed" state). Mirrors the terminal path's `Stop` hook.
         crate::monitor::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "idle").await;
 
+        // Stop is a user-owned boundary. In particular, do not immediately
+        // turn feedback they have not seen acknowledged into another running
+        // turn; leave the durable queue visible until they explicitly send it.
+        if stop == "cancelled" {
+            return;
+        }
+
         // The steering extension may have raced this boundary and started the
         // user's message as a fresh adapter-owned turn. Adopt it before the
         // ordinary durable queue so prompts retain their arrival order.
@@ -1711,9 +1719,7 @@ impl Task {
                 }
             }
             Command::ForcePending { by, reply } => {
-                if !self.turn_live {
-                    let _ = reply.send(Err(anyhow!("there is no running turn to steer")));
-                } else if !self.pending_steers.is_empty() || self.pending_external.is_some() {
+                if !self.pending_steers.is_empty() || self.pending_external.is_some() {
                     let _ = reply.send(Err(anyhow!(
                         "another steer is still pending; retry when it settles"
                     )));
@@ -1727,7 +1733,14 @@ impl Task {
                             }
                         };
                     if queued.trim().is_empty() {
-                        let _ = reply.send(Err(anyhow!("there is no queued feedback to steer")));
+                        let _ = reply.send(Err(anyhow!("there is no queued feedback to send")));
+                    } else if !self.turn_live {
+                        let result =
+                            match session::clear_pending_prompt(&self.db, &self.session_id).await {
+                                Ok(()) => self.start_prompt(queued.clone(), by, Vec::new()).await,
+                                Err(error) => Err(error),
+                            };
+                        let _ = reply.send(result);
                     } else {
                         let id = self.next_id();
                         let request = wire::request_line(
@@ -1766,6 +1779,12 @@ impl Task {
                     ))
                     .await;
                 if r.is_ok() && self.turn_live {
+                    for (_, pending) in self.pending_steers.drain() {
+                        let _ = pending.reply.send(Err(anyhow!("turn was cancelled")));
+                    }
+                    if let Some(pending) = self.pending_external.take() {
+                        let _ = pending.reply.send(Err(anyhow!("turn was cancelled")));
+                    }
                     // Cancellation is a client-owned boundary. Some adapters do
                     // not answer the cancelled prompt, so settle loom's journal
                     // and lifecycle immediately after the notification lands.
