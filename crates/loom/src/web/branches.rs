@@ -13,6 +13,7 @@ use crate::events;
 use super::sessions::ByQuery;
 use super::{author_or_manual, branch_view, require_branch};
 use super::{ApiResult, AppError, AppState};
+use axum::http::StatusCode;
 
 // ---------------------------------------------------------------------------
 // Branches
@@ -131,17 +132,78 @@ pub(super) async fn set_branch_status(
         }),
     )
     .await?;
-    // Mirror the trail onto the branch's wired GitHub thread (a no-op when the
-    // `github` tag is absent) — detached, so a GitHub hiccup never slows or
-    // fails the status write.
-    tokio::spawn(crate::github::sync_status_comment(
-        st.clone(),
-        branch.id.clone(),
-    ));
+    // Mirror the trail onto every origin thread the branch is wired to — the
+    // GitHub comment and/or the Slack message (each a no-op when its wiring tag
+    // is absent) — detached, so an integration hiccup never slows or fails the
+    // status write.
+    crate::slack::spawn_status_mirrors(st.clone(), branch.id.clone());
     let branch = branch_mod::get(&st.db, &branch.id)
         .await?
         .ok_or_else(|| AppError::not_found("branch"))?;
     Ok(Json(branch_view(&st.db, &branch).await?))
+}
+
+/// `POST /api/branches/{id}/slack/reply` — post a message from the session back
+/// to its wired Slack thread. The token stays on the server: the agent (holding
+/// `LOOM_TOKEN`) calls this route rather than being handed the workspace-wide
+/// bot token, and loom derives the destination from the branch's `slack` wiring
+/// tag. The Slack analog of the GitHub-triggered session replying with `gh`.
+#[derive(Deserialize)]
+pub(super) struct SlackReplyReq {
+    pub text: String,
+}
+
+pub(super) async fn slack_reply(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Json(req): Json<SlackReplyReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let branch = require_branch(&st.db, &key).await?;
+    let text = req.text.trim();
+    if text.is_empty() {
+        return Err(AppError::bad_request("text is required"));
+    }
+    let wired = tags::get(&st.db, &branch.id, crate::slack::WIRED_TAG)
+        .await?
+        .ok_or_else(|| AppError::bad_request("this branch is not wired to a Slack thread"))?;
+    let (_team, channel, root) = crate::slack::parse_wiring(&wired.value)
+        .ok_or_else(|| AppError::bad_request("malformed slack wiring tag"))?;
+    let web = crate::slack::SlackWeb::from_db(&st.db)
+        .await
+        .ok_or_else(|| AppError::bad_request("Slack is not configured on this server"))?;
+    let ts = web
+        .post_message(&channel, Some(&root), text)
+        .await
+        .map_err(|e| AppError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    Ok(Json(json!({ "posted": true, "ts": ts })))
+}
+
+/// `GET /api/slack/status` — read-only connection state for the Connections
+/// settings pane. `connected` reflects whether an `auth.test` with the bot token
+/// succeeds (a credential-health proxy for the live socket).
+pub(super) async fn slack_status(State(st): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let configured = !crate::slack::app_token(&st.db).await.is_empty()
+        && !crate::slack::bot_token(&st.db).await.is_empty();
+    let enabled = crate::slack::is_enabled(&st.db).await;
+    let (connected, bot_user, team, error) = if configured {
+        match crate::slack::SlackWeb::from_db(&st.db).await {
+            Some(web) => match web.auth_test().await {
+                Ok(id) => (true, Some(id.user_id), Some(id.team_id), None),
+                Err(e) => (false, None, None, Some(e.to_string())),
+            },
+            None => (false, None, None, None),
+        }
+    } else {
+        (false, None, None, None)
+    };
+    Ok(Json(json!({
+        "configured": configured,
+        "enabled": enabled,
+        "connected": connected,
+        "bot_user": bot_user,
+        "team": team,
+        "error": error,
+    })))
 }
 
 /// Append a raw event row to a branch's log — the escape hatch for an event

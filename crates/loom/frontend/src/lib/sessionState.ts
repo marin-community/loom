@@ -31,10 +31,11 @@ function parkOf(value: string | undefined): number {
 // loud status. Mirrors weaver-core's `IDLE_KEY`.
 export const IDLE_KEY = 'idle';
 
-// Loom's machine bookkeeping for its GitHub side-effects (the PR back-link
-// mark, the status-card comment id). Not user-meaningful, so the pill row
-// hides them; the `github` wiring tag itself stays visible.
-const BOOKKEEPING_KEYS = ['github.linked', 'github.status_comment'];
+// Loom's machine bookkeeping for its GitHub/Slack side-effects (the PR
+// back-link mark, the status-card comment/message id). Not user-meaningful,
+// so the pill row hides them; the `github`/`slack` wiring tags themselves
+// stay visible.
+const BOOKKEEPING_KEYS = ['github.linked', 'github.status_comment', 'slack.status_message'];
 
 // Severity of a tag value: 0 is quiet (a pill), >0 is loud (a badge).
 function severityOf(value: string | undefined): number {

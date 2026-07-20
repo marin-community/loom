@@ -102,6 +102,7 @@ and why; you don't hand-edit `.env` itself.
 | `LOOM_OWNER_GITHUB` | **yes** | GitHub login seeded as the first approved user on a fresh database — the only account that can sign in until it approves others. Approved users are also who may drive the `@loom` trigger; add more in **Settings → Approved users**. |
 | `GH_TOKEN` | **yes** | GitHub token loom uses to clone private repos, push branches, and reply to `@loom` comments. |
 | `LOOM_GITHUB_WEBHOOK_SECRET` | for `@loom` | Shared secret for the inbound webhook; must match the secret on the GitHub webhook. Until set, the webhook rejects every delivery. |
+| `LOOM_SLACK_APP_TOKEN` / `LOOM_SLACK_BOT_TOKEN` | for `/marinbot` | App-level and bot OAuth tokens for the Slack Socket Mode trigger. Both unset (the default) leaves it off. See [docs/slack-trigger.md](../docs/slack-trigger.md). |
 | `ANTHROPIC_API_KEY` | for Claude | API key for the Claude agents. Alternatively log in interactively (see [first-run](#agent-authentication)). |
 | `OPENAI_API_KEY` | for Codex | API key for the Codex agents; only needed if you launch the `codex` runtime. Alternatively log in interactively (see [first-run](#agent-authentication)). |
 | `LOOM_GITHUB_CLIENT_ID` / `_SECRET` | for login | GitHub OAuth app — the owner's only way to sign in on a fresh DB (see [first-run](#first-run-login)). Callback: `https://<LOOM_DOMAIN>/api/auth/github/callback`. |
@@ -308,6 +309,15 @@ Without the App (the classic path), instead:
 
 Full behaviour, authorization rules, and hardening notes:
 [docs/github-trigger.md](../docs/github-trigger.md).
+
+## Wire the Slack `/marinbot` trigger
+
+Set `slack_app_token` and `slack_bot_token` in `loom.toml` (`loom config
+render-env` writes them into `.env` as `LOOM_SLACK_APP_TOKEN` /
+`LOOM_SLACK_BOT_TOKEN`), then add the Slack user ids allowed to trigger it to
+`slack.allowed_users` — empty means no one can, even from inside the
+workspace. Full behaviour, the Slack app's required scopes, and invite
+requirements: [docs/slack-trigger.md](../docs/slack-trigger.md).
 
 ## Where state lives
 

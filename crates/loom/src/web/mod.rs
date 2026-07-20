@@ -73,7 +73,7 @@ mod logview;
 mod repo_env;
 mod repos;
 mod scratch;
-mod sessions;
+pub(crate) mod sessions;
 mod settings;
 mod watches;
 
@@ -639,6 +639,7 @@ pub fn router(state: AppState) -> Router {
         // partial write). No live session required — `weaver` runs as an
         // HTTP-only client of loom and these are its primary write path.
         .route("/branches/{id}/status", post(set_branch_status))
+        .route("/branches/{id}/slack/reply", post(slack_reply))
         .route("/branches/{id}/events", post(create_branch_event))
         .route(
             "/branches/{id}/tags/{key}",
@@ -706,6 +707,7 @@ pub fn router(state: AppState) -> Router {
             axum::routing::put(put_repo_env).delete(delete_repo_env),
         )
         .route("/settings", get(get_settings).patch(patch_settings))
+        .route("/slack/status", get(slack_status))
         // Operator-managed agent environment variables.
         .route("/env", get(get_env))
         .route(

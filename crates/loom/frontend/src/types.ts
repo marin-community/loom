@@ -799,6 +799,21 @@ export interface GithubConfig {
   app_slug: string;
 }
 
+/** Read-only Slack connection state for the Connections settings pane
+ *  (`GET /api/slack/status`). `configured` means both the app-level and bot
+ *  tokens are set (via env, outside the settings registry); `connected` means
+ *  an `auth.test` with the bot token just succeeded — a live credential-health
+ *  check, not merely "tokens present". `bot_user`/`team` are populated only
+ *  when connected; `error` only when configured but not connected. */
+export interface SlackStatus {
+  configured: boolean;
+  enabled: boolean;
+  connected: boolean;
+  bot_user: string | null;
+  team: string | null;
+  error: string | null;
+}
+
 // --- Conversation log (iris format) ----------------------------------------
 // The normalized agent conversation served by `GET /sessions/{id}/conversation`.
 // Mirrors `weaver_core::transcript::iris`: a list of role-tagged messages, each

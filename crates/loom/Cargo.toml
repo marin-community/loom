@@ -68,6 +68,13 @@ toml = { version = "1", default-features = false, features = ["parse", "display"
 # before running them; the tests reuse it for fixtures.
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
+# The Slack Socket Mode client (crate::slack) dials `wss://` out to Slack, so it
+# needs a real (not dev-only) dependency *with* a TLS feature — the bare crate
+# can't open a secure socket ("TLS support not compiled in"). `rustls-tls-webpki-
+# roots` bundles the roots, matching reqwest's rustls stack above (no system dep).
+# 0.29 matches axum 0.8's own tokio-tungstenite so the two speak one protocol
+# stack; the terminal round-trip integration test reuses this same client.
+tokio-tungstenite = { version = "0.29", features = ["connect", "rustls-tls-webpki-roots"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tower-http = { version = "0.6", features = ["cors", "fs", "compression-full"] }
@@ -76,9 +83,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 croner = "3"
 
 [dev-dependencies]
-# WebSocket client for the terminal round-trip integration test. 0.29 matches
-# axum 0.8's own tokio-tungstenite, so the two speak the same protocol stack.
-tokio-tungstenite = "0.29"
 futures-util = "0.3"
 # Raw-body HTTP client for the scratch-upload integration test, plus `stream`
 # for reading the ACP `/chat/stream` SSE body chunk by chunk.

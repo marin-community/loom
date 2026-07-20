@@ -124,7 +124,7 @@ const POLL_TICK: Duration = Duration::from_secs(30);
 /// (posted the `…/s/{id}` comment). Set by the poll loop's back-link poster or,
 /// for a `@loom`-triggered PR, by the trigger reply — so exactly one link lands.
 /// Shared with [`crate::web`] (the trigger reply path).
-pub const LINKED_TAG: &str = "github.linked";
+pub const LINKED_TAG: &str = tags::GITHUB_LINKED_KEY;
 
 // ---------------------------------------------------------------------------
 // The status card
@@ -149,13 +149,11 @@ pub const STATUS_COMMENT_TAG: &str = tags::GITHUB_COMMENT_KEY;
 /// count line so a long session never turns the comment into a scroll.
 const STATUS_CARD_CAP: usize = 15;
 
-/// Keys loom stamps mechanically to track its own GitHub side-effects. The
-/// generic tag routes refuse to *set* them — a forged comment id would aim
-/// loom's edits at someone else's comment. Clearing stays allowed (harmless:
-/// loom re-creates its bookkeeping on the next pass).
-pub fn is_reserved_tag(key: &str) -> bool {
-    key == LINKED_TAG || key == STATUS_COMMENT_TAG
-}
+/// Keys loom stamps mechanically to track its own integration side-effects —
+/// now centralized as [`tags::is_reserved_tag`] (both generic tag routes gate on
+/// it, and Slack bookkeeping joins the same list). Re-exported here for the
+/// GitHub call sites that reference it.
+pub use tags::is_reserved_tag;
 
 /// Parse a [`WIRED_TAG`] value — `owner/name#number` — into its slug and
 /// thread number. `None` for anything else (the tag is free-form user input,
