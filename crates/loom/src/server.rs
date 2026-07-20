@@ -329,7 +329,11 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     tokio::spawn(watch::run(state.clone()));
     // Retire embedded code-server instances that have gone idle.
     tokio::spawn(crate::ide::reap_loop(state.clone()));
-    tracing::debug!("background tasks spawned (monitor, github poll, watch, ide reaper)");
+    // The Slack Socket Mode client. Always spawned; it self-gates on token
+    // presence and the `slack.enabled` switch, so an unconfigured loom idles
+    // here cheaply.
+    tokio::spawn(crate::slack::run(state.clone()));
+    tracing::debug!("background tasks spawned (monitor, github poll, watch, ide reaper, slack)");
     // `into_make_service_with_connect_info` surfaces the peer `SocketAddr` to the
     // auth middleware, which uses it to recognise (and optionally trust) loopback.
     axum::serve(

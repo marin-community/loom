@@ -6,6 +6,7 @@ import type { AgentMetadata, CustomAgent, SettingView } from '../types';
 import ToggleSwitch from '../components/ToggleSwitch.vue';
 import TokensPanel from '../components/TokensPanel.vue';
 import AccountPanel from '../components/AccountPanel.vue';
+import SlackPanel from '../components/SlackPanel.vue';
 import EnvPanel from '../components/EnvPanel.vue';
 import LogsPanel from '../components/LogsPanel.vue';
 import AgentProfileEditor from '../components/AgentProfileEditor.vue';
@@ -53,9 +54,11 @@ const categories: CategoryItem[] = [
   },
   {
     id: 'github',
-    label: 'GitHub',
-    groups: ['GitHub'],
-    summary: 'Pull request polling, merge archiving, and issue-comment launch triggers.',
+    label: 'Connections',
+    groups: ['GitHub', 'Slack'],
+    summary:
+      'GitHub and Slack integrations: PR polling, merge archiving, issue-comment and ' +
+      '`/marinbot` launch triggers, and their connection state.',
   },
   {
     id: 'watches',
@@ -389,6 +392,7 @@ onMounted(load);
           <AccountPanel v-if="category === 'access'" />
           <TokensPanel v-if="category === 'access'" />
           <AppearancePanel v-if="category === 'workspace'" />
+          <SlackPanel v-if="category === 'github'" />
 
           <section
             v-if="currentSettings.length"

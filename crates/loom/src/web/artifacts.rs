@@ -206,12 +206,9 @@ pub(super) async fn write_artifact(
     )
     .await
     .ok();
-    // A wired GitHub thread's status card links the session's documents —
-    // refresh it so a new doc appears there without waiting for a status write.
-    tokio::spawn(crate::github::sync_status_comment(
-        st.clone(),
-        branch.id.clone(),
-    ));
+    // A wired thread's status card links the session's documents — refresh it so
+    // a new doc appears there without waiting for a status write.
+    crate::slack::spawn_status_mirrors(st.clone(), branch.id.clone());
     Ok(Json(
         artifact_view(&st.db, &branch.repo_root, &a, None).await?,
     ))
@@ -243,6 +240,9 @@ pub(super) async fn delete_artifact(
     )
     .await
     .ok();
+    // A wired thread's status card lists the session's documents — refresh it so
+    // a deleted doc stops appearing there.
+    crate::slack::spawn_status_mirrors(st.clone(), branch.id.clone());
     Ok(Json(json!({ "deleted": true, "name": a.name })))
 }
 
@@ -361,10 +361,7 @@ pub(super) async fn write_branch_artifact(
     .await
     .ok();
     // Same card refresh as the session-scoped write route above.
-    tokio::spawn(crate::github::sync_status_comment(
-        st.clone(),
-        branch.id.clone(),
-    ));
+    crate::slack::spawn_status_mirrors(st.clone(), branch.id.clone());
     Ok(Json(
         artifact_view(&st.db, &branch.repo_root, &a, None).await?,
     ))
@@ -418,6 +415,9 @@ pub(super) async fn delete_branch_artifact(
     )
     .await
     .ok();
+    // A wired thread's status card lists the session's documents — refresh it so
+    // a deleted doc stops appearing there.
+    crate::slack::spawn_status_mirrors(st.clone(), branch.id.clone());
     Ok(Json(json!({ "deleted": true, "name": a.name })))
 }
 

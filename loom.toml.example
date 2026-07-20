@@ -39,6 +39,13 @@ owner_github = "your-github-login"
 # openai_api_key = ""
 # gh_token = ""
 
+# Slack Socket Mode integration (the `/marinbot` / `@marinbot` trigger) —
+# optional; unset leaves it off. Both are secrets: an app-level token
+# (`xapp-…`, needs the `connections:write` scope) and a bot-user OAuth token
+# (`xoxb-…`). See docs/slack-trigger.md.
+# slack_app_token = ""
+# slack_bot_token = ""
+
 # Deploy-mechanism knobs — every one has a sensible compose-level default, so
 # leave them commented out unless you need to override one. (You can also
 # override any of these, or anything above, for a single invocation by

@@ -86,6 +86,36 @@ pub const GITHUB_KEY: &str = "github";
 /// else's comment); clearing it just makes the next status write post afresh.
 pub const GITHUB_COMMENT_KEY: &str = "github.status_comment";
 
+/// Loom's bookkeeping that a session's PR back-link comment was already posted,
+/// so the poll loop doesn't re-post it. Machine-owned like [`GITHUB_COMMENT_KEY`].
+pub const GITHUB_LINKED_KEY: &str = "github.linked";
+
+/// Branch tag wiring a session to a Slack thread; the value is
+/// `team_id/channel_id/thread_ts` (team-scoped — channel ids only mean something
+/// within a workspace). Quiet. While present, loom mirrors every `weaver status`
+/// write onto one message in that thread — the "On it" status card, edited in
+/// place. The `/marinbot` (and `@marinbot`) trigger stamps it at launch;
+/// clearing it stops the mirroring.
+pub const SLACK_KEY: &str = "slack";
+
+/// Loom's bookkeeping for the Slack status card: the message `ts` it edits, with
+/// the wiring it belongs to in the note. Machine-owned — the tag routes refuse
+/// to set it by hand (a forged `ts` would aim loom's edits at another message);
+/// clearing it just makes the next status write post afresh.
+pub const SLACK_STATUS_MSG_KEY: &str = "slack.status_message";
+
+/// Keys loom stamps mechanically to track its own integration side-effects. The
+/// generic tag routes refuse to *set* them — a forged comment id / message `ts`
+/// would aim loom's edits at someone else's content. Clearing stays allowed
+/// (harmless: loom re-creates its bookkeeping on the next pass). Centralized here
+/// (rather than per-integration) because both generic tag routes gate on it.
+pub fn is_reserved_tag(key: &str) -> bool {
+    matches!(
+        key,
+        GITHUB_LINKED_KEY | GITHUB_COMMENT_KEY | SLACK_STATUS_MSG_KEY
+    )
+}
+
 /// The loud keys: those that raise an attention signal on the dashboard. Any
 /// other key is quiet (a deletable pill) — including the soothing [`IDLE_KEY`].
 pub const LOUD_KEYS: &[&str] = &[ATTENTION_KEY, TRIAGE_KEY];

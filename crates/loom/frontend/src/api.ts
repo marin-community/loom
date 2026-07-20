@@ -373,7 +373,7 @@ export const restartShell = () => post('/shell/restart');
 
 // --- Authentication --------------------------------------------------------
 
-import type { Me, Token, CreatedToken, User, GithubConfig } from './types';
+import type { Me, Token, CreatedToken, User, GithubConfig, SlackStatus } from './types';
 
 /** Who the caller is + which sign-in methods to offer. Never 401s. */
 export const getMe = () => get('/auth/me') as Promise<Me>;
@@ -425,6 +425,12 @@ export const setGithubConfig = (clientId: string, clientSecret?: string) =>
     client_id: clientId,
     ...(clientSecret !== undefined ? { client_secret: clientSecret } : {}),
   }) as Promise<GithubConfig>;
+
+// --- Slack -------------------------------------------------------------
+
+/** Read-only Slack connection state — configured/connected plus the bot
+ *  identity or error (`GET /api/slack/status`). */
+export const getSlackStatus = () => get('/slack/status') as Promise<SlackStatus>;
 
 // --- Server logs / debug ---------------------------------------------------
 

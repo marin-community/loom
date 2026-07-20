@@ -62,6 +62,15 @@ pub struct LoomConfig {
     pub openai_api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_token: Option<String>,
+    /// Slack app-level token (`xapp-…`, needs `connections:write`) — opens the
+    /// Socket Mode websocket. With both this and `slack_bot_token` set, loom
+    /// connects to Slack and the `/marinbot` trigger goes live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slack_app_token: Option<String>,
+    /// Slack bot-user OAuth token (`xoxb-…`) — every Web API call
+    /// (`chat.postMessage`, `conversations.history`, …) the integration makes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slack_bot_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_email: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,6 +169,18 @@ pub static FIELDS: &[FieldSpec] = &[
         secret: true,
         get_fn: |c| c.gh_token.as_deref(),
         set_fn: |c, v| c.gh_token = Some(v),
+    },
+    FieldSpec {
+        env_name: "LOOM_SLACK_APP_TOKEN",
+        secret: true,
+        get_fn: |c| c.slack_app_token.as_deref(),
+        set_fn: |c, v| c.slack_app_token = Some(v),
+    },
+    FieldSpec {
+        env_name: "LOOM_SLACK_BOT_TOKEN",
+        secret: true,
+        get_fn: |c| c.slack_bot_token.as_deref(),
+        set_fn: |c, v| c.slack_bot_token = Some(v),
     },
     FieldSpec {
         env_name: "LOOM_TLS_EMAIL",
@@ -411,6 +432,8 @@ mod tests {
                 "ANTHROPIC_API_KEY",
                 "OPENAI_API_KEY",
                 "GH_TOKEN",
+                "LOOM_SLACK_APP_TOKEN",
+                "LOOM_SLACK_BOT_TOKEN",
             ]
         );
     }

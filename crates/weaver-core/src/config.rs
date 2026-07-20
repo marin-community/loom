@@ -188,6 +188,47 @@ pub const REGISTRY: &[SettingSpec] = &[
         options: &[],
     },
     SettingSpec {
+        key: "slack.enabled",
+        label: "Slack integration",
+        description: "Master switch for the Slack Socket Mode integration. loom \
+            only connects when both `LOOM_SLACK_APP_TOKEN` and \
+            `LOOM_SLACK_BOT_TOKEN` are configured; turning this OFF closes any \
+            live connection without removing the tokens. With it on and the \
+            tokens present, `/marinbot` (and `@marinbot`) launch sessions and \
+            mirror their status back to the Slack thread.",
+        kind: SettingKind::Bool,
+        default: "true",
+        group: "Slack",
+        options: &[],
+    },
+    SettingSpec {
+        key: "slack.allowed_users",
+        label: "Slack allowed users",
+        description: "Space- or comma-separated Slack user IDs (e.g. `U0123ABCD`) \
+            permitted to trigger `/marinbot`. A session is privileged — it holds \
+            repo and agent credentials — so the trigger is deny-by-default: with \
+            this empty, no one can launch even inside the installed workspace. \
+            Events from another workspace or an externally-shared (Slack Connect) \
+            channel are always rejected, regardless of this list.",
+        kind: SettingKind::String,
+        default: "",
+        group: "Slack",
+        options: &[],
+    },
+    SettingSpec {
+        key: "slack.default_repo",
+        label: "Slack default repository",
+        description: "The managed repository (`owner/name`) a `/marinbot` \
+            launch targets when the command text carries no `owner/name:` \
+            prefix. Slack conversations have no repo of their own, so without \
+            this — or an explicit prefix — a trigger has nothing to work on and \
+            replies asking for one.",
+        kind: SettingKind::String,
+        default: "",
+        group: "Slack",
+        options: &[],
+    },
+    SettingSpec {
         key: "auth.trust_loopback",
         label: "Trust loopback requests",
         description: "When enabled, requests from 127.0.0.1/::1 are trusted as \
