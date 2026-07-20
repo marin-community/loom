@@ -350,8 +350,21 @@ async fn migrate_loom(pool: &Db) -> Result<()> {
     add_column_if_missing(pool, "sessions", "current_mode", "TEXT").await?;
     // The durable prompt queue: a paragraph-appended user message accumulated
     // while a turn is in flight, dispatched as one `session/prompt` at the next
-    // turn boundary. Empty/NULL when nothing is queued.
-    add_column_if_missing(pool, "sessions", "pending_prompt", "TEXT").await?;
+    // turn boundary. Canonically the empty string when nothing is queued — never
+    // NULL. Declared `NOT NULL DEFAULT ''` so a fresh database matches the shape
+    // long-lived databases already carry (older schemas created the column inside
+    // `CREATE TABLE sessions` as `TEXT NOT NULL DEFAULT ''`; `CREATE TABLE IF NOT
+    // EXISTS` is then a no-op and this additive migration is swallowed as a
+    // duplicate). Keeping every database on one shape means the queue-clearing
+    // writes below can never trip a `NOT NULL` constraint on one database while
+    // passing on another — see `session::take_pending_prompt`.
+    add_column_if_missing(
+        pool,
+        "sessions",
+        "pending_prompt",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    .await?;
     // The custom agent's execution backend: 'terminal' (a PTY running its launch
     // command) or 'acp' (its launch command is an ACP adapter driven over stdio).
     // Added here for databases created before the column; a fresh DB has it from

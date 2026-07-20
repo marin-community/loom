@@ -76,7 +76,10 @@ pub struct Session {
     pub current_mode: Option<String>,
     /// The durable prompt queue: a paragraph-appended user message accumulated
     /// while a turn is in flight, dispatched as one prompt at the next turn
-    /// boundary. `None`/empty when nothing is queued.
+    /// boundary. Canonically the empty string when nothing is queued — the column
+    /// is `NOT NULL DEFAULT ''`, so the queue-clearing writes store `''`, never
+    /// NULL (an `Option` only because a legacy row may still hold NULL; treat
+    /// `None` and `Some("")` identically). See [`take_pending_prompt`].
     pub pending_prompt: Option<String>,
 }
 
@@ -378,7 +381,7 @@ pub async fn prepare_handoff(
         "UPDATE sessions
          SET agent_kind = ?, model = ?, effort = ?, status = ?,
              acp_session_id = NULL, acp_ack_seq = 0, acp_inflight = NULL,
-             current_mode = NULL, pending_prompt = NULL
+             current_mode = NULL, pending_prompt = ''
          WHERE id = ?",
     )
     .bind(agent_kind)
@@ -445,7 +448,11 @@ pub async fn take_pending_prompt(db: &Db, id: &str) -> Result<Option<String>> {
     };
 
     let result = sqlx::query(
-        "UPDATE sessions SET pending_prompt = NULL
+        // Clear to '' (the canonical empty), never NULL: the column is
+        // `NOT NULL DEFAULT ''` on long-lived databases, so writing NULL here
+        // fails the consume, the queue can never drain, and the conversation
+        // wedges. See the module note on `pending_prompt`.
+        "UPDATE sessions SET pending_prompt = ''
          WHERE id = ? AND pending_prompt = ?",
     )
     .bind(id)
@@ -463,13 +470,13 @@ pub async fn take_pending_prompt(db: &Db, id: &str) -> Result<Option<String>> {
 /// appended behind it while the steering request was in flight.
 pub async fn consume_pending_prompt(db: &Db, id: &str, promoted: &str) -> Result<()> {
     let current = read_pending_prompt(db, id).await?;
-    let remaining = if current == promoted {
-        None
+    // Canonically '' (never NULL) when the whole queue was promoted — the column
+    // is `NOT NULL DEFAULT ''` on long-lived databases.
+    let remaining: &str = if current == promoted {
+        ""
     } else if let Some(rest) = current.strip_prefix(promoted) {
-        Some(
-            rest.strip_prefix("\n\n")
-                .ok_or_else(|| anyhow!("queued prompt changed while it was being steered"))?,
-        )
+        rest.strip_prefix("\n\n")
+            .ok_or_else(|| anyhow!("queued prompt changed while it was being steered"))?
     } else {
         bail!("queued prompt changed while it was being steered");
     };
@@ -610,6 +617,51 @@ mod tests {
         assert_eq!(session.acp_ack_seq, 0);
         assert!(session.acp_inflight.is_none());
         assert!(session.current_mode.is_none());
-        assert!(session.pending_prompt.is_none());
+        assert!(
+            session.pending_prompt.as_deref().unwrap_or("").is_empty(),
+            "handoff clears the queue to empty, never NULL"
+        );
+    }
+
+    /// Regression: the queue clears to `''`, never NULL. `sessions.pending_prompt`
+    /// is `NOT NULL DEFAULT ''` (the shape long-lived databases carry), so a
+    /// clearing write of NULL raises `NOT NULL constraint failed` — which used to
+    /// make the queued prompt unconsumable and wedge the whole conversation. The
+    /// in-memory schema now matches that shape, so this exercises the real
+    /// constraint that shipped unguarded.
+    #[tokio::test]
+    async fn draining_the_queue_clears_to_empty_not_null() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        // The column must actually carry the constraint, or this guards nothing.
+        let notnull: i64 = sqlx::query_scalar(
+            "SELECT \"notnull\" FROM pragma_table_info('sessions') WHERE name = 'pending_prompt'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(notnull, 1, "pending_prompt must be NOT NULL");
+
+        let branch = branch_id(&db, "weaver/drain").await;
+        insert(&db, &new_session("drain", &branch, None))
+            .await
+            .unwrap();
+        append_pending_prompt(&db, "drain", "queued text")
+            .await
+            .unwrap();
+
+        // take: the wedge path — this UPDATE used to write NULL and fail here.
+        let taken = take_pending_prompt(&db, "drain").await.unwrap();
+        assert_eq!(taken.as_deref(), Some("queued text"));
+        let row = get(&db, "drain").await.unwrap().unwrap();
+        assert_eq!(
+            row.pending_prompt.as_deref(),
+            Some(""),
+            "cleared to '', not NULL"
+        );
+
+        // consume of the whole queue and a full handoff must clear the same way.
+        append_pending_prompt(&db, "drain", "again").await.unwrap();
+        consume_pending_prompt(&db, "drain", "again").await.unwrap();
+        assert_eq!(read_pending_prompt(&db, "drain").await.unwrap(), "");
     }
 }

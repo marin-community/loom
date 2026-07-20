@@ -738,15 +738,17 @@ async fn queue_consume_failure_does_not_dispatch_or_replay() {
         .unwrap();
     assert_eq!(queued["queued"], true);
 
-    // Reproduce a failed queue-consumption write. The production incident's
-    // error was discarded, so its exact SQLite cause is unavailable; the
-    // invariant is that a failed consume must keep loom from dispatching.
+    // Reproduce a failed queue-consumption write. The production incident was a
+    // `NOT NULL constraint failed: sessions.pending_prompt` — the clearing write
+    // now stores '' rather than NULL, so this injects the same class of failure
+    // on the real clearing update. The invariant is that a failed consume must
+    // keep loom from dispatching.
     sqlx::query(
         "CREATE TRIGGER reject_queue_consume
          BEFORE UPDATE OF pending_prompt ON sessions
          WHEN OLD.id = 'acp-queue-failure'
-              AND OLD.pending_prompt IS NOT NULL
-              AND NEW.pending_prompt IS NULL
+              AND OLD.pending_prompt <> ''
+              AND NEW.pending_prompt = ''
          BEGIN
              SELECT RAISE(FAIL, 'injected queue consume failure');
          END",
@@ -1234,7 +1236,9 @@ async fn interrupt_leaves_queued_feedback_idle_until_sent() {
         })
     })
     .await;
-    assert_eq!(chat["pending_prompt"], Value::Null);
+    // Drained queue is the canonical empty string, never NULL (see
+    // `session::take_pending_prompt`); the frontend treats '' and null alike.
+    assert_eq!(chat["pending_prompt"], "");
     assert!(chat["blocks"].as_array().unwrap().iter().any(|block| {
         block["kind"] == "user_message"
             && block["turn"] == 1
