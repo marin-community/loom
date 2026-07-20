@@ -2872,6 +2872,23 @@ pub(super) async fn prompt_session(
     ))
 }
 
+/// Pull unseen next-turn feedback back out of the durable queue for editing.
+/// The ACP task owns the consume so this action is serialized with automatic
+/// dispatch at a turn boundary and with steering responses.
+pub(super) async fn retract_queued_prompt(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let (session, _) = require_session(&st.db, &key).await?;
+    require_acp(&session)?;
+    let handle = require_acp_task(&st, &session)?;
+    let text = handle
+        .retract_pending()
+        .await
+        .map_err(|e| AppError::conflict(e.to_string()))?;
+    Ok(Json(json!({ "text": text })))
+}
+
 #[derive(Debug, Deserialize)]
 pub(super) struct ConfigOptionBody {
     pub value: Value,

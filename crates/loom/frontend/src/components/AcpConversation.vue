@@ -14,6 +14,7 @@ import {
   getSessionChat,
   promptSession,
   forceQueuedSession,
+  retractQueuedSession,
   interruptSession,
   answerPermission,
   setSessionMode,
@@ -81,6 +82,8 @@ const shadows = reactive(
 const liveTools = reactive(new Map<string, SseTool>());
 const turnLive = ref(false);
 const liveTurnNo = ref<number | null>(null);
+const turnStartedAt = ref<number | null>(null);
+const lastProgressAt = ref<number | null>(null);
 // Optimistic rows exist only while an HTTP send is unresolved. Delivery state
 // comes from the durable queue snapshot/SSE, never from the click that initiated
 // the request.
@@ -117,6 +120,43 @@ function applyMetadata(next: AcpMetadata) {
 
 const blockKey = (turn: number, seq: number) => `${turn}:${seq}`;
 
+function timeOf(value: string | undefined): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function markProgress(at?: string) {
+  const next = timeOf(at) ?? Date.now();
+  lastProgressAt.value = Math.max(lastProgressAt.value ?? 0, next);
+  if (turnStartedAt.value == null) turnStartedAt.value = next;
+}
+
+/** Rebuild timing from durable journal timestamps after a reload. The opening
+ * user message is the turn start; the newest block is the last server-observed
+ * progress. Live deltas/tools advance the latter in real time below. */
+function restoreLiveTiming(turn: number | null, preserveObserved = false) {
+  if (turn == null) {
+    turnStartedAt.value = null;
+    lastProgressAt.value = null;
+    return;
+  }
+  const current = [...blocks.values()].filter((block) => block.turn === turn);
+  const opening = current.find((block) => block.kind === 'user_message') ?? current[0];
+  const restoredStart = timeOf(opening?.created_at) ?? Date.now();
+  const restoredProgress =
+    current.reduce<number | null>((latest, block) => {
+      const at = timeOf(block.created_at);
+      return at == null ? latest : Math.max(latest ?? 0, at);
+    }, null) ?? restoredStart;
+  turnStartedAt.value = preserveObserved
+    ? Math.min(turnStartedAt.value ?? restoredStart, restoredStart)
+    : restoredStart;
+  lastProgressAt.value = preserveObserved
+    ? Math.max(lastProgressAt.value ?? restoredProgress, restoredProgress)
+    : restoredProgress;
+}
+
 type LoadState = 'loading' | 'ready' | 'error';
 const state = ref<LoadState>('loading');
 const errorMsg = ref('');
@@ -133,12 +173,14 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
   try {
     const snap = await getSessionChat(id.value);
     if (seq !== loadSeq) return;
+    const preserveObservedTiming = preserve && liveTurnNo.value === snap.live_turn;
     blocks.clear();
     for (const b of snap.blocks) blocks.set(blockKey(b.turn, b.seq), b);
     shadows.clear();
     liveTools.clear();
     liveTurnNo.value = snap.live_turn;
     turnLive.value = snap.live_turn != null;
+    restoreLiveTiming(snap.live_turn, preserveObservedTiming);
     effectiveMode.value = snap.effective_mode ?? null;
     pendingPrompt.value = snap.pending_prompt?.trim() ? snap.pending_prompt : null;
     applyMetadata(snap.metadata ?? emptyMetadata());
@@ -160,6 +202,7 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
 // ── Stream application ───────────────────────────────────────────────────────
 function onBlock(b: ChatBlock) {
   blocks.set(blockKey(b.turn, b.seq), b);
+  if (b.turn === liveTurnNo.value) markProgress(b.created_at);
   if (b.kind === 'tool_call') {
     const tid = (b.payload as unknown as ToolCallPayload).tool_call_id;
     if (tid) liveTools.delete(tid);
@@ -179,6 +222,7 @@ function onBlock(b: ChatBlock) {
 function onDelta(d: SseDelta) {
   turnLive.value = true;
   liveTurnNo.value = d.turn;
+  markProgress();
   const k = `${d.turn}:${d.kind}`;
   const cur = shadows.get(k) ?? { turn: d.turn, kind: d.kind, text: '' };
   cur.text += d.text;
@@ -190,6 +234,7 @@ function onTool(t: SseTool) {
   liveTools.set(t.tool_call_id, t);
   turnLive.value = true;
   liveTurnNo.value = t.turn;
+  markProgress();
   autoFollow();
 }
 
@@ -197,11 +242,15 @@ function onTurn(ev: SseTurn) {
   if (ev.state === 'started') {
     turnLive.value = true;
     liveTurnNo.value = ev.turn;
+    turnStartedAt.value = Date.now();
+    lastProgressAt.value = turnStartedAt.value;
     effectiveMode.value = ev.effective_mode ?? null;
     autoFollow();
   } else {
     turnLive.value = false;
     liveTurnNo.value = null;
+    turnStartedAt.value = null;
+    lastProgressAt.value = null;
     effectiveMode.value = null;
   }
 }
@@ -276,12 +325,13 @@ watch(id, () => {
 const draft = ref('');
 const composerInput = ref<HTMLTextAreaElement | null>(null);
 const sending = ref(false);
+const editingQueued = ref(false);
 const sendError = ref('');
 const composerVisible = computed(() => canSend(props.session));
 const selectedFiles = ref<string[]>([]);
 
 async function submitPrompt(forceSteer = false) {
-  if (!draft.value.trim() || sending.value) return;
+  if (!draft.value.trim() || sending.value || editingQueued.value) return;
   const local = localCommand(draft.value);
   if (local) {
     draft.value = '';
@@ -315,7 +365,7 @@ async function submitPrompt(forceSteer = false) {
 }
 
 async function forceQueued() {
-  if (sending.value) return;
+  if (sending.value || editingQueued.value) return;
   sending.value = true;
   sendError.value = '';
   try {
@@ -326,6 +376,33 @@ async function forceQueued() {
     sendError.value = (e as Error).message ?? 'Failed to send queued feedback';
   } finally {
     sending.value = false;
+  }
+}
+
+async function editQueued() {
+  if (!pendingPrompt.value || sending.value || editingQueued.value) return;
+  editingQueued.value = true;
+  sendError.value = '';
+  let moved = false;
+  try {
+    const { text } = await retractQueuedSession(id.value);
+    // A click can race with typing in another tab or in the composer itself.
+    // Preserve both pieces of human-authored text instead of overwriting either.
+    draft.value = draft.value.trim() ? `${text}\n\n${draft.value}` : text;
+    pendingPrompt.value = null;
+    await load({ preserve: true });
+    moved = true;
+  } catch (e) {
+    sendError.value = (e as Error).message ?? 'Failed to edit queued feedback';
+    await load({ preserve: true });
+  } finally {
+    editingQueued.value = false;
+  }
+  if (moved) {
+    // Re-enable before focusing: disabled form controls cannot receive focus.
+    await nextTick();
+    composerInput.value?.focus();
+    composerInput.value?.setSelectionRange(draft.value.length, draft.value.length);
   }
 }
 
@@ -443,6 +520,13 @@ function onComposerKeydown(e: KeyboardEvent) {
       if (activeCommand.value) chooseCommand(activeCommand.value);
       return;
     }
+  }
+  // Chat-history convention, scoped to the only message that is still
+  // editable: ArrowUp in an empty composer retracts unseen queued feedback.
+  if (e.key === 'ArrowUp' && draft.value === '' && pendingPrompt.value) {
+    e.preventDefault();
+    editQueued();
+    return;
   }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
@@ -924,8 +1008,8 @@ function toggleFold(key: string, dflt = false) {
   folds.value = m;
 }
 
-// ── Working timer (elapsed) ──────────────────────────────────────────────────
-const elapsed = ref(0);
+// ── Working timer (elapsed + time since observable progress) ─────────────────
+const clock = ref(Date.now());
 let elapsedTimer: ReturnType<typeof setInterval> | null = null;
 watch(turnLive, (live) => {
   if (elapsedTimer) {
@@ -933,17 +1017,36 @@ watch(turnLive, (live) => {
     elapsedTimer = null;
   }
   if (live) {
-    elapsed.value = 0;
-    elapsedTimer = setInterval(() => (elapsed.value += 1), 1000);
+    clock.value = Date.now();
+    elapsedTimer = setInterval(() => (clock.value = Date.now()), 1000);
   }
 });
 onUnmounted(() => {
   if (elapsedTimer) clearInterval(elapsedTimer);
 });
-const elapsedLabel = computed(() => {
-  const m = Math.floor(elapsed.value / 60);
-  const s = elapsed.value % 60;
+function durationLabel(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
   return `${m}:${String(s).padStart(2, '0')}`;
+}
+const elapsedSeconds = computed(() =>
+  turnStartedAt.value == null
+    ? 0
+    : Math.max(0, Math.floor((clock.value - turnStartedAt.value) / 1000)),
+);
+const progressAgeSeconds = computed(() =>
+  lastProgressAt.value == null
+    ? 0
+    : Math.max(0, Math.floor((clock.value - lastProgressAt.value) / 1000)),
+);
+const elapsedLabel = computed(() => durationLabel(elapsedSeconds.value));
+// A quiet turn is not necessarily stuck (the model may be reasoning without
+// streaming), so the UI reports the observable fact and lets the operator judge.
+const visiblyQuiet = computed(() => progressAgeSeconds.value >= 15);
+const progressLabel = computed(() => {
+  if (progressAgeSeconds.value < 2) return 'updated just now';
+  if (!visiblyQuiet.value) return `updated ${durationLabel(progressAgeSeconds.value)} ago`;
+  return `no updates for ${durationLabel(progressAgeSeconds.value)}`;
 });
 
 // ── Follow-the-foot scroll (lib/followFoot.ts): pinned-at-the-newest-exchange. ──
@@ -1192,22 +1295,34 @@ function goTo(anchor: string) {
               <span class="acp-prompt-state" data-testid="acp-queued"
                 >queued · agent hasn’t seen this yet</span
               >
-              <button
-                type="button"
-                class="acp-prompt-action"
-                data-testid="acp-force-queued"
-                :disabled="sending"
-                :title="
-                  turnLive
-                    ? steeringSupported
-                      ? 'Inject all queued feedback into the running turn now'
-                      : 'Stop the running turn and send all queued feedback as the next turn'
-                    : 'Start a new turn with all queued feedback'
-                "
-                @click="forceQueued"
-              >
-                {{ turnLive ? (steeringSupported ? 'Force now' : 'Stop & send') : 'Send now' }}
-              </button>
+              <span class="acp-prompt-actions">
+                <button
+                  type="button"
+                  class="acp-prompt-action"
+                  data-testid="acp-edit-queued"
+                  :disabled="sending || editingQueued"
+                  title="Move this unseen feedback back into the editor (ArrowUp from an empty editor)"
+                  @click="editQueued"
+                >
+                  {{ editingQueued ? 'Moving…' : 'Edit' }}
+                </button>
+                <button
+                  type="button"
+                  class="acp-prompt-action"
+                  data-testid="acp-force-queued"
+                  :disabled="sending || editingQueued"
+                  :title="
+                    turnLive
+                      ? steeringSupported
+                        ? 'Inject all queued feedback into the running turn now'
+                        : 'Stop the running turn and send all queued feedback as the next turn'
+                      : 'Start a new turn with all queued feedback'
+                  "
+                  @click="forceQueued"
+                >
+                  {{ turnLive ? (steeringSupported ? 'Force now' : 'Stop & send') : 'Send now' }}
+                </button>
+              </span>
             </header>
             <MarkdownView :id="id" path="" :source="pendingPrompt" />
           </section>
@@ -1229,13 +1344,16 @@ function goTo(anchor: string) {
           <div
             v-if="turnLive"
             class="acp-status"
+            :data-quiet="visiblyQuiet"
             data-testid="acp-working"
             role="status"
             aria-live="polite"
+            title="Update age measures visible agent output and tool activity; silence alone does not prove the agent is stuck."
           >
             <span class="acp-live-label">{{ statusLabel }}…</span>
             <span class="acp-status-meta"
-              >turn {{ (liveTurnNo ?? 0) + 1 }} · {{ elapsedLabel }}</span
+              >turn {{ (liveTurnNo ?? 0) + 1 }} · {{ elapsedLabel }} elapsed ·
+              {{ progressLabel }}</span
             >
           </div>
         </div>
@@ -1295,7 +1413,7 @@ function goTo(anchor: string) {
         ref="composerInput"
         v-model="draft"
         rows="2"
-        :disabled="sending"
+        :disabled="sending || editingQueued"
         :placeholder="commandHint || 'Message the agent…'"
         data-testid="acp-composer-input"
         class="acp-input"
@@ -1428,7 +1546,7 @@ function goTo(anchor: string) {
             type="button"
             class="btn-secondary px-3 py-1 text-xs"
             data-testid="acp-composer-force-steer"
-            :disabled="sending || !draft.trim()"
+            :disabled="sending || editingQueued || !draft.trim()"
             title="Inject this feedback into the running turn"
             @click="submitPrompt(true)"
           >
@@ -1448,7 +1566,7 @@ function goTo(anchor: string) {
             type="submit"
             class="btn-primary px-3 py-1 text-sm"
             data-testid="acp-composer-send"
-            :disabled="sending || !draft.trim()"
+            :disabled="sending || editingQueued || !draft.trim()"
           >
             {{ sending ? 'Sending…' : 'Send' }}
           </button>
@@ -1507,6 +1625,10 @@ function goTo(anchor: string) {
   font-family: var(--font-mono);
   font-size: 0.6875rem;
   color: var(--attn);
+}
+.acp-prompt-actions {
+  display: inline-flex;
+  gap: 0.625rem;
 }
 .acp-prompt-action {
   border-bottom: 1px solid currentColor;
@@ -1777,6 +1899,12 @@ function goTo(anchor: string) {
   background-clip: text;
   -webkit-text-fill-color: transparent;
   animation: acp-shimmer 2.2s linear infinite;
+}
+.acp-status[data-quiet='true'] .acp-live-label {
+  animation: none;
+  background: none;
+  -webkit-text-fill-color: currentColor;
+  color: var(--muted);
 }
 @keyframes acp-shimmer {
   from {

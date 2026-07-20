@@ -309,6 +309,11 @@ export const forceQueuedSession = (id: string, by?: string) =>
     files: [],
   }) as Promise<PromptAck>;
 
+/** Atomically pull unseen next-turn feedback out of the server queue so it can
+ * be edited in the composer. A 409 means dispatch/steering won the race. */
+export const retractQueuedSession = (id: string) =>
+  del(`/sessions/${id}/prompt`) as Promise<{ text: string }>;
+
 /** Worktree-backed completion for `@file` mentions in the ACP composer. */
 export const listSessionFiles = (id: string, query: string) =>
   get(`/sessions/${id}/files?q=${encodeURIComponent(query)}`) as Promise<{ files: string[] }>;

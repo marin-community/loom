@@ -263,9 +263,10 @@ test.describe('acp conversation', () => {
   });
 
   test('a live turn shows a status line naming the activity', async ({ page, weaver }) => {
+    await page.clock.install();
     await openAcp(page, weaver, { goal: 'say:ready' });
     const input = page.getByTestId('acp-composer-input');
-    await input.fill('wait:2500|say:done');
+    await input.fill('wait:3500|say:done');
     await page.getByTestId('acp-composer-send').click();
 
     // The status line sits at the transcript tail, names the activity, and
@@ -274,6 +275,17 @@ test.describe('acp conversation', () => {
     await expect(status).toBeVisible({ timeout: 15_000 });
     await expect(status).toContainText('Working…');
     await expect(status).toContainText('turn 2');
+    await expect(status).toContainText('elapsed');
+    await expect(status).toContainText(/updated (just now|0:0[1-9] ago)/);
+    await expect(status).toHaveAttribute(
+      'title',
+      /silence alone does not prove the agent is stuck/,
+    );
+    // Time alone never becomes a false "stuck" verdict. Once updates go quiet,
+    // the perpetual activity shimmer stops and the UI reports only that fact.
+    await page.clock.fastForward(16_000);
+    await expect(status).toHaveAttribute('data-quiet', 'true');
+    await expect(status).toContainText('no updates for 0:16');
     await page.screenshot({ path: test.info().outputPath('acp-live-status.png') });
     await expect(status).toBeHidden({ timeout: 15_000 });
   });
@@ -399,6 +411,44 @@ test.describe('acp conversation', () => {
     await expect(
       page.getByTestId('acp-conversation').getByText('say:and another thought', { exact: true }),
     ).toBeVisible({ timeout: 20_000 });
+  });
+
+  test('ArrowUp and Edit pull unseen queued feedback back into the composer', async ({
+    page,
+    weaver,
+  }) => {
+    await openAcp(page, weaver, {
+      goal: 'say:ready',
+      name: 'acp-edit-queue-ui',
+      steering: false,
+    });
+    const input = page.getByTestId('acp-composer-input');
+    await input.fill('wait:5000|say:first turn done');
+    await page.getByTestId('acp-composer-send').click();
+    await expect(page.getByTestId('acp-working')).toBeVisible({ timeout: 15_000 });
+
+    await input.fill('say:before edit');
+    await page.getByTestId('acp-composer-send').click();
+    await expect(page.getByTestId('acp-edit-queued')).toBeVisible();
+
+    // Empty-composer ArrowUp follows chat-history convention, but only recalls
+    // the message the agent has not seen yet.
+    await input.focus();
+    await input.press('ArrowUp');
+    await expect(page.getByTestId('acp-pending')).toBeHidden();
+    await expect(input).toHaveValue('say:before edit');
+
+    await input.fill('say:after edit');
+    await page.getByTestId('acp-composer-send').click();
+    const pending = page.getByTestId('acp-pending');
+    await expect(pending).toContainText('say:after edit');
+    await expect(pending).not.toContainText('say:before edit');
+
+    // The visible action provides the same flow without a keyboard shortcut.
+    await page.getByTestId('acp-edit-queued').click();
+    await expect(pending).toBeHidden();
+    await expect(input).toHaveValue('say:after edit');
+    await expect(input).toBeFocused();
   });
 
   test('@file completion resolves server files and sends an ACP resource', async ({ page, weaver }) => {

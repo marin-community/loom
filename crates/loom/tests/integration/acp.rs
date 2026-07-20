@@ -794,6 +794,57 @@ async fn prompt_queues_during_a_live_turn() {
     );
 }
 
+/// Retracting unseen feedback is serialized by the ACP task: either the browser
+/// gets the exact durable text back for editing, or a turn boundary wins and the
+/// request conflicts. It can never both dispatch and return the same prompt.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_prompt_can_be_retracted_for_editing() {
+    let ts = TestServer::start().await;
+    start_new(&ts, "acp-edit-queue", None, None).await;
+
+    ts.client
+        .post(
+            "/api/sessions/acp-edit-queue/prompt",
+            json!({ "text": "wait:900|say:first" }),
+        )
+        .await
+        .unwrap();
+    let queued = ts
+        .client
+        .post(
+            "/api/sessions/acp-edit-queue/prompt",
+            json!({ "text": "say:revise me" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(queued["queued"], true);
+
+    let retracted = ts
+        .client
+        .delete("/api/sessions/acp-edit-queue/prompt")
+        .await
+        .unwrap();
+    assert_eq!(retracted["text"], "say:revise me");
+
+    let chat = ts
+        .client
+        .get("/api/sessions/acp-edit-queue/chat")
+        .await
+        .unwrap();
+    assert!(chat["pending_prompt"].is_null());
+
+    let settled = poll_chat(&ts, "acp-edit-queue", Duration::from_secs(10), |blocks| {
+        count_kind(blocks, "turn_end") >= 1
+    })
+    .await;
+    assert_eq!(
+        count_kind(settled["blocks"].as_array().unwrap(), "user_message"),
+        1,
+        "retracted feedback must not also dispatch"
+    );
+}
+
 /// A queued prompt must not be dispatched unless removing its durable copy
 /// succeeds. Otherwise every turn boundary can dispatch the same still-pending
 /// text again, growing the journal until the session is stopped.

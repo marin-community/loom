@@ -215,6 +215,7 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `GET /api/sessions/{id}/chat` | `{blocks: [ChatBlockView], live_turn}` — the ACP session's journal snapshot (per-block conversation record) plus the in-flight turn, if any |
 | `GET /api/sessions/{id}/chat/stream` | SSE tail of the live journal: `block` (a committed block), `delta` (a streaming message/thought chunk), `tool` (a live tool-call update), `turn` (started / ended) |
 | `POST /api/sessions/{id}/prompt` | `{text}` → 202 `{queued, steered, turn}` — dispatch a user message as a `session/prompt`; a live turn uses the advertised codex-acp steering extension, with the durable next-turn queue as fallback |
+| `DELETE /api/sessions/{id}/prompt` | atomically retract unseen next-turn feedback and return `{text}` for editing; 409 when dispatch or steering already won the race |
 | `POST /api/sessions/{id}/permissions/{request_id}` | `{option_id}` → answer an open permission request (200 / 404 unknown / 409 already resolved) |
 | `PUT /api/sessions/{id}/mode` | `{mode_id}` → change the ACP session's permission mode (`session/set_mode`), journaled as a `mode_change` |
 | `GET /api/branches` / `GET PATCH /api/branches/{id}` | list / inspect / edit tracked branches |

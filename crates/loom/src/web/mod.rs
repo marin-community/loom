@@ -616,7 +616,10 @@ pub fn router(state: AppState) -> Router {
         // `session/prompt` queueing send, a permission answer, a mode change).
         .route("/sessions/{id}/chat", get(get_session_chat))
         .route("/sessions/{id}/chat/stream", get(chat_stream))
-        .route("/sessions/{id}/prompt", post(prompt_session))
+        .route(
+            "/sessions/{id}/prompt",
+            post(prompt_session).delete(retract_queued_prompt),
+        )
         .route(
             "/sessions/{id}/permissions/{request_id}",
             post(answer_permission),

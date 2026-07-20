@@ -238,7 +238,10 @@ with the model — user turns, replies, thinking, and tool calls — live and
 (via the archive capture below) still there to review after the terminal is gone.
 For ACP sessions, a prompt submitted while the agent is working steers the live
 turn when the adapter supports steering; otherwise loom safely queues it as the
-next turn.
+next turn. Unseen queued feedback can be pulled back into the composer with its
+**Edit** action or ArrowUp from an empty composer. The live status names visible
+thinking, writing, or tool activity and reports how long it has been since the
+agent produced an observable update; quiet time is not guessed to mean stuck.
 
 Whenever a session is archived — by the Archive button or automatically on merge
 — loom first captures that conversation to disk: it finds the agent's transcript

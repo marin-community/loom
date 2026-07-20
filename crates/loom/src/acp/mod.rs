@@ -203,6 +203,19 @@ impl AcpHandle {
             .map_err(|_| anyhow!("acp task dropped the reply"))?
     }
 
+    /// Atomically retract the durable next-turn queue for editing. This runs on
+    /// the ACP task so a turn boundary cannot dispatch the same text while the
+    /// browser is moving it back into the composer.
+    pub async fn retract_pending(&self) -> Result<String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::RetractPending { reply: tx })
+            .await
+            .map_err(|_| anyhow!("acp task is gone"))?;
+        rx.await
+            .map_err(|_| anyhow!("acp task dropped the reply"))?
+    }
+
     /// Interrupt the in-flight turn (`session/cancel`).
     pub async fn cancel(&self) -> Result<()> {
         let (tx, rx) = oneshot::channel();
@@ -455,6 +468,9 @@ enum Command {
     ForcePending {
         by: Option<String>,
         reply: oneshot::Sender<Result<PromptAck>>,
+    },
+    RetractPending {
+        reply: oneshot::Sender<Result<String>>,
     },
     Cancel {
         reply: oneshot::Sender<Result<()>>,
@@ -1972,6 +1988,27 @@ impl Task {
                             }
                         }
                     }
+                }
+            }
+            Command::RetractPending { reply } => {
+                // A steering RPC may already have handed this text to the
+                // adapter even though its durable fallback is still visible.
+                // Once that request is in flight, claiming the text is editable
+                // would be a lie: the eventual response can consume or run it.
+                if !self.pending_steers.is_empty() || self.pending_external.is_some() {
+                    let _ = reply.send(Err(anyhow!(
+                        "queued feedback is already being steered; wait for it to settle"
+                    )));
+                } else {
+                    let result = session::take_pending_prompt(&self.db, &self.session_id)
+                        .await
+                        .and_then(|pending| {
+                            pending.ok_or_else(|| anyhow!("there is no queued feedback to edit"))
+                        });
+                    if result.is_ok() {
+                        self.emit_queue(None);
+                    }
+                    let _ = reply.send(result);
                 }
             }
             Command::Cancel { reply } => {
