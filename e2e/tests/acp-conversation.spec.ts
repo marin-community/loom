@@ -237,6 +237,25 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('acp-activity-item')).toHaveCount(2);
   });
 
+  test('gloms interleaved thinking and commands into one activity run', async ({ page, weaver }) => {
+    await openAcp(page, weaver, {
+      goal: 'think:inspect provider versions|tool:read:Read lockfile|think:compare constraints|tool:search:Find callers|say:done',
+    });
+    const conv = page.getByTestId('acp-conversation');
+    await expect(conv.getByText('done', { exact: true })).toBeVisible();
+
+    // Thought/tool alternation is one investigation, not four collapsed rows.
+    const head = page.getByTestId('acp-activity-head');
+    await expect(head).toHaveCount(1);
+    await expect(head).toContainText('2 thinking');
+    await expect(head).toContainText('2 steps');
+    await expect(page.getByTestId('acp-activity-thought')).toHaveCount(0);
+
+    await head.click();
+    await expect(page.getByTestId('acp-activity-thought')).toHaveCount(2);
+    await expect(page.getByTestId('acp-activity-item')).toHaveCount(2);
+  });
+
   test('a failed call opens its group and shows the failure', async ({ page, weaver }) => {
     await openAcp(page, weaver, { goal: 'tool:read:Read config|toolfail:cargo test|say:after' });
     const conv = page.getByTestId('acp-conversation');

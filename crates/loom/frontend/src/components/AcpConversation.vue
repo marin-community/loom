@@ -768,16 +768,24 @@ async function answer(perm: PermissionPayload, optionId: string) {
 }
 
 // ── The render model ─────────────────────────────────────────────────────────
-// Every run of consecutive tool calls — quiet reads and consequential edits
-// alike — folds into one *activity* group, closed by default; a group holding a
-// failed call opens by default (and the failed call's output with it). A live
-// (non-terminal) tool never renders as a row: it drives the status line until
-// its terminal block journals into the group.
+// A stretch of settled reasoning and tool calls is one piece of *activity*.
+// Agents frequently alternate a tiny thought with every command; rendering
+// those as separate folds turns one investigation into a wall of “thinking”.
+// Keep their order in the expanded view, but give the collapsed transcript one
+// honest summary. A group holding a failed call opens by default (and the failed
+// call's output with it). A live (non-terminal) tool never renders as a row: it
+// drives the status line until its terminal block journals into the group.
 
 interface ActivityItem {
   tool: ToolCallPayload;
   failed: boolean;
 }
+interface ThoughtItem {
+  key: string;
+  text: string;
+}
+type ActivityEntry =
+  { type: 'thought'; thought: ThoughtItem } | { type: 'tool'; item: ActivityItem };
 
 type Row =
   | {
@@ -800,7 +808,14 @@ type Row =
     }
   | { type: 'agent'; key: string; time: string; text: string; streaming: boolean }
   | { type: 'thought'; key: string; text: string; streaming: boolean }
-  | { type: 'activity'; key: string; items: ActivityItem[]; failures: number }
+  | {
+      type: 'activity';
+      key: string;
+      entries: ActivityEntry[];
+      items: ActivityItem[];
+      thoughts: ThoughtItem[];
+      failures: number;
+    }
   | { type: 'permission'; key: string; perm: PermissionPayload }
   | { type: 'mode'; key: string; mode: string }
   | { type: 'handoff'; key: string; handoff: HandoffPayload };
@@ -851,15 +866,17 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
 
   let currentUsage: AcpUsage | null = null;
 
-  let activity: ActivityItem[] = [];
+  let activity: ActivityEntry[] = [];
   let activityKey = '';
   const flushActivity = () => {
     if (!activity.length) return;
     rows.push({
       type: 'activity',
       key: activityKey,
-      items: activity,
-      failures: activity.filter((i) => i.failed).length,
+      entries: activity,
+      items: activity.flatMap((entry) => (entry.type === 'tool' ? [entry.item] : [])),
+      thoughts: activity.flatMap((entry) => (entry.type === 'thought' ? [entry.thought] : [])),
+      failures: activity.filter((entry) => entry.type === 'tool' && entry.item.failed).length,
     });
     activity = [];
   };
@@ -909,18 +926,16 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
         break;
       }
       case 'thought':
-        flushActivity();
-        rows.push({
+        if (!activity.length) activityKey = `act-${k}`;
+        activity.push({
           type: 'thought',
-          key: k,
-          text: (b.payload as unknown as ThoughtPayload).text ?? '',
-          streaming: false,
+          thought: { key: k, text: (b.payload as unknown as ThoughtPayload).text ?? '' },
         });
         break;
       case 'tool_call': {
         const tool = b.payload as unknown as ToolCallPayload;
         if (!activity.length) activityKey = `act-${k}`;
-        activity.push({ tool, failed: tool.status === 'failed' });
+        activity.push({ type: 'tool', item: { tool, failed: tool.status === 'failed' } });
         break;
       }
       case 'permission_request':
@@ -1055,6 +1070,16 @@ function activityBreakdown(items: ActivityItem[]): string {
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([kind, c]) => `${c} ${kind}`)
     .join(' · ');
+}
+function activitySummary(row: Extract<Row, { type: 'activity' }>): string {
+  const parts: string[] = [];
+  if (row.thoughts.length) parts.push(`${row.thoughts.length} thinking`);
+  if (row.items.length) {
+    const steps = `${row.items.length} ${row.items.length === 1 ? 'step' : 'steps'}`;
+    const breakdown = activityBreakdown(row.items);
+    parts.push(breakdown ? `${steps} — ${breakdown}` : steps);
+  }
+  return parts.join(' · ');
 }
 // Whether a call carries anything worth expanding (a diff or non-empty text).
 function hasDetail(t: ToolCallPayload): boolean {
@@ -1241,24 +1266,16 @@ function goTo(anchor: string) {
               <MarkdownView :id="id" path="" :source="row.text" />
             </section>
 
-            <!-- Thinking — streaming shows its live tail (the status line below
-                 names it); settled folds away. -->
+            <!-- Only a live thought remains a standalone row; settled thoughts
+                 are folded into the surrounding activity run below. -->
             <div v-else-if="row.type === 'thought'" class="acp-thought" data-testid="acp-thought">
-              <template v-if="row.streaming">
-                <div class="acp-thought-live-clip">
-                  <p class="acp-thought-body">{{ row.text }}</p>
-                </div>
-              </template>
-              <template v-else>
-                <button type="button" class="acp-fold-head" @click="toggleFold(row.key)">
-                  <span class="chev" :class="{ open: foldOpen(row.key) }">▸</span>
-                  <span>thinking</span>
-                </button>
-                <p v-if="foldOpen(row.key)" class="acp-thought-body">{{ row.text }}</p>
-              </template>
+              <div class="acp-thought-live-clip">
+                <p class="acp-thought-body">{{ row.text }}</p>
+              </div>
             </div>
 
-            <!-- Apparatus: one folded activity line per run of tool calls. -->
+            <!-- Apparatus: one folded activity line per continuous run of
+                 settled thinking and tool calls. -->
             <div
               v-else-if="row.type === 'activity'"
               class="acp-activity"
@@ -1271,15 +1288,16 @@ function goTo(anchor: string) {
                 @click="toggleFold(row.key, row.failures > 0)"
               >
                 <span class="chev" :class="{ open: foldOpen(row.key, row.failures > 0) }">▸</span>
-                <span v-if="row.items.length === 1" class="acp-activity-solo">
+                <span
+                  v-if="row.entries.length === 1 && row.items.length === 1"
+                  class="acp-activity-solo"
+                >
                   <span class="acp-tool-glyph">{{ toolGlyph(row.items[0].tool.tool_kind) }}</span>
                   <span class="truncate">{{
                     row.items[0].tool.title || row.items[0].tool.tool_kind
                   }}</span>
                 </span>
-                <span v-else
-                  >{{ row.items.length }} steps — {{ activityBreakdown(row.items) }}</span
-                >
+                <span v-else>{{ activitySummary(row) }}</span>
                 <span
                   v-if="row.failures"
                   class="acp-activity-failbadge"
@@ -1289,46 +1307,62 @@ function goTo(anchor: string) {
               </button>
               <ul v-if="foldOpen(row.key, row.failures > 0)" class="acp-activity-list">
                 <li
-                  v-for="it in row.items"
-                  :key="it.tool.tool_call_id"
-                  data-testid="acp-activity-item"
+                  v-for="entry in row.entries"
+                  :key="entry.type === 'thought' ? entry.thought.key : entry.item.tool.tool_call_id"
+                  :data-testid="entry.type === 'tool' ? 'acp-activity-item' : undefined"
                 >
-                  <button
-                    type="button"
-                    class="acp-activity-line"
-                    :disabled="!hasDetail(it.tool)"
-                    @click="toggleFold(`tool-${it.tool.tool_call_id}`, it.failed)"
-                  >
-                    <span class="acp-tool-glyph">{{ toolGlyph(it.tool.tool_kind) }}</span>
-                    <span class="truncate">{{ it.tool.title || it.tool.tool_kind }}</span>
-                    <span v-if="it.failed" class="acp-activity-status text-block">failed</span>
-                    <span
-                      v-else-if="hasDetail(it.tool)"
-                      class="chev sm"
-                      :class="{ open: foldOpen(`tool-${it.tool.tool_call_id}`, it.failed) }"
-                      >▸</span
+                  <template v-if="entry.type === 'thought'">
+                    <p class="acp-activity-thought" data-testid="acp-activity-thought">
+                      {{ entry.thought.text }}
+                    </p>
+                  </template>
+                  <template v-else>
+                    <button
+                      type="button"
+                      class="acp-activity-line"
+                      :disabled="!hasDetail(entry.item.tool)"
+                      @click="toggleFold(`tool-${entry.item.tool.tool_call_id}`, entry.item.failed)"
                     >
-                  </button>
-                  <div
-                    v-if="hasDetail(it.tool) && foldOpen(`tool-${it.tool.tool_call_id}`, it.failed)"
-                    class="acp-detail"
-                    data-testid="acp-detail"
-                  >
-                    <template v-for="(c, ci) in it.tool.content" :key="ci">
-                      <!-- A diff renders as real ±diff lines. -->
-                      <pre v-if="c.type === 'diff'" class="acp-diff" data-testid="acp-diff"><code
-                        v-for="(l, li) in diffLines(c)"
-                        :key="li"
-                        class="acp-diff-line"
-                        :class="l.sign === '-' ? 'acp-diff-del' : 'acp-diff-add'"
-                      >{{ l.sign }} {{ l.text }}
+                      <span class="acp-tool-glyph">{{ toolGlyph(entry.item.tool.tool_kind) }}</span>
+                      <span class="truncate">{{
+                        entry.item.tool.title || entry.item.tool.tool_kind
+                      }}</span>
+                      <span v-if="entry.item.failed" class="acp-activity-status text-block"
+                        >failed</span
+                      >
+                      <span
+                        v-else-if="hasDetail(entry.item.tool)"
+                        class="chev sm"
+                        :class="{
+                          open: foldOpen(`tool-${entry.item.tool.tool_call_id}`, entry.item.failed),
+                        }"
+                        >▸</span
+                      >
+                    </button>
+                    <div
+                      v-if="
+                        hasDetail(entry.item.tool) &&
+                        foldOpen(`tool-${entry.item.tool.tool_call_id}`, entry.item.failed)
+                      "
+                      class="acp-detail"
+                      data-testid="acp-detail"
+                    >
+                      <template v-for="(c, ci) in entry.item.tool.content" :key="ci">
+                        <!-- A diff renders as real ±diff lines. -->
+                        <pre v-if="c.type === 'diff'" class="acp-diff" data-testid="acp-diff"><code
+                          v-for="(l, li) in diffLines(c)"
+                          :key="li"
+                          class="acp-diff-line"
+                          :class="l.sign === '-' ? 'acp-diff-del' : 'acp-diff-add'"
+                        >{{ l.sign }} {{ l.text }}
   </code></pre>
-                      <!-- Text / command output on the recessed panel tone. -->
-                      <pre v-else-if="c.type === 'text' && c.text" class="acp-payload">{{
-                        c.text
-                      }}</pre>
-                    </template>
-                  </div>
+                        <!-- Text / command output on the recessed panel tone. -->
+                        <pre v-else-if="c.type === 'text' && c.text" class="acp-payload">{{
+                          c.text
+                        }}</pre>
+                      </template>
+                    </div>
+                  </template>
                 </li>
               </ul>
             </div>
@@ -1904,6 +1938,15 @@ function goTo(anchor: string) {
   font-size: 0.75rem;
   color: var(--muted);
   text-align: left;
+}
+.acp-activity-thought {
+  margin: 0;
+  padding: 0.25rem 0.625rem 0.25rem 1.65rem;
+  color: var(--muted);
+  font-family: var(--font-serif);
+  font-size: 0.8125rem;
+  font-style: italic;
+  line-height: 1.45;
 }
 .acp-activity-line:not(:disabled) {
   cursor: pointer;
