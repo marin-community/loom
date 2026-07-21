@@ -312,8 +312,8 @@ mod tests {
     /// realistic `base_rev`) is satisfied.
     async fn seed_artifact(db: &Db) -> i64 {
         sqlx::query(
-            "INSERT OR IGNORE INTO branches (id, repo_root, branch, base_branch)
-             VALUES ('b1', '/r', 'b1', 'main')",
+            "INSERT INTO branches (id, repo_root, branch, base_branch)
+             VALUES ('b1', '/r', 'b1', 'main') ON CONFLICT DO NOTHING",
         )
         .execute(db)
         .await

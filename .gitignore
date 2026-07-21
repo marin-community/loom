@@ -17,6 +17,12 @@ python/weaver-loom/dist/
 __pycache__/
 python/weaver-loom/.venv/
 python/weaver-loom/uv.lock
+deploy/pulumi/.venv/
+
+# Local Pulumi stack files contain encrypted secret material and deployment-
+# specific config. The checked-in example is documentation, not a live stack.
+deploy/pulumi/Pulumi.*.yaml
+!deploy/pulumi/Pulumi.example.yaml
 
 # Local-only container env, rendered from loom.toml by `loom config render-env`
 # (deploy/standalone/.env — holds GH_TOKEN etc.). Never commit it: host secrets.

@@ -1,0 +1,22 @@
+# Copy to Pulumi.<stack>.yaml, then set loomDotenv with `pulumi config set
+# --secret`; never put its plaintext value in this file.
+config:
+  gcp:project: my-project
+  loom-gcp:region: us-central1
+  loom-gcp:zone: us-central1-a
+  loom-gcp:domain: loom.example.com
+  loom-gcp:operatorCidr: 203.0.113.7/32
+  # Existing VPC name. The stack adds Loom's tagged web and SSH rules but does
+  # not modify or second-guess unrelated rules managed by the operator.
+  loom-gcp:network: default
+  # Set this to bootstrap.py's --service-account-name before importing a
+  # non-default legacy deployment.
+  loom-gcp:vmServiceAccountName: loom-vm
+  # Name of an existing, already-delegated Cloud DNS managed zone. Omit this
+  # field when DNS is hosted elsewhere and create the exported A record there.
+  loom-gcp:dnsManagedZone: example-com
+  loom-gcp:githubRepository: rjpower/weaver
+  loom-gcp:githubRef: refs/heads/main
+  # Build locally on the VM for the first deployment. After the image workflow
+  # has published an image, change to pull and add imageTag with its commit SHA.
+  loom-gcp:imageMode: build

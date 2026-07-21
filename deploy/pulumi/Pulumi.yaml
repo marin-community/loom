@@ -1,0 +1,6 @@
+name: loom-gcp
+runtime:
+  name: python
+  options:
+    virtualenv: .venv
+description: Single-host loom deployment on Google Cloud

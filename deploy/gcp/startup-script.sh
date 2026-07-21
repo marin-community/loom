@@ -31,12 +31,31 @@ REPO_URL="$(meta instance/attributes/repo-url)"
 GIT_REF="$(meta instance/attributes/git-ref)"
 IMAGE_MODE="$(meta instance/attributes/image-mode)"
 AR_IMAGE="$(meta instance/attributes/ar-image 2>/dev/null || true)"
+BACKUP_BUCKET="$(meta instance/attributes/backup-bucket 2>/dev/null || true)"
 
 REPO_DIR=/opt/loom
 DATA_DISK_DEVICE=/dev/disk/by-id/google-loom-data
 DATA_MOUNT=/mnt/loom-data
 
 echo "== loom startup-script: domain=${LOOM_DOMAIN} image-mode=${IMAGE_MODE} =="
+
+# Caddy requests a public certificate as soon as the stack starts. A newly
+# managed Cloud DNS record (or a zone delegation) can lag the VM creation, so
+# hold the workload until public DNS points at this VM. This guard makes a
+# single Pulumi update safe even though infrastructure creation is concurrent.
+EXTERNAL_IP="$(meta instance/network-interfaces/0/access-configs/0/external-ip)"
+for _ in $(seq 1 80); do
+  if getent ahostsv4 "$LOOM_DOMAIN" | awk '{print $1}' | grep -Fxq "$EXTERNAL_IP"; then
+    echo "== ${LOOM_DOMAIN} resolves to ${EXTERNAL_IP} =="
+    break
+  fi
+  echo "== waiting for ${LOOM_DOMAIN} to resolve to ${EXTERNAL_IP} =="
+  sleep 15
+done
+if ! getent ahostsv4 "$LOOM_DOMAIN" | awk '{print $1}' | grep -Fxq "$EXTERNAL_IP"; then
+  echo "loom startup-script: refusing to start Caddy before DNS is ready" >&2
+  exit 1
+fi
 
 # ---- Docker + compose plugin ----------------------------------------------
 # Docker's signed apt repo, not `curl | sh` — this is a long-lived
@@ -151,6 +170,21 @@ if [ -n "$DOCKER_GID" ]; then
   echo "DOCKER_GID=${DOCKER_GID}" >>"$ENV_FILE"
 fi
 chmod 600 "$ENV_FILE"
+
+# ---- nightly, online SQLite backup -----------------------------------------
+# Pulumi supplies the bucket in instance metadata and grants this VM's service
+# account objectCreator on it. The script uses SQLite's `.backup` API inside the
+# running container, so an active WAL cannot produce a torn copy.
+if [ -n "$BACKUP_BUCKET" ]; then
+  install -m 0755 "${REPO_DIR}/deploy/gcp/backup-sqlite.sh" \
+    /usr/local/sbin/loom-backup-sqlite
+  install -m 0644 "${REPO_DIR}/deploy/gcp/loom-backup.service" \
+    /etc/systemd/system/loom-backup.service
+  install -m 0644 "${REPO_DIR}/deploy/gcp/loom-backup.timer" \
+    /etc/systemd/system/loom-backup.timer
+  systemctl daemon-reload
+  systemctl enable --now loom-backup.timer
+fi
 
 # ---- bring up the stack -----------------------------------------------------
 cd "${REPO_DIR}/deploy/standalone"

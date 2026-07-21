@@ -4,11 +4,11 @@
 //!
 //! One row per consolidated *block*, addressed by `(session_id, turn, seq)`:
 //! `turn` is the 0-based prompt cycle, `seq` the 0-based position within it.
-//! Every write is idempotent — `INSERT OR IGNORE` on that key — so a relay spool
-//! replay after a loom restart re-ingests the same frames without duplicating a
-//! block. The one mutable block is `permission_request`: inserted open, then
-//! `UPDATE`d in place with its outcome when resolved (keyed by the upstream
-//! request id inside the payload).
+//! Every write is idempotent — conflicts on that key are ignored — so a relay
+//! spool replay after a loom restart re-ingests the same frames without
+//! duplicating a block. The one mutable block is `permission_request`: inserted
+//! open, then `UPDATE`d in place with its outcome when resolved (keyed by the
+//! upstream request id inside the payload).
 //!
 //! `payload` is opaque JSON here; its shape is keyed by `kind` (see the block
 //! kinds documented on [`crate::acp`]). This module only stores and reads it.
@@ -109,8 +109,9 @@ pub async fn insert(
     payload: &Value,
 ) -> Result<bool> {
     let res = sqlx::query(
-        "INSERT OR IGNORE INTO chat_blocks (session_id, turn, seq, kind, payload, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO chat_blocks (session_id, turn, seq, kind, payload, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT DO NOTHING",
     )
     .bind(session_id)
     .bind(turn)
@@ -126,23 +127,34 @@ pub async fn insert(
 /// Every block for a session, in `(turn, seq)` order — the transcript snapshot
 /// the client fetches before tailing the SSE stream.
 pub async fn list(db: &Db, session_id: &str) -> Result<Vec<ChatBlockView>> {
-    let rows = sqlx::query(
+    let rows = sqlx::query_as::<_, ChatBlockRow>(
         "SELECT turn, seq, kind, payload, created_at FROM chat_blocks
          WHERE session_id = ? ORDER BY turn ASC, seq ASC",
     )
     .bind(session_id)
     .fetch_all(db)
     .await?;
-    Ok(rows.into_iter().map(row_to_view).collect())
+    Ok(rows.into_iter().map(ChatBlockView::from).collect())
 }
 
-fn row_to_view(r: sqlx::sqlite::SqliteRow) -> ChatBlockView {
-    ChatBlockView {
-        turn: r.get("turn"),
-        seq: r.get("seq"),
-        kind: r.get("kind"),
-        payload: serde_json::from_str(&r.get::<String, _>("payload")).unwrap_or(Value::Null),
-        created_at: r.get("created_at"),
+#[derive(sqlx::FromRow)]
+struct ChatBlockRow {
+    turn: i64,
+    seq: i64,
+    kind: String,
+    payload: String,
+    created_at: String,
+}
+
+impl From<ChatBlockRow> for ChatBlockView {
+    fn from(row: ChatBlockRow) -> Self {
+        Self {
+            turn: row.turn,
+            seq: row.seq,
+            kind: row.kind,
+            payload: serde_json::from_str(&row.payload).unwrap_or(Value::Null),
+            created_at: row.created_at,
+        }
     }
 }
 
@@ -165,7 +177,7 @@ pub async fn max_turn_seq(db: &Db, session_id: &str) -> Result<Option<(i64, i64)
 /// [`crate::acp`] reloads these so a REST answer can still resolve one; the
 /// matching un-acked frame replays the JSON-RPC id.
 pub async fn open_permissions(db: &Db, session_id: &str) -> Result<Vec<ChatBlockView>> {
-    let rows = sqlx::query(
+    let rows = sqlx::query_as::<_, ChatBlockRow>(
         "SELECT turn, seq, kind, payload, created_at FROM chat_blocks
          WHERE session_id = ? AND kind = ? ORDER BY turn ASC, seq ASC",
     )
@@ -175,7 +187,7 @@ pub async fn open_permissions(db: &Db, session_id: &str) -> Result<Vec<ChatBlock
     .await?;
     Ok(rows
         .into_iter()
-        .map(row_to_view)
+        .map(ChatBlockView::from)
         .filter(|v| v.payload.get("outcome").map(Value::is_null).unwrap_or(true))
         .collect())
 }
@@ -233,7 +245,7 @@ pub async fn resolve_permission(
     option_id: &str,
     by: &str,
 ) -> Result<Option<ChatBlockView>> {
-    let rows = sqlx::query(
+    let rows = sqlx::query_as::<_, ChatBlockRow>(
         "SELECT turn, seq, kind, payload, created_at FROM chat_blocks
          WHERE session_id = ? AND kind = ?",
     )
@@ -241,8 +253,8 @@ pub async fn resolve_permission(
     .bind(kind::PERMISSION_REQUEST)
     .fetch_all(db)
     .await?;
-    for r in rows {
-        let mut view = row_to_view(r);
+    for row in rows {
+        let mut view = ChatBlockView::from(row);
         if view.payload.get("request_id").and_then(Value::as_str) != Some(request_id) {
             continue;
         }

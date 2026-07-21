@@ -39,7 +39,7 @@
 //! the sqlite write for any block that frame *completed* has committed: the ack
 //! watermark is held back to just before the earliest frame still feeding an open
 //! consolidation buffer, a live tool call, or an unanswered permission request
-//! (block-boundary acking). Journal writes are idempotent (`INSERT OR IGNORE` on
+//! (block-boundary acking). Journal writes are idempotent (conflicts ignored on
 //! `(session_id, turn, seq)`, plus upstream-id guards for tool calls and turn
 //! ends), so a replay after a loom restart re-ingests without duplicating.
 

@@ -168,9 +168,12 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
     and the auth tables `users` (the approved-operator allowlist, seeded with
     the owner), `api_tokens` (hashed bearer tokens), and `auth_sessions`
     (hashed login cookies). See [Authentication](#authentication). Loom-owned
-    tables migrate via `add_column_if_missing` / `CREATE ... IF NOT EXISTS` in
-    `migrate_loom`, not the numbered core migrations below (those run before
-    loom creates its tables).
+    tables have their own ordered migration stream under
+    `crates/loom/migrations/`, recorded in `loom_schema_migrations`. This is a
+    separate stream because the core migrations run before loom creates its
+    tables. A pre-stream loom database is adopted once by presence-based
+    introspection, then stamped at the baseline version; do not add more
+    error-message-driven `ALTER TABLE` probes.
   - **Schema migrations** (`weaver-core/src/migrations.rs`): ordered SQL files
     under `crates/weaver-core/migrations/` (`NNNN_name.sql`, embedded with
     `include_str!`), applied at startup and recorded in a `schema_migrations`
@@ -178,6 +181,42 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
     a row in `MIGRATIONS`; never edit one that has shipped. A pre-framework
     database is brought to the baseline by a one-time `legacy_bootstrap` on
     first run.
+
+### Database ownership and the PostgreSQL seam
+
+The schema has two owners even though both currently share one SQLite file:
+
+- `weaver-core` owns the durable work ledger (`branches`, issues, tags,
+  events, artifacts, discussions, watches) and `schema_migrations`. Its
+  original baseline also physically creates `settings`; operator config is a
+  loom concern, but moving that table is still future boundary work.
+- `loom` owns host-local runtime, identity, integration, and agent-config
+  tables (`sessions`, chat, users/tokens, repos, agent config) and
+  `loom_schema_migrations`.
+
+The target rule is to keep cross-owner links as identifiers in application
+code. Two existing exceptions remain explicit split prerequisites: the
+`sessions.branch_id` schema has a physical foreign key to `branches`, and the
+issue-list view joins sessions to branches to apply automation visibility.
+Remove those before putting the owners in different databases, and do not add
+new cross-owner joins in the meantime.
+
+`weaver-core::db` is the backend seam: callers use its `Db` and
+`DbTransaction` aliases, time values are computed by Rust and bound, row
+decoding uses `FromRow`, and new conflict clauses should use portable
+`ON CONFLICT` forms. The implementation is still deliberately SQLite:
+`Db = SqlitePool`, connection setup uses WAL/`BEGIN IMMEDIATE`, migrations use
+SQLite introspection, and runtime queries use SQLite placeholders. These
+changes make a future backend explicit; they do not claim PostgreSQL support.
+
+The first useful shared-PostgreSQL move is the durable ledger, not host-local
+sessions. Its main data-model gate is a logical repository identity: today
+ledger rows key repos by absolute checkout paths, so two hosts would otherwise
+create two unrelated histories for the same repository. After that change —
+and after removing the FK/join and relocating `settings` noted above — a
+PostgreSQL implementation of the database seam and a real PostgreSQL CI lane
+can move the ledger while each runtime host keeps its sessions and chat in
+local SQLite.
 - **`server.json`** in `$WEAVER_HOME`: pid + bound addr, written when `loom`
   comes up. The `loom` CLI uses it to find the daemon when `WEAVER_API` is
   unset.

@@ -20,7 +20,6 @@
 
 use anyhow::Result;
 use serde::Serialize;
-use sqlx::Row;
 
 use crate::db::{now_iso, Db};
 
@@ -38,7 +37,7 @@ pub const PROTOCOLS: &[&str] = &["terminal", "acp"];
 /// One custom agent definition — a row of the `custom_agents` table and the shape
 /// the API returns for the editor. Every field is operator-supplied except the
 /// timestamps.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, sqlx::FromRow)]
 pub struct CustomAgent {
     /// The id referenced by the agent list and a session's `agent_kind`.
     pub name: String,
@@ -113,25 +112,11 @@ pub fn validate_fields(agent: &CustomAgent) -> std::result::Result<(), String> {
     Ok(())
 }
 
-fn row_to_agent(r: &sqlx::sqlite::SqliteRow) -> CustomAgent {
-    CustomAgent {
-        name: r.get::<String, _>("name"),
-        label: r.get::<String, _>("label"),
-        setup: r.get::<String, _>("setup"),
-        launch: r.get::<String, _>("launch"),
-        resume: r.get::<String, _>("resume"),
-        reports_status: r.get::<i64, _>("reports_status") != 0,
-        protocol: {
-            let p = r.get::<String, _>("protocol");
-            if p.is_empty() {
-                "terminal".to_string()
-            } else {
-                p
-            }
-        },
-        created_at: r.get::<String, _>("created_at"),
-        updated_at: r.get::<String, _>("updated_at"),
+fn normalize_protocol(mut agent: CustomAgent) -> CustomAgent {
+    if agent.protocol.is_empty() {
+        agent.protocol = "terminal".to_string();
     }
+    agent
 }
 
 const COLUMNS: &str =
@@ -140,15 +125,18 @@ const COLUMNS: &str =
 /// Every custom agent, ordered by name.
 pub async fn list(db: &Db) -> Result<Vec<CustomAgent>> {
     let sql = format!("SELECT {COLUMNS} FROM custom_agents ORDER BY name");
-    let rows = sqlx::query(&sql).fetch_all(db).await?;
-    Ok(rows.iter().map(row_to_agent).collect())
+    let rows = sqlx::query_as::<_, CustomAgent>(&sql).fetch_all(db).await?;
+    Ok(rows.into_iter().map(normalize_protocol).collect())
 }
 
 /// One custom agent by name, or `None` when it isn't defined.
 pub async fn get(db: &Db, name: &str) -> Result<Option<CustomAgent>> {
     let sql = format!("SELECT {COLUMNS} FROM custom_agents WHERE name = ?");
-    let row = sqlx::query(&sql).bind(name).fetch_optional(db).await?;
-    Ok(row.as_ref().map(row_to_agent))
+    let row = sqlx::query_as::<_, CustomAgent>(&sql)
+        .bind(name)
+        .fetch_optional(db)
+        .await?;
+    Ok(row.map(normalize_protocol))
 }
 
 /// Whether a custom agent by this name exists.
@@ -185,7 +173,7 @@ pub async fn set(db: &Db, agent: &CustomAgent) -> Result<()> {
     .bind(&agent.setup)
     .bind(&agent.launch)
     .bind(&agent.resume)
-    .bind(i64::from(agent.reports_status))
+    .bind(agent.reports_status)
     .bind(protocol)
     .bind(&now)
     .bind(&now)

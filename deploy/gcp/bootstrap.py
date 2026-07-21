@@ -3,7 +3,13 @@
 # requires-python = ">=3.11"
 # dependencies = ["click>=8.1"]
 # ///
-"""Provisions a single GCE VM that runs the standalone loom stack
+"""Legacy provisioner for the single-VM GCP deployment.
+
+New deployments use ``deploy/pulumi``. This script remains as a transition for
+existing installations; import its resources before allowing Pulumi to manage
+them, and never run both provisioners independently against the same names.
+
+Provisions a single GCE VM that runs the standalone loom stack
 (../standalone/docker-compose.yml) behind its bundled Caddy front-door. Run
 this from your workstation, not the VM. See ./README.md for the full runbook
 and the required run order.

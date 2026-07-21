@@ -32,8 +32,9 @@ use base64::Engine as _;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
+use weaver_core::db::iso_in_days;
 
-use crate::db::{weaver_home, Db};
+use crate::db::{now_iso, weaver_home, Db};
 
 /// Prefix on every loom API token, so a leaked secret is recognisable and
 /// greppable. A token looks like `loom_<43 url-safe base64 chars>`.
@@ -48,9 +49,10 @@ pub const SESSION_TTL_DAYS: i64 = 30;
 pub const SESSION_COOKIE: &str = "loom_session";
 /// The reserved [`TokenKind::Local`] token name.
 const LOCAL_TOKEN_NAME: &str = "this machine";
-/// SQLite expression for the current instant in our stored ISO format — the one
-/// `weaver-core` writes, so string comparisons against `*_at` columns are sound.
-const SQL_NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
+
+// Instants and expiries are computed app-side ([`now_iso`] / [`iso_in_days`])
+// and bound as parameters — the stored ISO format orders lexicographically, so
+// the `*_at` comparisons below need no SQL date functions.
 
 // ---------------------------------------------------------------------------
 // Principal
@@ -153,7 +155,7 @@ fn verify_password(password: &str, stored: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// One approved operator.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct User {
     pub username: String,
     pub github_login: Option<String>,
@@ -168,37 +170,28 @@ impl User {
     }
 }
 
-fn user_from_row(r: &sqlx::sqlite::SqliteRow) -> User {
-    User {
-        username: r.get("username"),
-        github_login: r.get("github_login"),
-        password_hash: r.get("password_hash"),
-        created_at: r.get("created_at"),
-    }
-}
-
 pub async fn get_user(db: &Db, username: &str) -> Result<Option<User>> {
-    let row = sqlx::query(
+    let row = sqlx::query_as::<_, User>(
         "SELECT username, github_login, password_hash, created_at FROM users WHERE username = ?",
     )
     .bind(username)
     .fetch_optional(db)
     .await?;
-    Ok(row.as_ref().map(user_from_row))
+    Ok(row)
 }
 
 /// The approved user whose `github_login` matches (case-insensitively — GitHub
 /// logins are case-insensitive), if any. This is the allowlist check the OAuth
 /// callback runs: an unknown GitHub identity has no row and is rejected.
 pub async fn user_by_github(db: &Db, login: &str) -> Result<Option<User>> {
-    let row = sqlx::query(
+    let row = sqlx::query_as::<_, User>(
         "SELECT username, github_login, password_hash, created_at FROM users
          WHERE github_login IS NOT NULL AND lower(github_login) = lower(?)",
     )
     .bind(login)
     .fetch_optional(db)
     .await?;
-    Ok(row.as_ref().map(user_from_row))
+    Ok(row)
 }
 
 /// Record the GitHub profile (numeric id + display name) captured at sign-in,
@@ -261,12 +254,12 @@ pub async fn commit_identity(db: &Db, username: &str) -> Result<Option<CommitIde
 }
 
 pub async fn list_users(db: &Db) -> Result<Vec<User>> {
-    let rows = sqlx::query(
+    let rows = sqlx::query_as::<_, User>(
         "SELECT username, github_login, password_hash, created_at FROM users ORDER BY created_at, username",
     )
     .fetch_all(db)
     .await?;
-    Ok(rows.iter().map(user_from_row).collect())
+    Ok(rows)
 }
 
 /// The primary (owner) user: the earliest-created row. Loopback requests and the
@@ -376,13 +369,12 @@ pub async fn loopback_principal(db: &Db) -> Result<Option<Principal>> {
 /// Open a browser session for `username`, returning the opaque cookie value.
 pub async fn create_session(db: &Db, username: &str) -> Result<String> {
     let (plain, hash, _) = mint_token();
-    let sql = format!(
-        "INSERT INTO auth_sessions (token_hash, username, expires_at)
-         VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now','+{SESSION_TTL_DAYS} days'))"
-    );
-    sqlx::query(&sql)
+    let expires_at = iso_in_days(SESSION_TTL_DAYS)
+        .ok_or_else(|| anyhow!("browser session expiry is outside the supported range"))?;
+    sqlx::query("INSERT INTO auth_sessions (token_hash, username, expires_at) VALUES (?, ?, ?)")
         .bind(&hash)
         .bind(username)
+        .bind(expires_at)
         .execute(db)
         .await?;
     Ok(plain)
@@ -392,12 +384,13 @@ pub async fn create_session(db: &Db, username: &str) -> Result<String> {
 /// or its user has since been removed.
 pub async fn lookup_session(db: &Db, cookie: &str) -> Result<Option<Principal>> {
     let hash = sha256_hex(cookie);
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(
         "SELECT s.username AS username, u.github_login AS github_login
          FROM auth_sessions s JOIN users u ON u.username = s.username
-         WHERE s.token_hash = ? AND s.expires_at > {SQL_NOW}"
-    ))
+         WHERE s.token_hash = ? AND s.expires_at > ?",
+    )
     .bind(&hash)
+    .bind(now_iso())
     .fetch_optional(db)
     .await?;
     Ok(row.map(|r| Principal {
@@ -438,7 +431,7 @@ impl TokenKind {
 }
 
 /// A token's non-secret metadata, for the token list.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct TokenInfo {
     pub id: String,
     pub name: String,
@@ -446,17 +439,6 @@ pub struct TokenInfo {
     pub created_at: String,
     pub last_used_at: Option<String>,
     pub expires_at: Option<String>,
-}
-
-fn token_info_from_row(r: &sqlx::sqlite::SqliteRow) -> TokenInfo {
-    TokenInfo {
-        id: r.get("id"),
-        name: r.get("name"),
-        prefix: r.get("prefix"),
-        created_at: r.get("created_at"),
-        last_used_at: r.get("last_used_at"),
-        expires_at: r.get("expires_at"),
-    }
 }
 
 /// Mint a personal access token owned by `username`. Returns the one-time
@@ -479,26 +461,28 @@ async fn create_token_kind(
 ) -> Result<(String, TokenInfo)> {
     let (plain, hash, prefix) = mint_token();
     let id = random_id();
-    // Expiry is computed in SQL so it shares the exact stored format; a positive
-    // `expires_in_days` sets it, anything else leaves the token non-expiring.
-    let expires_sql = match expires_in_days {
-        Some(d) if d > 0 => format!("strftime('%Y-%m-%dT%H:%M:%fZ','now','+{d} days')"),
-        _ => "NULL".to_string(),
+    // A positive `expires_in_days` sets the expiry; anything else leaves the
+    // token non-expiring.
+    let expires_at = match expires_in_days {
+        Some(d) if d > 0 => Some(
+            iso_in_days(d).ok_or_else(|| anyhow!("token expiry is outside the supported range"))?,
+        ),
+        _ => None,
     };
-    let sql = format!(
+    sqlx::query(
         "INSERT INTO api_tokens (id, username, name, token_hash, prefix, kind, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, {expires_sql})"
-    );
-    sqlx::query(&sql)
-        .bind(&id)
-        .bind(username)
-        .bind(name)
-        .bind(&hash)
-        .bind(&prefix)
-        .bind(kind.as_str())
-        .execute(db)
-        .await
-        .context("creating token")?;
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(username)
+    .bind(name)
+    .bind(&hash)
+    .bind(&prefix)
+    .bind(kind.as_str())
+    .bind(&expires_at)
+    .execute(db)
+    .await
+    .context("creating token")?;
     let info = get_token(db, &id)
         .await?
         .ok_or_else(|| anyhow!("token vanished after insert"))?;
@@ -506,25 +490,25 @@ async fn create_token_kind(
 }
 
 async fn get_token(db: &Db, id: &str) -> Result<Option<TokenInfo>> {
-    let row = sqlx::query(
+    let row = sqlx::query_as::<_, TokenInfo>(
         "SELECT id, name, prefix, created_at, last_used_at, expires_at FROM api_tokens WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(db)
     .await?;
-    Ok(row.as_ref().map(token_info_from_row))
+    Ok(row)
 }
 
 /// Every user-managed token (the machine 'local' token is infrastructure and is
 /// omitted), newest first.
 pub async fn list_tokens(db: &Db) -> Result<Vec<TokenInfo>> {
-    let rows = sqlx::query(
+    let rows = sqlx::query_as::<_, TokenInfo>(
         "SELECT id, name, prefix, created_at, last_used_at, expires_at FROM api_tokens
          WHERE kind = 'pat' ORDER BY created_at DESC",
     )
     .fetch_all(db)
     .await?;
-    Ok(rows.iter().map(token_info_from_row).collect())
+    Ok(rows)
 }
 
 /// Revoke a token by id. Refuses the machine 'local' token. Returns whether a
@@ -545,24 +529,24 @@ pub async fn lookup_token(db: &Db, token: &str) -> Result<Option<Principal>> {
         return Ok(None);
     }
     let hash = sha256_hex(token);
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(
         "SELECT t.id AS id, t.username AS username, u.github_login AS github_login
          FROM api_tokens t JOIN users u ON u.username = t.username
-         WHERE t.token_hash = ? AND (t.expires_at IS NULL OR t.expires_at > {SQL_NOW})"
-    ))
+         WHERE t.token_hash = ? AND (t.expires_at IS NULL OR t.expires_at > ?)",
+    )
     .bind(&hash)
+    .bind(now_iso())
     .fetch_optional(db)
     .await?;
     let Some(row) = row else {
         return Ok(None);
     };
     let id: String = row.get("id");
-    let _ = sqlx::query(&format!(
-        "UPDATE api_tokens SET last_used_at = {SQL_NOW} WHERE id = ?"
-    ))
-    .bind(&id)
-    .execute(db)
-    .await;
+    let _ = sqlx::query("UPDATE api_tokens SET last_used_at = ? WHERE id = ?")
+        .bind(now_iso())
+        .bind(&id)
+        .execute(db)
+        .await;
     Ok(Some(Principal {
         username: row.get("username"),
         github_login: row.get("github_login"),
@@ -619,8 +603,9 @@ async fn register_local_token(db: &Db, plain: &str) -> Result<()> {
     let hash = sha256_hex(plain);
     let prefix: String = plain.chars().take(PREFIX_KEEP).collect();
     sqlx::query(
-        "INSERT OR IGNORE INTO api_tokens (id, username, name, token_hash, prefix, kind)
-         VALUES (?, ?, ?, ?, ?, 'local')",
+        "INSERT INTO api_tokens (id, username, name, token_hash, prefix, kind)
+         VALUES (?, ?, ?, ?, ?, 'local')
+         ON CONFLICT DO NOTHING",
     )
     .bind(random_id())
     .bind(&owner)
@@ -1044,7 +1029,7 @@ mod tests {
     async fn register_then_lookup(db: &Db) -> Principal {
         let (plain, _, _) = mint_token();
         register_local_token(db, &plain).await.unwrap();
-        // Re-registering the same plaintext is a no-op (INSERT OR IGNORE).
+        // Re-registering the same plaintext is a no-op (conflict ignored).
         register_local_token(db, &plain).await.unwrap();
         lookup_token(db, &plain).await.unwrap().unwrap()
     }

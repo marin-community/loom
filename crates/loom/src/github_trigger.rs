@@ -344,11 +344,13 @@ impl IssueCommentEvent {
 /// A repeat (a replay, or a GitHub retry of a delivery we already handled)
 /// returns `false`, so the caller treats it as a no-op.
 pub async fn record_delivery(db: &Db, delivery_id: &str) -> Result<bool> {
-    let res = sqlx::query("INSERT OR IGNORE INTO processed_deliveries (delivery_id) VALUES (?)")
-        .bind(delivery_id)
-        .execute(db)
-        .await
-        .context("recording webhook delivery")?;
+    let res = sqlx::query(
+        "INSERT INTO processed_deliveries (delivery_id) VALUES (?) ON CONFLICT DO NOTHING",
+    )
+    .bind(delivery_id)
+    .execute(db)
+    .await
+    .context("recording webhook delivery")?;
     Ok(res.rows_affected() > 0)
 }
 

@@ -328,8 +328,8 @@ mod tests {
     /// write satisfies the `artifacts.branch_id` foreign key. Idempotent.
     async fn ensure_branch(db: &Db, id: &str) {
         sqlx::query(
-            "INSERT OR IGNORE INTO branches (id, repo_root, branch, base_branch)
-             VALUES (?, '/r', ?, 'main')",
+            "INSERT INTO branches (id, repo_root, branch, base_branch)
+             VALUES (?, '/r', ?, 'main') ON CONFLICT DO NOTHING",
         )
         .bind(id)
         .bind(id)

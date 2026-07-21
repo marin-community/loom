@@ -1,6 +1,13 @@
-# Deploying loom to a single GCE VM
+# Legacy scripted GCE deployment
 
-Script-based (no Terraform) provisioning of one Google Compute Engine VM that
+This imperative path is retained for existing installations. New deployments
+should use the [Pulumi stack](../pulumi), which adds declarative state,
+protected resources, scheduled snapshots and backups, Cloud DNS records, and
+keyless image publishing. Follow its [import plan](../pulumi/IMPORT.md) before
+letting Pulumi manage resources created here; never run both provisioners over
+the same resources independently.
+
+Script-based provisioning of one Google Compute Engine VM that
 runs the [standalone stack](../standalone) — loom + its bundled Caddy
 front-door — and fronts it with your domain's TLS. This is Model 1 (a single
 host with Docker on 80/443); see [`../README.md`](../README.md#future-cloud--cluster)

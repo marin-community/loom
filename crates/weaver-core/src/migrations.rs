@@ -16,6 +16,12 @@
 //! pre-repo-scope `issues` table, backfill additive columns) to bring it to the
 //! point where the baseline migration applies cleanly, then records every
 //! migration as it runs.
+//!
+//! The engine itself is a [`Stream`]: an ordered migration set plus the
+//! indicator table recording it. weaver-core's own stream is private to
+//! [`run`]; loom runs a second stream over the same database for its tables,
+//! which are created *after* these migrations run and so can never join this
+//! numbered set.
 
 use anyhow::{Context, Result};
 use sqlx::Row;
@@ -84,96 +90,148 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     ),
 ];
 
+/// weaver-core's own stream. Kept private: the tables it manages are this
+/// crate's to migrate, and callers only ever need [`run`].
+const STREAM: Stream = Stream {
+    indicator_table: "schema_migrations",
+    migrations: MIGRATIONS,
+};
+
 /// Apply every pending migration, bringing the database up to the latest schema.
 pub async fn run(pool: &Db) -> Result<()> {
     // A database without the indicator table is either brand-new or predates
     // the framework; bootstrap it once before the ordered migrations run.
-    if !indicator_exists(pool).await? {
+    if !STREAM.indicator_exists(pool).await? {
         legacy_bootstrap(pool).await?;
     }
-    ensure_indicator(pool).await?;
-    apply_pending(pool).await?;
+    STREAM.ensure_indicator(pool).await?;
+    STREAM.apply_pending(pool).await?;
     Ok(())
 }
 
-/// Does the `schema_migrations` indicator table exist yet?
-async fn indicator_exists(pool: &Db) -> Result<bool> {
-    let name: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'",
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(name.is_some())
+/// A versioned migration stream: an ordered `(version, name, sql)` set recorded
+/// in its own indicator table. Two streams over one database never interact —
+/// each tracks its versions in its own table — which is what lets loom version
+/// its tables (created after weaver-core's migrations run) separately.
+pub struct Stream {
+    /// The table recording applied versions, e.g. `schema_migrations`. Must be
+    /// a trusted literal: it is interpolated into SQL, never bound.
+    pub indicator_table: &'static str,
+    /// The ordered migration set. Versions are dense and strictly increasing;
+    /// the runner applies any not yet recorded, in order.
+    pub migrations: &'static [(i64, &'static str, &'static str)],
 }
 
-/// Create the indicator table that records which migrations have been applied.
-async fn ensure_indicator(pool: &Db) -> Result<()> {
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS schema_migrations (
-            version    INTEGER PRIMARY KEY,
-            name       TEXT NOT NULL,
-            applied_at TEXT NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await
-    .context("creating schema_migrations table")?;
-    Ok(())
-}
-
-/// Run every migration whose version is not yet recorded, each in its own
-/// transaction, recording it on success.
-///
-/// Safe to run from two processes at once (e.g. `loom` and a `weaver` CLI
-/// invocation both first-opening a fresh database): each migration *claims* its
-/// version with `INSERT OR IGNORE` as the transaction's first write, which takes
-/// the write lock atomically. The claimer (rows affected = 1) runs the SQL and
-/// commits the claim and the change together; a concurrent runner that finds the
-/// version already claimed (rows affected = 0) skips it rather than re-applying
-/// and colliding on the primary key.
-async fn apply_pending(pool: &Db) -> Result<()> {
-    let applied: Vec<i64> = sqlx::query_scalar("SELECT version FROM schema_migrations")
-        .fetch_all(pool)
-        .await
-        .context("reading schema_migrations")?;
-    for (version, name, sql) in MIGRATIONS {
-        // Fast path: a plain read, no lock. The claim below is the real guard.
-        if applied.contains(version) {
-            continue;
-        }
-        let mut tx = pool.begin().await?;
-        // Claim first, before any read in this transaction, so the INSERT (not a
-        // stale-snapshot read) is what acquires the write lock.
-        let claimed = sqlx::query(
-            "INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-        )
-        .bind(version)
-        .bind(*name)
-        .bind(now_iso())
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-        if claimed == 0 {
-            // Another runner has this version in hand; leave it to them.
-            tx.rollback().await?;
-            continue;
-        }
-        tracing::info!(version, name, "applying migration");
-        for stmt in split_statements(sql) {
-            sqlx::query(&stmt)
-                .execute(&mut *tx)
-                .await
-                .with_context(|| format!("migration {version} ({name}): {stmt}"))?;
-        }
-        tx.commit().await?;
+impl Stream {
+    /// Does the indicator table exist yet?
+    pub async fn indicator_exists(&self, pool: &Db) -> Result<bool> {
+        let name: Option<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
+                .bind(self.indicator_table)
+                .fetch_optional(pool)
+                .await?;
+        Ok(name.is_some())
     }
-    Ok(())
+
+    /// Create the indicator table that records which migrations have been applied.
+    pub async fn ensure_indicator(&self, pool: &Db) -> Result<()> {
+        sqlx::query(&format!(
+            "CREATE TABLE IF NOT EXISTS {} (
+                version    INTEGER PRIMARY KEY,
+                name       TEXT NOT NULL,
+                applied_at TEXT NOT NULL
+            )",
+            self.indicator_table
+        ))
+        .execute(pool)
+        .await
+        .with_context(|| format!("creating {} table", self.indicator_table))?;
+        Ok(())
+    }
+
+    /// Record `version` as applied without running its SQL. The adoption path
+    /// for a database whose schema was built before its stream existed: a
+    /// bootstrap brings the schema to the migration's end state by hand, then
+    /// stamps it so the stream never re-applies it. A no-op when the version is
+    /// already recorded.
+    pub async fn stamp(&self, pool: &Db, version: i64, name: &str) -> Result<()> {
+        sqlx::query(&format!(
+            "INSERT INTO {} (version, name, applied_at) VALUES (?, ?, ?)
+             ON CONFLICT DO NOTHING",
+            self.indicator_table
+        ))
+        .bind(version)
+        .bind(name)
+        .bind(now_iso())
+        .execute(pool)
+        .await
+        .with_context(|| format!("stamping {} version {version}", self.indicator_table))?;
+        Ok(())
+    }
+
+    /// Run every migration whose version is not yet recorded, each in its own
+    /// transaction, recording it on success.
+    ///
+    /// Safe to run from two processes at once (e.g. `loom` and a `weaver` CLI
+    /// invocation both first-opening a fresh database): each migration *claims*
+    /// its version with an `ON CONFLICT DO NOTHING` insert as the transaction's
+    /// first write, which takes the write lock atomically. The claimer (rows
+    /// affected = 1) runs the SQL and commits the claim and the change together;
+    /// a concurrent runner that finds the version already claimed (rows
+    /// affected = 0) skips it rather than re-applying and colliding on the
+    /// primary key.
+    pub async fn apply_pending(&self, pool: &Db) -> Result<()> {
+        let applied: Vec<i64> =
+            sqlx::query_scalar(&format!("SELECT version FROM {}", self.indicator_table))
+                .fetch_all(pool)
+                .await
+                .with_context(|| format!("reading {}", self.indicator_table))?;
+        for (version, name, sql) in self.migrations {
+            // Fast path: a plain read, no lock. The claim below is the real guard.
+            if applied.contains(version) {
+                continue;
+            }
+            let mut tx = pool.begin().await?;
+            // Claim first, before any read in this transaction, so the INSERT
+            // (not a stale-snapshot read) is what acquires the write lock.
+            let claimed = sqlx::query(&format!(
+                "INSERT INTO {} (version, name, applied_at) VALUES (?, ?, ?)
+                 ON CONFLICT DO NOTHING",
+                self.indicator_table
+            ))
+            .bind(version)
+            .bind(*name)
+            .bind(now_iso())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if claimed == 0 {
+                // Another runner has this version in hand; leave it to them.
+                tx.rollback().await?;
+                continue;
+            }
+            tracing::info!(
+                version,
+                name,
+                stream = self.indicator_table,
+                "applying migration"
+            );
+            for stmt in split_statements(sql) {
+                sqlx::query(&stmt)
+                    .execute(&mut *tx)
+                    .await
+                    .with_context(|| format!("migration {version} ({name}): {stmt}"))?;
+            }
+            tx.commit().await?;
+        }
+        Ok(())
+    }
 }
 
 /// Split a migration file into individual statements. Strips `--` line comments
 /// first so semicolons inside them don't truncate a statement, then splits on
 /// `;` and drops empty fragments.
-fn split_statements(sql: &str) -> Vec<String> {
+pub fn split_statements(sql: &str) -> Vec<String> {
     let stripped: String = sql
         .lines()
         .map(|line| match line.find("--") {
@@ -293,11 +351,20 @@ async fn migrate_issues_to_repo_scope(pool: &Db) -> Result<()> {
 }
 
 /// Run `ALTER TABLE … ADD COLUMN` when the column is missing. A no-op when the
-/// column already exists or the table doesn't exist yet.
-async fn add_column_if_missing(pool: &Db, table: &str, column: &str, decl: &str) -> Result<()> {
+/// column already exists or the table doesn't exist yet. Returns whether the
+/// column was freshly added, so a caller can gate a one-time backfill on it.
+/// Introspection-gated on presence only — a legacy bootstrap can never assume
+/// an existing column's exact declaration, since deployed databases carry
+/// shapes stricter than any one source revision.
+pub async fn add_column_if_missing(
+    pool: &Db,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> Result<bool> {
     let cols = table_columns(pool, table).await?;
     if cols.is_empty() || cols.iter().any(|c| c == column) {
-        return Ok(());
+        return Ok(false);
     }
     let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {decl}");
     sqlx::query(&sql)
@@ -305,11 +372,11 @@ async fn add_column_if_missing(pool: &Db, table: &str, column: &str, decl: &str)
         .await
         .with_context(|| format!("adding column {table}.{column}"))?;
     tracing::info!(%table, %column, "added column");
-    Ok(())
+    Ok(true)
 }
 
 /// Column names of `table`, or empty if it doesn't exist.
-async fn table_columns(pool: &Db, table: &str) -> Result<Vec<String>> {
+pub async fn table_columns(pool: &Db, table: &str) -> Result<Vec<String>> {
     // `table` is always a hardcoded literal here, so the format! is safe.
     let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
         .fetch_all(pool)
@@ -374,13 +441,56 @@ mod tests {
         assert_eq!(count, MIGRATIONS.len() as i64);
     }
 
+    #[tokio::test]
+    async fn independent_streams_keep_separate_versions() {
+        const FIRST_MIGRATIONS: &[(i64, &str, &str)] =
+            &[(1, "first", "CREATE TABLE first_owned (id INTEGER)")];
+        const SECOND_MIGRATIONS: &[(i64, &str, &str)] =
+            &[(1, "second", "CREATE TABLE second_owned (id INTEGER)")];
+        const FIRST: Stream = Stream {
+            indicator_table: "first_schema_migrations",
+            migrations: FIRST_MIGRATIONS,
+        };
+        const SECOND: Stream = Stream {
+            indicator_table: "second_schema_migrations",
+            migrations: SECOND_MIGRATIONS,
+        };
+
+        let pool = empty_pool().await;
+        FIRST.ensure_indicator(&pool).await.unwrap();
+        SECOND.ensure_indicator(&pool).await.unwrap();
+        FIRST.apply_pending(&pool).await.unwrap();
+        SECOND.apply_pending(&pool).await.unwrap();
+        // Stamping an existing version is idempotent and confined to its stream.
+        FIRST.stamp(&pool, 1, "first").await.unwrap();
+
+        let first: Vec<i64> = sqlx::query_scalar("SELECT version FROM first_schema_migrations")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let second: Vec<i64> = sqlx::query_scalar("SELECT version FROM second_schema_migrations")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(first, vec![1]);
+        assert_eq!(second, vec![1]);
+        assert!(!table_columns(&pool, "first_owned")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(!table_columns(&pool, "second_owned")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
     /// A version already recorded — as if a concurrent runner claimed and applied
-    /// it — is skipped (the `INSERT OR IGNORE` claim affects 0 rows, no PK
+    /// it — is skipped (the conflict-safe claim affects 0 rows, no PK
     /// conflict), while the remaining migrations still apply.
     #[tokio::test]
     async fn already_claimed_versions_are_skipped() {
         let pool = empty_pool().await;
-        ensure_indicator(&pool).await.unwrap();
+        STREAM.ensure_indicator(&pool).await.unwrap();
         // Stand up the baseline and record it, mimicking another process having
         // applied migration 1 already.
         for stmt in split_statements(MIGRATIONS[0].2) {
@@ -451,7 +561,7 @@ mod tests {
         let pool = empty_pool().await;
         // Stand up the schema through 0004 only, then seed marks on the old
         // columns as a pre-0005 database would carry them.
-        ensure_indicator(&pool).await.unwrap();
+        STREAM.ensure_indicator(&pool).await.unwrap();
         for (version, name, sql) in MIGRATIONS.iter().take_while(|(v, _, _)| *v < 5) {
             for stmt in split_statements(sql) {
                 sqlx::query(&stmt).execute(&pool).await.unwrap();
@@ -605,7 +715,7 @@ mod tests {
     #[tokio::test]
     async fn goal_artifact_migration_backfills_existing_goals() {
         let pool = empty_pool().await;
-        ensure_indicator(&pool).await.unwrap();
+        STREAM.ensure_indicator(&pool).await.unwrap();
         // Stand up the schema through 0011, then seed branches as a pre-0012
         // database would carry them — a goal in the column, no `goal` artifact.
         for (version, name, sql) in MIGRATIONS.iter().take_while(|(v, _, _)| *v < 12) {

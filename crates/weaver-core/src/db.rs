@@ -48,6 +48,9 @@ impl ImmediateTransaction<'_> {
     }
 }
 
+/// A write transaction on [`Db`]. Callers hold this alias rather than naming
+/// the backend's transaction type themselves.
+pub type DbTransaction<'a> = ImmediateTransaction<'a>;
 /// Root directory for all weaver state on this machine.
 pub fn weaver_home() -> PathBuf {
     if let Ok(p) = std::env::var("WEAVER_HOME") {
@@ -110,6 +113,23 @@ pub fn now_iso() -> String {
         .to_string()
 }
 
+/// The instant `days` days from now, in the same stored format as [`now_iso`].
+/// Expiries are computed app-side and bound as parameters so queries carry no
+/// backend-specific date arithmetic; the format orders lexicographically, so
+/// string comparison against `*_at` columns is sound. Returns `None` when the
+/// requested interval or resulting instant is outside chrono's range.
+pub fn iso_in_days(days: i64) -> Option<String> {
+    let delta = chrono::TimeDelta::try_days(days)?;
+    chrono::Utc::now()
+        .checked_add_signed(delta)
+        .map(|instant| instant.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
+}
+
+/// Open (creating if missing) and migrate the on-disk database.
+///
+/// Backend-specific surface, kept here and in [`begin_immediate`]: the
+/// `sqlite:` DSN string, the WAL journal mode, the `busy_timeout`, and the
+/// migrate-then-reopen connection dance below.
 pub async fn connect(path: &Path) -> Result<Db> {
     tracing::info!(path = %path.display(), "opening database");
     if let Some(parent) = path.parent() {
@@ -173,7 +193,10 @@ pub async fn connect_in_memory() -> Result<Db> {
 ///
 /// Contenders queue on [`WRITE_LOCK`] before acquiring a pool connection. This
 /// preserves read capacity while writes wait for SQLite's single writer slot.
-pub async fn begin_immediate(db: &Db) -> sqlx::Result<ImmediateTransaction<'static>> {
+///
+/// Backend-specific surface (with [`connect`]): the lock-upgrade behaviour and
+/// the `BEGIN IMMEDIATE` statement are SQLite's.
+pub async fn begin_immediate(db: &Db) -> sqlx::Result<DbTransaction<'static>> {
     let writer = WRITE_LOCK.lock().await;
     let tx = db.begin_with("BEGIN IMMEDIATE").await?;
     Ok(ImmediateTransaction {
@@ -193,6 +216,31 @@ mod tests {
     use super::*;
     use std::future::Future;
     use std::task::Poll;
+
+    #[test]
+    fn iso_in_days_uses_the_shared_sortable_timestamp_format() {
+        let before = chrono::Utc::now();
+        let encoded = iso_in_days(2).unwrap();
+        let after = chrono::Utc::now();
+        let parsed = chrono::DateTime::parse_from_rfc3339(&encoded)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        // Formatting truncates sub-millisecond precision, hence the small
+        // tolerance around the time spent inside `iso_in_days`.
+        assert!(parsed >= before + chrono::Duration::days(2) - chrono::Duration::milliseconds(2));
+        assert!(parsed <= after + chrono::Duration::days(2) + chrono::Duration::milliseconds(2));
+        assert_eq!(encoded.len(), "2026-01-01T00:00:00.000Z".len());
+        assert!(encoded.ends_with('Z'));
+        assert!(iso_in_days(i64::MAX).is_none());
+    }
+
+    #[tokio::test]
+    async fn immediate_transactions_use_the_facade_alias() {
+        let db = connect_in_memory().await.unwrap();
+        let tx: DbTransaction<'_> = begin_immediate(&db).await.unwrap();
+        tx.rollback().await.unwrap();
+    }
 
     /// Regression: the on-disk pool must serve a fully-migrated schema on every
     /// connection. A schema-changing migration once left some pooled connections

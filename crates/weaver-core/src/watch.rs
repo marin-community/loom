@@ -374,7 +374,8 @@ pub async fn list(db: &Db) -> Result<Vec<Watch>> {
 
 pub async fn list_enabled(db: &Db) -> Result<Vec<Watch>> {
     Ok(
-        sqlx::query_as::<_, Watch>("SELECT * FROM watches WHERE enabled = 1 ORDER BY name ASC")
+        sqlx::query_as::<_, Watch>("SELECT * FROM watches WHERE enabled = ? ORDER BY name ASC")
+            .bind(true)
             .fetch_all(db)
             .await?,
     )

@@ -152,6 +152,19 @@ async fn loopback_trust_then_token_local_and_cookie_gate_access() {
 
 #[tokio::test]
 #[serial]
+async fn absurd_token_expiry_is_a_bad_request_not_a_panic() {
+    let ts = TestServer::start().await;
+    let response = reqwest::Client::new()
+        .post(url(&ts, "/api/auth/tokens"))
+        .json(&json!({ "name": "too-long", "expires_in_days": i64::MAX }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[serial]
 async fn health_is_public_but_protected_routes_are_not() {
     let ts = TestServer::start().await;
     let http = reqwest::Client::new();

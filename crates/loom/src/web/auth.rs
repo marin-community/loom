@@ -364,6 +364,14 @@ pub(super) async fn create_token(
     if name.is_empty() {
         return Err(AppError::bad_request("a token name is required"));
     }
+    if body
+        .expires_in_days
+        .is_some_and(|days| days > 0 && weaver_core::db::iso_in_days(days).is_none())
+    {
+        return Err(AppError::bad_request(
+            "token expiry is outside the supported range",
+        ));
+    }
     let (token, info) =
         auth::create_token(&st.db, &principal.username, name, body.expires_in_days).await?;
     tracing::info!(username = %principal.username, id = %info.id, name = %info.name, "api token created");

@@ -6,7 +6,8 @@ a TLS front-door in front of it is the choice this directory captures.
 | Path | Front-door | Use it when |
 |---|---|---|
 | **[`standalone/`](standalone/)** | **bundled** (Caddy, automatic HTTPS) | You want one self-contained, internet-facing host. **Start here.** |
-| [`gcp/`](gcp/) | bundled (runs `standalone/` unmodified) | You want scripted provisioning of a single GCE VM to run the standalone stack on, instead of bringing your own host. |
+| [`pulumi/`](pulumi/) | bundled (runs `standalone/` unmodified) | You want a production single-VM GCP deployment described as IaC, with snapshots, backups, DNS, and keyless image publishing. |
+| [`gcp/`](gcp/) | bundled (runs `standalone/` unmodified) | Legacy imperative provisioning for an existing GCE install; migrate it to Pulumi. |
 | cloud / cluster | — | Future work — see [below](#future-cloud--cluster). |
 
 The rest of this README documents the **standalone** stack. It exposes loom to
