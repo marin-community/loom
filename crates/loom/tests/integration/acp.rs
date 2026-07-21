@@ -67,6 +67,9 @@ async fn make_session(ts: &TestServer, id: &str) {
             managed_by: None,
             created_by: None,
             protocol: "acp".to_string(),
+            origin: "user".to_string(),
+            class: "interactive".to_string(),
+            tracking_issue_id: None,
         },
     )
     .await
@@ -2422,6 +2425,9 @@ async fn adopt_converts_a_terminal_builtin_session_to_acp() {
             managed_by: None,
             created_by: None,
             protocol: "terminal".to_string(),
+            origin: "user".to_string(),
+            class: "interactive".to_string(),
+            tracking_issue_id: None,
         },
     )
     .await

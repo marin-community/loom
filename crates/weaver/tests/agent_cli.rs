@@ -1016,20 +1016,25 @@ async fn set_status_rejects_unknown_level() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn config_get_set_ls_rm_roundtrip() {
+async fn config_get_ls_reads_settings() {
     let env = Env::start().await;
     // A known setting has a default value before anything is set.
     let out = env.run(&["config", "ls"]);
     assert!(out.contains("(default)"), "ls should mark defaults: {out}");
 
-    env.run(&["config", "set", "agent.default", "codex"]);
+    // Settings are written by operators (`loom config set` / the settings
+    // pane); the in-session surface only reads them.
+    weaver_core::config::apply(
+        &env.db,
+        &[("agent.default".to_string(), Some("codex".to_string()))],
+    )
+    .await
+    .unwrap();
     let out = env.run(&["config", "get", "agent.default"]);
     assert_eq!(out.trim(), "codex");
-
-    env.run(&["config", "rm", "agent.default"]);
     let out = env.run(&["config", "ls"]);
     assert!(
-        out.contains("agent.default") && out.contains("(default)"),
-        "rm should restore the default: {out}"
+        out.contains("agent.default") && out.contains("codex"),
+        "ls shows the stored value: {out}"
     );
 }

@@ -78,6 +78,21 @@ export const uploadSessionScratch = (id: string, file: File) =>
     ScratchFile & { path: string }
   >;
 
+// --- Sessions ----------------------------------------------------------------
+
+/** The fleet: every session, optionally widened past the two default-hidden
+ *  categories. `archived` includes torn-down sessions; `automation` includes
+ *  agent/system-launched sessions (`class: 'automation'`) — background work a
+ *  person didn't start, hidden from the fleet list by default. Symmetric flags,
+ *  both off by default (`GET /api/sessions`). */
+export const listSessions = (opts: { archived?: boolean; automation?: boolean } = {}) => {
+  const params = new URLSearchParams();
+  if (opts.archived) params.set('archived', 'true');
+  if (opts.automation) params.set('automation', 'true');
+  const qs = params.toString();
+  return get(`/sessions${qs ? `?${qs}` : ''}`) as Promise<Session[]>;
+};
+
 // --- Issues ----------------------------------------------------------------
 
 import type {
@@ -188,9 +203,16 @@ export const deleteCustomAgent = (name: string) =>
   );
 
 /** Every issue across every repo — the Issues pane's cross-repo board. Pass
- *  `all` to include closed issues. */
-export const listIssues = (all = false) =>
-  get(`/issues${all ? '?all=true' : ''}`) as Promise<Issue[]>;
+ *  `all` to include closed issues, `automation` to include issues claimed by an
+ *  automation-class session (hidden by default, symmetric with `archived` on
+ *  `listSessions`). */
+export const listIssues = (opts: { all?: boolean; automation?: boolean } = {}) => {
+  const params = new URLSearchParams();
+  if (opts.all) params.set('all', 'true');
+  if (opts.automation) params.set('automation', 'true');
+  const qs = params.toString();
+  return get(`/issues${qs ? `?${qs}` : ''}`) as Promise<Issue[]>;
+};
 
 /** Launch a new loom session that picks up (claims) an existing weaver issue:
  *  the issue's repo is the new session's cwd, and the backend seeds the branch's

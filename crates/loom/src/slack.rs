@@ -843,26 +843,22 @@ async fn launch(
         .ok()
         .flatten();
     if let Some(b) = &existing {
-        if let Ok(Some(sess)) = crate::session::active_for_branch(&state.db, &b.id).await {
-            if sess.status != "archived" {
-                // A live session already owns this thread — don't launch a
-                // second. Ack (👀 on the mention; a note for a slash) and stop.
-                if let Anchor::Mention { event_ts, .. } = &trigger.anchor {
-                    web.add_reaction(&trigger.channel_id, event_ts, "eyes")
-                        .await
-                        .ok();
-                } else {
-                    notify(web, trigger, "Already working on this thread.")
-                        .await
-                        .ok();
-                }
-                return Ok(());
+        // An archived session no longer counts as active, so a thread whose
+        // session was archived falls straight through to a fresh launch on the
+        // kept branch.
+        if let Ok(Some(_)) = crate::session::active_for_branch(&state.db, &b.id).await {
+            // A live session already owns this thread — don't launch a
+            // second. Ack (👀 on the mention; a note for a slash) and stop.
+            if let Anchor::Mention { event_ts, .. } = &trigger.anchor {
+                web.add_reaction(&trigger.channel_id, event_ts, "eyes")
+                    .await
+                    .ok();
+            } else {
+                notify(web, trigger, "Already working on this thread.")
+                    .await
+                    .ok();
             }
-            // A session row that outlived its terminal — retire it (`error`, not
-            // `archived`, so the branch frees for a fresh launch) and fall through.
-            crate::session::set_status(&state.db, &sess.id, "error")
-                .await
-                .ok();
+            return Ok(());
         }
     }
 
@@ -879,7 +875,7 @@ async fn launch(
         req.name = Some(branch_name.clone());
     }
 
-    let view = crate::web::sessions::create_session_core(state.clone(), req, None)
+    let view = crate::web::sessions::create_session_core(state.clone(), req, None, "slack")
         .await
         .map_err(|e| anyhow!("{e:?}"))?;
 

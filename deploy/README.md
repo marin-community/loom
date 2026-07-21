@@ -170,7 +170,7 @@ Background on these knobs is in the repo
 [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md). To change one after the fact:
 
 ```sh
-docker compose exec loom weaver config set auth.trust_loopback false
+docker compose exec loom loom config set auth.trust_loopback false
 ```
 
 Access past the front-door is then gated by GitHub/password login for the UI and

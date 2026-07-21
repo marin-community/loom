@@ -44,7 +44,7 @@ other `weaver` subcommand.
 | `crates/weaver-core/` | lib: `branches`, `issues`, `events`, `db`, `migrations` (ordered SQL + `schema_migrations` indicator), `git`, `config`, `artifacts` (versioned documents), `repo_config` (`.weaver/config.toml`), `transcript` (agent conversation logs: raw → iris format → markdown), agent helpers. Pure logic; used by `loom` for DB access, and by `weaver` only for the DB-free pieces (`transcript`, `tags` constants/validators, the agent primer). |
 | `crates/weaver-api/` | typed loom REST client + DTOs (`Client`, `*View`/`*Req` types, `endpoint::default_client()` for resolving `$WEAVER_API`/`$LOOM_TOKEN`). Zero server deps (no `axum`, no sqlite driver) — the one cross-process seam `weaver` links against instead of `weaver-core`'s DB layer. |
 | `crates/smartdoc/` | the markdown-convention layer: parse references (`#N`, `artifact:<name>`), project live status into the render. Dependency-free of weaver. See [artifacts.md](artifacts.md). |
-| `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`summary`, `readme`, `status` [read or set level + message], `tag` [`set`/`rm`/`ls` a branch tag], `issue …`, `where`, `log`, `chatlog` [render the agent's conversation transcript], `hook`, `config`) — every command drives `weaver-api::Client` over HTTP; none touch sqlite |
+| `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`summary`, `readme`, `status` [read or set level + message], `tag` [`set`/`rm`/`ls` a branch tag], `issue …`, `where`, `log`, `chatlog` [render the agent's conversation transcript], `hook`, `config` [read-only: `get`/`ls`; writes go through `loom config set` or the settings pane]) — every command drives `weaver-api::Client` over HTTP; none touch sqlite |
 | `crates/loom/src/web.rs` | axum routes, request/response types, SSE — **the API surface** (incl. the auth middleware + login/token/user handlers) |
 | `crates/loom/src/auth.rs` | authentication core: token/password crypto, the `users`/`api_tokens`/`auth_sessions` tables, the machine-local token, and the GitHub OAuth calls. `axum`-free so it unit-tests directly |
 | `crates/loom/src/server.rs` | bind, write `server.json`, spawn bg tasks |
@@ -150,7 +150,19 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
   opened only by `loom` — `weaver` reaches it over HTTP. WAL mode handles
   concurrency among loom's own connections.
   - Core tables: `branches`, `issues`, `events`, `settings`.
-  - Loom tables (`crates/loom/src/db.rs`): `sessions`, `recent_repos`,
+  - Loom tables (`crates/loom/src/db.rs`): `sessions` (`origin` — the channel
+    it was created through: `user`/`agent`/`github`/`slack`/`watch`/`actions`/
+    `ops`, stamped server-side at create; `class` — `interactive`/`automation`,
+    gating default-list visibility, see [Status & tags](#status--tags). A
+    request may set `class` explicitly; otherwise `watch`/`actions`/`ops`
+    origins default to `automation` while `github`/`slack` stay `interactive` —
+    a person asked for those sessions and expects to find them on the board;
+    `turn_count` — incremented on each `working` lifecycle edge;
+    `tracking_issue_id` — the weaver issue opened at create. One *active*
+    session per branch is enforced by a partial unique index on `branch_id`
+    where `status NOT IN ('done', 'error', 'archived')` — an archived session
+    releases its branch slot, so relaunching a done/archived branch is never
+    blocked by its predecessor), `recent_repos`,
     `branch_github` (per-branch PR snapshot), `chat_blocks` (the ACP
     [chat journal](#rest-api): one row per `(session_id, turn, seq)` block),
     and the auth tables `users` (the approved-operator allowlist, seeded with
@@ -195,7 +207,7 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | Method + path | What it does |
 |---|---|
 | `GET /api/health` | liveness probe |
-| `GET /api/sessions` / `POST /api/sessions` | list / create sessions (create takes optional `scratch: [{name, content_base64}]`, `parent_branch`, `protocol` (`terminal`\|`acp`, an opt-in override of the agent's declared default), and `mode` (the initial ACP permission posture; omitted uses `agent.mode`); opens a tracking issue and returns its id as `tracking_issue`) |
+| `GET /api/sessions` / `POST /api/sessions` | list / create sessions (list takes `archived` — default `false`, include torn-down sessions — and `automation` — default `false`, include automation-class sessions, otherwise hidden from the default fleet view; create takes optional `scratch: [{name, content_base64}]`, `parent_branch`, `protocol` (`terminal`\|`acp`, an opt-in override of the agent's declared default), and `mode` (the initial ACP permission posture; omitted uses `agent.mode`); opens a tracking issue and returns its id as `tracking_issue`) |
 | `GET PATCH DELETE /api/sessions/{id}` | session CRUD (status, title, goal, description) |
 | `PUT DELETE /api/sessions/{id}/tags/{key}` | set (upsert) / clear a branch tag — the well-known `attention` and `triage` keys plus any free-form key |
 | `GET /api/sessions/{id}/url` | the session's dashboard URL as `{url}`, built from the externally-visible origin (`auth.base_url`, else the request's own Host) — what `loom session url` prints, so an agent can link a PR back to its session without inventing a loopback link |
@@ -220,7 +232,7 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `PUT /api/sessions/{id}/mode` | `{mode_id}` → change the ACP session's permission mode (`session/set_mode`), journaled as a `mode_change` |
 | `GET /api/branches` / `GET PATCH /api/branches/{id}` | list / inspect / edit tracked branches |
 | `GET POST /api/branches/{id}/issues` | issues claimed by the branch / create one |
-| `GET /api/issues?all=…` | the cross-repo issue board (every repo's issues; `all=true` includes closed) — what the loom Issues pane reads |
+| `GET /api/issues?all=…` | the cross-repo issue board (every repo's issues; `all=true` includes closed, `automation=true` includes automation-class sessions' tracking issues, otherwise hidden) — what the loom Issues pane reads |
 | `GET PATCH DELETE /api/issues/{id}` | per-issue CRUD |
 | `PUT DELETE /api/issues/{id}/tags/{key}` | set (upsert) / clear a free-form issue label — quiet `(key, value)` pills, no loud `attention`/`triage` ladder |
 | `GET POST /api/repos/issues?repo_root=…` | repo-wide board (`scope=repo\|backlog`) / create a backlog item |
@@ -243,8 +255,12 @@ top-level (`id`, `status`, `work_dir`, `term_session`, `agent_kind`, `model`,
 `effort`, `pending_prompt`, `github_repo`, `last_activity_at`,
 `created_at`, `updated_at`, `parent_id`, `protocol` (`terminal` or `acp`),
 `acp_session_id`, `current_mode`, `usage` (`{used, size}` context window, from
-the journal's latest `usage` block), and — on the create response only —
-`tracking_issue`) plus a nested `branch: BranchView`
+the journal's latest `usage` block), `origin` (the channel that created it:
+`user`/`agent`/`github`/`slack`/`watch`/`actions`/`ops`), `class`
+(`interactive`/`automation`), `turn_count` (incremented on each `working`
+lifecycle edge), and `tracking_issue` (the weaver issue opened at create;
+populated on every read, not just the create response)) plus a nested
+`branch: BranchView`
 (`id`, `name`, `title`, `goal`, `description`, `tags`,
 `repo_root`, `branch`, `base_branch`, `created_at`, `updated_at`,
 `open_issue_count`, `github`).
@@ -485,6 +501,18 @@ once the terminal is gone (orphaned/done/archived), leaving the read-only log.
 Orphan detection is independent: if the session's supervisor is no longer alive,
 the session becomes `orphaned` and is eligible for `loom adopt`.
 
+**Automation lifecycle.** A `class = automation` session — every session not
+launched interactively by a human, excluding a watch's own warm sessions —
+carries a turn cap (`automation.turn_cap`, default `100`, `0` disables)
+counted by `sessions.turn_count`. Exceeding the cap raises a loud `blocked`
+attention tag and the ACP driver refuses to start a new turn. The monitor also
+reaps automation sessions: one is archived once its `tracking_issue_id`
+closes, or after `automation.idle_archive_secs` (default `28800`, `0`
+disables) of inactivity — both guarded by a no-live-turn check and a grace
+period, so a session mid-turn or only just gone quiet is never torn down out
+from under it. The `automation.*` settings live in
+`weaver-core::config::registry()` under the **Automation** group.
+
 ## GitHub integration
 
 When the `gh` CLI is installed and authenticated, loom keeps a per-branch
@@ -510,7 +538,7 @@ automatically — the same teardown as the Archive button (`web::archive`, share
 code): the terminal killed, worktree removed, branch and weaver history kept. The
 worktree is removed with `--force`, so any uncommitted work in it is discarded;
 a merged PR is taken to mean the workstream is done. Turn the behaviour off with
-`weaver config set github.archive_on_merge false` (or in the settings pane).
+`loom config set github.archive_on_merge false` (or in the settings pane).
 Both settings live in `weaver-core::config::registry()` under the **GitHub**
 group.
 

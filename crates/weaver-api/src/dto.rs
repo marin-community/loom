@@ -137,9 +137,23 @@ pub struct SessionView {
     /// that predate the column. A tracking/UX field,
     /// not a security boundary: the fleet stays co-owned by everyone authenticated.
     pub created_by: Option<String>,
-    /// The tracking issue opened for this session's task at launch (the handle
-    /// handed back to whoever launched it). Only populated on the create
-    /// response; `None` on the list/get/patch paths, which don't recompute it.
+    /// How this session came to exist: `"user"` (hand-launched), `"agent"`
+    /// (delegated by another session), `"github"` / `"slack"` (chat triggers),
+    /// `"watch"` (engine infrastructure). Stamped once at create.
+    #[serde(default = "default_origin")]
+    pub origin: String,
+    /// Presentation tier: `"interactive"` fleet work or `"automation"`
+    /// machinery. The default `GET /api/sessions` listing hides
+    /// automation-class rows; `?automation=true` includes them.
+    #[serde(default = "default_class")]
+    pub class: String,
+    /// Completed agent turns on this session.
+    #[serde(default)]
+    pub turn_count: i64,
+    /// The tracking issue opened (or claimed) for this session's task at launch
+    /// — the handle handed back to whoever launched it — or `null` when the
+    /// launch tracked nothing. Stored on the session row, so every read path
+    /// carries it.
     pub tracking_issue: Option<i64>,
     /// Manual park override for the fleet list's resting shelf: `"parked"` (pinned
     /// to the shelf), `"active"` (kept live even when idle), or `null` (auto — the
@@ -189,6 +203,14 @@ pub struct AcpUsage {
 
 fn default_protocol() -> String {
     "terminal".to_string()
+}
+
+fn default_origin() -> String {
+    "user".to_string()
+}
+
+fn default_class() -> String {
+    "interactive".to_string()
 }
 
 /// Issue as the API exposes it.
@@ -613,6 +635,12 @@ pub struct CreateReq {
     /// tool call and escalates only risky actions). Ignored for a terminal launch.
     #[serde(default)]
     pub mode: Option<String>,
+    /// Session class override: `"interactive"` or `"automation"` (anything else
+    /// is rejected). Blank/absent derives from the launch origin
+    /// (watch/actions/ops → automation, else interactive). Automation-class
+    /// sessions are hidden from the default fleet listing.
+    #[serde(default)]
+    pub class: Option<String>,
 }
 
 /// Body for `POST /api/sessions/{id}/handoff`: replace the live ACP runtime

@@ -294,8 +294,7 @@ EOF
 # (current_exe dir + /tapestry), so the two must land in the same directory.
 COPY --from=build /out/loom     /usr/local/bin/loom
 COPY --from=build /out/tapestry /usr/local/bin/tapestry
-# `weaver` is the agent-facing CLI — kept on PATH for `docker exec weaver
-# weaver config set …` (settings live in the shared sqlite db).
+# `weaver` is the agent-facing CLI loom injects into every session's PATH.
 COPY --from=build /out/weaver   /usr/local/bin/weaver
 COPY --from=build /out/dist     /app/static/dist
 

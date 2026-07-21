@@ -18,10 +18,20 @@ use crate::events::EventBus;
 use crate::session::{self as session_mod, Session};
 use crate::web::AppState;
 use crate::{backend, events};
+use weaver_core::branch as branch_mod;
 use weaver_core::config as core_config;
 use weaver_core::tags;
 
 const TICK: Duration = Duration::from_millis(1500);
+
+/// The retention reaper runs at most once every this many monitor ticks
+/// (~90s at the 1.5s tick) — archiving is heavyweight next to the per-tick work.
+const REAP_EVERY_TICKS: u32 = 60;
+
+/// Neither reap trigger fires while the session's last activity is this recent.
+/// Archiving destroys the worktree, so a session that just moved is never
+/// reaped — even when its tracking issue has closed.
+const REAP_GRACE_SECS: i64 = 900;
 
 pub async fn run(state: AppState) {
     let mut screen_hash: HashMap<String, u64> = HashMap::new();
@@ -32,6 +42,8 @@ pub async fn run(state: AppState) {
     let mut stale_seen: HashSet<String> = HashSet::new();
     // Watermark: process every event written after this id, then advance.
     let mut last_event = events::max_id(&state.db).await.unwrap_or(0);
+    // Ticks since the retention reaper last ran (see [`REAP_EVERY_TICKS`]).
+    let mut reap_tick: u32 = 0;
     tracing::info!(tick_ms = TICK.as_millis() as u64, "monitor loop started");
 
     loop {
@@ -174,6 +186,108 @@ pub async fn run(state: AppState) {
 
         screen_hash.retain(|k, _| alive.contains(k));
         stale_seen.retain(|k| alive.contains(k));
+
+        // 3. Retention: reap finished / long-idle automation sessions, on a
+        //    slower cadence than the tick.
+        reap_tick += 1;
+        if reap_tick >= REAP_EVERY_TICKS {
+            reap_tick = 0;
+            reap_automation(&state, &sessions, now).await;
+        }
+    }
+}
+
+/// Why the reaper archives an automation session — [`reap_decision`]'s verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReapReason {
+    /// The tracking issue the session was launched for has been closed.
+    IssueClosed,
+    /// The session sat idle past `automation.idle_archive_secs`.
+    IdleTtl,
+}
+
+/// Whether the reaper may consider `session` at all: automation-class, not a
+/// warm (watch-managed) session — those are exempt infrastructure — and in a
+/// non-terminal status.
+fn reap_candidate(session: &Session) -> bool {
+    session.class == "automation"
+        && session.managed_by.is_none()
+        && matches!(session.status.as_str(), "created" | "running" | "orphaned")
+}
+
+/// The pure reaper verdict for one session. `issue_closed` is the pre-fetched
+/// status of the session's tracking issue (false when it has none), and
+/// `idle_archive_secs <= 0` disables the TTL trigger. Both triggers share a
+/// safety guard: no live ACP turn (`acp_inflight`; a terminal session's only
+/// liveness signal is `last_activity_at` itself) and at least
+/// [`REAP_GRACE_SECS`] of stillness — archiving destroys the worktree, so a
+/// session that just moved is never reaped.
+fn reap_decision(
+    session: &Session,
+    issue_closed: bool,
+    idle_archive_secs: i64,
+    now: DateTime<Utc>,
+) -> Option<ReapReason> {
+    if !reap_candidate(session) || session.acp_inflight.is_some() {
+        return None;
+    }
+    let idle = idle_secs(session, now);
+    if idle < REAP_GRACE_SECS {
+        return None;
+    }
+    if issue_closed {
+        return Some(ReapReason::IssueClosed);
+    }
+    if idle_archive_secs > 0 && idle >= idle_archive_secs {
+        return Some(ReapReason::IdleTtl);
+    }
+    None
+}
+
+/// One reaper pass: archive every automation session [`reap_decision`] convicts,
+/// via the shared archive path (worktree teardown + transcript capture + the
+/// `status` event that lands on SSE). Errors are logged, never fatal to a tick.
+async fn reap_automation(state: &AppState, sessions: &[Session], now: DateTime<Utc>) {
+    let ttl = core_config::get(&state.db, "automation.idle_archive_secs")
+        .await
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(core_config::DEFAULT_AUTOMATION_IDLE_ARCHIVE_SECS);
+    for session in sessions {
+        // Only a candidate's tracking issue is worth a lookup.
+        if !reap_candidate(session) {
+            continue;
+        }
+        let issue_closed = match session.tracking_issue_id {
+            Some(issue_id) => match weaver_core::issue::get(&state.db, issue_id).await {
+                Ok(issue) => issue.is_some_and(|i| i.status == "closed"),
+                Err(e) => {
+                    tracing::warn!(id = %session.id, issue = issue_id, error = %e,
+                        "reaper: tracking issue lookup failed");
+                    false
+                }
+            },
+            None => false,
+        };
+        let Some(reason) = reap_decision(session, issue_closed, ttl, now) else {
+            continue;
+        };
+        let branch = match branch_mod::get(&state.db, &session.branch_id).await {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                tracing::warn!(id = %session.id, branch = %session.branch_id,
+                    "reaper: session's branch row is missing");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(id = %session.id, error = %e, "reaper: branch lookup failed");
+                continue;
+            }
+        };
+        tracing::info!(id = %session.id, branch = %branch.branch, ?reason,
+            "reaping automation session");
+        if let Err(e) = crate::web::archive(state, session, &branch).await {
+            tracing::warn!(id = %session.id, error = %e.message(), "reaper: archive failed");
+        }
     }
 }
 
@@ -327,6 +441,32 @@ async fn promote_lifecycle(db: &Db, bus: &EventBus, session: &Session, kind: &st
     let mutations = lifecycle_mutations(kind)?;
     let branch_id = session.branch_id.as_str();
 
+    // Turn accounting: every `working` edge is one agent turn, counted for every
+    // session. The cap applies only to automation-class sessions that are not
+    // warm (watch-managed) infrastructure; past it, the branch is marked
+    // `blocked` below instead of returning the attention axis to calm.
+    let mut cap_note: Option<String> = None;
+    if kind == "working" {
+        match session_mod::increment_turn_count(db, &session.id).await {
+            Ok(count) => {
+                let cap = core_config::get(db, "automation.turn_cap")
+                    .await
+                    .and_then(|v| v.trim().parse::<i64>().ok())
+                    .unwrap_or(core_config::DEFAULT_AUTOMATION_TURN_CAP);
+                if cap > 0
+                    && count > cap
+                    && session.class == "automation"
+                    && session.managed_by.is_none()
+                {
+                    cap_note = Some(format!("turn cap ({cap}) reached"));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(id = %session.id, error = %e, "turn count increment failed")
+            }
+        }
+    }
+
     // Lifecycle: alive → running. Idempotent once running; never overrides a
     // terminal state.
     let status_changed = session.status != "running" && !session_mod::is_terminal(&session.status);
@@ -361,6 +501,11 @@ async fn promote_lifecycle(db: &Db, bus: &EventBus, session: &Session, kind: &st
     // and dashboards refresh only on a real edge. The author is `agent` — these
     // are the agent's own lifecycle marks.
     for &(key, value) in mutations {
+        // A capped session owns the attention axis below: don't let the routine
+        // `working` calm-down clear the tag it is about to raise.
+        if cap_note.is_some() && key == tags::ATTENTION_KEY {
+            continue;
+        }
         let current = tags::get(db, branch_id, key)
             .await
             .ok()
@@ -377,6 +522,40 @@ async fn promote_lifecycle(db: &Db, bus: &EventBus, session: &Session, kind: &st
             let _ = tags::set(db, branch_id, key, value, "", "agent").await;
         }
         let _ = events::record_tag(db, bus, branch_id, key, value, "", "agent").await;
+    }
+
+    // Cap enforcement: past the cap an automation session reads as `blocked`, so
+    // the fleet surfaces it instead of letting it burn turns quietly. Set once —
+    // a repeated over-cap edge on an already-blocked branch is a no-op.
+    if let Some(note) = cap_note {
+        let already_blocked = tags::get(db, branch_id, tags::ATTENTION_KEY)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|t| t.value == "blocked");
+        if !already_blocked {
+            tracing::info!(id = %session.id, branch = %branch_id, %note,
+                "automation session over its turn cap; marking blocked");
+            let _ = tags::set(
+                db,
+                branch_id,
+                tags::ATTENTION_KEY,
+                "blocked",
+                &note,
+                "agent",
+            )
+            .await;
+            let _ = events::record_tag(
+                db,
+                bus,
+                branch_id,
+                tags::ATTENTION_KEY,
+                "blocked",
+                &note,
+                "agent",
+            )
+            .await;
+        }
     }
 
     // Advance the watermark past our own freshly-recorded events so the next
@@ -462,6 +641,10 @@ mod tests {
             acp_inflight: None,
             current_mode: None,
             pending_prompt: None,
+            origin: "user".to_string(),
+            class: "interactive".to_string(),
+            turn_count: 0,
+            tracking_issue_id: None,
         }
     }
 
@@ -488,6 +671,63 @@ mod tests {
         // An unparseable timestamp is treated as not stale rather than panicking.
         let bad = session_with_activity(Some("not-a-time"), "also-bad");
         assert!(!is_stale(&bad, 0, now));
+    }
+
+    #[test]
+    fn reap_decision_triggers_and_guards() {
+        use super::{reap_decision, ReapReason, REAP_GRACE_SECS};
+        let now = Utc::now();
+        let iso = |t: chrono::DateTime<Utc>| t.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+        let long_ago = iso(now - Duration::hours(9));
+        let ttl = 28800; // the 8h default
+
+        let mut idle = session_with_activity(Some(&long_ago), &long_ago);
+        idle.class = "automation".to_string();
+
+        // Past the TTL → IdleTtl; a closed tracking issue wins even with the
+        // TTL disabled; neither trigger without a closed issue and TTL off.
+        assert_eq!(
+            reap_decision(&idle, false, ttl, now),
+            Some(ReapReason::IdleTtl)
+        );
+        assert_eq!(
+            reap_decision(&idle, true, 0, now),
+            Some(ReapReason::IssueClosed)
+        );
+        assert_eq!(reap_decision(&idle, false, 0, now), None);
+
+        // Past the grace window but under the TTL: kept on the TTL axis, but a
+        // closed tracking issue still reaps it.
+        let mid = iso(now - Duration::seconds(REAP_GRACE_SECS + 60));
+        let mut settled = session_with_activity(Some(&mid), &mid);
+        settled.class = "automation".to_string();
+        assert_eq!(reap_decision(&settled, false, ttl, now), None);
+        assert_eq!(
+            reap_decision(&settled, true, ttl, now),
+            Some(ReapReason::IssueClosed)
+        );
+
+        // The shared guard: recent activity or a live ACP turn blocks BOTH
+        // triggers — archive destroys the worktree.
+        let fresh_at = iso(now - Duration::minutes(5));
+        let mut fresh = session_with_activity(Some(&fresh_at), &fresh_at);
+        fresh.class = "automation".to_string();
+        assert_eq!(reap_decision(&fresh, true, ttl, now), None);
+        let mut inflight = idle.clone();
+        inflight.acp_inflight = Some("{}".to_string());
+        assert_eq!(reap_decision(&inflight, true, ttl, now), None);
+
+        // Not a candidate: interactive class, warm (watch-managed), or already
+        // in a terminal status.
+        let mut interactive = idle.clone();
+        interactive.class = "interactive".to_string();
+        assert_eq!(reap_decision(&interactive, true, ttl, now), None);
+        let mut warm = idle.clone();
+        warm.managed_by = Some("w1".to_string());
+        assert_eq!(reap_decision(&warm, true, ttl, now), None);
+        let mut archived = idle.clone();
+        archived.status = "archived".to_string();
+        assert_eq!(reap_decision(&archived, true, ttl, now), None);
     }
 
     #[test]
@@ -551,6 +791,9 @@ mod tests {
                 managed_by: None,
                 created_by: None,
                 protocol: protocol.to_string(),
+                origin: "user".to_string(),
+                class: "interactive".to_string(),
+                tracking_issue_id: None,
             },
         )
         .await

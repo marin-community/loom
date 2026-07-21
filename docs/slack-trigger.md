@@ -103,7 +103,7 @@ Two gates, both deny-by-default:
   installed workspace:
 
   ```sh
-  weaver config set slack.allowed_users "U0123ABCD U0456EFGH"
+  loom config set slack.allowed_users "U0123ABCD U0456EFGH"
   ```
 
   Also settable in **Settings → Slack**. Membership in a channel or workspace
@@ -123,7 +123,7 @@ Without a prefix, loom falls back to **`slack.default_repo`**, since a Slack
 conversation has no repo of its own the way a GitHub issue does:
 
 ```sh
-weaver config set slack.default_repo "acme/web"
+loom config set slack.default_repo "acme/web"
 ```
 
 With neither, the trigger replies asking for one rather than guessing.

@@ -133,8 +133,8 @@ enum Cmd {
 
     /// The typed `loom.toml` `loom setup` writes and everything derived from
     /// it, plus `set` — a direct-to-sqlite write of the daemon's own runtime
-    /// `settings` table (the same keys `weaver config set` exposes over
-    /// HTTP), with no server required.
+    /// `settings` table (the keys the settings pane exposes over HTTP), with
+    /// no server required.
     ///
     /// `loom.toml` is the single authored source of truth for every
     /// credential/setting — the shared contract a deploy (e.g. the GCP
@@ -479,7 +479,7 @@ struct ConfigPathOpts {
 /// one to override a single invocation without editing the file.
 ///
 /// `set` is a different contract — the runtime `settings` table
-/// (`weaver_core::config::REGISTRY`, the same one `weaver config set` writes
+/// (`weaver_core::config::REGISTRY`, the same one the settings pane writes
 /// over HTTP) rather than `loom.toml` — written straight to the daemon's
 /// sqlite database with no server needed. This is what
 /// `deploy/standalone/docker-compose.yml`'s `loom-init` uses to seed the
@@ -494,7 +494,7 @@ enum ConfigCmd {
     /// echoes a value.
     PushSecrets(PushSecretsOpts),
     /// Set a runtime setting directly in the sqlite `settings` table — no
-    /// running server needed (unlike `weaver config set`, which needs one).
+    /// running server needed.
     Set {
         /// Dotted key, e.g. `auth.cookie_secure` (see the settings pane, or
         /// `weaver_core::config::REGISTRY`, for the full list).
@@ -1584,9 +1584,9 @@ async fn run_config(cmd: ConfigCmd) -> Result<()> {
 
 /// `loom config set` — write one runtime setting straight into the sqlite
 /// `settings` table, no running server needed. The direct-db counterpart to
-/// `weaver config set`, which does the same thing over `PATCH /api/settings`
-/// against a running daemon — the form a deploy's boot sequence needs, since
-/// it must seed the auth settings *before* loom starts listening.
+/// the settings pane's `PATCH /api/settings` against a running daemon — the
+/// form a deploy's boot sequence needs, since it must seed the auth settings
+/// *before* loom starts listening.
 async fn cmd_config_set(key: String, value: String) -> Result<()> {
     if let Err(why) = weaver_core::config::validate(&key, &value) {
         bail!("{key}: {why}");

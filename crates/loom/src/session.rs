@@ -81,10 +81,36 @@ pub struct Session {
     /// NULL (an `Option` only because a legacy row may still hold NULL; treat
     /// `None` and `Some("")` identically). See [`take_pending_prompt`].
     pub pending_prompt: Option<String>,
+    /// How this session came to exist: `"user"` (hand-launched), `"agent"`
+    /// (delegated by another session), `"github"` / `"slack"` (chat triggers),
+    /// `"watch"` (engine infrastructure). Stamped once at create, never
+    /// re-derived.
+    #[serde(default = "default_origin")]
+    pub origin: String,
+    /// Presentation tier: `"interactive"` fleet work or `"automation"`
+    /// machinery, which the default fleet listing hides. Derived from `origin`
+    /// at create (watch/actions/ops → automation), overridable per request.
+    #[serde(default = "default_class")]
+    pub class: String,
+    /// Completed agent turns on this session, advanced at each turn boundary
+    /// via [`increment_turn_count`].
+    #[serde(default)]
+    pub turn_count: i64,
+    /// The weaver issue opened (or claimed) as this session's tracker at
+    /// launch, or `None` when the launch tracked nothing.
+    pub tracking_issue_id: Option<i64>,
 }
 
 fn default_protocol() -> String {
     "terminal".to_string()
+}
+
+fn default_origin() -> String {
+    "user".to_string()
+}
+
+fn default_class() -> String {
+    "interactive".to_string()
 }
 
 /// Session **lifecycle** states — the mechanical, orchestrator-owned axis: is
@@ -128,6 +154,13 @@ pub struct NewSession {
     /// Execution backend, stamped once at create from the resolved agent/override
     /// and immutable thereafter: `"terminal"` or `"acp"`. See [`Session::protocol`].
     pub protocol: String,
+    /// How this session came to exist. See [`Session::origin`].
+    pub origin: String,
+    /// `"interactive"` or `"automation"`. See [`Session::class`].
+    pub class: String,
+    /// The tracking issue opened/claimed for this session's task at launch, or
+    /// `None` when there is nothing to track. See [`Session::tracking_issue_id`].
+    pub tracking_issue_id: Option<i64>,
 }
 
 pub async fn insert(db: &Db, s: &NewSession) -> Result<Session> {
@@ -141,8 +174,8 @@ pub async fn insert(db: &Db, s: &NewSession) -> Result<Session> {
         "INSERT INTO sessions
          (id, branch_id, work_dir, term_session, agent_kind, model, effort, status,
           github_repo, parent_branch_id, managed_by, created_by, protocol,
-          last_activity_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          origin, class, tracking_issue_id, last_activity_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&s.id)
     .bind(&s.branch_id)
@@ -157,6 +190,9 @@ pub async fn insert(db: &Db, s: &NewSession) -> Result<Session> {
     .bind(&s.managed_by)
     .bind(&s.created_by)
     .bind(protocol)
+    .bind(&s.origin)
+    .bind(&s.class)
+    .bind(s.tracking_issue_id)
     .bind(&now)
     .bind(&now)
     .execute(db)
@@ -183,11 +219,14 @@ pub async fn get(db: &Db, id: &str) -> Result<Option<Session>> {
     Ok(row)
 }
 
-/// The active (non-terminal) session for a branch, if any.
+/// The active (non-terminal) session for a branch, if any. Archived counts as
+/// terminal here — an archived session keeps its history row but no longer
+/// occupies the branch slot — matching the `idx_sessions_active_branch`
+/// predicate.
 pub async fn active_for_branch(db: &Db, branch_id: &str) -> Result<Option<Session>> {
     let row = sqlx::query_as::<_, Session>(
         "SELECT * FROM sessions
-         WHERE branch_id = ? AND status NOT IN ('done', 'error')
+         WHERE branch_id = ? AND status NOT IN ('done', 'error', 'archived')
          ORDER BY created_at DESC
          LIMIT 1",
     )
@@ -281,6 +320,21 @@ pub async fn set_status(db: &Db, id: &str, status: &str) -> Result<()> {
         "session status changed"
     );
     Ok(())
+}
+
+/// Count one completed agent turn: increment [`Session::turn_count`] and return
+/// the new total. Called at each turn boundary (the monitor's terminal turn
+/// detection, the ACP task's turn end).
+pub async fn increment_turn_count(db: &Db, id: &str) -> Result<i64> {
+    sqlx::query("UPDATE sessions SET turn_count = turn_count + 1 WHERE id = ?")
+        .bind(id)
+        .execute(db)
+        .await?;
+    let count: i64 = sqlx::query_scalar("SELECT turn_count FROM sessions WHERE id = ?")
+        .bind(id)
+        .fetch_one(db)
+        .await?;
+    Ok(count)
 }
 
 /// Mark a live session orphaned after its terminal disappears.
@@ -576,6 +630,9 @@ mod tests {
             managed_by: managed_by.map(str::to_string),
             created_by: None,
             protocol: "terminal".to_string(),
+            origin: "user".to_string(),
+            class: "interactive".to_string(),
+            tracking_issue_id: None,
         }
     }
 

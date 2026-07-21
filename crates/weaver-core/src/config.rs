@@ -20,7 +20,7 @@ pub const DEFAULT_AGENT_EFFORT: &str = "";
 /// value directly; Codex maps it onto its own mode vocabulary at launch.
 pub const DEFAULT_AGENT_MODE: &str = "auto";
 /// Whether the server adopts orphaned sessions on startup. Off by default:
-/// the operator opts in via `weaver config set server.auto_adopt true`.
+/// the operator opts in via `loom config set server.auto_adopt true`.
 pub const DEFAULT_AUTO_ADOPT: bool = false;
 /// Whether loom polls GitHub (via the `gh` CLI) for each session's PR, review,
 /// and check status. On by default, but a no-op wherever `gh` is missing.
@@ -385,6 +385,33 @@ pub const REGISTRY: &[SettingSpec] = &[
         options: &[],
     },
     SettingSpec {
+        key: "automation.turn_cap",
+        label: "Turn cap",
+        description: "Cap on agent turns for an automation-class session (one \
+            turn per `working` edge). Past the cap the session's branch is \
+            marked `blocked` and no new ACP turn is started — an in-flight turn \
+            is never interrupted. Warm (watch-managed) sessions are exempt. \
+            0 disables the cap.",
+        kind: SettingKind::Int,
+        default: "100",
+        group: "Automation",
+        options: &[],
+    },
+    SettingSpec {
+        key: "automation.idle_archive_secs",
+        label: "Idle archive (seconds)",
+        description: "Idle TTL for an automation-class session: once it has \
+            gone this long without any activity (and has no live turn), the \
+            retention reaper archives it — tearing down the terminal and \
+            worktree while keeping the branch and its history. Warm \
+            (watch-managed) sessions are exempt. 0 disables the TTL; a closed \
+            tracking issue still archives the session.",
+        kind: SettingKind::Int,
+        default: "28800",
+        group: "Automation",
+        options: &[],
+    },
+    SettingSpec {
         key: "ide.enabled",
         label: "Enable embedded editor",
         description: "Master switch for the per-session embedded VS Code \
@@ -477,6 +504,16 @@ pub const DEFAULT_WATCH_ADOPT_WARM: bool = true;
 /// How many seconds a non-terminal session may be idle before the monitor emits
 /// a one-shot `stale` event. 30 minutes by default.
 pub const DEFAULT_WATCH_STALE_AFTER_SECS: i64 = 1800;
+
+/// Cap on agent turns for an automation-class session (one turn per `working`
+/// edge). Past the cap the branch is marked `blocked` and no new ACP turn is
+/// started. 0 disables the cap.
+pub const DEFAULT_AUTOMATION_TURN_CAP: i64 = 100;
+
+/// Idle TTL after which the retention reaper archives an automation-class
+/// session (8 hours). 0 disables the TTL trigger; a closed tracking issue
+/// still archives the session.
+pub const DEFAULT_AUTOMATION_IDLE_ARCHIVE_SECS: i64 = 28800;
 
 /// Look up the [`SettingSpec`] for a key, if it is a registered setting.
 pub fn spec(key: &str) -> Option<&'static SettingSpec> {

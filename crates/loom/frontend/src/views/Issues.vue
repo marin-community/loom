@@ -2,7 +2,7 @@
 import { ref, reactive, computed, nextTick, onMounted, onActivated } from 'vue';
 import { useRouter } from 'vue-router';
 import {
-  get,
+  listSessions,
   listIssues,
   createRepoIssue,
   patchIssue,
@@ -40,6 +40,10 @@ const error = ref('');
 // Client-side filters over the full (all-status) fetch — at fleet scale the
 // whole board is a cheap single GET, so toggles never re-hit the server.
 const showClosed = ref(false);
+// Issues claimed by an automation-class session (a background agent/watch/
+// trigger, not a person) are hidden by default — same shape as showClosed —
+// so the board reads as the human backlog unless asked to widen.
+const showAutomation = ref(false);
 const search = ref('');
 const repoFilter = ref('');
 
@@ -56,12 +60,13 @@ const busy = reactive<Record<number, boolean>>({});
 
 async function load() {
   try {
-    // Fetch everything (including closed issues / archived sessions) once;
-    // `showClosed` filters client-side, and archived sessions still reference
-    // their issues. The API hides archived by default, so ask for them.
+    // Fetch everything (including closed issues, archived sessions, and
+    // automation-claimed issues/sessions) once; `showClosed`/`showAutomation`
+    // filter client-side. The API hides archived and automation by default, so
+    // ask for both.
     const [iss, ses] = await Promise.all([
-      listIssues(true),
-      get('/sessions?archived=true') as Promise<Session[]>,
+      listIssues({ all: true, automation: true }),
+      listSessions({ archived: true, automation: true }),
     ]);
     issues.value = iss;
     sessions.value = ses;
@@ -192,6 +197,7 @@ const visible = computed(() => {
   const q = search.value.trim().toLowerCase();
   return issues.value.filter((i) => {
     if (!showClosed.value && i.status !== 'open') return false;
+    if (!showAutomation.value && isAutomationClaimed(i)) return false;
     if (repoFilter.value && i.repo_root !== repoFilter.value) return false;
     if (!q) return true;
     const hay = [`#${i.id}`, i.title, i.body, ...i.tags.map((t) => `${t.key} ${t.value}`)]
@@ -217,6 +223,22 @@ const sessionsByBranch = computed(() => {
   }
   return m;
 });
+
+// An issue is automation-claimed when the session *currently* working its
+// branch (`claimed_branch`) is automation-class — the branch's active session
+// if one exists, else its most recently created. Archiving frees the branch
+// slot, so an archived automation run must not hide an issue a person has
+// since picked up on the re-let branch. Mirrors the server's own default-hide
+// rule (`GET /api/issues`).
+function isAutomationClaimed(i: Issue): boolean {
+  if (!i.claimed_branch) return false;
+  const held = sessionsByBranch.value.get(`${i.repo_root}\0${i.claimed_branch}`) ?? [];
+  const active = (s: Session) => !['done', 'error', 'archived'].includes(s.status);
+  const holder = [...held].sort(
+    (a, b) => Number(active(b)) - Number(active(a)) || b.created_at.localeCompare(a.created_at),
+  )[0];
+  return holder?.class === 'automation';
+}
 
 // Sessions that reference an issue: the branch working it (claimed) and the
 // branch it came from (source), matched against the live session list by
@@ -377,6 +399,15 @@ async function removeTag(i: Issue, key: string) {
             data-testid="issues-show-closed"
           />
           Show closed
+        </label>
+        <label class="flex items-center gap-1.5 text-xs text-muted">
+          <input
+            v-model="showAutomation"
+            type="checkbox"
+            class="accent-accent"
+            data-testid="issues-show-automation"
+          />
+          Show automation
         </label>
         <button
           type="button"

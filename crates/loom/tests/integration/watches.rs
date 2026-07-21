@@ -1364,6 +1364,9 @@ async fn insert_managed_session(
             managed_by: Some(watch_id.to_string()),
             created_by: None,
             protocol: "terminal".to_string(),
+            origin: "watch".to_string(),
+            class: "automation".to_string(),
+            tracking_issue_id: None,
         },
     )
     .await

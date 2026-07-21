@@ -117,7 +117,8 @@ enum Cmd {
         #[arg(long)]
         event: String,
     },
-    /// Get, set, or list configuration.
+    /// Get or list configuration. Settings are written by operators via
+    /// `loom config set` or the settings pane — not from here.
     Config {
         #[command(subcommand)]
         cmd: ConfigCmd,
@@ -321,10 +322,6 @@ enum ArtifactCmd {
 enum ConfigCmd {
     /// Print one setting's value.
     Get { key: String },
-    /// Set a setting.
-    Set { key: String, value: String },
-    /// Clear a setting, restoring its default.
-    Rm { key: String },
     /// List every setting and its value.
     Ls,
 }
@@ -1795,18 +1792,6 @@ async fn cmd_config(cmd: ConfigCmd) -> Result<()> {
                 Some(s) => println!("{}", s.value),
                 None => bail!("no setting '{key}' — see `weaver config ls`"),
             }
-        }
-        ConfigCmd::Set { key, value } => {
-            let mut changes = serde_json::Map::new();
-            changes.insert(key.clone(), json!(value));
-            client.patch_settings(changes).await?;
-            println!("set {key}");
-        }
-        ConfigCmd::Rm { key } => {
-            let mut changes = serde_json::Map::new();
-            changes.insert(key.clone(), Value::Null);
-            client.patch_settings(changes).await?;
-            println!("removed {key}");
         }
     }
     Ok(())

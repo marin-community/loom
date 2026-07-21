@@ -61,6 +61,8 @@ use crate::db::{now_iso, Db};
 use crate::session;
 use crate::web::AppState;
 use weaver_api::{AcpCost, AcpUsage};
+use weaver_core::config as core_config;
+use weaver_core::tags;
 use wire::{
     method, Incoming, IncomingKind, PermissionOption, RequestPermissionParams, SessionNotification,
     SessionUpdate, ToolCall, ToolCallContent, ToolCallLocation,
@@ -358,6 +360,20 @@ impl AcpRegistry {
         if inner.map.get(session_id).map(|(g, _)| *g) == Some(generation) {
             inner.map.remove(session_id);
         }
+    }
+
+    /// Whether `generation` is still the registered task for `session_id`.
+    /// `stop` drops the handle without aborting the task future, so a stopped
+    /// or superseded task can linger on a final turn boundary; it must not
+    /// consume shared durable state (the prompt queue) its successor owns.
+    fn is_current(&self, session_id: &str, generation: u64) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .map
+            .get(session_id)
+            .map(|(g, _)| *g)
+            == Some(generation)
     }
 }
 
@@ -1455,6 +1471,17 @@ impl Task {
     }
 
     async fn dispatch_pending_prompt(&mut self) {
+        // A lingering superseded task's deferred turn boundary can fire after a
+        // handoff has re-let the session; letting it drain the queue would lose
+        // the prompt against its dead relay.
+        if !self.registry.is_current(&self.session_id, self.generation) {
+            return;
+        }
+        // The cap gate runs before the durable queue is consumed, so a refused
+        // dispatch keeps the prompt queued and visible instead of dropping it.
+        if self.refuse_if_turn_capped().await.is_err() {
+            return;
+        }
         // Consuming the durable copy is a precondition for dispatch. Starting a
         // turn after a failed clear leaves the same text eligible at every later
         // boundary and turns one SQLite error into an unbounded replay loop.
@@ -1627,6 +1654,11 @@ impl Task {
     }
 
     async fn start_pending_prompt(&mut self, by: Option<String>) -> Result<PromptAck> {
+        if !self.registry.is_current(&self.session_id, self.generation) {
+            bail!("session task was superseded");
+        }
+        // Gate before consuming the durable copy so a capped session keeps it.
+        self.refuse_if_turn_capped().await?;
         let pending = session::take_pending_prompt(&self.db, &self.session_id)
             .await?
             .ok_or_else(|| anyhow!("there is no queued feedback to send"))?;
@@ -1724,6 +1756,66 @@ impl Task {
             .await
     }
 
+    /// Refuse to open a new turn once an automation-class session has spent its
+    /// `automation.turn_cap` turns: make sure the branch carries the loud
+    /// `blocked` attention tag (recorded on the bus so it lands on SSE) and
+    /// return the refusal as an error. Warm (watch-managed) sessions are exempt
+    /// infrastructure and 0 disables the cap. Only *new* turns are gated — an
+    /// in-flight turn is never interrupted. Best-effort reads: a lookup failure
+    /// never blocks a turn.
+    async fn refuse_if_turn_capped(&self) -> Result<()> {
+        let Some(session) = session::get(&self.db, &self.session_id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return Ok(());
+        };
+        if session.class != "automation" || session.managed_by.is_some() {
+            return Ok(());
+        }
+        let cap = core_config::get(&self.db, "automation.turn_cap")
+            .await
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(core_config::DEFAULT_AUTOMATION_TURN_CAP);
+        if cap <= 0 || session.turn_count < cap {
+            return Ok(());
+        }
+        let note = format!("turn cap ({cap}) reached");
+        tracing::info!(
+            session = %self.session_id,
+            turn_count = session.turn_count,
+            "refusing new acp turn: {note}"
+        );
+        let already_blocked = tags::get(&self.db, &session.branch_id, tags::ATTENTION_KEY)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|t| t.value == "blocked");
+        if !already_blocked {
+            let _ = tags::set(
+                &self.db,
+                &session.branch_id,
+                tags::ATTENTION_KEY,
+                "blocked",
+                &note,
+                "agent",
+            )
+            .await;
+            let _ = crate::events::record_tag(
+                &self.db,
+                &self.bus,
+                &session.branch_id,
+                tags::ATTENTION_KEY,
+                "blocked",
+                &note,
+                "agent",
+            )
+            .await;
+        }
+        bail!("{note}")
+    }
+
     async fn start_turn_with_block(
         &mut self,
         text: String,
@@ -1731,6 +1823,9 @@ impl Task {
         opening_kind: &str,
         opening_payload: Value,
     ) -> Result<()> {
+        // The cap gate sits before any turn state advances, so a refusal leaves
+        // the counters, the journal, and any queued prompt untouched.
+        self.refuse_if_turn_capped().await?;
         if self.turns_dispatched > 0 {
             self.current_turn += 1;
             self.next_seq = 0;

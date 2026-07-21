@@ -67,7 +67,27 @@ function setFilter(f: AttentionFilter) {
 // so the list never reads as empty while archived rows exist.
 const showArchived = ref(false);
 
-const archivedCount = computed(() => sessions.value.filter((s) => s.status === 'archived').length);
+// Automation-class sessions (agent/github/slack/watch/actions/ops launched —
+// see docs/loom-ui.md) are a background fleet, not the one a person is minding.
+// Hidden by default, same shape as the archived toggle below: a reveal chip
+// brings them back as ordinary cards (see the origin pill on the row).
+const showAutomation = ref(false);
+const automationCount = computed(
+  () => sessions.value.filter((s) => s.class === 'automation').length,
+);
+
+// The automation-aware base: every session when the toggle is on, else the
+// fleet minus automation-class rows. Everything downstream (archived count,
+// visible rows, filter-pill counts) reads through this so automation stays
+// fully invisible — not just hidden from the list, but from the tallies too —
+// until a person asks to see it.
+const filteredBase = computed<Session[]>(() =>
+  showAutomation.value ? sessions.value : sessions.value.filter((s) => s.class !== 'automation'),
+);
+
+const archivedCount = computed(
+  () => filteredBase.value.filter((s) => s.status === 'archived').length,
+);
 
 // The archived-aware, filtered set to display (membership only — the tree below
 // imposes the order). Archived rows are hidden by default; a reveal chip brings
@@ -77,7 +97,7 @@ const archivedCount = computed(() => sessions.value.filter((s) => s.status === '
 // contains attention floats up (see treeRows), and attention rows carry their
 // loud signal chip, so they stay easy to spot.
 const visibleSessions = computed<Session[]>(() => {
-  const all = sessions.value;
+  const all = filteredBase.value;
   const live = all.filter((s) => s.status !== 'archived');
   const base = showArchived.value || live.length === 0 ? all : live;
   if (filter.value === 'attention') return base.filter((s) => effectiveAttention(s).level !== 'ok');
@@ -85,12 +105,13 @@ const visibleSessions = computed<Session[]>(() => {
   return base;
 });
 
-// Counts reflect the full fleet (NOT the archived-hidden view) so the filter
-// chips read the true picture; effectiveAttention() already forces archived → ok
-// and ignores stale watch marks, keeping "needs attention" honest.
+// Counts reflect the full fleet (NOT the archived-hidden view, but automation-
+// aware) so the filter chips read the true picture; effectiveAttention()
+// already forces archived → ok and ignores stale watch marks, keeping "needs
+// attention" honest.
 const counts = computed(() => {
-  const c = { all: sessions.value.length, attention: 0, ok: 0 };
-  for (const s of sessions.value) {
+  const c = { all: filteredBase.value.length, attention: 0, ok: 0 };
+  for (const s of filteredBase.value) {
     if (effectiveAttention(s).level === 'ok') c.ok += 1;
     else c.attention += 1; // 'attention' and 'blocked' both need a human
   }
@@ -393,7 +414,7 @@ async function handleCreated() {
            Each segment pairs a label with its count in a small pill so the
            number reads as a count, not a suffix glued to the word. -->
       <div
-        v-if="sessions.length"
+        v-if="filteredBase.length"
         class="inline-flex overflow-hidden rounded border border-line text-xs"
       >
         <button
@@ -434,6 +455,22 @@ async function handleCreated() {
         {{ showArchived ? 'Hide' : 'Show' }} {{ archivedCount }} archived
       </button>
 
+      <!-- Automation-class sessions live below the fold too: same anatomy as
+           the archived chip, right alongside it. -->
+      <button
+        v-if="automationCount"
+        type="button"
+        :aria-pressed="showAutomation"
+        data-testid="automation-toggle"
+        :class="[
+          'rounded border border-line px-2.5 py-1 text-xs text-muted transition-colors',
+          showAutomation ? 'bg-subtle text-fg' : 'bg-input hover:bg-subtle',
+        ]"
+        @click="showAutomation = !showAutomation"
+      >
+        {{ showAutomation ? 'Hide' : 'Show' }} {{ automationCount }} automation
+      </button>
+
       <!-- Toggles the create form. Closed → primary (accent) call-to-action;
            open → a neutral "Cancel" so it never reads as a second primary
            action competing with the form's own Create button. -->
@@ -468,7 +505,7 @@ async function handleCreated() {
     </div>
 
     <div
-      v-if="!sessions.length"
+      v-if="!filteredBase.length"
       class="rounded-md border border-dashed border-line p-6 text-center"
     >
       <p class="text-sm text-muted">No sessions yet.</p>
@@ -495,7 +532,7 @@ async function handleCreated() {
     <!-- Every session is resting — the live list is empty but the fleet isn't.
          Point at the shelf below rather than reading as "no sessions". -->
     <p
-      v-if="sessions.length && !liveRows.length"
+      v-if="filteredBase.length && !liveRows.length"
       class="rounded-md border border-dashed border-line px-4 py-3 text-center font-serif text-[13px] italic text-muted"
     >
       All sessions are resting on the shelf below.
@@ -576,6 +613,17 @@ async function handleCreated() {
             >
               {{ s.branch.title || s.branch.name }}
             </router-link>
+            <!-- Origin: the automation surface that launched this session
+                 (github, slack, watch, actions, ops) — a quiet identity pill,
+                 shown only for a non-human origin so an ordinary session
+                 (`user`) stays unmarked. -->
+            <span
+              v-if="s.origin && s.origin !== 'user'"
+              class="tag-pill"
+              data-testid="origin-pill"
+              :title="`origin: ${s.origin}`"
+              >{{ s.origin }}</span
+            >
             <!-- Loud signals: the agent's `attention` and a watch's
                  `triage`, each a deletable chip. The × clears that tag (calm is
                  its absence) — there is no separate "Mark OK" verb. -->
@@ -758,6 +806,13 @@ async function handleCreated() {
               >
                 {{ s.branch.title || s.branch.name }}
               </router-link>
+              <span
+                v-if="s.origin && s.origin !== 'user'"
+                class="tag-pill"
+                data-testid="origin-pill"
+                :title="`origin: ${s.origin}`"
+                >{{ s.origin }}</span
+              >
               <span class="meta-chip !text-[10px] uppercase tracking-wide text-info">{{
                 parkLabel(s)
               }}</span>

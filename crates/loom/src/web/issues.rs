@@ -27,6 +27,19 @@ pub(super) struct IssueListQuery {
     all: bool,
 }
 
+/// Query for the cross-repo board: `all` as above, plus the automation opt-in
+/// mirroring `GET /api/sessions?automation=true`.
+#[derive(Debug, Deserialize)]
+pub(super) struct AllIssuesQuery {
+    #[serde(default)]
+    all: bool,
+    /// Include issues claimed by an automation-class session's branch. Defaults
+    /// to `false` — the board shows the work of the interactive fleet, not the
+    /// trackers its machinery opens for itself.
+    #[serde(default)]
+    automation: bool,
+}
+
 /// Build an [`IssueView`] for an issue, gathering its tags (a separate query).
 async fn issue_view(db: &Db, issue: Issue) -> ApiResult<IssueView> {
     let tags = weaver_core::issue::list_tags(db, issue.id).await?;
@@ -45,9 +58,37 @@ async fn issue_views(db: &Db, issues: Vec<Issue>) -> ApiResult<Vec<IssueView>> {
 /// Every issue across every repo — the loom dashboard's cross-repo issue board.
 pub(super) async fn list_all_issues(
     State(st): State<AppState>,
-    Query(q): Query<IssueListQuery>,
+    Query(q): Query<AllIssuesQuery>,
 ) -> ApiResult<Json<Vec<IssueView>>> {
-    let issues = weaver_core::issue::list_all(&st.db, q.all).await?;
+    let mut issues = weaver_core::issue::list_all(&st.db, q.all).await?;
+    if !q.automation {
+        // Branches whose *current* claim-holder is an automation-class session,
+        // as (repo_root, branch) pairs — issues key their claim by branch name,
+        // not branch id. The holder is the branch's active session if one
+        // exists, else its most recently created: archiving frees the branch
+        // slot, so an archived automation run must not hide an issue a person
+        // has since picked up on the re-let branch, while a reaped run with no
+        // successor keeps its issue off the default board.
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT b.repo_root, b.branch FROM sessions s
+             JOIN branches b ON b.id = s.branch_id
+             WHERE s.class = 'automation'
+               AND s.id = (
+                   SELECT s2.id FROM sessions s2
+                   WHERE s2.branch_id = s.branch_id
+                   ORDER BY (s2.status NOT IN ('done', 'error', 'archived')) DESC,
+                            s2.created_at DESC
+                   LIMIT 1
+               )",
+        )
+        .fetch_all(&st.db)
+        .await?;
+        let hidden: std::collections::HashSet<(String, String)> = rows.into_iter().collect();
+        issues.retain(|i| match &i.claimed_branch {
+            Some(claimed) => !hidden.contains(&(i.repo_root.clone(), claimed.clone())),
+            None => true,
+        });
+    }
     Ok(Json(issue_views(&st.db, issues).await?))
 }
 

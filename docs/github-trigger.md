@@ -196,7 +196,7 @@ launches nothing.
   case-insensitively anywhere in a comment's prose, as a standalone mention
   ([step 4](#how-it-works)) — both `@loom rebase onto main` and `can you rebase
   this, @loom?` trigger. Settable in **Settings → GitHub** or
-  `weaver config set github.trigger_phrase "…"`.
+  `loom config set github.trigger_phrase "…"`.
 - `github.bot_login` (or `LOOM_GITHUB_BOT_LOGIN`) — a GitHub login whose own
   comments are ignored, so a bot account can post without re-triggering itself.
 

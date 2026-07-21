@@ -18,7 +18,7 @@ use crate::session::{self as session_mod, Session};
 use weaver_core::branch as branch_mod;
 
 use super::auth::public_base;
-use super::sessions::create_session_core;
+use super::sessions::{archive, create_session_core};
 use super::{ApiResult, AppError, AppState};
 
 // ---------------------------------------------------------------------------
@@ -395,38 +395,26 @@ async fn handle_trigger(
                 }
                 // The session is active in the DB but its terminal is unreachable —
                 // an orphaned session that outlived its terminal (e.g. a crash the
-                // monitor hasn't marked yet). Retire it with a terminal status so the
-                // branch is free — `error`, not `archived`, because `active_for_branch`
-                // still counts `archived` as active and `create_session_core` would
-                // then reject the branch as busy. Then fall through to launch a fresh
-                // session: the trigger goal already carries this comment and the dead
-                // session's commits are on the branch, so nothing is dropped. The
-                // fresh launch reuses the existing worktree (see `existing_branch`).
+                // monitor hasn't marked yet). Archive it — the shared teardown
+                // captures its chatlog and frees the branch slot (archived no
+                // longer counts as active) — then fall through to launch a fresh
+                // session: the trigger goal already carries this comment and the
+                // dead session's commits are on the branch, so nothing is dropped.
+                // The fresh launch re-provisions the branch's worktree (see
+                // `existing_branch`).
                 tracing::warn!(
                     session = %sess.id,
                     branch = %b.id,
                     repo = %slug.slug(),
-                    "github webhook: session terminal unreachable; retiring it and launching a fresh session"
+                    "github webhook: session terminal unreachable; archiving it and launching a fresh session"
                 );
-                if let Err(e) = session_mod::set_status(&st.db, &sess.id, "error").await {
-                    tracing::warn!(session = %sess.id, error = %e, "github webhook: retiring unreachable session failed");
+                if let Err(e) = archive(&st, &sess, &b).await {
+                    tracing::warn!(session = %sess.id, error = ?e, "github webhook: archiving unreachable session failed");
                     return Err(format!(
-                        "retiring unreachable session {} failed: {e}",
+                        "archiving unreachable session {} failed: {e:?}",
                         sess.id
                     ));
                 }
-                crate::events::record(
-                    &st.db,
-                    &st.bus,
-                    &b.id,
-                    "status",
-                    serde_json::json!({
-                        "status": "error",
-                        "reason": "terminal unreachable when forwarding a new @loom comment; relaunching",
-                    }),
-                )
-                .await
-                .ok();
             }
         }
     }
@@ -455,7 +443,7 @@ async fn handle_trigger(
             req.name = Some(format!("issue-{number}"));
         }
     }
-    let view = match create_session_core(st.clone(), req, Some(username)).await {
+    let view = match create_session_core(st.clone(), req, Some(username), "github").await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(repo = %slug.slug(), error = ?e, "github webhook: session create failed");

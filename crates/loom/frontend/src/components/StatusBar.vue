@@ -12,7 +12,12 @@ import { useFleet } from '../lib/sessionsStore';
 const { sessions, online } = useFleet();
 const clock = ref('');
 
-const live = computed(() => sessions.value.filter((s) => s.status !== 'archived'));
+// Automation-class sessions (agent/github/slack/watch/actions/ops launched)
+// stay out of the fleet vitals by default, same as archived — a background
+// session shouldn't move the "N sessions" count a person reads at a glance.
+const live = computed(() =>
+  sessions.value.filter((s) => s.status !== 'archived' && s.class !== 'automation'),
+);
 const needsMe = computed(
   () => live.value.filter((s) => effectiveAttention(s).level !== 'ok').length,
 );

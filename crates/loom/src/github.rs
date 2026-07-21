@@ -1298,6 +1298,9 @@ mod tests {
                 managed_by: None,
                 created_by: None,
                 protocol: "terminal".to_string(),
+                origin: "user".to_string(),
+                class: "interactive".to_string(),
+                tracking_issue_id: None,
             },
         )
         .await

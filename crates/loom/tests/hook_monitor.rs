@@ -161,6 +161,22 @@ async fn hook_event_drives_session_status() {
         got, "running",
         "monitor should have flipped status to running"
     );
+    // The same `working` edge counts one agent turn. The hookless shell agent
+    // is `running` from create, so the status poll above can return before the
+    // monitor tick that drains the hook row — poll the count separately.
+    let mut turns = 0;
+    for _ in 0..40 {
+        turns = session_mod::get(&pool, &id)
+            .await
+            .unwrap()
+            .unwrap()
+            .turn_count;
+        if turns == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(turns, 1, "a working hook counts one turn");
 
     // A `waiting` hook (a quiet lull) stamps the soothing, *quiet* `idle` mark —
     // the calm "resting, no one needed" state, never the loud `attention` axis,
@@ -207,5 +223,106 @@ async fn hook_event_drives_session_status() {
     assert!(
         kinds.contains(&"hook"),
         "events should include a hook row: {kinds:?}"
+    );
+}
+
+/// Seed a branch + session of the given `class` / `managed_by` and return the
+/// branch id. Class rides a direct UPDATE: launch paths own the column's
+/// provenance, and this test only needs the stored value.
+async fn seed_classed_session(
+    db: &loom::db::Db,
+    id: &str,
+    branch_name: &str,
+    class: &str,
+    managed_by: Option<&str>,
+) -> String {
+    let branch = weaver_core::branch::upsert(db, "/r", branch_name, "main")
+        .await
+        .unwrap();
+    session_mod::insert(
+        db,
+        &session_mod::NewSession {
+            id: id.to_string(),
+            branch_id: branch.id.clone(),
+            work_dir: "/w".to_string(),
+            term_session: format!("weaver-{id}"),
+            agent_kind: "claude".to_string(),
+            model: String::new(),
+            effort: String::new(),
+            status: "running".to_string(),
+            github_repo: None,
+            parent_branch_id: None,
+            managed_by: managed_by.map(str::to_string),
+            created_by: None,
+            protocol: "acp".to_string(),
+            origin: "user".to_string(),
+            class: "interactive".to_string(),
+            tracking_issue_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE sessions SET class = ? WHERE id = ?")
+        .bind(class)
+        .bind(id)
+        .execute(db)
+        .await
+        .unwrap();
+    branch.id
+}
+
+/// Exceeding `automation.turn_cap` on an automation-class session marks the
+/// branch `blocked`; warm (watch-managed) sessions are exempt. Drives the same
+/// `promote_lifecycle` path the hook consumer uses, via the ACP entry point —
+/// no server or monitor sleeps needed.
+#[tokio::test]
+async fn turn_cap_blocks_automation_session() {
+    let pool = db::connect_in_memory().await.unwrap();
+    let bus = EventBus::new();
+    weaver_core::config::apply(&pool, &[("automation.turn_cap".into(), Some("1".into()))])
+        .await
+        .unwrap();
+
+    let branch_id = seed_classed_session(&pool, "cap1", "weaver/cap", "automation", None).await;
+
+    // Turn 1 is within the cap: no attention tag raised.
+    loom::monitor::record_acp_lifecycle(&pool, &bus, "cap1", "working").await;
+    let s = session_mod::get(&pool, "cap1").await.unwrap().unwrap();
+    assert_eq!(s.turn_count, 1, "working edge counts a turn");
+    assert!(
+        weaver_core::tags::get(&pool, &branch_id, weaver_core::tags::ATTENTION_KEY)
+            .await
+            .unwrap()
+            .is_none(),
+        "within the cap the attention axis stays calm"
+    );
+
+    // Turn 2 exceeds the cap: blocked, with the cap note.
+    loom::monitor::record_acp_lifecycle(&pool, &bus, "cap1", "working").await;
+    let tag = weaver_core::tags::get(&pool, &branch_id, weaver_core::tags::ATTENTION_KEY)
+        .await
+        .unwrap()
+        .expect("over the cap the branch is marked blocked");
+    assert_eq!(tag.value, "blocked");
+    assert!(
+        tag.note.contains("turn cap (1) reached"),
+        "note carries the cap: {}",
+        tag.note
+    );
+
+    // A warm (watch-managed) automation session is exempt infrastructure: the
+    // count still advances but the cap never marks it blocked.
+    let warm_branch =
+        seed_classed_session(&pool, "warm1", "weaver/warm", "automation", Some("w1")).await;
+    loom::monitor::record_acp_lifecycle(&pool, &bus, "warm1", "working").await;
+    loom::monitor::record_acp_lifecycle(&pool, &bus, "warm1", "working").await;
+    let warm = session_mod::get(&pool, "warm1").await.unwrap().unwrap();
+    assert_eq!(warm.turn_count, 2, "warm sessions still count turns");
+    assert!(
+        weaver_core::tags::get(&pool, &warm_branch, weaver_core::tags::ATTENTION_KEY)
+            .await
+            .unwrap()
+            .is_none(),
+        "warm sessions are never capped"
     );
 }

@@ -220,7 +220,7 @@ Set `server.auto_adopt` to have loom adopt every recoverable session
 automatically on startup (off by default):
 
 ```sh
-weaver config set server.auto_adopt true
+loom config set server.auto_adopt true
 ```
 
 ## GitHub
@@ -256,8 +256,8 @@ same as the Archive button. Turn either behaviour off in **Settings** or from
 the CLI:
 
 ```sh
-weaver config set github.archive_on_merge false   # keep the worktree after merge
-weaver config set github.poll false               # stop polling GitHub entirely
+loom config set github.archive_on_merge false   # keep the worktree after merge
+loom config set github.poll false               # stop polling GitHub entirely
 ```
 
 Polling is a quiet no-op for repositories without a GitHub remote, or wherever
@@ -354,18 +354,18 @@ genuinely remote callers need to present a token or log in.
 ## Configuration
 
 Settings live in the `settings` table of the sqlite database, which only
-`loom` opens directly; `weaver config` reads and writes them over the REST
-API. Each known setting is declared in a registry (`config.rs`) with a
-label, help text, type, and default.
+`loom` opens directly. `weaver config` is read-only — it fetches the current
+values over the REST API. Each known setting is declared in a registry
+(`config.rs`) with a label, help text, type, and default.
 
-Edit them in the **Settings** pane of the web UI, or from the CLI:
+Edit them in the **Settings** pane of the web UI, or write them straight to
+sqlite with `loom config set` (no running server needed):
 
 ```sh
 weaver config ls
 weaver config get agent.default
-weaver config set agent.default codex
-weaver config set agent.mode bypassPermissions
-weaver config rm agent.default
+loom config set agent.default codex
+loom config set agent.mode bypassPermissions
 ```
 
 Notable settings:

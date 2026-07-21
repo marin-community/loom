@@ -777,29 +777,47 @@ async fn orphaned_session_terminal_relaunches_instead_of_dropping() {
         200
     );
 
-    // A fresh session appears (two rows now: the retired one + the new one) and a
-    // second reply lands.
-    wait_for_sessions(&ts, 2).await;
+    // A fresh session appears, the unreachable one is archived out of the
+    // default fleet (both rows visible under `?archived=true`), and a second
+    // reply lands.
+    for _ in 0..200 {
+        let n = ts
+            .client
+            .get("/api/sessions?archived=true")
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len();
+        if n >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
     wait_for_comments(&fake, 2).await;
 
-    let sessions = ts.client.get("/api/sessions").await.unwrap();
+    let sessions = ts.client.get("/api/sessions?archived=true").await.unwrap();
     let sessions = sessions.as_array().unwrap().clone();
+    assert_eq!(sessions.len(), 2, "the archived session plus the fresh one");
     let retired = sessions
         .iter()
         .find(|s| s["id"].as_str() == Some(first_id.as_str()))
         .expect("the orphaned session is still recorded");
     assert_eq!(
         retired["status"].as_str(),
-        Some("error"),
-        "the unreachable session was retired to a terminal status so the branch is free"
+        Some("archived"),
+        "the unreachable session was archived so the branch is free"
     );
-    let fresh_id = sessions
-        .iter()
-        .find(|s| s["id"].as_str() != Some(first_id.as_str()))
-        .expect("a fresh session was launched")["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    // The default fleet shows only the fresh session.
+    let visible = ts.client.get("/api/sessions").await.unwrap();
+    let visible = visible.as_array().unwrap().clone();
+    assert_eq!(
+        visible.len(),
+        1,
+        "the archived session is hidden by default"
+    );
+    let fresh_id = visible[0]["id"].as_str().unwrap().to_string();
+    assert_ne!(fresh_id, first_id, "a fresh session was launched");
 
     // The reply is the launch cue, not a forward ack — proving a relaunch happened
     // rather than the comment being silently swallowed by the dead terminal.

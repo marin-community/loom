@@ -1,5 +1,5 @@
 import { ref } from 'vue';
-import { get } from '../api';
+import { listSessions } from '../api';
 import type { Session } from '../types';
 
 // One shared snapshot of the fleet. The session list, the status bar, and the
@@ -20,14 +20,15 @@ const online = ref(true);
 
 let inflight: Promise<void> | null = null;
 
-// Pull the whole fleet, archived included — the superset the list's archive
-// toggle needs (the status bar just filters archived out locally). Concurrent
-// callers coalesce onto the one in-flight request.
+// Pull the whole fleet, archived and automation-class sessions included — the
+// superset the list's archive/automation toggles need (the status bar and the
+// list itself just filter each out locally). Concurrent callers coalesce onto
+// the one in-flight request.
 async function refresh(): Promise<void> {
   if (inflight) return inflight;
   inflight = (async () => {
     try {
-      sessions.value = (await get('/sessions?archived=true')) as Session[];
+      sessions.value = await listSessions({ archived: true, automation: true });
       online.value = true;
     } catch {
       // Keep the last good snapshot; the status bar's offline dot says why.

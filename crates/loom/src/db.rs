@@ -49,10 +49,26 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- the midpoint of its neighbours on drag). Shares one numeric axis with the
     -- derived auto-order so manually-placed and untouched rows interleave.
     sort_order         REAL,
+    -- How this session came to exist: 'user' (hand-launched), 'agent'
+    -- (delegated by another session), 'github' / 'slack' (chat triggers),
+    -- 'watch' (engine infrastructure). Stamped once at create.
+    origin             TEXT NOT NULL DEFAULT 'user',
+    -- Presentation tier: 'interactive' fleet work or 'automation' machinery,
+    -- which the fleet listing hides unless asked. Derived from origin at create
+    -- (watch/actions/ops -> automation), overridable per request.
+    class              TEXT NOT NULL DEFAULT 'interactive',
+    -- Completed agent turns on this session, incremented at each turn boundary.
+    turn_count         INTEGER NOT NULL DEFAULT 0,
+    -- The weaver issue opened (or claimed) as this session's tracker at launch,
+    -- or NULL when the launch tracked nothing.
+    tracking_issue_id  INTEGER,
     created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
+-- Archived counts as terminal here: an archived session keeps its history row
+-- but no longer occupies the branch slot, so a fresh session can attach to the
+-- same branch.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_active_branch
-    ON sessions(branch_id) WHERE status NOT IN ('done', 'error');
+    ON sessions(branch_id) WHERE status NOT IN ('done', 'error', 'archived');
 
 CREATE TABLE IF NOT EXISTS recent_repos (
     repo_root    TEXT PRIMARY KEY,
@@ -365,6 +381,52 @@ async fn migrate_loom(pool: &Db) -> Result<()> {
         "TEXT NOT NULL DEFAULT ''",
     )
     .await?;
+    // Session provenance + class (see the `sessions` schema above). Backfilled
+    // only when the column was freshly added — the rows predating it are the
+    // ones whose origin must be reconstructed from the old heuristics: an
+    // engine-managed (warm) session is watch machinery, and a session with a
+    // recorded launcher was delegated by an agent.
+    let origin_added =
+        add_column_if_missing(pool, "sessions", "origin", "TEXT NOT NULL DEFAULT 'user'").await?;
+    add_column_if_missing(
+        pool,
+        "sessions",
+        "class",
+        "TEXT NOT NULL DEFAULT 'interactive'",
+    )
+    .await?;
+    add_column_if_missing(pool, "sessions", "turn_count", "INTEGER NOT NULL DEFAULT 0").await?;
+    add_column_if_missing(pool, "sessions", "tracking_issue_id", "INTEGER").await?;
+    if origin_added {
+        sqlx::query(
+            "UPDATE sessions SET origin = 'watch', class = 'automation'
+             WHERE managed_by IS NOT NULL",
+        )
+        .execute(pool)
+        .await
+        .context("backfilling watch session origin")?;
+        sqlx::query(
+            "UPDATE sessions SET origin = 'agent'
+             WHERE origin = 'user' AND parent_branch_id IS NOT NULL",
+        )
+        .execute(pool)
+        .await
+        .context("backfilling agent session origin")?;
+    }
+    // Recreate the one-active-session-per-branch index under its current
+    // predicate (archived no longer occupies the branch slot). `CREATE INDEX IF
+    // NOT EXISTS` above silently keeps an old definition, so drop first; the
+    // predicate indexes strictly fewer rows than any prior one, so recreation
+    // cannot conflict on existing data.
+    sqlx::query("DROP INDEX IF EXISTS idx_sessions_active_branch")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_active_branch
+         ON sessions(branch_id) WHERE status NOT IN ('done', 'error', 'archived')",
+    )
+    .execute(pool)
+    .await?;
     // The custom agent's execution backend: 'terminal' (a PTY running its launch
     // command) or 'acp' (its launch command is an ACP adapter driven over stdio).
     // Added here for databases created before the column; a fresh DB has it from
@@ -436,15 +498,17 @@ async fn rename_column_if_present(pool: &Db, table: &str, from: &str, to: &str) 
     }
 }
 
-/// Run `ALTER TABLE … ADD COLUMN`, treating an already-present column as success.
-async fn add_column_if_missing(pool: &Db, table: &str, column: &str, decl: &str) -> Result<()> {
+/// Run `ALTER TABLE … ADD COLUMN`, treating an already-present column as
+/// success. Returns whether the column was freshly added (`false` when it
+/// already existed) so a caller can gate a one-time backfill on it.
+async fn add_column_if_missing(pool: &Db, table: &str, column: &str, decl: &str) -> Result<bool> {
     let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {decl}");
     match sqlx::query(&sql).execute(pool).await {
         Ok(_) => {
             tracing::info!(%table, %column, "added column");
-            Ok(())
+            Ok(true)
         }
-        Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+        Err(e) if e.to_string().contains("duplicate column name") => Ok(false),
         Err(e) => Err(e).with_context(|| format!("adding column {table}.{column}")),
     }
 }

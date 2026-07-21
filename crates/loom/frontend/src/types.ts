@@ -94,8 +94,18 @@ export interface Session {
    *  a security boundary: the fleet stays co-owned by everyone authenticated. */
   created_by: string | null;
   /** The tracking issue opened for this session's task at launch (the handle
-   *  the launcher follows). Only set on the create response. */
+   *  the launcher follows). Populated on every read. */
   tracking_issue: number | null;
+  /** Who/what launched this session: `user` (the New Session drawer or the CLI)
+   *  or an automation surface — `agent`, `github`, `slack`, `watch`, `actions`,
+   *  `ops`. Drives the origin pill on an automation-class row. */
+  origin: string;
+  /** `interactive` (a person's own session) or `automation` (agent/system
+   *  launched). Automation-class sessions are excluded from the default fleet
+   *  list and issue board — the Automation toggle reveals them. */
+  class: string;
+  /** Total agent turns run so far. */
+  turn_count: number;
   /** Manual park override for the fleet list's resting shelf: `'parked'` pins the
    *  row to the shelf, `'active'` keeps it live even when idle, `null` = auto (the
    *  client shelves it once idle past the threshold). Set by dragging a row

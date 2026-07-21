@@ -272,8 +272,7 @@ pub(crate) async fn branch_view(db: &Db, branch: &Branch) -> ApiResult<BranchVie
     ))
 }
 
-/// Build a [`SessionView`] for a session + its branch. `tracking_issue` is left
-/// `None`; only the create path fills it.
+/// Build a [`SessionView`] for a session + its branch.
 pub(crate) async fn session_view(
     db: &Db,
     session: &Session,
@@ -307,7 +306,10 @@ pub(crate) async fn session_view(
         updated_at: branch.updated_at.clone(),
         parent_id: session.parent_branch_id.clone(),
         created_by: session.created_by.clone(),
-        tracking_issue: None,
+        origin: session.origin.clone(),
+        class: session.class.clone(),
+        turn_count: session.turn_count,
+        tracking_issue: session.tracking_issue_id,
         park: session.park.clone(),
         sort_order: session.sort_order,
         protocol: session.protocol.clone(),
