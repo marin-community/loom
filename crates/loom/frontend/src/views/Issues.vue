@@ -65,7 +65,7 @@ async function load() {
     // filter client-side. The API hides archived and automation by default, so
     // ask for both.
     const [iss, ses] = await Promise.all([
-      listIssues(true, true),
+      listIssues({ all: true, automation: true }),
       listSessions({ archived: true, automation: true }),
     ]);
     issues.value = iss;

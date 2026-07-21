@@ -206,10 +206,10 @@ export const deleteCustomAgent = (name: string) =>
  *  `all` to include closed issues, `automation` to include issues claimed by an
  *  automation-class session (hidden by default, symmetric with `archived` on
  *  `listSessions`). */
-export const listIssues = (all = false, automation = false) => {
+export const listIssues = (opts: { all?: boolean; automation?: boolean } = {}) => {
   const params = new URLSearchParams();
-  if (all) params.set('all', 'true');
-  if (automation) params.set('automation', 'true');
+  if (opts.all) params.set('all', 'true');
+  if (opts.automation) params.set('automation', 'true');
   const qs = params.toString();
   return get(`/issues${qs ? `?${qs}` : ''}`) as Promise<Issue[]>;
 };
