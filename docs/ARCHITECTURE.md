@@ -291,7 +291,8 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 
 `SessionView` (`/api/sessions[/...]`) returns session-specific fields
 top-level (`id`, `status`, `work_dir`, `term_session`, `agent_kind`, `model`,
-`effort`, `pending_prompt`, `github_repo`, `last_activity_at`,
+`effort`, `pending_prompt`, `github_repo`, `github_issue` (the `repo` + `number`
+linked on the session's tracking issue), `last_activity_at`,
 `created_at`, `updated_at`, `parent_id`, `protocol` (`terminal` or `acp`),
 `acp_session_id`, `current_mode`, `usage` (`{used, size}` context window, from
 the journal's latest `usage` block), `origin` (the channel that created it:
@@ -557,8 +558,11 @@ from under it. The `automation.*` settings live in
 When the `gh` CLI is installed and authenticated, loom keeps a per-branch
 pull-request snapshot alongside the session. A second background loop
 (`github::poll`, sibling of the monitor, spawned in `server::serve`) ticks every
-30s and, for each active session, runs `gh pr view <branch> --json …` from the
-repo root. The result — PR number, URL, state (`OPEN`/`CLOSED`/`MERGED`), draft
+30s and, for each active session, runs `gh pr list --head <branch> …` from the
+repo root. `<branch>` is the worktree's live HEAD (falling back to loom's stored
+branch identity when the worktree cannot be read), so an agent that switches or
+renames its branch before opening a PR is still discovered. The result — PR
+number, URL, state (`OPEN`/`CLOSED`/`MERGED`), draft
 flag, `reviewDecision`, a rolled-up `checks` verdict (`passing`/`failing`/
 `pending`), and mergeability — is written to the loom-owned `branch_github`
 table (one row per branch, keyed `branch_id`) and served as `BranchView.github`.
@@ -570,6 +574,12 @@ while the `github.poll` setting is off, `gh` is missing (probed once, cached via
 `gh_available`), or the repo has no GitHub remote (a per-branch `gh` error that
 is logged at debug and skipped). So it is a no-op on non-GitHub repos rather
 than a failure.
+
+The session header always renders PR and issue association pills, including an
+empty state. The PR editor can pin an explicit number or return to live-branch
+discovery through `PUT` / `DELETE /api/sessions/{id}/github`; the issue editor
+patches the GitHub link on the session's weaver tracking issue, which remains
+the source of truth for that association.
 
 **Archive on merge.** When a poll finds a branch's PR has merged and
 `github.archive_on_merge` is on (the default), loom archives the session

@@ -2,13 +2,7 @@
 import { ref, computed, nextTick } from 'vue';
 import { useRouter } from 'vue-router';
 import type { AgentMetadata, Session } from '../types';
-import {
-  handoffSession,
-  listAgents,
-  refreshSessionGithub,
-  setSessionGithub,
-  clearSessionGithub,
-} from '../api';
+import { handoffSession, listAgents } from '../api';
 import {
   messageOf,
   conversationState,
@@ -24,7 +18,7 @@ import SignalChip from './SignalChip.vue';
 import TagPill from './TagPill.vue';
 import SessionDetailsPopover from './SessionDetailsPopover.vue';
 import SessionRemedyButton from './SessionRemedyButton.vue';
-import GithubStatus from './GithubStatus.vue';
+import GithubAssociations from './GithubAssociations.vue';
 
 // The session page header — one compact chrome block shared by both the detail
 // view and the file browser, so the "where am I / what is this" context never
@@ -33,7 +27,7 @@ import GithubStatus from './GithubStatus.vue';
 //   row 1  ← all · title (inline rename) · [signal chips]ⁱ
 //           · lifecycle badge · ⌄ details menu
 //   row 2  the agent's current-state message as prose (the point of the page)
-//   row 3  repo/branch · agent · PR link · the quiet conversation-state + freshness
+//   row 3  repo/branch · agent · PR/issue links · quiet conversation-state + freshness
 //
 // The old full-width "▶ Working … last activity" strip is gone: when the session
 // is calm, its state is a quiet note on row 3; when a loud signal is raised it
@@ -187,41 +181,6 @@ async function submitHandoff() {
     handoffBusy.value = false;
   }
 }
-
-// PR association: automatic by default, with an explicit numeric override for
-// branches whose current work belongs to a different PR than GitHub infers.
-const prOpen = ref(false);
-const prDraft = ref('');
-const prBusy = ref('');
-const prError = ref('');
-
-function togglePrEditor() {
-  prOpen.value = !prOpen.value;
-  prError.value = '';
-  prDraft.value = String(props.ws.branch.github_pr ?? props.ws.branch.github?.pr_number ?? '');
-}
-
-async function updatePr(action: 'set' | 'auto' | 'refresh') {
-  if (prBusy.value) return;
-  const number = Number(prDraft.value);
-  if (action === 'set' && (!Number.isInteger(number) || number <= 0)) {
-    prError.value = 'Enter a positive PR number.';
-    return;
-  }
-  prBusy.value = action;
-  prError.value = '';
-  try {
-    if (action === 'set') await setSessionGithub(props.ws.id, number);
-    else if (action === 'auto') await clearSessionGithub(props.ws.id);
-    else await refreshSessionGithub(props.ws.id);
-    prOpen.value = false;
-    emit('reload');
-  } catch (e) {
-    prError.value = (e as Error).message;
-  } finally {
-    prBusy.value = '';
-  }
-}
 </script>
 
 <template>
@@ -291,65 +250,6 @@ async function updatePr(action: 'set' | 'auto' | 'refresh') {
           <SessionDetailsPopover :ws="ws" v-model:open="showDetails">
             <template #actions>
               <div class="space-y-1">
-                <button
-                  type="button"
-                  data-testid="action-pr-mapping"
-                  class="block w-full rounded px-2 py-1.5 text-left text-fg transition-colors hover:bg-subtle"
-                  @click="togglePrEditor"
-                >
-                  <span class="block text-xs font-medium">Pull request</span>
-                  <span class="block text-2xs text-faint">
-                    {{
-                      ws.branch.github_pr
-                        ? `Pinned to #${ws.branch.github_pr}`
-                        : ws.branch.github
-                          ? `Automatic · #${ws.branch.github.pr_number}`
-                          : 'Automatic · none found'
-                    }}
-                  </span>
-                </button>
-                <form
-                  v-if="prOpen"
-                  class="space-y-2 rounded border border-line bg-input p-2"
-                  data-testid="pr-mapping-form"
-                  @submit.prevent="updatePr('set')"
-                >
-                  <label class="block text-2xs font-semibold uppercase tracking-wider text-muted">
-                    PR number
-                    <input
-                      v-model="prDraft"
-                      type="number"
-                      min="1"
-                      class="mt-1 block w-full rounded bg-surface px-2 py-1.5 font-mono text-xs font-normal normal-case tracking-normal text-fg"
-                    />
-                  </label>
-                  <p v-if="prError" class="text-xs text-block">{{ prError }}</p>
-                  <div class="flex flex-wrap gap-1.5">
-                    <button
-                      type="submit"
-                      class="btn-primary px-2 py-1 text-xs"
-                      :disabled="!!prBusy"
-                    >
-                      {{ prBusy === 'set' ? 'Saving…' : 'Pin PR' }}
-                    </button>
-                    <button
-                      type="button"
-                      class="btn-secondary px-2 py-1 text-xs"
-                      :disabled="!!prBusy"
-                      @click="updatePr('auto')"
-                    >
-                      Use current
-                    </button>
-                    <button
-                      type="button"
-                      class="btn-secondary px-2 py-1 text-xs"
-                      :disabled="!!prBusy"
-                      @click="updatePr('refresh')"
-                    >
-                      Refresh
-                    </button>
-                  </div>
-                </form>
                 <button
                   v-if="canHandoff"
                   type="button"
@@ -475,13 +375,12 @@ async function updatePr(action: 'set' | 'auto' | 'refresh') {
           · <span :class="modelTint" class="font-medium">{{ ws.model }}</span></template
         >
       </span>
-      <!-- The branch's PR, surfaced inline as a small link — the one place you
-           already look — rather than buried in the Overview tab. Compact mode is
-           the same tight glyphline the dashboard list uses. -->
-      <template v-if="ws.branch.github">
-        <span class="text-faint">·</span>
-        <GithubStatus :gh="ws.branch.github" compact class="min-w-0" />
-      </template>
+      <span class="text-faint">·</span>
+
+      <!-- GitHub associations stay visible even when empty. Clicking either
+           pill opens its editor; the PR retains automatic discovery as a mode,
+           while the issue is the explicit link on this session's tracker. -->
+      <GithubAssociations :ws="ws" @reload="emit('reload')" />
       <div class="ml-auto flex shrink-0 items-center gap-1.5">
         <span v-if="!signals.length" data-testid="conversation-state" :class="toneClass">
           {{ conv.glyph }} {{ conv.label }}

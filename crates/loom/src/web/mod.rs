@@ -279,6 +279,16 @@ pub(crate) async fn session_view(
     branch: &Branch,
 ) -> ApiResult<SessionView> {
     let bv = branch_view(db, branch).await?;
+    let github_issue = if let Some(id) = session.tracking_issue_id {
+        weaver_core::issue::get(db, id).await?.and_then(|issue| {
+            match (issue.github_repo, issue.github_issue) {
+                (Some(repo), Some(number)) => Some(weaver_api::GithubIssueRef { repo, number }),
+                _ => None,
+            }
+        })
+    } else {
+        None
+    };
     // The latest usage block is a cheap indexed query; `None` for a terminal
     // session (or an ACP session before the agent reports usage).
     let usage = if session.protocol == "acp" {
@@ -298,6 +308,7 @@ pub(crate) async fn session_view(
         model: session.model.clone(),
         effort: session.effort.clone(),
         github_repo: session.github_repo.clone(),
+        github_issue,
         last_activity_at: session
             .last_activity_at
             .clone()

@@ -714,6 +714,30 @@ pub async fn clear_status(db: &Db, branch_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// The branch name GitHub should use for automatic PR discovery.
+///
+/// A session's [`Branch`] is its durable loom identity, but an agent is free to
+/// switch or rename the checked-out git branch after launch. Workflows such as
+/// Marin's `fix-issue` skill do exactly that before opening an `agent/...` PR.
+/// Prefer the worktree's live HEAD so the poller follows that PR; fall back to
+/// the stored name when the worktree is missing, detached, or unreadable.
+async fn discovery_branch(session: &Session, branch: &Branch) -> String {
+    match crate::git::current_branch(Path::new(&session.work_dir)).await {
+        Ok(current) if !current.trim().is_empty() && current != "HEAD" => {
+            if current != branch.branch {
+                tracing::debug!(
+                    session = %session.id,
+                    stored_branch = %branch.branch,
+                    worktree_branch = %current,
+                    "using worktree HEAD for GitHub PR discovery"
+                );
+            }
+            current
+        }
+        _ => branch.branch.clone(),
+    }
+}
+
 /// Persist (replacing) the snapshot for a branch.
 pub async fn upsert_status(db: &Db, branch_id: &str, s: &GithubStatus) -> Result<()> {
     sqlx::query(
@@ -768,7 +792,8 @@ pub async fn refresh(
         // treating yesterday's cached number as authoritative. Only when the
         // branch has no open PR do we revisit the previous number once, to
         // preserve its close/merge transition before the snapshot is cleared.
-        let current = fetch_open_pr(&repo_root, &branch.branch, token.as_deref()).await?;
+        let head = discovery_branch(session, branch).await;
+        let current = fetch_open_pr(&repo_root, &head, token.as_deref()).await?;
         if current.is_some() {
             current
         } else if previous.as_ref().is_some_and(|pr| pr.pr_state == "OPEN") {
@@ -1371,6 +1396,18 @@ mod tests {
 
         clear_mapping(&f.state.db, &f.branch.id).await.unwrap();
         assert_eq!(get_mapping(&f.state.db, &f.branch.id).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn automatic_discovery_follows_the_worktree_head_branch() {
+        let f = fixture().await;
+        git(&f.work_dir, &["switch", "-c", "agent/20260721-fix-7473"]);
+
+        assert_eq!(
+            discovery_branch(&f.session, &f.branch).await,
+            "agent/20260721-fix-7473"
+        );
+        assert_eq!(f.branch.branch, "weaver/feat", "loom identity stays stable");
     }
 
     #[tokio::test]

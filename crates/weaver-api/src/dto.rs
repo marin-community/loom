@@ -126,6 +126,11 @@ pub struct SessionView {
     pub model: String,
     pub effort: String,
     pub github_repo: Option<String>,
+    /// GitHub issue linked to this session's tracking issue, if any. This is
+    /// separate from `branch.github`, which is the pull request created by the
+    /// work. The tracking issue remains the source of truth for edits.
+    #[serde(default)]
+    pub github_issue: Option<GithubIssueRef>,
     pub last_activity_at: String,
     pub created_at: String,
     pub updated_at: String,
@@ -199,6 +204,13 @@ pub struct AcpUsage {
     pub size: u64,
     #[serde(default)]
     pub cost: Option<AcpCost>,
+}
+
+/// A GitHub issue association carried by a session's tracking issue.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GithubIssueRef {
+    pub repo: String,
+    pub number: i64,
 }
 
 fn default_protocol() -> String {

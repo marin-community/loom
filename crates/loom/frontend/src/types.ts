@@ -80,6 +80,8 @@ export interface Session {
   /** Reasoning effort interpreted by the selected agent protocol. */
   effort: string;
   github_repo: string | null;
+  /** GitHub issue linked to this session's weaver tracking issue. */
+  github_issue: { repo: string; number: number } | null;
   last_activity_at: string;
   created_at: string;
   updated_at: string;

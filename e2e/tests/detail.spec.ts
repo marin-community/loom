@@ -45,7 +45,7 @@ test.describe('session detail view', () => {
     await expect(page).toHaveTitle('Weaver - Sessions');
   });
 
-  test('edits the session pull request mapping from the manage menu', async ({ page, weaver }) => {
+  test('edits pull request and issue associations from visible pills', async ({ page, weaver }) => {
     const s = await weaver.seedSession({ goal: 'Map my PR', name: 'pr-map' });
     let requestBody: unknown;
     await page.route(`**/api/sessions/${s.id}/github`, async (route) => {
@@ -57,14 +57,33 @@ test.describe('session detail view', () => {
     });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
-    await page.getByRole('button', { name: 'manage' }).click();
-    await page.getByTestId('action-pr-mapping').click();
+    const prPill = page.getByTestId('pr-association-pill');
+    const issuePill = page.getByTestId('issue-association-pill');
+    await expect(prPill).toHaveText('PR —');
+    await expect(issuePill).toHaveText('Issue —');
+
+    await prPill.click();
     const form = page.getByTestId('pr-mapping-form');
     await form.getByLabel('PR number').fill('37');
     await form.getByRole('button', { name: 'Pin PR' }).click();
 
     await expect.poll(() => requestBody).toEqual({ pr_number: 37 });
     await expect(form).toBeHidden();
+
+    await issuePill.click();
+    const issueForm = page.getByTestId('issue-mapping-form');
+    await issueForm.getByLabel('owner/repo#number').fill('acme/widgets#73');
+    await issueForm.getByRole('button', { name: 'Save' }).click();
+
+    await expect(issuePill).toHaveText('Issue #73');
+    await expect.poll(async () => (await weaver.getSession(s.id)).github_issue).toEqual({
+      repo: 'acme/widgets',
+      number: 73,
+    });
+
+    await issuePill.click();
+    await page.getByTestId('issue-mapping-form').getByRole('button', { name: 'Clear' }).click();
+    await expect(issuePill).toHaveText('Issue —');
   });
 
   test('clearing the attention chip marks the agent’s attention calm', async ({ page, weaver }) => {

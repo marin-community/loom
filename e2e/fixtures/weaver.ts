@@ -59,11 +59,13 @@ export interface Session {
   agent_kind: string;
   pending_prompt: string;
   github_repo: string | null;
+  github_issue: { repo: string; number: number } | null;
   last_activity_at: string;
   created_at: string;
   updated_at: string;
   /** Branch id of the session that launched this one, or null at the top level. */
   parent_id: string | null;
+  tracking_issue: number | null;
   branch: Branch;
 }
 
