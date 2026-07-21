@@ -16,6 +16,9 @@ use crate::db::{now_iso, Db};
 pub const DEFAULT_AGENT: &str = "claude";
 pub const DEFAULT_AGENT_MODEL: &str = "";
 pub const DEFAULT_AGENT_EFFORT: &str = "";
+/// Provider-neutral permission posture for new ACP sessions. Claude uses this
+/// value directly; Codex maps it onto its own mode vocabulary at launch.
+pub const DEFAULT_AGENT_MODE: &str = "auto";
 /// Whether the server adopts orphaned sessions on startup. Off by default:
 /// the operator opts in via `weaver config set server.auto_adopt true`.
 pub const DEFAULT_AUTO_ADOPT: bool = false;
@@ -135,6 +138,24 @@ pub const REGISTRY: &[SettingSpec] = &[
         default: DEFAULT_AGENT_EFFORT,
         group: "Agents",
         options: &[],
+    },
+    SettingSpec {
+        key: "agent.mode",
+        label: "Default permissions",
+        description: "Permission posture used for new ACP sessions and agent \
+            handoffs when the request does not specify one. `auto` approves \
+            routine work and asks for risky actions; `bypassPermissions` runs \
+            without permission prompts. Ignored by terminal sessions.",
+        kind: SettingKind::Enum,
+        default: DEFAULT_AGENT_MODE,
+        group: "Agents",
+        options: &[
+            "auto",
+            "default",
+            "acceptEdits",
+            "plan",
+            "bypassPermissions",
+        ],
     },
     SettingSpec {
         key: "server.auto_adopt",
@@ -688,6 +709,15 @@ mod tests {
         assert_eq!(json["options"], serde_json::json!(["dark", "light"]));
         assert_eq!(json["value"], "dark");
         assert_eq!(json["is_default"], true);
+
+        let mode = views
+            .iter()
+            .find(|v| v.spec.key == "agent.mode")
+            .expect("agent.mode should be registered");
+        let json = serde_json::to_value(mode).unwrap();
+        assert_eq!(json["kind"], "enum");
+        assert_eq!(json["value"], "auto");
+        assert_eq!(json["options"][4], "bypassPermissions");
     }
 
     #[test]

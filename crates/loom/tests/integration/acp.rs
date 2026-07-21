@@ -1557,6 +1557,36 @@ async fn rest_create(ts: &TestServer, agent: &str, goal: &str) -> Value {
         .expect("acp session creates")
 }
 
+/// A workspace permission default applies when REST create omits `mode`; the
+/// adapter-reported session state proves it reached the ACP handshake rather
+/// than merely round-tripping through the settings endpoint.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_create_uses_the_configured_permission_default() {
+    let ts = TestServer::start().await;
+    seed_acp_agent(&ts, "fake-mode-default").await;
+    loom::config::apply(
+        &ts.state.db,
+        &[(
+            "agent.mode".to_string(),
+            Some("bypassPermissions".to_string()),
+        )],
+    )
+    .await
+    .unwrap();
+
+    let created = rest_create(&ts, "fake-mode-default", "say:configured").await;
+    let id = created["id"].as_str().unwrap();
+    poll_view(&ts, id, Duration::from_secs(10), |view| {
+        view["current_mode"] == "bypassPermissions"
+    })
+    .await;
+    ts.client
+        .post(&format!("/api/sessions/{id}/archive"), json!({}))
+        .await
+        .unwrap();
+}
+
 /// Poll `GET /api/sessions/{id}` until `pred` accepts the view, returning it.
 async fn poll_view(
     ts: &TestServer,
@@ -1798,6 +1828,13 @@ async fn handoff_recovers_without_a_live_task_and_preserves_the_queue() {
     let id = created["id"].as_str().unwrap().to_string();
     poll_chat(&ts, &id, Duration::from_secs(10), |blocks| {
         blocks.iter().any(|block| block["kind"] == "turn_end")
+    })
+    .await;
+    // `turn_end` is journaled before the task finishes its lifecycle work and
+    // checks the durable queue. Wait for the later idle edge so this simulated
+    // crash cannot race the old task into consuming the queue we add below.
+    poll_view(&ts, &id, Duration::from_secs(10), |view| {
+        branch_tag_value(view, "idle") == "idle"
     })
     .await;
 

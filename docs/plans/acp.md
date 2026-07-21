@@ -329,11 +329,12 @@ HTTP, orthogonal to the execution backend).
 ### Permissions & modes
 
 The launch posture is a per-session choice, not a hard-coded constant: the
-create form (and `loom session launch --mode`) picks the **`auto`** default
-(Claude Code's background-classifier posture — a safety model vets each tool
+create form (and `loom session launch --mode`) uses the configurable
+**`agent.mode`** default (`auto` unless changed) or an explicit posture. `auto`
+is Claude Code's background-classifier posture — a safety model vets each tool
 call, running routine work on its own and escalating only genuinely risky
-actions) or an explicit posture — **autonomous** (`bypassPermissions`) for a
-fully unattended run, or a supervised mode (`acceptEdits`, `default`, `plan`).
+actions. Other choices are **autonomous** (`bypassPermissions`) for a fully
+unattended run, or a supervised mode (`acceptEdits`, `default`, `plan`).
 The mode is live thereafter — the
 composer's mode chip drives `session/set_mode`. In any gated mode a
 `session/request_permission` surfaces as an interactive card in the
