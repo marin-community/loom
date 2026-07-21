@@ -6,4 +6,3 @@ Wants=docker.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/loom-backup-sqlite
-

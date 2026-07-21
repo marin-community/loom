@@ -42,4 +42,3 @@ docker compose cp "loom:${CONTAINER_PATH}" "$HOST_PATH"
 gzip "$HOST_PATH"
 gcloud storage cp "${HOST_PATH}.gz" \
   "gs://${BUCKET}/sqlite/${PROJECT}/${BACKUP_NAME}.gz"
-
