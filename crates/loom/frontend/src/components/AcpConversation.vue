@@ -48,6 +48,7 @@ import type {
 } from '../types';
 import { canSend } from '../lib/sessionState';
 import { useFollowFoot } from '../lib/followFoot';
+import { formatTokens } from '../lib/usage';
 import MarkdownView from './MarkdownView.vue';
 import AgentUsage from './AgentUsage.vue';
 
@@ -820,12 +821,6 @@ function usageFromPayload(payload: UsagePayload): AcpUsage | null {
     : null;
 }
 
-function shortTokens(tokens: number): string {
-  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}m`;
-  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}k`;
-  return String(tokens);
-}
-
 const latestUsage = computed<AcpUsage | null>(() => {
   let usage: AcpUsage | null = null;
   const sorted = [...blocks.values()].sort((a, b) => a.turn - b.turn || a.seq - b.seq);
@@ -1214,8 +1209,8 @@ function goTo(anchor: string) {
               <span
                 >turn {{ row.turn + 1 }} · {{ row.stop
                 }}<template v-if="row.usage">
-                  · {{ shortTokens(row.usage.used) }} /
-                  {{ shortTokens(row.usage.size) }} context</template
+                  · {{ formatTokens(row.usage.used) }} /
+                  {{ formatTokens(row.usage.size) }} context</template
                 ></span
               >
             </div>

@@ -382,6 +382,15 @@ pub async fn clear_acp_state(db: &Db, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// The turn recorded in a session's durable ACP in-flight state, when valid.
+pub fn acp_inflight_turn(session: &Session) -> Option<i64> {
+    session
+        .acp_inflight
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value.get("turn").and_then(serde_json::Value::as_i64))
+}
+
 /// Replace an ACP session's runtime profile and clear every piece of
 /// provider-private relay/session state. The journal and durable prompt queue
 /// are deliberately untouched: both belong to loom's stable session and must

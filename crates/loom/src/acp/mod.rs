@@ -420,12 +420,7 @@ async fn start_inner(
         Err(error) => {
             state.acp.stop(session_id);
             let latest = session::get(&state.db, session_id).await.ok().flatten();
-            if let Some(turn) = latest
-                .as_ref()
-                .and_then(|session| session.acp_inflight.as_deref())
-                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-                .and_then(|value| value.get("turn").and_then(Value::as_i64))
-            {
+            if let Some(turn) = latest.as_ref().and_then(session::acp_inflight_turn) {
                 let _ = chat::close_abandoned_turn(&state.db, session_id, turn).await;
             }
             let _ = session::clear_acp_state(&state.db, session_id).await;

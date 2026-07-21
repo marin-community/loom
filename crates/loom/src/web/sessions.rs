@@ -2626,12 +2626,7 @@ pub(super) async fn handoff_session(
     let persisted = session_mod::get(&st.db, &session.id)
         .await?
         .ok_or_else(|| AppError::not_found("session"))?;
-    if let Some(turn) = persisted
-        .acp_inflight
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-        .and_then(|value| value.get("turn").and_then(Value::as_i64))
-    {
+    if let Some(turn) = session_mod::acp_inflight_turn(&persisted) {
         crate::chat::close_abandoned_turn(&st.db, &session.id, turn).await?;
     }
     backend::kill_session_and_wait(&session.term_session).await?;
@@ -2678,15 +2673,6 @@ pub(super) async fn handoff_session(
     Ok(Json(session_view(&st.db, &session, &branch).await?))
 }
 
-/// The in-flight turn number from a session's persisted `acp_inflight`, or `None`.
-fn live_turn(session: &Session) -> Option<i64> {
-    session
-        .acp_inflight
-        .as_deref()
-        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-        .and_then(|v| v.get("turn").and_then(Value::as_i64))
-}
-
 /// Permission posture captured when the persisted in-flight turn started. This
 /// differs from `Session.current_mode` after a live config change: that selection
 /// applies to the next prompt.
@@ -2721,7 +2707,7 @@ pub(super) async fn get_session_chat(
         .filter(|pending| !pending.trim().is_empty());
     Ok(Json(json!({
         "blocks": blocks,
-        "live_turn": live_turn(&session),
+        "live_turn": session_mod::acp_inflight_turn(&session),
         "effective_mode": effective_turn_mode(&session),
         "pending_prompt": pending_prompt,
         "metadata": metadata,

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import type { AcpUsage } from '../types';
+import { formatTokens } from '../lib/usage';
 
 const props = withDefaults(defineProps<{ usage: AcpUsage; compact?: boolean }>(), {
   compact: false,
@@ -15,12 +16,6 @@ const tone = computed(() => {
   if (percent.value >= 75) return 'warning';
   return 'normal';
 });
-
-function formatTokens(tokens: number): string {
-  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(tokens >= 10_000_000 ? 0 : 1)}m`;
-  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}k`;
-  return String(tokens);
-}
 
 const costLabel = computed(() => {
   const cost = props.usage.cost;
