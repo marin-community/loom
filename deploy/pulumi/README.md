@@ -20,7 +20,8 @@ export PROJECT=my-project
 export STATE_BUCKET="${PROJECT}-loom-pulumi-state"
 gcloud storage buckets create "gs://${STATE_BUCKET}" \
   --project="${PROJECT}" --location=us-central1 --uniform-bucket-level-access
-gcloud storage buckets update "gs://${STATE_BUCKET}" --versioning
+gcloud storage buckets update "gs://${STATE_BUCKET}" \
+  --versioning --public-access-prevention
 pulumi login "gs://${STATE_BUCKET}"
 ```
 
@@ -64,6 +65,11 @@ hosted elsewhere, omit the setting, create an A record for the exported
 `address`, and only then run `post-up.py`. Both the startup script and post-up
 driver refuse to start Caddy until public DNS resolves to the reserved address,
 preventing repeated failed ACME challenges.
+
+The stack uses the configured existing VPC (`default` unless `network` is set).
+It adds tagged Loom web and SSH rules, with Loom's SSH rule scoped to
+`operatorCidr`; it deliberately does not inspect, remove, or override unrelated
+firewall rules owned by the operator.
 
 The protected address, data disk, secret, and backup bucket make an accidental
 `pulumi destroy` fail rather than erase durable state. Remove protection only
@@ -135,6 +141,8 @@ GitHub repository variables from `pulumi stack output`:
 On pushes to `main`, [the image workflow](../../.github/workflows/image.yml)
 uses GitHub OIDC—no JSON key—to publish an immutable commit-SHA tag. The
 repository rejects tag replacement and deliberately has no mutable `latest`.
+Rerunning the workflow for an already-published commit detects the existing tag
+and exits successfully without rebuilding or moving it.
 Set `imageMode: pull`, pin `imageTag` to that SHA, and run `pulumi up` for a
 reproducible rollout; then run `post-up.py` to stream the new startup
 generation.

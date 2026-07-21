@@ -273,6 +273,7 @@ def create_infrastructure(config: DeploymentConfig) -> Infrastructure:
             "{}-{}-backups", config.project, config.instance_name
         ),
         uniform_bucket_level_access=True,
+        public_access_prevention="enforced",
         versioning={"enabled": True},
         lifecycle_rules=[
             {

@@ -31,6 +31,9 @@ pulumi import gcp:compute/instance:Instance loom \
 Set `loom-gcp:vmServiceAccountName` to `VM_SERVICE_ACCOUNT` before previewing;
 the setting exists specifically so a deployment created with
 `bootstrap.py --service-account-name` can be adopted without replacement.
+Set `loom-gcp:network` to the VM's existing VPC name before previewing. The
+stack adds its own tagged rules but deliberately leaves unrelated operator-owned
+firewall policy alone.
 
 If `dnsManagedZone` names a Cloud DNS zone that already contains the live A
 record, import that record too. The record name is fully qualified and ends in

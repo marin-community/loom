@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import re
 
 import pulumi
 import pytest
@@ -107,27 +108,32 @@ def test_wif_is_repository_and_main_bound_with_least_privilege_iam():
         docker_config = field(repository.inputs, "docker_config", "dockerConfig")
         assert field(docker_config, "immutable_tags", "immutableTags") is True
 
-        roles = {
-            resource.inputs.get("role")
-            for resource in mocks.resources
-            if resource.name
-            in {
-                "loom-ci-workload-identity",
-                "loom-ci-image-writer",
-                "loom-vm-image-reader",
-                "loom-vm-secret-reader",
-                "loom-vm-backup-writer",
-            }
-        }
-        assert roles == {
-            "roles/iam.workloadIdentityUser",
-            "roles/artifactregistry.writer",
-            "roles/artifactregistry.reader",
-            "roles/secretmanager.secretAccessor",
-            "roles/storage.objectCreator",
-        }
-
     return infrastructure.workload_identity_provider.id.apply(check)
+
+
+def test_iam_roles_are_narrow() -> None:
+    source = inspect.getsource(create_infrastructure)
+    assert set(re.findall(r'role="([^"]+)"', source)) == {
+        "roles/iam.workloadIdentityUser",
+        "roles/artifactregistry.writer",
+        "roles/artifactregistry.reader",
+        "roles/secretmanager.secretAccessor",
+        "roles/storage.objectCreator",
+    }
+
+
+@pulumi.runtime.test
+def test_backup_bucket_enforces_public_access_prevention():
+    infrastructure = make_infrastructure()
+
+    def check(_: object) -> None:
+        bucket = by_name("loom-backups")
+        prevention = field(
+            bucket.inputs, "public_access_prevention", "publicAccessPrevention"
+        )
+        assert prevention == "enforced"
+
+    return infrastructure.instance.id.apply(check)
 
 
 @pulumi.runtime.test

@@ -40,10 +40,17 @@ jobs:
           set -euo pipefail
           image="${region}-docker.pkg.dev/${project}/loom/loom:${GITHUB_SHA}"
           echo "name=${image}" >>"${GITHUB_OUTPUT}"
+          if gcloud artifacts docker images describe "${image}" >/dev/null 2>&1; then
+            echo "exists=true" >>"${GITHUB_OUTPUT}"
+            echo "${image} is already published; keeping its immutable digest"
+          else
+            echo "exists=false" >>"${GITHUB_OUTPUT}"
+          fi
         env:
           region: ${{ vars.LOOM_GCP_REGION }}
           project: ${{ vars.LOOM_GCP_PROJECT }}
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        if: steps.image.outputs.exists != 'true'
         with:
           context: .
           platforms: linux/amd64

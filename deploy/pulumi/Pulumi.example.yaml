@@ -6,6 +6,9 @@ config:
   loom-gcp:zone: us-central1-a
   loom-gcp:domain: loom.example.com
   loom-gcp:operatorCidr: 203.0.113.7/32
+  # Existing VPC name. The stack adds Loom's tagged web and SSH rules but does
+  # not modify or second-guess unrelated rules managed by the operator.
+  loom-gcp:network: default
   # Set this to bootstrap.py's --service-account-name before importing a
   # non-default legacy deployment.
   loom-gcp:vmServiceAccountName: loom-vm

@@ -61,6 +61,8 @@ class InfrastructureSourceContract(unittest.TestCase):
         self.assertIn("id-token: write", workflow)
         self.assertIn("google-github-actions/auth@", workflow)
         self.assertIn("${GITHUB_SHA}", workflow)
+        self.assertIn("gcloud artifacts docker images describe", workflow)
+        self.assertIn("steps.image.outputs.exists != 'true'", workflow)
         self.assertNotIn("loom:latest", workflow)
         self.assertNotIn("credentials_json", workflow)
         self.assertIn('docker_config={"immutable_tags": True}', SOURCE)
