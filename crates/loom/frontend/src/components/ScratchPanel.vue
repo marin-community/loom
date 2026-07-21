@@ -84,6 +84,11 @@ function onDrop(e: DragEvent) {
   if (dropped && dropped.length) uploadFiles(dropped);
 }
 
+function onScratchChanged(event: Event) {
+  const changedId = (event as CustomEvent<{ id?: string }>).detail?.id;
+  if (changedId === props.id) refresh();
+}
+
 const fileInput = ref<HTMLInputElement | null>(null);
 function onPick(e: Event) {
   const input = e.target as HTMLInputElement;
@@ -106,12 +111,14 @@ onMounted(() => {
   window.addEventListener('dragleave', onDragLeave);
   window.addEventListener('dragover', onDragOver);
   window.addEventListener('drop', onDrop);
+  window.addEventListener('loom:scratch-changed', onScratchChanged);
 });
 onUnmounted(() => {
   window.removeEventListener('dragenter', onDragEnter);
   window.removeEventListener('dragleave', onDragLeave);
   window.removeEventListener('dragover', onDragOver);
   window.removeEventListener('drop', onDrop);
+  window.removeEventListener('loom:scratch-changed', onScratchChanged);
 });
 </script>
 

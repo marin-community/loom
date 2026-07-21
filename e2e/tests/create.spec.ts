@@ -81,6 +81,26 @@ test.describe('creating a session via the UI form', () => {
     expect(files.map((f) => f.name).sort()).toEqual(['shot.png', 'trace.log']);
   });
 
+  test('an agent startup failure opens its recoverable session', async ({ page, weaver }) => {
+    const failed = await weaver.seedSession({ goal: 'Recover me', name: 'failed-create' });
+    await page.route('**/api/sessions', async (route) => {
+      if (route.request().method() !== 'POST') return route.continue();
+      await route.fulfill({
+        status: 502,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'acp launch failed: agent did not respond', session_id: failed.id }),
+      });
+    });
+    await page.goto(weaver.baseUrl);
+    await page.getByRole('button', { name: 'New session' }).click();
+    await page.getByPlaceholder(repoPlaceholder).fill(weaver.repoPath);
+    await page.getByPlaceholder('Add a /health endpoint').fill('Start a limited agent');
+    await page.getByRole('button', { name: 'Create', exact: true }).click();
+
+    await expect(page).toHaveURL(new RegExp(`/s/${failed.id}$`));
+    await expect(page.getByTestId('new-session-drawer')).toHaveCount(0);
+  });
+
   test('agent selection drives model and effort choices', async ({ page, weaver }) => {
     const registry = (await (await fetch(`${weaver.baseUrl}/api/agents`)).json()) as {
       agents: { kind: string; models: { label: string }[]; efforts: { label: string }[] }[];

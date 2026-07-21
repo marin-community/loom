@@ -1083,22 +1083,47 @@ pub(crate) async fn create_session_core(
         .await
         .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         if let Err(e) = crate::acp::start(&st, &session.id, launch).await {
-            // Mark the row errored (visible, inspectable) rather than leaving a
-            // running row with no live task behind it.
+            // Keep the durable row/worktree visible and recoverable, but retain
+            // non-2xx create semantics so CLI/webhook callers never announce a
+            // failed agent as successfully launched. The browser uses the
+            // returned session id to navigate to its handoff controls.
             let _ = session_mod::set_status(&st.db, &session.id, "error").await;
+            let note =
+                format!("Agent failed to start: {e}. Hand off this session to another provider.");
+            tags::set(
+                &st.db,
+                &branch.id,
+                tags::ATTENTION_KEY,
+                "blocked",
+                &note,
+                "loom",
+            )
+            .await
+            .ok();
+            events::record_tag(
+                &st.db,
+                &st.bus,
+                &branch.id,
+                tags::ATTENTION_KEY,
+                "blocked",
+                &note,
+                "loom",
+            )
+            .await
+            .ok();
             events::record(
                 &st.db,
                 &st.bus,
                 &branch.id,
                 "status",
-                json!({ "status": "error", "reason": "acp launch failed" }),
+                json!({ "status": "error", "reason": "acp launch failed", "error": e.to_string() }),
             )
             .await
             .ok();
-            return Err(AppError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("acp launch failed: {e}"),
-            ));
+            return Err(
+                AppError::new(StatusCode::BAD_GATEWAY, format!("acp launch failed: {e}"))
+                    .with_fields(json!({ "session_id": session.id })),
+            );
         }
         tracing::info!(session = %session.id, branch = %branch.id, "acp session launched");
         session
@@ -2495,9 +2520,9 @@ pub(super) async fn handoff_session(
 ) -> ApiResult<Json<SessionView>> {
     let (session, branch) = require_session(&st.db, &key).await?;
     require_acp(&session)?;
-    if session.status != "running" {
+    if !matches!(session.status.as_str(), "running" | "orphaned" | "error") {
         return Err(AppError::conflict(format!(
-            "session '{}' is {}, not running",
+            "session '{}' is {}, not handoff-capable",
             session.id, session.status
         )));
     }
@@ -2540,6 +2565,12 @@ pub(super) async fn handoff_session(
     // Resolve every fallible launch input before quiescing the current task.
     let repo_root = PathBuf::from(&branch.repo_root);
     let work_dir = PathBuf::from(&session.work_dir);
+    if !work_dir.exists() {
+        return Err(AppError::bad_request(format!(
+            "worktree {} no longer exists on disk — cannot hand off",
+            session.work_dir
+        )));
+    }
     let repo_cfg = repo_cfg_or_default(&repo_root);
     let mut extra_env = launch_env(&st.db, &repo_root, &repo_cfg).await;
     apply_user_github_token(&st.db, &mut extra_env, session.created_by.as_deref()).await;
@@ -2574,12 +2605,32 @@ pub(super) async fn handoff_session(
     .await
     .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let handle = require_acp_task(&st, &session)?;
-    handle
-        .prepare_handoff()
-        .await
-        .map_err(|e| AppError::conflict(e.to_string()))?;
+    // A healthy task quiesces on its ordered command channel, preserving the
+    // active-turn/queue safety gate. A missing task is the recovery case: settle
+    // its persisted in-flight turn, retain the durable queue, and continue.
+    if let Some(handle) = st.acp.get(&session.id) {
+        if let Err(error) = handle.prepare_handoff().await {
+            tokio::task::yield_now().await;
+            if st.acp.is_live(&session.id) {
+                return Err(AppError::conflict(error.to_string()));
+            }
+            tracing::warn!(session = %session.id, %error,
+                "ACP task vanished while preparing handoff; using persisted recovery state");
+        }
+    } else {
+        tracing::warn!(session = %session.id,
+            "handing off without a live ACP task; using persisted recovery state");
+    }
+    // Re-read after the task handshake: it may have vanished after our initial
+    // route snapshot while persisting a newer in-flight turn.
+    let persisted = session_mod::get(&st.db, &session.id)
+        .await?
+        .ok_or_else(|| AppError::not_found("session"))?;
+    if let Some(turn) = session_mod::acp_inflight_turn(&persisted) {
+        crate::chat::close_abandoned_turn(&st.db, &session.id, turn).await?;
+    }
     backend::kill_session_and_wait(&session.term_session).await?;
+    crate::chat::reset_usage(&st.db, &session.id).await?;
     session_mod::prepare_handoff(&st.db, &session.id, target, &model, &effort, "running").await?;
 
     let boundary = json!({
@@ -2622,15 +2673,6 @@ pub(super) async fn handoff_session(
     Ok(Json(session_view(&st.db, &session, &branch).await?))
 }
 
-/// The in-flight turn number from a session's persisted `acp_inflight`, or `None`.
-fn live_turn(session: &Session) -> Option<i64> {
-    session
-        .acp_inflight
-        .as_deref()
-        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-        .and_then(|v| v.get("turn").and_then(Value::as_i64))
-}
-
 /// Permission posture captured when the persisted in-flight turn started. This
 /// differs from `Session.current_mode` after a live config change: that selection
 /// applies to the next prompt.
@@ -2665,7 +2707,7 @@ pub(super) async fn get_session_chat(
         .filter(|pending| !pending.trim().is_empty());
     Ok(Json(json!({
         "blocks": blocks,
-        "live_turn": live_turn(&session),
+        "live_turn": session_mod::acp_inflight_turn(&session),
         "effective_mode": effective_turn_mode(&session),
         "pending_prompt": pending_prompt,
         "metadata": metadata,

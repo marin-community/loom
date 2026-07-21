@@ -969,6 +969,7 @@ pub async fn build_acp_launch(
         // does not advertise.
         mode: (!is_codex).then(|| spec.mode.to_string()),
         goal,
+        setup_timeout: std::time::Duration::from_secs(30),
     })
 }
 

@@ -95,10 +95,49 @@ async fn start_new_with_env(
         new_or_load: NewOrLoad::New { cwd, meta: None },
         mode: mode.map(str::to_string),
         goal: goal.map(str::to_string),
+        setup_timeout: Duration::from_secs(5),
     };
     acp::start(&ts.state, id, launch)
         .await
         .expect("acp session starts");
+}
+
+/// A live adapter that withholds a setup response must not keep create/start
+/// open forever or leave its detached relay behind.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn silent_setup_stage_times_out_and_cleans_provider_state() {
+    let ts = TestServer::start().await;
+    make_session(&ts, "acp-setup-timeout").await;
+    let cwd = ts.repo_path().to_path_buf();
+    let launch = AcpLaunch {
+        adapter_cmd: agent_cmd(),
+        cwd: cwd.clone(),
+        env: vec![(
+            "FAKE_ACP_IGNORE_METHOD".to_string(),
+            "session/new".to_string(),
+        )],
+        new_or_load: NewOrLoad::New { cwd, meta: None },
+        mode: None,
+        goal: Some("say:never starts".to_string()),
+        setup_timeout: Duration::from_millis(150),
+    };
+
+    let error = acp::start(&ts.state, "acp-setup-timeout", launch)
+        .await
+        .expect_err("silent session/new times out");
+    assert!(error.to_string().contains("session/new"), "{error}");
+    assert!(error.to_string().contains("timed out"), "{error}");
+    let session = session_mod::get(&ts.state.db, "acp-setup-timeout")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(session.acp_session_id.is_none());
+    assert_eq!(session.acp_ack_seq, 0);
+    assert!(session.acp_inflight.is_none());
+    assert!(session.current_mode.is_none());
+    assert!(!ts.state.acp.is_live("acp-setup-timeout"));
+    assert!(!backend::has_session(&session.term_session).await);
 }
 
 /// Collect broadcast SSE events until `until` matches one (or the timeout).
@@ -1627,6 +1666,54 @@ async fn rest_create_drives_the_turn_lifecycle() {
     assert_eq!(nudges, 1, "the send recorded exactly one nudge audit event");
 }
 
+/// REST keeps failure semantics for non-browser callers, while returning the
+/// durable failed session id so the UI can navigate to its recovery controls.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_create_failure_exposes_the_recoverable_error_session() {
+    let ts = TestServer::start().await;
+    loom::custom_agents::set(
+        &ts.state.db,
+        &loom::custom_agents::CustomAgent {
+            name: "broken-create".to_string(),
+            label: "Broken create".to_string(),
+            setup: String::new(),
+            launch: "exit 7".to_string(),
+            resume: String::new(),
+            reports_status: false,
+            protocol: "acp".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/api/sessions", ts.addr))
+        .json(&json!({
+            "goal": "cannot start",
+            "cwd": ts.cwd(),
+            "agent": "broken-create",
+            "name": "broken-create"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let body: Value = response.json().await.unwrap();
+    let id = body["session_id"].as_str().expect("failed session id");
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or("")
+        .contains("acp launch failed"));
+    let view = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    assert_eq!(view["status"], "error");
+    assert_eq!(branch_tag_value(&view, "attention"), "blocked");
+    assert!(!ts.state.acp.is_live(id));
+    assert!(!backend::has_session(view["term_session"].as_str().unwrap()).await);
+}
+
 /// A provider handoff keeps loom's identity and canonical journal, records one
 /// compact boundary instead of the synthetic bootstrap prompt, and continues at
 /// the next turn under the replacement adapter.
@@ -1695,6 +1782,80 @@ async fn handoff_replaces_provider_and_continues_the_journal() {
     .await;
     assert!(chat["blocks"].as_array().unwrap().iter().any(|b| {
         b["kind"] == "user_message" && b["turn"] == 2 && b["payload"]["text"] == "say:after"
+    }));
+}
+
+/// A missing task is a supported recovery state: close its abandoned turn,
+/// preserve unseen queued feedback, reset old-provider usage, and replace it.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handoff_recovers_without_a_live_task_and_preserves_the_queue() {
+    let ts = TestServer::start().await;
+    seed_acp_agent(&ts, "fake-dead").await;
+    seed_acp_agent(&ts, "fake-replacement").await;
+
+    let created = rest_create(&ts, "fake-dead", "usage:90:100|say:ready").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    poll_chat(&ts, &id, Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|block| block["kind"] == "turn_end")
+    })
+    .await;
+
+    ts.state.acp.stop(&id);
+    backend::kill_session_and_wait(created["term_session"].as_str().unwrap())
+        .await
+        .unwrap();
+    loom::chat::insert(
+        &ts.state.db,
+        &id,
+        1,
+        0,
+        loom::chat::kind::USER_MESSAGE,
+        &json!({ "text": "abandoned request", "by": "manual" }),
+    )
+    .await
+    .unwrap();
+    session_mod::set_inflight(
+        &ts.state.db,
+        &id,
+        Some(r#"{"prompt_id":99,"turn":1,"mode":"default"}"#),
+    )
+    .await
+    .unwrap();
+    session_mod::append_pending_prompt(&ts.state.db, &id, "say:queued survives")
+        .await
+        .unwrap();
+    session_mod::set_status(&ts.state.db, &id, "error")
+        .await
+        .unwrap();
+
+    let handed = ts
+        .client
+        .post(
+            &format!("/api/sessions/{id}/handoff"),
+            json!({ "agent": "fake-replacement" }),
+        )
+        .await
+        .expect("disconnected handoff succeeds");
+    assert_eq!(handed["agent_kind"], "fake-replacement");
+    assert_eq!(handed["status"], "running");
+    assert_eq!(handed["usage"], Value::Null, "old provider usage reset");
+
+    let chat = poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
+        blocks.iter().any(|block| {
+            block["kind"] == "agent_message" && block["payload"]["text"] == "queued survives"
+        })
+    })
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert!(blocks.iter().any(|block| {
+        block["turn"] == 1
+            && block["kind"] == "turn_end"
+            && block["payload"]["stop_reason"] == "error"
+    }));
+    assert!(blocks.iter().any(|block| {
+        block["kind"] == "user_message"
+            && block["payload"]["text"].as_str() == Some("say:queued survives")
     }));
 }
 

@@ -126,7 +126,9 @@ const handoffModel = ref('');
 const handoffEffort = ref('');
 const handoffBusy = ref(false);
 const handoffError = ref('');
-const canHandoff = computed(() => props.ws.protocol === 'acp' && props.ws.status === 'running');
+const canHandoff = computed(
+  () => props.ws.protocol === 'acp' && ['running', 'orphaned', 'error'].includes(props.ws.status),
+);
 const unchangedHandoff = computed(
   () =>
     handoffAgent.value === props.ws.agent_kind &&
@@ -177,6 +179,7 @@ async function submitHandoff() {
     handoffOpen.value = false;
     showDetails.value = false;
     notice.value = `Handed off to ${handoffAgent.value}.`;
+    window.dispatchEvent(new CustomEvent('loom:acp-handoff', { detail: { id: props.ws.id } }));
     await emit('reload');
   } catch (e) {
     handoffError.value = (e as Error).message;

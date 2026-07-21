@@ -20,6 +20,7 @@ import {
   setSessionMode,
   setSessionConfigOption,
   listSessionFiles,
+  uploadSessionScratch,
 } from '../api';
 import type {
   Session,
@@ -43,10 +44,13 @@ import type {
   AcpConfigOption,
   AcpConfigChoice,
   HandoffPayload,
+  AcpUsage,
 } from '../types';
 import { canSend } from '../lib/sessionState';
 import { useFollowFoot } from '../lib/followFoot';
+import { formatTokens } from '../lib/usage';
 import MarkdownView from './MarkdownView.vue';
+import AgentUsage from './AgentUsage.vue';
 
 // The Conversation surface for an *ACP* session (`protocol='acp'`): typeset
 // dialogue, not chat bubbles. Serif prose for the humans and the agent; the
@@ -263,6 +267,16 @@ function onQueue(ev: SseQueue) {
 // ── SSE lifecycle (kept-alive discipline) ────────────────────────────────────
 let source: EventSource | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+function rebindStream() {
+  closeStream();
+  openStream();
+  load({ preserve: true });
+}
+function rebindAfterHandoff(event: Event) {
+  const handedOffId = (event as CustomEvent<{ id?: string }>).detail?.id;
+  if (handedOffId !== id.value) return;
+  rebindStream();
+}
 function openStream() {
   const stream = new EventSource(`/api/sessions/${id.value}/chat/stream`);
   source = stream;
@@ -305,6 +319,7 @@ function closeStream() {
 }
 
 onMounted(() => {
+  window.addEventListener('loom:acp-handoff', rebindAfterHandoff);
   openStream();
   load();
 });
@@ -314,12 +329,25 @@ onActivated(() => {
   load({ preserve: true });
 });
 onDeactivated(closeStream);
-onUnmounted(closeStream);
+onUnmounted(() => {
+  window.removeEventListener('loom:acp-handoff', rebindAfterHandoff);
+  closeStream();
+});
 watch(id, () => {
   closeStream();
   openStream();
   load();
 });
+watch(
+  () => props.session.agent_kind,
+  (runtime, previous) => {
+    if (runtime === previous) return;
+    // A handoff replaces the task and its broadcast channel without replacing
+    // loom's stable session id. Rebind deterministically when the header reloads
+    // the new provider; clean SSE EOF is not reported consistently by browsers.
+    rebindStream();
+  },
+);
 
 // ── Composer ─────────────────────────────────────────────────────────────────
 const draft = ref('');
@@ -329,9 +357,52 @@ const editingQueued = ref(false);
 const sendError = ref('');
 const composerVisible = computed(() => canSend(props.session));
 const selectedFiles = ref<string[]>([]);
+const attachmentInput = ref<HTMLInputElement | null>(null);
+const uploadingAttachment = ref(false);
+
+function resizeComposer() {
+  nextTick(() => {
+    const input = composerInput.value;
+    if (!input) return;
+    input.style.height = 'auto';
+    input.style.height = `${Math.min(input.scrollHeight, 256)}px`;
+  });
+}
+watch(draft, resizeComposer);
+watch(id, () => {
+  draft.value = '';
+  selectedFiles.value = [];
+  sendError.value = '';
+});
+
+function removeSelectedFile(path: string) {
+  selectedFiles.value = selectedFiles.value.filter((selected) => selected !== path);
+}
+
+async function onAttachmentPick(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const files = Array.from(input.files ?? []);
+  input.value = '';
+  if (!files.length || uploadingAttachment.value) return;
+  uploadingAttachment.value = true;
+  sendError.value = '';
+  try {
+    for (const file of files) {
+      const uploaded = await uploadSessionScratch(id.value, file);
+      if (!selectedFiles.value.includes(uploaded.path)) selectedFiles.value.push(uploaded.path);
+    }
+    window.dispatchEvent(new CustomEvent('loom:scratch-changed', { detail: { id: id.value } }));
+    resizeComposer();
+  } catch (e) {
+    sendError.value = (e as Error).message ?? 'Failed to attach file';
+  } finally {
+    uploadingAttachment.value = false;
+  }
+}
 
 async function submitPrompt(forceSteer = false) {
-  if (!draft.value.trim() || sending.value || editingQueued.value) return;
+  if (!draft.value.trim() || sending.value || editingQueued.value || uploadingAttachment.value)
+    return;
   const local = localCommand(draft.value);
   if (local) {
     draft.value = '';
@@ -345,8 +416,7 @@ async function submitPrompt(forceSteer = false) {
   optimistic.value.push(pending);
   autoFollow();
   try {
-    const files = selectedFiles.value.filter((path) => text.includes(`@${path}`));
-    await promptSession(id.value, text, undefined, forceSteer, files);
+    await promptSession(id.value, text, undefined, forceSteer, [...selectedFiles.value]);
     const index = optimistic.value.findIndex((o) => o.key === pending.key);
     if (index >= 0) optimistic.value.splice(index, 1);
     draft.value = '';
@@ -472,7 +542,9 @@ onUnmounted(() => {
 const activeFile = computed(() => fileMatches.value[fileIndex.value] ?? null);
 
 function chooseFile(path: string) {
-  draft.value = draft.value.replace(/@[^\s@]*$/, `@${path} `);
+  // The visible pill owns the attachment. Remove the completion token so a
+  // long path does not pollute the prose the agent receives.
+  draft.value = draft.value.replace(/@[^\s@]*$/, '').replace(/[ \t]+$/, ' ');
   if (!selectedFiles.value.includes(path)) selectedFiles.value.push(path);
   fileMatches.value = [];
   nextTick(() => composerInput.value?.focus());
@@ -697,7 +769,14 @@ interface ActivityItem {
 }
 
 type Row =
-  | { type: 'turnRule'; key: string; turn: number; stop: string; ctx: number | null; loud: boolean }
+  | {
+      type: 'turnRule';
+      key: string;
+      turn: number;
+      stop: string;
+      usage: AcpUsage | null;
+      loud: boolean;
+    }
   | {
       type: 'user';
       key: string;
@@ -737,6 +816,12 @@ function shortTime(ts: string): string {
   return ts.length >= 16 && ts[10] === 'T' ? ts.slice(11, 16) : ts;
 }
 
+function usageFromPayload(payload: UsagePayload): AcpUsage | null {
+  return typeof payload.used === 'number' && typeof payload.size === 'number' && payload.size > 0
+    ? { used: payload.used, size: payload.size, cost: payload.cost }
+    : null;
+}
+
 // The latest plan block feeds the right rail, not the transcript flow.
 const latestPlan = computed<PlanEntry[]>(() => {
   let entries: PlanEntry[] = [];
@@ -746,21 +831,14 @@ const latestPlan = computed<PlanEntry[]>(() => {
   return entries;
 });
 
-const model = computed<{ rows: Row[]; toc: TocItem[] }>(() => {
+const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(() => {
   const rows: Row[] = [];
   const toc: TocItem[] = [];
   let n = 0;
 
   const sorted = [...blocks.values()].sort((a, b) => a.turn - b.turn || a.seq - b.seq);
 
-  const usageBlocks = sorted.filter((b) => b.kind === 'usage');
-  const usageAt = (turn: number): number | null => {
-    let used: number | null = null;
-    for (const u of usageBlocks) {
-      if (u.turn <= turn) used = (u.payload as unknown as UsagePayload).used ?? used;
-    }
-    return used;
-  };
+  let currentUsage: AcpUsage | null = null;
 
   let activity: ActivityItem[] = [];
   let activityKey = '';
@@ -848,6 +926,7 @@ const model = computed<{ rows: Row[]; toc: TocItem[] }>(() => {
         break;
       case 'handoff':
         flushActivity();
+        currentUsage = null;
         rows.push({
           type: 'handoff',
           key: k,
@@ -862,12 +941,15 @@ const model = computed<{ rows: Row[]; toc: TocItem[] }>(() => {
           key: k,
           turn: b.turn,
           stop,
-          ctx: usageAt(b.turn),
+          usage: currentUsage ? { ...currentUsage } : null,
           loud: stop === 'refusal',
         });
         break;
       }
-      // plan / usage: not rendered inline.
+      case 'usage':
+        currentUsage = usageFromPayload(b.payload as unknown as UsagePayload);
+        break;
+      // plan: rendered in the rail rather than inline.
     }
   }
   flushActivity();
@@ -904,7 +986,7 @@ const model = computed<{ rows: Row[]; toc: TocItem[] }>(() => {
     }
   }
 
-  return { rows, toc };
+  return { rows, toc, usage: currentUsage };
 });
 
 // The empty conversation, styled on purpose — a fresh session has no journal
@@ -1115,8 +1197,9 @@ function goTo(anchor: string) {
             >
               <span
                 >turn {{ row.turn + 1 }} · {{ row.stop
-                }}<template v-if="row.ctx != null">
-                  · {{ Math.round(row.ctx / 1000) }}k ctx</template
+                }}<template v-if="row.usage">
+                  · {{ formatTokens(row.usage.used) }} /
+                  {{ formatTokens(row.usage.size) }} context</template
                 ></span
               >
             </div>
@@ -1401,19 +1484,53 @@ function goTo(anchor: string) {
       data-testid="acp-composer"
       @submit.prevent="submitPrompt(false)"
     >
-      <p v-if="sendError" class="mb-1.5 text-xs text-block" data-testid="acp-composer-error">
+      <p
+        v-if="sendError"
+        class="acp-composer-error text-xs text-block"
+        data-testid="acp-composer-error"
+      >
         {{ sendError }}
       </p>
       <textarea
         ref="composerInput"
         v-model="draft"
-        rows="2"
+        rows="4"
         :disabled="sending || editingQueued"
         :placeholder="commandHint || 'Message the agent…'"
         data-testid="acp-composer-input"
         class="acp-input"
         @keydown="onComposerKeydown"
       ></textarea>
+      <ul v-if="selectedFiles.length" class="acp-attachments" data-testid="acp-attachments">
+        <li
+          v-for="path in selectedFiles"
+          :key="path"
+          class="acp-attachment-pill"
+          data-testid="acp-attachment-pill"
+        >
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.7"
+            aria-hidden="true"
+          >
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+            <path d="M14 2v6h6" />
+          </svg>
+          <span class="truncate">{{ path }}</span>
+          <button
+            type="button"
+            :aria-label="`Remove ${path}`"
+            :title="`Remove ${path}`"
+            @click="removeSelectedFile(path)"
+          >
+            ×
+          </button>
+        </li>
+      </ul>
       <ul
         v-if="fileMatches.length"
         class="acp-command-menu"
@@ -1459,6 +1576,39 @@ function goTo(anchor: string) {
       <div class="acp-composer-actions">
         <!-- Agent-owned config selectors + slash discovery on the left. -->
         <div class="acp-composer-left">
+          <button
+            type="button"
+            class="acp-attach-button"
+            data-testid="acp-composer-attach"
+            :disabled="uploadingAttachment"
+            :title="uploadingAttachment ? 'Attaching…' : 'Attach files'"
+            @click="attachmentInput?.click()"
+          >
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path
+                d="m21.4 11-9.2 9.2a6 6 0 0 1-8.5-8.5l8.6-8.6A4 4 0 1 1 18 8.8l-8.6 8.6a2 2 0 1 1-2.8-2.8l8.5-8.5"
+              />
+            </svg>
+            <span>{{ uploadingAttachment ? 'Attaching…' : 'Attach' }}</span>
+          </button>
+          <input
+            ref="attachmentInput"
+            type="file"
+            multiple
+            class="hidden"
+            data-testid="acp-composer-file-input"
+            @change="onAttachmentPick"
+          />
           <div
             v-for="option in configOptions"
             :key="option.id"
@@ -1536,12 +1686,14 @@ function goTo(anchor: string) {
           </button>
         </div>
         <div class="acp-composer-right">
+          <AgentUsage v-if="model.usage" :usage="model.usage" />
+          <span class="acp-send-hint">Enter to send · Shift+Enter for a new line</span>
           <button
             v-if="turnLive && steeringSupported"
             type="button"
             class="btn-secondary px-3 py-1 text-xs"
             data-testid="acp-composer-force-steer"
-            :disabled="sending || editingQueued || !draft.trim()"
+            :disabled="sending || editingQueued || uploadingAttachment || !draft.trim()"
             title="Inject this feedback into the running turn"
             @click="submitPrompt(true)"
           >
@@ -1561,7 +1713,7 @@ function goTo(anchor: string) {
             type="submit"
             class="btn-primary px-3 py-1 text-sm"
             data-testid="acp-composer-send"
-            :disabled="sending || editingQueued || !draft.trim()"
+            :disabled="sending || editingQueued || uploadingAttachment || !draft.trim()"
           >
             {{ sending ? 'Sending…' : 'Send' }}
           </button>
@@ -1926,38 +2078,115 @@ function goTo(anchor: string) {
 
 /* Composer. */
 .acp-composer {
-  margin-top: 0.5rem;
-  border-top: 1px solid var(--line);
-  padding-top: 0.625rem;
+  position: relative;
+  margin-top: 0.75rem;
+  overflow: visible;
+  border: 1px solid var(--line);
+  border-radius: 0.625rem;
+  background: var(--input);
+  box-shadow: 0 7px 24px rgb(0 0 0 / 0.08);
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+.acp-composer:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--line));
+  box-shadow:
+    0 7px 24px rgb(0 0 0 / 0.08),
+    0 0 0 2px color-mix(in srgb, var(--accent) 13%, transparent);
+}
+.acp-composer-error {
+  margin: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--block) 28%, var(--line));
+  padding: 0.5rem 0.75rem;
 }
 .acp-input {
+  display: block;
   width: 100%;
-  resize: vertical;
-  max-height: 12rem;
-  border-radius: 0.25rem;
-  background: var(--input);
-  padding: 0.55rem 0.7rem;
+  min-height: 7.25rem;
+  max-height: 16rem;
+  resize: none;
+  border: 0;
+  border-radius: 0.625rem 0.625rem 0 0;
+  background: transparent;
+  padding: 0.8rem 0.9rem;
   font-family: var(--font-serif);
-  font-size: 0.9375rem;
-  line-height: 1.5;
+  font-size: 1rem;
+  line-height: 1.55;
   outline: none;
 }
 .acp-input:focus {
-  box-shadow: 0 0 0 1px var(--accent);
+  box-shadow: none;
+}
+.acp-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  padding: 0 0.75rem 0.65rem;
+}
+.acp-attachment-pill {
+  display: inline-flex;
+  min-width: 0;
+  max-width: min(22rem, 100%);
+  align-items: center;
+  gap: 0.375rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  padding: 0.24rem 0.35rem 0.24rem 0.55rem;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+}
+.acp-attachment-pill svg {
+  flex: none;
+  color: var(--accent);
+}
+.acp-attachment-pill button {
+  display: grid;
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--faint);
+}
+.acp-attachment-pill button:hover {
+  background: var(--subtle-hover);
+  color: var(--block);
 }
 .acp-composer-actions {
-  margin-top: 0.55rem;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
+  gap: 0.625rem;
+  border-top: 1px solid var(--line);
+  padding: 0.55rem 0.65rem;
 }
 .acp-composer-left {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.65rem;
+  gap: 0.45rem;
   min-width: 0;
+}
+.acp-attach-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border-radius: 0.25rem;
+  padding: 0.2rem 0.35rem;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+}
+.acp-attach-button:hover:not(:disabled) {
+  background: var(--subtle);
+  color: var(--fg);
+}
+.acp-attach-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
 }
 
 /* Slash-command autocomplete, populated by ACP `available_commands_update`. */
@@ -2000,9 +2229,34 @@ function goTo(anchor: string) {
 }
 .acp-composer-right {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 0.5rem;
-  flex: none;
+  min-width: 0;
+}
+.acp-send-hint {
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .acp-composer-actions {
+    align-items: flex-end;
+    flex-direction: column;
+  }
+  .acp-composer-left,
+  .acp-composer-right {
+    width: 100%;
+  }
+  .acp-composer-right {
+    justify-content: flex-end;
+  }
+  .acp-send-hint {
+    display: none;
+  }
 }
 
 /* Mode chip + dropdown. */

@@ -299,6 +299,11 @@ function handleMessage(msg) {
     }
     return;
   }
+  // Integration tests use this to model an adapter process that stays alive
+  // but never answers one setup stage — the production failure behind a create
+  // request that otherwise waits forever.
+  const ignoredMethods = new Set((process.env.FAKE_ACP_IGNORE_METHOD || "").split(",").filter(Boolean));
+  if (ignoredMethods.has(msg.method)) return;
   switch (msg.method) {
     case "initialize":
       respond(msg.id, {

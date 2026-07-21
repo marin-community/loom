@@ -266,6 +266,25 @@ async fn wait_for_comments(fake: &FakeGithub, n: usize) {
     panic!("expected >= {n} replies, saw {have}");
 }
 
+/// The fake records a reply inside `post_issue_comment`, one await before the
+/// detached webhook task persists the reply id. Wait for that durable boundary
+/// when a test needs to assert the bookkeeping tag rather than racing it.
+async fn wait_for_session_tag(ts: &TestServer, session_id: &str, key: &str) -> serde_json::Value {
+    for _ in 0..200 {
+        let sessions = ts.client.get("/api/sessions").await.unwrap();
+        if let Some(session) = sessions.as_array().unwrap().iter().find(|session| {
+            session["id"] == session_id
+                && session["branch"]["tags"]
+                    .as_array()
+                    .is_some_and(|tags| tags.iter().any(|tag| tag["key"] == key))
+        }) {
+            return session.clone();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("session {session_id} never acquired tag {key}");
+}
+
 /// Poll until the fake gateway has recorded at least `n` reactions.
 async fn wait_for_reactions(fake: &FakeGithub, n: usize) {
     for _ in 0..200 {
@@ -482,8 +501,8 @@ async fn status_writes_mirror_onto_the_on_it_comment() {
     wait_for_comments(&fake, 1).await;
 
     let sessions = ts.client.get("/api/sessions").await.unwrap();
-    let session = &sessions.as_array().unwrap()[0];
-    let session_id = session["id"].as_str().unwrap().to_string();
+    let session_id = sessions[0]["id"].as_str().unwrap().to_string();
+    let session = wait_for_session_tag(&ts, &session_id, "github.status_comment").await;
     let branch_id = session["branch"]["id"].as_str().unwrap().to_string();
     let tags = session["branch"]["tags"].as_array().unwrap();
     let tag = |key: &str| {

@@ -163,11 +163,28 @@ pub struct SessionView {
     /// before one is set.
     #[serde(default)]
     pub current_mode: Option<String>,
-    /// The latest context-window usage (`{used, size}`) reported by an ACP agent,
-    /// or `null`.
+    /// The latest context-window usage reported by the current ACP provider, or
+    /// `null` before it reports (and immediately after a provider handoff).
     #[serde(default)]
-    pub usage: Option<serde_json::Value>,
+    pub usage: Option<AcpUsage>,
     pub branch: BranchView,
+}
+
+/// Cumulative session cost optionally reported alongside ACP context usage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AcpCost {
+    pub amount: f64,
+    pub currency: String,
+}
+
+/// Current model-context utilization for an ACP session. This is context-window
+/// state, not a provider account/rate-limit quota.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AcpUsage {
+    pub used: u64,
+    pub size: u64,
+    #[serde(default)]
+    pub cost: Option<AcpCost>,
 }
 
 fn default_protocol() -> String {

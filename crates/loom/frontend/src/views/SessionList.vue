@@ -10,6 +10,7 @@ import GithubStatus from '../components/GithubStatus.vue';
 import NewSessionDrawer from '../components/NewSessionDrawer.vue';
 import SessionRowActions from '../components/SessionRowActions.vue';
 import SessionRemedyButton from '../components/SessionRemedyButton.vue';
+import AgentUsage from '../components/AgentUsage.vue';
 import { timeAgo } from '../lib/time';
 import {
   effectiveAttention,
@@ -597,6 +598,7 @@ async function handleCreated() {
             <!-- Soothing idle mark: a calm, neutral chip when the agent is
                  resting (no loud signal). Reassures rather than alarms. -->
             <IdleChip v-if="idleTag(s)" :tag="idleTag(s)!" />
+            <AgentUsage v-if="s.usage" :usage="s.usage" compact />
             <!-- Quiet free-form tags: deletable pills, never the loud fill. -->
             <TagPill
               v-for="t in quietTags(s)"

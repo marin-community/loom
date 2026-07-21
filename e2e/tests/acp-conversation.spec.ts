@@ -187,6 +187,15 @@ test.describe('acp conversation', () => {
     await expect.poll(async () => (await weaver.getSession(s.id)).agent_kind).toBe('acp-fake-next');
     await expect(page.getByText('acp-fake-next', { exact: true })).toBeVisible();
     await expect(conv.getByText('before handoff', { exact: true })).toBeVisible();
+    await expect
+      .poll(async () => {
+        const res = await fetch(`${weaver.baseUrl}/api/sessions/${s.id}/chat`);
+        const chat = (await res.json()) as {
+          blocks: Array<{ kind: string; payload: { from?: string; to?: string } }>;
+        };
+        return chat.blocks.find((block) => block.kind === 'handoff')?.payload;
+      })
+      .toEqual({ from: 'acp-fake', to: 'acp-fake-next', model: '', effort: '' });
     await expect(page.getByTestId('acp-handoff')).toContainText('acp-fake → acp-fake-next');
 
     const input = page.getByTestId('acp-composer-input');
@@ -320,6 +329,7 @@ test.describe('acp conversation', () => {
       }),
     ).toBeVisible();
     await expect(conv.locator('.acp-label', { hasText: 'Agent' })).toHaveCount(1);
+    await expect(page.getByTestId('agent-usage')).toContainText('41k / 200k context · 21%');
   });
 
   test('stop settles working and leaves unseen feedback idle until sent', async ({ page, weaver }) => {
@@ -461,12 +471,32 @@ test.describe('acp conversation', () => {
     const menu = page.getByTestId('acp-file-menu');
     await expect(menu.getByText('@README.md', { exact: true })).toBeVisible();
     await menu.getByText('@README.md', { exact: true }).click();
-    await expect(input).toHaveValue('resources|@README.md ');
+    await expect(input).toHaveValue('resources|');
+    await expect(page.getByTestId('acp-attachment-pill')).toContainText('README.md');
 
     await page.getByTestId('acp-composer-send').click();
     await expect(page.getByTestId('acp-conversation').getByText('README.md', { exact: true })).toBeVisible({
       timeout: 15_000,
     });
+  });
+
+  test('composer uploads become removable ACP resource pills', async ({ page, weaver }) => {
+    await openAcp(page, weaver, { goal: 'say:ready', name: 'acp-upload-resource' });
+    await page.getByTestId('acp-composer-file-input').setInputFiles({
+      name: 'long-notes.txt',
+      mimeType: 'text/plain',
+      buffer: Buffer.from('notes for the agent'),
+    });
+
+    const pill = page.getByTestId('acp-attachment-pill');
+    await expect(pill).toContainText('scratch/long-notes.txt');
+    await expect(page.getByTestId('scratch-panel')).toContainText('long-notes.txt');
+    await page.getByTestId('acp-composer-input').fill('resources');
+    await page.getByTestId('acp-composer-send').click();
+    await expect(
+      page.getByTestId('acp-conversation').getByText('scratch/long-notes.txt', { exact: true }),
+    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('acp-attachment-pill')).toHaveCount(0);
   });
 
   test('the composer steers a prompt into a live turn', async ({ page, weaver }) => {

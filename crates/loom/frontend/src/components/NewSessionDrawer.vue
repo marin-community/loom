@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { get, listAgents, listRepos, post, registerRepo } from '../api';
+import { useRouter } from 'vue-router';
+import { ApiError, get, listAgents, listRepos, post, registerRepo } from '../api';
 import type { AgentMetadata, ManagedRepo, RecentRepo, RepoBranch } from '../types';
 import AgentRuntimePicker from './AgentRuntimePicker.vue';
 import ScratchPicker from './ScratchPicker.vue';
@@ -9,6 +10,7 @@ const emit = defineEmits<{
   close: [];
   created: [];
 }>();
+const router = useRouter();
 
 const recentRepos = ref<RecentRepo[]>([]);
 const managedRepos = ref<ManagedRepo[]>([]);
@@ -237,6 +239,17 @@ async function create() {
     emit('created');
     emit('close');
   } catch (e) {
+    const failedSession = e instanceof ApiError ? e.body.session_id : undefined;
+    if (typeof failedSession === 'string' && failedSession) {
+      // Provisioning succeeded far enough to leave a recoverable session, but
+      // its agent setup failed. Refresh the fleet and take the user straight to
+      // the visible error/handoff controls instead of marooning the drawer.
+      emit('created');
+      resetForm();
+      emit('close');
+      await router.push(`/s/${failedSession}`);
+      return;
+    }
     error.value = (e as Error).message;
   } finally {
     creating.value = false;

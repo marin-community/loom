@@ -27,7 +27,8 @@
 //! - `permission_request` `{ request_id, tool_call_id, title, options, outcome }`
 //!   — inserted open, `UPDATE`d in place on resolution.
 //! - `mode_change`    `{ mode_id, by }`.
-//! - `usage`          `{ used, size }`.
+//! - `usage`          `{ used, size, cost? }` (or an internal null marker at a
+//!   provider boundary).
 //! - `turn_end`       `{ stop_reason }`.
 //! - `handoff`        `{ from, to, model, effort }` — the provider boundary
 //!   that replaces the synthetic bootstrap prompt in the visible journal.
@@ -47,6 +48,7 @@ mod wire;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
@@ -58,6 +60,7 @@ use crate::chat::{self, kind, ChatBlockView};
 use crate::db::{now_iso, Db};
 use crate::session;
 use crate::web::AppState;
+use weaver_api::{AcpCost, AcpUsage};
 use wire::{
     method, Incoming, IncomingKind, PermissionOption, RequestPermissionParams, SessionNotification,
     SessionUpdate, ToolCall, ToolCallContent, ToolCallLocation,
@@ -97,6 +100,9 @@ pub struct AcpLaunch {
     /// The session's goal, sent as the first `session/prompt` (journaled as the
     /// first `user_message`). `None` waits for the first REST prompt.
     pub goal: Option<String>,
+    /// Maximum time to wait for one ACP setup response. Kept on the launch so
+    /// integration tests can exercise a silent adapter without a 30-second wait.
+    pub setup_timeout: Duration,
 }
 
 /// How a prompt was accepted plus the turn it belongs to — the `POST /prompt`
@@ -391,11 +397,41 @@ async fn start_inner(
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
     crate::backend::new_relay_session(&relay_name, &launch.adapter_cmd, &env, &launch.cwd).await?;
-    let stream = crate::backend::subscribe_relay(&relay_name, 0).await?;
-
     let (events_tx, _) = broadcast::channel(256);
-    let mut task = Task::fresh(state, &session, relay_name, stream, events_tx.clone()).await?;
-    task.handshake(&launch, handoff).await?;
+    // From this point onward the detached relay exists. Any failure must tear it
+    // down and clear partially-persisted provider state before returning, or the
+    // caller gets a stuck row plus a relay name handoff cannot safely reuse.
+    let prepared: Result<Task> = async {
+        let stream = crate::backend::subscribe_relay(&relay_name, 0).await?;
+        let mut task = Task::fresh(
+            state,
+            &session,
+            relay_name.clone(),
+            stream,
+            events_tx.clone(),
+        )
+        .await?;
+        task.handshake(&launch, handoff).await?;
+        Ok(task)
+    }
+    .await;
+    let mut task = match prepared {
+        Ok(task) => task,
+        Err(error) => {
+            state.acp.stop(session_id);
+            let latest = session::get(&state.db, session_id).await.ok().flatten();
+            if let Some(turn) = latest.as_ref().and_then(session::acp_inflight_turn) {
+                let _ = chat::close_abandoned_turn(&state.db, session_id, turn).await;
+            }
+            let _ = session::clear_acp_state(&state.db, session_id).await;
+            if let Err(cleanup) = crate::backend::kill_session_and_wait(&relay_name).await {
+                return Err(anyhow!(
+                    "{error}; failed to clean up ACP relay after setup error: {cleanup}"
+                ));
+            }
+            return Err(error);
+        }
+    };
 
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     task.generation = state.acp.register(
@@ -905,7 +941,9 @@ impl Task {
                 wire::initialize_params(),
             ))
             .await?;
-        let (res, err) = self.recv_until_response(id).await?;
+        let (res, err) = self
+            .recv_until_response(id, method::INITIALIZE, launch.setup_timeout)
+            .await?;
         let res = res.ok_or_else(|| anyhow!("initialize failed: {err:?}"))?;
         if let Ok(init) = serde_json::from_value::<wire::InitializeResult>(res) {
             self.load_session_cap = init.agent_capabilities.load_session;
@@ -920,7 +958,9 @@ impl Task {
                 self.stream
                     .write(&wire::request_line(id, method::SESSION_NEW, params))
                     .await?;
-                let (res, err) = self.recv_until_response(id).await?;
+                let (res, err) = self
+                    .recv_until_response(id, method::SESSION_NEW, launch.setup_timeout)
+                    .await?;
                 let res = res.ok_or_else(|| anyhow!("session/new failed: {err:?}"))?;
                 let ns: wire::NewSessionResult = serde_json::from_value(res)?;
                 self.acp_session_id = ns.session_id.clone();
@@ -954,7 +994,10 @@ impl Task {
                     .write(&wire::request_line(id, method::SESSION_LOAD, params))
                     .await?;
                 // History replays as `session/update` notifications during the call.
-                let (res, err) = self.recv_until_response(id).await?;
+                let load_timeout = launch.setup_timeout.saturating_mul(4);
+                let (res, err) = self
+                    .recv_until_response(id, method::SESSION_LOAD, load_timeout)
+                    .await?;
                 self.suppress_journal = false;
                 // Drop any consolidation the suppressed replay left half-open so it
                 // can't flush stale history into a later turn.
@@ -986,7 +1029,9 @@ impl Task {
                     wire::set_mode_params(&self.acp_session_id, mode),
                 ))
                 .await?;
-            let (result, error) = self.recv_until_response(id).await?;
+            let (result, error) = self
+                .recv_until_response(id, method::SESSION_SET_MODE, launch.setup_timeout)
+                .await?;
             if result.is_none() {
                 bail!("session/set_mode failed: {error:?}");
             }
@@ -1007,9 +1052,24 @@ impl Task {
 
     /// Drive frames until the response to `want` arrives, processing interleaved
     /// notifications/requests normally. Used only during the synchronous handshake.
-    async fn recv_until_response(&mut self, want: u64) -> Result<(Option<Value>, Option<Value>)> {
+    async fn recv_until_response(
+        &mut self,
+        want: u64,
+        method_name: &str,
+        timeout: Duration,
+    ) -> Result<(Option<Value>, Option<Value>)> {
+        let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            match self.stream.recv().await {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                bail!("timed out waiting for ACP {method_name} response after {timeout:?}");
+            }
+            let event = tokio::time::timeout(remaining, self.stream.recv())
+                .await
+                .map_err(|_| {
+                    anyhow!("timed out waiting for ACP {method_name} response after {timeout:?}")
+                })?;
+            match event {
                 Some(RelayEvent::Frame { seq, payload }) => {
                     self.highest_seq = seq;
                     let inc: Incoming = match serde_json::from_slice(&payload) {
@@ -1157,11 +1217,26 @@ impl Task {
                     .await;
                 }
             }
-            SessionUpdate::UsageUpdate { used, size } => {
+            SessionUpdate::UsageUpdate { used, size, cost } => {
                 // Usage is metadata, not a prose boundary. Flushing here split
                 // replies into tiny blocks when an adapter reported it often.
-                self.journal_block(kind::USAGE, json!({ "used": used, "size": size }))
+                // ACP requires both context fields; silently ignore a malformed
+                // legacy update instead of publishing a misleading 0/0 meter.
+                if let (Some(used), Some(size)) = (used, size) {
+                    let usage = AcpUsage {
+                        used,
+                        size,
+                        cost: cost.map(|cost| AcpCost {
+                            amount: cost.amount,
+                            currency: cost.currency,
+                        }),
+                    };
+                    self.journal_block(
+                        kind::USAGE,
+                        serde_json::to_value(usage).unwrap_or(Value::Null),
+                    )
                     .await;
+                }
             }
             SessionUpdate::SessionInfoUpdate { meta } => {
                 let status = meta

@@ -116,7 +116,7 @@ export interface Session {
    *  `acceptEdits`, `default`, `plan`), or null for a terminal session / before
    *  one is set. */
   current_mode: string | null;
-  /** The latest context-window usage an ACP agent reported, or null. */
+  /** The latest context-window usage the current ACP provider reported, or null. */
   usage: AcpUsage | null;
   /** The ACP modes the adapter offers, when the server exposes them. Absent today
    *  (SessionView carries only `current_mode`), so the mode chip falls back to the
@@ -130,10 +130,16 @@ export interface Session {
 // These hand-mirror loom's `chat.rs` / `acp/mod.rs` serde shapes: the block
 // contract (`GET /sessions/{id}/chat`) and the `/chat/stream` SSE events.
 
-/** Context-window usage `{used, size}` (tokens). */
+export interface AcpCost {
+  amount: number;
+  currency: string;
+}
+
+/** Context-window usage (tokens), plus optional cumulative session cost. */
 export interface AcpUsage {
-  used?: number | null;
-  size?: number | null;
+  used: number;
+  size: number;
+  cost?: AcpCost | null;
 }
 
 /** The closed set of chat-journal block kinds. */
@@ -273,6 +279,8 @@ export interface PermissionPayload {
 export interface UsagePayload {
   used: number | null;
   size: number | null;
+  cost?: AcpCost | null;
+  reset?: boolean;
 }
 export interface TurnEndPayload {
   stop_reason: string;

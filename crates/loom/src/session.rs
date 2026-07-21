@@ -366,9 +366,35 @@ pub async fn set_current_mode(db: &Db, id: &str, mode_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Clear state owned by one ACP adapter process after setup fails. The stable
+/// loom session, journal, runtime profile, and durable human prompt queue stay
+/// intact so the failed session can be inspected or handed off.
+pub async fn clear_acp_state(db: &Db, id: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE sessions
+         SET acp_session_id = NULL, acp_ack_seq = 0, acp_inflight = NULL,
+             current_mode = NULL
+         WHERE id = ?",
+    )
+    .bind(id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// The turn recorded in a session's durable ACP in-flight state, when valid.
+pub fn acp_inflight_turn(session: &Session) -> Option<i64> {
+    session
+        .acp_inflight
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value.get("turn").and_then(serde_json::Value::as_i64))
+}
+
 /// Replace an ACP session's runtime profile and clear every piece of
-/// provider-private relay/session state. The journal is deliberately untouched:
-/// it is keyed by loom's stable session id and continues across the handoff.
+/// provider-private relay/session state. The journal and durable prompt queue
+/// are deliberately untouched: both belong to loom's stable session and must
+/// continue across a disconnected handoff.
 pub async fn prepare_handoff(
     db: &Db,
     id: &str,
@@ -381,7 +407,7 @@ pub async fn prepare_handoff(
         "UPDATE sessions
          SET agent_kind = ?, model = ?, effort = ?, status = ?,
              acp_session_id = NULL, acp_ack_seq = 0, acp_inflight = NULL,
-             current_mode = NULL, pending_prompt = ''
+             current_mode = NULL
          WHERE id = ?",
     )
     .bind(agent_kind)
@@ -434,7 +460,12 @@ pub async fn read_pending_prompt(db: &Db, id: &str) -> Result<String> {
 /// the prompt stays visibly queued instead of becoming eligible for replay at
 /// every later turn boundary.
 pub async fn take_pending_prompt(db: &Db, id: &str) -> Result<Option<String>> {
-    let mut tx = db.begin().await?;
+    // Take the writer lock before reading. A deferred transaction can read while
+    // another writer holds WAL's reserved lock, then fail its read -> write
+    // upgrade immediately with SQLITE_BUSY instead of honoring busy_timeout.
+    // Stop-and-send reaches this just after persisting its cancellation boundary,
+    // so that race used to leak "database is locked" to the composer.
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
     let pending: Option<String> =
         sqlx::query_scalar::<_, Option<String>>("SELECT pending_prompt FROM sessions WHERE id = ?")
             .bind(id)
@@ -617,10 +648,7 @@ mod tests {
         assert_eq!(session.acp_ack_seq, 0);
         assert!(session.acp_inflight.is_none());
         assert!(session.current_mode.is_none());
-        assert!(
-            session.pending_prompt.as_deref().unwrap_or("").is_empty(),
-            "handoff clears the queue to empty, never NULL"
-        );
+        assert_eq!(session.pending_prompt.as_deref(), Some("queued"));
     }
 
     /// Regression: the queue clears to `''`, never NULL. `sessions.pending_prompt`
@@ -663,5 +691,39 @@ mod tests {
         append_pending_prompt(&db, "drain", "again").await.unwrap();
         consume_pending_prompt(&db, "drain", "again").await.unwrap();
         assert_eq!(read_pending_prompt(&db, "drain").await.unwrap(), "");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn take_pending_prompt_waits_for_a_concurrent_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::connect(&dir.path().join("weaver.db"))
+            .await
+            .unwrap();
+        let branch = branch_id(&db, "weaver/busy-queue").await;
+        insert(&db, &new_session("busy-queue", &branch, None))
+            .await
+            .unwrap();
+        append_pending_prompt(&db, "busy-queue", "send after stop")
+            .await
+            .unwrap();
+
+        let writer = weaver_core::db::begin_immediate(&db).await.unwrap();
+        let contender_db = db.clone();
+        let take =
+            tokio::spawn(async move { take_pending_prompt(&contender_db, "busy-queue").await });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !take.is_finished(),
+            "queue consumption should wait for the writer instead of returning SQLITE_BUSY"
+        );
+        writer.commit().await.unwrap();
+
+        let taken = tokio::time::timeout(std::time::Duration::from_secs(1), take)
+            .await
+            .expect("queue consumption resumes once the writer commits")
+            .unwrap()
+            .unwrap();
+        assert_eq!(taken.as_deref(), Some("send after stop"));
     }
 }

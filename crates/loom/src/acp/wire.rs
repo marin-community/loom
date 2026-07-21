@@ -149,12 +149,16 @@ pub enum SessionUpdate {
         #[serde(rename = "currentModeId")]
         current_mode_id: String,
     },
-    /// Context-window / cost usage.
+    /// Context-window / cumulative cost usage. `used` and `size` are required by
+    /// ACP, but remain optional here so one malformed adapter notification does
+    /// not make the whole stream undecodable; loom drops incomplete updates.
     UsageUpdate {
         #[serde(default)]
         used: Option<u64>,
         #[serde(default)]
         size: Option<u64>,
+        #[serde(default)]
+        cost: Option<UsageCost>,
     },
     /// codex-acp's thread lifecycle. Loom normally owns turn boundaries through
     /// the `session/prompt` response; this closes the rare turn that the
@@ -178,6 +182,12 @@ pub enum SessionUpdate {
     /// Anything else (prompt_suggestion, …): ignored.
     #[serde(other)]
     Other,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UsageCost {
+    pub amount: f64,
+    pub currency: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -613,12 +623,16 @@ mod tests {
 
         let usage: SessionUpdate = serde_json::from_value(json!({
             "sessionUpdate": "usage_update", "used": 41000, "size": 200000,
+            "cost": { "amount": 1.25, "currency": "USD" },
         }))
         .unwrap();
         match usage {
-            SessionUpdate::UsageUpdate { used, size } => {
+            SessionUpdate::UsageUpdate { used, size, cost } => {
                 assert_eq!(used, Some(41000));
                 assert_eq!(size, Some(200000));
+                let cost = cost.unwrap();
+                assert_eq!(cost.amount, 1.25);
+                assert_eq!(cost.currency, "USD");
             }
             other => panic!("wrong variant: {other:?}"),
         }
