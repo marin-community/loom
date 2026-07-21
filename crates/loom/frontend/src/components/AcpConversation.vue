@@ -409,6 +409,10 @@ async function submitPrompt(forceSteer = false) {
     emit('command', local.name, local.args);
     return;
   }
+  // Disabling a focused textarea moves focus to the document body. Remember an
+  // Enter-key submission so the composer can resume typing after the request;
+  // button submits and users who move to another control keep their new focus.
+  const restoreComposerFocus = document.activeElement === composerInput.value;
   sending.value = true;
   sendError.value = '';
   const text = draft.value;
@@ -431,6 +435,13 @@ async function submitPrompt(forceSteer = false) {
     sendError.value = (e as Error).message ?? 'Failed to send';
   } finally {
     sending.value = false;
+    if (
+      restoreComposerFocus &&
+      (!document.activeElement || document.activeElement === document.body)
+    ) {
+      await nextTick();
+      composerInput.value?.focus();
+    }
   }
 }
 

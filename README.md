@@ -365,6 +365,7 @@ sqlite with `loom config set` (no running server needed):
 weaver config ls
 weaver config get agent.default
 loom config set agent.default codex
+loom config set agent.mode bypassPermissions
 ```
 
 Notable settings:
@@ -373,6 +374,9 @@ Notable settings:
   launch` is given no `--agent` (`claude`, `codex`, or any custom agent).
 - `agent.model` / `agent.effort` — default model and reasoning effort for new
   sessions. The Settings UI populates these from the selected agent type.
+- `agent.mode` — default permission posture for new ACP sessions and handoffs:
+  `auto` (the default), `default`, `acceptEdits`, `plan`, or
+  `bypassPermissions` (“Always allow”). An explicit launch `--mode` overrides it.
 - `server.auto_adopt` — adopt every recoverable session on daemon startup.
 - `github.poll` — poll GitHub (via `gh`) for each session's PR, review, and
   check status (on by default; a no-op without `gh` or a GitHub remote).

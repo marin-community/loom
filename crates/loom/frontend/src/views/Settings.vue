@@ -91,7 +91,12 @@ const categories: CategoryItem[] = [
   },
 ];
 
-const agentKeys = { agent: 'agent.default', model: 'agent.model', effort: 'agent.effort' };
+const agentKeys = {
+  agent: 'agent.default',
+  model: 'agent.model',
+  effort: 'agent.effort',
+  mode: 'agent.mode',
+};
 const agentProfileTitle = 'Session default runtime';
 
 function categoryFromQuery(q: unknown): Category {
@@ -283,7 +288,7 @@ function setAgent(kind: string) {
   sanitizeAgentDraft();
 }
 
-function setProfileChoice(key: 'model' | 'effort', value: string) {
+function setProfileChoice(key: 'model' | 'effort' | 'mode', value: string) {
   drafts.value[agentKeys[key]] = value;
   sanitizeAgentDraft();
 }
@@ -370,18 +375,20 @@ onMounted(load);
         <div v-else-if="category === 'agents'" class="space-y-4">
           <AgentProfileEditor
             :title="agentProfileTitle"
-            note="Used when a new work session does not specify an agent."
+            note="Runtime, model, effort, and permissions used when a new session does not override them."
             :keys="agentKeys"
             :agents="availableAgents()"
             :agent-kind="drafts[agentKeys.agent] ?? ''"
             :model="drafts[agentKeys.model] ?? ''"
             :effort="drafts[agentKeys.effort] ?? ''"
+            :mode="drafts[agentKeys.mode] ?? 'auto'"
             :dirty="dirtyKeys(profileKeys()).length > 0"
             :is-default="profileIsDefault()"
             :busy="busy === agentProfileTitle"
             @update-agent="setAgent"
             @update-model="(value) => setProfileChoice('model', value)"
             @update-effort="(value) => setProfileChoice('effort', value)"
+            @update-mode="(value) => setProfileChoice('mode', value)"
             @save="saveKeys(profileKeys(), agentProfileTitle)"
             @reset="resetKeys(profileKeys(), agentProfileTitle)"
           />

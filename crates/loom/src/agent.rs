@@ -800,7 +800,7 @@ fn weaver_bin_path() -> String {
 /// `mode` / `--mode` still overrides — e.g. `bypassPermissions` for a fully
 /// unattended run. (For a codex session this maps to codex's `agent` mode; see
 /// [`codex_acp_mode`].)
-pub const DEFAULT_ACP_MODE: &str = "auto";
+pub const DEFAULT_ACP_MODE: &str = weaver_core::config::DEFAULT_AGENT_MODE;
 
 /// Resolve the execution backend for a launch: the agent's declared `protocol`
 /// unless the create request overrides it. A blank/absent override keeps the
