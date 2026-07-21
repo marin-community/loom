@@ -20,6 +20,19 @@ export class ApiError extends Error {
   }
 }
 
+async function responseError(res: Response): Promise<ApiError> {
+  let message = res.statusText;
+  let body: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = await res.json();
+    if (parsed && typeof parsed === 'object') body = parsed as Record<string, unknown>;
+    if (typeof body.error === 'string') message = body.error;
+  } catch {
+    /* keep statusText */
+  }
+  return new ApiError(message, res.status, body);
+}
+
 async function request(path: string, opts: RequestInit = {}): Promise<unknown> {
   const res = await fetch('/api' + path, {
     headers: { 'content-type': 'application/json' },
@@ -29,16 +42,7 @@ async function request(path: string, opts: RequestInit = {}): Promise<unknown> {
     onUnauthorized?.();
   }
   if (!res.ok) {
-    let message = res.statusText;
-    let body: Record<string, unknown> = {};
-    try {
-      const parsed: unknown = await res.json();
-      if (parsed && typeof parsed === 'object') body = parsed as Record<string, unknown>;
-      if (typeof body.error === 'string') message = body.error;
-    } catch {
-      /* keep statusText */
-    }
-    throw new ApiError(message, res.status, body);
+    throw await responseError(res);
   }
   if (res.status === 204) return null;
   const text = await res.text();
@@ -50,16 +54,7 @@ async function request(path: string, opts: RequestInit = {}): Promise<unknown> {
 async function rawBody(method: string, path: string, body: BodyInit): Promise<unknown> {
   const res = await fetch('/api' + path, { method, body });
   if (!res.ok) {
-    let message = res.statusText;
-    let failure: Record<string, unknown> = {};
-    try {
-      const parsed: unknown = await res.json();
-      if (parsed && typeof parsed === 'object') failure = parsed as Record<string, unknown>;
-      if (typeof failure.error === 'string') message = failure.error;
-    } catch {
-      /* keep statusText */
-    }
-    throw new ApiError(message, res.status, failure);
+    throw await responseError(res);
   }
   if (res.status === 204) return null;
   const text = await res.text();
