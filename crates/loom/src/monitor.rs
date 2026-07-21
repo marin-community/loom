@@ -119,6 +119,9 @@ pub async fn run(state: AppState) {
                 .await;
             }
             if !backend::has_session(&session.term_session).await {
+                if session.status == "orphaned" {
+                    continue;
+                }
                 match session_mod::mark_orphaned(&state.db, &session.id).await {
                     Ok(true) => {
                         tracing::info!(
@@ -139,7 +142,7 @@ pub async fn run(state: AppState) {
                     Ok(false) => tracing::debug!(
                         id = %session.id,
                         snapshot_status = %session.status,
-                        "terminal ended after session reached a terminal state"
+                        "session no longer eligible for orphan transition"
                     ),
                     Err(e) => tracing::warn!(
                         id = %session.id,

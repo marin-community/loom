@@ -300,7 +300,7 @@ pub async fn mark_orphaned(db: &Db, id: &str) -> Result<bool> {
     .await?;
     let changed = result.rows_affected() == 1;
     if changed {
-        tracing::info!(%id, new = "orphaned", "session status changed");
+        tracing::info!(%id, "session marked orphaned atomically");
     }
     Ok(changed)
 }
