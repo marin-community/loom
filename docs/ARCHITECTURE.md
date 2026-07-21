@@ -153,7 +153,10 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
   - Loom tables (`crates/loom/src/db.rs`): `sessions` (`origin` — the channel
     it was created through: `user`/`agent`/`github`/`slack`/`watch`/`actions`/
     `ops`, stamped server-side at create; `class` — `interactive`/`automation`,
-    gating default-list visibility, see [Status & tags](#status--tags);
+    gating default-list visibility, see [Status & tags](#status--tags). A
+    request may set `class` explicitly; otherwise `watch`/`actions`/`ops`
+    origins default to `automation` while `github`/`slack` stay `interactive` —
+    a person asked for those sessions and expects to find them on the board;
     `turn_count` — incremented on each `working` lifecycle edge;
     `tracking_issue_id` — the weaver issue opened at create. One *active*
     session per branch is enforced by a partial unique index on `branch_id`

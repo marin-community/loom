@@ -548,6 +548,9 @@ pub(crate) async fn create_session_core(
     );
     // The session's class — automation machinery vs interactive fleet work. An
     // explicit request value wins (validated); otherwise derived from the origin.
+    // github/slack default to interactive deliberately: a person asked for that
+    // session and expects to find it on their board. Only unattended machinery
+    // (watch rounds, actions, ops) defaults to automation.
     let class = match req
         .class
         .as_deref()
