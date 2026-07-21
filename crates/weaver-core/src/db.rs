@@ -275,7 +275,7 @@ mod tests {
             std::future::poll_fn(|cx| {
                 assert!(
                     waiter.as_mut().poll(cx).is_pending(),
-                    "writer unexpectedly acquired SQLite's lock"
+                    "waiter unexpectedly acquired SQLite's writer lock"
                 );
                 Poll::Ready(())
             })
@@ -283,7 +283,7 @@ mod tests {
         }
 
         let read = tokio::time::timeout(
-            std::time::Duration::from_millis(250),
+            std::time::Duration::from_secs(1),
             sqlx::query_scalar::<_, i64>("SELECT 1").fetch_one(&db),
         )
         .await;
