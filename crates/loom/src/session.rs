@@ -283,6 +283,28 @@ pub async fn set_status(db: &Db, id: &str, status: &str) -> Result<()> {
     Ok(())
 }
 
+/// Mark a live session orphaned after its terminal disappears.
+///
+/// The monitor discovers liveness from a fleet snapshot, which can be stale by
+/// the time teardown finishes. Keep the terminal-state guard in the UPDATE so
+/// an archive racing that snapshot cannot be overwritten back to `orphaned`.
+/// Returns whether this call performed the transition.
+pub async fn mark_orphaned(db: &Db, id: &str) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE sessions SET status = 'orphaned'
+         WHERE id = ?
+           AND status NOT IN ('orphaned', 'done', 'error', 'archived')",
+    )
+    .bind(id)
+    .execute(db)
+    .await?;
+    let changed = result.rows_affected() == 1;
+    if changed {
+        tracing::info!(%id, "session marked orphaned atomically");
+    }
+    Ok(changed)
+}
+
 pub async fn touch(db: &Db, id: &str) -> Result<()> {
     sqlx::query("UPDATE sessions SET last_activity_at = ? WHERE id = ?")
         .bind(now_iso())
@@ -598,6 +620,53 @@ mod tests {
         assert!(
             active_managed_by(&db, "ov-other").await.unwrap().is_none(),
             "no warm session for a watch that owns none"
+        );
+    }
+
+    /// Regression: archive kills the terminal before its final status write, so
+    /// the monitor can still be holding a `running` fleet snapshot when it sees
+    /// that terminal disappear. Its orphan transition must compare-and-set the
+    /// current row, not overwrite a terminal status from that stale snapshot.
+    #[tokio::test]
+    async fn orphan_transition_cannot_resurrect_an_archived_session() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let branch = branch_id(&db, "weaver/archive-race").await;
+        insert(&db, &new_session("archive-race", &branch, None))
+            .await
+            .unwrap();
+
+        let stale_monitor_snapshot = get(&db, "archive-race").await.unwrap().unwrap();
+        assert_eq!(stale_monitor_snapshot.status, "running");
+        set_status(&db, "archive-race", "archived").await.unwrap();
+
+        assert!(
+            !mark_orphaned(&db, &stale_monitor_snapshot.id)
+                .await
+                .unwrap(),
+            "terminal rows reject a stale monitor's orphan transition"
+        );
+        assert_eq!(
+            get(&db, "archive-race").await.unwrap().unwrap().status,
+            "archived"
+        );
+    }
+
+    #[tokio::test]
+    async fn orphan_transition_is_edge_triggered_for_a_live_session() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let branch = branch_id(&db, "weaver/orphan").await;
+        insert(&db, &new_session("orphan", &branch, None))
+            .await
+            .unwrap();
+
+        assert!(mark_orphaned(&db, "orphan").await.unwrap());
+        assert_eq!(
+            get(&db, "orphan").await.unwrap().unwrap().status,
+            "orphaned"
+        );
+        assert!(
+            !mark_orphaned(&db, "orphan").await.unwrap(),
+            "an already-orphaned row does not emit another edge"
         );
     }
 

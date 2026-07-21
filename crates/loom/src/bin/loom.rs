@@ -329,7 +329,7 @@ enum SessionCmd {
         /// Target reasoning effort; omit for the runtime default.
         #[arg(long)]
         effort: Option<String>,
-        /// Target ACP permission posture; omit for `auto`.
+        /// Target ACP permission posture; omit for configured `agent.mode`.
         #[arg(long)]
         mode: Option<String>,
     },
@@ -654,8 +654,9 @@ struct LaunchOpts {
     /// builtins).
     #[arg(long)]
     protocol: Option<String>,
-    /// ACP launch permission posture: `auto` (the default), `bypassPermissions`,
-    /// `acceptEdits`, `default`, or `plan`. Ignored for a terminal launch.
+    /// ACP launch permission posture: `auto`, `bypassPermissions`, `acceptEdits`,
+    /// `default`, or `plan`. Omit for configured `agent.mode`; ignored for a
+    /// terminal launch.
     #[arg(long)]
     mode: Option<String>,
 }

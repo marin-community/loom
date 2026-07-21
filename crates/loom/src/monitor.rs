@@ -119,22 +119,36 @@ pub async fn run(state: AppState) {
                 .await;
             }
             if !backend::has_session(&session.term_session).await {
-                if session.status != "orphaned" {
-                    tracing::info!(
+                if session.status == "orphaned" {
+                    continue;
+                }
+                match session_mod::mark_orphaned(&state.db, &session.id).await {
+                    Ok(true) => {
+                        tracing::info!(
+                            id = %session.id,
+                            term_session = %session.term_session,
+                            "terminal session ended; marked orphaned"
+                        );
+                        let _ = events::record(
+                            &state.db,
+                            &state.bus,
+                            &session.branch_id,
+                            "status",
+                            json!({ "status": "orphaned", "reason": "terminal session ended" }),
+                        )
+                        .await;
+                        last_event = events::max_id(&state.db).await.unwrap_or(last_event);
+                    }
+                    Ok(false) => tracing::debug!(
                         id = %session.id,
-                        term_session = %session.term_session,
-                        "terminal session ended; marking orphaned"
-                    );
-                    let _ = session_mod::set_status(&state.db, &session.id, "orphaned").await;
-                    let _ = events::record(
-                        &state.db,
-                        &state.bus,
-                        &session.branch_id,
-                        "status",
-                        json!({ "status": "orphaned", "reason": "terminal session ended" }),
-                    )
-                    .await;
-                    last_event = events::max_id(&state.db).await.unwrap_or(last_event);
+                        snapshot_status = %session.status,
+                        "session no longer eligible for orphan transition"
+                    ),
+                    Err(e) => tracing::warn!(
+                        id = %session.id,
+                        error = %e,
+                        "could not mark ended terminal session orphaned"
+                    ),
                 }
                 continue;
             }

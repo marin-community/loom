@@ -608,9 +608,9 @@ pub struct CreateReq {
     #[serde(default)]
     pub protocol: Option<String>,
     /// The ACP launch permission posture (`auto` | `bypassPermissions` |
-    /// `acceptEdits` | `default` | `plan`). Blank/absent defaults to `auto` — a
-    /// background classifier vets each tool call, escalating only risky actions as
-    /// a permission card. Ignored for a terminal launch.
+    /// `acceptEdits` | `default` | `plan`). Blank/absent uses the configured
+    /// `agent.mode` (which defaults to `auto`: a background classifier vets each
+    /// tool call and escalates only risky actions). Ignored for a terminal launch.
     #[serde(default)]
     pub mode: Option<String>,
 }
@@ -626,7 +626,7 @@ pub struct HandoffReq {
     /// Blank/absent uses the target runtime's default.
     #[serde(default)]
     pub effort: Option<String>,
-    /// ACP permission posture. Blank/absent uses loom's ACP default.
+    /// ACP permission posture. Blank/absent uses the configured `agent.mode`.
     #[serde(default)]
     pub mode: Option<String>,
 }

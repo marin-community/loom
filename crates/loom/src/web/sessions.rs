@@ -37,6 +37,18 @@ use super::{ApiResult, AppError, AppState};
 const MISSING_GITHUB_TOKEN_MESSAGE: &str = "No GitHub token configured. Add your personal GitHub token in Settings > Account, or configure GH_TOKEN in Settings > Environment.";
 const HANDOFF_HISTORY_CHARS: usize = 64 * 1024;
 
+/// Resolve an optional per-request ACP permission posture over the workspace
+/// default. Empty request values behave like omission, matching model/effort.
+async fn launch_mode(db: &Db, requested: Option<&str>) -> String {
+    if let Some(mode) = requested.map(str::trim).filter(|mode| !mode.is_empty()) {
+        return mode.to_string();
+    }
+    config::get_or(db, "agent.mode", agent::DEFAULT_ACP_MODE)
+        .await
+        .trim()
+        .to_string()
+}
+
 pub(super) async fn list_agents(State(st): State<AppState>) -> ApiResult<Json<Value>> {
     let default_agent = configured_agent(&st.db, "agent.default", config::DEFAULT_AGENT).await;
     Ok(Json(json!({
@@ -617,16 +629,9 @@ pub(crate) async fn create_session_core(
         }
         None => return Err(AppError::bad_request(format!("unknown agent '{runtime}'"))),
     };
-    // The ACP launch permission posture (ignored for a terminal launch): the
-    // request's mode, else the `auto` default — a background classifier vets each
-    // tool call and escalates only risky actions as a permission card.
-    let mode = req
-        .mode
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(agent::DEFAULT_ACP_MODE)
-        .to_string();
+    // The ACP launch permission posture (ignored for a terminal launch): an
+    // explicit request wins, then the workspace's `agent.mode` default.
+    let mode = launch_mode(&st.db, req.mode.as_deref()).await;
     tracing::debug!(model = %model, effort = %effort, protocol = %protocol, "resolved and validated model/effort/protocol");
     ensure_github_token_available(&st.db, &extra_env, created_by.as_deref(), &runtime).await?;
     tracing::debug!(runtime = %runtime, "github token availability check passed");
@@ -2554,13 +2559,7 @@ pub(super) async fn handoff_session(
             "handoff target matches the current runtime profile",
         ));
     }
-    let mode = req
-        .mode
-        .as_deref()
-        .map(str::trim)
-        .filter(|m| !m.is_empty())
-        .unwrap_or(agent::DEFAULT_ACP_MODE)
-        .to_string();
+    let mode = launch_mode(&st.db, req.mode.as_deref()).await;
 
     // Resolve every fallible launch input before quiescing the current task.
     let repo_root = PathBuf::from(&branch.repo_root);

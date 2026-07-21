@@ -299,6 +299,19 @@ test.describe('acp conversation', () => {
     await expect(status).toBeHidden({ timeout: 15_000 });
   });
 
+  test('Enter returns focus to the composer after sending', async ({ page, weaver }) => {
+    await openAcp(page, weaver, { goal: 'say:ready', name: 'acp-composer-focus' });
+    const input = page.getByTestId('acp-composer-input');
+
+    await input.fill('say:first message');
+    await input.press('Enter');
+
+    await expect(input).toHaveValue('');
+    await expect(input).toBeFocused();
+    await input.pressSequentially('say:second message');
+    await expect(input).toHaveValue('say:second message');
+  });
+
   test('streaming deltas appear, then consolidate into one message', async ({ page, weaver }) => {
     // A `wait` keeps the turn live long enough for the streamed text to arrive
     // as a delta before its block journals.

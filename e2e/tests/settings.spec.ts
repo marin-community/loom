@@ -35,6 +35,34 @@ test.describe('settings · agent defaults', () => {
     await expect(page.getByText('Fleet concierge runtime', { exact: true })).toHaveCount(0);
   });
 
+  test('default agent permissions can be set to always allow', async ({ page, weaver }) => {
+    await page.goto(`${weaver.baseUrl}/settings`);
+    const session = page.locator('section').filter({
+      has: page.getByRole('heading', { name: 'Session default runtime' }),
+    });
+    const permissions = session.getByTestId('agent-mode-picker');
+
+    await expect(permissions.getByRole('button', { name: /Auto/ })).toHaveAttribute(
+      'data-active',
+      'true',
+    );
+    await permissions.getByRole('button', { name: /Always allow/ }).click();
+    await session.getByRole('button', { name: 'Save' }).click();
+    await expect(page.getByText('Saved Session default runtime.')).toBeVisible();
+
+    const settings = (await (await fetch(`${weaver.baseUrl}/api/settings`)).json()) as {
+      settings: { key: string; value: string; is_default: boolean }[];
+    };
+    expect(settings.settings.find((setting) => setting.key === 'agent.mode')).toMatchObject({
+      value: 'bypassPermissions',
+      is_default: false,
+    });
+    await expect(permissions.getByRole('button', { name: /Always allow/ })).toHaveAttribute(
+      'data-active',
+      'true',
+    );
+  });
+
   test('overlapping settings are consolidated into workspace and access', async ({ page, weaver }) => {
     await page.goto(`${weaver.baseUrl}/settings`);
     await expect(page.getByRole('button', { name: 'Workspace', exact: true })).toBeVisible();
