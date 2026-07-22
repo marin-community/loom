@@ -1203,16 +1203,16 @@ fn claude_acp_meta(
         options.insert("tools".to_string(), json!(tools));
         options.insert("settingSources".to_string(), json!([]));
         options.insert("strictMcpConfig".to_string(), json!(true));
-        options.insert(
-            "mcpServers".to_string(),
+        let mut mcp_servers = Map::new();
+        mcp_servers.insert(
+            crate::restricted_mcp::SERVER_NAME.to_string(),
             json!({
-                "loom_github": {
-                    "type": "stdio",
-                    "command": "loom",
-                    "args": ["restricted-github-mcp"]
-                }
+                "type": "stdio",
+                "command": "loom",
+                "args": ["restricted-github-mcp"]
             }),
         );
+        options.insert("mcpServers".to_string(), Value::Object(mcp_servers));
     }
     if options.is_empty() {
         return None;

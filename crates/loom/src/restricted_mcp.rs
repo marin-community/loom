@@ -9,7 +9,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-const SERVER_NAME: &str = "loom_github";
+pub(crate) const SERVER_NAME: &str = "loom_github";
 pub(crate) const GITHUB_TOOL_NAMES: [&str; 6] = [
     "issue_view",
     "issue_comment",
@@ -22,12 +22,13 @@ pub(crate) const GITHUB_TOOL_NAMES: [&str; 6] = [
 pub(crate) fn permission_rule(tool: &str) -> Option<String> {
     GITHUB_TOOL_NAMES
         .contains(&tool)
-        .then(|| format!("mcp__loom_github__{tool}"))
+        .then(|| format!("mcp__{SERVER_NAME}__{tool}"))
 }
 
 pub(crate) fn is_permission_rule(rule: &str) -> bool {
-    rule.strip_prefix("mcp__loom_github__")
-        .is_some_and(|tool| GITHUB_TOOL_NAMES.contains(&tool))
+    rule.strip_prefix("mcp__")
+        .and_then(|suffix| suffix.split_once("__"))
+        .is_some_and(|(server, tool)| server == SERVER_NAME && GITHUB_TOOL_NAMES.contains(&tool))
 }
 
 fn tools() -> Value {
