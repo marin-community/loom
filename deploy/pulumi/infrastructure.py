@@ -18,6 +18,14 @@ import pulumi_gcp as gcp
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _positive_config_int(value: int | None, default: int, name: str) -> int:
+    """Default only an absent Pulumi integer; reject explicit zero/negatives."""
+    resolved = default if value is None else value
+    if resolved <= 0:
+        raise ValueError(f"{name} must be positive")
+    return resolved
+
+
 @dataclass(frozen=True)
 class DeploymentConfig:
     project: str
@@ -49,6 +57,13 @@ class DeploymentConfig:
             r"[0-9a-f]{40}", self.image_tag
         ):
             raise ValueError("pull mode requires an immutable commit-SHA imageTag")
+        for name, value in (
+            ("bootDiskGb", self.boot_disk_gb),
+            ("dataDiskGb", self.data_disk_gb),
+            ("snapshotRetentionDays", self.snapshot_retention_days),
+            ("backupRetentionDays", self.backup_retention_days),
+        ):
+            _positive_config_int(value, value, name)
 
     @classmethod
     def from_pulumi(cls) -> "DeploymentConfig":
@@ -70,8 +85,12 @@ class DeploymentConfig:
             instance_name=config.get("instanceName") or "loom",
             vm_service_account_name=config.get("vmServiceAccountName") or "loom-vm",
             machine_type=config.get("machineType") or "e2-highmem-4",
-            boot_disk_gb=config.get_int("bootDiskGb") or 100,
-            data_disk_gb=config.get_int("dataDiskGb") or 500,
+            boot_disk_gb=_positive_config_int(
+                config.get_int("bootDiskGb"), 100, "bootDiskGb"
+            ),
+            data_disk_gb=_positive_config_int(
+                config.get_int("dataDiskGb"), 500, "dataDiskGb"
+            ),
             repo_url=config.get("repoUrl")
             or "https://github.com/rjpower/weaver.git",
             git_ref=config.get("gitRef") or "main",
@@ -79,8 +98,12 @@ class DeploymentConfig:
             image_tag=config.get("imageTag") or "latest",
             github_repository=config.get("githubRepository") or "rjpower/weaver",
             github_ref=config.get("githubRef") or "refs/heads/main",
-            snapshot_retention_days=config.get_int("snapshotRetentionDays") or 14,
-            backup_retention_days=config.get_int("backupRetentionDays") or 30,
+            snapshot_retention_days=_positive_config_int(
+                config.get_int("snapshotRetentionDays"), 14, "snapshotRetentionDays"
+            ),
+            backup_retention_days=_positive_config_int(
+                config.get_int("backupRetentionDays"), 30, "backupRetentionDays"
+            ),
         )
 
 

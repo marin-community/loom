@@ -246,7 +246,11 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | Method + path | What it does |
 |---|---|
 | `GET /api/health` | liveness probe |
-| `GET /api/sessions` / `POST /api/sessions` | list / create sessions (list takes `archived` — default `false`, include torn-down sessions — and `automation` — default `false`, include automation-class sessions, otherwise hidden from the default fleet view; create takes optional `scratch: [{name, content_base64}]`, `parent_branch`, `protocol` (`terminal`\|`acp`, an opt-in override of the agent's declared default), and `mode` (the initial ACP permission posture; omitted uses `agent.mode`); opens a tracking issue and returns its id as `tracking_issue`) |
+| `GET /api/sessions` / `POST /api/sessions` | list / create sessions (list takes `archived` — default `false` — and `automation` — default `false`; create resolves `profile` or `default`, permits launch selectors only when the profile is non-strict, stamps the resolved profile revision/policy, opens a tracking issue, and returns its id as `tracking_issue`) |
+| `GET POST /api/profiles`; `GET PUT DELETE /api/profiles/{name}` | named launch-policy CRUD; profile secret values are never returned |
+| `PUT DELETE /api/profiles/{profile}/env/{name}` | write-only profile environment management |
+| `POST /api/auth/federate` | exchange a mapped, verified OIDC identity for a short-lived Ed25519-signed Loom automation token |
+| `GET POST /api/runs`; `GET /api/runs/{id}` | durable, subject-scoped automation runs with idempotency reservation |
 | `GET PATCH DELETE /api/sessions/{id}` | session CRUD (status, title, goal, description) |
 | `PUT DELETE /api/sessions/{id}/tags/{key}` | set (upsert) / clear a branch tag — the well-known `attention` and `triage` keys plus any free-form key |
 | `GET /api/sessions/{id}/url` | the session's dashboard URL as `{url}`, built from the externally-visible origin (`auth.base_url`, else the request's own Host) — what `loom session url` prints, so an agent can link a PR back to its session without inventing a loopback link |

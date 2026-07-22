@@ -70,6 +70,7 @@ async fn hook_event_drives_session_status() {
     let home = TestHome(tempfile::tempdir().unwrap());
     std::env::set_var("WEAVER_HOME", home.0.path());
     std::env::set_var("WEAVER_TAPESTRY_BIN", tapestry_bin());
+    std::env::remove_var("LOOM_TOKEN");
     // `seed_owner` no longer defaults to a real login — this test's requests
     // ride loopback trust, which needs a seeded owner to resolve to.
     std::env::set_var("LOOM_OWNER_GITHUB", "rjpower");
@@ -115,7 +116,7 @@ async fn hook_event_drives_session_status() {
     tokio::spawn(server::serve(state, listener));
 
     std::env::set_var("WEAVER_API", format!("http://{addr}"));
-    let client = client::default();
+    let client = client::Client::new(format!("http://{addr}"));
     for _ in 0..60 {
         if client.get("/api/health").await.is_ok() {
             break;
@@ -227,8 +228,8 @@ async fn hook_event_drives_session_status() {
 }
 
 /// Seed a branch + session of the given `class` / `managed_by` and return the
-/// branch id. Class rides a direct UPDATE: launch paths own the column's
-/// provenance, and this test only needs the stored value.
+/// branch id. The turn budget is stamped with the launch policy, matching the
+/// runtime invariant that later global config edits cannot mutate a session.
 async fn seed_classed_session(
     db: &loom::db::Db,
     id: &str,
@@ -239,7 +240,7 @@ async fn seed_classed_session(
     let branch = weaver_core::branch::upsert(db, "/r", branch_name, "main")
         .await
         .unwrap();
-    session_mod::insert(
+    session_mod::insert_with_policy(
         db,
         &session_mod::NewSession {
             id: id.to_string(),
@@ -256,18 +257,25 @@ async fn seed_classed_session(
             created_by: None,
             protocol: "acp".to_string(),
             origin: "user".to_string(),
-            class: "interactive".to_string(),
+            class: class.to_string(),
             tracking_issue_id: None,
+        },
+        &session_mod::SessionLaunchPolicy {
+            profile: loom::profile::DEFAULT_PROFILE.to_string(),
+            launch_mode: "auto".to_string(),
+            profile_revision: 1,
+            env_clear: false,
+            ambient_allowlist: "[]".to_string(),
+            idle_archive_secs: None,
+            turn_budget: if class == "automation" { 1 } else { 0 },
+            creator_kind: "system".to_string(),
+            creator_subject: "test".to_string(),
+            parent_session_id: None,
+            automation_run_id: None,
         },
     )
     .await
     .unwrap();
-    sqlx::query("UPDATE sessions SET class = ? WHERE id = ?")
-        .bind(class)
-        .bind(id)
-        .execute(db)
-        .await
-        .unwrap();
     branch.id
 }
 

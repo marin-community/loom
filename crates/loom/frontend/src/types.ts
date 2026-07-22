@@ -130,6 +130,9 @@ export interface Session {
   current_mode: string | null;
   /** The latest context-window usage the current ACP provider reported, or null. */
   usage: AcpUsage | null;
+  profile: string;
+  profile_revision: number;
+  launch_mode: string;
   /** The ACP modes the adapter offers, when the server exposes them. Absent today
    *  (SessionView carries only `current_mode`), so the mode chip falls back to the
    *  well-known claude/codex mode set — see `AcpConversation`. */
@@ -808,6 +811,35 @@ export interface EnvVar {
   value: string;
   updated_at: string;
 }
+
+/** Named launch posture. Environment values are write-only; only metadata is returned. */
+export interface Profile {
+  name: string;
+  description: string;
+  agent_kind: string;
+  model: string;
+  effort: string;
+  protocol: string;
+  mode: string;
+  class: 'interactive' | 'automation';
+  strict: boolean;
+  env_clear: boolean;
+  ambient_allowlist: string[];
+  idle_archive_secs: number | null;
+  max_concurrent: number;
+  turn_budget: number | null;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+  env: ProfileEnv[];
+}
+
+export interface ProfileEnv {
+  name: string;
+  updated_at: string;
+}
+
+export type ProfileInput = Omit<Profile, 'revision' | 'created_at' | 'updated_at' | 'env'>;
 
 /**
  * The GitHub App / sign-in config (secret withheld). Mirrors `GithubConfigView`.

@@ -11,11 +11,12 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::dto::{
-    AnchorDto, ArtifactMeta, ArtifactUpsertReq, ArtifactView, BranchStatusReq, BranchView,
-    CommentDto, CreateEventReq, CreateIssueReq, CreateRepoIssueReq, CreateReq, CreateTokenReq,
-    CreateWatchReq, CreatedTokenView, HandoffReq, IssueView, NewCommentBody, NewThreadBody,
-    PatchIssueReq, PatchSessionReq, PatchWatchReq, RunWatchReq, SendReq, SessionView,
-    SettingsEnvelope, TagReq, ThreadDto, TokenView, WatchView,
+    AnchorDto, ArtifactMeta, ArtifactUpsertReq, ArtifactView, AutomationTokenReq,
+    AutomationTokenView, BranchStatusReq, BranchView, CommentDto, CreateEventReq, CreateIssueReq,
+    CreateRepoIssueReq, CreateReq, CreateTokenReq, CreateWatchReq, CreatedTokenView, FederationReq,
+    FederationView, HandoffReq, IssueView, NewCommentBody, NewThreadBody, PatchIssueReq,
+    PatchSessionReq, PatchWatchReq, ProfileReq, ProfileView, PutProfileEnvReq, RunReq, RunView,
+    RunWatchReq, SendReq, SessionView, SettingsEnvelope, TagReq, ThreadDto, TokenView, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -663,6 +664,67 @@ impl Client {
 
     // -- Settings -------------------------------------------------------------
 
+    /// List named launch profiles. Secret environment values are withheld.
+    pub async fn list_profiles(&self) -> Result<Vec<ProfileView>> {
+        self.get_typed("/api/profiles").await
+    }
+
+    pub async fn get_profile(&self, name: &str) -> Result<ProfileView> {
+        self.get_typed(&format!("/api/profiles/{}", Self::seg(name)))
+            .await
+    }
+
+    pub async fn create_profile(&self, req: &ProfileReq) -> Result<ProfileView> {
+        self.send_typed(Method::POST, "/api/profiles", Some(req))
+            .await
+    }
+
+    pub async fn put_profile(&self, name: &str, req: &ProfileReq) -> Result<ProfileView> {
+        self.send_typed(
+            Method::PUT,
+            &format!("/api/profiles/{}", Self::seg(name)),
+            Some(req),
+        )
+        .await
+    }
+
+    pub async fn delete_profile(&self, name: &str) -> Result<Value> {
+        self.delete(&format!("/api/profiles/{}", Self::seg(name)))
+            .await
+    }
+
+    pub async fn set_profile_env(
+        &self,
+        profile: &str,
+        name: &str,
+        value: &str,
+    ) -> Result<ProfileView> {
+        let req = PutProfileEnvReq {
+            value: value.to_string(),
+        };
+        self.send_typed(
+            Method::PUT,
+            &format!(
+                "/api/profiles/{}/env/{}",
+                Self::seg(profile),
+                Self::seg(name)
+            ),
+            Some(&req),
+        )
+        .await
+    }
+
+    pub async fn remove_profile_env(&self, profile: &str, name: &str) -> Result<ProfileView> {
+        let value = self
+            .delete(&format!(
+                "/api/profiles/{}/env/{}",
+                Self::seg(profile),
+                Self::seg(name)
+            ))
+            .await?;
+        serde_json::from_value(value).map_err(|e| anyhow!("decoding profile response: {e}"))
+    }
+
     /// Every registered setting and its effective value (`GET /api/settings`).
     pub async fn list_settings(&self) -> Result<SettingsEnvelope> {
         self.get_typed("/api/settings").await
@@ -718,6 +780,32 @@ impl Client {
     }
 
     // -- API tokens -------------------------------------------------------
+
+    pub async fn mint_automation_token(
+        &self,
+        req: &AutomationTokenReq,
+    ) -> Result<AutomationTokenView> {
+        self.send_typed(Method::POST, "/api/auth/automation-token", Some(req))
+            .await
+    }
+
+    pub async fn list_federations(&self) -> Result<Vec<FederationView>> {
+        self.get_typed("/api/auth/federations").await
+    }
+
+    pub async fn add_federation(&self, req: &FederationReq) -> Result<FederationView> {
+        self.send_typed(Method::POST, "/api/auth/federations", Some(req))
+            .await
+    }
+
+    pub async fn remove_federation(&self, id: &str) -> Result<Value> {
+        self.delete(&format!("/api/auth/federations/{}", Self::seg(id)))
+            .await
+    }
+
+    pub async fn create_run(&self, req: &RunReq) -> Result<RunView> {
+        self.send_typed(Method::POST, "/api/runs", Some(req)).await
+    }
 
     /// List the user-managed API tokens (`GET /api/auth/tokens`).
     pub async fn list_tokens(&self) -> Result<Vec<TokenView>> {

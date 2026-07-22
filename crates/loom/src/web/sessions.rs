@@ -39,18 +39,18 @@ const HANDOFF_HISTORY_CHARS: usize = 64 * 1024;
 
 /// Resolve an optional per-request ACP permission posture over the workspace
 /// default. Empty request values behave like omission, matching model/effort.
-async fn launch_mode(db: &Db, requested: Option<&str>) -> String {
+fn launch_mode(requested: Option<&str>, fallback: &str) -> String {
     if let Some(mode) = requested.map(str::trim).filter(|mode| !mode.is_empty()) {
         return mode.to_string();
     }
-    config::get_or(db, "agent.mode", agent::DEFAULT_ACP_MODE)
-        .await
-        .trim()
-        .to_string()
+    fallback.trim().to_string()
 }
 
 pub(super) async fn list_agents(State(st): State<AppState>) -> ApiResult<Json<Value>> {
-    let default_agent = configured_agent(&st.db, "agent.default", config::DEFAULT_AGENT).await;
+    let default_agent = crate::profile::get(&st.db, crate::profile::DEFAULT_PROFILE)
+        .await?
+        .map(|profile| profile.agent_kind)
+        .unwrap_or_else(|| config::DEFAULT_AGENT.to_string());
     Ok(Json(json!({
         // The picker list (builtins + custom) and the full custom-agent
         // definitions the editor round-trips.
@@ -166,11 +166,11 @@ pub(super) async fn session_url_route(
 pub(super) async fn create_session(
     State(st): State<AppState>,
     Extension(principal): Extension<Principal>,
-    Json(req): Json<CreateReq>,
+    Json(mut req): Json<CreateReq>,
 ) -> ApiResult<Json<SessionView>> {
     // Naming a managed repo here registers it: a signed-in principal asking to
     // launch into `owner/name` is the grant, so a repo loom has never seen just
-    // works (it is cloned on the way through `create_session_core`). The `repos`
+    // works (it is cloned on the way through runtime provisioning). The `repos`
     // allowlist exists to gate the *unauthenticated* GitHub webhook, which
     // resolves its own clone against it before it ever reaches the shared core —
     // so admitting a repo on an authenticated launch leaves that boundary intact.
@@ -185,19 +185,25 @@ pub(super) async fn create_session(
     // A launch that names a parent branch is an agent delegating work; a plain
     // launch is the human's own. The GitHub/Slack trigger paths stamp their own
     // origin at their call sites.
-    let origin = if req
+    let delegated = req
         .parent_branch
         .as_deref()
         .map(str::trim)
-        .is_some_and(|s| !s.is_empty())
-    {
-        "agent"
-    } else {
-        "user"
-    };
-    Ok(Json(
-        create_session_core(st, req, Some(principal.username), origin).await?,
-    ))
+        .is_some_and(|value| !value.is_empty());
+    let actor = crate::runtime::Actor::from_principal(&principal, delegated);
+    match &principal.grant {
+        crate::auth::Grant::Session { .. } => {
+            req.parent_branch = actor.bound_parent_branch().map(str::to_string);
+        }
+        crate::auth::Grant::Automation { .. } => {
+            return Err(AppError::new(
+                StatusCode::FORBIDDEN,
+                "automation credentials create sessions through /api/runs",
+            ));
+        }
+        crate::auth::Grant::Admin => {}
+    }
+    Ok(Json(crate::runtime::create_session(st, req, actor).await?))
 }
 
 /// Add a managed-repo reference to the registry if it isn't there yet — the same
@@ -217,73 +223,6 @@ async fn ensure_repo_registered(db: &Db, input: &str) -> ApiResult<()> {
     )
     .await?;
     Ok(())
-}
-
-async fn configured_agent(db: &Db, key: &str, default: &str) -> String {
-    let value = config::get_or(db, key, default).await;
-    let value = value.trim();
-    if agent::exists(db, value).await {
-        value.to_string()
-    } else {
-        default.to_string()
-    }
-}
-
-/// Whether `value` is a valid model selector (or effort, when `model` is false)
-/// for `runtime`'s agent type. A custom agent offers no selectors (empty choice
-/// lists), so any non-empty value is invalid for it — as is an unknown runtime.
-async fn selector_valid(db: &Db, runtime: &str, value: &str, model: bool) -> bool {
-    match agent::metadata_for(db, runtime).await {
-        Ok(Some(meta)) if model => agent::validate_model(&meta, value).is_ok(),
-        Ok(Some(meta)) => agent::validate_effort(&meta, value).is_ok(),
-        _ => false,
-    }
-}
-
-async fn configured_selector(db: &Db, key: &str, runtime: &str, model: bool) -> String {
-    let value = config::get_or(db, key, "").await;
-    let value = value.trim();
-    if value.is_empty() || !selector_valid(db, runtime, value, model).await {
-        return String::new();
-    }
-    value.to_string()
-}
-
-/// The default agent kind for a new session when the request doesn't pin one: the
-/// repo's `.weaver/config.toml` `[agent] default` when it names a real agent
-/// type, else the operator's global `agent.default`. Repo-file values resolve
-/// over the builtin default, mirroring `WEAVER.md`.
-async fn repo_default_agent(db: &Db, cfg: &weaver_core::repo_config::RepoConfig) -> String {
-    if let Some(kind) = cfg
-        .agent
-        .default
-        .as_deref()
-        .map(str::trim)
-        .filter(|k| !k.is_empty())
-    {
-        if agent::exists(db, kind).await {
-            return kind.to_string();
-        }
-    }
-    configured_agent(db, "agent.default", config::DEFAULT_AGENT).await
-}
-
-/// The model/effort selector for a new session when the request doesn't pin one:
-/// the repo file's `[agent]` value when it validates for the runtime, else the
-/// operator's configured default. `repo_value` is `cfg.agent.model`/`.effort`.
-async fn repo_or_configured_selector(
-    db: &Db,
-    repo_value: Option<&str>,
-    key: &str,
-    runtime: &str,
-    model: bool,
-) -> String {
-    if let Some(value) = repo_value.map(str::trim).filter(|v| !v.is_empty()) {
-        if selector_valid(db, runtime, value, model).await {
-            return value.to_string();
-        }
-    }
-    configured_selector(db, key, runtime, model).await
 }
 
 /// The valid `[env]` entries from a repo's `.weaver/config.toml`, as launch
@@ -325,22 +264,94 @@ fn repo_cfg_or_default(repo_root: &std::path::Path) -> weaver_core::repo_config:
 /// layer overriding the previous for a shared name. Best-effort: a database error
 /// in a layer degrades to the layers that did resolve. `cfg` is the already-loaded
 /// repo config (the caller reads it once for env, setup, and defaults).
-async fn launch_env(
+async fn launch_env_for_profile(
     db: &Db,
     repo_root: &std::path::Path,
     cfg: &weaver_core::repo_config::RepoConfig,
+    profile_name: &str,
+    strict: bool,
 ) -> Vec<(String, String)> {
     let repo_root_str = repo_root.display().to_string();
-    let mut env = agent_env::pairs(db).await.unwrap_or_default();
-    repo_env::layer(
-        &mut env,
-        repo_env::pairs(db, &repo_root_str)
-            .await
-            .unwrap_or_default(),
-    );
-    repo_env::layer(&mut env, config_env_pairs(cfg));
-    tracing::debug!(repo = %repo_root_str, env_vars = env.len(), "layered launch environment");
+    let mut env = crate::profile::env_pairs(db, profile_name)
+        .await
+        .unwrap_or_default();
+    let repo_pairs = repo_env::pairs(db, &repo_root_str)
+        .await
+        .unwrap_or_default();
+    let config_pairs = config_env_pairs(cfg);
+    if strict {
+        // A strict profile's declared names are policy, not defaults. Repo
+        // layers may add variables but cannot replace a profile-owned value.
+        for (name, value) in repo_pairs.into_iter().chain(config_pairs) {
+            if !env.iter().any(|(existing, _)| existing == &name) {
+                env.push((name, value));
+            }
+        }
+    } else {
+        repo_env::layer(&mut env, repo_pairs);
+        repo_env::layer(&mut env, config_pairs);
+    }
+    tracing::debug!(repo = %repo_root_str, profile = profile_name, strict, env_vars = env.len(), "layered launch environment");
     env
+}
+
+async fn automation_policy_defaults(db: &Db) -> (i64, i64) {
+    let idle = config::get(db, "automation.idle_archive_secs")
+        .await
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(config::DEFAULT_AUTOMATION_IDLE_ARCHIVE_SECS);
+    let turns = config::get(db, "automation.turn_cap")
+        .await
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(config::DEFAULT_AUTOMATION_TURN_CAP);
+    (idle, turns)
+}
+
+/// Build the explicit ambient baseline used when Tapestry clears inheritance.
+/// Profile/repo values win over baseline and allowlisted ambient values; loom's
+/// own session variables are injected later by `agent::session_env`.
+fn cleared_environment(
+    explicit: Vec<(String, String)>,
+    ambient_allowlist: &[String],
+) -> Vec<(String, String)> {
+    const BASELINE: &[&str] = &[
+        "PATH", "HOME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME",
+    ];
+    let mut env = Vec::new();
+    for name in BASELINE.iter().copied().chain(
+        ambient_allowlist
+            .iter()
+            .map(String::as_str)
+            .filter(|name| !BASELINE.contains(name)),
+    ) {
+        if let Ok(value) = std::env::var(name) {
+            env.push((name.to_string(), value));
+        }
+    }
+    repo_env::layer(&mut env, explicit);
+    env
+}
+
+async fn resume_environment(
+    db: &Db,
+    session: &Session,
+    repo_root: &std::path::Path,
+    cfg: &weaver_core::repo_config::RepoConfig,
+) -> Vec<(String, String)> {
+    let env = launch_env_for_profile(
+        db,
+        repo_root,
+        cfg,
+        &session.profile,
+        session.policy_env_clear,
+    )
+    .await;
+    if !session.policy_env_clear {
+        return env;
+    }
+    let allowlist =
+        serde_json::from_str::<Vec<String>>(&session.policy_ambient_allowlist).unwrap_or_default();
+    cleared_environment(env, &allowlist)
 }
 
 /// Overlay the launching user's personal GitHub token onto `env` as `GH_TOKEN`,
@@ -377,6 +388,23 @@ fn set_env(env: &mut Vec<(String, String)>, name: &str, value: String) {
     } else {
         env.push((name.to_string(), value));
     }
+}
+
+async fn rotate_session_token(
+    db: &Db,
+    session: &Session,
+    env: &mut Vec<(String, String)>,
+) -> ApiResult<()> {
+    crate::auth::revoke_session_tokens(db, &session.id).await?;
+    let token = crate::auth::create_session_token(
+        db,
+        session.created_by.as_deref(),
+        &session.id,
+        &session.branch_id,
+    )
+    .await?;
+    set_env(env, "LOOM_TOKEN", token);
+    Ok(())
 }
 
 fn env_has_key(env: &[(String, String)], name: &str) -> bool {
@@ -526,26 +554,73 @@ fn tail_chars(s: &str, max: usize) -> String {
     format!("…(truncated)\n{tail}")
 }
 
-/// The session-creation core shared by interactive and webhook launches. Returns
-/// the view directly so each caller can shape its own response.
-///
-/// `created_by` is the launching principal's username (attribution for the shared
-/// board), or `None` for a system launch with no user behind it. `origin`
-/// records how the launch came to be (`user` / `agent` / `github` / `slack`);
-/// it derives the session's default class.
-pub(crate) async fn create_session_core(
+/// The session-creation core shared by every producer. The actor supplies trusted
+/// attribution, origin, ancestry, and profile bounds; request fields cannot
+/// impersonate those properties. Returns the view directly so each caller can
+/// shape its own response.
+pub(crate) async fn provision_session(
     st: AppState,
     req: CreateReq,
-    created_by: Option<String>,
-    origin: &str,
+    actor: crate::runtime::Actor,
 ) -> ApiResult<SessionView> {
+    let created_by = actor.display_creator();
+    let origin = actor.origin();
     tracing::info!(
         repo = ?req.repo,
         agent = ?req.agent,
         created_by = ?created_by,
         origin,
-        "create_session_core: starting session creation"
+        "provision_session: starting session creation"
     );
+    let profile_name = req
+        .profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(crate::profile::DEFAULT_PROFILE)
+        .to_string();
+    let launch_profile = crate::profile::get(&st.db, &profile_name)
+        .await?
+        .ok_or_else(|| AppError::bad_request(format!("unknown profile '{profile_name}'")))?;
+    if let Some(allowed) = actor.allowed_profiles() {
+        if !allowed.iter().any(|name| name == &profile_name) {
+            return Err(AppError::new(
+                StatusCode::FORBIDDEN,
+                format!("automation grant does not allow profile '{profile_name}'"),
+            ));
+        }
+        if !launch_profile.is_automation_safe() {
+            return Err(AppError::bad_request(format!(
+                "automation profile '{profile_name}' must be automation-class, strict, and env-cleared"
+            )));
+        }
+    }
+    if launch_profile.strict
+        && [
+            req.agent.as_deref(),
+            req.model.as_deref(),
+            req.effort.as_deref(),
+            req.protocol.as_deref(),
+            req.mode.as_deref(),
+            req.class.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.trim().is_empty())
+    {
+        return Err(AppError::bad_request(format!(
+            "strict profile '{profile_name}' does not allow launch overrides"
+        )));
+    }
+    if launch_profile.max_concurrent > 0
+        && crate::profile::active_count(&st.db, &profile_name).await?
+            >= launch_profile.max_concurrent
+    {
+        return Err(AppError::conflict(format!(
+            "profile '{profile_name}' has reached its max_concurrent limit ({})",
+            launch_profile.max_concurrent
+        )));
+    }
     // The session's class — automation machinery vs interactive fleet work. An
     // explicit request value wins (validated); otherwise derived from the origin.
     // github/slack default to interactive deliberately: a person asked for that
@@ -566,7 +641,7 @@ pub(crate) async fn create_session_core(
         }
         None => match origin {
             "watch" | "actions" | "ops" => "automation".to_string(),
-            _ => "interactive".to_string(),
+            _ => launch_profile.class.clone(),
         },
     };
     // Resolve the repo root. An explicit managed `repo` (a slug/URL) is
@@ -617,16 +692,33 @@ pub(crate) async fn create_session_core(
     };
     tracing::debug!(repo_root = %repo_root.display(), "loaded repo config");
 
+    let agent_overridden = req
+        .agent
+        .as_deref()
+        .is_some_and(|agent| !agent.trim().is_empty());
     let agent = match req.agent {
         Some(a) => a.trim().to_string(),
-        None => repo_default_agent(&st.db, &repo_cfg).await,
+        None => launch_profile.agent_kind.clone(),
     };
     let runtime = agent.clone();
     tracing::debug!(agent = %agent, runtime = %runtime, "resolved agent runtime");
     // The resolved launch environment: global agent_env < per-repo repo_env < the
     // repo file's [env]. It is needed before provisioning so a real agent launch
     // can stop cleanly when neither the user nor the deployment provides GH_TOKEN.
-    let mut extra_env = launch_env(&st.db, &repo_root, &repo_cfg).await;
+    let mut extra_env = launch_env_for_profile(
+        &st.db,
+        &repo_root,
+        &repo_cfg,
+        &profile_name,
+        launch_profile.strict,
+    )
+    .await;
+    if launch_profile.env_clear {
+        let allowlist = launch_profile
+            .ambient_names()
+            .map_err(|e| AppError::bad_request(e.to_string()))?;
+        extra_env = cleared_environment(extra_env, &allowlist);
+    }
     // Run the launching user's git/gh as themselves: overlay their personal
     // GitHub token as GH_TOKEN (design §6.3, "Level B"). See
     // `apply_user_github_token` for the precedence rules. This happens before
@@ -639,30 +731,14 @@ pub(crate) async fn create_session_core(
     let model = match req.model.as_deref().map(str::trim) {
         Some(model) if !model.is_empty() => model.to_string(),
         Some(_) => String::new(),
-        None => {
-            repo_or_configured_selector(
-                &st.db,
-                repo_cfg.agent.model.as_deref(),
-                "agent.model",
-                &runtime,
-                true,
-            )
-            .await
-        }
+        None if !agent_overridden => launch_profile.model.clone(),
+        None => String::new(),
     };
     let effort = match req.effort.as_deref().map(str::trim) {
         Some(effort) if !effort.is_empty() => effort.to_string(),
         Some(_) => String::new(),
-        None => {
-            repo_or_configured_selector(
-                &st.db,
-                repo_cfg.agent.effort.as_deref(),
-                "agent.effort",
-                &runtime,
-                false,
-            )
-            .await
-        }
+        None if !agent_overridden => launch_profile.effort.clone(),
+        None => String::new(),
     };
     // Resolve the execution backend (terminal|acp) from the agent's declared
     // protocol and the optional request override, validating model/effort against
@@ -674,14 +750,23 @@ pub(crate) async fn create_session_core(
         Some(meta) => {
             agent::validate_model(&meta, &model).map_err(AppError::bad_request)?;
             agent::validate_effort(&meta, &effort).map_err(AppError::bad_request)?;
-            agent::resolve_protocol(&meta, req.protocol.as_deref())
-                .map_err(AppError::bad_request)?
+            let protocol = req.protocol.as_deref().or_else(|| {
+                (!agent_overridden && !launch_profile.protocol.trim().is_empty())
+                    .then_some(launch_profile.protocol.as_str())
+            });
+            agent::resolve_protocol(&meta, protocol).map_err(AppError::bad_request)?
         }
         None => return Err(AppError::bad_request(format!("unknown agent '{runtime}'"))),
     };
     // The ACP launch permission posture (ignored for a terminal launch): an
-    // explicit request wins, then the workspace's `agent.mode` default.
-    let mode = launch_mode(&st.db, req.mode.as_deref()).await;
+    // explicit request wins, then the selected profile's mode.
+    let mode = req
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&launch_profile.mode)
+        .to_string();
     tracing::debug!(model = %model, effort = %effort, protocol = %protocol, "resolved and validated model/effort/protocol");
     ensure_github_token_available(&st.db, &extra_env, created_by.as_deref(), &runtime).await?;
     tracing::debug!(runtime = %runtime, "github token availability check passed");
@@ -894,6 +979,31 @@ pub(crate) async fn create_session_core(
         None => None,
     };
     let parent_branch_name = parent.as_ref().map(|b| b.branch.clone());
+    let parent_session_id = match &parent {
+        Some(parent) => session_mod::active_for_branch(&st.db, &parent.id)
+            .await?
+            .map(|session| session.id),
+        None => None,
+    };
+    let (inherited_idle, inherited_turn_budget) = if class == "automation" {
+        automation_policy_defaults(&st.db).await
+    } else {
+        (0, 0)
+    };
+    let (creator_kind, creator_subject) = actor.creator_identity();
+    let launch_policy = session_mod::SessionLaunchPolicy {
+        profile: profile_name.clone(),
+        launch_mode: mode.clone(),
+        profile_revision: launch_profile.revision,
+        env_clear: launch_profile.env_clear,
+        ambient_allowlist: launch_profile.ambient_allowlist.clone(),
+        idle_archive_secs: Some(launch_profile.idle_archive_secs.unwrap_or(inherited_idle)),
+        turn_budget: launch_profile.turn_budget.unwrap_or(inherited_turn_budget),
+        creator_kind: creator_kind.to_string(),
+        creator_subject,
+        parent_session_id,
+        automation_run_id: actor.automation_run_id().map(str::to_string),
+    };
 
     // Open this session's tracking issue before the launch prompt is written,
     // so the agent can be told its issue number. When an agent delegated this
@@ -913,7 +1023,13 @@ pub(crate) async fn create_session_core(
     .await?;
     tracing::debug!(branch = %branch.id, tracking_issue = ?tracking_issue, "tracking issue resolved");
 
-    let session_id = branch_mod::new_id();
+    // Automation reserves its session id durably before provisioning. Reusing
+    // it here makes retries converge on one runtime identity instead of
+    // silently allocating a second session after an ambiguous response.
+    let session_id = actor
+        .reserved_session_id()
+        .map(str::to_string)
+        .unwrap_or_else(branch_mod::new_id);
     let run_dir = db::run_dir(&session_id);
     tokio::fs::create_dir_all(&run_dir).await?;
     tracing::info!(session = %session_id, branch = %branch.id, run_dir = %run_dir.display(), "allocated session id and run dir");
@@ -1010,7 +1126,7 @@ pub(crate) async fn create_session_core(
                 // launching the agent into a half-provisioned worktree. The
                 // worktree is left intact for inspection; full output is in the
                 // run dir's setup.log.
-                let session = session_mod::insert(
+                let session = session_mod::insert_with_policy(
                     &st.db,
                     &NewSession {
                         id: session_id.clone(),
@@ -1030,6 +1146,7 @@ pub(crate) async fn create_session_core(
                         class: class.clone(),
                         tracking_issue_id: tracking_issue,
                     },
+                    &launch_policy,
                 )
                 .await?;
                 tracing::info!(
@@ -1107,6 +1224,11 @@ pub(crate) async fn create_session_core(
         class: class.clone(),
         tracking_issue_id: tracking_issue,
     };
+    crate::auth::revoke_session_tokens(&st.db, &session_id).await?;
+    let session_token =
+        crate::auth::create_session_token(&st.db, created_by.as_deref(), &session_id, &branch.id)
+            .await?;
+    set_env(&mut extra_env, "LOOM_TOKEN", session_token);
     let session = if protocol == "acp" {
         // The ACP path inserts the row *first* — `acp::start` binds a relay to it
         // and reads it back — then brings up the headless adapter over the relay.
@@ -1114,7 +1236,7 @@ pub(crate) async fn create_session_core(
             session = %session_id, branch = %branch.id, runtime = %runtime,
             work_dir = %work_dir.display(), mode = %mode, "launching acp session"
         );
-        let session = session_mod::insert(&st.db, &new_session).await?;
+        let session = session_mod::insert_with_policy(&st.db, &new_session, &launch_policy).await?;
         // A custom acp agent supplies its own adapter command; a builtin
         // resolves its adapter (claude-agent-acp / codex-acp).
         let custom = if agent::builtin_agent_type(&runtime).is_some() {
@@ -1134,6 +1256,7 @@ pub(crate) async fn create_session_core(
                 goal_file: goal_file.as_deref(),
                 primer_file: None,
                 extra_env: &extra_env,
+                env_clear: launch_profile.env_clear,
                 mode: &mode,
                 custom: custom.as_ref(),
             },
@@ -1142,6 +1265,9 @@ pub(crate) async fn create_session_core(
         .await
         .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         if let Err(e) = crate::acp::start(&st, &session.id, launch).await {
+            crate::auth::revoke_session_tokens(&st.db, &session.id)
+                .await
+                .ok();
             // Keep the durable row/worktree visible and recoverable, but retain
             // non-2xx create semantics so CLI/webhook callers never announce a
             // failed agent as successfully launched. The browser uses the
@@ -1195,7 +1321,12 @@ pub(crate) async fn create_session_core(
             env_vars = extra_env.len(),
             "launching agent terminal"
         );
-        agent::launch(
+        // Make the session-bound token resolvable before the child starts. A
+        // terminal agent may call back into loom as soon as its shell execs;
+        // inserting after `agent::launch` left a race where that first request
+        // saw a correctly minted token as unauthorized.
+        let session = session_mod::insert_with_policy(&st.db, &new_session, &launch_policy).await?;
+        if let Err(e) = agent::launch(
             &st.db,
             &agent::LaunchSpec {
                 branch_id: &branch.id,
@@ -1208,13 +1339,23 @@ pub(crate) async fn create_session_core(
                 model: &model,
                 effort: &effort,
                 extra_env: &extra_env,
+                env_clear: launch_profile.env_clear,
             },
             agent::LaunchMode::Fresh,
         )
         .await
-        .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        {
+            crate::auth::revoke_session_tokens(&st.db, &session_id)
+                .await
+                .ok();
+            let _ = session_mod::set_status(&st.db, &session_id, "error").await;
+            return Err(AppError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                e.to_string(),
+            ));
+        }
         tracing::info!(session = %session_id, branch = %branch.id, "agent terminal launched");
-        session_mod::insert(&st.db, &new_session).await?
+        session
     };
     tracing::debug!(session = %session.id, status = %status, "inserted session row");
 
@@ -1525,6 +1666,7 @@ pub(super) async fn delete_session(
     tokio::fs::remove_dir_all(db::run_dir(&session.id))
         .await
         .ok();
+    crate::auth::revoke_session_tokens(&st.db, &session.id).await?;
     session_mod::delete(&st.db, &session.id).await?;
     // Release this branch's claimed issues back to the repo backlog before the
     // branch row goes away — issues are repo-owned and must outlive teardown.
@@ -1575,6 +1717,7 @@ pub(crate) async fn archive(
         st.acp.stop(&session.id);
     }
     backend::kill_session(&session.term_session).await.ok();
+    crate::auth::revoke_session_tokens(&st.db, &session.id).await?;
     crate::shell::kill_debug_all(&session.id).await;
     st.ide.kill(&session.id);
     let repo_root = PathBuf::from(&branch.repo_root);
@@ -1788,10 +1931,15 @@ pub(crate) async fn create_warm_session(
     tokio::fs::create_dir_all(&run_dir).await?;
     tracing::debug!(watch = %watch.id, session = %session_id, "allocated warm session id and run dir");
 
-    // The warm session runs the configured default agent (the watch's
-    // judging agent, normally `claude`); its `prompt` param, when set, seeds the
-    // first turn.
-    let agent = configured_agent(&st.db, "agent.default", config::DEFAULT_AGENT).await;
+    // Warm infrastructure resolves the same authoritative default profile as
+    // ordinary launches. Watches still supply their own model/effort selectors,
+    // but there is no second `agent.*` settings authority.
+    let launch_profile = crate::profile::get(&st.db, crate::profile::DEFAULT_PROFILE)
+        .await?
+        .ok_or_else(|| {
+            AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "default profile missing")
+        })?;
+    let agent = launch_profile.agent_kind.clone();
     let goal_file = match watch
         .params()
         .get("prompt")
@@ -1808,9 +1956,66 @@ pub(crate) async fn create_warm_session(
 
     let term_session = format!("weaver-{session_id}");
     let repo_cfg = repo_cfg_or_default(&repo_root);
-    let extra_env = launch_env(&st.db, &repo_root, &repo_cfg).await;
+    let mut extra_env = launch_env_for_profile(
+        &st.db,
+        &repo_root,
+        &repo_cfg,
+        &launch_profile.name,
+        launch_profile.strict,
+    )
+    .await;
+    if launch_profile.env_clear {
+        let allowlist = launch_profile
+            .ambient_names()
+            .map_err(|error| AppError::bad_request(error.to_string()))?;
+        extra_env = cleared_environment(extra_env, &allowlist);
+    }
+
+    // Persist before exposing the scoped credential to the child. Token lookup
+    // deliberately requires a live bound session, so an eager agent cannot hit
+    // a transient authentication failure during startup.
+    let status = agent::initial_status(&st.db, &agent).await;
+    let (inherited_idle, inherited_turn_budget) = automation_policy_defaults(&st.db).await;
+    let session = session_mod::insert_with_policy(
+        &st.db,
+        &NewSession {
+            id: session_id.clone(),
+            branch_id: branch.id.clone(),
+            work_dir: work_dir.display().to_string(),
+            term_session: term_session.clone(),
+            agent_kind: agent.clone(),
+            model: watch.model.clone(),
+            effort: watch.effort.clone(),
+            status: status.to_string(),
+            github_repo: None,
+            parent_branch_id: None,
+            managed_by: Some(watch.id.clone()),
+            created_by: None,
+            protocol: "terminal".to_string(),
+            origin: "watch".to_string(),
+            class: "automation".to_string(),
+            tracking_issue_id: None,
+        },
+        &session_mod::SessionLaunchPolicy {
+            profile: launch_profile.name.clone(),
+            launch_mode: launch_profile.mode.clone(),
+            profile_revision: launch_profile.revision,
+            env_clear: launch_profile.env_clear,
+            ambient_allowlist: launch_profile.ambient_allowlist.clone(),
+            idle_archive_secs: Some(launch_profile.idle_archive_secs.unwrap_or(inherited_idle)),
+            turn_budget: launch_profile.turn_budget.unwrap_or(inherited_turn_budget),
+            creator_kind: "system".to_string(),
+            creator_subject: format!("watch:{}", watch.id),
+            parent_session_id: None,
+            automation_run_id: None,
+        },
+    )
+    .await?;
+    let session_token =
+        crate::auth::create_session_token(&st.db, None, &session_id, &branch.id).await?;
+    set_env(&mut extra_env, "LOOM_TOKEN", session_token);
     tracing::info!(watch = %watch.id, session = %session_id, agent = %agent, work_dir = %work_dir.display(), "launching warm session agent terminal");
-    agent::launch(
+    if let Err(error) = agent::launch(
         &st.db,
         &agent::LaunchSpec {
             branch_id: &branch.id,
@@ -1823,42 +2028,22 @@ pub(crate) async fn create_warm_session(
             model: &watch.model,
             effort: &watch.effort,
             extra_env: &extra_env,
+            env_clear: launch_profile.env_clear,
         },
         agent::LaunchMode::Fresh,
     )
     .await
-    .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    {
+        crate::auth::revoke_session_tokens(&st.db, &session_id)
+            .await
+            .ok();
+        session_mod::delete(&st.db, &session_id).await.ok();
+        return Err(AppError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            error.to_string(),
+        ));
+    }
     tracing::info!(watch = %watch.id, session = %session_id, "warm session agent terminal launched");
-
-    let status = agent::initial_status(&st.db, &agent).await;
-    let session = session_mod::insert(
-        &st.db,
-        &NewSession {
-            id: session_id,
-            branch_id: branch.id.clone(),
-            work_dir: work_dir.display().to_string(),
-            term_session,
-            agent_kind: agent,
-            model: watch.model.clone(),
-            effort: watch.effort.clone(),
-            status: status.to_string(),
-            github_repo: None,
-            parent_branch_id: None,
-            managed_by: Some(watch.id.clone()),
-            // Engine-created infrastructure, no user behind it.
-            created_by: None,
-            // Warm sessions stay on the terminal backend: the watch engine
-            // drives the judge by typing into its PTY, a flow the acp prompt
-            // queue does not replace yet.
-            protocol: "terminal".to_string(),
-            // Engine infrastructure: automation-class, so even a warm session
-            // that loses its `managed_by` stamp stays out of the fleet listing.
-            origin: "watch".to_string(),
-            class: "automation".to_string(),
-            tracking_issue_id: None,
-        },
-    )
-    .await?;
 
     repo::record_use(&st.db, &repo_root_str).await.ok();
     tracing::info!(
@@ -1952,7 +2137,8 @@ async fn adopt_terminal_into_acp(
     let work_dir = PathBuf::from(&session.work_dir);
     let repo_root = PathBuf::from(&branch.repo_root);
     let repo_cfg = repo_cfg_or_default(&repo_root);
-    let extra_env = launch_env(&st.db, &repo_root, &repo_cfg).await;
+    let mut extra_env = resume_environment(&st.db, session, &repo_root, &repo_cfg).await;
+    rotate_session_token(&st.db, session, &mut extra_env).await?;
     let run_dir = db::run_dir(&session.id);
     let primer_file = {
         let f = run_dir.join("primer.txt");
@@ -1993,6 +2179,7 @@ async fn adopt_terminal_into_acp(
             goal_file: goal_file.as_deref(),
             primer_file: primer_file.as_deref(),
             extra_env: &extra_env,
+            env_clear: session.policy_env_clear,
             // Terminal rows carry no mode; on adoption they take the acp default.
             mode: agent::DEFAULT_ACP_MODE,
             custom: None,
@@ -2050,7 +2237,8 @@ async fn adopt_acp(
         // The relay is gone — respawn the adapter and reopen the conversation.
         let repo_root = PathBuf::from(&branch.repo_root);
         let repo_cfg = repo_cfg_or_default(&repo_root);
-        let extra_env = launch_env(&st.db, &repo_root, &repo_cfg).await;
+        let mut extra_env = resume_environment(&st.db, session, &repo_root, &repo_cfg).await;
+        rotate_session_token(&st.db, session, &mut extra_env).await?;
         let runtime = session.agent_kind.clone();
         let custom = if agent::builtin_agent_type(&runtime).is_some() {
             None
@@ -2087,6 +2275,7 @@ async fn adopt_acp(
                 goal_file: goal_file.as_deref(),
                 primer_file: primer_file.as_deref(),
                 extra_env: &extra_env,
+                env_clear: session.policy_env_clear,
                 mode: &mode,
                 custom: custom.as_ref(),
             },
@@ -2171,7 +2360,8 @@ async fn resume_agent(
     // provisioned; this only resumes the agent.
     let repo_root = PathBuf::from(&branch.repo_root);
     let repo_cfg = repo_cfg_or_default(&repo_root);
-    let extra_env = launch_env(&st.db, &repo_root, &repo_cfg).await;
+    let mut extra_env = resume_environment(&st.db, session, &repo_root, &repo_cfg).await;
+    rotate_session_token(&st.db, session, &mut extra_env).await?;
     let runtime = session.agent_kind.clone();
     tracing::info!(session = %session.id, branch = %branch.id, runtime = %runtime, work_dir = %work_dir.display(), "relaunching agent terminal for resume");
     agent::launch(
@@ -2187,6 +2377,7 @@ async fn resume_agent(
             model: &session.model,
             effort: &session.effort,
             extra_env: &extra_env,
+            env_clear: session.policy_env_clear,
         },
         agent::LaunchMode::Adopt,
     )
@@ -2639,7 +2830,7 @@ pub(super) async fn handoff_session(
             "handoff target matches the current runtime profile",
         ));
     }
-    let mode = launch_mode(&st.db, req.mode.as_deref()).await;
+    let mode = launch_mode(req.mode.as_deref(), &session.launch_mode);
 
     // Resolve every fallible launch input before quiescing the current task.
     let repo_root = PathBuf::from(&branch.repo_root);
@@ -2651,7 +2842,8 @@ pub(super) async fn handoff_session(
         )));
     }
     let repo_cfg = repo_cfg_or_default(&repo_root);
-    let mut extra_env = launch_env(&st.db, &repo_root, &repo_cfg).await;
+    let mut extra_env = resume_environment(&st.db, &session, &repo_root, &repo_cfg).await;
+    rotate_session_token(&st.db, &session, &mut extra_env).await?;
     apply_user_github_token(&st.db, &mut extra_env, session.created_by.as_deref()).await;
     ensure_github_token_available(&st.db, &extra_env, session.created_by.as_deref(), &runtime)
         .await?;
@@ -2676,6 +2868,7 @@ pub(super) async fn handoff_session(
             goal_file: Some(&prompt_file),
             primer_file: None,
             extra_env: &extra_env,
+            env_clear: session.policy_env_clear,
             mode: &mode,
             custom: custom.as_ref(),
         },

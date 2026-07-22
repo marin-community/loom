@@ -186,6 +186,15 @@ pub struct SessionView {
     /// `null` before it reports (and immediately after a provider handoff).
     #[serde(default)]
     pub usage: Option<AcpUsage>,
+    /// Named launch posture selected when this session was created.
+    #[serde(default = "default_profile")]
+    pub profile: String,
+    /// Revision of the profile whose non-secret policy was stamped at launch.
+    #[serde(default)]
+    pub profile_revision: i64,
+    /// Resolved launch permission posture, immutable for this session.
+    #[serde(default)]
+    pub launch_mode: String,
     pub branch: BranchView,
 }
 
@@ -219,6 +228,154 @@ fn default_protocol() -> String {
 
 fn default_origin() -> String {
     "user".to_string()
+}
+
+fn default_profile() -> String {
+    "default".to_string()
+}
+
+/// A reusable, named session launch posture. Secret environment values are
+/// deliberately excluded; `env` contains names and update timestamps only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileView {
+    pub name: String,
+    pub description: String,
+    pub agent_kind: String,
+    pub model: String,
+    pub effort: String,
+    pub protocol: String,
+    pub mode: String,
+    pub class: String,
+    pub strict: bool,
+    pub env_clear: bool,
+    pub ambient_allowlist: Vec<String>,
+    pub idle_archive_secs: Option<i64>,
+    pub max_concurrent: i64,
+    pub turn_budget: Option<i64>,
+    pub revision: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub env: Vec<ProfileEnvView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileEnvView {
+    pub name: String,
+    pub updated_at: String,
+}
+
+/// Body for creating or replacing a profile.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProfileReq {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub agent_kind: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub effort: String,
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default = "default_class")]
+    pub class: String,
+    #[serde(default)]
+    pub strict: bool,
+    #[serde(default)]
+    pub env_clear: bool,
+    #[serde(default)]
+    pub ambient_allowlist: Vec<String>,
+    #[serde(default)]
+    pub idle_archive_secs: Option<i64>,
+    #[serde(default)]
+    pub max_concurrent: i64,
+    #[serde(default)]
+    pub turn_budget: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PutProfileEnvReq {
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutomationTokenReq {
+    pub subject: String,
+    pub profiles: Vec<String>,
+    pub ttl_secs: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutomationTokenView {
+    pub token: String,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FederateReq {
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FederationReq {
+    #[serde(default = "github_oidc_issuer")]
+    pub issuer: String,
+    pub audience: String,
+    pub repository_id: String,
+    pub workflow_ref: String,
+    #[serde(default)]
+    pub event_name: Option<String>,
+    #[serde(default)]
+    pub ref_pattern: Option<String>,
+    pub profile: String,
+}
+
+fn github_oidc_issuer() -> String {
+    "https://token.actions.githubusercontent.com".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FederationView {
+    pub id: String,
+    pub issuer: String,
+    pub audience: String,
+    pub repository_id: String,
+    pub workflow_ref: String,
+    pub event_name: Option<String>,
+    pub ref_pattern: Option<String>,
+    pub profile: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunReq {
+    pub profile: String,
+    pub idempotency_key: String,
+    #[serde(default = "actions_source")]
+    pub source: String,
+    pub session: CreateReq,
+}
+
+fn actions_source() -> String {
+    "actions".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunView {
+    pub id: String,
+    pub actor_subject: String,
+    pub source: String,
+    pub profile: String,
+    pub idempotency_key: String,
+    pub session_id: String,
+    pub status: String,
+    pub outcome: Option<String>,
+    pub summary: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 fn default_class() -> String {
@@ -653,6 +810,9 @@ pub struct CreateReq {
     /// sessions are hidden from the default fleet listing.
     #[serde(default)]
     pub class: Option<String>,
+    /// Named launch profile. Blank/absent selects `default`.
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 /// Body for `POST /api/sessions/{id}/handoff`: replace the live ACP runtime

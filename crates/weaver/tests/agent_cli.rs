@@ -1026,15 +1026,15 @@ async fn config_get_ls_reads_settings() {
     // pane); the in-session surface only reads them.
     weaver_core::config::apply(
         &env.db,
-        &[("agent.default".to_string(), Some("codex".to_string()))],
+        &[("server.auto_adopt".to_string(), Some("true".to_string()))],
     )
     .await
     .unwrap();
-    let out = env.run(&["config", "get", "agent.default"]);
-    assert_eq!(out.trim(), "codex");
+    let out = env.run(&["config", "get", "server.auto_adopt"]);
+    assert_eq!(out.trim(), "true");
     let out = env.run(&["config", "ls"]);
     assert!(
-        out.contains("agent.default") && out.contains("codex"),
+        out.contains("server.auto_adopt") && out.contains("true"),
         "ls shows the stored value: {out}"
     );
 }

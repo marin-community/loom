@@ -61,6 +61,9 @@ pub struct LaunchOptions<'a> {
     /// so secret values never touch any process's argv. Inherited by the exec'd
     /// login shell and everything it spawns, exactly as `export` would.
     pub env: &'a [(&'a str, &'a str)],
+    /// Start the supervisor and its child from an empty environment. The
+    /// supplied `env` is then the complete child environment.
+    pub env_clear: bool,
     pub cols: u16,
     pub rows: u16,
     /// Which backend to run. [`Mode::Pty`] (the default) keeps the historical
@@ -101,6 +104,7 @@ pub async fn spawn_detached(opts: &LaunchOptions<'_>) -> Result<()> {
         "cwd": opts.cwd,
         "script": opts.script,
         "env": opts.env,
+        "env_clear": opts.env_clear,
         "cols": opts.cols,
         "rows": opts.rows,
         "mode": opts.mode,
@@ -108,6 +112,16 @@ pub async fn spawn_detached(opts: &LaunchOptions<'_>) -> Result<()> {
     });
 
     let mut cmd = std::process::Command::new(&exe);
+    if opts.env_clear {
+        // The detached supervisor must resolve the same isolated socket root
+        // as its parent, but it does not need the rest of loom's environment.
+        let socket_env: Vec<_> = ["WEAVER_HOME", "WEAVER_TAPESTRY_DIR"]
+            .into_iter()
+            .filter_map(|name| std::env::var(name).ok().map(|value| (name, value)))
+            .collect();
+        cmd.env_clear();
+        cmd.envs(socket_env);
+    }
     // `-` tells the supervisor to read its JSON spec from stdin (see below); the
     // spec never appears on argv.
     cmd.arg("supervise")
@@ -167,6 +181,8 @@ pub struct LaunchSpec {
     pub cwd: std::path::PathBuf,
     pub script: String,
     pub env: Vec<(String, String)>,
+    #[serde(default)]
+    pub env_clear: bool,
     pub cols: u16,
     pub rows: u16,
     /// Backend mode. Absent in specs written before relay mode existed, so it
@@ -186,6 +202,7 @@ impl From<LaunchSpec> for SupervisorConfig {
             cwd: s.cwd,
             script: s.script,
             env: s.env,
+            env_clear: s.env_clear,
             cols: s.cols,
             rows: s.rows,
             mode: s.mode,

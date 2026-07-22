@@ -416,6 +416,25 @@ export const setEnv = (name: string, value: string) =>
 export const deleteEnv = (name: string) =>
   del(`/env/${encodeURIComponent(name)}`).then((r) => (r as EnvEnvelope).env);
 
+// --- Launch profiles -------------------------------------------------------
+
+import type { Profile, ProfileInput } from './types';
+
+export const listProfiles = () => get('/profiles') as Promise<Profile[]>;
+export const createProfile = (profile: ProfileInput) =>
+  post('/profiles', profile) as Promise<Profile>;
+export const updateProfile = (name: string, profile: ProfileInput) =>
+  put(`/profiles/${encodeURIComponent(name)}`, profile) as Promise<Profile>;
+export const deleteProfile = (name: string) => del(`/profiles/${encodeURIComponent(name)}`);
+export const setProfileEnv = (profile: string, name: string, value: string) =>
+  put(`/profiles/${encodeURIComponent(profile)}/env/${encodeURIComponent(name)}`, {
+    value,
+  }) as Promise<Profile>;
+export const deleteProfileEnv = (profile: string, name: string) =>
+  del(
+    `/profiles/${encodeURIComponent(profile)}/env/${encodeURIComponent(name)}`,
+  ) as Promise<Profile>;
+
 /** Reset the operator scratch shell — kill it and spawn a fresh login shell. */
 export const restartShell = () => post('/shell/restart');
 

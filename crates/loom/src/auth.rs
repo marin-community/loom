@@ -30,6 +30,7 @@ use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt
 use argon2::Argon2;
 use base64::Engine as _;
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use weaver_core::db::iso_in_days;
@@ -79,12 +80,36 @@ impl AuthVia {
     }
 }
 
-/// An authenticated caller: which approved user, and how they proved it.
+/// Capabilities carried by an authenticated identity. Admin is the compatibility
+/// grant for users, browser sessions, loopback trust, PATs, and the local token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Grant {
+    Admin,
+    Automation {
+        subject: String,
+        profiles: Vec<String>,
+    },
+    Session {
+        session_id: String,
+        branch_id: String,
+    },
+}
+
+/// An authenticated caller: identity, proof mechanism, and explicit grant.
 #[derive(Debug, Clone)]
 pub struct Principal {
     pub username: String,
     pub github_login: Option<String>,
     pub via: AuthVia,
+    pub grant: Grant,
+    pub automation_context: Option<crate::automation::FederationContext>,
+}
+
+impl Principal {
+    pub fn is_admin(&self) -> bool {
+        matches!(self.grant, Grant::Admin)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -344,6 +369,8 @@ pub async fn verify_login(db: &Db, username: &str, password: &str) -> Result<Opt
             username: user.username,
             github_login: user.github_login,
             via: AuthVia::Session,
+            grant: Grant::Admin,
+            automation_context: None,
         }))
     } else {
         Ok(None)
@@ -359,6 +386,8 @@ pub async fn loopback_principal(db: &Db) -> Result<Option<Principal>> {
         username: u.username,
         github_login: u.github_login,
         via: AuthVia::Loopback,
+        grant: Grant::Admin,
+        automation_context: None,
     }))
 }
 
@@ -397,6 +426,8 @@ pub async fn lookup_session(db: &Db, cookie: &str) -> Result<Option<Principal>> 
         username: r.get("username"),
         github_login: r.get("github_login"),
         via: AuthVia::Session,
+        grant: Grant::Admin,
+        automation_context: None,
     }))
 }
 
@@ -526,13 +557,32 @@ pub async fn revoke_token(db: &Db, id: &str) -> Result<bool> {
 /// orphaned token.
 pub async fn lookup_token(db: &Db, token: &str) -> Result<Option<Principal>> {
     if !token.starts_with(TOKEN_PREFIX) {
-        return Ok(None);
+        return Ok(crate::automation::verify(db, token)
+            .await?
+            .map(|claims| Principal {
+                username: claims.sub.clone(),
+                github_login: None,
+                via: AuthVia::Token,
+                grant: Grant::Automation {
+                    subject: claims.sub.clone(),
+                    profiles: claims.profiles.clone(),
+                },
+                automation_context: claims.github,
+            }));
     }
     let hash = sha256_hex(token);
     let row = sqlx::query(
-        "SELECT t.id AS id, t.username AS username, u.github_login AS github_login
+        "SELECT t.id AS id, t.username AS username, u.github_login AS github_login,
+                t.grant_json AS grant_json
          FROM api_tokens t JOIN users u ON u.username = t.username
-         WHERE t.token_hash = ? AND (t.expires_at IS NULL OR t.expires_at > ?)",
+         WHERE t.token_hash = ? AND (t.expires_at IS NULL OR t.expires_at > ?)
+           AND (
+             t.kind != 'session' OR EXISTS(
+               SELECT 1 FROM sessions s
+               WHERE s.id = t.bound_session_id
+                 AND s.status NOT IN ('done', 'error', 'archived')
+             )
+           )",
     )
     .bind(&hash)
     .bind(now_iso())
@@ -542,6 +592,14 @@ pub async fn lookup_token(db: &Db, token: &str) -> Result<Option<Principal>> {
         return Ok(None);
     };
     let id: String = row.get("id");
+    let grant_json: String = row.get("grant_json");
+    let grant: Grant = match serde_json::from_str(&grant_json) {
+        Ok(grant) => grant,
+        Err(error) => {
+            tracing::warn!(token_id = %id, %error, "rejecting token with invalid grant metadata");
+            return Ok(None);
+        }
+    };
     let _ = sqlx::query("UPDATE api_tokens SET last_used_at = ? WHERE id = ?")
         .bind(now_iso())
         .bind(&id)
@@ -551,7 +609,58 @@ pub async fn lookup_token(db: &Db, token: &str) -> Result<Option<Principal>> {
         username: row.get("username"),
         github_login: row.get("github_login"),
         via: AuthVia::Token,
+        grant,
+        automation_context: None,
     }))
+}
+
+/// Mint an opaque credential bound to exactly one session and branch. The
+/// primary/admin user owns the row for lifecycle cleanup, while authorization
+/// comes exclusively from the serialized session grant.
+pub async fn create_session_token(
+    db: &Db,
+    owner: Option<&str>,
+    session_id: &str,
+    branch_id: &str,
+) -> Result<String> {
+    let username = match owner {
+        Some(username) if get_user(db, username).await?.is_some() => username.to_string(),
+        _ => primary_user(db)
+            .await?
+            .ok_or_else(|| anyhow!("no primary user for session token"))?,
+    };
+    let (plain, hash, prefix) = mint_token();
+    let id = random_id();
+    let grant = serde_json::to_string(&Grant::Session {
+        session_id: session_id.to_string(),
+        branch_id: branch_id.to_string(),
+    })?;
+    sqlx::query(
+        "INSERT INTO api_tokens
+         (id, username, name, token_hash, prefix, kind, grant_json, subject, bound_session_id)
+         VALUES (?, ?, ?, ?, ?, 'session', ?, ?, ?)",
+    )
+    .bind(id)
+    .bind(username)
+    .bind(format!("session {session_id}"))
+    .bind(hash)
+    .bind(prefix)
+    .bind(grant)
+    .bind(session_id)
+    .bind(session_id)
+    .execute(db)
+    .await?;
+    Ok(plain)
+}
+
+pub async fn revoke_session_tokens(db: &Db, session_id: &str) -> Result<u64> {
+    Ok(
+        sqlx::query("DELETE FROM api_tokens WHERE kind = 'session' AND bound_session_id = ?")
+            .bind(session_id)
+            .execute(db)
+            .await?
+            .rows_affected(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -942,6 +1051,56 @@ mod tests {
         assert!(revoke_token(&db, &info.id).await.unwrap());
         assert!(lookup_token(&db, &plain).await.unwrap().is_none());
         assert!(list_tokens(&db).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn session_tokens_are_scoped_and_revoked_by_session() {
+        let db = connect_in_memory_with_owner("rjpower").await;
+        let branch = weaver_core::branch::upsert(&db, "/repo", "weaver/scoped", "main")
+            .await
+            .unwrap();
+        crate::session::insert(
+            &db,
+            &crate::session::NewSession {
+                id: "s1".to_string(),
+                branch_id: branch.id.clone(),
+                work_dir: "/w".to_string(),
+                term_session: "weaver-s1".to_string(),
+                agent_kind: "shell".to_string(),
+                model: String::new(),
+                effort: String::new(),
+                status: "running".to_string(),
+                github_repo: None,
+                parent_branch_id: None,
+                managed_by: None,
+                created_by: Some("rjpower".to_string()),
+                protocol: "terminal".to_string(),
+                origin: "user".to_string(),
+                class: "interactive".to_string(),
+                tracking_issue_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let plain = create_session_token(&db, Some("rjpower"), "s1", &branch.id)
+            .await
+            .unwrap();
+        let principal = lookup_token(&db, &plain).await.unwrap().unwrap();
+        assert_eq!(
+            principal.grant,
+            Grant::Session {
+                session_id: "s1".to_string(),
+                branch_id: branch.id,
+            }
+        );
+        assert_eq!(list_tokens(&db).await.unwrap().len(), 0);
+        crate::session::set_status(&db, "s1", "archived")
+            .await
+            .unwrap();
+        assert!(lookup_token(&db, &plain).await.unwrap().is_none());
+        assert_eq!(revoke_session_tokens(&db, "s1").await.unwrap(), 1);
+        assert!(lookup_token(&db, &plain).await.unwrap().is_none());
     }
 
     #[tokio::test]

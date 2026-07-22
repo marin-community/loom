@@ -86,8 +86,8 @@ async fn loopback_trust_then_token_local_and_cookie_gate_access() {
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
 
-    // 4c. The machine-local token (what loom injects into its subprocesses) works
-    //     too — that is what keeps the agent and watches running with trust off.
+    // 4c. The machine-local admin token still works for operator CLI and watch
+    //     infrastructure. Agent sessions receive narrower session tokens.
     let home = std::env::var("WEAVER_HOME").unwrap();
     let local = std::fs::read_to_string(Path::new(&home).join("loom-token")).unwrap();
     let r = http
@@ -123,6 +123,17 @@ async fn loopback_trust_then_token_local_and_cookie_gate_access() {
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
+
+    // An explicit invalid bearer is authoritative: it cannot fall through to
+    // the otherwise-valid cookie (or loopback trust).
+    let r = http
+        .get(url(&ts, "/api/sessions"))
+        .header("cookie", &cookie_pair)
+        .bearer_auth("loom_revoked-or-invalid")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 
     // 4e. A wrong password is rejected.
     let r = http
@@ -194,4 +205,86 @@ async fn health_is_public_but_protected_routes_are_not() {
     // A protected route is gated.
     let r = http.get(url(&ts, "/api/branches")).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+#[serial]
+async fn session_token_is_limited_to_its_tree_and_work_items() {
+    let ts = TestServer::start().await;
+    let created = ts
+        .client
+        .post(
+            "/api/sessions",
+            json!({ "cwd": ts.cwd(), "goal": "scoped parent", "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let session_id = created["id"].as_str().unwrap();
+    let branch_id = created["branch"]["id"].as_str().unwrap();
+    let tracking_issue = created["tracking_issue"].as_i64().unwrap();
+    let token =
+        loom::auth::create_session_token(&ts.state.db, Some("rjpower"), session_id, branch_id)
+            .await
+            .unwrap();
+
+    let unrelated = weaver_core::issue::add(
+        &ts.state.db,
+        &weaver_core::issue::NewIssue {
+            repo_root: ts.cwd(),
+            title: "unrelated backlog".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    ts.client
+        .patch("/api/settings", json!({ "auth.trust_loopback": false }))
+        .await
+        .unwrap();
+    let http = reqwest::Client::new();
+
+    let own = http
+        .get(url(&ts, &format!("/api/sessions/{session_id}")))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(own.status(), StatusCode::OK);
+    let issue = http
+        .get(url(&ts, &format!("/api/issues/{tracking_issue}")))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(issue.status(), StatusCode::OK);
+
+    let child = http
+        .post(url(&ts, "/api/sessions"))
+        .bearer_auth(&token)
+        .json(&json!({ "cwd": ts.cwd(), "goal": "scoped child", "agent": "shell" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(child.status(), StatusCode::OK);
+    let child: Value = child.json().await.unwrap();
+    let child_row = loom::session::get(&ts.state.db, child["id"].as_str().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(child_row.parent_session_id.as_deref(), Some(session_id));
+
+    let unrelated = http
+        .get(url(&ts, &format!("/api/issues/{}", unrelated.id)))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unrelated.status(), StatusCode::FORBIDDEN);
+    let admin = http
+        .get(url(&ts, "/api/auth/tokens"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin.status(), StatusCode::FORBIDDEN);
 }

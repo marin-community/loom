@@ -89,6 +89,7 @@ async fn start_server() -> (TestHome, loom::client::Client, db::Db, String) {
     // `seed_owner` no longer defaults to a real login — this suite's requests
     // ride loopback trust, which needs a seeded owner to resolve to.
     std::env::set_var("LOOM_OWNER_GITHUB", "rjpower");
+    std::env::remove_var("LOOM_TOKEN");
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -123,7 +124,7 @@ async fn start_server() -> (TestHome, loom::client::Client, db::Db, String) {
     tokio::spawn(server::serve(state, listener));
 
     std::env::set_var("WEAVER_API", format!("http://{addr}"));
-    let client = client::default();
+    let client = client::Client::new(format!("http://{addr}"));
     for _ in 0..60 {
         if client.get("/api/health").await.is_ok() {
             break;

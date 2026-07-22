@@ -65,11 +65,13 @@
 mod agents;
 mod artifacts;
 mod auth;
+mod automation;
 mod branches;
 mod discussion;
 mod env;
 mod issues;
 mod logview;
+mod profiles;
 mod repo_env;
 mod repos;
 mod scratch;
@@ -80,11 +82,13 @@ mod watches;
 use agents::*;
 use artifacts::*;
 use auth::*;
+use automation::*;
 use branches::*;
 use discussion::*;
 use env::*;
 use issues::*;
 use logview::*;
+use profiles::*;
 use repo_env::*;
 use repos::*;
 use scratch::*;
@@ -327,6 +331,9 @@ pub(crate) async fn session_view(
         acp_session_id: session.acp_session_id.clone(),
         current_mode: session.current_mode.clone(),
         usage,
+        profile: session.profile.clone(),
+        profile_revision: session.profile_revision,
+        launch_mode: session.launch_mode.clone(),
         branch: bv,
     })
 }
@@ -538,6 +545,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/logout", post(auth_logout))
         .route("/auth/github/login", get(github_login))
         .route("/auth/github/callback", get(github_callback))
+        .route("/auth/federate", post(federate))
         // The inbound GitHub webhook. Deliberately OUTSIDE `require_auth`: it is
         // authenticated cryptographically by the HMAC signature it carries, not
         // by a loom principal. The handler is the untrusted-input boundary.
@@ -723,6 +731,15 @@ pub fn router(state: AppState) -> Router {
             axum::routing::put(put_repo_env).delete(delete_repo_env),
         )
         .route("/settings", get(get_settings).patch(patch_settings))
+        .route("/profiles", get(list_profiles).post(create_profile))
+        .route(
+            "/profiles/{name}",
+            get(get_profile).put(put_profile).delete(delete_profile),
+        )
+        .route(
+            "/profiles/{profile}/env/{name}",
+            axum::routing::put(put_profile_env).delete(delete_profile_env),
+        )
         .route("/slack/status", get(slack_status))
         // Operator-managed agent environment variables.
         .route("/env", get(get_env))
@@ -759,6 +776,14 @@ pub fn router(state: AppState) -> Router {
         // approved-user allowlist, and the GitHub OAuth app config.
         .route("/auth/tokens", get(list_tokens).post(create_token))
         .route("/auth/tokens/{id}", delete(revoke_token))
+        .route("/auth/automation-token", post(mint_automation_token))
+        .route(
+            "/auth/federations",
+            get(list_federations).post(add_federation),
+        )
+        .route("/auth/federations/{id}", delete(remove_federation))
+        .route("/runs", get(list_runs).post(create_run))
+        .route("/runs/{id}", get(get_run))
         .route("/auth/password", post(set_own_password))
         // The caller's own GitHub token (a fine-grained PAT), injected as
         // GH_TOKEN into the sessions they launch so their agents act as them.

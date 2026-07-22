@@ -68,6 +68,8 @@ pub struct SupervisorConfig {
     pub script: String,
     /// Extra environment for the child, on top of the inherited environment.
     pub env: Vec<(String, String)>,
+    /// Whether the child inherits nothing beyond `env`.
+    pub env_clear: bool,
     /// Initial PTY size (relay mode ignores it — there is no PTY).
     pub cols: u16,
     pub rows: u16,
@@ -154,9 +156,12 @@ async fn run_pty(cfg: SupervisorConfig) -> Result<()> {
         })
         .context("openpty")?;
 
-    let mut builder = CommandBuilder::new("sh");
+    let mut builder = CommandBuilder::new("/bin/sh");
     builder.args(["-c", &cfg.script]);
     builder.cwd(&cfg.cwd);
+    if cfg.env_clear {
+        builder.env_clear();
+    }
     for (k, v) in &cfg.env {
         builder.env(k, v);
     }
@@ -641,7 +646,10 @@ mod relay {
             .max(1);
 
         // --- child over pipes ---------------------------------------------
-        let mut cmd = std::process::Command::new("sh");
+        let mut cmd = std::process::Command::new("/bin/sh");
+        if cfg.env_clear {
+            cmd.env_clear();
+        }
         cmd.arg("-c")
             .arg(&cfg.script)
             .current_dir(&cfg.cwd)

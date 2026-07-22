@@ -14,7 +14,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use futures_util::SinkExt;
-use loom::client::{self, Client};
+use loom::client::Client;
 use loom::events::EventBus;
 use loom::web::AppState;
 use loom::{db, server};
@@ -160,6 +160,9 @@ impl TestServer {
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("WEAVER_HOME", home.path());
         std::env::set_var("WEAVER_TAPESTRY_BIN", tapestry_bin());
+        // Never let the outer loom session's scoped bearer leak into this
+        // isolated server or CLI subprocesses spawned by a test.
+        std::env::remove_var("LOOM_TOKEN");
         // `seed_owner` no longer defaults to a real login — the suite's requests
         // ride loopback trust, which needs a seeded owner to resolve to.
         std::env::set_var("LOOM_OWNER_GITHUB", "rjpower");
@@ -209,7 +212,14 @@ impl TestServer {
         // rather than spawning a real (slow, environment-dependent) claude.
         // A test exercising the agent path overrides this itself.
         std::env::set_var("WEAVER_WATCH_AGENT_CMD", "true");
-        let client = client::default();
+        // The developer or CI process may itself be running inside a loom
+        // session and therefore carry a scoped `LOOM_TOKEN`.  That credential
+        // belongs to a different database and, correctly, an explicit invalid
+        // bearer may not fall through to loopback trust.  This fixture is
+        // specifically exercising trusted-loopback requests, so construct an
+        // unauthenticated client deliberately instead of inheriting ambient
+        // credentials through `client::default()`.
+        let client = Client::new(format!("http://{addr}"));
         for _ in 0..60 {
             if client.get("/api/health").await.is_ok() {
                 break;

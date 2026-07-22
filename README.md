@@ -131,9 +131,10 @@ weaver chatlog                        # render this worktree's agent conversatio
 `loom session` is the uniform surface for driving a child session. `loom
 session launch`'s positional argument is the **task**: it becomes the branch
 goal and the agent's opening prompt, and the `weaver/<slug>` branch name is
-derived from it (override with `--name`). The agent is `claude` unless you pass
-`--agent` or change `agent.default`, so the common case is just `loom session
-launch "<what to do>"`. A launch with no task and nothing to pick up prints a
+derived from it (override with `--name`). Launches resolve the `default` profile
+unless you pass `--profile`; a non-strict profile can still be overridden with
+`--agent`, `--model`, `--effort`, `--protocol`, or `--mode`. The common case is
+just `loom session launch "<what to do>"`. A launch with no task and nothing to pick up prints a
 usage hint and exits without launching. New branches fork from a
 freshly-fetched `origin/<default branch>` — the latest mainline — unless you
 pin a parent with `--base` (also a field in the web create form).
@@ -353,30 +354,31 @@ genuinely remote callers need to present a token or log in.
 
 ## Configuration
 
-Settings live in the `settings` table of the sqlite database, which only
-`loom` opens directly. `weaver config` is read-only — it fetches the current
-values over the REST API. Each known setting is declared in a registry
-(`config.rs`) with a label, help text, type, and default.
+General settings live in the `settings` table of the sqlite database, which only
+`loom` opens directly. Agent launch policy and agent environment live in named
+profiles instead. `weaver config` is read-only — it fetches general settings
+over the REST API. Each known setting is declared in a registry (`config.rs`)
+with a label, help text, type, and default.
 
 Edit them in the **Settings** pane of the web UI, or write them straight to
 sqlite with `loom config set` (no running server needed):
 
 ```sh
 weaver config ls
-weaver config get agent.default
-loom config set agent.default codex
-loom config set agent.mode bypassPermissions
+loom profile ls
+loom profile show default
+loom profile add restricted --agent codex --strict --env-clear
+loom profile env set restricted GH_TOKEN '<token>'
 ```
 
 Notable settings:
 
-- `agent.default` — agent kind launched for a new session when `loom session
-  launch` is given no `--agent` (`claude`, `codex`, or any custom agent).
-- `agent.model` / `agent.effort` — default model and reasoning effort for new
-  sessions. The Settings UI populates these from the selected agent type.
-- `agent.mode` — default permission posture for new ACP sessions and handoffs:
-  `auto` (the default), `default`, `acceptEdits`, `plan`, or
-  `bypassPermissions` (“Always allow”). An explicit launch `--mode` overrides it.
+- Profiles select the agent, model, effort, protocol, ACP mode, session class,
+  concurrency/turn/idle limits, and environment posture. `strict` profiles
+  reject launch-time overrides; `env_clear` profiles start from a minimal
+  baseline plus their explicit ambient allowlist and layered profile/repo env.
+- Profile environment values are write-only: API, CLI, and Settings responses
+  expose names and update times, never secret values.
 - `server.auto_adopt` — adopt every recoverable session on daemon startup.
 - `github.poll` — poll GitHub (via `gh`) for each session's PR, review, and
   check status (on by default; a no-op without `gh` or a GitHub remote).

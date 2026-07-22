@@ -114,6 +114,7 @@ async fn main() -> Result<()> {
                 cwd: &PathBuf::from(cwd),
                 script,
                 env: &[],
+                env_clear: false,
                 cols: 80,
                 rows: 24,
                 mode: tapestry::Mode::Pty,

@@ -14,7 +14,7 @@ use weaver_api::{
     SetGithubConfigReq, SetPasswordReq, TokenView, UserView,
 };
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Grant, Principal};
 use crate::config;
 use crate::user_token;
 
@@ -43,6 +43,127 @@ fn unauthorized(message: &str) -> AppError {
     AppError::new(StatusCode::UNAUTHORIZED, message)
 }
 
+async fn is_session_descendant(st: &AppState, ancestor: &str, candidate: &str) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        "WITH RECURSIVE tree(id) AS (
+           SELECT id FROM sessions WHERE id = ?
+           UNION ALL
+           SELECT child.id FROM sessions child JOIN tree ON child.parent_session_id = tree.id
+         )
+         SELECT EXISTS(SELECT 1 FROM tree WHERE id = ?)",
+    )
+    .bind(ancestor)
+    .bind(candidate)
+    .fetch_one(&st.db)
+    .await
+    .unwrap_or(false)
+}
+
+async fn branch_belongs_to_session_tree(st: &AppState, ancestor: &str, branch_id: &str) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        "WITH RECURSIVE tree(id, branch_id) AS (
+           SELECT id, branch_id FROM sessions WHERE id = ?
+           UNION ALL
+           SELECT child.id, child.branch_id
+           FROM sessions child JOIN tree ON child.parent_session_id = tree.id
+         )
+         SELECT EXISTS(SELECT 1 FROM tree WHERE branch_id = ?)",
+    )
+    .bind(ancestor)
+    .bind(branch_id)
+    .fetch_one(&st.db)
+    .await
+    .unwrap_or(false)
+}
+
+async fn issue_belongs_to_session(st: &AppState, branch_id: &str, issue_id: &str) -> bool {
+    let Ok(issue_id) = issue_id.parse::<i64>() else {
+        return false;
+    };
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+           SELECT 1 FROM issues i JOIN branches b ON b.id = ?
+           WHERE i.id = ? AND i.repo_root = b.repo_root
+             AND (i.claimed_branch = b.branch OR i.source_branch = b.branch)
+         )",
+    )
+    .bind(branch_id)
+    .bind(issue_id)
+    .fetch_one(&st.db)
+    .await
+    .unwrap_or(false)
+}
+
+async fn automation_owns_session(st: &AppState, subject: &str, session_id: &str) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM sessions
+         WHERE id = ? AND creator_kind = 'automation' AND creator_subject = ?)",
+    )
+    .bind(session_id)
+    .bind(subject)
+    .fetch_one(&st.db)
+    .await
+    .unwrap_or(false)
+}
+
+async fn grant_allows(
+    st: &AppState,
+    principal: &Principal,
+    method: &axum::http::Method,
+    raw_path: &str,
+) -> bool {
+    if principal.is_admin() {
+        return true;
+    }
+    let path = raw_path.strip_prefix("/api").unwrap_or(raw_path);
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match &principal.grant {
+        Grant::Admin => true,
+        Grant::Automation { subject, .. } => {
+            if path == "/runs" || path.starts_with("/runs/") {
+                return true;
+            }
+            if *method == axum::http::Method::GET && segments.first() == Some(&"sessions") {
+                if let Some(session_id) = segments.get(1) {
+                    return automation_owns_session(st, subject, session_id).await;
+                }
+            }
+            false
+        }
+        Grant::Session {
+            session_id,
+            branch_id,
+        } => {
+            if *method == axum::http::Method::POST && path == "/sessions" {
+                return true;
+            }
+            if segments.first() == Some(&"sessions") && segments.len() >= 2 {
+                return is_session_descendant(st, session_id, segments[1]).await;
+            }
+            if segments.first() == Some(&"branches") && segments.len() >= 2 {
+                return branch_belongs_to_session_tree(st, session_id, segments[1]).await;
+            }
+            if segments.first() == Some(&"issues") && segments.len() >= 2 {
+                return issue_belongs_to_session(st, branch_id, segments[1]).await;
+            }
+            *method == axum::http::Method::GET
+                && matches!(
+                    path,
+                    "/sessions"
+                        | "/branches"
+                        | "/issues"
+                        | "/agents"
+                        | "/repos"
+                        | "/repos/recent"
+                        | "/repos/branches"
+                        | "/repos/issues"
+                        | "/settings"
+                        | "/profiles"
+                )
+        }
+    }
+}
+
 /// Pull the token out of an `Authorization: Bearer <token>` header.
 fn bearer_token(headers: &HeaderMap) -> Option<String> {
     let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
@@ -65,10 +186,13 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 /// Resolve the caller to an authenticated [`Principal`], or `None`. Order: a
 /// bearer token, a session cookie, then loopback trust.
 async fn resolve_principal(st: &AppState, headers: &HeaderMap, peer: IpAddr) -> Option<Principal> {
-    if let Some(token) = bearer_token(headers) {
-        if let Ok(Some(p)) = auth::lookup_token(&st.db, &token).await {
-            return Some(p);
-        }
+    // An explicit bearer credential is authoritative. Invalid, expired,
+    // revoked, or malformed bearer input must not fall through to a valid
+    // browser cookie or loopback trust, otherwise revoking a scoped token has
+    // no effect on same-host requests.
+    if headers.contains_key(header::AUTHORIZATION) {
+        let token = bearer_token(headers)?;
+        return auth::lookup_token(&st.db, &token).await.ok().flatten();
     }
     if let Some(cookie) = cookie_value(headers, auth::SESSION_COOKIE) {
         if let Ok(Some(p)) = auth::lookup_session(&st.db, &cookie).await {
@@ -101,6 +225,10 @@ pub(super) async fn require_auth(
     let headers = req.headers().clone();
     match resolve_principal(&st, &headers, peer.ip()).await {
         Some(principal) => {
+            if !grant_allows(&st, &principal, req.method(), req.uri().path()).await {
+                return AppError::new(StatusCode::FORBIDDEN, "credential grant forbids this route")
+                    .into_response();
+            }
             req.extensions_mut().insert(principal);
             next.run(req).await
         }
