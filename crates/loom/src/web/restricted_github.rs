@@ -62,24 +62,24 @@ fn validate_arguments(tool: &str, value: serde_json::Value) -> ApiResult<ToolArg
         "issue_comment" | "issue_edit" | "pr_comment" | "pr_edit"
     );
     match arguments.body.as_deref() {
-        Some(body) if body.len() > 65_536 => {
-            return Err(AppError::bad_request(
-                "GitHub body must be at most 65536 bytes",
-            ))
+        Some(body) if body.len() > crate::mcp::github::BODY_MAX_BYTES => {
+            return Err(AppError::bad_request(format!(
+                "GitHub body must be at most {} bytes",
+                crate::mcp::github::BODY_MAX_BYTES
+            )))
         }
         None if requires_body => {
             return Err(AppError::bad_request(format!("{tool} requires a body")))
         }
         _ => {}
     }
-    if arguments
-        .title
-        .as_deref()
-        .is_some_and(|title| title.trim().is_empty() || title.len() > 256)
-    {
-        return Err(AppError::bad_request(
-            "GitHub title must be 1-256 bytes when provided",
-        ));
+    if arguments.title.as_deref().is_some_and(|title| {
+        title.trim().is_empty() || title.len() > crate::mcp::github::TITLE_MAX_BYTES
+    }) {
+        return Err(AppError::bad_request(format!(
+            "GitHub title must be 1-{} bytes when provided",
+            crate::mcp::github::TITLE_MAX_BYTES
+        )));
     }
     if matches!(tool, "issue_view" | "pr_view")
         && (arguments.body.is_some() || arguments.title.is_some())

@@ -13,6 +13,8 @@ use super::{Adapter, ServeFuture};
 
 const SERVER_NAME: &str = "loom_github";
 const COMMENT_TOOL_SET: &str = "mcp/github/comment";
+pub(crate) const BODY_MAX_BYTES: usize = 65_536;
+pub(crate) const TITLE_MAX_BYTES: usize = 256;
 const GITHUB_TOOL_NAMES: [&str; 6] = [
     "issue_view",
     "issue_comment",
@@ -66,8 +68,8 @@ fn serve_boxed() -> ServeFuture {
 
 fn tools() -> Value {
     let number = json!({ "type": "integer", "minimum": 1 });
-    let body = json!({ "type": "string", "maxLength": 65536 });
-    let title = json!({ "type": "string", "minLength": 1, "maxLength": 256 });
+    let body = json!({ "type": "string", "maxLength": BODY_MAX_BYTES });
+    let title = json!({ "type": "string", "minLength": 1, "maxLength": TITLE_MAX_BYTES });
     json!([
         {
             "name": GITHUB_TOOL_NAMES[0],
