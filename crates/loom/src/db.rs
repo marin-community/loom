@@ -141,7 +141,7 @@ async fn adopt_unversioned_schema(pool: &Db) -> Result<()> {
         .execute(pool)
         .await?;
     sqlx::query(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_active_branch
+        "CREATE UNIQUE INDEX idx_sessions_active_branch
          ON sessions(branch_id) WHERE status NOT IN ('done', 'error', 'archived')",
     )
     .execute(pool)
