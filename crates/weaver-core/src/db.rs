@@ -8,6 +8,46 @@ use tokio::sync::{Mutex, MutexGuard};
 
 pub type Db = SqlitePool;
 
+const MIGRATION_POOL_CONNECTIONS: u32 = 1;
+const SHARED_POOL_CONNECTIONS: u32 = 5;
+
+/// An on-disk database whose core schema is migrated, but whose shared pool has
+/// not opened yet.
+///
+/// Schema owners layered above `weaver-core` use [`migration_db`](Self::migration_db)
+/// to finish their own migrations on the same single connection, then call
+/// [`finish`](Self::finish). This keeps every schema change ahead of the pooled
+/// connections that may cache prepared statements against that schema.
+pub struct DatabaseBootstrap {
+    migrator: Db,
+    options: SqliteConnectOptions,
+    path: PathBuf,
+}
+
+impl DatabaseBootstrap {
+    /// The single-connection pool reserved for schema migration.
+    pub fn migration_db(&self) -> &Db {
+        &self.migrator
+    }
+
+    /// Close the migration connection and open the normal shared pool.
+    pub async fn finish(self) -> Result<Db> {
+        let Self {
+            migrator,
+            options,
+            path,
+        } = self;
+        migrator.close().await;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(SHARED_POOL_CONNECTIONS)
+            .connect_with(options)
+            .await
+            .with_context(|| format!("opening database {}", path.display()))?;
+        tracing::info!(path = %path.display(), "database ready");
+        Ok(pool)
+    }
+}
+
 // SQLite permits one writer at a time. Coordinate multi-statement writers
 // before they check out a pooled connection: relying on SQLite's busy handler
 // lets every contender occupy a connection while it waits, which can exhaust
@@ -131,6 +171,15 @@ pub fn iso_in_days(days: i64) -> Option<String> {
 /// `sqlite:` DSN string, the WAL journal mode, the `busy_timeout`, and the
 /// migrate-then-reopen connection dance below.
 pub async fn connect(path: &Path) -> Result<Db> {
+    begin_bootstrap(path).await?.finish().await
+}
+
+/// Open an on-disk database for single-connection schema migration.
+///
+/// Core migrations run before this returns. Callers that own additional tables
+/// may apply their migrations through [`DatabaseBootstrap::migration_db`]
+/// before opening the shared pool with [`DatabaseBootstrap::finish`].
+pub async fn begin_bootstrap(path: &Path) -> Result<DatabaseBootstrap> {
     tracing::info!(path = %path.display(), "opening database");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -145,31 +194,24 @@ pub async fn connect(path: &Path) -> Result<Db> {
         // take the lock up front — see [`begin_immediate`].
         .busy_timeout(std::time::Duration::from_secs(5));
 
-    // Apply migrations on a dedicated single connection, then close it, *before*
-    // the shared read/write pool opens. A column-adding migration (`ALTER TABLE
-    // … ADD COLUMN`) changes a table's column count mid-run; if migrations ran on
-    // the multi-connection pool, a connection that cached the table at its old
-    // width could later be reused for a `SELECT *` and decode a short row against
-    // the wider struct — an out-of-bounds panic. Finalising the schema on one
-    // connection first means every pooled connection sees the finished schema on
-    // its first use.
-    {
-        let migrator = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options.clone())
-            .await
-            .with_context(|| format!("opening database {} to migrate", path.display()))?;
-        migrate(&migrator).await?;
-        migrator.close().await;
-    }
-
-    let pool = SqlitePoolOptions::new()
-        .max_connections(5)
-        .connect_with(options)
+    // Keep the migration connection alive after the core stream completes so
+    // higher-level schema owners can migrate through it too. Only `finish`
+    // closes it and opens the shared read/write pool. A column-adding migration
+    // (`ALTER TABLE … ADD COLUMN`) changes a table's column count mid-run; if
+    // migrations ran on the multi-connection pool, a connection that cached the
+    // table at its old width could later be reused for a `SELECT *` and decode a
+    // short row against the wider struct — an out-of-bounds panic.
+    let migrator = SqlitePoolOptions::new()
+        .max_connections(MIGRATION_POOL_CONNECTIONS)
+        .connect_with(options.clone())
         .await
-        .with_context(|| format!("opening database {}", path.display()))?;
-    tracing::info!(path = %path.display(), "database ready");
-    Ok(pool)
+        .with_context(|| format!("opening database {} to migrate", path.display()))?;
+    migrate(&migrator).await?;
+    Ok(DatabaseBootstrap {
+        migrator,
+        options,
+        path: path.to_path_buf(),
+    })
 }
 
 pub async fn connect_in_memory() -> Result<Db> {
@@ -280,6 +322,21 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(tag.value, "blocked");
+    }
+
+    #[tokio::test]
+    async fn bootstrap_keeps_one_connection_until_all_schema_owners_finish() {
+        let dir = tempfile::tempdir().unwrap();
+        let bootstrap = begin_bootstrap(&dir.path().join("weaver.db"))
+            .await
+            .unwrap();
+        assert_eq!(
+            bootstrap.migration_db().options().get_max_connections(),
+            MIGRATION_POOL_CONNECTIONS
+        );
+
+        let db = bootstrap.finish().await.unwrap();
+        assert_eq!(db.options().get_max_connections(), SHARED_POOL_CONNECTIONS);
     }
 
     #[tokio::test]

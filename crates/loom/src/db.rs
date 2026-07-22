@@ -22,9 +22,9 @@ const LOOM_STREAM: Stream = Stream {
 
 /// Open the shared database and apply loom's schema after the core schema.
 pub async fn connect(path: &Path) -> Result<Db> {
-    let pool = weaver_core::db::connect(path).await?;
-    migrate_loom(&pool).await?;
-    Ok(pool)
+    let bootstrap = weaver_core::db::begin_bootstrap(path).await?;
+    migrate_loom(bootstrap.migration_db()).await?;
+    bootstrap.finish().await
 }
 
 /// In-memory variant for tests.
@@ -141,7 +141,7 @@ async fn adopt_unversioned_schema(pool: &Db) -> Result<()> {
         .execute(pool)
         .await?;
     sqlx::query(
-        "CREATE UNIQUE INDEX idx_sessions_active_branch
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_active_branch
          ON sessions(branch_id) WHERE status NOT IN ('done', 'error', 'archived')",
     )
     .execute(pool)
@@ -265,6 +265,84 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
+    }
+
+    /// Regression for the on-disk upgrade path: loom once opened the shared
+    /// five-connection pool after core migrations, then changed the sessions
+    /// schema through that pool. Connections cached different table widths and
+    /// index definitions, producing `Row` out-of-bounds panics and an
+    /// `idx_sessions_active_branch already exists` startup failure. The
+    /// single-connection in-memory tests cannot exercise that boundary.
+    #[tokio::test]
+    async fn on_disk_adoption_finishes_before_the_shared_pool_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("weaver.db");
+        let core = weaver_core::db::connect(&path).await.unwrap();
+        insert_branch(&core, "legacy-branch").await;
+        sqlx::query(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                branch_id TEXT NOT NULL,
+                work_dir TEXT NOT NULL,
+                term_session TEXT NOT NULL,
+                agent_kind TEXT NOT NULL DEFAULT 'claude',
+                status TEXT NOT NULL,
+                github_repo TEXT,
+                last_activity_at TEXT,
+                created_at TEXT NOT NULL DEFAULT ''
+             )",
+        )
+        .execute(&core)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE UNIQUE INDEX idx_sessions_active_branch
+             ON sessions(branch_id) WHERE status NOT IN ('done', 'error')",
+        )
+        .execute(&core)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions
+             (id, branch_id, work_dir, term_session, status, created_at)
+             VALUES ('legacy', 'legacy-branch', '/w', 'term', 'running', '2026-01-01')",
+        )
+        .execute(&core)
+        .await
+        .unwrap();
+        core.close().await;
+
+        let db = connect(&path).await.unwrap();
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM loom_schema_migrations ORDER BY version")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(versions, vec![1]);
+        let index_sql: String = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'index' AND name = 'idx_sessions_active_branch'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert!(index_sql.contains("'archived'"));
+
+        // Hold every connection at once so each member of the finished pool
+        // decodes the widened row instead of repeatedly borrowing one member.
+        let mut connections = Vec::new();
+        for _ in 0..db.options().get_max_connections() {
+            let mut connection = db.acquire().await.unwrap();
+            let session = sqlx::query_as::<_, crate::session::Session>(
+                "SELECT * FROM sessions WHERE id = 'legacy'",
+            )
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+            assert_eq!(session.class, "interactive");
+            assert_eq!(session.turn_count, 0);
+            connections.push(connection);
+        }
     }
 
     #[tokio::test]
