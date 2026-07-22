@@ -14,7 +14,7 @@
 
 use anyhow::{bail, Result};
 
-use crate::db::Db;
+use crate::{db::Db, runner};
 
 /// Whether a session with this name has a live supervisor.
 pub async fn has_session(name: &str) -> bool {
@@ -82,7 +82,8 @@ pub async fn new_session(
         0 => script.to_string(),
         gb => format!("{}{}", memory_prelude(name, gb), script),
     };
-    let result = tapestry::spawn_detached(&tapestry::LaunchOptions {
+    let supervisor_bin = tapestry_bin();
+    let options = tapestry::LaunchOptions {
         name,
         cwd,
         script: &script,
@@ -92,9 +93,9 @@ pub async fn new_session(
         rows: 24,
         mode: tapestry::Mode::Pty,
         segment_max_bytes: None,
-        supervisor_bin: tapestry_bin().as_deref(),
-    })
-    .await;
+        supervisor_bin: supervisor_bin.as_deref(),
+    };
+    let result = runner::spawn(&options, memory_max_gb).await;
     match &result {
         Ok(()) => tracing::info!(session = %name, "terminal session spawned"),
         Err(e) => tracing::warn!(session = %name, error = %e, "failed to spawn terminal session"),
@@ -116,9 +117,11 @@ pub async fn new_relay_session(
     env: &[(&str, &str)],
     env_clear: bool,
     cwd: &std::path::Path,
+    memory_max_gb: u64,
 ) -> Result<()> {
-    tracing::info!(session = %name, cwd = %cwd.display(), "spawning relay session");
-    let result = tapestry::spawn_detached(&tapestry::LaunchOptions {
+    tracing::info!(session = %name, cwd = %cwd.display(), memory_max_gb, "spawning relay session");
+    let supervisor_bin = tapestry_bin();
+    let options = tapestry::LaunchOptions {
         name,
         cwd,
         script,
@@ -128,9 +131,9 @@ pub async fn new_relay_session(
         rows: 24,
         mode: tapestry::Mode::Relay,
         segment_max_bytes: None,
-        supervisor_bin: tapestry_bin().as_deref(),
-    })
-    .await;
+        supervisor_bin: supervisor_bin.as_deref(),
+    };
+    let result = runner::spawn(&options, memory_max_gb).await;
     match &result {
         Ok(()) => tracing::info!(session = %name, "relay session spawned"),
         Err(e) => tracing::warn!(session = %name, error = %e, "failed to spawn relay session"),
@@ -237,6 +240,8 @@ pub async fn kill_session(name: &str) -> Result<()> {
             Ok(()) => tracing::info!(name = %name, "terminal killed"),
             Err(e) => tracing::warn!(name = %name, error = %e, "failed to kill terminal"),
         }
+    } else {
+        runner::remove(name).await?;
     }
     Ok(())
 }
@@ -255,6 +260,7 @@ pub async fn kill_session_and_wait(name: &str) -> Result<()> {
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
+    runner::remove(name).await?;
     Ok(())
 }
 

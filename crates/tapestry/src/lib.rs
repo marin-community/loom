@@ -29,6 +29,7 @@ pub use client::{Attach, AttachInput, AttachOutput, Client, RelayEvent, RelayStr
 pub use supervisor::{run as supervise, SupervisorConfig};
 
 use anyhow::{Context, Result};
+use std::collections::BTreeMap;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Stdio;
@@ -81,6 +82,51 @@ pub struct LaunchOptions<'a> {
     pub supervisor_bin: Option<&'a Path>,
 }
 
+/// Encode the supervisor launch spec exactly as [`spawn_detached`] sends it.
+///
+/// Alternative placement backends can carry the same stdin-only contract
+/// without duplicating its shape or putting secret environment values on an
+/// argv. The returned bytes are sensitive until the supervisor consumes them.
+pub fn encode_launch_spec(
+    opts: &LaunchOptions<'_>,
+    environment_overrides: &[(&str, &str)],
+) -> Result<Vec<u8>> {
+    encode_launch_spec_with_ambient(opts, environment_overrides, std::env::vars())
+}
+
+fn encode_launch_spec_with_ambient(
+    opts: &LaunchOptions<'_>,
+    environment_overrides: &[(&str, &str)],
+    ambient: impl IntoIterator<Item = (String, String)>,
+) -> Result<Vec<u8>> {
+    let mut env = BTreeMap::new();
+    if !opts.env_clear {
+        env.extend(ambient);
+    }
+    env.extend(
+        opts.env
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string())),
+    );
+    env.extend(
+        environment_overrides
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string())),
+    );
+    serde_json::to_vec(&LaunchSpec {
+        name: opts.name.to_string(),
+        cwd: opts.cwd.to_path_buf(),
+        script: opts.script.to_string(),
+        env: env.into_iter().collect(),
+        env_clear: opts.env_clear,
+        cols: opts.cols,
+        rows: opts.rows,
+        mode: opts.mode,
+        segment_max_bytes: opts.segment_max_bytes,
+    })
+    .context("encoding tapestry launch spec")
+}
+
 /// Launch a session's supervisor as a **detached** process: it `setsid`s into
 /// its own session, dropping its controlling terminal and stdio. With no
 /// controlling terminal it ignores the SIGHUP its launcher's exit would
@@ -99,17 +145,7 @@ pub async fn spawn_detached(opts: &LaunchOptions<'_>) -> Result<()> {
         Some(p) => p.to_path_buf(),
         None => std::env::current_exe().context("resolving tapestry binary")?,
     };
-    let spec = serde_json::json!({
-        "name": opts.name,
-        "cwd": opts.cwd,
-        "script": opts.script,
-        "env": opts.env,
-        "env_clear": opts.env_clear,
-        "cols": opts.cols,
-        "rows": opts.rows,
-        "mode": opts.mode,
-        "segment_max_bytes": opts.segment_max_bytes,
-    });
+    let spec = encode_launch_spec(opts, &[])?;
 
     let mut cmd = std::process::Command::new(&exe);
     if opts.env_clear {
@@ -157,7 +193,7 @@ pub async fn spawn_detached(opts: &LaunchOptions<'_>) -> Result<()> {
             .take()
             .context("detached supervisor stdin pipe missing")?;
         stdin
-            .write_all(spec.to_string().as_bytes())
+            .write_all(&spec)
             .context("writing launch spec to supervisor stdin")?;
     }
 
@@ -221,4 +257,89 @@ pub async fn list_sessions() -> Vec<String> {
         }
     }
     live
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encoded_launch_spec_preserves_the_stdin_contract() {
+        let env = [("API_TOKEN", "secret-value")];
+        let options = LaunchOptions {
+            name: "session-1",
+            cwd: Path::new("/workspace"),
+            script: "agent --run",
+            env: &env,
+            env_clear: true,
+            cols: 100,
+            rows: 40,
+            mode: Mode::Relay,
+            segment_max_bytes: Some(1024),
+            supervisor_bin: None,
+        };
+        let encoded = encode_launch_spec_with_ambient(&options, &[], []).unwrap();
+        let decoded: LaunchSpec = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.name, "session-1");
+        assert_eq!(decoded.cwd, Path::new("/workspace"));
+        assert_eq!(decoded.script, "agent --run");
+        assert_eq!(decoded.env, [("API_TOKEN".into(), "secret-value".into())]);
+        assert!(decoded.env_clear);
+        assert_eq!(decoded.mode, Mode::Relay);
+    }
+
+    #[test]
+    fn encoded_launch_spec_preserves_ambient_env_with_explicit_precedence() {
+        let env = [("EXPLICIT", "session")];
+        let options = LaunchOptions {
+            name: "session-1",
+            cwd: Path::new("/workspace"),
+            script: "true",
+            env: &env,
+            env_clear: false,
+            cols: 80,
+            rows: 24,
+            mode: Mode::Pty,
+            segment_max_bytes: None,
+            supervisor_bin: None,
+        };
+        let ambient = [
+            ("AMBIENT".to_string(), "inherited".to_string()),
+            ("EXPLICIT".to_string(), "ambient".to_string()),
+        ];
+        let encoded = encode_launch_spec_with_ambient(
+            &options,
+            &[("WEAVER_API", "http://loom:7878")],
+            ambient,
+        )
+        .unwrap();
+        let decoded: LaunchSpec = serde_json::from_slice(&encoded).unwrap();
+        let env: BTreeMap<_, _> = decoded.env.into_iter().collect();
+        assert_eq!(env.get("AMBIENT").map(String::as_str), Some("inherited"));
+        assert_eq!(env.get("EXPLICIT").map(String::as_str), Some("session"));
+        assert_eq!(
+            env.get("WEAVER_API").map(String::as_str),
+            Some("http://loom:7878")
+        );
+    }
+
+    #[test]
+    fn encoded_launch_spec_drops_ambient_env_when_cleared() {
+        let options = LaunchOptions {
+            name: "session-1",
+            cwd: Path::new("/workspace"),
+            script: "true",
+            env: &[],
+            env_clear: true,
+            cols: 80,
+            rows: 24,
+            mode: Mode::Pty,
+            segment_max_bytes: None,
+            supervisor_bin: None,
+        };
+        let ambient = [("AMBIENT".to_string(), "inherited".to_string())];
+        let encoded = encode_launch_spec_with_ambient(&options, &[], ambient).unwrap();
+        let decoded: LaunchSpec = serde_json::from_slice(&encoded).unwrap();
+        assert!(decoded.env.is_empty());
+    }
 }

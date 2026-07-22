@@ -156,6 +156,25 @@ database included). This is deliberate for a single-tenant host running the
 owner's own agents; do not carry it into a deploy that runs code you do not
 trust.
 
+Each session supervisor runs in a separately labeled Docker container using the
+same Loom image. Its Unix socket and ACP spool remain in the shared `loom_home`
+volume, so replacing the Compose `loom` service does not replace session
+containers. On startup, Loom discovers those containers and reattaches live ACP
+journals before serving requests. Session containers join the `loom_default`
+network so their scoped `WEAVER_API` callbacks resolve the replacement control
+service by its stable Compose name.
+
+The first update that enables DockerRunner is a one-time cutover: supervisors
+created by an older Loom still live inside the control container and stop when
+it is replaced. Inventory those sessions before the cutover and adopt any
+recoverable session afterward with `loom session adopt <branch>`.
+
+Session containers use `restart: no`, so a host reboot interrupts them. Loom
+then marks ordinary sessions orphaned for manual adoption unless
+`server.auto_adopt` is enabled; set it with
+`loom config set server.auto_adopt true` when automatic post-reboot recovery is
+the desired policy.
+
 The `loom` container also runs with `SYS_ADMIN`, an unconfined AppArmor profile,
 and an unconfined seccomp profile. The first two let `loom-cgroup-init`
 (root-only, via a single sudoers line) remount the container's own cgroup-v2
@@ -409,10 +428,14 @@ docker compose ps                       # service status
 docker compose logs -f loom             # daemon logs
 docker compose exec loom bash           # a shell in the container
 docker compose pull caddy && \
-  docker compose up -d --build          # update: rebuild loom, refresh Caddy
-docker compose down                     # stop (keeps volumes/state)
+  docker compose up -d --build          # update services; sessions stay up
 docker compose down -v                  # stop and DELETE all state
 ```
+
+Use service recreation (`docker compose up -d --force-recreate --no-deps loom`)
+for a control-only restart. Do not use `docker compose down` while sessions are
+live: their endpoints intentionally keep `loom_default` in use, so Compose
+cannot remove that network. `down -v` also permanently deletes Loom state.
 
 ## Future: cloud / cluster
 

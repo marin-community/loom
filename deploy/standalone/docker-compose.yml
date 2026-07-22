@@ -54,6 +54,16 @@ services:
     # request path), so warnings rely on the per-request span (method/path) instead.
     environment:
       RUST_BACKTRACE: "1"
+      # Place every Tapestry supervisor in its own sibling container. These
+      # containers share the durable home/tool volumes and control socket;
+      # recreating this control-plane service therefore leaves live agents up.
+      LOOM_RUNNER: docker
+      LOOM_SESSION_IMAGE: ${LOOM_IMAGE:-loom:latest}
+      LOOM_SESSION_HOME_VOLUME: loom_loom_home
+      LOOM_SESSION_UV_VOLUME: loom_uv
+      LOOM_SESSION_DOCKER_GID: ${DOCKER_GID:-999}
+      LOOM_SESSION_NETWORK: loom_default
+      LOOM_SESSION_API_URL: http://loom:7878
     depends_on:
       loom-init:
         condition: service_completed_successfully
@@ -142,3 +152,9 @@ volumes:
   uv:
   caddy_data:
   caddy_config:
+
+# Session containers are created directly through the Docker API rather than
+# by Compose, so pin the service network name they join across invocations.
+networks:
+  default:
+    name: loom_default

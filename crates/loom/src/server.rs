@@ -11,7 +11,7 @@ use tokio::net::TcpListener;
 use crate::events::EventBus;
 use crate::session as session_mod;
 use crate::web::AppState;
-use crate::{backend, config, db, github, monitor, watch, web};
+use crate::{backend, config, db, github, monitor, runner, watch, web};
 use weaver_core::branch as branch_mod;
 use weaver_core::watch as watch_store;
 
@@ -94,6 +94,7 @@ pub async fn run(addr: &str) -> Result<()> {
 
     let db = db::connect(&db::default_db_path()).await?;
     ensure_bootstrap_operator(&db).await?;
+    runner::validate().await?;
     let trigger = crate::github_trigger::GithubTrigger::production(db.clone());
     let state = AppState {
         db,

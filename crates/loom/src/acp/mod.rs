@@ -424,6 +424,7 @@ async fn start_inner(
         &env,
         launch.env_clear,
         &launch.cwd,
+        crate::backend::memory_max_gb(&state.db).await,
     )
     .await?;
     let (events_tx, _) = broadcast::channel(256);
