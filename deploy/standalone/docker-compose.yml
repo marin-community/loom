@@ -79,14 +79,20 @@ services:
     # container's own cgroup-v2 tree read-write and delegates an agents/
     # subtree to the app user; each session then confines itself there and a
     # runaway agent OOMs alone instead of taking the VM down. The remount is
-    # what needs SYS_ADMIN and an unconfined AppArmor profile — a wider grant
-    # than default, but this container already holds the root-equivalent
-    # docker.sock (above), so it adds nothing on this single-tenant box. Without
-    # these the init script fails and sessions simply run unlimited.
+    # what needs SYS_ADMIN and an unconfined AppArmor profile. Bubblewrap also
+    # needs the unconfined seccomp profile below to create its sandbox namespaces.
+    # These are wider than default, but this container already holds the
+    # root-equivalent docker.sock (above), so they add nothing on this
+    # single-tenant box. Without the first two the init script fails and sessions
+    # simply run unlimited.
     cap_add:
       - SYS_ADMIN
     security_opt:
       - apparmor=unconfined
+      # Docker's default seccomp profile denies the namespace operations bwrap
+      # needs. Scope this exception to loom; the container is already the
+      # single-tenant trust boundary because it has the host Docker socket.
+      - seccomp=unconfined
     # The delegation dance assumes the container sees only its own cgroup
     # subtree; private is the cgroup-v2 default, pinned here because the limits
     # depend on it.

@@ -80,7 +80,8 @@ RUN set -eux; \
     # relaying network) and otherwise degrades to unsandboxed with a warning;
     # Codex prefers a system `bwrap` over the one it bundles. Both need the
     # unprivileged user namespaces this container already permits (the
-    # SYS_ADMIN + apparmor=unconfined grant in docker-compose.yml).
+    # SYS_ADMIN + apparmor=unconfined + seccomp=unconfined grants in
+    # docker-compose.yml).
     #
     # The remaining tools round out what a general coding agent expects to find:
     # sqlite3 (loom's own store is sqlite; agents inspect/seed .db files),
@@ -105,12 +106,11 @@ RUN set -eux; \
 # The agent runtimes loom's sessions launch — Claude Code (`claude`) and the
 # OpenAI Codex CLI (`codex`) — are deliberately NOT baked into the image. The
 # container runs as a non-root user, so a runtime installed into the read-only
-# system dirs (what a build-time `npm i -g` lands in) can neither self-update
-# (Claude reports it's "installed in a read-only location") nor be bumped live.
-# Instead loom-entrypoint (below) installs both at first boot into the app user's
-# $HOME on the persisted loom_home volume, where they are writable, update in
-# place (`claude` auto-updates; `codex update` on demand), and survive container
-# recreates. Pin either with CLAUDE_CODE_VERSION / CODEX_VERSION (see compose).
+# system dirs can neither self-update nor be bumped live. Instead
+# loom-entrypoint (below) installs both native CLIs at first boot into the app
+# user's $HOME on the persisted loom_home volume, where they are writable,
+# update in place, and survive container recreates. Claude can be pinned with
+# CLAUDE_CODE_VERSION (see compose).
 
 # code-server — the per-session embedded VS Code that `crate::ide` spawns and
 # reverse-proxies (one rooted at each worktree, behind loom's auth). The `.deb`
@@ -252,18 +252,18 @@ if [ "${1:-}" = loom ] && [ "${2:-}" = server ]; then
     [ -x "$HOME/.local/bin/claude" ] \
       || echo "loom: WARNING: Claude install failed (offline?); agents lack 'claude' until a later boot installs it" >&2
   fi
-  if ! command -v codex >/dev/null 2>&1; then
-    echo "loom: installing Codex CLI into $HOME/.npm-global ..." >&2
-    # The Codex runtime installs the same way client packages do: `npm i -g`
-    # lands `codex` in $HOME/.npm-global/bin (NPM_CONFIG_PREFIX, on the volume,
-    # early on PATH), so it persists across recreates and can be bumped live with
-    # `codex update`. Pin with CODEX_VERSION (an npm dist-tag or exact version;
-    # default `latest`). Non-fatal — like Claude, loom still boots and agents can
-    # add it on a later networked boot. Codex is useless without OpenAI auth
-    # (OPENAI_API_KEY, or `codex login`); installing the CLI needs neither.
-    npm install -g "@openai/codex@${CODEX_VERSION:-latest}" || true
-    command -v codex >/dev/null 2>&1 \
-      || echo "loom: WARNING: Codex install failed (offline?); the codex runtime is unavailable until a later boot installs it" >&2
+  if [ ! -x "$HOME/.local/bin/codex" ]; then
+    echo "loom: installing native Codex CLI into $HOME/.local ..." >&2
+    # Use OpenAI's native installer rather than the npm wrapper. It downloads the
+    # platform binary into the persisted, writable home volume, which is already
+    # early on PATH. CODEX_NON_INTERACTIVE prevents an entrypoint without a TTY
+    # from blocking on installer prompts. Non-fatal — like Claude, loom still
+    # boots and agents can add it on a later networked boot.
+    # Codex is useless without OpenAI auth (OPENAI_API_KEY, or `codex login`),
+    # but installing the CLI needs neither.
+    curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh || true
+    [ -x "$HOME/.local/bin/codex" ] \
+      || echo "loom: WARNING: native Codex install failed (offline?); the codex runtime is unavailable until a later boot installs it" >&2
   fi
   if ! command -v claude-agent-acp >/dev/null 2>&1 || ! command -v codex-acp >/dev/null 2>&1; then
     echo "loom: installing the ACP adapters into $HOME/.npm-global ..." >&2

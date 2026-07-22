@@ -156,15 +156,18 @@ database included). This is deliberate for a single-tenant host running the
 owner's own agents; do not carry it into a deploy that runs code you do not
 trust.
 
-The `loom` container also runs with `SYS_ADMIN` and an unconfined AppArmor
-profile. These exist for one purpose: at boot, `loom-cgroup-init` (root-only,
-via a single sudoers line) remounts the container's own cgroup-v2 tree
-read-write and delegates an `agents/` subtree to the app user, which is what
+The `loom` container also runs with `SYS_ADMIN`, an unconfined AppArmor profile,
+and an unconfined seccomp profile. The first two let `loom-cgroup-init`
+(root-only, via a single sudoers line) remount the container's own cgroup-v2
+tree read-write and delegate an `agents/` subtree to the app user, which is what
 lets loom confine **each session to its own memory cgroup** (the
 `session.memory_max_gb` setting, default 8 GiB). A runaway agent process is
 then OOM-killed inside its session instead of stalling the whole VM. Next to
-the docker.sock mount these grants add no real capability on this box; remove
-them and loom still runs, with sessions simply unlimited.
+the docker.sock mount these grants add no real capability on this box. The
+seccomp exception additionally lets bubblewrap create the namespaces that
+Codex and Claude use for command sandboxing. Remove the first two and loom
+still runs with sessions unlimited; remove the seccomp exception and their
+command sandboxes cannot start.
 
 Background on these knobs is in the repo
 [README "Authentication"](../README.md#authentication) and
@@ -346,28 +349,27 @@ The agent tooling the image ships splits by how it updates:
   runs as a non-root user, so a runtime installed into the read-only system dirs
   could neither self-update (Claude reports "installed in a read-only location")
   nor be bumped live. Instead, the first time the daemon starts it installs both
-  `claude` and `codex` into the persisted `loom_home` volume (`~/.local/bin` and
-  the home npm prefix `~/.npm-global/bin`), where updates land without a rebuild
-  and survive `up`/`down`/recreate. That first install needs network (the deploy
-  needs it anyway); if it fails loom still comes up and installs on a later boot.
+  native CLIs into the persisted `loom_home` volume (`~/.local/bin`), where
+  updates land without a rebuild and survive `up`/`down`/recreate. That first
+  install needs network (the deploy needs it anyway); if it fails loom still
+  comes up and installs on a later boot.
   - **Claude Code** auto-updates itself in place. Pin the tracked build with
     `CLAUDE_CODE_VERSION` (`stable` — the default — `latest`, or an exact version
     like `2.1.198`); force one live with
     `docker compose exec loom claude install <version> --force`.
-  - **Codex CLI** updates on demand rather than automatically. Pin with
-    `CODEX_VERSION` (an npm dist-tag or exact version; default `latest`); bump one
-    live with `docker compose exec loom codex update` (or reinstall with
-    `docker compose exec loom npm i -g @openai/codex@<version>`).
+  - **Codex CLI** updates on demand rather than automatically. Bump one live
+    with `docker compose exec loom codex update`, or remove
+    `~/.local/bin/codex` and restart the service to rerun the native installer.
 
-  Set either pin in the `loom` service's `environment:` in
+  Set the Claude pin in the `loom` service's `environment:` in
   [`docker-compose.yml`](standalone/docker-compose.yml).
 
 - **Command sandboxing.** The image ships `bubblewrap` + `socat`, the sandbox
   the runtimes reach for on Linux: Claude Code's sandboxed Bash runs commands
   under `bwrap` (falling back to unsandboxed with a warning if it can't), and
   Codex prefers a system `bwrap` over the one it bundles. Both rely on the
-  unprivileged user namespaces this container already permits via its
-  `SYS_ADMIN` + `apparmor=unconfined` grant (see
+  unprivileged user namespaces this container permits through its
+  `SYS_ADMIN` + `apparmor=unconfined` + `seccomp=unconfined` grants (see
   [Security posture](#security-posture)); a fresh `/proc` mount can still fail
   in this nested setting, so a runtime may need its weaker-nested-sandbox escape
   hatch (Codex `--no-proc`; Claude `enableWeakerNestedSandbox`) to sandbox at
