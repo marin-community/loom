@@ -480,6 +480,8 @@ pub struct AgentLaunchContext<'a> {
     pub goal_file: Option<&'a Path>,
     /// Optional system context file for runtimes that support it.
     pub primer_file: Option<&'a Path>,
+    /// Prompt prelude policy stamped onto the session (`weaver` or `none`).
+    pub prelude: &'a str,
     pub server_addr: &'a str,
     pub model: &'a str,
     pub effort: &'a str,
@@ -644,6 +646,8 @@ pub struct LaunchSpec<'a> {
     /// Optional system context appended via `--append-system-prompt-file` for
     /// runtimes that support it.
     pub primer_file: Option<&'a Path>,
+    /// Prompt prelude policy stamped onto the session (`weaver` or `none`).
+    pub prelude: &'a str,
     pub server_addr: &'a str,
     pub model: &'a str,
     pub effort: &'a str,
@@ -665,6 +669,7 @@ pub async fn launch(db: &Db, spec: &LaunchSpec<'_>, mode: LaunchMode) -> Result<
         term_session: spec.term_session,
         goal_file: spec.goal_file,
         primer_file: spec.primer_file,
+        prelude: spec.prelude,
         server_addr: spec.server_addr,
         model: spec.model,
         effort: spec.effort,
@@ -686,9 +691,11 @@ pub async fn launch(db: &Db, spec: &LaunchSpec<'_>, mode: LaunchMode) -> Result<
 async fn prepare_claude(ctx: &AgentLaunchContext<'_>) {
     let weaver_bin = weaver_bin_path();
 
-    if let Err(e) = install_hooks(ctx.work_dir, &weaver_bin, HookMode::Terminal).await {
-        tracing::warn!(work_dir = %ctx.work_dir.display(), error = %e,
-            "agent hook setup failed; launching without lifecycle hooks");
+    if ctx.prelude == "weaver" {
+        if let Err(e) = install_hooks(ctx.work_dir, &weaver_bin, HookMode::Terminal).await {
+            tracing::warn!(work_dir = %ctx.work_dir.display(), error = %e,
+                "agent hook setup failed; launching without lifecycle hooks");
+        }
     }
     if let Err(e) = seed_claude_launch_gates(ctx.work_dir, ctx.model, ctx.effort).await {
         tracing::warn!(work_dir = %ctx.work_dir.display(), error = %e,
@@ -861,6 +868,8 @@ pub enum AcpOpen {
 /// carrying the same launch inputs but mapping them onto the adapter / `_meta` /
 /// goal shape the protocol takes.
 pub struct AcpLaunchSpec<'a> {
+    /// Durable Loom session id, exposed only to the session-scoped MCP bridge.
+    pub session_id: &'a str,
     pub branch_id: &'a str,
     /// The resolved runtime: the builtin `claude`, or a custom agent's name.
     pub runtime: &'a str,
@@ -878,6 +887,13 @@ pub struct AcpLaunchSpec<'a> {
     pub env_clear: bool,
     /// The launch permission posture (`bypassPermissions`, `acceptEdits`, …).
     pub mode: &'a str,
+    /// Whether Loom installs its standard Weaver orientation hook.
+    pub prelude: &'a str,
+    /// Stamped restricted-profile posture. Restricted sessions do not load
+    /// Claude settings and any unmatched permission request is denied by Loom.
+    pub restricted: bool,
+    /// JSON array stamped on the session/profile.
+    pub allowed_tools: &'a str,
     /// The resolved custom agent when `runtime` names one (its `launch` command is
     /// the ACP adapter); `None` for the builtin claude.
     pub custom: Option<&'a CustomAgent>,
@@ -908,7 +924,7 @@ pub async fn build_acp_launch(
         None => claude_acp_cmd(db).await,
     };
 
-    if is_claude {
+    if is_claude && spec.prelude == "weaver" && !spec.restricted {
         // Install only the SessionStart primer hook; the work-cycle hooks and the
         // launch-gate seed are redundant under ACP (protocol turn edges + the
         // bypass posture replace them).
@@ -928,12 +944,29 @@ pub async fn build_acp_launch(
         goal_text = primer_text.clone();
     }
     let meta = if is_claude {
-        claude_acp_meta(spec.model, primer_text.as_deref(), spec.mode)
+        claude_acp_meta(
+            spec.model,
+            primer_text.as_deref(),
+            spec.mode,
+            spec.restricted,
+            spec.allowed_tools,
+        )
     } else {
         None
     };
 
     let mut env = session_env(spec.server_addr, spec.branch_id, spec.extra_env);
+    env.push(("LOOM_SESSION_ID".to_string(), spec.session_id.to_string()));
+    if spec.restricted {
+        // GitHub mutations are performed by Loom's server-side restricted tool
+        // endpoint. The adapter and model never receive the credential.
+        env.retain(|(name, _)| !matches!(name.as_str(), "GH_TOKEN" | "GITHUB_TOKEN"));
+        env.retain(|(name, _)| name != "CLAUDE_CODE_DISABLE_AUTO_MEMORY");
+        env.push((
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY".to_string(),
+            "1".to_string(),
+        ));
+    }
     if is_codex {
         // Adapter-contract env, deferring to any operator-provided value.
         push_env_default(
@@ -955,8 +988,15 @@ pub async fn build_acp_launch(
             },
             goal_text.filter(|g| !g.trim().is_empty()),
         ),
-        // A load replays history — no goal, and `_meta` is unused.
-        AcpOpen::Load(id) => (NewOrLoad::Load { acp_session_id: id }, None),
+        // A load replays history — no goal, but restricted adapter metadata is
+        // restated so tool/settings policy survives a process restart.
+        AcpOpen::Load(id) => (
+            NewOrLoad::Load {
+                acp_session_id: id,
+                meta,
+            },
+            None,
+        ),
     };
 
     Ok(AcpLaunch {
@@ -1113,7 +1153,13 @@ pub fn is_full_access_mode(mode: &str) -> bool {
 /// The `_meta.claudeCode.options` object for the claude adapter — only the fields
 /// that are actually configured (model, the primer as `appendSystemPrompt`, the
 /// permission mode). `None` when nothing is set.
-fn claude_acp_meta(model: &str, primer: Option<&str>, mode: &str) -> Option<Value> {
+fn claude_acp_meta(
+    model: &str,
+    primer: Option<&str>,
+    mode: &str,
+    restricted: bool,
+    allowed_tools_json: &str,
+) -> Option<Value> {
     let mut options = Map::new();
     let model = model.trim();
     if !model.is_empty() {
@@ -1125,6 +1171,48 @@ fn claude_acp_meta(model: &str, primer: Option<&str>, mode: &str) -> Option<Valu
     let mode = mode.trim();
     if !mode.is_empty() {
         options.insert("permissionMode".to_string(), json!(mode));
+    }
+    if restricted {
+        let allowed_tools: Vec<String> =
+            serde_json::from_str(allowed_tools_json).unwrap_or_default();
+        let mut tools = Vec::<String>::new();
+        for rule in &allowed_tools {
+            let Some(name) = crate::profile::allowed_tool_name(rule) else {
+                continue;
+            };
+            // MCP tools are contributed by the server below. `Read` rules also
+            // govern Claude's built-in Glob/Grep paths, so expose that complete
+            // read-only trio without adding unscoped allow rules.
+            let visible = if name == "Read" {
+                &["Read", "Glob", "Grep"][..]
+            } else if name.starts_with("mcp__") {
+                &[]
+            } else {
+                if !tools.iter().any(|existing| existing == name) {
+                    tools.push(name.to_string());
+                }
+                continue;
+            };
+            for visible_name in visible {
+                if !tools.iter().any(|existing| existing == visible_name) {
+                    tools.push((*visible_name).to_string());
+                }
+            }
+        }
+        options.insert("allowedTools".to_string(), json!(allowed_tools));
+        options.insert("tools".to_string(), json!(tools));
+        options.insert("settingSources".to_string(), json!([]));
+        options.insert("strictMcpConfig".to_string(), json!(true));
+        options.insert(
+            "mcpServers".to_string(),
+            json!({
+                "loom_github": {
+                    "type": "stdio",
+                    "command": "loom",
+                    "args": ["restricted-github-mcp"]
+                }
+            }),
+        );
     }
     if options.is_empty() {
         return None;
@@ -1441,6 +1529,7 @@ mod tests {
             term_session: "",
             goal_file,
             primer_file,
+            prelude: "weaver",
             server_addr: "",
             model,
             effort,
@@ -2000,19 +2089,93 @@ mod tests {
     #[test]
     fn claude_acp_meta_sets_only_configured_fields() {
         // Nothing configured → no _meta at all.
-        assert!(claude_acp_meta("", None, "").is_none());
+        assert!(claude_acp_meta("", None, "", false, "[]").is_none());
 
-        let m = claude_acp_meta("opus", Some("be careful"), "bypassPermissions").unwrap();
+        let m =
+            claude_acp_meta("opus", Some("be careful"), "bypassPermissions", false, "[]").unwrap();
         let opts = &m["claudeCode"]["options"];
         assert_eq!(opts["model"], "opus");
         assert_eq!(opts["appendSystemPrompt"], "be careful");
         assert_eq!(opts["permissionMode"], "bypassPermissions");
 
         // A blank primer is dropped; model/mode still ride.
-        let m2 = claude_acp_meta("sonnet", Some("  "), "plan").unwrap();
+        let m2 = claude_acp_meta("sonnet", Some("  "), "plan", false, "[]").unwrap();
         let opts2 = &m2["claudeCode"]["options"];
         assert_eq!(opts2["model"], "sonnet");
         assert!(opts2.get("appendSystemPrompt").is_none());
+
+        let restricted = claude_acp_meta(
+            "",
+            None,
+            "default",
+            true,
+            r#"["Read(./**)","mcp__loom_github__issue_view","mcp__loom_github__issue_comment"]"#,
+        )
+        .unwrap();
+        let restricted = &restricted["claudeCode"]["options"];
+        assert_eq!(restricted["settingSources"], json!([]));
+        assert_eq!(restricted["strictMcpConfig"], true);
+        assert_eq!(restricted["tools"], json!(["Read", "Glob", "Grep"]));
+        assert_eq!(
+            restricted["allowedTools"],
+            json!([
+                "Read(./**)",
+                "mcp__loom_github__issue_view",
+                "mcp__loom_github__issue_comment"
+            ])
+        );
+        assert_eq!(restricted["mcpServers"]["loom_github"]["command"], "loom");
         assert_eq!(opts2["permissionMode"], "plan");
+    }
+
+    #[tokio::test]
+    async fn restricted_acp_launch_keeps_github_token_out_of_the_adapter() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let work_dir = tempfile::tempdir().unwrap();
+        let extra_env = vec![
+            ("GH_TOKEN".to_string(), "server-only".to_string()),
+            ("ANTHROPIC_API_KEY".to_string(), "model-key".to_string()),
+        ];
+        let launch = build_acp_launch(
+            &db,
+            &AcpLaunchSpec {
+                session_id: "session-1",
+                branch_id: "branch-1",
+                runtime: "claude",
+                work_dir: work_dir.path(),
+                server_addr: "127.0.0.1:7878",
+                model: "",
+                effort: "",
+                goal_file: None,
+                primer_file: None,
+                extra_env: &extra_env,
+                env_clear: true,
+                mode: "default",
+                prelude: "none",
+                restricted: true,
+                allowed_tools: r#"["Read(./**)","mcp__loom_github__issue_edit"]"#,
+                custom: None,
+            },
+            AcpOpen::Fresh,
+        )
+        .await
+        .unwrap();
+
+        assert!(!launch
+            .env
+            .iter()
+            .any(|(name, _)| matches!(name.as_str(), "GH_TOKEN" | "GITHUB_TOKEN")));
+        assert!(launch
+            .env
+            .iter()
+            .any(|(name, value)| name == "ANTHROPIC_API_KEY" && value == "model-key"));
+        assert!(launch
+            .env
+            .iter()
+            .any(|(name, value)| name == "LOOM_SESSION_ID" && value == "session-1"));
+        assert!(launch
+            .env
+            .iter()
+            .any(|(name, value)| { name == "CLAUDE_CODE_DISABLE_AUTO_MEMORY" && value == "1" }));
     }
 }

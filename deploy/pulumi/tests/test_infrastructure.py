@@ -130,11 +130,37 @@ def test_profile_manifest_accepts_references_but_not_secret_values() -> None:
             "secret_ref": "projects/example/secrets/ops-token/versions/7",
         }
     ]
+    assert profiles[0]["profile"]["prelude"] == "weaver"
+    assert profiles[0]["profile"]["restricted"] is False
+    assert profiles[0]["profile"]["allowed_tools"] == []
     assert references == [("example", "ops-token")]
     with pytest.raises(ValueError, match="full secretRef"):
         _profile_manifest(
             {"ops": {"agent": "codex", "env": {"OPS_TOKEN": "plaintext"}}}
         )
+
+
+def test_profile_manifest_round_trips_restricted_policy() -> None:
+    profiles, _ = _profile_manifest(
+        {
+            "github_comment": {
+                "agent": "claude",
+                "prelude": "none",
+                "restricted": True,
+                "allowedTools": [
+                    "Read(./**)",
+                    "mcp__loom_github__issue_view",
+                ],
+            }
+        }
+    )
+    profile = profiles[0]["profile"]
+    assert profile["prelude"] == "none"
+    assert profile["restricted"] is True
+    assert profile["allowed_tools"] == [
+        "Read(./**)",
+        "mcp__loom_github__issue_view",
+    ]
 
 
 def test_google_mapping_binds_numeric_subject_email_and_profile() -> None:

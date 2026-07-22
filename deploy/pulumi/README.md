@@ -147,6 +147,15 @@ one retry-safe run when the `loom` label is added to an issue. It requests only
 in GitHub. Run `loom federation ls`, `loom profile show ops`, and `pulumi stack
 output workloadClients` to audit the effective non-secret configuration.
 
+For prompt-driven GitHub mutations, declare the stock-compatible
+`github_comment` profile shown in `Pulumi.example.yaml`, including a
+least-privilege CI token as the `GH_TOKEN` Secret Manager reference. Bind each
+approved caller's exact workflow to only that profile. The workflow sends its
+complete task in `session.goal`; no editorial policy lives in the Loom profile,
+and Loom keeps the token server-side behind fixed GitHub tools.
+See [Restricted GitHub sessions](../../docs/restricted-sessions.md) for the
+exchange and rollout checklist.
+
 ## Operations and debugging
 
 The VM runs the Google Cloud Ops Agent and scrapes Loom's loopback-only

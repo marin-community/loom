@@ -583,6 +583,42 @@ async fn permission_auto_answered_under_bypass() {
     );
 }
 
+/// A restricted session never leaves an unmatched tool approval open for a
+/// human and never honors a permissive ACP mode. Loom selects the adapter's
+/// one-shot rejection from the stamped session policy.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restricted_session_rejects_unmatched_permission_requests() {
+    let ts = TestServer::start().await;
+    start_new(&ts, "acp-restricted", Some("bypassPermissions"), None).await;
+    sqlx::query("UPDATE sessions SET policy_restricted = 1 WHERE id = ?")
+        .bind("acp-restricted")
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+
+    ts.client
+        .post(
+            "/api/sessions/acp-restricted/prompt",
+            json!({ "text": "permission:outside-policy|say:continued" }),
+        )
+        .await
+        .unwrap();
+
+    let chat = poll_chat(&ts, "acp-restricted", Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|block| block["kind"] == "turn_end")
+    })
+    .await;
+    let permission = chat["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|block| block["kind"] == "permission_request")
+        .expect("permission request is journaled");
+    assert_eq!(permission["payload"]["outcome"]["option_id"], "reject");
+    assert_eq!(permission["payload"]["outcome"]["by"], "restricted-profile");
+}
+
 /// 3b. Permission REST-answer: under `default` the request stays open until a
 ///     `POST /permissions/{id}` answers it, then the turn completes.
 #[serial]
@@ -2423,6 +2459,7 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
     };
     let addr = ts.addr.to_string();
     let spec = |goal_file, extra_env| loom::agent::AcpLaunchSpec {
+        session_id: "s-codex",
         branch_id: "b-codex",
         runtime: "codex",
         work_dir: dir.path(),
@@ -2434,6 +2471,9 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
         extra_env,
         env_clear: false,
         mode: "bypassPermissions",
+        prelude: "weaver",
+        restricted: false,
+        allowed_tools: "[]",
         custom: None,
     };
 

@@ -67,6 +67,8 @@ use wire::{
     SessionUpdate, ToolCall, ToolCallContent, ToolCallLocation,
 };
 
+const RESTRICTED_CANCELLED_OPTION: &str = "__loom_restricted_cancelled__";
+
 // ---------------------------------------------------------------------------
 // Public surface
 // ---------------------------------------------------------------------------
@@ -79,7 +81,13 @@ pub enum NewOrLoad {
     /// adapter options (e.g. `{"claudeCode":{"options":{...}}}`).
     New { cwd: PathBuf, meta: Option<Value> },
     /// Reopen the agent's existing on-disk session by id (`session/load`).
-    Load { acp_session_id: String },
+    Load {
+        acp_session_id: String,
+        /// Adapter options are restated when a new adapter process resumes the
+        /// provider session. Restricted sessions rely on this to preserve the
+        /// stamped settings and tool boundary across server restarts.
+        meta: Option<Value>,
+    },
 }
 
 /// Everything [`start`] needs to bring an ACP session up.
@@ -1005,7 +1013,10 @@ impl Task {
                     self.replace_config_options(options, false);
                 }
             }
-            NewOrLoad::Load { acp_session_id } => {
+            NewOrLoad::Load {
+                acp_session_id,
+                meta,
+            } => {
                 self.acp_session_id = acp_session_id.clone();
                 // Continue the *existing* journal: seed the turn/seq cursor from it
                 // so a post-load prompt opens a fresh turn (rather than colliding
@@ -1022,8 +1033,11 @@ impl Task {
                 // re-journaling for the duration of the call.
                 self.suppress_journal = true;
                 let id = self.next_id();
-                let params =
-                    wire::load_session_params(acp_session_id, &launch.cwd.to_string_lossy());
+                let params = wire::load_session_params(
+                    acp_session_id,
+                    &launch.cwd.to_string_lossy(),
+                    meta.as_ref(),
+                );
                 self.stream
                     .write(&wire::request_line(id, method::SESSION_LOAD, params))
                     .await?;
@@ -1931,16 +1945,21 @@ impl Task {
         let params: RequestPermissionParams =
             serde_json::from_value(inc.params.unwrap_or(Value::Null))?;
         self.flush_buf().await;
+        let restricted = session::get(&self.db, &self.session_id)
+            .await?
+            .is_some_and(|session| session.policy_restricted);
 
         match chat::permission_outcome(&self.db, &self.session_id, &req_key).await? {
             chat::PermissionOutcome::Resolved(option_id) => {
                 // Already answered before a crash: re-send the stored answer.
+                let outcome = if option_id == RESTRICTED_CANCELLED_OPTION {
+                    wire::permission_cancelled()
+                } else {
+                    wire::permission_selected(&option_id)
+                };
                 let _ = self
                     .stream
-                    .write(&wire::response_line(
-                        &jsonrpc_id,
-                        wire::permission_selected(&option_id),
-                    ))
+                    .write(&wire::response_line(&jsonrpc_id, outcome))
                     .await;
                 return Ok(());
             }
@@ -1978,6 +1997,34 @@ impl Task {
         // Policy follows the mode captured when this turn started. A config write
         // during the turn changes `current_mode` for the next prompt only; using it
         // here would auto-approve a request raised by an older, restricted turn.
+        if restricted {
+            if let Some(opt) = deny_choice(&params.options) {
+                let _ = self
+                    .answer_permission(&req_key, &opt, "restricted-profile")
+                    .await;
+            } else if let Some(pending) = self.pending_perms.remove(&req_key) {
+                let _ = self
+                    .stream
+                    .write(&wire::response_line(
+                        &pending.jsonrpc_id,
+                        wire::permission_cancelled(),
+                    ))
+                    .await;
+                if let Ok(Some(view)) = chat::resolve_permission(
+                    &self.db,
+                    &self.session_id,
+                    &req_key,
+                    RESTRICTED_CANCELLED_OPTION,
+                    "restricted-profile",
+                )
+                .await
+                {
+                    self.emit("block", serde_json::to_value(&view).unwrap_or(Value::Null));
+                }
+                let _ = self.maybe_ack().await;
+            }
+            return Ok(());
+        }
         let bypass = self
             .effective_mode
             .as_deref()
@@ -2417,6 +2464,16 @@ fn auto_choice(options: &[PermissionOption]) -> Option<String> {
         .map(|o| o.option_id.clone())
 }
 
+/// The one-shot denial a restricted profile selects for every tool call that
+/// reached ACP permission handling (allowed rules execute before this point).
+fn deny_choice(options: &[PermissionOption]) -> Option<String> {
+    options
+        .iter()
+        .find(|o| o.kind == "reject_once")
+        .or_else(|| options.iter().find(|o| o.kind.starts_with("reject")))
+        .map(|o| o.option_id.clone())
+}
+
 /// Render permission options into the journal contract's `options` array.
 fn permission_options_json(options: &[PermissionOption]) -> Vec<Value> {
     options
@@ -2468,7 +2525,7 @@ fn queued_prompt_text(text: &str, resources: &[Value]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{auto_choice, queued_prompt_text, PermissionOption};
+    use super::{auto_choice, deny_choice, queued_prompt_text, PermissionOption};
     use serde_json::json;
 
     #[test]
@@ -2500,5 +2557,23 @@ mod tests {
         ];
         assert_eq!(auto_choice(&options).as_deref(), Some("once"));
         assert_eq!(auto_choice(&options[..1]), None);
+    }
+
+    #[test]
+    fn restricted_permission_choice_prefers_one_shot_rejection() {
+        let options = [
+            PermissionOption {
+                option_id: "allow".to_string(),
+                name: "Allow once".to_string(),
+                kind: "allow_once".to_string(),
+            },
+            PermissionOption {
+                option_id: "deny".to_string(),
+                name: "Reject".to_string(),
+                kind: "reject_once".to_string(),
+            },
+        ];
+        assert_eq!(deny_choice(&options).as_deref(), Some("deny"));
+        assert_eq!(deny_choice(&options[..1]), None);
     }
 }

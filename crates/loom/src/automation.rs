@@ -656,6 +656,9 @@ mod tests {
                 idle_archive_secs: Some(60),
                 max_concurrent: 1,
                 turn_budget: Some(10),
+                prelude: "weaver".to_string(),
+                restricted: false,
+                allowed_tools: vec![],
             },
         )
         .await

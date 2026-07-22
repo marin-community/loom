@@ -30,6 +30,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "workload-federation",
         include_str!("../migrations/0004_workload_federation.sql"),
     ),
+    (
+        5,
+        "restricted-profiles",
+        include_str!("../migrations/0005_restricted_profiles.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -257,7 +262,7 @@ mod tests {
                 .fetch_all(&db)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5]);
 
         let columns = table_columns(&db, "sessions").await.unwrap();
         for expected in [
@@ -272,12 +277,28 @@ mod tests {
             "profile",
             "creator_subject",
             "parent_session_id",
+            "policy_prelude",
+            "policy_restricted",
+            "policy_allowed_tools",
         ] {
             assert!(
                 columns.iter().any(|column| column == expected),
                 "{expected}"
             );
         }
+
+        let stock = crate::profile::get(&db, "github_comment")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stock.restricted);
+        assert_eq!(stock.prelude, "none");
+        assert_eq!(stock.agent_kind, "claude");
+        assert_eq!(stock.mode, "default");
+        assert!(stock
+            .allowed_tool_rules()
+            .unwrap()
+            .contains(&"mcp__loom_github__issue_edit".to_string()));
 
         insert_branch(&db, "t1").await;
         sqlx::query(
@@ -341,7 +362,7 @@ mod tests {
                 .fetch_all(&db)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5]);
         let index_sql: String = sqlx::query_scalar(
             "SELECT sql FROM sqlite_master
              WHERE type = 'index' AND name = 'idx_sessions_active_branch'",
@@ -415,7 +436,7 @@ mod tests {
             .fetch_one(&db)
             .await
             .unwrap();
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
 
         // Adoption replaced the historical index predicate: archived history
         // no longer prevents a new active session from claiming the branch.

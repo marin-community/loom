@@ -39,6 +39,31 @@ config:
       env:
         KUBECONFIG:
           secretRef: projects/my-project/secrets/ops-kubeconfig/versions/latest
+    github_comment:
+      description: Restricted GitHub automation with a caller-supplied prompt
+      class: automation
+      agent: claude
+      protocol: acp
+      mode: default
+      strict: true
+      envClear: true
+      ambientAllowlist: []
+      prelude: none
+      restricted: true
+      allowedTools:
+        - Read(./**)
+        - mcp__loom_github__issue_view
+        - mcp__loom_github__issue_comment
+        - mcp__loom_github__issue_edit
+        - mcp__loom_github__pr_view
+        - mcp__loom_github__pr_comment
+        - mcp__loom_github__pr_edit
+      maxConcurrent: 4
+      turnBudget: 4
+      idleArchiveSeconds: 900
+      env:
+        GH_TOKEN:
+          secretRef: projects/my-project/secrets/loom-github-ci-token/versions/latest
   # Pulumi creates these service accounts and exports the non-secret client
   # configuration a Cloud Run service or Grafana gateway consumes. Import an
   # existing account at the generated resource URN before the first update.
@@ -59,6 +84,12 @@ config:
       ref: refs/heads/main
       serviceTag: weaver-actions
       profile: ops
+    - name: marin-prose-cleanup
+      repositoryId: "987654321"
+      workflowRef: marin-community/marin/.github/workflows/prose-cleanup.yml@refs/heads/main
+      event: issues
+      serviceTag: marin-prose-cleanup
+      profile: github_comment
   # Optional Cloud Monitoring email channels for the managed readiness alert.
   loom-gcp:alertEmails:
     - operator@example.com

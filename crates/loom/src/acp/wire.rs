@@ -439,8 +439,12 @@ pub fn new_session_params(cwd: &str, meta: Option<&Value>) -> Value {
 }
 
 /// `session/load` params.
-pub fn load_session_params(session_id: &str, cwd: &str) -> Value {
-    serde_json::json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [] })
+pub fn load_session_params(session_id: &str, cwd: &str, meta: Option<&Value>) -> Value {
+    let mut value = serde_json::json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [] });
+    if let Some(meta) = meta {
+        value["_meta"] = meta.clone();
+    }
+    value
 }
 
 /// `session/prompt` params carrying text plus validated resource-link blocks.
@@ -510,6 +514,16 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(resp.kind(), IncomingKind::Response);
+    }
+
+    #[test]
+    fn load_session_restates_adapter_metadata() {
+        let meta = serde_json::json!({
+            "claudeCode": { "options": { "settingSources": [], "tools": ["Read"] } }
+        });
+        let params = load_session_params("session-1", "/worktree", Some(&meta));
+        assert_eq!(params["sessionId"], "session-1");
+        assert_eq!(params["_meta"], meta);
     }
 
     #[test]

@@ -1,18 +1,18 @@
 //! A user's own GitHub token (a fine-grained PAT), stored in the
 //! `user_github_tokens` table.
 //!
-//! When that user launches an interactive session, loom injects the token as
-//! `GH_TOKEN` into the session env ([`crate::runtime::create_session`]),
-//! overriding the shared ambient `GH_TOKEN` from the deploy env — so the agent's
-//! `git push` / `gh` act as *that user*. Combined with the per-user commit author
-//! identity loom already sets ([`crate::auth::commit_identity`]), both the commit
-//! and the push are attributed to them.
+//! For an ordinary interactive session, loom injects the token as `GH_TOKEN`
+//! into the session env ([`crate::runtime::create_session`]), overriding the
+//! shared ambient credential. A restricted session keeps the token server-side
+//! and resolves it only for its fixed GitHub tool surface. Combined with the
+//! per-user commit author identity loom already sets
+//! ([`crate::auth::commit_identity`]), ordinary pushes are attributed to them.
 //!
 //! The value is **write-only** over the API: callers learn only *that* a token is
 //! set and when it changed, never the token itself — the same treatment
-//! [`crate::repo_env`] gives per-repo secrets. This is blast-radius reduction, not
-//! isolation: in loom's single shared container any agent can still read the
-//! exported `GH_TOKEN` (shared-loom design §6.4).
+//! [`crate::repo_env`] gives per-repo secrets. Export into ordinary shared
+//! sessions is blast-radius reduction rather than isolation; restricted sessions
+//! avoid that export entirely.
 
 use anyhow::Result;
 use serde::Serialize;

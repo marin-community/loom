@@ -12,6 +12,32 @@ use crate::auth::{Grant, Principal};
 
 use super::{ApiResult, AppError, AppState};
 
+fn github_idempotency_key(
+    context: &crate::automation::GithubContext,
+    requested: &str,
+) -> ApiResult<String> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return Ok(format!(
+            "github-run:{}:{}:{}",
+            context.repository_id, context.run_id, context.run_attempt
+        ));
+    }
+    if requested.len() > 128
+        || !requested
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+    {
+        return Err(AppError::bad_request(
+            "GitHub idempotency_key must be 1-128 ASCII letters, digits, '.', '_', ':', or '-'",
+        ));
+    }
+    Ok(format!(
+        "github-caller:{}:{}",
+        context.repository_id, requested
+    ))
+}
+
 pub(super) async fn federate(
     State(st): State<AppState>,
     Json(req): Json<FederateReq>,
@@ -126,10 +152,7 @@ pub(super) async fn create_run(
                 }
             }
             req.session.repo = Some(context.repository.clone());
-            format!(
-                "{}:{}:{}",
-                context.repository_id, context.run_id, context.run_attempt
-            )
+            github_idempotency_key(context, &req.idempotency_key)?
         }
         _ => {
             let key = req.idempotency_key.trim();
@@ -233,4 +256,37 @@ pub(super) async fn get_run(
         return Err(AppError::new(StatusCode::FORBIDDEN, "run access forbidden"));
     }
     Ok(Json(run.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::github_idempotency_key;
+    use crate::automation::GithubContext;
+
+    fn context() -> GithubContext {
+        GithubContext {
+            repository_id: "1234".to_string(),
+            run_id: "55".to_string(),
+            run_attempt: "2".to_string(),
+            ..GithubContext::default()
+        }
+    }
+
+    #[test]
+    fn github_caller_can_choose_a_deterministic_idempotency_key() {
+        assert_eq!(
+            github_idempotency_key(&context(), "prose-cleanup:issue:7:abc123").unwrap(),
+            "github-caller:1234:prose-cleanup:issue:7:abc123"
+        );
+        assert_eq!(
+            github_idempotency_key(&context(), "").unwrap(),
+            "github-run:1234:55:2"
+        );
+    }
+
+    #[test]
+    fn github_caller_idempotency_keys_are_bounded_and_log_safe() {
+        assert!(github_idempotency_key(&context(), "contains spaces").is_err());
+        assert!(github_idempotency_key(&context(), &"x".repeat(129)).is_err());
+    }
 }

@@ -3,8 +3,250 @@
 use reqwest::StatusCode;
 use serde_json::json;
 use serial_test::serial;
+use std::os::unix::fs::PermissionsExt;
 
 use crate::fixtures::TestServer;
+
+struct EnvVarSet {
+    name: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarSet {
+    fn set(name: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(name);
+        std::env::set_var(name, value);
+        Self { name, previous }
+    }
+}
+
+impl Drop for EnvVarSet {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(self.name, value),
+            None => std::env::remove_var(self.name),
+        }
+    }
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stock_github_comment_profile_round_trips_restricted_policy() {
+    let ts = TestServer::start().await;
+    let profile = ts.client.get("/api/profiles/github_comment").await.unwrap();
+
+    assert_eq!(profile["agent_kind"], "claude");
+    assert_eq!(profile["protocol"], "acp");
+    assert_eq!(profile["mode"], "default");
+    assert_eq!(profile["prelude"], "none");
+    assert_eq!(profile["restricted"], true);
+    assert!(profile["allowed_tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|rule| rule == "mcp__loom_github__issue_edit"));
+    assert!(profile["env"].as_array().unwrap().is_empty());
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restricted_profile_sends_the_caller_goal_as_the_first_prompt() {
+    let _adapter = EnvVarSet::set(
+        "WEAVER_CLAUDE_ACP_CMD",
+        &crate::fixtures::fake_acp_agent_cmd(),
+    );
+    let ts = TestServer::start().await;
+    ts.client
+        .put(
+            "/api/profiles/github_comment/env/GH_TOKEN",
+            json!({ "value": "github-actions-token" }),
+        )
+        .await
+        .unwrap();
+
+    let goal = "say:caller supplied prompt";
+    let session = ts
+        .client
+        .post(
+            "/api/sessions",
+            json!({
+                "cwd": ts.cwd(),
+                "profile": "github_comment",
+                "title": "Restricted prompt test",
+                "goal": goal
+            }),
+        )
+        .await
+        .unwrap();
+    let id = session["id"].as_str().unwrap();
+    assert!(ts
+        .client
+        .put(
+            &format!("/api/sessions/{id}/mode"),
+            json!({ "mode_id": "bypassPermissions" }),
+        )
+        .await
+        .is_err());
+    assert!(ts
+        .client
+        .post(
+            &format!("/api/sessions/{id}/handoff"),
+            json!({ "agent": "codex" }),
+        )
+        .await
+        .is_err());
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let chat = ts
+            .client
+            .get(&format!("/api/sessions/{id}/chat"))
+            .await
+            .unwrap();
+        if let Some(message) = chat["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|block| block["kind"] == "user_message")
+        {
+            assert_eq!(message["payload"]["text"], goal);
+            assert!(!message["payload"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("weaver summary"));
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "caller goal was never dispatched"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restricted_github_tool_uses_the_server_side_token_and_fixed_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = dir.path().join("gh");
+    std::fs::write(
+        &gh,
+        "#!/bin/sh\n\
+         case \"$GH_TOKEN\" in\n\
+           requester-token) printf 'requester:' ;;\n\
+           server-only-token) printf 'profile:' ;;\n\
+           *) exit 17 ;;\n\
+         esac\n\
+         printf '%s' \"$*\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let _path = EnvVarSet::set("PATH", &path);
+    let _adapter = EnvVarSet::set(
+        "WEAVER_CLAUDE_ACP_CMD",
+        &crate::fixtures::fake_acp_agent_cmd(),
+    );
+    let ts = TestServer::start().await;
+    ts.client
+        .put(
+            "/api/profiles/github_comment/env/GH_TOKEN",
+            json!({ "value": "server-only-token" }),
+        )
+        .await
+        .unwrap();
+    loom::user_token::set(&ts.state.db, "rjpower", "requester-token")
+        .await
+        .unwrap();
+    let session = ts
+        .client
+        .post(
+            "/api/sessions",
+            json!({
+                "cwd": ts.cwd(),
+                "profile": "github_comment",
+                "title": "Restricted GitHub tool test",
+                "goal": "say:ready"
+            }),
+        )
+        .await
+        .unwrap();
+    let id = session["id"].as_str().unwrap();
+    let tracking = weaver_core::issue::add(
+        &ts.state.db,
+        &weaver_core::issue::NewIssue {
+            repo_root: ts.cwd(),
+            github_repo: Some("octo/fixed".to_string()),
+            github_issue: Some(7),
+            title: "Restricted target".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE sessions SET github_repo = 'octo/fixed', tracking_issue_id = ? WHERE id = ?",
+    )
+    .bind(tracking.id)
+    .bind(id)
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+
+    let response = ts
+        .client
+        .post(
+            &format!("/api/sessions/{id}/restricted-github/issue_edit"),
+            json!({ "arguments": { "number": 7, "body": "clean body" } }),
+        )
+        .await
+        .unwrap();
+    let text = response["text"].as_str().unwrap();
+    assert!(text.contains("requester:issue edit 7 --repo octo/fixed --body clean body"));
+    assert!(!text.contains("server-only-token"));
+    assert!(!text.contains("requester-token"));
+
+    loom::user_token::remove(&ts.state.db, "rjpower")
+        .await
+        .unwrap();
+    let fallback = ts
+        .client
+        .post(
+            &format!("/api/sessions/{id}/restricted-github/issue_view"),
+            json!({ "arguments": { "number": 7 } }),
+        )
+        .await
+        .unwrap();
+    assert!(fallback["text"]
+        .as_str()
+        .unwrap()
+        .contains("profile:issue view 7 --repo octo/fixed"));
+    assert!(ts
+        .client
+        .post(
+            &format!("/api/sessions/{id}/restricted-github/issue_edit"),
+            json!({ "arguments": { "number": 8, "body": "wrong issue" } }),
+        )
+        .await
+        .is_err());
+
+    sqlx::query("UPDATE sessions SET policy_allowed_tools = '[\"Read(./**)\"]' WHERE id = ?")
+        .bind(id)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    assert!(ts
+        .client
+        .post(
+            &format!("/api/sessions/{id}/restricted-github/issue_edit"),
+            json!({ "arguments": { "number": 7, "body": "no longer allowed" } }),
+        )
+        .await
+        .is_err());
+}
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

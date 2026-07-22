@@ -85,6 +85,9 @@ def _profile_manifest(
             "idle_archive_secs": raw.get("idleArchiveSeconds"),
             "max_concurrent": int(raw.get("maxConcurrent", 0)),
             "turn_budget": raw.get("turnBudget"),
+            "prelude": str(raw.get("prelude", "weaver")),
+            "restricted": bool(raw.get("restricted", False)),
+            "allowed_tools": list(raw.get("allowedTools", [])),
         }
         env = []
         for env_name, env_value in sorted(dict(raw.get("env", {})).items()):

@@ -30,6 +30,7 @@ pub mod monitor;
 pub mod profile;
 pub mod repo;
 pub mod repo_env;
+pub mod restricted_mcp;
 pub mod runs;
 pub(crate) mod runtime;
 pub mod server;

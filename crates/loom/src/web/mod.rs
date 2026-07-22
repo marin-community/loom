@@ -78,6 +78,7 @@ mod logview;
 mod profiles;
 mod repo_env;
 mod repos;
+mod restricted_github;
 mod scratch;
 pub(crate) mod sessions;
 mod settings;
@@ -97,6 +98,7 @@ use logview::*;
 use profiles::*;
 use repo_env::*;
 use repos::*;
+use restricted_github::*;
 use scratch::*;
 use sessions::*;
 use settings::*;
@@ -574,6 +576,10 @@ pub fn router(state: AppState) -> Router {
         // The session's own dashboard URL — the link an agent hands a human.
         .route("/sessions/{id}/url", get(session_url_route))
         .route("/sessions/{id}/archive", post(archive_session))
+        .route(
+            "/sessions/{id}/restricted-github/{tool}",
+            post(restricted_github_tool),
+        )
         .route("/sessions/{id}/adopt", post(adopt_session))
         .route("/sessions/{id}/handoff", post(handoff_session))
         .route("/sessions/{id}/recover", post(recover_session))

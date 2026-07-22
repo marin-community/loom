@@ -250,11 +250,12 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `GET /metrics` | public OpenMetrics scrape derived from durable session/profile/run/migration state; labels are bounded operational dimensions and never contain session/branch/path/user/token/error values (deployments normally restrict this at the public edge) |
 | `GET /api/diagnostics` | admin-only redacted counts, profile capacity, automation failures/staleness, orphan/error inventory, migration state, and non-secret federation metadata; backs Settings → Diagnostics |
 | `GET /api/sessions` / `POST /api/sessions` | list / create sessions (list takes `archived` — default `false` — and `automation` — default `false`; create resolves `profile` or `default`, permits launch selectors only when the profile is non-strict, stamps the resolved profile revision/policy, opens a tracking issue, and returns its id as `tracking_issue`) |
-| `GET POST /api/profiles`; `GET PUT DELETE /api/profiles/{name}` | named launch-policy CRUD; profile secret values are never returned |
+| `GET POST /api/profiles`; `GET PUT DELETE /api/profiles/{name}` | named launch-policy CRUD, including prelude and restricted Claude tool policy; profile secret values are never returned |
 | `PUT DELETE /api/profiles/{profile}/env/{name}` | write-only profile environment management; a write supplies exactly one literal `value` or a full GCP Secret Manager `secret_ref`, and reads expose only source/reference metadata |
 | `POST /api/deployment/reconcile` | admin-only idempotent reconciliation of deployment-managed profiles, environment references, and federation mappings; pruning never touches operator-managed rows |
 | `POST /api/auth/federate` | exchange an exact mapped, signature-verified GitHub or Google OIDC identity for a ten-minute Ed25519-signed, profile-scoped Loom automation token |
-| `GET POST /api/runs`; `GET /api/runs/{id}` | durable, subject-scoped automation runs with idempotency reservation |
+| `GET POST /api/runs`; `GET /api/runs/{id}` | durable, subject-scoped automation runs with idempotency reservation; verified GitHub callers may provide a validated deterministic key, otherwise the workflow run/attempt is used |
+| `POST /api/sessions/{id}/restricted-github/{tool}` | session-token-scoped fixed GitHub operations for a restricted session; checks stamped tool policy, fixes the target repository and thread from the session, and resolves the requester/profile token server-side |
 | `GET PATCH DELETE /api/sessions/{id}` | session CRUD (status, title, goal, description) |
 | `PUT DELETE /api/sessions/{id}/tags/{key}` | set (upsert) / clear a branch tag — the well-known `attention` and `triage` keys plus any free-form key |
 | `GET /api/sessions/{id}/url` | the session's dashboard URL as `{url}`, built from the externally-visible origin (`auth.base_url`, else the request's own Host) — what `loom session url` prints, so an agent can link a PR back to its session without inventing a loopback link |
@@ -701,6 +702,22 @@ token and exchanges again; no refresh token or service-account key is stored by
 Loom. Automation run records and metrics persist the mapping's bounded service
 tag, so operators can distinguish Marin, Grafana, and Actions traffic without
 using the workload subject as an observability label.
+
+**Restricted sessions.** A restricted profile is a stamped security posture,
+not a task template. It is valid only for strict, environment-cleared Claude ACP
+automation with `prelude = none`, `mode = default`, no ambient allowlist, and
+scoped Claude SDK tool rules. The first prompt is the caller's complete
+`session.goal`; Loom does not add `WEAVER.md` or infer rewrite instructions.
+Restricted launch and recovery omit repository environment/setup and Claude
+user/project/local settings. Repository reads are path-scoped, and GitHub
+mutations use a fixed MCP bridge backed by a session-scoped REST endpoint. Loom
+resolves the requester/profile GitHub token server-side and invokes `gh` without
+a shell against the session's fixed repository and linked thread; the credential
+never enters the agent environment. Allowed rules execute directly; any remaining ACP permission
+request is answered with the adapter's one-shot rejection (or a cancelled
+outcome), including after `session/load`. Runtime handoff and permission-mode
+changes are forbidden. The stock `github_comment` profile contains the policy
+only; deployment must provide its write-only `GH_TOKEN`.
 
 **Cookies** are `HttpOnly; SameSite=Lax; Path=/`; the `Secure` attribute is
 added when `auth.cookie_secure` is on (set it when loom is reached over HTTPS).

@@ -1,0 +1,93 @@
+# Restricted GitHub sessions
+
+Restricted sessions let a trusted GitHub Actions workflow supply a complete,
+one-shot prompt without giving the agent Weaver's normal issue-solving prelude
+or an unrestricted developer environment. Loom supplies the security envelope;
+the workflow owns task semantics, stale-write checks, and prose policy.
+
+The stock `github_comment` profile uses Claude over ACP with no Weaver prelude,
+no repository environment or setup script, no Claude user/project/local
+settings, repository-scoped read tools, and a fixed GitHub issue/PR MCP surface.
+The MCP bridge calls a session-scoped Loom endpoint; Loom runs `gh` server-side
+against the session's fixed repository and linked issue/PR number, so neither a
+general shell nor the GitHub token enters the agent process. Anything outside
+the configured Claude permission rules is rejected by Loom.
+The profile intentionally has no token in its seed. Configure a least-privilege
+CI identity as its write-only `GH_TOKEN` before enabling a federation mapping.
+
+## GitHub Actions request
+
+The caller job needs `id-token: write`. A composite action runs under the
+calling workflow's OIDC identity, so Loom's federation mapping must name the
+caller's numeric repository id and exact workflow ref—not the composite action's
+repository.
+
+After constructing the full prompt in `prompt_file`, the job exchanges its OIDC
+token and submits the run:
+
+```bash
+set -euo pipefail
+
+audience=$(jq -rn --arg value "$LOOM_URL" '$value|@uri')
+oidc_token=$(curl --fail-with-body --silent --show-error \
+  -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+  "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -r .value)
+loom_token=$(curl --fail-with-body --silent --show-error \
+  -H 'Content-Type: application/json' \
+  -d "$(jq -n --arg token "$oidc_token" '{token:$token}')" \
+  "$LOOM_URL/api/auth/federate" | jq -r .token)
+
+request=$(jq -n \
+  --arg repo "$GITHUB_REPOSITORY" \
+  --arg title "Prose cleanup for #$NUMBER" \
+  --arg key "prose-cleanup:$KIND:$NUMBER:$BODY_HASH" \
+  --rawfile goal "$prompt_file" \
+  --argjson number "$NUMBER" \
+  '{
+    profile: "github_comment",
+    idempotency_key: $key,
+    source: "actions",
+    session: {
+      repo: $repo,
+      title: $title,
+      goal: $goal,
+      github_issue: $number
+    }
+  }')
+curl --fail-with-body --silent --show-error \
+  -H "Authorization: Bearer $loom_token" \
+  -H 'Content-Type: application/json' \
+  -d "$request" "$LOOM_URL/api/runs"
+```
+
+GitHub caller keys accept up to 128 ASCII letters, digits, `.`, `_`, `:`, and
+`-`. Loom namespaces them by verified repository and subject. An empty key keeps
+the compatibility behavior of deduplicating one workflow run attempt; a body
+hash key converges retries and reruns for the same source description.
+
+Do not put `GH_TOKEN` in the request or prompt. Automation requests are stored
+for audit and idempotency. The token belongs in the profile's write-only
+environment, preferably as a deployment-managed Secret Manager reference. Loom
+resolves it only while executing a fixed GitHub tool. The existing human/comment
+launch path uses the approved requester's stored GitHub token by default, also
+server-side for a restricted session.
+
+## Production rollout
+
+1. Declare `github_comment` in the production Pulumi profile manifest with its
+   `GH_TOKEN` secret reference, and grant the Loom VM access to that secret.
+2. Add one `githubFederations` entry per approved caller workflow, constrained
+   to the numeric repository id, exact workflow ref, event/ref where useful, and
+   only `github_comment`.
+3. Deploy the merged Loom image and reconcile the manifest. Audit with `loom
+   profile show github_comment` and `loom federation ls`.
+4. Run a synthetic issue through the direct API. Verify the prompt appears as
+   the first turn without `WEAVER.md`, a duplicate body-hash key returns the
+   original run, no shell or code-writing tool is visible, the agent environment
+   contains no GitHub token, and only the requested GitHub mutation occurs.
+5. Change the Marin prose-cleanup action from posting `@weaverbot` to the OIDC
+   exchange above, keeping its current body-hash/stale-write prompt. Roll the
+   action revision through `marin-community/*` consumers in batches.
+
+Disable the federation mapping or remove the profile token to stop new runs.
+That rollback does not affect interactive Loom sessions.

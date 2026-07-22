@@ -25,6 +25,9 @@ pub(super) fn input(req: ProfileReq, name: String) -> ProfileInput {
         idle_archive_secs: req.idle_archive_secs,
         max_concurrent: req.max_concurrent,
         turn_budget: req.turn_budget,
+        prelude: req.prelude,
+        restricted: req.restricted,
+        allowed_tools: req.allowed_tools,
     }
 }
 
@@ -42,6 +45,9 @@ pub(super) async fn view(st: &AppState, profile: Profile) -> ApiResult<ProfileVi
             updated_at: entry.updated_at,
         })
         .collect();
+    let allowed_tools = profile
+        .allowed_tool_rules()
+        .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(ProfileView {
         name: profile.name,
         description: profile.description,
@@ -57,6 +63,9 @@ pub(super) async fn view(st: &AppState, profile: Profile) -> ApiResult<ProfileVi
         idle_archive_secs: profile.idle_archive_secs,
         max_concurrent: profile.max_concurrent,
         turn_budget: profile.turn_budget,
+        prelude: profile.prelude,
+        restricted: profile.restricted,
+        allowed_tools,
         revision: profile.revision,
         created_at: profile.created_at,
         updated_at: profile.updated_at,

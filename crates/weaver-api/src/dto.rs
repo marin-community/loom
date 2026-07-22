@@ -234,6 +234,10 @@ fn default_profile() -> String {
     "default".to_string()
 }
 
+fn default_prelude() -> String {
+    "weaver".to_string()
+}
+
 /// A reusable, named session launch posture. Secret environment values are
 /// deliberately excluded; `env` contains names and update timestamps only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,6 +256,12 @@ pub struct ProfileView {
     pub idle_archive_secs: Option<i64>,
     pub max_concurrent: i64,
     pub turn_budget: Option<i64>,
+    #[serde(default = "default_prelude")]
+    pub prelude: String,
+    #[serde(default)]
+    pub restricted: bool,
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
     pub revision: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -298,6 +308,12 @@ pub struct ProfileReq {
     pub max_concurrent: i64,
     #[serde(default)]
     pub turn_budget: Option<i64>,
+    #[serde(default = "default_prelude")]
+    pub prelude: String,
+    #[serde(default)]
+    pub restricted: bool,
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -422,10 +438,29 @@ pub struct DeploymentView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunReq {
     pub profile: String,
+    /// Caller-selected durable key. Verified GitHub callers may leave this
+    /// blank to use repository/run/attempt, or provide a bounded deterministic
+    /// key (for example an issue body hash) that Loom namespaces to the verified
+    /// identity.
+    #[serde(default)]
     pub idempotency_key: String,
     #[serde(default = "actions_source")]
     pub source: String,
     pub session: CreateReq,
+}
+
+/// One invocation of Loom's fixed, session-scoped GitHub tool surface.
+/// `arguments` is validated against the named tool by the server; the generic
+/// envelope keeps MCP transport details out of the REST contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestrictedGithubToolReq {
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestrictedGithubToolView {
+    pub text: String,
 }
 
 fn actions_source() -> String {

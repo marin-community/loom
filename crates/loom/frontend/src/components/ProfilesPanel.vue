@@ -27,7 +27,11 @@ function editable(profile: Profile): ProfileInput {
   // `profile` is a Vue reactive proxy; structuredClone rejects proxies with a
   // DataCloneError. Copy the one nested collection explicitly and keep the
   // editable draft detached from the server snapshot.
-  return { ...input, ambient_allowlist: [...input.ambient_allowlist] };
+  return {
+    ...input,
+    ambient_allowlist: [...input.ambient_allowlist],
+    allowed_tools: [...input.allowed_tools],
+  };
 }
 
 function choose(name: string) {
@@ -73,6 +77,9 @@ function add() {
     idle_archive_secs: null,
     max_concurrent: 0,
     turn_budget: null,
+    prelude: 'weaver',
+    restricted: false,
+    allowed_tools: [],
   };
 }
 
@@ -228,6 +235,13 @@ onMounted(load);
             </select>
           </label>
           <label class="text-xs"
+            >Prelude
+            <select v-model="draft.prelude" class="mt-1 w-full rounded bg-input px-2 py-1.5">
+              <option value="weaver">Weaver</option>
+              <option value="none">None (caller prompt only)</option>
+            </select>
+          </label>
+          <label class="text-xs"
             >Max concurrent (0 = unlimited)
             <input
               v-model.number="draft.max_concurrent"
@@ -241,6 +255,10 @@ onMounted(load);
           >
           <label class="flex items-center gap-2 text-xs"
             ><input v-model="draft.env_clear" type="checkbox" /> Clear ambient environment</label
+          >
+          <label class="flex items-center gap-2 text-xs"
+            ><input v-model="draft.restricted" type="checkbox" /> Restricted automation
+            posture</label
           >
           <label class="text-xs"
             >Turn budget (blank = inherit)
@@ -268,6 +286,20 @@ onMounted(load);
               @input="
                 draft!.ambient_allowlist = ($event.target as HTMLInputElement).value
                   .split(',')
+                  .map((v) => v.trim())
+                  .filter(Boolean)
+              "
+            />
+          </label>
+          <label class="text-xs sm:col-span-2"
+            >Allowed Claude tools (one permission rule per line)
+            <textarea
+              :value="draft.allowed_tools.join('\n')"
+              rows="6"
+              class="mt-1 w-full rounded bg-input px-2 py-1.5 font-mono"
+              @input="
+                draft!.allowed_tools = ($event.target as HTMLTextAreaElement).value
+                  .split('\n')
                   .map((v) => v.trim())
                   .filter(Boolean)
               "

@@ -270,11 +270,16 @@ async fn launch_env_for_profile(
     cfg: &weaver_core::repo_config::RepoConfig,
     profile_name: &str,
     strict: bool,
+    restricted: bool,
 ) -> Vec<(String, String)> {
     let repo_root_str = repo_root.display().to_string();
     let mut env = crate::profile::env_pairs(db, profile_name)
         .await
         .unwrap_or_default();
+    if restricted {
+        tracing::debug!(repo = %repo_root_str, profile = profile_name, "restricted launch uses profile environment only");
+        return env;
+    }
     let repo_pairs = repo_env::pairs(db, &repo_root_str)
         .await
         .unwrap_or_default();
@@ -344,6 +349,7 @@ async fn resume_environment(
         cfg,
         &session.profile,
         session.policy_env_clear,
+        session.policy_restricted,
     )
     .await;
     if !session.policy_env_clear {
@@ -471,6 +477,13 @@ async fn setup_timeout(db: &Db) -> std::time::Duration {
         .unwrap_or(config::DEFAULT_SETUP_TIMEOUT_SECS as u64)
         .max(1);
     std::time::Duration::from_secs(secs)
+}
+
+fn repo_setup_for_profile(
+    cfg: &weaver_core::repo_config::RepoConfig,
+    restricted: bool,
+) -> Option<String> {
+    (!restricted).then(|| cfg.setup.script()).flatten()
 }
 
 /// Run a registered repo's `[setup]` script in the worktree before the agent
@@ -711,6 +724,7 @@ pub(crate) async fn provision_session(
         &repo_cfg,
         &profile_name,
         launch_profile.strict,
+        launch_profile.restricted,
     )
     .await;
     if launch_profile.env_clear {
@@ -719,11 +733,11 @@ pub(crate) async fn provision_session(
             .map_err(|e| AppError::bad_request(e.to_string()))?;
         extra_env = cleared_environment(extra_env, &allowlist);
     }
-    // Run the launching user's git/gh as themselves: overlay their personal
-    // GitHub token as GH_TOKEN (design §6.3, "Level B"). See
-    // `apply_user_github_token` for the precedence rules. This happens before
-    // the preflight below so the guard and the eventual launch inspect the same
-    // environment vector.
+    // Select the launching user's GitHub credential by overlaying it as
+    // GH_TOKEN (design §6.3, "Level B"). See `apply_user_github_token` for the
+    // precedence rules. This happens before preflight. Ordinary sessions export
+    // it; a restricted ACP launch removes it from the adapter environment and
+    // the server-side GitHub tool resolves the same user's token on demand.
     apply_user_github_token(&st.db, &mut extra_env, created_by.as_deref()).await;
 
     // Normalize and validate the model / effort selections through the resolved
@@ -999,6 +1013,9 @@ pub(crate) async fn provision_session(
         ambient_allowlist: launch_profile.ambient_allowlist.clone(),
         idle_archive_secs: Some(launch_profile.idle_archive_secs.unwrap_or(inherited_idle)),
         turn_budget: launch_profile.turn_budget.unwrap_or(inherited_turn_budget),
+        prelude: launch_profile.prelude.clone(),
+        restricted: launch_profile.restricted,
+        allowed_tools: launch_profile.allowed_tools.clone(),
         creator_kind: creator_kind.to_string(),
         creator_subject,
         parent_session_id,
@@ -1044,26 +1061,20 @@ pub(crate) async fn provision_session(
     // Goal, scratch, and tracking context ride in as the positional prompt that
     // seeds the session's first turn.
     let goal_file = {
-        let mut prompt_parts: Vec<String> = Vec::new();
-        if !goal.is_empty() {
-            // A hookless runtime (Codex, custom) never receives the WEAVER.md
-            // primer, so the launch prompt is its entire orientation — those
-            // still get the goal pasted. Hook-capable agents get a pointer
-            // instead: the goal lives once, as the `goal` artifact.
-            let hookless = !agent::metadata_for(&st.db, &runtime)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|m| m.supports_hooks);
-            if hookless {
-                prompt_parts.push(goal.clone());
-            }
-            prompt_parts.push(entrance_note(&title, tracking_issue));
-        }
-        if let Some(note) = scratch_note(&scratch_names) {
-            prompt_parts.push(note);
-        }
-        let launch_prompt = prompt_parts.join("\n\n");
+        let supports_hooks = agent::metadata_for(&st.db, &runtime)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|metadata| metadata.supports_hooks);
+        let scratch = scratch_note(&scratch_names);
+        let entrance = entrance_note(&title, tracking_issue);
+        let launch_prompt = build_launch_prompt(
+            &goal,
+            &launch_profile.prelude,
+            supports_hooks,
+            &entrance,
+            scratch.as_deref(),
+        );
         if launch_prompt.is_empty() {
             None
         } else {
@@ -1112,7 +1123,7 @@ pub(crate) async fn provision_session(
     // script is never executed (recorded as skipped); a failed run leaves the
     // session in a visible error state instead of launching a half-provisioned
     // worktree.
-    if let Some(script) = repo_cfg.setup.script() {
+    if let Some(script) = repo_setup_for_profile(&repo_cfg, launch_profile.restricted) {
         tracing::debug!(branch = %branch.id, repo = %repo_root.display(), "repo declares a [setup] script");
         if repo::is_allowlisted(&st.db, &repo_root)
             .await
@@ -1247,6 +1258,7 @@ pub(crate) async fn provision_session(
         let launch = agent::build_acp_launch(
             &st.db,
             &agent::AcpLaunchSpec {
+                session_id: &session.id,
                 branch_id: &branch.id,
                 runtime: &runtime,
                 work_dir: &work_dir,
@@ -1258,6 +1270,9 @@ pub(crate) async fn provision_session(
                 extra_env: &extra_env,
                 env_clear: launch_profile.env_clear,
                 mode: &mode,
+                prelude: &launch_profile.prelude,
+                restricted: launch_profile.restricted,
+                allowed_tools: &launch_profile.allowed_tools,
                 custom: custom.as_ref(),
             },
             agent::AcpOpen::Fresh,
@@ -1335,6 +1350,7 @@ pub(crate) async fn provision_session(
                 term_session: &term_session,
                 goal_file: goal_file.as_deref(),
                 primer_file: None,
+                prelude: &launch_profile.prelude,
                 server_addr: &st.addr,
                 model: &model,
                 effort: &effort,
@@ -1406,6 +1422,31 @@ fn entrance_note(title: &str, tracking_issue: Option<i64>) -> String {
         ));
     }
     note
+}
+
+/// Construct the positional first prompt from the stamped prelude policy.
+/// `none` deliberately makes the caller's goal the whole orientation; the
+/// normal Weaver profile keeps the established hook-capable/hookless split.
+fn build_launch_prompt(
+    goal: &str,
+    prelude: &str,
+    supports_hooks: bool,
+    entrance: &str,
+    scratch: Option<&str>,
+) -> String {
+    let mut parts = Vec::new();
+    if !goal.is_empty() {
+        if prelude == "none" || !supports_hooks {
+            parts.push(goal);
+        }
+        if prelude == "weaver" {
+            parts.push(entrance);
+        }
+    }
+    if let Some(scratch) = scratch {
+        parts.push(scratch);
+    }
+    parts.join("\n\n")
 }
 
 /// Open (or adopt) the tracking issue for a freshly-launched session: the one
@@ -1962,6 +2003,7 @@ pub(crate) async fn create_warm_session(
         &repo_cfg,
         &launch_profile.name,
         launch_profile.strict,
+        launch_profile.restricted,
     )
     .await;
     if launch_profile.env_clear {
@@ -2004,6 +2046,9 @@ pub(crate) async fn create_warm_session(
             ambient_allowlist: launch_profile.ambient_allowlist.clone(),
             idle_archive_secs: Some(launch_profile.idle_archive_secs.unwrap_or(inherited_idle)),
             turn_budget: launch_profile.turn_budget.unwrap_or(inherited_turn_budget),
+            prelude: launch_profile.prelude.clone(),
+            restricted: launch_profile.restricted,
+            allowed_tools: launch_profile.allowed_tools.clone(),
             creator_kind: "system".to_string(),
             creator_subject: format!("watch:{}", watch.id),
             parent_session_id: None,
@@ -2024,6 +2069,7 @@ pub(crate) async fn create_warm_session(
             term_session: &term_session,
             goal_file: goal_file.as_deref(),
             primer_file: None,
+            prelude: &launch_profile.prelude,
             server_addr: &st.addr,
             model: &watch.model,
             effort: &watch.effort,
@@ -2140,10 +2186,12 @@ async fn adopt_terminal_into_acp(
     let mut extra_env = resume_environment(&st.db, session, &repo_root, &repo_cfg).await;
     rotate_session_token(&st.db, session, &mut extra_env).await?;
     let run_dir = db::run_dir(&session.id);
-    let primer_file = {
-        let f = run_dir.join("primer.txt");
-        f.exists().then_some(f)
-    };
+    let primer_file = (session.policy_prelude == "weaver")
+        .then(|| {
+            let f = run_dir.join("primer.txt");
+            f.exists().then_some(f)
+        })
+        .flatten();
     let goal_file = {
         let f = run_dir.join("goal.txt");
         f.exists().then_some(f)
@@ -2170,6 +2218,7 @@ async fn adopt_terminal_into_acp(
     let launch = agent::build_acp_launch(
         &st.db,
         &agent::AcpLaunchSpec {
+            session_id: &session.id,
             branch_id: &branch.id,
             runtime,
             work_dir: &work_dir,
@@ -2182,6 +2231,9 @@ async fn adopt_terminal_into_acp(
             env_clear: session.policy_env_clear,
             // Terminal rows carry no mode; on adoption they take the acp default.
             mode: agent::DEFAULT_ACP_MODE,
+            prelude: &session.policy_prelude,
+            restricted: session.policy_restricted,
+            allowed_tools: &session.policy_allowed_tools,
             custom: None,
         },
         open,
@@ -2266,6 +2318,7 @@ async fn adopt_acp(
         let launch = agent::build_acp_launch(
             &st.db,
             &agent::AcpLaunchSpec {
+                session_id: &session.id,
                 branch_id: &branch.id,
                 runtime: &runtime,
                 work_dir: &work_dir,
@@ -2277,6 +2330,9 @@ async fn adopt_acp(
                 extra_env: &extra_env,
                 env_clear: session.policy_env_clear,
                 mode: &mode,
+                prelude: &session.policy_prelude,
+                restricted: session.policy_restricted,
+                allowed_tools: &session.policy_allowed_tools,
                 custom: custom.as_ref(),
             },
             open,
@@ -2314,10 +2370,12 @@ async fn resume_prompt_files(
     branch: &Branch,
 ) -> (Option<PathBuf>, Option<PathBuf>) {
     let run_dir = db::run_dir(&session.id);
-    let primer_file = {
-        let f = run_dir.join("primer.txt");
-        f.exists().then_some(f)
-    };
+    let primer_file = (session.policy_prelude == "weaver")
+        .then(|| {
+            let f = run_dir.join("primer.txt");
+            f.exists().then_some(f)
+        })
+        .flatten();
     let goal_file = {
         let f = run_dir.join("goal.txt");
         if f.exists() {
@@ -2373,6 +2431,7 @@ async fn resume_agent(
             term_session: &session.term_session,
             goal_file: goal_file.as_deref(),
             primer_file: primer_file.as_deref(),
+            prelude: &session.policy_prelude,
             server_addr: &st.addr,
             model: &session.model,
             effort: &session.effort,
@@ -2796,6 +2855,12 @@ pub(super) async fn handoff_session(
 ) -> ApiResult<Json<SessionView>> {
     let (session, branch) = require_session(&st.db, &key).await?;
     require_acp(&session)?;
+    if session.policy_restricted {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "restricted sessions cannot change agent runtime",
+        ));
+    }
     if !matches!(session.status.as_str(), "running" | "orphaned" | "error") {
         return Err(AppError::conflict(format!(
             "session '{}' is {}, not handoff-capable",
@@ -2859,6 +2924,7 @@ pub(super) async fn handoff_session(
     let launch = agent::build_acp_launch(
         &st.db,
         &agent::AcpLaunchSpec {
+            session_id: &session.id,
             branch_id: &branch.id,
             runtime: &runtime,
             work_dir: &work_dir,
@@ -2870,6 +2936,9 @@ pub(super) async fn handoff_session(
             extra_env: &extra_env,
             env_clear: session.policy_env_clear,
             mode: &mode,
+            prelude: &session.policy_prelude,
+            restricted: session.policy_restricted,
+            allowed_tools: &session.policy_allowed_tools,
             custom: custom.as_ref(),
         },
         agent::AcpOpen::Fresh,
@@ -3290,6 +3359,12 @@ pub(super) async fn set_mode(
 ) -> ApiResult<Json<Value>> {
     let (session, branch) = require_session(&st.db, &key).await?;
     require_acp(&session)?;
+    if session.policy_restricted && req.mode_id != "default" {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "restricted sessions cannot change permission mode",
+        ));
+    }
     let handle = require_acp_task(&st, &session)?;
     let by = author_or_manual(req.by.as_deref());
     handle
@@ -3362,6 +3437,40 @@ mod tests {
             env.iter().any(|(k, v)| k == "GH_TOKEN" && v == "ghp_alice"),
             "the launching user's token is exported as GH_TOKEN"
         );
+    }
+
+    #[tokio::test]
+    async fn restricted_environment_uses_only_profile_values() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        crate::profile::env_set(&db, "github_comment", "GH_TOKEN", "profile-token")
+            .await
+            .unwrap();
+        crate::repo_env::set(&db, &repo.display().to_string(), "REPO_SECRET", "leak")
+            .await
+            .unwrap();
+        let mut cfg = weaver_core::repo_config::RepoConfig::default();
+        cfg.env
+            .insert("COMMITTED_SECRET".to_string(), "leak".to_string());
+
+        let env = launch_env_for_profile(&db, repo, &cfg, "github_comment", true, true).await;
+
+        assert_eq!(
+            env,
+            vec![("GH_TOKEN".to_string(), "profile-token".to_string())]
+        );
+    }
+
+    #[test]
+    fn restricted_profile_ignores_repository_setup() {
+        let mut cfg = weaver_core::repo_config::RepoConfig::default();
+        cfg.setup.script = Some("touch should-not-run".to_string());
+        assert_eq!(
+            repo_setup_for_profile(&cfg, false).as_deref(),
+            Some("touch should-not-run")
+        );
+        assert!(repo_setup_for_profile(&cfg, true).is_none());
     }
 
     #[tokio::test]
@@ -3602,5 +3711,22 @@ mod tests {
         let untracked = entrance_note("Poke around", None);
         assert!(untracked.contains("weaver summary"));
         assert!(!untracked.contains("issue"));
+    }
+
+    #[test]
+    fn restricted_prelude_delivers_the_caller_goal_without_weaver_orientation() {
+        let goal = "Rewrite only the issue body.\nBody hash: abc123";
+        assert_eq!(
+            build_launch_prompt(goal, "none", true, "run weaver summary", None),
+            goal
+        );
+        assert_eq!(
+            build_launch_prompt(goal, "weaver", true, "run weaver summary", None),
+            "run weaver summary"
+        );
+        assert_eq!(
+            build_launch_prompt(goal, "weaver", false, "run weaver summary", None),
+            format!("{goal}\n\nrun weaver summary")
+        );
     }
 }

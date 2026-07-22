@@ -26,6 +26,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Internal stdio MCP bridge used by restricted GitHub sessions.
+    #[command(hide = true)]
+    RestrictedGithubMcp,
     /// Manage the loom server daemon: run, start, stop, restart, status.
     ///
     /// `loom server run` runs the server in the foreground (REST API + Vue UI +
@@ -621,7 +624,7 @@ enum DeploymentCmd {
 #[derive(Subcommand)]
 enum ProfileCmd {
     /// Add a named launch profile.
-    Add(ProfileAddOpts),
+    Add(Box<ProfileAddOpts>),
     /// List profiles (secret values are never returned).
     Ls,
     /// Show one profile.
@@ -664,6 +667,15 @@ struct ProfileAddOpts {
     max_concurrent: i64,
     #[arg(long)]
     turn_budget: Option<i64>,
+    /// Prelude injected before the task: `weaver` or `none`.
+    #[arg(long, default_value = "weaver")]
+    prelude: String,
+    /// Apply Loom's restricted automation security posture.
+    #[arg(long)]
+    restricted: bool,
+    /// Claude SDK tool rules allowed without an interactive approval.
+    #[arg(long, value_delimiter = ',')]
+    allowed_tool: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -809,6 +821,7 @@ async fn main() {
 async fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::RestrictedGithubMcp => loom::restricted_mcp::serve_github().await,
         Cmd::Server { cmd } => run_server(cmd).await,
         Cmd::Session { cmd } => run_session(cmd).await,
         Cmd::Issue { cmd } => run_issue(cmd).await,
@@ -1060,6 +1073,9 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
                     idle_archive_secs: opts.idle_archive_secs,
                     max_concurrent: opts.max_concurrent,
                     turn_budget: opts.turn_budget,
+                    prelude: opts.prelude,
+                    restricted: opts.restricted,
+                    allowed_tools: opts.allowed_tool,
                 })
                 .await?;
             println!(

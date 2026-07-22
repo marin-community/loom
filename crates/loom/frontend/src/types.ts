@@ -828,6 +828,9 @@ export interface Profile {
   idle_archive_secs: number | null;
   max_concurrent: number;
   turn_budget: number | null;
+  prelude: 'weaver' | 'none';
+  restricted: boolean;
+  allowed_tools: string[];
   revision: number;
   created_at: string;
   updated_at: string;

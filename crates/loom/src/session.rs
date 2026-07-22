@@ -107,6 +107,9 @@ pub struct Session {
     pub policy_ambient_allowlist: String,
     pub policy_idle_archive_secs: Option<i64>,
     pub policy_turn_budget: i64,
+    pub policy_prelude: String,
+    pub policy_restricted: bool,
+    pub policy_allowed_tools: String,
     /// Stable creator identity. `created_by` remains display attribution only.
     pub creator_kind: String,
     pub creator_subject: String,
@@ -188,6 +191,9 @@ pub struct SessionLaunchPolicy {
     pub ambient_allowlist: String,
     pub idle_archive_secs: Option<i64>,
     pub turn_budget: i64,
+    pub prelude: String,
+    pub restricted: bool,
+    pub allowed_tools: String,
     pub creator_kind: String,
     pub creator_subject: String,
     pub parent_session_id: Option<String>,
@@ -213,6 +219,9 @@ impl SessionLaunchPolicy {
             ambient_allowlist: "[]".to_string(),
             idle_archive_secs: None,
             turn_budget: 0,
+            prelude: "weaver".to_string(),
+            restricted: false,
+            allowed_tools: "[]".to_string(),
             creator_kind: creator_kind.to_string(),
             creator_subject: s.created_by.clone().unwrap_or_else(|| s.origin.clone()),
             parent_session_id: None,
@@ -243,9 +252,10 @@ pub async fn insert_with_policy(
           origin, class, tracking_issue_id, last_activity_at, created_at,
           profile, launch_mode, profile_revision, policy_env_clear,
           policy_ambient_allowlist, policy_idle_archive_secs, policy_turn_budget,
+          policy_prelude, policy_restricted, policy_allowed_tools,
           creator_kind, creator_subject, parent_session_id, automation_run_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&s.id)
     .bind(&s.branch_id)
@@ -272,6 +282,9 @@ pub async fn insert_with_policy(
     .bind(&policy.ambient_allowlist)
     .bind(policy.idle_archive_secs)
     .bind(policy.turn_budget)
+    .bind(&policy.prelude)
+    .bind(policy.restricted)
+    .bind(&policy.allowed_tools)
     .bind(&policy.creator_kind)
     .bind(&policy.creator_subject)
     .bind(&policy.parent_session_id)

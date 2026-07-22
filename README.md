@@ -370,16 +370,26 @@ sqlite with `loom config set` (no running server needed):
 weaver config ls
 loom profile ls
 loom profile show default
-loom profile add restricted --agent codex --strict --env-clear
-loom profile env set restricted GH_TOKEN '<token>'
+loom profile show github_comment
+loom profile env secret github_comment GH_TOKEN \
+  projects/my-project/secrets/loom-github-ci-token/versions/latest
 ```
 
 Notable settings:
 
 - Profiles select the agent, model, effort, protocol, ACP mode, session class,
-  concurrency/turn/idle limits, and environment posture. `strict` profiles
-  reject launch-time overrides; `env_clear` profiles start from a minimal
-  baseline plus their explicit ambient allowlist and layered profile/repo env.
+  concurrency/turn/idle limits, prelude, and environment posture. `strict`
+  profiles reject launch-time overrides; `env_clear` profiles start from a
+  minimal baseline plus their explicit ambient allowlist and layered
+  profile/repo env.
+- Restricted profiles are Claude ACP automation envelopes for caller-supplied
+  prompts. They suppress the Weaver prelude and repository setup/config, clear
+  Claude setting sources, expose repository-scoped read tools plus fixed
+  server-side GitHub tools, and have Loom reject every unmatched permission
+  request. The GitHub credential never enters the agent process. The stock
+  `github_comment` profile is ready for GitHub-originated editorial/comment
+  tasks after an operator adds its write-only `GH_TOKEN` environment value. See
+  [Restricted GitHub sessions](docs/restricted-sessions.md).
 - Profile environment values are write-only: API, CLI, and Settings responses
   expose names and update times, never secret values.
 - `server.auto_adopt` — adopt every recoverable session on daemon startup.
