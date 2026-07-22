@@ -6,7 +6,7 @@
 #
 # `loom.toml` is not read directly by anything else — run
 # `loom config render-env` to turn it into `deploy/standalone/.env`, the file
-# docker compose (and a GCP deploy's Secret Manager push) actually consumes.
+# docker compose and other deployment tooling consume.
 # Re-run it after any edit here; the generated `.env` is not meant to be
 # hand-edited.
 

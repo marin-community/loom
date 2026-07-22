@@ -1,8 +1,0 @@
-[Unit]
-Description=Back up loom's SQLite database to GCS
-After=docker.service google-startup-scripts.service
-Wants=docker.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/loom-backup-sqlite

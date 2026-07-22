@@ -6,8 +6,7 @@ a TLS front-door in front of it is the choice this directory captures.
 | Path | Front-door | Use it when |
 |---|---|---|
 | **[`standalone/`](standalone/)** | **bundled** (Caddy, automatic HTTPS) | You want one self-contained, internet-facing host. **Start here.** |
-| [`pulumi/`](pulumi/) | bundled (runs `standalone/` unmodified) | You want a production single-VM GCP deployment described as IaC, with snapshots, backups, DNS, and keyless image publishing. |
-| [`gcp/`](gcp/) | bundled (runs `standalone/` unmodified) | Legacy imperative provisioning for an existing GCE install; migrate it to Pulumi. |
+| production | — | Deployment policy belongs in the operator's infrastructure repository. `loom.oa.dev` is managed by [`marin-community/marin/infra/loom`](https://github.com/marin-community/marin/tree/main/infra/loom). |
 | cloud / cluster | — | Future work — see [below](#future-cloud--cluster). |
 
 The rest of this README documents the **standalone** stack. It exposes loom to
@@ -65,8 +64,7 @@ docker compose logs -f caddy   # watch the certificate get issued
 
 Then open `https://<LOOM_DOMAIN>` and [log in](#first-run-login).
 
-Or let [`run.py`](standalone/run.py) do the render + `up` in one step — the
-local/self-hosted counterpart to [`gcp/bootstrap.py`](gcp/bootstrap.py):
+Or let [`run.py`](standalone/run.py) do the render + `up` in one step:
 
 ```sh
 deploy/standalone/run.py            # render .env from loom.toml, then compose up
@@ -110,7 +108,7 @@ and why; you don't hand-edit `.env` itself.
 | `LOOM_TLS_EMAIL` | no | ACME contact for cert-expiry notices; only used if you uncomment the global block in the Caddyfile. |
 | `HOST_UID` / `HOST_GID` | no (1000) | uid:gid the image runs as — matters only if you bind-mount a host dir. |
 | `LOOM_IMAGE` | no | Override the image tag (defaults to the locally-built `loom:latest`). |
-| `DOCKER_GID` | no (999) | Host `docker` group gid the loom container joins to reach the bind-mounted Docker socket for in-session `docker build` (see [Agent runtime](#agent-runtime--client-packages)). `run.py` and the GCP startup-script derive it from the host automatically; set it by hand only for a manual `docker compose up` on a host whose docker gid isn't the 999 default. |
+| `DOCKER_GID` | no (999) | Host `docker` group gid the loom container joins to reach the bind-mounted Docker socket for in-session `docker build` (see [Agent runtime](#agent-runtime--client-packages)). `run.py` derives it from the host automatically; set it by hand only for a manual `docker compose up` on a host whose docker gid isn't the 999 default. |
 
 Every one of these is an ordinary `loom.toml` field (`tls_email`, `host_uid`,
 `host_gid`, `image`, alongside the credential fields above) — there's no
@@ -164,7 +162,7 @@ journals before serving requests. Session containers join the `loom_default`
 network so their scoped `WEAVER_API` callbacks resolve the replacement control
 service by its stable Compose name.
 
-The first update that enables DockerRunner is a one-time cutover: supervisors
+The first update that enables `ContainerRunner` is a one-time cutover: supervisors
 created by an older Loom still live inside the control container and stop when
 it is replaced. Inventory those sessions before the cutover and adopt any
 recoverable session afterward with `loom session adopt <branch>`.
@@ -265,10 +263,15 @@ loom config render-env
 done, skip straight to step 2 below.
 
 `loom.toml` is a complete, self-sufficient handoff — every credential plus
-`LOOM_DOMAIN` and `LOOM_OWNER_GITHUB` — for any deploy that consumes it:
-`loom config render-env` produces this stack's `.env` directly, and
-`loom config push-secrets --backend gcp --project <id>` hands the secret
-fields to a fresh [GCP deploy](gcp/README.md)'s Secret Manager.
+`LOOM_DOMAIN` and `LOOM_OWNER_GITHUB` — for any deploy that consumes it.
+`loom config render-env` produces this stack's `.env` directly.
+`loom config push-secrets --backend gcp --project <id>` is available only for
+operator-owned deployments that consume per-field secrets.
+
+Production `loom.oa.dev` instead uploads the rendered environment as one
+versioned `LOOM_DOTENV` Secret Manager payload, records its exact numeric
+version in Pulumi, and follows the
+[Marin deployment runbook](https://github.com/marin-community/marin/tree/main/infra/loom).
 
 To register by hand instead:
 
@@ -412,10 +415,9 @@ The agent tooling the image ships splits by how it updates:
   plus the buildx/compose plugins), and the `loom` container bind-mounts the
   host's `/var/run/docker.sock` — so a session's `docker build`/`docker compose`
   runs against the *host* daemon, reusing its layer cache and writing images to
-  the host data-root (the persistent data disk on the GCP deploy), not into the
-  container. The non-root app user reaches the socket by joining the host
-  `docker` group via `DOCKER_GID`, which `run.py` and the GCP startup-script
-  derive from the host for you. Note the socket-share tradeoff in
+  the host data-root, not into the container. The non-root app user reaches the
+  socket by joining the host `docker` group via `DOCKER_GID`, which `run.py`
+  derives from the host for you. Note the socket-share tradeoff in
   [Security posture](#security-posture): it is the same daemon that runs this
   stack. `docker build` and `docker run` with in-container paths work; a
   `docker run -v <worktree-path>:…` bind mount does **not**, because that path

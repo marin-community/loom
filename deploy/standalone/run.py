@@ -3,8 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["click>=8.1"]
 # ///
-"""Bring the standalone loom stack up with one command — the local/self-hosted
-counterpart to gcp/bootstrap.py (which provisions a VM to run this same stack).
+"""Bring the standalone Loom Compose stack up with one command.
 
 It does the two manual steps for you: render deploy/standalone/.env from your
 loom.toml, then `docker compose up -d --build` here. With --local it targets
@@ -67,7 +66,7 @@ def docker_gid() -> str | None:
     it (compose `group_add`) and reach the bind-mounted Docker socket for
     `docker build`. None when there's no such group (e.g. Docker Desktop on
     macOS, where the socket isn't group-owned anyway) — the compose file's 999
-    fallback then applies. Keep in sync with gcp/startup-script.sh's derivation."""
+    fallback then applies."""
     try:
         import grp
 

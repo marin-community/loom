@@ -1,4 +1,4 @@
-//! Manual DockerRunner lifecycle test.
+//! Manual container-runner lifecycle test.
 //!
 //! Build the test image with `HOST_UID=$(id -u)` and `HOST_GID=$(id -g)`, then
 //! run `cargo test -p loom --test docker_runner -- --ignored`. The regular suite

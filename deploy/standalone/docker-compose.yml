@@ -70,16 +70,16 @@ services:
     expose:
       - "7878" # internal to the compose network only — never published
     ports:
-      # Loopback-only scrape/debug path for the host's Ops Agent. Caddy remains
+      # Loopback-only scrape/debug path for host monitoring. Caddy remains
       # the sole public listener and explicitly blocks `/metrics`.
       - "127.0.0.1:7878:7878"
     # Docker-out-of-Docker: a session's `docker build`/`docker compose` talks to
     # the HOST's Docker daemon over its bind-mounted socket (volumes, below), so
     # builds run on the host — reusing its layer cache and writing images/layers
-    # to the host data-root (the persistent data disk on the GCP deploy), not into
+    # to the host data root, not into
     # the container. The non-root app user reaches the root-owned socket by joining
-    # the host `docker` group via its numeric gid: startup-script.sh derives it on
-    # the GCP VM and run.py on a standalone host (both append DOCKER_GID to .env);
+    # the host `docker` group via its numeric gid: run.py derives it and appends
+    # DOCKER_GID to .env;
     # the 999 fallback is the usual Debian docker gid for a hand-run `compose up`.
     # SECURITY: this is the SAME daemon that runs this stack, so a session's docker
     # commands can see and mutate loom's own containers/volumes (the DB included) —

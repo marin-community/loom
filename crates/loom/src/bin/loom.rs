@@ -155,8 +155,7 @@ enum Cmd {
     /// no server required.
     ///
     /// `loom.toml` is the single authored source of truth for every
-    /// credential/setting — the shared contract a deploy (e.g. the GCP
-    /// scripts under `deploy/gcp`) builds against:
+    /// credential/setting — the shared contract deployment tooling consumes:
     ///
     ///     loom config render-env                # -> deploy/standalone/.env
     ///     loom config secret-names               # the secret fields' ENV_NAMEs
@@ -491,7 +490,7 @@ struct ConfigPathOpts {
 }
 
 /// Subcommands under `loom config` — the typed `loom.toml` and everything
-/// rendered/pushed from it. The contract a deploy (e.g. `deploy/gcp`) builds
+/// rendered/pushed from it. The contract deployment tooling builds
 /// against — see [`Cmd::Config`]. `render-env` and `push-secrets` resolve
 /// every field from `loom.toml` *or* a same-named env var (env wins) — set
 /// one to override a single invocation without editing the file.
@@ -1926,7 +1925,7 @@ fn prompt_secret(name: &str, already_set: bool) -> Result<Option<String>> {
 
 // ---------------------------------------------------------------------------
 // `loom config` — the typed loom.toml, and everything derived from it. The
-// shared contract a deploy (e.g. deploy/gcp) builds against; see `Cmd::Config`.
+// shared contract deployment tooling builds against; see `Cmd::Config`.
 // ---------------------------------------------------------------------------
 
 async fn run_config(cmd: ConfigCmd) -> Result<()> {

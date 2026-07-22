@@ -147,19 +147,10 @@ through the environment, or in `loom.toml` (see
 [`loom.toml.example`](../loom.toml.example)) and run `loom config render-env`
 to fold them into the deploy's `.env`.
 
-On the GCP deploy, the tokens travel the same handoff as every other
-credential: put them in `loom.toml` and push with
-
-```sh
-PROJECT=hai-gcp-models deploy/gcp/secrets.py
-```
-
-which re-renders the single `LOOM_DOTENV` blob the VM's startup script
-fetches on boot (see [`deploy/gcp/README.md` "Credential
-handoff"](../deploy/gcp/README.md#credential-handoff)). Don't push a Slack
-token as its own standalone Secret Manager secret — the startup script only
-ever reads `LOOM_DOTENV`, so a separately-stored secret is simply never
-fetched.
+For `loom.oa.dev`, the tokens travel with every other credential in the
+versioned `LOOM_DOTENV` payload managed by the
+[Marin `infra/loom` runbook](https://github.com/marin-community/marin/tree/main/infra/loom).
+Do not create standalone Slack-token secrets that the deployment never reads.
 
 `slack.enabled` (default on) closes the socket without discarding the tokens
 — use it to pause the integration without losing configuration. It, along

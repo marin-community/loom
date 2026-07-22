@@ -17,12 +17,6 @@ python/weaver-loom/dist/
 __pycache__/
 python/weaver-loom/.venv/
 python/weaver-loom/uv.lock
-deploy/pulumi/.venv/
-
-# Local Pulumi stack files contain encrypted secret material and deployment-
-# specific config. The checked-in example is documentation, not a live stack.
-deploy/pulumi/Pulumi.*.yaml
-!deploy/pulumi/Pulumi.example.yaml
 
 # Local-only container env, rendered from loom.toml by `loom config render-env`
 # (deploy/standalone/.env — holds GH_TOKEN etc.). Never commit it: host secrets.
@@ -31,7 +25,3 @@ deploy/pulumi/Pulumi.*.yaml
 # `loom setup`'s authored config — every credential in plaintext TOML. Never
 # commit it; `loom.toml.example` (tracked) documents the shape.
 loom.toml
-
-# bootstrap.py's remembered GCP deploy knobs (project id, region, machine type,
-# ...). Not secret, but project-specific, so it stays out of the repo.
-deploy/gcp/deploy.toml
