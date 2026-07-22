@@ -76,6 +76,40 @@ The protected address, data disk, secret, and backup bucket make an accidental
 during an explicitly planned teardown. The boot disk is disposable; the
 separately attached data disk is retained when the VM is replaced.
 
+## Actions automation bring-up
+
+Use one canonical public URL with no trailing slash. It is both the API base
+and the exact OIDC audience, so `https://loom.example.com` and
+`https://loom.example.com/` are intentionally different and the latter is
+rejected by the workflow.
+
+Create a strict, environment-cleared profile and then bind the exact workflow
+identity to it:
+
+```sh
+export LOOM_URL=https://loom.example.com
+loom profile add github-actions \
+  --agent codex --class automation --strict --env-clear \
+  --mode auto --max-concurrent 2 --turn-budget 100 --idle-archive-secs 28800
+loom profile env set github-actions GH_TOKEN '<fine-grained token>'
+
+repo=rjpower/weaver
+repo_id=$(gh api "repos/$repo" --jq .id)
+loom federation add \
+  --audience "$LOOM_URL" \
+  --repository-id "$repo_id" \
+  --workflow-ref "$repo/.github/workflows/loom-issue.yml@refs/heads/main" \
+  --event issues --ref refs/heads/main --profile github-actions
+```
+
+Set repository variable `LOOM_URL` to that same value and, if the profile is
+not named `github-actions`, set `LOOM_PROFILE`. The opt-in
+[`loom-issue.yml`](../../.github/workflows/loom-issue.yml) workflow then starts
+one retry-safe run when the `loom` label is added to an issue. It requests only
+`contents: read` and `id-token: write`; no long-lived Loom credential is stored
+in GitHub. Run `loom federation ls` to audit mappings and `loom profile show
+github-actions` to verify that secret values remain withheld.
+
 ## Backups
 
 Two independent recovery mechanisms are installed:
@@ -137,6 +171,7 @@ GitHub repository variables from `pulumi stack output`:
 | `LOOM_GCP_REGION` | stack region |
 | `LOOM_GCP_WIF_PROVIDER` | `githubWorkloadIdentityProvider` output |
 | `LOOM_GCP_IMAGE_SERVICE_ACCOUNT` | `githubServiceAccount` output |
+| `LOOM_URL` | canonical public URL, with no trailing slash |
 
 On pushes to `main`, [the image workflow](../../.github/workflows/image.yml)
 uses GitHub OIDC—no JSON key—to publish an immutable commit-SHA tag. The

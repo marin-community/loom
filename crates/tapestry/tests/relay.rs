@@ -34,6 +34,7 @@ impl Relay {
             cwd: std::env::temp_dir(),
             script: script.to_string(),
             env: vec![],
+            env_clear: false,
             cols: 80,
             rows: 24,
             mode: Mode::Relay,
@@ -145,6 +146,45 @@ async fn write_then_subscribe_yields_the_frame() {
     assert_eq!(next_frame(&mut sub).await, (1, b"got:hello".to_vec()));
 
     r.kill().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn relay_env_clear_blocks_ambient_values() {
+    let home = TempDir::new().unwrap();
+    std::env::set_var("WEAVER_HOME", home.path());
+    std::env::set_var("TAPESTRY_RELAY_SECRET", "must-not-leak");
+    let name = format!("tap-relay-{}-env-clear", std::process::id());
+    let cfg = SupervisorConfig {
+        name: name.clone(),
+        cwd: std::env::temp_dir(),
+        script: "echo ${TAPESTRY_RELAY_SECRET-unset}:$TAPESTRY_EXPLICIT; sleep 30".to_string(),
+        env: vec![("TAPESTRY_EXPLICIT".to_string(), "kept".to_string())],
+        env_clear: true,
+        cols: 80,
+        rows: 24,
+        mode: Mode::Relay,
+        segment_max_bytes: None,
+    };
+    tokio::spawn(async move {
+        let _ = tapestry::supervise(cfg).await;
+    });
+    for _ in 0..200 {
+        if Client::connect(&name).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut sub = Client::connect(&name)
+        .await
+        .unwrap()
+        .subscribe(0)
+        .await
+        .unwrap();
+    let (_, payload) = next_frame(&mut sub).await;
+    std::env::remove_var("TAPESTRY_RELAY_SECRET");
+    assert_eq!(payload, b"unset:kept");
+    let _ = Client::connect(&name).await.unwrap().kill().await;
 }
 
 /// Frames written with no subscriber are spooled and replay in order on a later

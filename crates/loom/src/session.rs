@@ -99,6 +99,20 @@ pub struct Session {
     /// The weaver issue opened (or claimed) as this session's tracker at
     /// launch, or `None` when the launch tracked nothing.
     pub tracking_issue_id: Option<i64>,
+    /// Named launch profile and its resolved non-secret policy snapshot.
+    pub profile: String,
+    pub launch_mode: String,
+    pub profile_revision: i64,
+    pub policy_env_clear: bool,
+    pub policy_ambient_allowlist: String,
+    pub policy_idle_archive_secs: Option<i64>,
+    pub policy_turn_budget: i64,
+    /// Stable creator identity. `created_by` remains display attribution only.
+    pub creator_kind: String,
+    pub creator_subject: String,
+    /// Immutable session ancestry for authorization; branch ancestry remains UI.
+    pub parent_session_id: Option<String>,
+    pub automation_run_id: Option<String>,
 }
 
 fn default_protocol() -> String {
@@ -163,7 +177,59 @@ pub struct NewSession {
     pub tracking_issue_id: Option<i64>,
 }
 
+/// Resolved profile/security metadata stamped with a new session. Keeping this
+/// separate preserves the compact `NewSession` fixture surface while real
+/// runtime launches use [`insert_with_policy`].
+pub struct SessionLaunchPolicy {
+    pub profile: String,
+    pub launch_mode: String,
+    pub profile_revision: i64,
+    pub env_clear: bool,
+    pub ambient_allowlist: String,
+    pub idle_archive_secs: Option<i64>,
+    pub turn_budget: i64,
+    pub creator_kind: String,
+    pub creator_subject: String,
+    pub parent_session_id: Option<String>,
+    pub automation_run_id: Option<String>,
+}
+
+impl SessionLaunchPolicy {
+    fn compatible(s: &NewSession) -> Self {
+        let creator_kind = if s.origin == "agent" {
+            "session"
+        } else if matches!(s.origin.as_str(), "actions" | "ops") {
+            "automation"
+        } else if s.created_by.is_some() {
+            "user"
+        } else {
+            "system"
+        };
+        Self {
+            profile: crate::profile::DEFAULT_PROFILE.to_string(),
+            launch_mode: crate::agent::DEFAULT_ACP_MODE.to_string(),
+            profile_revision: 1,
+            env_clear: false,
+            ambient_allowlist: "[]".to_string(),
+            idle_archive_secs: None,
+            turn_budget: 0,
+            creator_kind: creator_kind.to_string(),
+            creator_subject: s.created_by.clone().unwrap_or_else(|| s.origin.clone()),
+            parent_session_id: None,
+            automation_run_id: None,
+        }
+    }
+}
+
 pub async fn insert(db: &Db, s: &NewSession) -> Result<Session> {
+    insert_with_policy(db, s, &SessionLaunchPolicy::compatible(s)).await
+}
+
+pub async fn insert_with_policy(
+    db: &Db,
+    s: &NewSession,
+    policy: &SessionLaunchPolicy,
+) -> Result<Session> {
     let now = now_iso();
     let protocol = if s.protocol.trim().is_empty() {
         "terminal"
@@ -174,8 +240,12 @@ pub async fn insert(db: &Db, s: &NewSession) -> Result<Session> {
         "INSERT INTO sessions
          (id, branch_id, work_dir, term_session, agent_kind, model, effort, status,
           github_repo, parent_branch_id, managed_by, created_by, protocol,
-          origin, class, tracking_issue_id, last_activity_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          origin, class, tracking_issue_id, last_activity_at, created_at,
+          profile, launch_mode, profile_revision, policy_env_clear,
+          policy_ambient_allowlist, policy_idle_archive_secs, policy_turn_budget,
+          creator_kind, creator_subject, parent_session_id, automation_run_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&s.id)
     .bind(&s.branch_id)
@@ -195,6 +265,17 @@ pub async fn insert(db: &Db, s: &NewSession) -> Result<Session> {
     .bind(s.tracking_issue_id)
     .bind(&now)
     .bind(&now)
+    .bind(&policy.profile)
+    .bind(&policy.launch_mode)
+    .bind(policy.profile_revision)
+    .bind(policy.env_clear)
+    .bind(&policy.ambient_allowlist)
+    .bind(policy.idle_archive_secs)
+    .bind(policy.turn_budget)
+    .bind(&policy.creator_kind)
+    .bind(&policy.creator_subject)
+    .bind(&policy.parent_session_id)
+    .bind(&policy.automation_run_id)
     .execute(db)
     .await?;
     tracing::info!(

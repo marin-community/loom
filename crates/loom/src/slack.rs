@@ -875,7 +875,8 @@ async fn launch(
         req.name = Some(branch_name.clone());
     }
 
-    let view = crate::web::sessions::create_session_core(state.clone(), req, None, "slack")
+    let actor = crate::runtime::Actor::producer("slack", "slack");
+    let view = crate::runtime::create_session(state.clone(), req, actor)
         .await
         .map_err(|e| anyhow!("{e:?}"))?;
 

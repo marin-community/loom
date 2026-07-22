@@ -28,6 +28,7 @@ impl Harness {
             cwd: std::env::temp_dir(),
             script: script.to_string(),
             env: vec![],
+            env_clear: false,
             cols: 80,
             rows: 24,
             mode: tapestry::Mode::Pty,
@@ -215,4 +216,32 @@ async fn dead_session_is_not_alive() {
     let home = TempDir::new().unwrap();
     std::env::set_var("WEAVER_HOME", home.path());
     assert!(!Client::is_alive("nonexistent-session").await);
+}
+
+#[tokio::test]
+#[serial]
+async fn env_clear_blocks_ambient_values_but_keeps_explicit_values() {
+    let home = TempDir::new().unwrap();
+    std::env::set_var("WEAVER_HOME", home.path());
+    std::env::set_var("TAPESTRY_AMBIENT_SECRET", "must-not-leak");
+    let name = format!("tap-test-{}-env-clear", std::process::id());
+    let cfg = SupervisorConfig {
+        name: name.clone(),
+        cwd: std::env::temp_dir(),
+        script: "echo ${TAPESTRY_AMBIENT_SECRET-unset}:$TAPESTRY_EXPLICIT; exec sleep 30"
+            .to_string(),
+        env: vec![("TAPESTRY_EXPLICIT".to_string(), "kept".to_string())],
+        env_clear: true,
+        cols: 80,
+        rows: 24,
+        mode: tapestry::Mode::Pty,
+        segment_max_bytes: None,
+    };
+    tokio::spawn(async move {
+        let _ = tapestry::supervise(cfg).await;
+    });
+    let screen = wait_for_screen(&name, "unset:kept").await;
+    std::env::remove_var("TAPESTRY_AMBIENT_SECRET");
+    assert!(!screen.contains("must-not-leak"));
+    let _ = Client::connect(&name).await.unwrap().kill().await;
 }

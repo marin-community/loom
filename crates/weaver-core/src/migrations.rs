@@ -92,10 +92,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
 
 /// weaver-core's own stream. Kept private: the tables it manages are this
 /// crate's to migrate, and callers only ever need [`run`].
-const STREAM: Stream = Stream {
-    indicator_table: "schema_migrations",
-    migrations: MIGRATIONS,
-};
+const STREAM: Stream = Stream::new("schema_migrations", MIGRATIONS);
 
 /// Apply every pending migration, bringing the database up to the latest schema.
 pub async fn run(pool: &Db) -> Result<()> {
@@ -116,13 +113,45 @@ pub async fn run(pool: &Db) -> Result<()> {
 pub struct Stream {
     /// The table recording applied versions, e.g. `schema_migrations`. Must be
     /// a trusted literal: it is interpolated into SQL, never bound.
-    pub indicator_table: &'static str,
+    indicator_table: &'static str,
     /// The ordered migration set. Versions are dense and strictly increasing;
     /// the runner applies any not yet recorded, in order.
-    pub migrations: &'static [(i64, &'static str, &'static str)],
+    migrations: &'static [(i64, &'static str, &'static str)],
 }
 
 impl Stream {
+    /// Construct a migration stream whose indicator table is a trusted SQL
+    /// identifier. The table name is interpolated into DDL because SQLite
+    /// cannot bind identifiers, so reject anything outside the portable
+    /// `[A-Za-z_][A-Za-z0-9_]*` shape at construction instead of exposing a
+    /// public string field future callers could fill from untrusted input.
+    pub const fn new(
+        indicator_table: &'static str,
+        migrations: &'static [(i64, &'static str, &'static str)],
+    ) -> Self {
+        let bytes = indicator_table.as_bytes();
+        assert!(
+            !bytes.is_empty(),
+            "migration indicator table must not be empty"
+        );
+        assert!(
+            bytes[0].is_ascii_alphabetic() || bytes[0] == b'_',
+            "migration indicator table must start with an ASCII letter or underscore"
+        );
+        let mut i = 1;
+        while i < bytes.len() {
+            assert!(
+                bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_',
+                "migration indicator table must be a portable SQL identifier"
+            );
+            i += 1;
+        }
+        Self {
+            indicator_table,
+            migrations,
+        }
+    }
+
     /// Does the indicator table exist yet?
     pub async fn indicator_exists(&self, pool: &Db) -> Result<bool> {
         let name: Option<String> =
@@ -447,14 +476,8 @@ mod tests {
             &[(1, "first", "CREATE TABLE first_owned (id INTEGER)")];
         const SECOND_MIGRATIONS: &[(i64, &str, &str)] =
             &[(1, "second", "CREATE TABLE second_owned (id INTEGER)")];
-        const FIRST: Stream = Stream {
-            indicator_table: "first_schema_migrations",
-            migrations: FIRST_MIGRATIONS,
-        };
-        const SECOND: Stream = Stream {
-            indicator_table: "second_schema_migrations",
-            migrations: SECOND_MIGRATIONS,
-        };
+        const FIRST: Stream = Stream::new("first_schema_migrations", FIRST_MIGRATIONS);
+        const SECOND: Stream = Stream::new("second_schema_migrations", SECOND_MIGRATIONS);
 
         let pool = empty_pool().await;
         FIRST.ensure_indicator(&pool).await.unwrap();
@@ -482,6 +505,23 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn stream_rejects_unsafe_indicator_identifiers() {
+        const NONE: &[(i64, &str, &str)] = &[];
+        for invalid in [
+            "",
+            "1schema",
+            "schema-migrations",
+            "schema migrations",
+            "x;",
+        ] {
+            let result = std::panic::catch_unwind(|| Stream::new(invalid, NONE));
+            assert!(result.is_err(), "accepted unsafe identifier {invalid:?}");
+        }
+        let stream = Stream::new("_loom_schema_2", NONE);
+        assert_eq!(stream.indicator_table, "_loom_schema_2");
     }
 
     /// A version already recorded — as if a concurrent runner claimed and applied

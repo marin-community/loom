@@ -110,54 +110,6 @@ pub struct SettingSpec {
 /// a new option appear in the settings pane.
 pub const REGISTRY: &[SettingSpec] = &[
     SettingSpec {
-        key: "agent.default",
-        label: "Default agent",
-        description: "Agent launched in each new session's terminal when `loom \
-            launch` is given no `--agent`.",
-        kind: SettingKind::String,
-        default: DEFAULT_AGENT,
-        group: "Agents",
-        options: &[],
-    },
-    SettingSpec {
-        key: "agent.model",
-        label: "Default model",
-        description: "Model selector used for new sessions when launch/create \
-            requests do not specify one.",
-        kind: SettingKind::String,
-        default: DEFAULT_AGENT_MODEL,
-        group: "Agents",
-        options: &[],
-    },
-    SettingSpec {
-        key: "agent.effort",
-        label: "Default effort",
-        description: "Reasoning effort used for new sessions when launch/create \
-            requests do not specify one.",
-        kind: SettingKind::String,
-        default: DEFAULT_AGENT_EFFORT,
-        group: "Agents",
-        options: &[],
-    },
-    SettingSpec {
-        key: "agent.mode",
-        label: "Default permissions",
-        description: "Permission posture used for new ACP sessions and agent \
-            handoffs when the request does not specify one. `auto` approves \
-            routine work and asks for risky actions; `bypassPermissions` runs \
-            without permission prompts. Ignored by terminal sessions.",
-        kind: SettingKind::Enum,
-        default: DEFAULT_AGENT_MODE,
-        group: "Agents",
-        options: &[
-            "auto",
-            "default",
-            "acceptEdits",
-            "plan",
-            "bypassPermissions",
-        ],
-    },
-    SettingSpec {
         key: "server.auto_adopt",
         label: "Auto-adopt on startup",
         description: "When enabled, the server recreates the terminal session for \
@@ -747,14 +699,9 @@ mod tests {
         assert_eq!(json["value"], "dark");
         assert_eq!(json["is_default"], true);
 
-        let mode = views
+        assert!(views
             .iter()
-            .find(|v| v.spec.key == "agent.mode")
-            .expect("agent.mode should be registered");
-        let json = serde_json::to_value(mode).unwrap();
-        assert_eq!(json["kind"], "enum");
-        assert_eq!(json["value"], "auto");
-        assert_eq!(json["options"][4], "bypassPermissions");
+            .all(|view| !view.spec.key.starts_with("agent.")));
     }
 
     #[test]

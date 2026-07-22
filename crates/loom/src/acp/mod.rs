@@ -61,7 +61,6 @@ use crate::db::{now_iso, Db};
 use crate::session;
 use crate::web::AppState;
 use weaver_api::{AcpCost, AcpUsage};
-use weaver_core::config as core_config;
 use weaver_core::tags;
 use wire::{
     method, Incoming, IncomingKind, PermissionOption, RequestPermissionParams, SessionNotification,
@@ -93,6 +92,7 @@ pub struct AcpLaunch {
     /// Out-of-band environment for the adapter process (delivered over the
     /// supervisor, never on argv).
     pub env: Vec<(String, String)>,
+    pub env_clear: bool,
     /// Open a fresh session or reload an existing one.
     pub new_or_load: NewOrLoad,
     /// The initial permission posture (`bypassPermissions`, `acceptEdits`,
@@ -412,7 +412,14 @@ async fn start_inner(
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    crate::backend::new_relay_session(&relay_name, &launch.adapter_cmd, &env, &launch.cwd).await?;
+    crate::backend::new_relay_session(
+        &relay_name,
+        &launch.adapter_cmd,
+        &env,
+        launch.env_clear,
+        &launch.cwd,
+    )
+    .await?;
     let (events_tx, _) = broadcast::channel(256);
     // From this point onward the detached relay exists. Any failure must tear it
     // down and clear partially-persisted provider state before returning, or the
@@ -1774,10 +1781,7 @@ impl Task {
         if session.class != "automation" || session.managed_by.is_some() {
             return Ok(());
         }
-        let cap = core_config::get(&self.db, "automation.turn_cap")
-            .await
-            .and_then(|v| v.trim().parse::<i64>().ok())
-            .unwrap_or(core_config::DEFAULT_AUTOMATION_TURN_CAP);
+        let cap = session.policy_turn_budget;
         if cap <= 0 || session.turn_count < cap {
             return Ok(());
         }

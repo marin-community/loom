@@ -485,6 +485,7 @@ pub struct AgentLaunchContext<'a> {
     pub effort: &'a str,
     /// Operator-managed environment variables exported into the session.
     pub extra_env: &'a [(String, String)],
+    pub env_clear: bool,
     /// Per-session memory ceiling in GiB (0 = unlimited), resolved from the
     /// `session.memory_max_gb` setting by [`launch`].
     pub memory_max_gb: u64,
@@ -650,6 +651,7 @@ pub struct LaunchSpec<'a> {
     /// into the session on top of loom's own `WEAVER_*` / `LOOM_TOKEN`. The
     /// caller reads these from the database; an empty slice adds nothing.
     pub extra_env: &'a [(String, String)],
+    pub env_clear: bool,
 }
 
 /// Bring up the session's terminal running the agent. `spec.runtime` is resolved
@@ -667,6 +669,7 @@ pub async fn launch(db: &Db, spec: &LaunchSpec<'_>, mode: LaunchMode) -> Result<
         model: spec.model,
         effort: spec.effort,
         extra_env: spec.extra_env,
+        env_clear: spec.env_clear,
         memory_max_gb: backend::memory_max_gb(db).await,
     };
     let resolved = resolve(db, spec.runtime)
@@ -723,6 +726,7 @@ async fn start_terminal(
         ctx.work_dir,
         &script,
         &env,
+        ctx.env_clear,
         ctx.memory_max_gb,
     )
     .await
@@ -748,11 +752,9 @@ pub fn read_local_token() -> Option<String> {
 }
 
 /// The session environment loom injects into an agent process — the same set for
-/// the terminal (PTY) and ACP (relay) backends: `WEAVER_API`, `WEAVER_BRANCH`, the
-/// machine-local `LOOM_TOKEN` (when minted), then the operator-managed vars last
-/// (so a stored var wins any shared name — safe, since `agent_env::validate_name`
-/// reserves loom's own `WEAVER_*`/`LOOM_` prefixes). Delivered out of band via the
-/// process environment, never on argv.
+/// the terminal (PTY) and ACP (relay) backends. `extra_env` carries the freshly
+/// minted session-bound `LOOM_TOKEN`; the machine-local admin token is never
+/// injected into an agent.
 pub fn session_env(
     server_addr: &str,
     branch_id: &str,
@@ -762,9 +764,6 @@ pub fn session_env(
         ("WEAVER_API".to_string(), format!("http://{server_addr}")),
         ("WEAVER_BRANCH".to_string(), branch_id.to_string()),
     ];
-    if let Some(token) = read_local_token() {
-        env.push(("LOOM_TOKEN".to_string(), token));
-    }
     for (k, v) in extra_env {
         env.push((k.clone(), v.clone()));
     }
@@ -876,6 +875,7 @@ pub struct AcpLaunchSpec<'a> {
     /// `appendSystemPrompt` option (the `--append-system-prompt-file` analogue).
     pub primer_file: Option<&'a Path>,
     pub extra_env: &'a [(String, String)],
+    pub env_clear: bool,
     /// The launch permission posture (`bypassPermissions`, `acceptEdits`, …).
     pub mode: &'a str,
     /// The resolved custom agent when `runtime` names one (its `launch` command is
@@ -963,6 +963,7 @@ pub async fn build_acp_launch(
         adapter_cmd,
         cwd: spec.work_dir.to_path_buf(),
         env,
+        env_clear: spec.env_clear,
         new_or_load,
         // Codex boots directly in its mapped mode via `INITIAL_AGENT_MODE`; a
         // post-setup `session/set_mode` would re-send a claude-flavored id it
@@ -1444,6 +1445,7 @@ mod tests {
             model,
             effort,
             extra_env: &[],
+            env_clear: false,
             memory_max_gb: 0,
         }
     }

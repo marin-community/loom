@@ -1,9 +1,9 @@
 use axum::{extract::State, Json};
 use serde_json::{json, Value};
 
-use crate::agent;
 use crate::config;
 use crate::db::Db;
+use crate::profile;
 
 use super::{ApiResult, AppError, AppState};
 
@@ -24,10 +24,15 @@ pub(super) async fn patch_settings(
     Json(body): Json<serde_json::Map<String, Value>>,
 ) -> ApiResult<Json<Value>> {
     let mut changes: Vec<config::Change> = Vec::with_capacity(body.len());
+    let mut legacy_agent_changes: Vec<config::Change> = Vec::new();
     let mut errors = serde_json::Map::new();
 
     for (key, raw) in body {
-        if config::spec(&key).is_none() {
+        let legacy_agent = matches!(
+            key.as_str(),
+            "agent.default" | "agent.model" | "agent.effort" | "agent.mode"
+        );
+        if config::spec(&key).is_none() && !legacy_agent {
             errors.insert(key, json!("unknown setting"));
             continue;
         }
@@ -44,16 +49,19 @@ pub(super) async fn patch_settings(
                 continue;
             }
         };
-        if let Some(value) = &value {
-            if let Err(why) = config::validate(&key, value) {
-                errors.insert(key, json!(why));
-                continue;
+        if !legacy_agent {
+            if let Some(value) = &value {
+                if let Err(why) = config::validate(&key, value) {
+                    errors.insert(key, json!(why));
+                    continue;
+                }
             }
         }
-        changes.push((key, value));
-    }
-    if errors.is_empty() {
-        validate_agent_settings_patch(&st.db, &mut changes, &mut errors).await;
+        if legacy_agent {
+            legacy_agent_changes.push((key, value));
+        } else {
+            changes.push((key, value));
+        }
     }
 
     if !errors.is_empty() {
@@ -65,8 +73,17 @@ pub(super) async fn patch_settings(
         };
         return Err(AppError::bad_request(message).with_details(Value::Object(errors)));
     }
+    if !legacy_agent_changes.is_empty() {
+        apply_legacy_agent_patch(&st.db, &legacy_agent_changes)
+            .await
+            .map_err(|error| AppError::bad_request(error.to_string()))?;
+    }
     config::apply(&st.db, &changes).await?;
-    let keys: Vec<&str> = changes.iter().map(|(k, _)| k.as_str()).collect();
+    let keys: Vec<&str> = changes
+        .iter()
+        .chain(&legacy_agent_changes)
+        .map(|(k, _)| k.as_str())
+        .collect();
     tracing::info!(keys = ?keys, "settings updated");
     settings_envelope(&st.db).await
 }
@@ -78,105 +95,44 @@ fn change_for<'a>(changes: &'a [config::Change], key: &str) -> Option<&'a Option
         .find_map(|(k, v)| (k == key).then_some(v))
 }
 
-fn changed(changes: &[config::Change], key: &str) -> bool {
-    change_for(changes, key).is_some()
-}
+/// Transitional adapter for pre-profile clients.  These keys are deliberately
+/// absent from the settings registry: accepting a PATCH mutates `default`
+/// directly, so there is still exactly one launch-policy authority.
+async fn apply_legacy_agent_patch(db: &Db, changes: &[config::Change]) -> anyhow::Result<()> {
+    let current = profile::get(db, profile::DEFAULT_PROFILE)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("default profile is missing"))?;
+    let mut input = current.as_input()?;
 
-async fn setting_after(db: &Db, changes: &[config::Change], key: &str, default: &str) -> String {
-    match change_for(changes, key) {
-        Some(Some(value)) => value.trim().to_string(),
-        Some(None) => default.to_string(),
-        None => config::get_or(db, key, default).await.trim().to_string(),
-    }
-}
-
-async fn validate_agent_settings_patch(
-    db: &Db,
-    changes: &mut Vec<config::Change>,
-    errors: &mut serde_json::Map<String, Value>,
-) {
-    validate_agent_settings_group(
-        db,
-        changes,
-        errors,
-        AgentSettingsGroup {
-            agent_key: "agent.default",
-            agent_default: config::DEFAULT_AGENT,
-            model_key: "agent.model",
-            effort_key: "agent.effort",
-        },
-    )
-    .await;
-}
-
-struct AgentSettingsGroup {
-    agent_key: &'static str,
-    agent_default: &'static str,
-    model_key: &'static str,
-    effort_key: &'static str,
-}
-
-async fn validate_agent_settings_group(
-    db: &Db,
-    changes: &mut Vec<config::Change>,
-    errors: &mut serde_json::Map<String, Value>,
-    group: AgentSettingsGroup,
-) {
-    if !changed(changes, group.agent_key)
-        && !changed(changes, group.model_key)
-        && !changed(changes, group.effort_key)
-    {
-        return;
-    }
-
-    let agent_kind = setting_after(db, changes, group.agent_key, group.agent_default).await;
-    let metadata = match agent::metadata_for(db, &agent_kind).await {
-        Ok(Some(m)) => m,
-        _ => {
-            errors.insert(
-                group.agent_key.to_string(),
-                json!(format!("unknown agent '{agent_kind}'")),
-            );
-            return;
+    if let Some(value) = change_for(changes, "agent.default") {
+        input.agent_kind = value
+            .as_deref()
+            .unwrap_or(config::DEFAULT_AGENT)
+            .trim()
+            .to_string();
+        if change_for(changes, "agent.model").is_none() {
+            input.model.clear();
         }
-    };
-    let model = setting_after(db, changes, group.model_key, "").await;
-    validate_agent_selector_setting(
-        changes,
-        errors,
-        group.agent_key,
-        group.model_key,
-        &model,
-        || agent::validate_model(&metadata, &model),
-    );
-
-    let effort = setting_after(db, changes, group.effort_key, "").await;
-    validate_agent_selector_setting(
-        changes,
-        errors,
-        group.agent_key,
-        group.effort_key,
-        &effort,
-        || agent::validate_effort(&metadata, &effort),
-    );
-}
-
-fn validate_agent_selector_setting(
-    changes: &mut Vec<config::Change>,
-    errors: &mut serde_json::Map<String, Value>,
-    agent_key: &str,
-    selector_key: &str,
-    value: &str,
-    validate: impl FnOnce() -> std::result::Result<(), String>,
-) {
-    if value.is_empty() {
-        return;
-    }
-    if let Err(why) = validate() {
-        if changed(changes, agent_key) && !changed(changes, selector_key) {
-            changes.push((selector_key.to_string(), None));
-        } else {
-            errors.insert(selector_key.to_string(), json!(why));
+        if change_for(changes, "agent.effort").is_none() {
+            input.effort.clear();
         }
+        // Protocol defaults are runtime-specific, so re-resolve it whenever
+        // the legacy caller changes the runtime.
+        input.protocol.clear();
     }
+    if let Some(value) = change_for(changes, "agent.model") {
+        input.model = value.as_deref().unwrap_or_default().trim().to_string();
+    }
+    if let Some(value) = change_for(changes, "agent.effort") {
+        input.effort = value.as_deref().unwrap_or_default().trim().to_string();
+    }
+    if let Some(value) = change_for(changes, "agent.mode") {
+        input.mode = value
+            .as_deref()
+            .unwrap_or(config::DEFAULT_AGENT_MODE)
+            .trim()
+            .to_string();
+    }
+    profile::upsert(db, &input).await?;
+    Ok(())
 }

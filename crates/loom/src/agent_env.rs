@@ -1,4 +1,4 @@
-//! Operator-managed environment variables, stored in the `agent_env` table.
+//! Compatibility facade for the default profile's environment variables.
 //!
 //! These are exported into every interactive agent session loom launches —
 //! alongside loom's own `WEAVER_*` / `LOOM_TOKEN` — so the operator can add a
@@ -10,7 +10,10 @@
 //! and github watches' `gh` calls — run in the server process, which has no
 //! ambient GitHub auth of its own.
 //!
-//! This is a flat name/value store: unlike [`crate::config`] there is no
+//! This remains a flat name/value API for existing settings, setup, GitHub,
+//! watch, and shell callers, but storage lives in `profile_env` under the
+//! protected `default` profile. New profile-specific callers use
+//! [`crate::profile`] directly. Unlike [`crate::config`] there is no
 //! registry of known keys, because the whole point is arbitrary,
 //! deploy-specific variables. The only constraint is that a name is a valid
 //! POSIX shell identifier, since the value is exported by the launch script.
@@ -72,9 +75,12 @@ pub fn validate_name(name: &str) -> std::result::Result<(), String> {
 
 /// Every stored variable, ordered by name.
 pub async fn list(db: &Db) -> Result<Vec<EnvVar>> {
-    let rows = sqlx::query("SELECT name, value, updated_at FROM agent_env ORDER BY name")
-        .fetch_all(db)
-        .await?;
+    let rows = sqlx::query(
+        "SELECT name, value, updated_at FROM profile_env
+         WHERE profile_name = 'default' ORDER BY name",
+    )
+    .fetch_all(db)
+    .await?;
     Ok(rows
         .into_iter()
         .map(|r| EnvVar {
@@ -91,12 +97,14 @@ pub async fn list(db: &Db) -> Result<Vec<EnvVar>> {
 /// and watch scripts — which run in the server process and so don't inherit the
 /// per-session agent environment.
 pub async fn get(db: &Db, name: &str) -> Option<String> {
-    sqlx::query_scalar::<_, String>("SELECT value FROM agent_env WHERE name = ?")
-        .bind(name)
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten()
+    sqlx::query_scalar::<_, String>(
+        "SELECT value FROM profile_env WHERE profile_name = 'default' AND name = ?",
+    )
+    .bind(name)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
 }
 
 /// The variables as a plain `(name, value)` list — what [`crate::agent::launch`]
@@ -114,8 +122,9 @@ pub async fn pairs(db: &Db) -> Result<Vec<(String, String)>> {
 pub async fn set(db: &Db, name: &str, value: &str) -> Result<()> {
     let now = now_iso();
     sqlx::query(
-        "INSERT INTO agent_env (name, value, updated_at) VALUES (?, ?, ?)
-         ON CONFLICT(name) DO UPDATE
+        "INSERT INTO profile_env (profile_name, name, value, updated_at)
+         VALUES ('default', ?, ?, ?)
+         ON CONFLICT(profile_name, name) DO UPDATE
            SET value = excluded.value, updated_at = excluded.updated_at",
     )
     .bind(name)
@@ -130,7 +139,7 @@ pub async fn set(db: &Db, name: &str, value: &str) -> Result<()> {
 
 /// Delete one variable. Removing an absent name is a no-op (returns `false`).
 pub async fn remove(db: &Db, name: &str) -> Result<bool> {
-    let res = sqlx::query("DELETE FROM agent_env WHERE name = ?")
+    let res = sqlx::query("DELETE FROM profile_env WHERE profile_name = 'default' AND name = ?")
         .bind(name)
         .execute(db)
         .await?;

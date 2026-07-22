@@ -95,6 +95,7 @@ async fn start_new_with_env(
         adapter_cmd: agent_cmd(),
         cwd: cwd.clone(),
         env,
+        env_clear: false,
         new_or_load: NewOrLoad::New { cwd, meta: None },
         mode: mode.map(str::to_string),
         goal: goal.map(str::to_string),
@@ -120,6 +121,7 @@ async fn silent_setup_stage_times_out_and_cleans_provider_state() {
             "FAKE_ACP_IGNORE_METHOD".to_string(),
             "session/new".to_string(),
         )],
+        env_clear: false,
         new_or_load: NewOrLoad::New { cwd, meta: None },
         mode: None,
         goal: Some("say:never starts".to_string()),
@@ -1568,15 +1570,14 @@ async fn rest_create(ts: &TestServer, agent: &str, goal: &str) -> Value {
 async fn rest_create_uses_the_configured_permission_default() {
     let ts = TestServer::start().await;
     seed_acp_agent(&ts, "fake-mode-default").await;
-    loom::config::apply(
-        &ts.state.db,
-        &[(
-            "agent.mode".to_string(),
-            Some("bypassPermissions".to_string()),
-        )],
-    )
-    .await
-    .unwrap();
+    let mut default = loom::profile::get(&ts.state.db, loom::profile::DEFAULT_PROFILE)
+        .await
+        .unwrap()
+        .unwrap()
+        .as_input()
+        .unwrap();
+    default.mode = "bypassPermissions".to_string();
+    loom::profile::upsert(&ts.state.db, &default).await.unwrap();
 
     let created = rest_create(&ts, "fake-mode-default", "say:configured").await;
     let id = created["id"].as_str().unwrap();
@@ -2335,6 +2336,7 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
         goal_file,
         primer_file: Some(primer.as_path()),
         extra_env,
+        env_clear: false,
         mode: "bypassPermissions",
         custom: None,
     };

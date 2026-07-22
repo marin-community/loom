@@ -18,7 +18,7 @@ use crate::session::{self as session_mod, Session};
 use weaver_core::branch as branch_mod;
 
 use super::auth::public_base;
-use super::sessions::{archive, create_session_core};
+use super::sessions::archive;
 use super::{ApiResult, AppError, AppState};
 
 // ---------------------------------------------------------------------------
@@ -443,7 +443,8 @@ async fn handle_trigger(
             req.name = Some(format!("issue-{number}"));
         }
     }
-    let view = match create_session_core(st.clone(), req, Some(username), "github").await {
+    let actor = crate::runtime::Actor::producer("github", username);
+    let view = match crate::runtime::create_session(st.clone(), req, actor).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(repo = %slug.slug(), error = ?e, "github webhook: session create failed");

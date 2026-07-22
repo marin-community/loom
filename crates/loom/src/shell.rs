@@ -98,6 +98,7 @@ pub async fn ensure(st: &AppState) -> Result<()> {
         &cwd,
         &script,
         &env_refs(&env),
+        false,
         backend::memory_max_gb(&st.db).await,
     )
     .await
@@ -159,6 +160,7 @@ pub async fn ensure_debug(
         &cwd,
         &script,
         &env_refs(&env),
+        false,
         backend::memory_max_gb(&st.db).await,
     )
     .await?;

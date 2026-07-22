@@ -74,6 +74,7 @@ pub async fn new_session(
     cwd: &std::path::Path,
     script: &str,
     env: &[(&str, &str)],
+    env_clear: bool,
     memory_max_gb: u64,
 ) -> Result<()> {
     tracing::info!(session = %name, cwd = %cwd.display(), memory_max_gb, "spawning terminal session");
@@ -86,6 +87,7 @@ pub async fn new_session(
         cwd,
         script: &script,
         env,
+        env_clear,
         cols: 80,
         rows: 24,
         mode: tapestry::Mode::Pty,
@@ -112,6 +114,7 @@ pub async fn new_relay_session(
     name: &str,
     script: &str,
     env: &[(&str, &str)],
+    env_clear: bool,
     cwd: &std::path::Path,
 ) -> Result<()> {
     tracing::info!(session = %name, cwd = %cwd.display(), "spawning relay session");
@@ -120,6 +123,7 @@ pub async fn new_relay_session(
         cwd,
         script,
         env,
+        env_clear,
         cols: 80,
         rows: 24,
         mode: tapestry::Mode::Relay,

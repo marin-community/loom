@@ -19,6 +19,7 @@ mod env;
 mod ide;
 mod logs;
 mod pane;
+mod profiles;
 mod recover;
 mod repos;
 mod scratch;

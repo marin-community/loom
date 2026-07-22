@@ -48,6 +48,9 @@ hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 libc = "0.2"
 percent-encoding = "2"
 rand = "0.9"
+# Generate and load the machine-local Ed25519 keypair used to sign scoped
+# automation JWTs. jsonwebtoken performs the actual JWT signing/verification.
+ring = "0.17"
 # Hidden (non-echoing) prompts for `loom setup secrets` — paste-once API keys
 # shouldn't land in shell history or a terminal scrollback.
 rpassword = "7"

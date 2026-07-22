@@ -1286,6 +1286,7 @@ dependencies = [
  "percent-encoding",
  "rand",
  "reqwest",
+ "ring",
  "rpassword",
  "serde",
  "serde_json",

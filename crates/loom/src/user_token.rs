@@ -2,7 +2,7 @@
 //! `user_github_tokens` table.
 //!
 //! When that user launches an interactive session, loom injects the token as
-//! `GH_TOKEN` into the session env ([`crate::web::sessions::create_session_core`]),
+//! `GH_TOKEN` into the session env ([`crate::runtime::create_session`]),
 //! overriding the shared ambient `GH_TOKEN` from the deploy env — so the agent's
 //! `git push` / `gh` act as *that user*. Combined with the per-user commit author
 //! identity loom already sets ([`crate::auth::commit_identity`]), both the commit

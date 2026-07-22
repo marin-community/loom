@@ -31,7 +31,11 @@ class RecordingMocks(Mocks):
 mocks = RecordingMocks()
 pulumi.runtime.set_mocks(mocks, project="loom-gcp", stack="test", preview=False)
 
-from infrastructure import DeploymentConfig, create_infrastructure  # noqa: E402
+from infrastructure import (  # noqa: E402
+    DeploymentConfig,
+    _positive_config_int,
+    create_infrastructure,
+)
 
 
 def make_infrastructure():
@@ -71,6 +75,25 @@ def test_pull_mode_requires_a_commit_sha() -> None:
             image_mode="pull",
             image_tag="latest",
         )
+
+
+@pytest.mark.parametrize(
+    ("value", "default", "expected"),
+    [(None, 14, 14), (7, 14, 7)],
+)
+def test_positive_config_int_defaults_only_absence(
+    value: int | None, default: int, expected: int
+) -> None:
+    assert _positive_config_int(value, default, "retentionDays") == expected
+
+
+@pytest.mark.parametrize("value", [0, -1])
+@pytest.mark.parametrize(
+    "name", ["bootDiskGb", "dataDiskGb", "snapshotRetentionDays", "backupRetentionDays"]
+)
+def test_positive_config_int_rejects_explicit_nonpositive(value: int, name: str) -> None:
+    with pytest.raises(ValueError, match=f"{name} must be positive"):
+        _positive_config_int(value, 10, name)
 
 
 @pulumi.runtime.test

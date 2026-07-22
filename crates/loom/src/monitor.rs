@@ -248,10 +248,6 @@ fn reap_decision(
 /// via the shared archive path (worktree teardown + transcript capture + the
 /// `status` event that lands on SSE). Errors are logged, never fatal to a tick.
 async fn reap_automation(state: &AppState, sessions: &[Session], now: DateTime<Utc>) {
-    let ttl = core_config::get(&state.db, "automation.idle_archive_secs")
-        .await
-        .and_then(|v| v.trim().parse::<i64>().ok())
-        .unwrap_or(core_config::DEFAULT_AUTOMATION_IDLE_ARCHIVE_SECS);
     for session in sessions {
         // Only a candidate's tracking issue is worth a lookup.
         if !reap_candidate(session) {
@@ -268,6 +264,7 @@ async fn reap_automation(state: &AppState, sessions: &[Session], now: DateTime<U
             },
             None => false,
         };
+        let ttl = session.policy_idle_archive_secs.unwrap_or(0);
         let Some(reason) = reap_decision(session, issue_closed, ttl, now) else {
             continue;
         };
@@ -449,10 +446,7 @@ async fn promote_lifecycle(db: &Db, bus: &EventBus, session: &Session, kind: &st
     if kind == "working" {
         match session_mod::increment_turn_count(db, &session.id).await {
             Ok(count) => {
-                let cap = core_config::get(db, "automation.turn_cap")
-                    .await
-                    .and_then(|v| v.trim().parse::<i64>().ok())
-                    .unwrap_or(core_config::DEFAULT_AUTOMATION_TURN_CAP);
+                let cap = session.policy_turn_budget;
                 if cap > 0
                     && count > cap
                     && session.class == "automation"
@@ -645,6 +639,17 @@ mod tests {
             class: "interactive".to_string(),
             turn_count: 0,
             tracking_issue_id: None,
+            profile: "default".to_string(),
+            launch_mode: "auto".to_string(),
+            profile_revision: 1,
+            policy_env_clear: false,
+            policy_ambient_allowlist: "[]".to_string(),
+            policy_idle_archive_secs: None,
+            policy_turn_budget: 0,
+            creator_kind: "user".to_string(),
+            creator_subject: "owner".to_string(),
+            parent_session_id: None,
+            automation_run_id: None,
         }
     }
 

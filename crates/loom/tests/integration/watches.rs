@@ -1333,6 +1333,20 @@ async fn set_config(state: &AppState, key: &str, value: &str) {
         .unwrap();
 }
 
+async fn set_default_profile_agent(state: &AppState, agent: &str) {
+    let mut profile = loom::profile::get(&state.db, loom::profile::DEFAULT_PROFILE)
+        .await
+        .unwrap()
+        .unwrap()
+        .as_input()
+        .unwrap();
+    profile.agent_kind = agent.to_string();
+    profile.model.clear();
+    profile.effort.clear();
+    profile.protocol.clear();
+    loom::profile::upsert(&state.db, &profile).await.unwrap();
+}
+
 /// Insert a managed (warm) session row directly, owned by `watch_id`. The
 /// branch is a throwaway in the test repo. Returns the session id. A direct
 /// insert keeps the hide/reconcile logic deterministic without standing up a
@@ -1493,7 +1507,7 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
     set_config(&state, "watch.adopt_warm", "true").await;
     // Warm sessions launch the default agent; pin it to `shell` so creation is
     // deterministic without a real `claude` on PATH.
-    set_config(&state, "agent.default", "shell").await;
+    set_default_profile_agent(&state, "shell").await;
 
     let repo_root = ts.repo_path().canonicalize().unwrap().display().to_string();
 
@@ -1607,7 +1621,7 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
 async fn ensure_warm_session_reuses_the_same_session() {
     let ts = TestServer::start().await;
     let state = engine_state(&ts).await;
-    set_config(&state, "agent.default", "shell").await;
+    set_default_profile_agent(&state, "shell").await;
 
     let repo_root = ts.repo_path().canonicalize().unwrap().display().to_string();
     let o = enabled_watch(

@@ -358,6 +358,10 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
         // (so the page is signed in without an OAuth round-trip).
         LOOM_OWNER_GITHUB: "loom-e2e-owner",
       };
+      // A suite launched from inside a real Loom session inherits that
+      // session's scoped bearer. It belongs to another database and explicit
+      // invalid credentials correctly cannot fall through to loopback trust.
+      delete childEnv.LOOM_TOKEN;
 
       // Bind to a random free port (0) and parse the actual port from stdout.
       const server: ChildProcess = spawn(

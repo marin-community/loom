@@ -90,6 +90,16 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TokenCmd,
     },
+    /// Manage named session launch profiles and their secret environment.
+    Profile {
+        #[command(subcommand)]
+        cmd: ProfileCmd,
+    },
+    /// Manage trusted GitHub Actions OIDC workflow mappings.
+    Federation {
+        #[command(subcommand)]
+        cmd: FederationCmd,
+    },
     /// Show the repo's issue board (every issue across branches + backlog).
     Issue {
         #[command(subcommand)]
@@ -329,7 +339,7 @@ enum SessionCmd {
         /// Target reasoning effort; omit for the runtime default.
         #[arg(long)]
         effort: Option<String>,
-        /// Target ACP permission posture; omit for configured `agent.mode`.
+        /// Target ACP permission posture; omit to keep the session's stamped mode.
         #[arg(long)]
         mode: Option<String>,
     },
@@ -546,6 +556,100 @@ enum TokenCmd {
         /// The token id (from `loom token ls`).
         id: String,
     },
+    /// Mint a short-lived automation-only JWT.
+    Mint {
+        #[arg(long)]
+        subject: String,
+        #[arg(long = "profile", required = true)]
+        profiles: Vec<String>,
+        /// Lifetime such as `10m`, `1h`, or seconds.
+        #[arg(long, default_value = "10m")]
+        ttl: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum FederationCmd {
+    Add {
+        #[arg(long, default_value = "https://token.actions.githubusercontent.com")]
+        issuer: String,
+        #[arg(long)]
+        audience: String,
+        #[arg(long)]
+        repository_id: String,
+        #[arg(long)]
+        workflow_ref: String,
+        #[arg(long)]
+        event: Option<String>,
+        #[arg(long = "ref")]
+        git_ref: Option<String>,
+        #[arg(long)]
+        profile: String,
+    },
+    Ls,
+    Rm {
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProfileCmd {
+    /// Add a named launch profile.
+    Add(ProfileAddOpts),
+    /// List profiles (secret values are never returned).
+    Ls,
+    /// Show one profile.
+    Show { name: String },
+    /// Remove an unused profile (`default` is protected).
+    Rm { name: String },
+    /// Manage a profile's write-only environment.
+    Env {
+        #[command(subcommand)]
+        cmd: ProfileEnvCmd,
+    },
+}
+
+#[derive(Args)]
+struct ProfileAddOpts {
+    name: String,
+    #[arg(long, default_value = "")]
+    description: String,
+    #[arg(long)]
+    agent: String,
+    #[arg(long, default_value = "")]
+    model: String,
+    #[arg(long, default_value = "")]
+    effort: String,
+    #[arg(long, default_value = "")]
+    protocol: String,
+    #[arg(long, default_value = "auto")]
+    mode: String,
+    #[arg(long, default_value = "interactive")]
+    class: String,
+    #[arg(long)]
+    strict: bool,
+    #[arg(long)]
+    env_clear: bool,
+    #[arg(long, value_delimiter = ',')]
+    ambient: Vec<String>,
+    #[arg(long)]
+    idle_archive_secs: Option<i64>,
+    #[arg(long, default_value_t = 0)]
+    max_concurrent: i64,
+    #[arg(long)]
+    turn_budget: Option<i64>,
+}
+
+#[derive(Subcommand)]
+enum ProfileEnvCmd {
+    /// Set a write-only environment value.
+    Set {
+        profile: String,
+        name: String,
+        value: String,
+    },
+    /// Remove an environment value.
+    Rm { profile: String, name: String },
 }
 
 /// Options for `loom watch add` — the flags build the trigger / scope /
@@ -603,13 +707,14 @@ struct LaunchOpts {
     /// its first prompt. Multiple words are joined, so quoting is optional. Omit
     /// only when seeding from `--claim`/`--issue`/`--branch`.
     task: Vec<String>,
+    /// Named launch profile. Defaults to `default`.
+    #[arg(long)]
+    profile: Option<String>,
     /// Branch slug to create (`weaver/<name>`). Defaults to a slug derived from
     /// the task. Mutually exclusive with `--branch`.
     #[arg(long)]
     name: Option<String>,
-    /// Agent to run: `claude` (the default), `shell` for a plain shell, or any
-    /// other command. Optional — omit to use the configured `agent.default`
-    /// (see `weaver config get agent.default`).
+    /// Agent to run. Optional — omit to use the selected profile's agent.
     #[arg(long)]
     agent: Option<String>,
     /// Repo to launch into: either a path to (any directory inside) a local
@@ -655,8 +760,8 @@ struct LaunchOpts {
     #[arg(long)]
     protocol: Option<String>,
     /// ACP launch permission posture: `auto`, `bypassPermissions`, `acceptEdits`,
-    /// `default`, or `plan`. Omit for configured `agent.mode`; ignored for a
-    /// terminal launch.
+    /// `default`, or `plan`. Omit to use the selected profile's mode; ignored
+    /// for a terminal launch.
     #[arg(long)]
     mode: Option<String>,
 }
@@ -677,6 +782,8 @@ async fn run() -> Result<()> {
         Cmd::Issue { cmd } => run_issue(cmd).await,
         Cmd::Watch { cmd } => run_watch(cmd).await,
         Cmd::Token { cmd } => run_token(cmd).await,
+        Cmd::Profile { cmd } => run_profile(cmd).await,
+        Cmd::Federation { cmd } => run_federation(cmd).await,
         Cmd::Setup { cmd } => run_setup(cmd).await,
         Cmd::Config { cmd } => run_config(cmd).await,
         Cmd::Launch(opts) => cmd_launch(opts.into()).await,
@@ -774,7 +881,144 @@ async fn run_token(cmd: TokenCmd) -> Result<()> {
         TokenCmd::Add { name, expires_days } => cmd_token_create(name, expires_days).await,
         TokenCmd::Ls => cmd_token_ls().await,
         TokenCmd::Rm { id } => cmd_token_rm(id).await,
+        TokenCmd::Mint {
+            subject,
+            profiles,
+            ttl,
+        } => {
+            let minted = client::default()
+                .mint_automation_token(&weaver_api::AutomationTokenReq {
+                    subject,
+                    profiles,
+                    ttl_secs: parse_ttl(&ttl)?,
+                })
+                .await?;
+            println!("{}", minted.token);
+            Ok(())
+        }
     }
+}
+
+fn parse_ttl(value: &str) -> Result<i64> {
+    let value = value.trim();
+    let (number, multiplier) = match value.chars().last() {
+        Some('s') => (&value[..value.len() - 1], 1),
+        Some('m') => (&value[..value.len() - 1], 60),
+        Some('h') => (&value[..value.len() - 1], 3600),
+        _ => (value, 1),
+    };
+    let amount: i64 = number.parse().context("invalid --ttl duration")?;
+    amount
+        .checked_mul(multiplier)
+        .ok_or_else(|| anyhow!("--ttl duration is too large"))
+}
+
+async fn run_federation(cmd: FederationCmd) -> Result<()> {
+    let client = client::default();
+    match cmd {
+        FederationCmd::Add {
+            issuer,
+            audience,
+            repository_id,
+            workflow_ref,
+            event,
+            git_ref,
+            profile,
+        } => {
+            let mapping = client
+                .add_federation(&weaver_api::FederationReq {
+                    issuer,
+                    audience,
+                    repository_id,
+                    workflow_ref,
+                    event_name: event,
+                    ref_pattern: git_ref,
+                    profile,
+                })
+                .await?;
+            println!("added federation mapping {}", mapping.id);
+        }
+        FederationCmd::Ls => {
+            for mapping in client.list_federations().await? {
+                println!(
+                    "{}  repo={}  workflow={}  profile={}",
+                    mapping.id, mapping.repository_id, mapping.workflow_ref, mapping.profile
+                );
+            }
+        }
+        FederationCmd::Rm { id } => {
+            client.remove_federation(&id).await?;
+            println!("removed federation mapping {id}");
+        }
+    }
+    Ok(())
+}
+
+async fn run_profile(cmd: ProfileCmd) -> Result<()> {
+    let client = client::default();
+    match cmd {
+        ProfileCmd::Add(opts) => {
+            let profile = client
+                .create_profile(&weaver_api::ProfileReq {
+                    name: opts.name,
+                    description: opts.description,
+                    agent_kind: opts.agent,
+                    model: opts.model,
+                    effort: opts.effort,
+                    protocol: opts.protocol,
+                    mode: opts.mode,
+                    class: opts.class,
+                    strict: opts.strict,
+                    env_clear: opts.env_clear,
+                    ambient_allowlist: opts.ambient,
+                    idle_archive_secs: opts.idle_archive_secs,
+                    max_concurrent: opts.max_concurrent,
+                    turn_budget: opts.turn_budget,
+                })
+                .await?;
+            println!(
+                "added profile {} (revision {})",
+                profile.name, profile.revision
+            );
+        }
+        ProfileCmd::Ls => {
+            for profile in client.list_profiles().await? {
+                println!(
+                    "{:<20} {:<11} {:<10} {:<8} {}",
+                    profile.name,
+                    profile.class,
+                    profile.agent_kind,
+                    if profile.strict { "strict" } else { "mutable" },
+                    profile.description
+                );
+            }
+        }
+        ProfileCmd::Show { name } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&client.get_profile(&name).await?)?
+            );
+        }
+        ProfileCmd::Rm { name } => {
+            client.delete_profile(&name).await?;
+            println!("removed profile {name}");
+        }
+        ProfileCmd::Env { cmd } => match cmd {
+            ProfileEnvCmd::Set {
+                profile,
+                name,
+                value,
+            } => {
+                client.set_profile_env(&profile, &name, &value).await?;
+                println!("set {name} on profile {profile}");
+            }
+            ProfileEnvCmd::Rm { profile, name } => {
+                client.remove_profile_env(&profile, &name).await?;
+                println!("removed {name} from profile {profile}");
+            }
+        },
+    }
+    Ok(())
 }
 
 async fn cmd_token_create(name: String, expires_days: Option<i64>) -> Result<()> {
@@ -1984,6 +2228,7 @@ async fn cmd_restart() -> Result<()> {
 /// `goal` string.
 struct LaunchArgs {
     goal: String,
+    profile: Option<String>,
     name: Option<String>,
     agent: Option<String>,
     repo: Option<String>,
@@ -2002,6 +2247,7 @@ impl From<LaunchOpts> for LaunchArgs {
     fn from(o: LaunchOpts) -> Self {
         LaunchArgs {
             goal: o.task.join(" "),
+            profile: o.profile,
             name: o.name,
             agent: o.agent,
             repo: o.repo,
@@ -2084,6 +2330,7 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
     }
     let LaunchArgs {
         goal,
+        profile,
         name,
         agent,
         repo,
@@ -2121,6 +2368,7 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
             "/api/sessions",
             json!({
                 "goal": goal,
+                "profile": profile,
                 "title": title,
                 "cwd": cwd,
                 "repo": managed_repo,
@@ -3247,6 +3495,7 @@ mod tests {
     fn empty_launch() -> LaunchArgs {
         LaunchArgs {
             goal: String::new(),
+            profile: None,
             name: None,
             agent: None,
             repo: None,

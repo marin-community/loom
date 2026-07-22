@@ -9,16 +9,25 @@ pub use weaver_core::db::{
 };
 use weaver_core::migrations::{add_column_if_missing, split_statements, table_columns, Stream};
 
-const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[(
-    1,
-    "baseline",
-    include_str!("../migrations/0001_baseline.sql"),
-)];
+const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
+    (
+        1,
+        "baseline",
+        include_str!("../migrations/0001_baseline.sql"),
+    ),
+    (
+        2,
+        "profiles",
+        include_str!("../migrations/0002_profiles.sql"),
+    ),
+    (
+        3,
+        "grants-runs",
+        include_str!("../migrations/0003_grants_runs.sql"),
+    ),
+];
 
-const LOOM_STREAM: Stream = Stream {
-    indicator_table: "loom_schema_migrations",
-    migrations: LOOM_MIGRATIONS,
-};
+const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
 
 /// Open the shared database and apply loom's schema after the core schema.
 pub async fn connect(path: &Path) -> Result<Db> {
@@ -60,6 +69,7 @@ async fn migrate_loom(pool: &Db) -> Result<()> {
 
     LOOM_STREAM.ensure_indicator(pool).await?;
     LOOM_STREAM.apply_pending(pool).await?;
+    crate::profile::normalize_default(pool).await?;
 
     // Configuration-dependent seeding is intentionally not a migration. If the
     // first start has no owner configured, a later restart must retry it.
@@ -237,7 +247,7 @@ mod tests {
                 .fetch_all(&db)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1]);
+        assert_eq!(versions, vec![1, 2, 3]);
 
         let columns = table_columns(&db, "sessions").await.unwrap();
         for expected in [
@@ -249,6 +259,9 @@ mod tests {
             "class",
             "turn_count",
             "tracking_issue_id",
+            "profile",
+            "creator_subject",
+            "parent_session_id",
         ] {
             assert!(
                 columns.iter().any(|column| column == expected),
@@ -314,7 +327,7 @@ mod tests {
             .fetch_one(&db)
             .await
             .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(count, 3);
 
         // Adoption replaced the historical index predicate: archived history
         // no longer prevents a new active session from claiming the branch.

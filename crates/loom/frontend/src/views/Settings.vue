@@ -2,14 +2,14 @@
 import { ref, computed, onMounted, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { get, patch, listAgents } from '../api';
-import type { AgentMetadata, CustomAgent, SettingView } from '../types';
+import type { CustomAgent, SettingView } from '../types';
 import ToggleSwitch from '../components/ToggleSwitch.vue';
 import TokensPanel from '../components/TokensPanel.vue';
 import AccountPanel from '../components/AccountPanel.vue';
 import SlackPanel from '../components/SlackPanel.vue';
 import EnvPanel from '../components/EnvPanel.vue';
 import LogsPanel from '../components/LogsPanel.vue';
-import AgentProfileEditor from '../components/AgentProfileEditor.vue';
+import ProfilesPanel from '../components/ProfilesPanel.vue';
 import CustomAgentsPanel from '../components/CustomAgentsPanel.vue';
 import AppearancePanel from '../components/AppearancePanel.vue';
 import SettingFieldRow from '../components/SettingFieldRow.vue';
@@ -91,22 +91,14 @@ const categories: CategoryItem[] = [
   },
 ];
 
-const agentKeys = {
-  agent: 'agent.default',
-  model: 'agent.model',
-  effort: 'agent.effort',
-  mode: 'agent.mode',
-};
-const agentProfileTitle = 'Session default runtime';
-
 function categoryFromQuery(q: unknown): Category {
   return categories.some((item) => item.id === q) ? (q as Category) : 'agents';
 }
 
 const category = ref<Category>(categoryFromQuery(route.query.tab));
 const settings = ref<SettingView[]>([]);
-const agents = ref<AgentMetadata[]>([]);
 const customAgents = ref<CustomAgent[]>([]);
+const profilesKey = ref(0);
 const drafts = ref<Record<string, string>>({});
 const error = ref('');
 const notice = ref('');
@@ -165,38 +157,6 @@ function defaultText(value: string): string {
   return value || '(empty)';
 }
 
-function availableAgents(): AgentMetadata[] {
-  return agents.value;
-}
-
-function selectedAgent(): AgentMetadata | undefined {
-  const kind = drafts.value[agentKeys.agent];
-  return availableAgents().find((agent) => agent.kind === kind);
-}
-
-function sanitizeAgentDraft() {
-  const choices = availableAgents();
-  if (!choices.length) return;
-  if (!choices.some((agent) => agent.kind === drafts.value[agentKeys.agent])) {
-    drafts.value[agentKeys.agent] = choices[0].kind;
-  }
-  const agent = selectedAgent();
-  if (!agent) return;
-  if (
-    drafts.value[agentKeys.model] &&
-    !agent.accepts_raw_model &&
-    !agent.models.some((choice) => choice.id === drafts.value[agentKeys.model])
-  ) {
-    drafts.value[agentKeys.model] = '';
-  }
-  if (
-    drafts.value[agentKeys.effort] &&
-    !agent.efforts.some((choice) => choice.id === drafts.value[agentKeys.effort])
-  ) {
-    drafts.value[agentKeys.effort] = '';
-  }
-}
-
 async function load() {
   try {
     const [res, agentRes] = await Promise.all([
@@ -207,10 +167,8 @@ async function load() {
       throw new Error('Unexpected /api/settings response — the server may be out of date.');
     }
     settings.value = res.settings;
-    agents.value = agentRes.agents;
     customAgents.value = agentRes.custom;
     drafts.value = Object.fromEntries(res.settings.map((s) => [s.key, s.value]));
-    sanitizeAgentDraft();
     error.value = '';
   } catch (e) {
     settings.value = [];
@@ -224,9 +182,8 @@ async function load() {
 async function reloadAgents() {
   try {
     const res = await listAgents();
-    agents.value = res.agents;
     customAgents.value = res.custom;
-    sanitizeAgentDraft();
+    profilesKey.value += 1;
   } catch (e) {
     error.value = (e as Error).message;
   }
@@ -251,7 +208,6 @@ function adopt(res: SettingsEnvelope, changedKeys: string[]) {
     const changed = res.settings.find((s) => s.key === changedKey);
     if (changed) drafts.value[changedKey] = changed.value;
   }
-  sanitizeAgentDraft();
 }
 
 function patchBody(keys: string[], reset = false): Record<string, string | null> {
@@ -279,24 +235,6 @@ async function resetKeys(keys: string[], label: string) {
 const saveSetting = (s: SettingView) => saveKeys([s.key], s.label);
 const resetSetting = (s: SettingView) => resetKeys([s.key], s.label);
 
-function profileKeys(): string[] {
-  return Object.values(agentKeys);
-}
-
-function setAgent(kind: string) {
-  drafts.value[agentKeys.agent] = kind;
-  sanitizeAgentDraft();
-}
-
-function setProfileChoice(key: 'model' | 'effort' | 'mode', value: string) {
-  drafts.value[agentKeys[key]] = value;
-  sanitizeAgentDraft();
-}
-
-function profileIsDefault(): boolean {
-  return profileKeys().every((key) => setting(key)?.is_default);
-}
-
 function durationOptions(s: SettingView): { label: string; value: string }[] {
   if (!s.key.endsWith('_secs')) return [];
   if (s.key.includes('cooldown')) {
@@ -314,8 +252,6 @@ function durationOptions(s: SettingView): { label: string; value: string }[] {
     { label: '1h', value: '3600' },
   ];
 }
-
-watch(() => [drafts.value['agent.default'], agents.value.length], sanitizeAgentDraft);
 
 onMounted(load);
 </script>
@@ -373,25 +309,7 @@ onMounted(load);
         <LogsPanel v-else-if="category === 'diagnostics'" />
 
         <div v-else-if="category === 'agents'" class="space-y-4">
-          <AgentProfileEditor
-            :title="agentProfileTitle"
-            note="Runtime, model, effort, and permissions used when a new session does not override them."
-            :keys="agentKeys"
-            :agents="availableAgents()"
-            :agent-kind="drafts[agentKeys.agent] ?? ''"
-            :model="drafts[agentKeys.model] ?? ''"
-            :effort="drafts[agentKeys.effort] ?? ''"
-            :mode="drafts[agentKeys.mode] ?? 'auto'"
-            :dirty="dirtyKeys(profileKeys()).length > 0"
-            :is-default="profileIsDefault()"
-            :busy="busy === agentProfileTitle"
-            @update-agent="setAgent"
-            @update-model="(value) => setProfileChoice('model', value)"
-            @update-effort="(value) => setProfileChoice('effort', value)"
-            @update-mode="(value) => setProfileChoice('mode', value)"
-            @save="saveKeys(profileKeys(), agentProfileTitle)"
-            @reset="resetKeys(profileKeys(), agentProfileTitle)"
-          />
+          <ProfilesPanel :key="profilesKey" />
           <CustomAgentsPanel :agents="customAgents" @reload="reloadAgents" />
         </div>
 
