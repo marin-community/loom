@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import re
 import unittest
 from pathlib import Path
 
@@ -58,21 +57,6 @@ class InfrastructureSourceContract(unittest.TestCase):
         self.assertIn(".backup", backup)
         self.assertIn("PRAGMA quick_check", backup)
         self.assertIn("gcloud storage cp", backup)
-
-    def test_image_workflow_is_keyless_and_immutable(self) -> None:
-        workflow = (ROOT / ".github/workflows/image.yml").read_text()
-        self.assertIn("id-token: write", workflow)
-        self.assertIn("google-github-actions/auth@", workflow)
-        self.assertIn("${GITHUB_SHA}", workflow)
-        self.assertIn("gcloud artifacts docker images describe", workflow)
-        self.assertIn("steps.image.outputs.exists != 'true'", workflow)
-        self.assertNotIn("loom:latest", workflow)
-        self.assertNotIn("credentials_json", workflow)
-        self.assertIn('docker_config={"immutable_tags": True}', SOURCE)
-        action_refs = re.findall(r"uses:\s+[^@\s]+@([^\s#]+)", workflow)
-        self.assertTrue(action_refs)
-        self.assertTrue(all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in action_refs))
-
 
 if __name__ == "__main__":
     unittest.main()

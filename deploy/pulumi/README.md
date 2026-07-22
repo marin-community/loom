@@ -236,41 +236,17 @@ volume. Do not restore over a running server.
 
 ## Deployment images
 
-Pulumi creates a repository-scoped Workload Identity Federation provider and a
-service account that can only write Artifact Registry images. Configure these
-GitHub repository variables from `pulumi stack output`:
-
-| Variable | Value |
-|---|---|
-| `LOOM_GCP_PROJECT` | GCP project id |
-| `LOOM_GCP_REGION` | stack region |
-| `LOOM_GCP_WIF_PROVIDER` | `githubWorkloadIdentityProvider` output |
-| `LOOM_GCP_IMAGE_SERVICE_ACCOUNT` | `githubServiceAccount` output |
-| `LOOM_URL` | canonical public URL, with no trailing slash |
-
-On pushes to `main`, [the image workflow](../../.github/workflows/image.yml)
-uses GitHub OIDC—no JSON key—to publish an immutable commit-SHA tag. The
-repository rejects tag replacement and deliberately has no mutable `latest`.
-Rerunning the workflow for an already-published commit detects the existing tag
-and exits successfully without rebuilding or moving it.
-Set `imageMode: pull`, pin `imageTag` to that SHA, and run `pulumi up` for a
-reproducible rollout; then run `post-up.py` to stream the new startup
-generation.
-
-The example stack uses `imageMode: build` so the first deployment is
-self-contained. Once that `pulumi up` has created WIF and Artifact Registry,
-set the four repository variables, manually dispatch **Publish deployment
-image**, and wait for it to finish. Then change `imageMode` to `pull`, set
-`imageTag` to the published commit SHA, run `pulumi up`, and run `post-up.py`.
-If a pull-mode VM boots before its selected image exists it fails safely and
-the post-up retrigger completes it after the image is published.
+The production deployment is owned by `infra/loom` in the Marin repository.
+Its Pulumi program builds a commit-pinned checkout on the operator's Docker
+daemon, pushes the image to Artifact Registry, and supplies the resulting
+digest to the VM. This repository does not publish production images from
+GitHub Actions.
 
 ## Validation
 
 ```sh
 python3 -m compileall -q infrastructure.py post-up.py tests
 shellcheck ../gcp/startup-script.sh ../gcp/backup-sqlite.sh
-actionlint ../../.github/workflows/image.yml
 .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m pytest -q tests  # Pulumi mocks; no cloud credentials
 pulumi preview                       # final provider/schema check

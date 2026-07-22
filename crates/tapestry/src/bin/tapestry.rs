@@ -10,7 +10,13 @@ use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use serde::Deserialize;
 use tapestry::{Client, LaunchOptions, LaunchSpec};
+
+fn read_launch_spec(reader: impl Read) -> Result<LaunchSpec> {
+    let mut deserializer = serde_json::Deserializer::from_reader(reader);
+    LaunchSpec::deserialize(&mut deserializer).context("parsing supervise spec (stdin)")
+}
 
 fn usage() -> ! {
     eprintln!(
@@ -81,11 +87,8 @@ async fn main() -> Result<()> {
             // manual poking. See [`tapestry::spawn_detached`].
             let spec: LaunchSpec = match args.get(1).map(String::as_str) {
                 Some("-") | None => {
-                    let mut buf = String::new();
-                    std::io::stdin()
-                        .read_to_string(&mut buf)
-                        .context("reading supervise spec from stdin")?;
-                    serde_json::from_str(&buf).context("parsing supervise spec (stdin)")?
+                    let stdin = std::io::stdin();
+                    read_launch_spec(stdin.lock())?
                 }
                 Some(json) => {
                     serde_json::from_str(json).context("parsing supervise spec (argv)")?
@@ -266,5 +269,32 @@ impl Drop for RawMode {
         unsafe {
             libc::tcsetattr(self.fd, libc::TCSANOW, &self.prev);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Cursor, Read};
+
+    use super::*;
+
+    struct NoEofReader(Cursor<Vec<u8>>);
+
+    impl Read for NoEofReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.0.position() == self.0.get_ref().len() as u64 {
+                panic!("launch spec parser waited for EOF");
+            }
+            self.0.read(buffer)
+        }
+    }
+
+    #[test]
+    fn launch_spec_parses_without_waiting_for_stdin_eof() {
+        let input = br#"{"name":"session-1","cwd":"/workspace","script":"true","env":[],"env_clear":false,"cols":80,"rows":24,"mode":"pty","segment_max_bytes":null}"#;
+        let spec = read_launch_spec(NoEofReader(Cursor::new(input.to_vec()))).unwrap();
+        assert_eq!(spec.name, "session-1");
+        assert_eq!(spec.cwd, PathBuf::from("/workspace"));
+        assert_eq!(spec.script, "true");
     }
 }
