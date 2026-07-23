@@ -436,6 +436,10 @@ Notable settings:
   [Restricted GitHub sessions](docs/restricted-sessions.md).
 - Profile environment values are write-only: API, CLI, and Settings responses
   expose names and update times, never secret values.
+- Ordinary sessions default `CARGO_TARGET_DIR` to the primary repository's
+  `target/` directory, so Rust builds are reused across its Weaver worktrees.
+  A profile, per-repo environment value, or committed `[env]` entry can override
+  it; restricted profiles receive no repository-derived defaults.
 - `server.auto_adopt` — adopt every recoverable session on daemon startup.
 - `github.poll` — poll GitHub (via `gh`) for each session's PR, review, and
   check status (on by default; a no-op without `gh` or a GitHub remote).

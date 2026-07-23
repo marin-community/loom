@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import * as api from '../api';
 import type { AgentMetadata, Profile, ProfileInput } from '../types';
 
@@ -15,6 +15,26 @@ const envName = ref('');
 const envValue = ref('');
 
 const current = computed(() => profiles.value.find((profile) => profile.name === selected.value));
+const selectedAgent = computed(() =>
+  agents.value.find((agent) => agent.kind === draft.value?.agent_kind),
+);
+
+function normalizeAgentChoices(metadata = selectedAgent.value) {
+  const profile = draft.value;
+  if (!profile || !metadata) return;
+  if (
+    profile.model &&
+    !metadata.accepts_raw_model &&
+    !metadata.models.some((choice) => choice.id === profile.model)
+  ) {
+    profile.model = '';
+  }
+  if (profile.effort && !metadata.efforts.some((choice) => choice.id === profile.effort)) {
+    profile.effort = '';
+  }
+}
+
+watch(selectedAgent, normalizeAgentChoices);
 
 function editable(profile: Profile): ProfileInput {
   const {
@@ -38,6 +58,7 @@ function choose(name: string) {
   selected.value = name;
   const profile = profiles.value.find((item) => item.name === name);
   draft.value = profile ? editable(profile) : null;
+  normalizeAgentChoices();
   creating.value = false;
   error.value = '';
   notice.value = '';
@@ -191,18 +212,53 @@ onMounted(load);
           <label class="text-xs"
             >Model
             <input
+              v-if="selectedAgent?.accepts_raw_model"
+              data-testid="profile-model"
+              v-model="draft.model"
+              list="profile-model-options"
+              placeholder="Agent default"
+              class="mt-1 w-full rounded bg-input px-2 py-1.5"
+            />
+            <datalist v-if="selectedAgent?.accepts_raw_model" id="profile-model-options">
+              <option
+                v-for="model in selectedAgent.models"
+                :key="model.id"
+                :value="model.id"
+                :label="model.label"
+              />
+            </datalist>
+            <select
+              v-else
               data-testid="profile-model"
               v-model="draft.model"
               class="mt-1 w-full rounded bg-input px-2 py-1.5"
-            />
+            >
+              <option value="">Agent default</option>
+              <option
+                v-for="model in selectedAgent?.models ?? []"
+                :key="model.id"
+                :value="model.id"
+              >
+                {{ model.label }}
+              </option>
+            </select>
           </label>
           <label class="text-xs"
             >Effort
-            <input
+            <select
               data-testid="profile-effort"
               v-model="draft.effort"
               class="mt-1 w-full rounded bg-input px-2 py-1.5"
-            />
+            >
+              <option value="">Agent default</option>
+              <option
+                v-for="effort in selectedAgent?.efforts ?? []"
+                :key="effort.id"
+                :value="effort.id"
+              >
+                {{ effort.label }}
+              </option>
+            </select>
           </label>
           <label class="text-xs"
             >Protocol
