@@ -1,6 +1,6 @@
 import { ref } from 'vue';
-import { listSessions } from '../api';
-import type { Session } from '../types';
+import { listRuns, listSessions } from '../api';
+import type { AutomationRun, Session } from '../types';
 
 // One shared snapshot of the fleet. The session list, the status bar, and the
 // detail page all read from here instead of each polling `/api/sessions` on
@@ -14,6 +14,7 @@ import type { Session } from '../types';
 // the view is a projection of REST state, never a separate browser-local truth.
 
 const sessions = ref<Session[]>([]);
+const runs = ref<AutomationRun[]>([]);
 // Last fetch reached the server? Drives the status bar's online dot; the cached
 // counts dim rather than vanish while the server is briefly unreachable.
 const online = ref(true);
@@ -21,14 +22,19 @@ const online = ref(true);
 let inflight: Promise<void> | null = null;
 
 // Pull the whole fleet, archived and automation-class sessions included — the
-// superset the list's archive/automation toggles need (the status bar and the
-// list itself just filter each out locally). Concurrent callers coalesce onto
-// the one in-flight request.
+// superset the Workspace/Automation panes and archive disclosures need (the
+// status bar and each pane project their own subset). Concurrent callers
+// coalesce onto the one in-flight request.
 async function refresh(): Promise<void> {
   if (inflight) return inflight;
   inflight = (async () => {
     try {
-      sessions.value = await listSessions({ archived: true, automation: true });
+      const [nextSessions, nextRuns] = await Promise.all([
+        listSessions({ archived: true, automation: true }),
+        listRuns(),
+      ]);
+      sessions.value = nextSessions;
+      runs.value = nextRuns;
       online.value = true;
     } catch {
       // Keep the last good snapshot; the status bar's offline dot says why.
@@ -63,5 +69,5 @@ function stopFleetPoll(): void {
 }
 
 export function useFleet() {
-  return { sessions, online, refresh, sessionById, startFleetPoll, stopFleetPoll };
+  return { sessions, runs, online, refresh, sessionById, startFleetPoll, stopFleetPoll };
 }

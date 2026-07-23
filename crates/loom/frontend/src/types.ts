@@ -104,7 +104,8 @@ export interface Session {
   origin: string;
   /** `interactive` (a person's own session) or `automation` (agent/system
    *  launched). Automation-class sessions are excluded from the default fleet
-   *  list and issue board — the Automation toggle reveals them. */
+   *  list and issue board; the Sessions view gives them a separate Automation
+   *  pane. */
   class: string;
   /** Total agent turns run so far. */
   turn_count: number;
@@ -138,6 +139,24 @@ export interface Session {
    *  well-known claude/codex mode set — see `AcpConversation`. */
   available_modes?: string[];
   branch: Branch;
+}
+
+/** Durable automation launch reservation (`GET /api/runs`). A run normally
+ *  points at an automation-class Session, but a launch can fail before that
+ *  session becomes usable; the Automation pane keeps those failures visible. */
+export interface AutomationRun {
+  id: string;
+  actor_subject: string;
+  source: string;
+  service_tag: string;
+  profile: string;
+  idempotency_key: string;
+  session_id: string;
+  status: string;
+  outcome: string | null;
+  summary: string;
+  created_at: string;
+  updated_at: string;
 }
 
 // ── ACP conversation surface ────────────────────────────────────────────────

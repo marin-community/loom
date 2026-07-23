@@ -38,12 +38,16 @@ const props = defineProps<{ ws: Session }>();
 const emit = defineEmits<{ reload: [] }>();
 
 const router = useRouter();
+const fleetHref = computed(() =>
+  props.ws.class === 'automation' ? { path: '/', query: { view: 'automation' } } : '/',
+);
+const fleetLabel = computed(() => (props.ws.class === 'automation' ? '← automation' : '← all'));
 // The detail page's subject is the session itself, so a successful Remove has to
 // leave: route back to the fleet list rather than reload a page that is gone.
 const actions = useSessionActions(
   () => props.ws.id,
   () => emit('reload'),
-  () => router.push('/'),
+  () => router.push(fleetHref.value),
 );
 const { busy, notice, error, rename, clearTag, run } = actions;
 
@@ -187,7 +191,9 @@ async function submitHandoff() {
   <header class="mb-1 rounded-r border-l-2 border-transparent py-0.5 pl-3 pr-1">
     <!-- Row 1 — nav, title (inline rename), attention + lifecycle controls -->
     <div class="flex items-center gap-2.5">
-      <router-link to="/" class="shrink-0 text-sm text-muted hover:text-fg">← all</router-link>
+      <router-link :to="fleetHref" class="shrink-0 text-sm text-muted hover:text-fg">{{
+        fleetLabel
+      }}</router-link>
       <input
         v-if="editing"
         ref="inputEl"

@@ -18,3 +18,10 @@ export function timeAgo(iso: string | null | undefined, now: number = Date.now()
   if (wks < 5) return `${wks}w ago`;
   return `${Math.round(days / 30)}mo ago`;
 }
+
+/** Locale-formatted exact time for a relative timestamp's tooltip/a11y label.
+ *  Invalid input is preserved rather than silently disappearing. */
+export function exactTime(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
+}

@@ -11,7 +11,14 @@ import NewSessionDrawer from '../components/NewSessionDrawer.vue';
 import SessionRowActions from '../components/SessionRowActions.vue';
 import SessionRemedyButton from '../components/SessionRemedyButton.vue';
 import AgentUsage from '../components/AgentUsage.vue';
+import AutomationSessions from '../components/AutomationSessions.vue';
 import { timeAgo } from '../lib/time';
+import {
+  isAutomationHistory,
+  needsAutomationIntervention,
+  runNeedsIntervention,
+  unmatchedAutomationRuns,
+} from '../lib/automationSessions';
 import {
   effectiveAttention,
   idleTag,
@@ -35,7 +42,7 @@ defineOptions({ name: 'SessionList' });
 // view paints from cache the instant it mounts (and, kept alive, stays painted
 // across navigation — no refetch flash, no re-animate). `refresh()` forces an
 // immediate re-pull after a write (create / clear tag).
-const { sessions, refresh } = useFleet();
+const { sessions, runs, refresh } = useFleet();
 
 // Attention filter — the dashboard's "which sessions need me?" control. The
 // URL query is the source of truth (`/?filter=attention`, the status bar's
@@ -61,29 +68,63 @@ function setFilter(f: AttentionFilter) {
   router.replace({ query: { ...route.query, filter: f === 'all' ? undefined : f } });
 }
 
+// The Sessions route has two URL-backed surfaces. Workspace is the default and
+// remains the human workbench; Automation is a purpose-built operational view.
+// Kept-alive route changes (including back/forward) flow through this computed
+// value without remounting the list.
+type SessionPane = 'workspace' | 'automation';
+const pane = computed<SessionPane>(() =>
+  route.query.view === 'automation' ? 'automation' : 'workspace',
+);
+const workspaceSessions = computed(() =>
+  sessions.value.filter((session) => session.class !== 'automation'),
+);
+const automationSessions = computed(() =>
+  sessions.value.filter((session) => session.class === 'automation'),
+);
+const unmatchedRuns = computed(() => unmatchedAutomationRuns(runs.value, automationSessions.value));
+const liveAutomationCount = computed(
+  () =>
+    automationSessions.value.filter((session) => !isAutomationHistory(session)).length +
+    unmatchedRuns.value.length,
+);
+const automationInterventionCount = computed(
+  () =>
+    automationSessions.value.filter(needsAutomationIntervention).length +
+    unmatchedRuns.value.filter(runNeedsIntervention).length,
+);
+const historyOpen = computed(() => pane.value === 'automation' && route.query.history === 'true');
+
+function paneQuery(next: SessionPane): Record<string, string | null | undefined> {
+  const query = { ...route.query };
+  if (next === 'automation') {
+    delete query.filter;
+    delete query.new;
+    query.view = 'automation';
+  } else {
+    delete query.view;
+    delete query.history;
+  }
+  return query as Record<string, string | null | undefined>;
+}
+
+function toggleAutomationHistory() {
+  const query = paneQuery('automation');
+  if (historyOpen.value) delete query.history;
+  else query.history = 'true';
+  router.replace({ query });
+}
+
 // Archived sessions are torn-down workstreams: kept for reference but clutter
 // the live fleet view. Hide them by default; a reveal chip brings them back.
 // They still show when there's nothing else to look at (an all-archived fleet),
 // so the list never reads as empty while archived rows exist.
 const showArchived = ref(false);
 
-// Automation-class sessions (agent/github/slack/watch/actions/ops launched —
-// see docs/loom-ui.md) are a background fleet, not the one a person is minding.
-// Hidden by default, same shape as the archived toggle below: a reveal chip
-// brings them back as ordinary cards (see the origin pill on the row).
-const showAutomation = ref(false);
-const automationCount = computed(
-  () => sessions.value.filter((s) => s.class === 'automation').length,
-);
-
-// The automation-aware base: every session when the toggle is on, else the
-// fleet minus automation-class rows. Everything downstream (archived count,
-// visible rows, filter-pill counts) reads through this so automation stays
-// fully invisible — not just hidden from the list, but from the tallies too —
-// until a person asks to see it.
-const filteredBase = computed<Session[]>(() =>
-  showAutomation.value ? sessions.value : sessions.value.filter((s) => s.class !== 'automation'),
-);
+// Every existing Workspace calculation reads this interactive-only base.
+// Automation has its own component and cannot leak into workspace counts,
+// threading, manual ordering, or the Parked shelf.
+const filteredBase = computed<Session[]>(() => workspaceSessions.value);
 
 const archivedCount = computed(
   () => filteredBase.value.filter((s) => s.status === 'archived').length,
@@ -368,7 +409,7 @@ const tokenConfigWarning = computed(() => error.value.startsWith(MISSING_GITHUB_
 // The New Session drawer is reflected in the URL (`/?new`), like the attention
 // filter above — so it's deep-linkable, the back button closes it, and the tab
 // title (composed in App.vue) can read "Weaver - New Session" while it's open.
-const showForm = computed(() => route.query.new !== undefined);
+const showForm = computed(() => pane.value === 'workspace' && route.query.new !== undefined);
 function openForm() {
   router.replace({ query: { ...route.query, new: null } });
 }
@@ -410,11 +451,66 @@ async function handleCreated() {
     <div class="mb-3 flex min-h-7 flex-wrap items-center gap-2.5">
       <h1 class="text-2xs font-semibold uppercase tracking-wider text-muted">Sessions</h1>
 
+      <nav
+        aria-label="Session surface"
+        class="inline-flex overflow-hidden rounded border border-line text-xs"
+        data-testid="session-panes"
+      >
+        <router-link
+          :to="{ path: '/', query: paneQuery('workspace') }"
+          data-testid="workspace-pane-link"
+          :aria-current="pane === 'workspace' ? 'page' : undefined"
+          :class="[
+            'flex items-center gap-1.5 px-2.5 py-1 font-medium transition-colors',
+            pane === 'workspace'
+              ? 'bg-accent text-accent-fg'
+              : 'bg-input text-muted hover:bg-subtle hover:text-fg',
+          ]"
+        >
+          Workspace
+          <span
+            class="rounded-full px-1.5 text-2xs leading-4"
+            :class="pane === 'workspace' ? 'bg-accent-fg/20' : 'bg-subtle text-faint'"
+            :aria-label="`${workspaceSessions.length} workspace sessions`"
+          >
+            {{ workspaceSessions.length }}
+          </span>
+        </router-link>
+        <router-link
+          :to="{ path: '/', query: paneQuery('automation') }"
+          data-testid="automation-pane-link"
+          :aria-current="pane === 'automation' ? 'page' : undefined"
+          :class="[
+            'flex items-center gap-1.5 border-l border-line px-2.5 py-1 font-medium transition-colors',
+            pane === 'automation'
+              ? 'bg-accent text-accent-fg'
+              : 'bg-input text-muted hover:bg-subtle hover:text-fg',
+          ]"
+        >
+          Automation
+          <span
+            class="rounded-full px-1.5 text-2xs leading-4"
+            :class="pane === 'automation' ? 'bg-accent-fg/20' : 'bg-subtle text-faint'"
+            :aria-label="`${liveAutomationCount} live automation runs`"
+          >
+            {{ liveAutomationCount }}
+          </span>
+          <span
+            v-if="automationInterventionCount"
+            class="rounded bg-block-soft px-1.5 text-2xs text-block ring-1 ring-inset ring-block-line/30"
+            data-testid="automation-intervention-badge"
+            :aria-label="`${automationInterventionCount} automation runs need intervention`"
+          >
+            {{ automationInterventionCount }} need intervention
+          </span>
+        </router-link>
+      </nav>
+
       <!-- Attention filter: jump straight to the sessions that need a human.
            Each segment pairs a label with its count in a small pill so the
            number reads as a count, not a suffix glued to the word. -->
       <div
-        v-if="filteredBase.length"
+        v-if="pane === 'workspace' && filteredBase.length"
         class="inline-flex overflow-hidden rounded border border-line text-xs"
       >
         <button
@@ -443,7 +539,7 @@ async function handleCreated() {
 
       <!-- Archived live below the fold: a quiet chip reveals/hides them. -->
       <button
-        v-if="archivedCount"
+        v-if="pane === 'workspace' && archivedCount"
         type="button"
         :aria-pressed="showArchived"
         :class="[
@@ -455,26 +551,11 @@ async function handleCreated() {
         {{ showArchived ? 'Hide' : 'Show' }} {{ archivedCount }} archived
       </button>
 
-      <!-- Automation-class sessions live below the fold too: same anatomy as
-           the archived chip, right alongside it. -->
-      <button
-        v-if="automationCount"
-        type="button"
-        :aria-pressed="showAutomation"
-        data-testid="automation-toggle"
-        :class="[
-          'rounded border border-line px-2.5 py-1 text-xs text-muted transition-colors',
-          showAutomation ? 'bg-subtle text-fg' : 'bg-input hover:bg-subtle',
-        ]"
-        @click="showAutomation = !showAutomation"
-      >
-        {{ showAutomation ? 'Hide' : 'Show' }} {{ automationCount }} automation
-      </button>
-
       <!-- Toggles the create form. Closed → primary (accent) call-to-action;
            open → a neutral "Cancel" so it never reads as a second primary
            action competing with the form's own Create button. -->
       <button
+        v-if="pane === 'workspace'"
         :class="[
           'ml-auto px-2.5 py-1 text-xs font-medium',
           showForm ? 'btn-secondary' : 'btn-primary',
@@ -507,7 +588,7 @@ async function handleCreated() {
     </div>
 
     <div
-      v-if="!filteredBase.length"
+      v-if="pane === 'workspace' && !filteredBase.length"
       class="rounded-md border border-dashed border-line p-6 text-center"
     >
       <p class="text-sm text-muted">No sessions yet.</p>
@@ -534,14 +615,14 @@ async function handleCreated() {
     <!-- Every session is resting — the live list is empty but the fleet isn't.
          Point at the shelf below rather than reading as "no sessions". -->
     <p
-      v-if="filteredBase.length && !liveRows.length"
+      v-if="pane === 'workspace' && filteredBase.length && !liveRows.length"
       class="rounded-md border border-dashed border-line px-4 py-3 text-center font-serif text-[13px] italic text-muted"
     >
       All sessions are resting on the shelf below.
     </p>
 
     <ul
-      v-if="liveRows.length"
+      v-if="pane === 'workspace' && liveRows.length"
       data-testid="session-list"
       class="fade-in rounded-md border border-line bg-surface"
       @dragover.prevent
@@ -740,7 +821,7 @@ async function handleCreated() {
          verb (and dragging a row back out) returns it. Shown while empty only
          mid-drag, so there's always somewhere to drop. -->
     <section
-      v-if="shelfCount || draggingId"
+      v-if="pane === 'workspace' && (shelfCount || draggingId)"
       data-testid="parked-shelf"
       class="mt-3 rounded-md transition-shadow"
       :class="overShelf && draggingId ? 'shadow-[inset_0_0_0_1px_var(--accent)]' : ''"
@@ -861,6 +942,17 @@ async function handleCreated() {
         </li>
       </ul>
     </section>
+
+    <AutomationSessions
+      v-if="pane === 'automation'"
+      :sessions="automationSessions"
+      :fleet="sessions"
+      :runs="runs"
+      :history-open="historyOpen"
+      :clearing-tag="clearingTag"
+      @toggle-history="toggleAutomationHistory"
+      @clear-tag="clearTag"
+    />
   </div>
 </template>
 

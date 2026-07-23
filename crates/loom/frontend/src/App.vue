@@ -44,6 +44,7 @@ const docTitle = computed(() => {
   if (typeof id === 'string' && route.path.startsWith(`/s/${id}`)) {
     return withSection(sessionById(id)?.branch.title || sessionById(id)?.branch.name);
   }
+  if (route.path === '/' && route.query.view === 'automation') return withSection('Automation');
   if (route.path === '/' && route.query.new !== undefined) return withSection('New Session');
   return withSection(route.meta.title as string | undefined);
 });

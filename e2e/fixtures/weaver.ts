@@ -277,6 +277,16 @@ async function deleteAllSessions(baseUrl: string) {
   }
 }
 
+/** Automation launch reservations are durable and intentionally have no
+ *  product delete endpoint. Test workers own a private sqlite database, so
+ *  clear that audit table directly between tests to keep run-only failures
+ *  from leaking into later count assertions. */
+function deleteAllAutomationRuns(dbPath: string) {
+  execFileSync("sqlite3", [dbPath, "DELETE FROM automation_runs;"], {
+    stdio: "pipe",
+  });
+}
+
 /** Delete every watch on a server, best-effort — watches aren't tied
  *  to a session, so the per-test wipe clears them explicitly. */
 async function deleteAllWatches(baseUrl: string) {
@@ -658,11 +668,13 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
     // crashed prior test left) so every test starts from a deterministic empty
     // panel regardless of ordering.
     await deleteAllWatches(baseUrl);
+    deleteAllAutomationRuns(childEnv.WEAVER_DB!);
 
     await use(fixture);
 
     // Reset for the next test in this worker.
     await deleteAllSessions(baseUrl);
+    deleteAllAutomationRuns(childEnv.WEAVER_DB!);
     await deleteAllWatches(baseUrl);
     await deleteAllIssues(baseUrl);
   },

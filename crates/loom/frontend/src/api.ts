@@ -93,11 +93,16 @@ export const listSessions = (opts: { archived?: boolean; automation?: boolean } 
   return get(`/sessions${qs ? `?${qs}` : ''}`) as Promise<Session[]>;
 };
 
+/** Durable automation launch reservations, including failures that never
+ *  produced a usable session (`GET /api/runs`). */
+export const listRuns = () => get('/runs') as Promise<AutomationRun[]>;
+
 // --- Issues ----------------------------------------------------------------
 
 import type {
   Issue,
   Session,
+  AutomationRun,
   ArtifactMeta,
   ArtifactView,
   ArtifactWriteBody,

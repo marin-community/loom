@@ -121,7 +121,29 @@ not VS Code:
   radius 4px on controls and 6px on panels. The 4/8/12/16 spacing grid.
 - **Numbers**: `tabular-nums` globally.
 
-## Fleet list: order & the resting shelf
+## Session surfaces
+
+Sessions has two URL-backed surfaces because a person's work and an automation
+execution have different operating rhythms:
+
+- **Workspace** is the default human workbench. It contains interactive-class
+  sessions only and keeps the attention filters, parent/child threads, manual
+  order, Parked shelf, and New session action.
+- **Automation** is an exceptions-first operational view. It contains
+  automation-class sessions only, puts blocked/error/orphaned/attention work
+  ahead of calm active work, and collapses done/archived history. Durable
+  `/api/runs` reservations without a matching session keep provisioning and
+  launch failures visible. Rows show origin, profile revision, turns, exact
+  activity time, and parent provenance without inheriting the Workspace's
+  manual order or parking controls.
+
+The Workspace / Automation links preserve the surface in the URL
+(`?view=automation`; `history=true` expands automation history). The Automation
+link carries a distinct intervention count even while Workspace is selected;
+archived history never inflates that live signal. The status bar remains the
+human fleet vital and excludes automation.
+
+## Workspace: order & the resting shelf
 
 The fleet list is where a long day's fatigue accumulates, so two controls keep it
 from becoming a wall of stale rows:

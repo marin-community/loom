@@ -13,6 +13,8 @@ const palette: Record<string, string> = {
   orphaned: 'bg-subtle text-muted',
   done: 'bg-ok-soft text-ok ring-1 ring-inset ring-ok-line/30',
   error: 'bg-block-soft text-block ring-1 ring-inset ring-block-line/30',
+  failed: 'bg-block-soft text-block ring-1 ring-inset ring-block-line/30',
+  creating: 'bg-info-soft text-info ring-1 ring-inset ring-info-line/30',
   archived: 'bg-subtle text-faint',
 };
 
