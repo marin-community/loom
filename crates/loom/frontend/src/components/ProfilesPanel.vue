@@ -23,7 +23,7 @@ function changeAgent(event: Event) {
   const profile = draft.value;
   if (!profile) return;
   profile.agent_kind = (event.target as HTMLSelectElement).value;
-  const metadata = agents.value.find((agent) => agent.kind === profile.agent_kind);
+  const metadata = selectedAgent.value;
   if (!metadata) return;
   if (
     profile.model &&
