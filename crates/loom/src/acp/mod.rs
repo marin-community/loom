@@ -50,7 +50,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tapestry::RelayEvent;
@@ -105,6 +105,13 @@ pub struct AcpLaunch {
     /// `default`, `plan`), applied via `session/set_mode` after setup. `None`
     /// leaves the adapter's default mode.
     pub mode: Option<String>,
+    /// Resolved launch selectors that must also be reflected in the adapter's
+    /// live config controls. Some adapters pass these through to the underlying
+    /// runtime before constructing their ACP `configOptions`, so the model can
+    /// be correct while the advertised picker is still on its own default.
+    pub initial_model: Option<String>,
+    /// The matching reasoning-effort selector, when the launch pinned one.
+    pub initial_effort: Option<String>,
     /// The session's goal, sent as the first `session/prompt` (journaled as the
     /// first `user_message`). `None` waits for the first REST prompt.
     pub goal: Option<String>,
@@ -966,6 +973,93 @@ impl Task {
         }
     }
 
+    /// Bring the adapter-owned model/effort controls into line with Loom's
+    /// resolved launch selectors. Claude's adapter, for example, forwards the
+    /// `_meta` model to the SDK but independently seeds its model config option
+    /// from settings/defaults. Going through the ordinary ACP config method
+    /// gives both sides one acknowledged state before the first prompt.
+    async fn reconcile_initial_config(
+        &mut self,
+        launch: &AcpLaunch,
+        cmd_rx: &mut mpsc::Receiver<Command>,
+    ) -> Result<()> {
+        for (kind, desired) in [
+            ("model", launch.initial_model.as_deref()),
+            ("effort", launch.initial_effort.as_deref()),
+        ] {
+            let Some(desired) = desired.map(str::trim).filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            let option = {
+                let metadata = self.metadata.lock().unwrap();
+                metadata.config_options.iter().find_map(|option| {
+                    let id = option.get("id").and_then(Value::as_str)?;
+                    let category = option.get("category").and_then(Value::as_str);
+                    let matches = match kind {
+                        "model" => category == Some("model") || id == "model",
+                        "effort" => {
+                            category == Some("thought_level")
+                                || id == "effort"
+                                || id.contains("reasoning")
+                        }
+                        _ => false,
+                    };
+                    matches.then(|| {
+                        (
+                            id.to_string(),
+                            option
+                                .get("currentValue")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        )
+                    })
+                })
+            };
+            let Some((config_id, current)) = option else {
+                // Older/custom adapters may not expose this selector. The
+                // launch channel still owns the runtime value in that case.
+                continue;
+            };
+            if current.as_deref() == Some(desired) {
+                continue;
+            }
+
+            let id = self.next_id();
+            self.stream
+                .write(&wire::request_line(
+                    id,
+                    method::SESSION_SET_CONFIG_OPTION,
+                    wire::set_config_option_params(
+                        &self.acp_session_id,
+                        &config_id,
+                        Value::String(desired.to_string()),
+                    ),
+                ))
+                .await?;
+            let (result, error) = self
+                .recv_until_response(
+                    id,
+                    method::SESSION_SET_CONFIG_OPTION,
+                    launch.setup_timeout,
+                    cmd_rx,
+                )
+                .await?;
+            let result = result.ok_or_else(|| {
+                anyhow!(
+                    "session/set_config_option failed while applying launch {kind} '{desired}': {error:?}"
+                )
+            })?;
+            let updated: wire::SetConfigOptionResult =
+                serde_json::from_value(result).with_context(|| {
+                    format!(
+                        "session/set_config_option returned invalid launch {kind} state for '{desired}'"
+                    )
+                })?;
+            self.replace_config_options(updated.config_options, false);
+        }
+        Ok(())
+    }
+
     // -- handshake ----------------------------------------------------------
 
     async fn handshake(
@@ -1066,6 +1160,8 @@ impl Task {
             }
         }
         session::set_acp(&self.db, &self.session_id, &self.acp_session_id).await?;
+
+        self.reconcile_initial_config(launch, cmd_rx).await?;
 
         if let Some(mode) = &launch.mode {
             let id = self.next_id();
