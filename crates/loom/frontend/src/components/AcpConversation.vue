@@ -1085,6 +1085,12 @@ function activitySummary(row: Extract<Row, { type: 'activity' }>): string {
 function hasDetail(t: ToolCallPayload): boolean {
   return (t.content ?? []).some((c) => c.type === 'diff' || (c.type === 'text' && !!c.text));
 }
+// Execute titles are the command line itself. Keep long commands compact in the
+// activity list, but always let the operator disclose the complete command even
+// when the call produced no output to use as a detail panel.
+function canExpandTool(t: ToolCallPayload): boolean {
+  return t.tool_kind === 'execute' || hasDetail(t);
+}
 interface DiffLine {
   sign: '-' | '+';
   text: string;
@@ -1124,6 +1130,12 @@ function toggleFold(key: string, dflt = false) {
   const m = new Map(folds.value);
   m.set(key, !foldOpen(key, dflt));
   folds.value = m;
+}
+function activityItemOpen(item: ActivityItem): boolean {
+  return foldOpen(`tool-${item.tool.tool_call_id}`, item.failed);
+}
+function toggleActivityItem(item: ActivityItem) {
+  toggleFold(`tool-${item.tool.tool_call_id}`, item.failed);
 }
 
 // ── Working timer (elapsed + time since observable progress) ─────────────────
@@ -1320,30 +1332,36 @@ function goTo(anchor: string) {
                     <button
                       type="button"
                       class="acp-activity-line"
-                      :disabled="!hasDetail(entry.item.tool)"
-                      @click="toggleFold(`tool-${entry.item.tool.tool_call_id}`, entry.item.failed)"
+                      :disabled="!canExpandTool(entry.item.tool)"
+                      :aria-expanded="
+                        canExpandTool(entry.item.tool) ? activityItemOpen(entry.item) : undefined
+                      "
+                      @click="toggleActivityItem(entry.item)"
                     >
                       <span class="acp-tool-glyph">{{ toolGlyph(entry.item.tool.tool_kind) }}</span>
-                      <span class="truncate">{{
-                        entry.item.tool.title || entry.item.tool.tool_kind
-                      }}</span>
+                      <span
+                        class="acp-activity-title"
+                        :class="{
+                          truncate: !activityItemOpen(entry.item),
+                          open: activityItemOpen(entry.item),
+                        }"
+                        data-testid="acp-activity-title"
+                        >{{ entry.item.tool.title || entry.item.tool.tool_kind }}</span
+                      >
                       <span v-if="entry.item.failed" class="acp-activity-status text-block"
                         >failed</span
                       >
                       <span
-                        v-else-if="hasDetail(entry.item.tool)"
+                        v-else-if="canExpandTool(entry.item.tool)"
                         class="chev sm"
                         :class="{
-                          open: foldOpen(`tool-${entry.item.tool.tool_call_id}`, entry.item.failed),
+                          open: activityItemOpen(entry.item),
                         }"
                         >▸</span
                       >
                     </button>
                     <div
-                      v-if="
-                        hasDetail(entry.item.tool) &&
-                        foldOpen(`tool-${entry.item.tool.tool_call_id}`, entry.item.failed)
-                      "
+                      v-if="hasDetail(entry.item.tool) && activityItemOpen(entry.item)"
                       class="acp-detail"
                       data-testid="acp-detail"
                     >
@@ -1955,6 +1973,11 @@ function goTo(anchor: string) {
 .acp-activity-line:not(:disabled):hover {
   background: color-mix(in srgb, var(--subtle) 55%, transparent);
   color: var(--fg);
+}
+.acp-activity-title.open {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .acp-activity-status {
   margin-left: auto;

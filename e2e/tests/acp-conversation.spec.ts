@@ -256,6 +256,27 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('acp-activity-item')).toHaveCount(2);
   });
 
+  test('expands a truncated command line in an activity run', async ({ page, weaver }) => {
+    const command =
+      'kubectl --kubeconfig /home/operator/.kube/cluster --context production -n services exec deployment/api -- printenv';
+    await openAcp(page, weaver, { goal: `tool:execute:${command}|say:done` });
+    await expect(page.getByText('done', { exact: true })).toBeVisible();
+
+    await page.getByTestId('acp-activity-head').click();
+    const item = page.getByTestId('acp-activity-item');
+    const title = item.getByTestId('acp-activity-title');
+    await expect(title).toHaveClass(/truncate/);
+    await expect(item.getByRole('button')).toHaveAttribute('aria-expanded', 'false');
+    await expect.poll(() => title.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+    const collapsedHeight = await title.evaluate((el) => el.clientHeight);
+
+    await item.getByRole('button').click();
+    await expect(title).not.toHaveClass(/truncate/);
+    await expect(title).toHaveText(command);
+    await expect(item.getByRole('button')).toHaveAttribute('aria-expanded', 'true');
+    await expect.poll(() => title.evaluate((el) => el.clientHeight)).toBeGreaterThan(collapsedHeight);
+  });
+
   test('a failed call opens its group and shows the failure', async ({ page, weaver }) => {
     await openAcp(page, weaver, { goal: 'tool:read:Read config|toolfail:cargo test|say:after' });
     const conv = page.getByTestId('acp-conversation');
