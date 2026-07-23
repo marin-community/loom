@@ -45,5 +45,5 @@ export function unmatchedAutomationRuns(
 }
 
 export function runNeedsIntervention(run: AutomationRun): boolean {
-  return run.status !== 'creating';
+  return run.status === 'failed';
 }

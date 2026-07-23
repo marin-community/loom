@@ -288,4 +288,43 @@ test.describe("automation session surface", () => {
     await expect(failed).toContainText("ops");
     await expect(failed).toContainText("default");
   });
+
+  test("an unmatched running reservation remains active", async ({
+    page,
+    weaver,
+  }) => {
+    const now = new Date().toISOString();
+    await page.route("**/api/runs", async (route) => {
+      await route.fulfill({
+        json: [
+          {
+            id: "running-reservation",
+            actor_subject: "automation:test",
+            source: "actions",
+            service_tag: "comment-rewriter",
+            profile: "default",
+            idempotency_key: "running-reservation",
+            session_id: "not-yet-visible",
+            status: "running",
+            outcome: null,
+            summary: "",
+            created_at: now,
+            updated_at: now,
+          },
+        ],
+      });
+    });
+
+    await page.goto(`${weaver.baseUrl}/?view=automation`);
+
+    await expect(page.getByTestId("automation-intervention-badge")).toHaveCount(
+      0,
+    );
+    await expect(
+      page
+        .getByTestId("automation-active")
+        .getByTestId("automation-run-only"),
+    ).toContainText("running");
+    await expect(page.getByTestId("automation-interventions")).toHaveCount(0);
+  });
 });
