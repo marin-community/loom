@@ -695,10 +695,6 @@ CwIDAQAB
 
     const TEST_APP_ID: i64 = 123456;
 
-    pub(crate) fn credentials() -> (i64, &'static str) {
-        (TEST_APP_ID, TEST_PRIVATE_KEY)
-    }
-
     // -- JWT ----------------------------------------------------------------
 
     /// The minted App JWT verifies against the public key and carries the
@@ -948,6 +944,14 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     /// tests stay parallel-safe.
     async fn configured_app(api_base: String, fallback: Arc<dyn GithubApi>) -> GithubApp {
         let db = crate::db::connect_in_memory().await.unwrap();
+        configured_app_for_db(db, api_base, fallback).await
+    }
+
+    async fn configured_app_for_db(
+        db: Db,
+        api_base: String,
+        fallback: Arc<dyn GithubApi>,
+    ) -> GithubApp {
         weaver_core::config::apply(
             &db,
             &[
@@ -961,6 +965,11 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         .await
         .unwrap();
         GithubApp::with_parts(db, api_base, fallback)
+    }
+
+    pub(crate) async fn configured_test_app(db: Db) -> GithubApp {
+        let base = spawn_mock(MockState::new(3600)).await;
+        configured_app_for_db(db, base, Arc::new(crate::github_trigger::GhCli)).await
     }
 
     // -- installation token exchange + caching ------------------------------
@@ -1029,7 +1038,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     }
 
     #[tokio::test]
-    async fn issue_fetch_uses_installation_token() {
+    async fn issue_fetch_maps_github_response() {
         let mock = MockState::new(3600);
         let base = spawn_mock(mock).await;
         let app = configured_app(base, Arc::new(RecordingFallback::default())).await;

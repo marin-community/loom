@@ -877,11 +877,7 @@ pub(crate) async fn provision_session(
         // The caller already holds the thread (the `@loom` trigger): record the
         // GitHub link on the tracking issue without the fetch-and-seed above.
         github_issue = Some(number);
-        github_repo = req
-            .repo
-            .as_deref()
-            .and_then(|r| crate::repo::parse_slug(r).ok())
-            .map(|s| s.slug());
+        github_repo = managed_slug.as_ref().map(|repo| repo.slug());
     }
 
     // Claiming an existing weaver issue seeds the same three fields from it.
@@ -3734,17 +3730,16 @@ mod tests {
     async fn restricted_builtin_accepts_configured_github_app() {
         let db = crate::db::connect_in_memory().await.unwrap();
         seed_user(&db, "alice").await;
-        let (app_id, private_key) = crate::github_app::tests::credentials();
         weaver_core::config::apply(
             &db,
             &[
                 (
                     crate::github_app::APP_ID_KEY.to_string(),
-                    Some(app_id.to_string()),
+                    Some("123456".to_string()),
                 ),
                 (
                     crate::github_app::APP_PRIVATE_KEY_KEY.to_string(),
-                    Some(private_key.to_string()),
+                    Some("configured-for-preflight".to_string()),
                 ),
             ],
         )

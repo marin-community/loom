@@ -254,7 +254,6 @@ pub(super) async fn restricted_github_tool(
 mod tests {
     use std::sync::Arc;
 
-    use axum::{routing::get, routing::post, Json, Router};
     use serde_json::json;
 
     use super::{github_token, validate_arguments};
@@ -280,48 +279,8 @@ mod tests {
 
     #[tokio::test]
     async fn github_app_is_the_restricted_tool_credential_fallback() {
-        async fn installation() -> Json<serde_json::Value> {
-            Json(json!({ "id": 42 }))
-        }
-
-        async fn token() -> Json<serde_json::Value> {
-            Json(json!({
-                "token": "ghs_repo_scoped",
-                "expires_at": "2099-01-01T00:00:00Z"
-            }))
-        }
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let router = Router::new()
-            .route("/repos/{owner}/{name}/installation", get(installation))
-            .route("/app/installations/{id}/access_tokens", post(token));
-        tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
-
         let db = crate::db::connect_in_memory().await.unwrap();
-        let (app_id, private_key) = crate::github_app::tests::credentials();
-        weaver_core::config::apply(
-            &db,
-            &[
-                (
-                    crate::github_app::APP_ID_KEY.to_string(),
-                    Some(app_id.to_string()),
-                ),
-                (
-                    crate::github_app::APP_PRIVATE_KEY_KEY.to_string(),
-                    Some(private_key.to_string()),
-                ),
-            ],
-        )
-        .await
-        .unwrap();
-        let app = Arc::new(crate::github_app::GithubApp::with_parts(
-            db.clone(),
-            format!("http://{address}"),
-            Arc::new(crate::github_trigger::GhCli),
-        ));
+        let app = Arc::new(crate::github_app::tests::configured_test_app(db.clone()).await);
         let state = super::AppState {
             db,
             bus: crate::events::EventBus::new(),
@@ -336,6 +295,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resolved, "ghs_repo_scoped");
+        assert_eq!(resolved, "ghs_installation_token");
     }
 }
