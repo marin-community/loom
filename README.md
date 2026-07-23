@@ -409,6 +409,7 @@ weaver config ls
 loom profile ls
 loom profile show default
 loom profile show github_comment
+# App-less deployments can give restricted GitHub tools a shared identity:
 loom profile env secret github_comment GH_TOKEN \
   projects/my-project/secrets/loom-github-ci-token/versions/latest
 ```
@@ -428,11 +429,11 @@ Notable settings:
   Loom expands profile capability sets into exact permissions when it stamps a
   session and derives adapter processes from its trusted MCP registry; profiles
   never supply executable MCP configuration. The GitHub credential never enters
-  the agent process. The stock
-  `github_comment` profile is seeded from its reviewed declarative manifest and
-  remains operator-editable after the first seed. It is ready for
-  GitHub-originated editorial/comment tasks after an operator adds its
-  write-only `GH_TOKEN` environment value. See
+  the agent process. Loom uses the requester's stored token first, a profile
+  `GH_TOKEN` second, and the configured GitHub App's short-lived,
+  repository-scoped installation token otherwise. The stock `github_comment`
+  profile is seeded from its reviewed declarative manifest and remains
+  operator-editable after the first seed. See
   [Restricted GitHub sessions](docs/restricted-sessions.md).
 - Profile environment values are write-only: API, CLI, and Settings responses
   expose names and update times, never secret values.

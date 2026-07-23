@@ -334,6 +334,37 @@ impl GithubApp {
         self.installation_token(installation_id).await
     }
 
+    async fn issue_json(&self, owner: &str, name: &str, number: i64) -> Result<serde_json::Value> {
+        let token = self.token_for_repo(owner, name).await?;
+        let url = format!("{}/repos/{owner}/{name}/issues/{number}", self.api_base);
+        let resp = self
+            .http
+            .get(&url)
+            .header(reqwest::header::ACCEPT, GH_ACCEPT)
+            .header("X-GitHub-Api-Version", GH_API_VERSION)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .context("fetching the issue")?;
+        let resp = check_status(resp, "fetching the issue").await?;
+        resp.json().await.context("parsing issue json")
+    }
+
+    /// Fetch the title, body, and URL used to seed a managed-repository launch.
+    pub(crate) async fn issue(
+        &self,
+        owner: &str,
+        name: &str,
+        number: i64,
+    ) -> Result<crate::github::Issue> {
+        let value = self.issue_json(owner, name, number).await?;
+        Ok(crate::github::Issue {
+            title: value["title"].as_str().unwrap_or_default().to_string(),
+            body: value["body"].as_str().unwrap_or_default().to_string(),
+            url: value["html_url"].as_str().unwrap_or_default().to_string(),
+        })
+    }
+
     // -- installation as allowlist ------------------------------------------
 
     /// When the App is installed on `slug`, ensure that repo is in the managed
@@ -509,22 +540,7 @@ impl GithubApi for GithubApp {
             return self.fallback.issue_state(repo, number).await;
         }
         let slug = crate::repo::parse_slug(repo).map_err(|e| anyhow!(e))?;
-        let token = self.token_for_repo(&slug.owner, &slug.name).await?;
-        let url = format!(
-            "{}/repos/{}/{}/issues/{number}",
-            self.api_base, slug.owner, slug.name
-        );
-        let resp = self
-            .http
-            .get(&url)
-            .header(reqwest::header::ACCEPT, GH_ACCEPT)
-            .header("X-GitHub-Api-Version", GH_API_VERSION)
-            .bearer_auth(&token)
-            .send()
-            .await
-            .context("fetching the issue")?;
-        let resp = check_status(resp, "fetching the issue").await?;
-        let v: serde_json::Value = resp.json().await.context("parsing issue json")?;
+        let v = self.issue_json(&slug.owner, &slug.name, number).await?;
         Ok(crate::github_trigger::IssueState {
             state: v["state"].as_str().unwrap_or_default().to_string(),
             title: v["title"].as_str().unwrap_or_default().to_string(),
@@ -625,7 +641,7 @@ async fn check_status(resp: reqwest::Response, what: &str) -> Result<reqwest::Re
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -678,6 +694,10 @@ CwIDAQAB
 -----END PUBLIC KEY-----";
 
     const TEST_APP_ID: i64 = 123456;
+
+    pub(crate) fn credentials() -> (i64, &'static str) {
+        (TEST_APP_ID, TEST_PRIVATE_KEY)
+    }
 
     // -- JWT ----------------------------------------------------------------
 
@@ -832,6 +852,8 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         Json(json!({
             "state": "closed",
             "title": format!("issue {number} of {owner}/{name}"),
+            "body": "issue body",
+            "html_url": format!("https://github.com/{owner}/{name}/issues/{number}"),
             "updated_at": "2026-07-18T12:00:00Z",
         }))
     }
@@ -1004,6 +1026,19 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
             mock.last_comment_auth.lock().unwrap().clone(),
             Some("Bearer ghs_installation_token".to_string()),
         );
+    }
+
+    #[tokio::test]
+    async fn issue_fetch_uses_installation_token() {
+        let mock = MockState::new(3600);
+        let base = spawn_mock(mock).await;
+        let app = configured_app(base, Arc::new(RecordingFallback::default())).await;
+
+        let issue = app.issue("acme", "widgets", 7).await.unwrap();
+
+        assert_eq!(issue.title, "issue 7 of acme/widgets");
+        assert_eq!(issue.body, "issue body");
+        assert_eq!(issue.url, "https://github.com/acme/widgets/issues/7");
     }
 
     #[tokio::test]

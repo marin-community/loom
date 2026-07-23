@@ -28,27 +28,48 @@ struct ToolArguments {
     title: Option<String>,
 }
 
-async fn github_token(st: &AppState, session: &crate::session::Session) -> ApiResult<String> {
-    if let Some(username) = session.created_by.as_deref() {
+async fn github_token(
+    st: &AppState,
+    created_by: Option<&str>,
+    profile: &str,
+    repo: &crate::repo::RepoSlug,
+) -> ApiResult<String> {
+    if let Some(username) = created_by {
         if let Some(token) = crate::user_token::get(&st.db, username).await? {
             if !token.trim().is_empty() {
                 return Ok(token);
             }
         }
     }
-    let token = crate::profile::env_pairs(&st.db, &session.profile)
+    if let Some(token) = crate::profile::env_pairs(&st.db, profile)
         .await
         .map_err(|error| AppError::new(StatusCode::BAD_GATEWAY, error.to_string()))?
         .into_iter()
         .find_map(|(name, value)| (name == "GH_TOKEN").then_some(value))
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            AppError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "restricted GitHub credential is unavailable",
-            )
-        })?;
-    Ok(token)
+    {
+        return Ok(token);
+    }
+    if let Some(app) = st.trigger.app() {
+        if app.is_configured().await {
+            return app
+                .token_for_repo(&repo.owner, &repo.name)
+                .await
+                .map_err(|error| {
+                    AppError::new(
+                        StatusCode::BAD_GATEWAY,
+                        format!(
+                            "could not mint a GitHub App token for {}: {error}",
+                            repo.slug()
+                        ),
+                    )
+                });
+        }
+    }
+    Err(AppError::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "restricted GitHub credential is unavailable",
+    ))
 }
 
 fn validate_arguments(tool: &str, value: serde_json::Value) -> ApiResult<ToolArguments> {
@@ -187,8 +208,8 @@ pub(super) async fn restricted_github_tool(
         .as_deref()
         .ok_or_else(|| AppError::bad_request("session has no fixed GitHub repository"))?;
     let repo = crate::repo::parse_slug(repo)
-        .map_err(|_| AppError::bad_request("session GitHub repository is invalid"))?
-        .slug();
+        .map_err(|_| AppError::bad_request("session GitHub repository is invalid"))?;
+    let repo_slug = repo.slug();
     let arguments = validate_arguments(&tool, req.arguments)?;
     let tracking_issue = match session.tracking_issue_id {
         Some(id) => weaver_core::issue::get(&st.db, id).await?,
@@ -196,14 +217,14 @@ pub(super) async fn restricted_github_tool(
     }
     .ok_or_else(|| AppError::bad_request("session has no linked GitHub thread"))?;
     if tracking_issue.github_issue != Some(arguments.number)
-        || tracking_issue.github_repo.as_deref() != Some(repo.as_str())
+        || tracking_issue.github_repo.as_deref() != Some(repo_slug.as_str())
     {
         return Err(AppError::new(
             StatusCode::FORBIDDEN,
             "GitHub tool target does not match the session's linked thread",
         ));
     }
-    let token = github_token(&st, &session).await?;
+    let token = github_token(&st, session.created_by.as_deref(), &session.profile, &repo).await?;
     let config_dir = crate::db::run_dir(&session.id).join("restricted-gh-config");
     tokio::fs::create_dir_all(&config_dir)
         .await
@@ -225,14 +246,18 @@ pub(super) async fn restricted_github_tool(
                 )
             })?;
     }
-    let text = invoke_gh(&repo, &tool, &arguments, &token, &config_dir).await?;
+    let text = invoke_gh(&repo_slug, &tool, &arguments, &token, &config_dir).await?;
     Ok(Json(RestrictedGithubToolView { text }))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::validate_arguments;
+    use std::sync::Arc;
+
+    use axum::{routing::get, routing::post, Json, Router};
     use serde_json::json;
+
+    use super::{github_token, validate_arguments};
 
     #[test]
     fn only_the_fixed_mcp_tools_map_to_permissions() {
@@ -251,5 +276,66 @@ mod tests {
         assert!(
             validate_arguments("issue_edit", json!({ "number": 7, "body": "clean body" })).is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn github_app_is_the_restricted_tool_credential_fallback() {
+        async fn installation() -> Json<serde_json::Value> {
+            Json(json!({ "id": 42 }))
+        }
+
+        async fn token() -> Json<serde_json::Value> {
+            Json(json!({
+                "token": "ghs_repo_scoped",
+                "expires_at": "2099-01-01T00:00:00Z"
+            }))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/repos/{owner}/{name}/installation", get(installation))
+            .route("/app/installations/{id}/access_tokens", post(token));
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let (app_id, private_key) = crate::github_app::tests::credentials();
+        weaver_core::config::apply(
+            &db,
+            &[
+                (
+                    crate::github_app::APP_ID_KEY.to_string(),
+                    Some(app_id.to_string()),
+                ),
+                (
+                    crate::github_app::APP_PRIVATE_KEY_KEY.to_string(),
+                    Some(private_key.to_string()),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+        let app = Arc::new(crate::github_app::GithubApp::with_parts(
+            db.clone(),
+            format!("http://{address}"),
+            Arc::new(crate::github_trigger::GhCli),
+        ));
+        let state = super::AppState {
+            db,
+            bus: crate::events::EventBus::new(),
+            addr: "127.0.0.1:0".to_string(),
+            ide: Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
+            trigger: crate::github_trigger::GithubTrigger::with_app(app),
+            acp: crate::acp::AcpRegistry::new(),
+        };
+        let repo = crate::repo::parse_slug("marin-community/loom").unwrap();
+
+        let resolved = github_token(&state, None, "github_comment", &repo)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, "ghs_repo_scoped");
     }
 }

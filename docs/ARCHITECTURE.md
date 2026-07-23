@@ -256,7 +256,7 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `POST /api/deployment/reconcile` | admin-only idempotent reconciliation of deployment-managed profiles, environment references, and federation mappings; pruning never touches operator-managed rows |
 | `POST /api/auth/federate` | exchange an exact mapped, signature-verified GitHub or Google OIDC identity for a ten-minute Ed25519-signed, profile-scoped Loom automation token |
 | `GET POST /api/runs`; `GET /api/runs/{id}` | durable, subject-scoped automation runs with idempotency reservation; verified GitHub callers may provide a validated deterministic key, otherwise the workflow run/attempt is used |
-| `POST /api/sessions/{id}/restricted-github/{tool}` | session-token-scoped fixed GitHub operations for a restricted session; checks stamped tool policy, fixes the target repository and thread from the session, and resolves the requester/profile token server-side |
+| `POST /api/sessions/{id}/restricted-github/{tool}` | session-token-scoped fixed GitHub operations for a restricted session; checks stamped tool policy, fixes the target repository and thread from the session, and resolves the requester/profile/GitHub App token server-side |
 | `GET PATCH DELETE /api/sessions/{id}` | session CRUD (status, title, goal, description) |
 | `PUT DELETE /api/sessions/{id}/tags/{key}` | set (upsert) / clear a branch tag — the well-known `attention` and `triage` keys plus any free-form key |
 | `GET /api/sessions/{id}/url` | the session's dashboard URL as `{url}`, built from the externally-visible origin (`auth.base_url`, else the request's own Host) — what `loom session url` prints, so an agent can link a PR back to its session without inventing a loopback link |
@@ -728,14 +728,16 @@ rules. Repository/profile data never supplies executable MCP configuration.
 Restricted launch and recovery omit repository environment/setup and Claude
 user/project/local settings. Repository reads are path-scoped, and GitHub
 mutations use a fixed MCP bridge backed by a session-scoped REST endpoint. Loom
-resolves the requester/profile GitHub token server-side and invokes `gh` without
-a shell against the session's fixed repository and linked thread; the credential
-never enters the agent environment. Allowed rules execute directly; any remaining ACP permission
-request is answered with the adapter's one-shot rejection (or a cancelled
-outcome), including after `session/load`. Runtime handoff and permission-mode
-changes are forbidden. The stock `github_comment` profile contains the policy
-only; its reviewed JSON manifest is seeded when absent and then remains
-operator-editable. Deployment must provide its write-only `GH_TOKEN`.
+resolves the requester's token, a profile token, or the configured GitHub App's
+short-lived repository installation token server-side and invokes `gh` without
+a shell against the session's fixed repository and linked thread; the
+credential never enters the agent environment. Allowed rules execute directly;
+any remaining ACP permission request is answered with the adapter's one-shot
+rejection (or a cancelled outcome), including after `session/load`. Runtime
+handoff and permission-mode changes are forbidden. The stock `github_comment`
+profile contains the policy only; its reviewed JSON manifest is seeded when
+absent and then remains operator-editable. App-less deployments must provide
+its write-only `GH_TOKEN`.
 
 **Cookies** are `HttpOnly; SameSite=Lax; Path=/`; the `Secure` attribute is
 added when `auth.cookie_secure` is on (set it when loom is reached over HTTPS).

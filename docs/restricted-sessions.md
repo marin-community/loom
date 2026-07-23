@@ -17,16 +17,19 @@ The MCP bridge calls a session-scoped Loom endpoint; Loom runs `gh` server-side
 against the session's fixed repository and linked issue/PR number, so neither a
 general shell nor the GitHub token enters the agent process. Anything outside
 the configured Claude permission rules is rejected by Loom.
-The profile intentionally has no token in its seed. Configure a least-privilege
-CI identity as its write-only `GH_TOKEN` before enabling a federation mapping.
-Its stock policy lives in `crates/loom/profiles/github_comment.json`, not in a
-schema migration. Loom seeds a missing stock profile through normal validation
-and does not overwrite later operator edits. Custom profiles use the same
-REST/CLI/UI or deployment-reconciliation contract; loading policy implicitly
-from a managed checkout would let repository content choose its own launch
-boundary and is deliberately unsupported. Custom profiles may compose the
-built-in capability sets Loom recognizes, but cannot define executable MCP
-adapters from repository content.
+The profile intentionally has no token in its seed. Loom resolves the
+requester's stored token first, a profile `GH_TOKEN` second, and the configured
+GitHub App's short-lived installation token for the fixed repository otherwise.
+An App-less deployment can configure a least-privilege CI identity as the
+profile's write-only `GH_TOKEN`. Its stock policy lives in
+`crates/loom/profiles/github_comment.json`, not in a schema migration. Loom
+seeds a missing stock profile through normal validation and does not overwrite
+later operator edits. Custom profiles use the same REST/CLI/UI or
+deployment-reconciliation contract; loading policy implicitly from a managed
+checkout would let repository content choose its own launch boundary and is
+deliberately unsupported. Custom profiles may compose the built-in capability
+sets Loom recognizes, but cannot define executable MCP adapters from repository
+content.
 
 ## GitHub Actions request
 
@@ -79,16 +82,20 @@ the compatibility behavior of deduplicating one workflow run attempt; a body
 hash key converges retries and reruns for the same source description.
 
 Do not put `GH_TOKEN` in the request or prompt. Automation requests are stored
-for audit and idempotency. The token belongs in the profile's write-only
-environment, preferably as a deployment-managed Secret Manager reference. Loom
-resolves it only while executing a fixed GitHub tool. The existing human/comment
-launch path uses the approved requester's stored GitHub token by default, also
-server-side for a restricted session.
+for audit and idempotency. Loom resolves a credential only while executing a
+fixed GitHub tool. Prefer the configured GitHub App, whose installation token is
+short-lived and scoped to the session's fixed repository. App-less deployments
+can put a least-privilege token in the profile's write-only environment,
+preferably as a deployment-managed Secret Manager reference. The existing
+human/comment launch path uses the approved requester's stored GitHub token by
+default, also server-side for a restricted session.
 
 ## Production rollout
 
-1. Declare `github_comment` in the production Pulumi profile manifest with its
-   `GH_TOKEN` secret reference, and grant the Loom VM access to that secret.
+1. Configure and install the production GitHub App on each target repository.
+   For an App-less deployment, declare `github_comment` in the Pulumi profile
+   manifest with a least-privilege `GH_TOKEN` secret reference and grant the
+   Loom VM access to that secret.
 2. Add one `githubFederations` entry per approved caller workflow, constrained
    to the numeric repository id, exact workflow ref, event/ref where useful, and
    only `github_comment`.
