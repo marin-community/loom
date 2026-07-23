@@ -879,7 +879,7 @@ async fn run() -> Result<()> {
             token_stdin,
         } => cmd_login(name, url, token_stdin).await,
         Cmd::Logout { name } => cmd_logout(name),
-        Cmd::Context { cmd } => run_client_context(cmd, context.as_deref()),
+        Cmd::Context { cmd } => run_client_context(cmd),
         Cmd::Profile { cmd } => run_profile(cmd).await,
         Cmd::Federation { cmd } => run_federation(cmd).await,
         Cmd::Deployment { cmd } => run_deployment(cmd).await,
@@ -1050,7 +1050,7 @@ fn cmd_logout(name: String) -> Result<()> {
     Ok(())
 }
 
-fn run_client_context(cmd: ClientContextCmd, explicit: Option<&str>) -> Result<()> {
+fn run_client_context(cmd: ClientContextCmd) -> Result<()> {
     let paths = loom::client_context::ClientPaths::discover()?;
     match cmd {
         ClientContextCmd::Ls => {
@@ -1085,26 +1085,26 @@ fn run_client_context(cmd: ClientContextCmd, explicit: Option<&str>) -> Result<(
             Ok(())
         }
         ClientContextCmd::Current => {
-            if explicit.is_none()
-                && std::env::var("WEAVER_API").is_ok_and(|url| !url.trim().is_empty())
-            {
-                println!("WEAVER_API  {}", loom::endpoint::base_url());
-                return Ok(());
-            }
-            match loom::client_context::resolve(explicit)? {
-                Some(context) => {
-                    let source = match context.source {
+            let selection = client::current_selection()?;
+            match selection.source {
+                client::ClientSelectionSource::Context { name, source } => {
+                    let source_name = match source {
                         loom::client_context::ContextSource::Explicit => "--context",
                         loom::client_context::ContextSource::Environment => "LOOM_CONTEXT",
-                        loom::client_context::ContextSource::Repository(ref path) => {
+                        loom::client_context::ContextSource::Repository(path) => {
                             println!("selector: {}", path.display());
                             "repository"
                         }
                         loom::client_context::ContextSource::Default => "default",
                     };
-                    println!("{}  {}  {source}", context.name, context.url);
+                    println!("{name}  {}  {source_name}", selection.base);
                 }
-                None => println!("local  {}  implicit", loom::endpoint::base_url()),
+                client::ClientSelectionSource::Environment => {
+                    println!("WEAVER_API  {}", selection.base)
+                }
+                client::ClientSelectionSource::Local => {
+                    println!("local  {}  implicit", selection.base)
+                }
             }
             Ok(())
         }

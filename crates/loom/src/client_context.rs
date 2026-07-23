@@ -15,6 +15,7 @@ const CREDENTIALS_FILE: &str = "credentials.toml";
 const REPO_CONFIG: &str = ".loom/client.toml";
 
 #[derive(Clone, Default, Serialize, Deserialize)]
+/// Public endpoint configuration stored in the user's XDG config directory.
 pub struct ClientConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_context: Option<String>,
@@ -23,6 +24,7 @@ pub struct ClientConfig {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+/// One named Loom server endpoint.
 pub struct ContextConfig {
     pub url: String,
 }
@@ -45,12 +47,14 @@ struct RepoConfig {
 }
 
 #[derive(Clone)]
+/// Paths to the public endpoint config and private credential store.
 pub struct ClientPaths {
     pub config: PathBuf,
     pub credentials: PathBuf,
 }
 
 #[derive(Clone)]
+/// A named context resolved for the current invocation.
 pub struct ResolvedContext {
     pub name: String,
     pub url: String,
@@ -59,6 +63,7 @@ pub struct ResolvedContext {
 }
 
 #[derive(Clone)]
+/// The selector that chose a named context.
 pub enum ContextSource {
     Explicit,
     Environment,
@@ -66,6 +71,7 @@ pub enum ContextSource {
     Default,
 }
 
+/// Non-secret context metadata displayed by `loom context ls`.
 pub struct ContextSummary {
     pub name: String,
     pub url: String,
@@ -74,6 +80,7 @@ pub struct ContextSummary {
 }
 
 impl ClientPaths {
+    /// Locate Loom client files using `XDG_CONFIG_HOME` or `~/.config`.
     pub fn discover() -> Result<Self> {
         let root = match std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
             Some(path) => PathBuf::from(path).join("loom"),
@@ -90,6 +97,7 @@ impl ClientPaths {
     }
 }
 
+/// Validate and normalize a root HTTP(S) Loom server URL.
 pub fn normalize_url(value: &str) -> Result<String> {
     let value = value.trim().trim_end_matches('/');
     let parsed =
@@ -107,6 +115,7 @@ pub fn normalize_url(value: &str) -> Result<String> {
     Ok(value.to_string())
 }
 
+/// Validate a portable context name and return its trimmed form.
 pub fn validate_name(name: &str) -> Result<&str> {
     let name = name.trim();
     if name.is_empty()
@@ -120,10 +129,12 @@ pub fn validate_name(name: &str) -> Result<&str> {
     Ok(name)
 }
 
+/// Load the public context configuration, or an empty configuration if absent.
 pub fn load_config(paths: &ClientPaths) -> Result<ClientConfig> {
     load_toml(&paths.config, "Loom client config")
 }
 
+/// Return the configured URL for a named context.
 pub fn context_url(paths: &ClientPaths, name: &str) -> Result<Option<String>> {
     let name = validate_name(name)?;
     Ok(load_config(paths)?
@@ -132,6 +143,7 @@ pub fn context_url(paths: &ClientPaths, name: &str) -> Result<Option<String>> {
         .map(|context| context.url.clone()))
 }
 
+/// Add or update a context endpoint without changing its credential.
 pub fn save_context(paths: &ClientPaths, name: &str, url: &str, make_default: bool) -> Result<()> {
     let name = validate_name(name)?.to_string();
     let url = normalize_url(url)?;
@@ -143,6 +155,7 @@ pub fn save_context(paths: &ClientPaths, name: &str, url: &str, make_default: bo
     save_config(paths, &config)
 }
 
+/// Save a validated endpoint and its personal API token in separate files.
 pub fn save_login(paths: &ClientPaths, name: &str, url: &str, token: &str) -> Result<()> {
     let name = validate_name(name)?.to_string();
     let token = token.trim();
@@ -160,6 +173,7 @@ pub fn save_login(paths: &ClientPaths, name: &str, url: &str, token: &str) -> Re
     save_credentials(paths, &credentials)
 }
 
+/// Make an existing named context the user default.
 pub fn use_context(paths: &ClientPaths, name: &str) -> Result<()> {
     let name = validate_name(name)?;
     let mut config = load_config(paths)?;
@@ -170,6 +184,7 @@ pub fn use_context(paths: &ClientPaths, name: &str) -> Result<()> {
     save_config(paths, &config)
 }
 
+/// Remove a locally saved credential without revoking the server-side token.
 pub fn remove_login(paths: &ClientPaths, name: &str) -> Result<bool> {
     let name = validate_name(name)?;
     let mut credentials = load_credentials(paths)?;
@@ -180,6 +195,7 @@ pub fn remove_login(paths: &ClientPaths, name: &str) -> Result<bool> {
     Ok(removed)
 }
 
+/// Remove a context and its locally saved credential.
 pub fn remove_context(paths: &ClientPaths, name: &str) -> Result<bool> {
     let name = validate_name(name)?;
     let mut config = load_config(paths)?;
@@ -195,6 +211,7 @@ pub fn remove_context(paths: &ClientPaths, name: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// List contexts with credential presence but never credential values.
 pub fn list_contexts(paths: &ClientPaths) -> Result<Vec<ContextSummary>> {
     let config = load_config(paths)?;
     let credentials = load_credentials(paths)?;
@@ -210,17 +227,28 @@ pub fn list_contexts(paths: &ClientPaths) -> Result<Vec<ContextSummary>> {
         .collect())
 }
 
+/// Resolve a named context for the current process and working directory.
 pub fn resolve(explicit: Option<&str>) -> Result<Option<ResolvedContext>> {
-    let paths = ClientPaths::discover()?;
     let cwd = std::env::current_dir().context("resolving current directory")?;
-    resolve_from(
-        &paths,
-        explicit,
-        std::env::var("LOOM_CONTEXT").ok().as_deref(),
-        &cwd,
-    )
+    let environment = std::env::var("LOOM_CONTEXT").ok();
+    let paths = match ClientPaths::discover() {
+        Ok(paths) => paths,
+        Err(error) => {
+            let named_context_requested = explicit.is_some_and(|name| !name.trim().is_empty())
+                || environment
+                    .as_deref()
+                    .is_some_and(|name| !name.trim().is_empty())
+                || repo_context(&cwd)?.is_some();
+            if named_context_requested {
+                return Err(error);
+            }
+            return Ok(None);
+        }
+    };
+    resolve_from(&paths, explicit, environment.as_deref(), &cwd)
 }
 
+/// Resolve a named context from explicit inputs, used by the CLI and tests.
 pub fn resolve_from(
     paths: &ClientPaths,
     explicit: Option<&str>,
