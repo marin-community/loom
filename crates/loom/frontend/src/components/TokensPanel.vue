@@ -10,10 +10,10 @@ const tokens = ref<Token[]>([]);
 const error = ref('');
 const busy = ref(false);
 const name = ref('');
-const expiresDays = ref('');
+const expiresDays = ref('30');
 const created = ref<CreatedToken | null>(null);
 const copied = ref(false);
-const expiryPresets = ['7', '30', '90'];
+const serverOrigin = window.location.origin;
 
 async function load() {
   try {
@@ -33,7 +33,7 @@ async function create() {
     const days = expiresDays.value.trim() ? Number(expiresDays.value) : null;
     created.value = await api.createToken(name.value.trim(), days);
     name.value = '';
-    expiresDays.value = '';
+    expiresDays.value = '30';
     copied.value = false;
     await load();
   } catch (e) {
@@ -69,19 +69,17 @@ async function copy() {
 
 const fmt = (ts: string | null) => (ts ? new Date(ts).toLocaleString() : '—');
 
-function setExpiry(days: string) {
-  expiresDays.value = days;
-}
-
 onMounted(load);
 </script>
 
 <template>
   <div>
-    <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-1.5">API tokens</h2>
+    <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-1.5">
+      Personal API tokens
+    </h2>
     <p class="mb-3 text-xs text-faint">
-      Tokens authenticate automation and remote CLIs. Use them as a bearer token or set
-      <code>LOOM_TOKEN</code>.
+      Sign in from <code>loom login</code> or another trusted client. A personal token has your
+      account's access, so store it like a password.
     </p>
 
     <p v-if="error" class="mb-3 text-sm text-block">{{ error }}</p>
@@ -104,6 +102,11 @@ onMounted(load);
           {{ copied ? 'Copied' : 'Copy' }}
         </button>
       </div>
+      <p class="mt-2 text-2xs text-muted">
+        Then run
+        <code class="select-all">loom login production --url {{ serverOrigin }}</code>
+        and paste the token when prompted.
+      </p>
     </div>
 
     <!-- Create form. -->
@@ -115,41 +118,24 @@ onMounted(load);
           <span class="text-2xs text-muted">Name</span>
           <input
             v-model="name"
-            placeholder="e.g. github-actions"
+            placeholder="e.g. laptop"
             data-testid="token-name"
             class="rounded bg-input px-2 py-1 text-sm outline-none focus:ring-1 ring-accent"
             @keyup.enter="create"
           />
         </label>
         <label class="flex flex-col gap-1 md:min-w-0">
-          <span class="text-2xs text-muted">Expires</span>
-          <input
+          <span class="text-2xs text-muted">Lifetime</span>
+          <select
             v-model="expiresDays"
-            type="number"
-            min="1"
-            placeholder="never"
+            data-testid="token-lifetime"
             class="rounded bg-input px-2 py-1 text-sm outline-none focus:ring-1 ring-accent"
-          />
-          <div class="flex flex-wrap gap-1">
-            <button
-              v-for="preset in expiryPresets"
-              :key="preset"
-              type="button"
-              class="rounded border border-line bg-input px-2 py-0.5 text-2xs text-muted transition-colors hover:text-fg"
-              :class="expiresDays === preset ? 'border-accent text-fg' : ''"
-              @click="setExpiry(preset)"
-            >
-              {{ preset }}d
-            </button>
-            <button
-              type="button"
-              class="rounded border border-line bg-input px-2 py-0.5 text-2xs text-muted transition-colors hover:text-fg"
-              :class="!expiresDays ? 'border-accent text-fg' : ''"
-              @click="setExpiry('')"
-            >
-              Never
-            </button>
-          </div>
+          >
+            <option value="7">7 days</option>
+            <option value="30">30 days (recommended)</option>
+            <option value="90">90 days</option>
+            <option value="">Never expires</option>
+          </select>
         </label>
         <div class="flex items-center md:justify-end">
           <button
@@ -162,6 +148,15 @@ onMounted(load);
           </button>
         </div>
       </div>
+    </div>
+
+    <div class="mb-4 rounded-md border border-line bg-surface px-3 py-2.5">
+      <p class="text-xs font-medium text-fg">Workflow credentials</p>
+      <p class="mt-1 text-2xs text-faint">
+        GitHub Actions and Google workloads should use workload federation when available. Loom
+        exchanges a verified OIDC identity for a fixed 10-minute token automatically; that lifetime
+        is separate from the personal-token choices above.
+      </p>
     </div>
 
     <!-- Existing tokens. -->

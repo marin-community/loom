@@ -11,8 +11,9 @@ test.describe('settings · tokens', () => {
     await page.getByTestId('settings-tab-access').click();
     await expect(page.getByTestId('token-row')).toHaveCount(0);
 
-    // Create a token — the one-time secret banner appears with a `loom_` value.
-    await page.getByTestId('token-name').fill('github-actions');
+    // Personal tokens default to the recommended 30-day lifetime.
+    await expect(page.getByTestId('token-lifetime')).toHaveValue('30');
+    await page.getByTestId('token-name').fill('laptop');
     await page.getByTestId('token-create').click();
 
     const banner = page.getByTestId('new-token');
@@ -22,7 +23,8 @@ test.describe('settings · tokens', () => {
     // It now shows in the list.
     const row = page.getByTestId('token-row');
     await expect(row).toHaveCount(1);
-    await expect(row).toContainText('github-actions');
+    await expect(row).toContainText('laptop');
+    await expect(row).toContainText('Expires');
 
     // Revoke it (accept the confirm dialog) and it disappears.
     page.once('dialog', (d) => d.accept());

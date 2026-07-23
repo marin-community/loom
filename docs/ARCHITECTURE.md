@@ -47,6 +47,7 @@ other `weaver` subcommand.
 | `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`summary`, `readme`, `status` [read or set level + message], `tag` [`set`/`rm`/`ls` a branch tag], `issue …`, `where`, `log`, `chatlog` [render the agent's conversation transcript], `hook`, `config` [read-only: `get`/`ls`; writes go through `loom config set` or the settings pane]) — every command drives `weaver-api::Client` over HTTP; none touch sqlite |
 | `crates/loom/src/web.rs` | axum routes, request/response types, SSE — **the API surface** (incl. the auth middleware + login/token/user handlers) |
 | `crates/loom/src/auth.rs` | authentication core: token/password crypto, the `users`/`api_tokens`/`auth_sessions` tables, the machine-local token, and the GitHub OAuth calls. `axum`-free so it unit-tests directly |
+| `crates/loom/src/client_context.rs` | named endpoint and credential resolution for the `loom` CLI: XDG user config, private credentials, and repository context selection |
 | `crates/loom/src/server.rs` | bind, write `server.json`, spawn bg tasks |
 | `crates/loom/src/monitor.rs` | status detection, orphan marking, hook-event consumer, and the shared lifecycle-promotion path (`promote_lifecycle`) both the terminal hook consumer and the ACP turn-boundary driver (`record_acp_lifecycle`) run through |
 | `crates/loom/src/watch.rs` | the watch engine: cron timer + event dispatcher + the round executor (the script subprocess executor every program runs on) |
@@ -643,10 +644,11 @@ to be restricted to the host metrics agent at the deployment edge). The static
 SPA needs no API principal. Protected requests resolve the
 request to a `Principal` three ways, in order:
 
-- **API token** — an `Authorization: Bearer loom_…` header. This is the
-  `LOOM_TOKEN` a CI job or a remote `loom` CLI presents. Tokens are random
-  secrets stored only as a SHA-256 hash (`api_tokens.token_hash`); the plaintext
-  is shown once at creation. Managed under Settings → Tokens or `loom token`.
+- **API token** — an `Authorization: Bearer loom_…` header. This is the token a
+  remote `loom` CLI saves with `loom login`, or that an ephemeral client passes
+  in `LOOM_TOKEN`. Tokens are random secrets stored only as a SHA-256 hash
+  (`api_tokens.token_hash`); the plaintext is shown once at creation. Managed
+  under Settings → Tokens or `loom token`.
 - **Session cookie** — the opaque `loom_session` cookie set by a successful
   GitHub or username/password login, stored hashed in `auth_sessions`.
 - **Loopback trust** — a request from `127.0.0.1`/`::1` is taken to be the
@@ -686,6 +688,17 @@ behind a **same-host reverse proxy** (where forwarded requests look like
 loopback and so trust must be off) local automation still authenticates via this
 token, while remote callers must present their own. The local token is hidden
 from the token list and is not revocable from the UI.
+
+**CLI contexts.** The `loom` CLI stores named server URLs in
+`$XDG_CONFIG_HOME/loom/config.toml` and their personal API tokens in a separate
+mode-0600 `credentials.toml`. A repository `.loom/client.toml` may select a
+context by name, but cannot provide a URL or token. Resolution order is
+`--context`, an explicit `WEAVER_API`, `LOOM_CONTEXT`, repository selection,
+the user default, then local daemon discovery. `LOOM_TOKEN` overrides the
+selected context's token unless an explicit context selects a different
+endpoint than `WEAVER_API`. The machine-local token fallback is limited to
+loopback URLs, so a local token is never sent to a context that names a remote
+host.
 
 **Workload federation.** An admin-managed federation mapping fixes the provider,
 issuer, exact audience, identity, service tag, and allowed strict automation
@@ -792,9 +805,10 @@ builtins are stdlib-only and need neither).
 |---|---|---|
 | `WEAVER_HOME` | state directory | `~/.weaver` |
 | `WEAVER_DB` | sqlite path, read only by `loom` | `$WEAVER_HOME/weaver.db` |
-| `WEAVER_API` | loom URL (both sides — server binds, `weaver`/`loom` CLI clients talk) | `http://127.0.0.1:7878` |
+| `WEAVER_API` | explicit loom URL (server bind input and CLI override) | `http://127.0.0.1:7878` |
+| `LOOM_CONTEXT` | named context for the `loom` CLI when `WEAVER_API` is unset | user default |
 | `WEAVER_BRANCH` | the current branch key, set by `loom session launch` in the worktree — the only source `weaver` uses; unset, every `weaver` command fails with a friendly error | — |
-| `LOOM_TOKEN` | bearer token the `weaver`/`loom` CLIs and automation send; falls back to the machine-local token file on the same host | — |
+| `LOOM_TOKEN` | explicit bearer token for the `weaver`/`loom` CLIs and automation; `loom` otherwise uses its selected context credential or a loopback-only machine token | — |
 | `LOOM_OWNER_GITHUB` | GitHub login seeded as the owner on a fresh database; unset seeds no owner at all | — |
 | `LOOM_GITHUB_CLIENT_ID` / `LOOM_GITHUB_CLIENT_SECRET` | GitHub OAuth app credentials (override the settings-stored values) | — |
 | `WEAVER_TAPESTRY_DIR` | directory holding tapestry's per-session control sockets | `$WEAVER_HOME/sock` |

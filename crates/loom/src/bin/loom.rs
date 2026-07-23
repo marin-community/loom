@@ -20,6 +20,9 @@ use weaver_core::db::Db;
     about = "Orchestrate concurrent agent workstreams"
 )]
 struct Cli {
+    /// Select a named client context for this command.
+    #[arg(long, global = true)]
+    context: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -92,6 +95,28 @@ enum Cmd {
     Token {
         #[command(subcommand)]
         cmd: TokenCmd,
+    },
+    /// Authenticate this CLI and save a named client context.
+    Login {
+        /// Context name to create or replace.
+        #[arg(default_value = "default")]
+        name: String,
+        /// Loom server URL. Omit to enter it interactively.
+        #[arg(long)]
+        url: Option<String>,
+        /// Read the API token from stdin instead of a hidden prompt.
+        #[arg(long)]
+        token_stdin: bool,
+    },
+    /// Remove the saved credential for a client context.
+    Logout {
+        #[arg(default_value = "default")]
+        name: String,
+    },
+    /// Manage named local and remote Loom client contexts.
+    Context {
+        #[command(subcommand)]
+        cmd: ClientContextCmd,
     },
     /// Manage named session launch profiles and their secret environment.
     Profile {
@@ -575,6 +600,27 @@ enum TokenCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum ClientContextCmd {
+    /// List configured contexts without exposing their credentials.
+    Ls,
+    /// Set the default context.
+    Use { name: String },
+    /// Add or update an endpoint without storing a credential.
+    Add {
+        name: String,
+        #[arg(long)]
+        url: String,
+        /// Also make this the default context.
+        #[arg(long = "use")]
+        use_context: bool,
+    },
+    /// Show the context selected for the current directory.
+    Current,
+    /// Remove a context and its saved credential.
+    Rm { name: String },
+}
+
 #[derive(Args)]
 struct FederationAddArgs {
     /// Stable mapping name. Omitted legacy calls derive one from identity fields.
@@ -818,14 +864,22 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
-    let cli = Cli::parse();
-    match cli.cmd {
+    let Cli { context, cmd } = Cli::parse();
+    client::set_context_override(context.as_deref())?;
+    match cmd {
         Cmd::Mcp { adapter } => loom::mcp::serve(&adapter).await,
         Cmd::Server { cmd } => run_server(cmd).await,
         Cmd::Session { cmd } => run_session(cmd).await,
         Cmd::Issue { cmd } => run_issue(cmd).await,
         Cmd::Watch { cmd } => run_watch(cmd).await,
         Cmd::Token { cmd } => run_token(cmd).await,
+        Cmd::Login {
+            name,
+            url,
+            token_stdin,
+        } => cmd_login(name, url, token_stdin).await,
+        Cmd::Logout { name } => cmd_logout(name),
+        Cmd::Context { cmd } => run_client_context(cmd, context.as_deref()),
         Cmd::Profile { cmd } => run_profile(cmd).await,
         Cmd::Federation { cmd } => run_federation(cmd).await,
         Cmd::Deployment { cmd } => run_deployment(cmd).await,
@@ -931,7 +985,7 @@ async fn run_token(cmd: TokenCmd) -> Result<()> {
             profiles,
             ttl,
         } => {
-            let minted = client::default()
+            let minted = client::default()?
                 .mint_automation_token(&weaver_api::AutomationTokenReq {
                     subject,
                     profiles,
@@ -939,6 +993,127 @@ async fn run_token(cmd: TokenCmd) -> Result<()> {
                 })
                 .await?;
             println!("{}", minted.token);
+            Ok(())
+        }
+    }
+}
+
+async fn cmd_login(name: String, url: Option<String>, token_stdin: bool) -> Result<()> {
+    let paths = loom::client_context::ClientPaths::discover()?;
+    let existing_url = loom::client_context::context_url(&paths, &name)?;
+    let url = match url {
+        Some(url) => url,
+        None => prompt_line("Server URL", existing_url.as_deref())?,
+    };
+    let url = loom::client_context::normalize_url(&url)?;
+    let token = if token_stdin {
+        use std::io::Read as _;
+        let mut token = String::new();
+        std::io::stdin()
+            .read_to_string(&mut token)
+            .context("reading API token from stdin")?;
+        token
+    } else {
+        rpassword::prompt_password("API token: ").context("reading API token")?
+    };
+    let token = token.trim();
+    if token.is_empty() {
+        bail!("API token must not be empty");
+    }
+
+    let remote = Client::new(url.clone()).with_token(Some(token.to_string()));
+    let me = remote.get("/api/auth/me").await?;
+    if me.get("authenticated").and_then(Value::as_bool) != Some(true) {
+        bail!("Loom rejected the API token");
+    }
+    remote
+        .list_tokens()
+        .await
+        .context("credential is authenticated but is not a user API token")?;
+    loom::client_context::save_login(&paths, &name, &url, token)?;
+    let username = me
+        .get("username")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown user");
+    println!("logged in to {url} as {username}");
+    println!("current context: {name}");
+    Ok(())
+}
+
+fn cmd_logout(name: String) -> Result<()> {
+    let paths = loom::client_context::ClientPaths::discover()?;
+    if loom::client_context::remove_login(&paths, &name)? {
+        println!("removed saved credential for {name}");
+    } else {
+        println!("no saved credential for {name}");
+    }
+    Ok(())
+}
+
+fn run_client_context(cmd: ClientContextCmd, explicit: Option<&str>) -> Result<()> {
+    let paths = loom::client_context::ClientPaths::discover()?;
+    match cmd {
+        ClientContextCmd::Ls => {
+            let contexts = loom::client_context::list_contexts(&paths)?;
+            if contexts.is_empty() {
+                println!("no contexts — add one with `loom context add <name> --url <url>`");
+                return Ok(());
+            }
+            for context in contexts {
+                let current = if context.is_default { "*" } else { " " };
+                let auth = if context.authenticated {
+                    "authenticated"
+                } else {
+                    "no credential"
+                };
+                println!("{current} {}  {}  {auth}", context.name, context.url);
+            }
+            Ok(())
+        }
+        ClientContextCmd::Use { name } => {
+            loom::client_context::use_context(&paths, &name)?;
+            println!("current context: {name}");
+            Ok(())
+        }
+        ClientContextCmd::Add {
+            name,
+            url,
+            use_context,
+        } => {
+            loom::client_context::save_context(&paths, &name, &url, use_context)?;
+            println!("saved context {name}");
+            Ok(())
+        }
+        ClientContextCmd::Current => {
+            if explicit.is_none()
+                && std::env::var("WEAVER_API").is_ok_and(|url| !url.trim().is_empty())
+            {
+                println!("WEAVER_API  {}", loom::endpoint::base_url());
+                return Ok(());
+            }
+            match loom::client_context::resolve(explicit)? {
+                Some(context) => {
+                    let source = match context.source {
+                        loom::client_context::ContextSource::Explicit => "--context",
+                        loom::client_context::ContextSource::Environment => "LOOM_CONTEXT",
+                        loom::client_context::ContextSource::Repository(ref path) => {
+                            println!("selector: {}", path.display());
+                            "repository"
+                        }
+                        loom::client_context::ContextSource::Default => "default",
+                    };
+                    println!("{}  {}  {source}", context.name, context.url);
+                }
+                None => println!("local  {}  implicit", loom::endpoint::base_url()),
+            }
+            Ok(())
+        }
+        ClientContextCmd::Rm { name } => {
+            if loom::client_context::remove_context(&paths, &name)? {
+                println!("removed context {name}");
+            } else {
+                println!("unknown context {name}");
+            }
             Ok(())
         }
     }
@@ -959,7 +1134,7 @@ fn parse_ttl(value: &str) -> Result<i64> {
 }
 
 async fn run_federation(cmd: FederationCmd) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     match cmd {
         FederationCmd::Add(args) => {
             let FederationAddArgs {
@@ -1041,7 +1216,7 @@ async fn run_deployment(cmd: DeploymentCmd) -> Result<()> {
             };
             let request: weaver_api::DeploymentReq =
                 serde_json::from_str(&contents).context("decoding deployment manifest")?;
-            let result = client::default().reconcile_deployment(&request).await?;
+            let result = client::default()?.reconcile_deployment(&request).await?;
             println!(
                 "reconciled {} profiles and {} federation mappings",
                 result.profiles.len(),
@@ -1053,7 +1228,7 @@ async fn run_deployment(cmd: DeploymentCmd) -> Result<()> {
 }
 
 async fn run_profile(cmd: ProfileCmd) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     match cmd {
         ProfileCmd::Add(opts) => {
             let profile = client
@@ -1133,7 +1308,7 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
 }
 
 async fn cmd_token_create(name: String, expires_days: Option<i64>) -> Result<()> {
-    let created = client::default()
+    let created = client::default()?
         .create_token(&weaver_api::CreateTokenReq {
             name,
             expires_in_days: expires_days,
@@ -1155,7 +1330,7 @@ async fn cmd_token_create(name: String, expires_days: Option<i64>) -> Result<()>
 }
 
 async fn cmd_token_ls() -> Result<()> {
-    let tokens = client::default().list_tokens().await?;
+    let tokens = client::default()?.list_tokens().await?;
     if tokens.is_empty() {
         println!("no tokens — create one with `loom token add <name>`");
         return Ok(());
@@ -1174,7 +1349,7 @@ async fn cmd_token_ls() -> Result<()> {
 }
 
 async fn cmd_token_rm(id: String) -> Result<()> {
-    client::default().revoke_token(&id).await?;
+    client::default()?.revoke_token(&id).await?;
     println!("revoked token {id}");
     Ok(())
 }
@@ -2455,7 +2630,7 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
         protocol,
         mode,
     } = a;
-    let client = client::default();
+    let client = client::default()?;
     let target = resolve_repo_target(repo.as_deref())?;
     // A managed repo travels as `repo` (the server registers it and clones it if
     // this is its first use); a local checkout travels as `cwd`. Exactly one is
@@ -2583,7 +2758,7 @@ async fn cmd_session_url(key: Option<String>) -> Result<()> {
                  pass a session key explicitly: loom session url <session>",
             )?,
     };
-    let client = client::default();
+    let client = client::default()?;
     let res: Value = client
         .get(&format!("/api/sessions/{}/url", enc_key(&key)))
         .await
@@ -2598,7 +2773,7 @@ async fn cmd_session_url(key: Option<String>) -> Result<()> {
 
 /// `loom session poll` — a one-shot status read: lifecycle + attention.
 async fn cmd_session_poll(key: String) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     let ws = fetch_session(&client, &key).await?;
     println!(
         "session {}  ({})",
@@ -2622,7 +2797,7 @@ async fn cmd_session_wait(
     interval: u64,
     lifecycle_only: bool,
 ) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     // Short-circuit if the session is already in a wake state at call time.
     let ws = fetch_session(&client, &key).await?;
     if let Some(reason) = wake_reason(&ws, &key, lifecycle_only) {
@@ -2700,7 +2875,7 @@ async fn cmd_session_send(key: String, message: String, submit: bool) -> Result<
     if message.trim().is_empty() {
         bail!("nothing to send — provide a message");
     }
-    let client = client::default();
+    let client = client::default()?;
     client
         .post(
             &format!("/api/sessions/{}/send", enc_key(&key)),
@@ -2716,7 +2891,7 @@ async fn cmd_session_send(key: String, message: String, submit: bool) -> Result<
 
 /// `loom session break` — send Escape to interrupt the agent's current turn.
 async fn cmd_session_break(key: String) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     client
         .post(
             &format!("/api/sessions/{}/interrupt", enc_key(&key)),
@@ -2729,7 +2904,7 @@ async fn cmd_session_break(key: String) -> Result<()> {
 
 /// `loom session preview` — print the session's recent terminal screen.
 async fn cmd_session_preview(key: String, lines: usize) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     let res = client
         .get(&format!(
             "/api/sessions/{}/preview?lines={lines}",
@@ -2743,7 +2918,7 @@ async fn cmd_session_preview(key: String, lines: usize) -> Result<()> {
 }
 
 async fn cmd_ps(archived: bool, search: Option<String>) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     // Hide archived sessions by default; `--search` narrows by substring. Both
     // ride the same query the dashboard uses, so the CLI and UI stay one surface.
     let mut query = Vec::new();
@@ -2786,7 +2961,7 @@ async fn cmd_ps(archived: bool, search: Option<String>) -> Result<()> {
 }
 
 async fn cmd_issues(all: bool, backlog: bool) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     let cwd = std::env::current_dir()?;
     let scope = if backlog { "backlog" } else { "repo" };
     let path = format!(
@@ -2828,7 +3003,7 @@ async fn cmd_issues(all: bool, backlog: bool) -> Result<()> {
 }
 
 async fn cmd_show(key: String) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     let ws = client
         .get(&format!("/api/sessions/{}", enc_key(&key)))
         .await?;
@@ -2844,7 +3019,7 @@ async fn cmd_session_rename(key: String, title: String) -> Result<()> {
     if title.is_empty() {
         bail!("nothing to rename to — provide a new title");
     }
-    let client = client::default();
+    let client = client::default()?;
     let ws = client
         .patch(
             &format!("/api/sessions/{}", enc_key(&key)),
@@ -2929,7 +3104,7 @@ fn print_session(ws: &Value) {
 
 async fn cmd_attach(key: String) -> Result<()> {
     use std::os::unix::process::CommandExt;
-    let client = client::default();
+    let client = client::default()?;
     let ws = client
         .get(&format!("/api/sessions/{}", enc_key(&key)))
         .await?;
@@ -2954,7 +3129,7 @@ async fn cmd_attach(key: String) -> Result<()> {
 }
 
 async fn cmd_archive(key: String) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     let res = client
         .post(
             &format!("/api/sessions/{}/archive", enc_key(&key)),
@@ -2976,7 +3151,7 @@ async fn cmd_archive(key: String) -> Result<()> {
 }
 
 async fn cmd_adopt(key: String) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     let ws = client
         .post(&format!("/api/sessions/{}/adopt", enc_key(&key)), json!({}))
         .await?;
@@ -2992,7 +3167,7 @@ async fn cmd_adopt(key: String) -> Result<()> {
 }
 
 async fn cmd_recover(key: String) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     let ws = client
         .post(
             &format!("/api/sessions/{}/recover", enc_key(&key)),
@@ -3017,7 +3192,7 @@ async fn cmd_handoff(
     effort: Option<String>,
     mode: Option<String>,
 ) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     let ws = client
         .handoff_session(
             &key,
@@ -3041,7 +3216,7 @@ async fn cmd_handoff(
 }
 
 async fn cmd_rm(key: String, keep_branch: bool) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     let path = format!("/api/sessions/{}?keep_branch={keep_branch}", enc_key(&key));
     let res = client.delete(&path).await?;
     println!("removed session {key}");
@@ -3056,7 +3231,7 @@ async fn cmd_rm(key: String, keep_branch: bool) -> Result<()> {
 }
 
 async fn cmd_open() -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     let url = client.base().to_string();
     println!("opening {url}");
     if std::process::Command::new("xdg-open")
@@ -3154,7 +3329,7 @@ async fn cmd_watch_new(name: String) -> Result<()> {
 /// (the registry the panel offers), or print one program's script source with
 /// `--source` as a working example to start a custom program from.
 async fn cmd_watch_programs(source: Option<String>) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     let rows = client
         .get("/api/watches/programs")
         .await?
@@ -3221,7 +3396,7 @@ fn build_scope(opts: &AddOpts) -> Result<Value> {
 
 /// `loom watch add` — register a watch via POST /api/watches.
 async fn cmd_watch_add(opts: AddOpts) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     let trigger = build_trigger(&opts);
     let scope = build_scope(&opts)?;
     let params = opts
@@ -3269,7 +3444,7 @@ async fn cmd_watch_add(opts: AddOpts) -> Result<()> {
 
 /// `loom watch rm` — delete a watch.
 async fn cmd_watch_rm(name: String) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     client.delete(&format!("/api/watches/{name}")).await?;
     println!("removed watch {name}");
     Ok(())
@@ -3277,7 +3452,7 @@ async fn cmd_watch_rm(name: String) -> Result<()> {
 
 /// `loom watch enable|disable` — PATCH the `enabled` toggle.
 async fn cmd_watch_set_enabled(name: String, enabled: bool) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     let o = client
         .patch(
             &format!("/api/watches/{name}"),
@@ -3294,7 +3469,7 @@ async fn cmd_watch_set_enabled(name: String, enabled: bool) -> Result<()> {
 
 /// `loom watch ls` — a table of every watch.
 async fn cmd_watch_ls() -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     let rows = client
         .get("/api/watches")
         .await?
@@ -3330,7 +3505,7 @@ async fn cmd_watch_ls() -> Result<()> {
 
 /// `loom watch run` — fire a round now and print outcome + summary.
 async fn cmd_watch_run(name: String, dry_run: bool) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     let res = client
         .post(
             &format!("/api/watches/{name}/run"),
@@ -3350,7 +3525,7 @@ async fn cmd_watch_run(name: String, dry_run: bool) -> Result<()> {
 /// `loom watch runs` / `logs` — the round history. `verbose` (the `logs`
 /// alias) also prints each round's actions.
 async fn cmd_watch_runs(name: String, limit: i64, verbose: bool) -> Result<()> {
-    let client = client::default();
+    let client = client::default()?;
     let rows = client
         .get(&format!("/api/watches/{name}/runs?limit={limit}"))
         .await?
@@ -3466,6 +3641,35 @@ fn capabilities_summary(o: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_context_commands_parse() {
+        let Cli { context, cmd } =
+            Cli::try_parse_from(["loom", "--context", "local", "session", "ls"]).unwrap();
+        assert_eq!(context.as_deref(), Some("local"));
+        assert!(matches!(cmd, Cmd::Session { .. }));
+
+        let Cli { cmd, .. } = Cli::try_parse_from([
+            "loom",
+            "context",
+            "add",
+            "production",
+            "--url",
+            "https://loom.example.com",
+            "--use",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cmd,
+            Cmd::Context {
+                cmd: ClientContextCmd::Add {
+                    name,
+                    use_context: true,
+                    ..
+                }
+            } if name == "production"
+        ));
+    }
 
     #[test]
     fn format_uptime_picks_a_sensible_granularity() {

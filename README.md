@@ -301,11 +301,37 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the shape of `SessionView`.
 
 ## Server address
 
-`loom server run` binds `127.0.0.1:7878` by default. Set `WEAVER_API` (e.g.
-`WEAVER_API=http://127.0.0.1:9000`) to point loom *and* the `loom` CLI at a
-different address. `loom server run --addr <host:port>` overrides `WEAVER_API`.
-The running daemon records the address it bound in `~/.weaver/server.json`,
-so the `loom` CLI finds it with no configuration in the common case.
+`loom server run` binds `127.0.0.1:7878` by default. The running daemon records
+the address it bound in `~/.weaver/server.json`, so the `loom` CLI finds a local
+server with no configuration. Named contexts make switching between local and
+remote servers explicit:
+
+```sh
+loom context add local --url http://127.0.0.1:7878
+loom login production --url https://loom.oa.dev
+loom context ls
+loom context use production
+loom --context local session ls
+```
+
+`loom login` validates a personal API token before storing it. The prompt is
+hidden; use `--token-stdin` when a password manager supplies the token. Context
+endpoints live in `$XDG_CONFIG_HOME/loom/config.toml` (normally
+`~/.config/loom/config.toml`) and tokens live separately in
+`credentials.toml`, which is mode 0600. A repository may select one of the
+user's contexts by committing `.loom/client.toml`:
+
+```toml
+context = "production"
+```
+
+Repository configuration names a context but cannot provide an endpoint or
+credential. Selection order is `--context`, `WEAVER_API`, `LOOM_CONTEXT`, the
+repository selector, the user's default context, then the recorded local
+server. `LOOM_TOKEN` overrides a saved context credential unless `--context`
+selects a different endpoint than `WEAVER_API`; this prevents an injected local
+machine token from being sent to a remote server. `loom context current` shows
+what the current directory selects.
 
 ## Authentication
 
@@ -324,25 +350,37 @@ TLS-terminating reverse proxy. Access is then gated three ways:
   no owner is seeded, so GitHub sign-in won't work until it's set. Add more
   users, set your password, and configure GitHub sign-in under **Settings →
   Account**.
-- **API tokens** for automation — the `LOOM_TOKEN` a CI job or a remote `loom`
-  CLI presents as a bearer. Mint one under **Settings → Tokens** or:
+- **Personal API tokens** for remote CLIs and other trusted clients. Mint one
+  under **Settings → Tokens** or from a locally authenticated CLI:
 
   ```sh
-  loom token add github-actions     # prints the secret once — store it now
+  loom token add laptop --expires-days 30  # prints the secret once
   ```
 
-  Then, from anywhere (e.g. a GitHub Actions step that kicks off a session in
-  response to a comment):
+  Then sign in once from the remote machine:
+
+  ```sh
+  loom login production --url https://loom.example.com
+  loom session launch "Investigate the failing test in #123"
+  ```
+
+  For an ephemeral environment, the environment-variable form remains
+  available:
 
   ```sh
   export WEAVER_API=https://loom.example.com
   export LOOM_TOKEN=loom_xxxxxxxx
-  loom session launch "Investigate the failing test in #123"
-  # or hit the API directly:
   curl -H "Authorization: Bearer $LOOM_TOKEN" \
        -H 'content-type: application/json' \
        "$WEAVER_API/api/sessions" -d '{"cwd":"/srv/repo","goal":"..."}'
   ```
+
+- **Federated workflow tokens** for GitHub Actions and Google workloads. Loom
+  verifies the workload's OIDC identity and returns an automation-scoped token
+  with a fixed ten-minute lifetime. The workflow exchanges again for each run;
+  it does not store a personal token or choose one of the day-based lifetimes
+  shown on the personal-token page. See
+  [Restricted sessions](docs/restricted-sessions.md).
 
 To configure **GitHub sign-in**: register an OAuth app on GitHub with the
 callback `https://loom.example.com/api/auth/github/callback`, then paste its
@@ -429,10 +467,15 @@ placeholder page), `cargo test --workspace` runs the backend suites, and `cd e2e
 
 - `WEAVER_HOME` — state directory (default `~/.weaver`)
 - `WEAVER_DB` — database path (default `$WEAVER_HOME/weaver.db`)
-- `WEAVER_API` — loom URL the `loom` CLI talks to (default `http://127.0.0.1:7878`)
-- `WEAVER_BRANCH` — override the branch resolver (set by `loom session launch` in the worktree)
-- `LOOM_TOKEN` — bearer token the `loom` CLI / automation sends (see [Authentication](#authentication))
-- `LOOM_OWNER_GITHUB` — GitHub login seeded as the owner on a fresh database. No default; leave it unset and no owner is seeded (GitHub sign-in won't work until it's set).
+- `WEAVER_API` — explicit loom URL; overrides automatic named-context selection
+- `LOOM_CONTEXT` — named context to use when `--context` and `WEAVER_API` are unset
+- `WEAVER_BRANCH` — override the branch resolver (set by `loom session launch`
+  in the worktree)
+- `LOOM_TOKEN` — explicit bearer token for CLI clients and automation; normally
+  overrides saved context credentials (see [Authentication](#authentication))
+- `LOOM_OWNER_GITHUB` — GitHub login seeded as the owner on a fresh database.
+  No default; leave it unset and no owner is seeded (GitHub sign-in won't work
+  until it is set).
 - `LOOM_GITHUB_CLIENT_ID` / `LOOM_GITHUB_CLIENT_SECRET` — GitHub OAuth app credentials
 - `LOOM_GITHUB_WEBHOOK_SECRET` — shared secret for the inbound GitHub trigger; until set, the webhook rejects every delivery ([docs/github-trigger.md](docs/github-trigger.md))
 - `WEAVER_REPOS_DIR` — managed repo store root (default `$WEAVER_HOME/repos`)
