@@ -914,6 +914,7 @@ pub async fn build_acp_launch(
     spec: &AcpLaunchSpec<'_>,
     open: AcpOpen,
 ) -> Result<AcpLaunch> {
+    let is_fresh = matches!(open, AcpOpen::Fresh);
     let is_codex = spec.custom.is_none() && spec.runtime == "codex";
     let is_claude = spec.custom.is_none() && !is_codex;
     let adapter_cmd = match spec.custom {
@@ -1009,6 +1010,12 @@ pub async fn build_acp_launch(
         // post-setup `session/set_mode` would re-send a claude-flavored id it
         // does not advertise.
         mode: (!is_codex).then(|| spec.mode.to_string()),
+        // Loading must preserve adapter-restored live choices: the user may
+        // have changed either selector after launch.
+        initial_model: (is_fresh && !spec.model.trim().is_empty())
+            .then(|| spec.model.trim().to_string()),
+        initial_effort: (is_fresh && !spec.effort.trim().is_empty())
+            .then(|| spec.effort.trim().to_string()),
         goal,
         setup_timeout: std::time::Duration::from_secs(30),
     })

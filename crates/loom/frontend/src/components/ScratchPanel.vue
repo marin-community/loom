@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, onMounted, onActivated, onDeactivated, onUnmounted } from 'vue';
 import { get, upload, del } from '../api';
 import type { ScratchFile } from '../types';
 
@@ -105,21 +105,36 @@ async function remove(name: string) {
   }
 }
 
-onMounted(() => {
+let listening = false;
+function activate() {
+  if (listening) return;
+  listening = true;
   refresh();
   window.addEventListener('dragenter', onDragEnter);
   window.addEventListener('dragleave', onDragLeave);
   window.addEventListener('dragover', onDragOver);
   window.addEventListener('drop', onDrop);
   window.addEventListener('loom:scratch-changed', onScratchChanged);
-});
-onUnmounted(() => {
+}
+function deactivate() {
+  if (!listening) return;
+  listening = false;
+  depth = 0;
+  dragging.value = false;
   window.removeEventListener('dragenter', onDragEnter);
   window.removeEventListener('dragleave', onDragLeave);
   window.removeEventListener('dragover', onDragOver);
   window.removeEventListener('drop', onDrop);
   window.removeEventListener('loom:scratch-changed', onScratchChanged);
-});
+}
+
+// SessionDetail is kept alive across navigation. Its component tree remains
+// mounted while hidden, so global drop ownership must follow activation rather
+// than mount lifetime or an old session will consume New Session's file drops.
+onMounted(activate);
+onActivated(activate);
+onDeactivated(deactivate);
+onUnmounted(deactivate);
 </script>
 
 <template>

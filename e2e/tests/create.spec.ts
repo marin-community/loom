@@ -81,6 +81,31 @@ test.describe('creating a session via the UI form', () => {
     expect(files.map((f) => f.name).sort()).toEqual(['shot.png', 'trace.log']);
   });
 
+  test('a cached session does not consume new-session file drops', async ({ page, weaver }) => {
+    const existing = await weaver.seedSession({ goal: 'Keep this session warm', name: 'warm' });
+    await page.goto(`${weaver.baseUrl}/s/${existing.id}`);
+    await expect(page.getByTestId('scratch-panel')).toBeVisible();
+
+    // SessionDetail is kept alive after returning to the fleet. Its whole-window
+    // scratch drop target must deactivate so the new-session picker owns this
+    // image instead of uploading it into the hidden old session.
+    await page.locator('[data-rail="sessions"]').click();
+    await page.getByRole('button', { name: 'New session' }).click();
+    const dropzone = page.getByTestId('scratch-picker-dropzone');
+    const dataTransfer = await page.evaluateHandle(() => {
+      const dt = new DataTransfer();
+      dt.items.add(new File(['image'], 'new-session.png', { type: 'image/png' }));
+      return dt;
+    });
+    await dropzone.dispatchEvent('dragenter', { dataTransfer });
+    await expect(page.getByTestId('scratch-dropzone')).toHaveCount(0);
+    await dropzone.dispatchEvent('drop', { dataTransfer });
+    await expect(page.getByTestId('scratch-picker-file')).toContainText('new-session.png');
+
+    const oldScratch = await fetch(`${weaver.baseUrl}/api/sessions/${existing.id}/scratch`);
+    expect((await oldScratch.json()) as { name: string }[]).toEqual([]);
+  });
+
   test('an agent startup failure opens its recoverable session', async ({ page, weaver }) => {
     const failed = await weaver.seedSession({ goal: 'Recover me', name: 'failed-create' });
     await page.route('**/api/sessions', async (route) => {

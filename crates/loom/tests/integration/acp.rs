@@ -98,6 +98,8 @@ async fn start_new_with_env(
         env_clear: false,
         new_or_load: NewOrLoad::New { cwd, meta: None },
         mode: mode.map(str::to_string),
+        initial_model: None,
+        initial_effort: None,
         goal: goal.map(str::to_string),
         setup_timeout: Duration::from_secs(5),
     };
@@ -124,6 +126,8 @@ async fn silent_setup_stage_times_out_and_cleans_provider_state() {
         env_clear: false,
         new_or_load: NewOrLoad::New { cwd, meta: None },
         mode: None,
+        initial_model: None,
+        initial_effort: None,
         goal: Some("say:never starts".to_string()),
         setup_timeout: Duration::from_millis(150),
     };
@@ -340,6 +344,78 @@ async fn composer_metadata_and_config_options_round_trip() {
         .await
         .expect("boolean config changes");
     assert_eq!(changed["value"], true);
+}
+
+/// Launch selectors can already be active in the underlying runtime while an
+/// adapter's initial configOptions still reflect its own defaults. The
+/// handshake reconciles both selectors through ACP before exposing metadata.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn launch_model_and_effort_replace_adapter_config_defaults() {
+    let ts = TestServer::start().await;
+    make_session(&ts, "acp-launch-config").await;
+    let cwd = ts.repo_path().to_path_buf();
+    let launch = AcpLaunch {
+        adapter_cmd: agent_cmd(),
+        cwd: cwd.clone(),
+        env: vec![],
+        env_clear: false,
+        new_or_load: NewOrLoad::New { cwd, meta: None },
+        mode: None,
+        initial_model: Some("fake-deep".to_string()),
+        initial_effort: Some("high".to_string()),
+        goal: None,
+        setup_timeout: Duration::from_secs(5),
+    };
+    acp::start(&ts.state, "acp-launch-config", launch)
+        .await
+        .expect("acp session starts");
+
+    let metadata = poll_metadata(&ts, "acp-launch-config", Duration::from_secs(5)).await;
+    let options = metadata["config_options"].as_array().unwrap();
+    assert!(options
+        .iter()
+        .any(|option| option["id"] == "model" && option["currentValue"] == "fake-deep"));
+    assert!(options.iter().any(|option| {
+        option["category"] == "thought_level" && option["currentValue"] == "high"
+    }));
+}
+
+/// A loaded ACP conversation owns its restored live selectors. Launch-time
+/// defaults must not overwrite model or effort choices made before restart.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn load_preserves_adapter_restored_model_and_effort() {
+    let ts = TestServer::start().await;
+    make_session(&ts, "acp-load-config").await;
+    let cwd = ts.repo_path().to_path_buf();
+    let launch = AcpLaunch {
+        adapter_cmd: agent_cmd(),
+        cwd: cwd.clone(),
+        env: vec![],
+        env_clear: false,
+        new_or_load: NewOrLoad::Load {
+            acp_session_id: "fake-loaded".to_string(),
+            meta: None,
+        },
+        mode: None,
+        initial_model: None,
+        initial_effort: None,
+        goal: None,
+        setup_timeout: Duration::from_secs(5),
+    };
+    acp::start(&ts.state, "acp-load-config", launch)
+        .await
+        .expect("acp session loads");
+
+    let metadata = poll_metadata(&ts, "acp-load-config", Duration::from_secs(5)).await;
+    let options = metadata["config_options"].as_array().unwrap();
+    assert!(options
+        .iter()
+        .any(|option| option["id"] == "model" && option["currentValue"] == "fake-fast"));
+    assert!(options.iter().any(|option| {
+        option["category"] == "thought_level" && option["currentValue"] == "medium"
+    }));
 }
 
 /// 1. New session end to end: prompt → journal has user_message + agent_message +
@@ -2501,6 +2577,8 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
     let cfg: Value = serde_json::from_str(&env_of(&launch, "CODEX_CONFIG")[0]).unwrap();
     assert_eq!(cfg["model"], "gpt-5.3-codex");
     assert_eq!(cfg["model_reasoning_effort"], "high");
+    assert_eq!(launch.initial_model.as_deref(), Some("gpt-5.3-codex"));
+    assert_eq!(launch.initial_effort.as_deref(), Some("high"));
     assert!(
         launch.mode.is_none(),
         "the mode boots via INITIAL_AGENT_MODE, not a claude-id set_mode"
@@ -2525,6 +2603,16 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
     .unwrap();
     assert_eq!(env_of(&launch, "CODEX_CONFIG"), vec![r#"{"model":"mine"}"#]);
     assert_eq!(launch.goal.as_deref(), Some("orient first"));
+
+    let loaded = loom::agent::build_acp_launch(
+        &ts.state.db,
+        &spec(None, &[]),
+        loom::agent::AcpOpen::Load("existing-acp-session".to_string()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(loaded.initial_model, None);
+    assert_eq!(loaded.initial_effort, None);
 }
 
 /// K. Phase 7, adopt-after-the-flip: an orphaned *terminal* session whose
