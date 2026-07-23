@@ -225,16 +225,15 @@ const sessionsByBranch = computed(() => {
 });
 
 // An issue is automation-claimed when the session *currently* working its
-// branch (`claimed_branch`) is automation-class — the branch's active session
-// if one exists, else its most recently created. Archiving frees the branch
-// slot, so an archived automation run must not hide an issue a person has
-// since picked up on the re-let branch. Mirrors the server's own default-hide
-// rule (`GET /api/issues`).
+// branch (`claimed_branch`) is automation-class. Archived sessions never own
+// work, including historical rows whose claims predate archive cleanup. Mirrors
+// the server's own default-hide rule (`GET /api/issues`).
 function isAutomationClaimed(i: Issue): boolean {
   if (!i.claimed_branch) return false;
   const held = sessionsByBranch.value.get(`${i.repo_root}\0${i.claimed_branch}`) ?? [];
-  const active = (s: Session) => !['done', 'error', 'archived'].includes(s.status);
-  const holder = [...held].sort(
+  const eligible = held.filter((s) => s.status !== 'archived');
+  const active = (s: Session) => !['done', 'error'].includes(s.status);
+  const holder = eligible.sort(
     (a, b) => Number(active(b)) - Number(active(a)) || b.created_at.localeCompare(a.created_at),
   )[0];
   return holder?.class === 'automation';
@@ -287,6 +286,12 @@ async function withBusy<T>(id: number, fn: () => Promise<T>): Promise<T | undefi
 
 async function setStatus(i: Issue, status: 'open' | 'closed') {
   await withBusy(i.id, async () => replaceIssue((await patchIssue(i.id, { status })) as Issue));
+}
+
+async function unclaim(i: Issue) {
+  await withBusy(i.id, async () =>
+    replaceIssue((await patchIssue(i.id, { claimed_branch: null })) as Issue),
+  );
 }
 
 // Launch a fresh loom session that picks up an unclaimed backlog issue: the
@@ -643,6 +648,17 @@ async function removeTag(i: Issue, key: string) {
               @click="setStatus(i, 'open')"
             >
               Reopen
+            </button>
+            <button
+              v-if="i.claimed_branch"
+              type="button"
+              class="rounded px-1.5 py-0.5 text-2xs text-muted hover:bg-subtle hover:text-fg"
+              data-testid="issue-unclaim"
+              :disabled="busy[i.id]"
+              :title="`Return issue #${i.id} to the unclaimed backlog`"
+              @click="unclaim(i)"
+            >
+              Unclaim
             </button>
             <button
               type="button"

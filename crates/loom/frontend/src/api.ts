@@ -226,10 +226,14 @@ export const launchSessionForIssue = (repoRoot: string, issueId: number) =>
 export const createRepoIssue = (repoRoot: string, title: string, body = '') =>
   post('/repos/issues', { repo_root: repoRoot, title, body }) as Promise<Issue>;
 
-/** Patch an issue's editable fields. `github` is `owner/name#number`; blank clears it. */
+/** Patch an issue's editable fields. Blank `github` unlinks it;
+ *  `claimed_branch: null` returns it to the unclaimed backlog. */
 export const patchIssue = (
   id: number,
-  body: Partial<Pick<Issue, 'title' | 'body' | 'status'>> & { github?: string },
+  body: Partial<Pick<Issue, 'title' | 'body' | 'status'>> & {
+    github?: string;
+    claimed_branch?: null;
+  },
 ) => patch(`/issues/${id}`, body) as Promise<Issue>;
 
 /** Refresh, pin, or clear a session's PR association. */

@@ -62,21 +62,20 @@ pub(super) async fn list_all_issues(
 ) -> ApiResult<Json<Vec<IssueView>>> {
     let mut issues = weaver_core::issue::list_all(&st.db, q.all).await?;
     if !q.automation {
-        // Branches whose *current* claim-holder is an automation-class session,
+        // Branches whose current claim-holder is an automation-class session,
         // as (repo_root, branch) pairs — issues key their claim by branch name,
-        // not branch id. The holder is the branch's active session if one
-        // exists, else its most recently created: archiving frees the branch
-        // slot, so an archived automation run must not hide an issue a person
-        // has since picked up on the re-let branch, while a reaped run with no
-        // successor keeps its issue off the default board.
+        // not branch id. Archived sessions never own work, including historical
+        // rows whose claims predate archive cleanup.
         let rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT b.repo_root, b.branch FROM sessions s
              JOIN branches b ON b.id = s.branch_id
              WHERE s.class = 'automation'
+               AND s.status != 'archived'
                AND s.id = (
                    SELECT s2.id FROM sessions s2
                    WHERE s2.branch_id = s.branch_id
-                   ORDER BY (s2.status NOT IN ('done', 'error', 'archived')) DESC,
+                     AND s2.status != 'archived'
+                   ORDER BY (s2.status NOT IN ('done', 'error')) DESC,
                             s2.created_at DESC
                    LIMIT 1
                )",
@@ -195,6 +194,16 @@ pub(super) async fn patch_issue(
     let existing = weaver_core::issue::get(&st.db, id)
         .await?
         .ok_or_else(|| AppError::not_found("issue"))?;
+    if req
+        .claimed_branch
+        .as_ref()
+        .and_then(|branch| branch.as_deref())
+        .is_some_and(|branch| !branch.trim().is_empty())
+    {
+        return Err(AppError::bad_request(
+            "claimed_branch can only be cleared; launch a session to claim an issue",
+        ));
+    }
     if let Some(status) = req.status.as_deref() {
         match status {
             "open" => weaver_core::issue::reopen(&st.db, id).await?,
@@ -253,6 +262,9 @@ pub(super) async fn patch_issue(
         .execute(&st.db)
         .await?;
         tracing::info!(issue = id, github = mapping, "issue GitHub mapping changed");
+    }
+    if req.claimed_branch.is_some() {
+        weaver_core::issue::set_claim(&st.db, id, None).await?;
     }
     let issue = weaver_core::issue::get(&st.db, id)
         .await?
@@ -532,5 +544,47 @@ mod tests {
         .0;
         assert_eq!(cleared.github_repo, None);
         assert_eq!(cleared.github_issue, None);
+    }
+
+    #[tokio::test]
+    async fn patch_issue_clears_claim_but_cannot_assign_one() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let st = test_state(db.clone());
+        let issue = weaver_core::issue::add(
+            &db,
+            &weaver_core::issue::NewIssue {
+                repo_root: "/r".to_string(),
+                claimed_branch: Some("weaver/worker".to_string()),
+                title: "claimed".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let cleared = patch_issue(
+            State(st.clone()),
+            Path(issue.id),
+            Json(PatchIssueReq {
+                claimed_branch: Some(None),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(cleared.claimed_branch, None);
+
+        let err = patch_issue(
+            State(st),
+            Path(issue.id),
+            Json(PatchIssueReq {
+                claimed_branch: Some(Some("weaver/other".to_string())),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 }

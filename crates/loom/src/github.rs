@@ -912,6 +912,10 @@ pub(crate) async fn apply_snapshot(
         && !session_mod::is_terminal(&session.status)
         && !recovered
     {
+        // Archive releases the branch's issue claims back to the backlog. Close
+        // the shipped work first so the existing merge lifecycle still finds
+        // those issues; archive then clears ownership from the closed rows too.
+        close_claimed_issues(state, branch, snap.pr_number).await;
         // The merge is already on the record as a `github` event (above) and the
         // archive records a `status` event, so no extra log line is needed.
         match crate::web::archive(state, session, branch).await {
@@ -921,7 +925,6 @@ pub(crate) async fn apply_snapshot(
                     pr = snap.pr_number,
                     "archived session after PR merge"
                 );
-                close_claimed_issues(state, branch, snap.pr_number).await;
             }
             Err(e) => tracing::warn!(
                 branch = %branch.branch,
@@ -1006,9 +1009,9 @@ async fn maybe_post_backlink(
 /// closure to its activity feed. The session is being torn down because its PR
 /// shipped, so the tracking issues it claimed close out with it — emitting the
 /// same `issue_closed` event `weaver issue close` records, so the dashboard
-/// reacts identically whether a person or the merge closed them. Best-effort:
-/// the archive has already happened, so a hiccup here only loses the auto-close,
-/// it must not surface as an error.
+/// reacts identically whether a person or the merge closed them. Best-effort: a
+/// hiccup here only loses the auto-close and must not prevent the session
+/// archive that follows.
 async fn close_claimed_issues(state: &AppState, branch: &Branch, pr: i64) {
     let closed = match weaver_core::issue::close_for_branch(
         &state.db,
@@ -1525,6 +1528,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(closed.status, "closed");
+        assert_eq!(
+            closed.claimed_branch, None,
+            "the archived session no longer owns the closed issue"
+        );
         // …and the closure lands on the activity feed as an `issue_closed` event,
         // just as `weaver issue close` would have recorded it.
         let logged = events::history(&f.state.db, &f.branch.id, 50)

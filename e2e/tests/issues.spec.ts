@@ -72,6 +72,20 @@ test.describe('issues pane', () => {
     expect(persisted.find((i) => i.id === issue.id)?.title).toBe('new shiny title');
   });
 
+  test('returns a claimed issue to the backlog', async ({ page, weaver }) => {
+    const session = await weaver.seedSession({ goal: 'g', name: 'feature' });
+    const issue = await weaver.seedIssue(session, 'release me');
+
+    await page.goto(`${weaver.baseUrl}/issues`);
+    const row = page.locator(`[data-issue-id="${issue.id}"]`);
+    await row.getByTestId('issue-unclaim').click();
+
+    await expect(row.getByTestId('issue-unclaim')).toHaveCount(0);
+    await expect(row.getByTestId('issue-launch')).toBeVisible();
+    const persisted = (await weaver.listIssues()).find((candidate) => candidate.id === issue.id);
+    expect(persisted?.claimed_branch).toBeNull();
+  });
+
   test('changes and clears an issue GitHub mapping through the inline editor', async ({ page, weaver }) => {
     const session = await weaver.seedSession({ goal: 'g', name: 'feature' });
     const issue = await weaver.seedIssue(session, 'remappable');

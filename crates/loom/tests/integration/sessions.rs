@@ -753,10 +753,8 @@ async fn archive_frees_the_branch_for_a_new_session() {
 }
 
 /// The issue board hides an issue only while its branch's *current* claim-holder
-/// is automation-class. An archived automation run with no successor keeps its
-/// issue off the default board, but once a person re-lets the branch with an
-/// interactive session (archiving freed the slot), the issue surfaces again —
-/// historical automation tenancy must not hide live interactive work.
+/// is automation-class. Archiving releases the issue to the visible backlog;
+/// historical automation tenancy must not hide work that no session owns.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_hiding_follows_the_branch_current_claim_holder() {
@@ -800,8 +798,8 @@ async fn issue_hiding_follows_the_branch_current_claim_holder() {
         .unwrap();
     let board = client.get("/api/issues").await.unwrap();
     assert!(
-        !on_board(board),
-        "an archived automation run with no successor keeps its issue hidden"
+        on_board(board),
+        "an archived automation run releases its issue to the visible backlog"
     );
 
     // A person picks the branch back up: the freed slot is re-let interactively.

@@ -1778,6 +1778,10 @@ pub(crate) async fn archive(
         }
     }
     session_mod::set_status(&st.db, &session.id, "archived").await?;
+    // A torn-down session cannot keep owning work. Return every issue it held
+    // to the repo backlog while preserving source-branch provenance and issue
+    // status, just as full session deletion does.
+    weaver_core::issue::unclaim_branch(&st.db, &branch.repo_root, &branch.branch).await?;
     // An archived session is finished with: its agent is gone, so it can no
     // longer "need me" — nor is it "resting". Clear every loud tag — the agent's
     // own `attention` and any watch's typed marks (loudness is value-driven, so

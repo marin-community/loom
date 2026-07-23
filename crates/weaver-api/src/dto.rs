@@ -1159,6 +1159,26 @@ pub struct PatchIssueReq {
     /// mapping; absent leaves it unchanged.
     #[serde(default)]
     pub github: Option<String>,
+    /// The branch currently working the issue. `null` clears the claim; absent
+    /// leaves it unchanged. Claims are created through session launch, so this
+    /// patch field deliberately supports clearing only.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub claimed_branch: Option<Option<String>>,
+}
+
+/// Preserve the PATCH distinction between an absent field and an explicit
+/// JSON `null`: serde's ordinary `Option<Option<T>>` handling maps both to the
+/// outer `None`.
+fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Some(Option::<T>::deserialize(deserializer)?))
 }
 
 /// Body for `POST /api/repos/issues`: create an unclaimed repo-level backlog

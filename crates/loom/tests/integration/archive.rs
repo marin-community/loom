@@ -99,6 +99,7 @@ async fn archive_keeps_branch_and_history() {
         .await
         .unwrap();
     let arch_id = arch["id"].as_str().unwrap().to_string();
+    let claimed_branch = arch["branch"]["branch"].as_str().unwrap().to_string();
     let arch_session = arch["term_session"].as_str().unwrap().to_string();
     let arch_work_dir = arch["work_dir"].as_str().unwrap().to_string();
     assert!(
@@ -168,6 +169,15 @@ async fn archive_keeps_branch_and_history() {
         .await
         .unwrap();
     assert_eq!(view["status"], "archived");
+    let issues = client.get("/api/issues?automation=true").await.unwrap();
+    assert!(
+        issues
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|issue| issue["claimed_branch"] != claimed_branch),
+        "an archived session must not own any issues"
+    );
     // Archiving cleared the attention tag so the dashboard stops flagging it
     // (absence is the calm state). The message (description) is kept as history.
     assert!(
