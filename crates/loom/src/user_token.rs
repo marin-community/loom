@@ -3,9 +3,9 @@
 //!
 //! For an ordinary interactive session, loom injects the token as `GH_TOKEN`
 //! into the session env ([`crate::runtime::create_session`]), overriding the
-//! shared ambient credential. A restricted session keeps the token server-side
-//! and resolves it only for its fixed GitHub tool surface. Combined with the
-//! per-user commit author identity loom already sets
+//! selected profile credential. Restricted sessions use the GitHub App (or an
+//! explicit App-less profile credential) instead. Combined with the per-user
+//! commit author identity loom already sets
 //! ([`crate::auth::commit_identity`]), ordinary pushes are attributed to them.
 //!
 //! The value is **write-only** over the API: callers learn only *that* a token is

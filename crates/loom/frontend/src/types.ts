@@ -808,8 +808,8 @@ export interface User {
   created_at: string;
 }
 
-/** One operator-managed agent environment variable. Exported into every
- *  interactive agent session loom launches. Mirrors `agent_env::EnvVar`. */
+/** One readable environment variable on the default profile. Mirrors
+ *  `agent_env::EnvVar`. */
 export interface EnvVar {
   name: string;
   value: string;

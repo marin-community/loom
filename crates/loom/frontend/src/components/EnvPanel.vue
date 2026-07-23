@@ -4,9 +4,8 @@ import * as api from '../api';
 import type { EnvVar } from '../types';
 import SettingsTableSection from './SettingsTableSection.vue';
 
-// Operator-managed environment variables, exported into every agent session
-// loom launches (on top of loom's own WEAVER_*/LOOM_TOKEN). A flat name/value
-// store edited at runtime — registry tokens, GH_HOST, ANTHROPIC_BASE_URL, etc.
+// The default profile's environment variables. Other profiles have independent
+// environment stores, and restricted profiles never inherit these values.
 const vars = ref<EnvVar[]>([]);
 // Per-name editable draft so an in-progress value edit survives a reload.
 const drafts = ref<Record<string, string>>({});
@@ -92,11 +91,12 @@ const add = () =>
 <template>
   <div>
     <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-1.5">
-      Agent environment
+      Default profile environment
     </h2>
     <p class="mb-3 text-xs text-faint">
-      Variables exported into new agent sessions loom launches. Changes apply to future sessions
-      only.
+      Variables exported into new sessions that use the default profile. Other profiles use their
+      own environment; restricted profiles do not inherit these values. Values on this screen are
+      readable configuration, not a secret store. Changes apply to future sessions only.
     </p>
 
     <p v-if="error" class="mb-3 text-sm text-block">{{ error }}</p>

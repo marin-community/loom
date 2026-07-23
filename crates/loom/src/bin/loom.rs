@@ -161,10 +161,9 @@ enum Cmd {
     ///
     ///     loom setup github-app --base-url https://loom.team.dev
     ///
-    /// `loom setup secrets` prompts for the paste-once secrets every agent
-    /// session needs (an Anthropic API key, a GitHub token) and stores them as
-    /// operator environment variables, live for every session launched from
-    /// then on:
+    /// `loom setup secrets` prompts for paste-once agent secrets (an Anthropic
+    /// API key, a GitHub token) and stores them on the default profile. They
+    /// apply to future sessions launched with that profile:
     ///
     ///     loom setup secrets
     Setup {
@@ -455,7 +454,7 @@ enum WatchCmd {
 enum SetupCmd {
     /// Create the GitHub App loom uses, via GitHub's manifest flow.
     GithubApp(GithubAppOpts),
-    /// Prompt for and store the paste-once agent secrets (Anthropic key, GitHub token).
+    /// Prompt for and store default-profile agent secrets (Anthropic key, GitHub token).
     Secrets(SecretsOpts),
 }
 
@@ -1982,7 +1981,7 @@ async fn cmd_setup_secrets(opts: SecretsOpts) -> Result<()> {
         .map(|(k, _)| k)
         .collect();
 
-    println!("Paste-once secrets for the agents loom launches (leave blank to skip).");
+    println!("Paste-once secrets for the default profile (leave blank to skip).");
     let anthropic = prompt_secret(
         "ANTHROPIC_API_KEY",
         existing_names.contains("ANTHROPIC_API_KEY"),
@@ -2010,8 +2009,8 @@ async fn cmd_setup_secrets(opts: SecretsOpts) -> Result<()> {
     }
     println!();
     println!(
-        "Stored {} as operator environment variables — every session launched from now \
-         on gets them (Settings → Environment in the web UI, or `GET /api/env`).",
+        "Stored {} on the default profile — future sessions using that profile get them \
+         (Settings → Environment in the web UI, or `GET /api/env`).",
         stored.join(", ")
     );
     println!(

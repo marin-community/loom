@@ -741,7 +741,7 @@ pub fn router(state: AppState) -> Router {
             get(list_repo_issues).post(create_repo_issue),
         )
         // Per-repo environment variables (write-only values), layered into a
-        // session's terminal above the global agent_env.
+        // non-restricted session's terminal above its selected profile.
         .route("/repos/env", get(get_repo_env))
         .route(
             "/repos/env/{name}",
@@ -759,7 +759,7 @@ pub fn router(state: AppState) -> Router {
             axum::routing::put(put_profile_env).delete(delete_profile_env),
         )
         .route("/slack/status", get(slack_status))
-        // Operator-managed agent environment variables.
+        // Readable compatibility facade for the default profile's environment.
         .route("/env", get(get_env))
         .route(
             "/env/{name}",

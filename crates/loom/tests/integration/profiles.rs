@@ -7,20 +7,26 @@ use std::os::unix::fs::PermissionsExt;
 
 use crate::fixtures::TestServer;
 
-struct EnvVarSet {
+struct EnvVarGuard {
     name: &'static str,
     previous: Option<std::ffi::OsString>,
 }
 
-impl EnvVarSet {
+impl EnvVarGuard {
     fn set(name: &'static str, value: &str) -> Self {
         let previous = std::env::var_os(name);
         std::env::set_var(name, value);
         Self { name, previous }
     }
+
+    fn unset(name: &'static str) -> Self {
+        let previous = std::env::var_os(name);
+        std::env::remove_var(name);
+        Self { name, previous }
+    }
 }
 
-impl Drop for EnvVarSet {
+impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         match &self.previous {
             Some(value) => std::env::set_var(self.name, value),
@@ -51,7 +57,7 @@ async fn stock_github_comment_profile_round_trips_restricted_policy() {
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restricted_profile_sends_the_caller_goal_as_the_first_prompt() {
-    let _adapter = EnvVarSet::set(
+    let _adapter = EnvVarGuard::set(
         "WEAVER_CLAUDE_ACP_CMD",
         &crate::fixtures::fake_acp_agent_cmd(),
     );
@@ -125,6 +131,49 @@ async fn restricted_profile_sends_the_caller_goal_as_the_first_prompt() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_restricted_launch_does_not_treat_the_app_as_an_unscoped_credential() {
+    let _token = EnvVarGuard::unset("GH_TOKEN");
+    let ts = TestServer::start().await;
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[
+            (
+                loom::github_app::APP_ID_KEY.to_string(),
+                Some("123456".to_string()),
+            ),
+            (
+                loom::github_app::APP_PRIVATE_KEY_KEY.to_string(),
+                Some("configured-for-preflight".to_string()),
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/api/sessions", ts.addr))
+        .json(&json!({
+            "cwd": ts.cwd(),
+            "profile": "github_comment",
+            "goal": "no repository installation target"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PRECONDITION_REQUIRED);
+    assert!(ts
+        .client
+        .get("/api/sessions")
+        .await
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restricted_github_tool_uses_the_server_side_token_and_fixed_repo() {
     let dir = tempfile::tempdir().unwrap();
     let gh = dir.path().join("gh");
@@ -132,7 +181,6 @@ async fn restricted_github_tool_uses_the_server_side_token_and_fixed_repo() {
         &gh,
         "#!/bin/sh\n\
          case \"$GH_TOKEN\" in\n\
-           requester-token) printf 'requester:' ;;\n\
            server-only-token) printf 'profile:' ;;\n\
            *) exit 17 ;;\n\
          esac\n\
@@ -145,8 +193,8 @@ async fn restricted_github_tool_uses_the_server_side_token_and_fixed_repo() {
         dir.path().display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let _path = EnvVarSet::set("PATH", &path);
-    let _adapter = EnvVarSet::set(
+    let _path = EnvVarGuard::set("PATH", &path);
+    let _adapter = EnvVarGuard::set(
         "WEAVER_CLAUDE_ACP_CMD",
         &crate::fixtures::fake_acp_agent_cmd(),
     );
@@ -214,9 +262,8 @@ async fn restricted_github_tool_uses_the_server_side_token_and_fixed_repo() {
         .await
         .unwrap();
     let text = response["text"].as_str().unwrap();
-    assert!(text.contains("requester:issue edit 7 --repo octo/fixed --body clean body"));
+    assert!(text.contains("profile:issue edit 7 --repo octo/fixed --body clean body"));
     assert!(!text.contains("server-only-token"));
-    assert!(!text.contains("requester-token"));
     let config_mode = std::fs::metadata(loom::db::run_dir(id).join("restricted-gh-config"))
         .unwrap()
         .permissions()
@@ -224,10 +271,7 @@ async fn restricted_github_tool_uses_the_server_side_token_and_fixed_repo() {
         & 0o777;
     assert_eq!(config_mode, 0o700);
 
-    loom::user_token::remove(&ts.state.db, "rjpower")
-        .await
-        .unwrap();
-    let fallback = ts
+    let second_response = ts
         .client
         .post(
             &format!("/api/sessions/{id}/restricted-github/issue_view"),
@@ -235,7 +279,7 @@ async fn restricted_github_tool_uses_the_server_side_token_and_fixed_repo() {
         )
         .await
         .unwrap();
-    assert!(fallback["text"]
+    assert!(second_response["text"]
         .as_str()
         .unwrap()
         .contains("profile:issue view 7 --repo octo/fixed"));

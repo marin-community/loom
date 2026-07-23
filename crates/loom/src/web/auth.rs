@@ -580,7 +580,8 @@ pub(super) async fn set_github_token(
 }
 
 /// `DELETE /api/auth/github-token` — clear the caller's personal GitHub token;
-/// their sessions then fall back to the shared ambient GH_TOKEN.
+/// new interactive sessions then retain any credential supplied by the selected
+/// profile.
 pub(super) async fn delete_github_token(
     State(st): State<AppState>,
     Extension(principal): Extension<Principal>,

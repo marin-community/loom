@@ -334,6 +334,37 @@ impl GithubApp {
         self.installation_token(installation_id).await
     }
 
+    async fn issue_json(&self, owner: &str, name: &str, number: i64) -> Result<serde_json::Value> {
+        let token = self.token_for_repo(owner, name).await?;
+        let url = format!("{}/repos/{owner}/{name}/issues/{number}", self.api_base);
+        let resp = self
+            .http
+            .get(&url)
+            .header(reqwest::header::ACCEPT, GH_ACCEPT)
+            .header("X-GitHub-Api-Version", GH_API_VERSION)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .context("fetching the issue")?;
+        let resp = check_status(resp, "fetching the issue").await?;
+        resp.json().await.context("parsing issue json")
+    }
+
+    /// Fetch the title, body, and URL used to seed a managed-repository launch.
+    pub(crate) async fn issue(
+        &self,
+        owner: &str,
+        name: &str,
+        number: i64,
+    ) -> Result<crate::github::Issue> {
+        let value = self.issue_json(owner, name, number).await?;
+        Ok(crate::github::Issue {
+            title: value["title"].as_str().unwrap_or_default().to_string(),
+            body: value["body"].as_str().unwrap_or_default().to_string(),
+            url: value["html_url"].as_str().unwrap_or_default().to_string(),
+        })
+    }
+
     // -- installation as allowlist ------------------------------------------
 
     /// When the App is installed on `slug`, ensure that repo is in the managed
@@ -509,22 +540,7 @@ impl GithubApi for GithubApp {
             return self.fallback.issue_state(repo, number).await;
         }
         let slug = crate::repo::parse_slug(repo).map_err(|e| anyhow!(e))?;
-        let token = self.token_for_repo(&slug.owner, &slug.name).await?;
-        let url = format!(
-            "{}/repos/{}/{}/issues/{number}",
-            self.api_base, slug.owner, slug.name
-        );
-        let resp = self
-            .http
-            .get(&url)
-            .header(reqwest::header::ACCEPT, GH_ACCEPT)
-            .header("X-GitHub-Api-Version", GH_API_VERSION)
-            .bearer_auth(&token)
-            .send()
-            .await
-            .context("fetching the issue")?;
-        let resp = check_status(resp, "fetching the issue").await?;
-        let v: serde_json::Value = resp.json().await.context("parsing issue json")?;
+        let v = self.issue_json(&slug.owner, &slug.name, number).await?;
         Ok(crate::github_trigger::IssueState {
             state: v["state"].as_str().unwrap_or_default().to_string(),
             title: v["title"].as_str().unwrap_or_default().to_string(),
@@ -625,7 +641,7 @@ async fn check_status(resp: reqwest::Response, what: &str) -> Result<reqwest::Re
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -756,6 +772,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
 
     /// The id the mock stamps on every created comment.
     const MOCK_COMMENT_ID: i64 = 4242;
+    pub(crate) const MOCK_INSTALLATION_TOKEN: &str = "ghs_installation_token";
     /// A comment id the mock's PATCH route answers with 404, standing in for a
     /// comment a human deleted.
     const MOCK_DELETED_COMMENT_ID: i64 = 404_404;
@@ -763,7 +780,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     async fn mock_access_tokens(State(s): State<Arc<MockState>>) -> Json<Value> {
         s.token_mints.fetch_add(1, Ordering::SeqCst);
         let exp = Utc::now() + Duration::seconds(s.expiry_offset_secs);
-        Json(json!({ "token": "ghs_installation_token", "expires_at": exp.to_rfc3339() }))
+        Json(json!({ "token": MOCK_INSTALLATION_TOKEN, "expires_at": exp.to_rfc3339() }))
     }
 
     async fn mock_installation(
@@ -832,6 +849,8 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         Json(json!({
             "state": "closed",
             "title": format!("issue {number} of {owner}/{name}"),
+            "body": "issue body",
+            "html_url": format!("https://github.com/{owner}/{name}/issues/{number}"),
             "updated_at": "2026-07-18T12:00:00Z",
         }))
     }
@@ -926,6 +945,14 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     /// tests stay parallel-safe.
     async fn configured_app(api_base: String, fallback: Arc<dyn GithubApi>) -> GithubApp {
         let db = crate::db::connect_in_memory().await.unwrap();
+        configured_app_for_db(db, api_base, fallback).await
+    }
+
+    async fn configured_app_for_db(
+        db: Db,
+        api_base: String,
+        fallback: Arc<dyn GithubApi>,
+    ) -> GithubApp {
         weaver_core::config::apply(
             &db,
             &[
@@ -941,6 +968,11 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         GithubApp::with_parts(db, api_base, fallback)
     }
 
+    pub(crate) async fn configured_test_app(db: Db) -> GithubApp {
+        let base = spawn_mock(MockState::new(3600)).await;
+        configured_app_for_db(db, base, Arc::new(crate::github_trigger::GhCli)).await
+    }
+
     // -- installation token exchange + caching ------------------------------
 
     /// A minted token is reused while fresh: a second request inside its lifetime
@@ -953,7 +985,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
 
         let t1 = app.installation_token(42).await.unwrap();
         let t2 = app.installation_token(42).await.unwrap();
-        assert_eq!(t1, "ghs_installation_token");
+        assert_eq!(t1, MOCK_INSTALLATION_TOKEN);
         assert_eq!(t1, t2);
         assert_eq!(
             mock.token_mints.load(Ordering::SeqCst),
@@ -1002,8 +1034,21 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         // The request carried the minted installation token, not the App JWT.
         assert_eq!(
             mock.last_comment_auth.lock().unwrap().clone(),
-            Some("Bearer ghs_installation_token".to_string()),
+            Some(format!("Bearer {MOCK_INSTALLATION_TOKEN}")),
         );
+    }
+
+    #[tokio::test]
+    async fn issue_fetch_maps_github_response() {
+        let mock = MockState::new(3600);
+        let base = spawn_mock(mock).await;
+        let app = configured_app(base, Arc::new(RecordingFallback::default())).await;
+
+        let issue = app.issue("acme", "widgets", 7).await.unwrap();
+
+        assert_eq!(issue.title, "issue 7 of acme/widgets");
+        assert_eq!(issue.body, "issue body");
+        assert_eq!(issue.url, "https://github.com/acme/widgets/issues/7");
     }
 
     #[tokio::test]
@@ -1023,7 +1068,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         assert_eq!(updates[0]["body"], "On it — now with a trail");
         assert_eq!(
             mock.last_comment_auth.lock().unwrap().clone(),
-            Some("Bearer ghs_installation_token".to_string()),
+            Some(format!("Bearer {MOCK_INSTALLATION_TOKEN}")),
         );
 
         // A 404 (the comment was deleted) is a clean `false`, not an error —

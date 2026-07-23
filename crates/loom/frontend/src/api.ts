@@ -141,8 +141,8 @@ export const getMyGithubToken = () => get('/auth/github-token') as Promise<Githu
 export const setMyGithubToken = (token: string) =>
   put('/auth/github-token', { token }) as Promise<GithubTokenStatus>;
 
-/** Clear your personal GitHub token; your sessions fall back to the shared
- *  ambient token (`DELETE /api/auth/github-token`). */
+/** Clear your personal GitHub token; new interactive sessions retain any
+ *  credential supplied by their selected profile (`DELETE /api/auth/github-token`). */
 export const deleteMyGithubToken = () => del('/auth/github-token');
 
 interface RepoEnvEnvelope {

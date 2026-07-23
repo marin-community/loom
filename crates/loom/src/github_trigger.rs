@@ -606,13 +606,23 @@ impl GithubTrigger {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_app(app: Arc<crate::github_app::GithubApp>) -> Arc<Self> {
+        Arc::new(Self {
+            gh: app.clone(),
+            app: Some(app),
+            limiter: Mutex::new(HashMap::new()),
+        })
+    }
+
     /// The GitHub gateway, for the permission check and the reply.
     pub fn gh(&self) -> &dyn GithubApi {
         self.gh.as_ref()
     }
 
-    /// The GitHub App client, when one is configured on this trigger — the
-    /// webhook uses it to treat an App-installed repo as implicitly allowlisted.
+    /// The GitHub App client, when one is configured on this trigger. The
+    /// webhook uses it to treat an App-installed repo as implicitly allowlisted,
+    /// and restricted GitHub tools use its repo-scoped installation tokens.
     pub fn app(&self) -> Option<&crate::github_app::GithubApp> {
         self.app.as_deref()
     }

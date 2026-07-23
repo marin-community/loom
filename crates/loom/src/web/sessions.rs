@@ -34,7 +34,7 @@ use super::scratch::{scratch_note, write_initial_scratch};
 use super::{author_or_manual, require_branch, require_session, session_view};
 use super::{ApiResult, AppError, AppState};
 
-const MISSING_GITHUB_TOKEN_MESSAGE: &str = "No GitHub token configured. Add your personal GitHub token in Settings > Account, or configure GH_TOKEN in Settings > Environment.";
+const MISSING_GITHUB_TOKEN_MESSAGE: &str = "No GitHub token configured. Add your personal GitHub token in Settings > Account, or configure a write-only GH_TOKEN on the selected profile.";
 const HANDOFF_HISTORY_CHARS: usize = 64 * 1024;
 
 /// Resolve an optional per-request ACP permission posture over the workspace
@@ -258,13 +258,13 @@ fn repo_cfg_or_default(repo_root: &std::path::Path) -> weaver_core::repo_config:
     })
 }
 
-/// Build the environment exported into a session's agent terminal, layered in
-/// priority order: the profile environment, then the per-repo [`repo_env`], then
-/// the repo's committed `.weaver/config.toml` `[env]` — each layer overriding the
-/// previous for a shared name. Loom fills in its repo-local defaults last only
-/// when no layer supplied the name. Best-effort: a database error in a layer
-/// degrades to the layers that did resolve. `cfg` is the already-loaded repo
-/// config (the caller reads it once for env, setup, and defaults).
+/// Build the environment exported into a session's agent terminal, starting
+/// with the selected profile and then layering the per-repo [`repo_env`] and
+/// committed `.weaver/config.toml` `[env]`. A strict profile keeps ownership of
+/// its declared names; a restricted profile receives only its own environment.
+/// Loom fills in its repo-local defaults last only when no layer supplied the
+/// name. Best-effort: a database error in a layer degrades to the layers that
+/// did resolve. `cfg` is the already-loaded repo config.
 async fn launch_env_for_profile(
     db: &Db,
     repo_root: &std::path::Path,
@@ -381,11 +381,10 @@ async fn resume_environment(
 /// Overlay the launching user's personal GitHub token onto `env` as `GH_TOKEN`,
 /// so the session's `git push` / `gh` act as that user (their pushes and PRs are
 /// attributed to them, matching the per-user commit identity loom already sets).
-/// The user's registered token takes precedence over any ambient `GH_TOKEN`; when
-/// they have none, whatever a lower env layer set (the ambient Settings →
-/// Environment value, `repo_env`, or the repo file) stands as the fallback. Only
-/// for a launch that carries a `created_by` username. Best-effort: a lookup
-/// failure is logged, never fatal, so a token-store hiccup can't block a launch.
+/// The user's registered token takes precedence over any `GH_TOKEN` from the
+/// selected profile, repository environment, or committed repo config. Only for
+/// a launch that carries a `created_by` username. Best-effort: a lookup failure
+/// is logged, never fatal, so a token-store hiccup can't block a launch.
 async fn apply_user_github_token(
     db: &Db,
     env: &mut Vec<(String, String)>,
@@ -398,14 +397,14 @@ async fn apply_user_github_token(
             tracing::info!(%username, "applied user github token as GH_TOKEN");
         }
         Ok(_) => {
-            tracing::debug!(%username, "no personal github token on file, leaving ambient GH_TOKEN")
+            tracing::debug!(%username, "no personal github token on file, retaining session GH_TOKEN")
         }
         Err(e) => tracing::warn!(%username, "failed to load user github token: {e}"),
     }
 }
 
 /// Set `name` in `env`, replacing an existing entry in place (so a user token
-/// overrides an ambient value) or appending it when absent.
+/// overrides a lower-precedence value) or appending it when absent.
 fn set_env(env: &mut Vec<(String, String)>, name: &str, value: String) {
     if let Some(slot) = env.iter_mut().find(|(k, _)| k == name) {
         slot.1 = value;
@@ -450,6 +449,7 @@ async fn ensure_github_token_available(
     env: &[(String, String)],
     created_by: Option<&str>,
     runtime: &str,
+    restricted_github_app: Option<&crate::github_app::GithubApp>,
 ) -> ApiResult<()> {
     // Only the builtin PR-driving agents (claude/codex) need GitHub credentials to
     // push as the user. A custom agent is operator-defined — it may be a manual
@@ -480,11 +480,33 @@ async fn ensure_github_token_available(
     {
         return Ok(());
     }
+    // Restricted sessions do not push directly. Their fixed GitHub tools can
+    // mint a repository-scoped installation token on demand; callers pass the
+    // App only for that launch posture.
+    if let Some(app) = restricted_github_app {
+        if app.is_configured().await {
+            return Ok(());
+        }
+    }
     tracing::warn!(created_by = ?created_by, runtime = %runtime, "launch blocked: no github token available");
     Err(AppError::new(
         StatusCode::PRECONDITION_REQUIRED,
         MISSING_GITHUB_TOKEN_MESSAGE,
     ))
+}
+
+async fn fetch_launch_issue(
+    st: &AppState,
+    repo_root: &std::path::Path,
+    managed_repo: Option<&crate::repo::RepoSlug>,
+    number: i64,
+) -> anyhow::Result<github::Issue> {
+    if let (Some(app), Some(repo)) = (st.trigger.app(), managed_repo) {
+        if app.is_configured().await {
+            return app.issue(&repo.owner, &repo.name, number).await;
+        }
+    }
+    github::fetch_issue(repo_root, number).await
 }
 
 /// The configured wall-clock budget for a repo setup run.
@@ -723,6 +745,13 @@ pub(crate) async fn provision_session(
     };
     tracing::debug!(repo_root = %repo_root.display(), "loaded repo config");
 
+    // A GitHub App token is repository-scoped. A managed slug gives both the
+    // preflight and issue seeding an exact installation target; a local path
+    // must keep using an explicitly supplied session credential.
+    let managed_slug = req
+        .repo
+        .as_deref()
+        .and_then(|repo| crate::repo::parse_slug(repo).ok());
     let agent_overridden = req
         .agent
         .as_deref()
@@ -733,9 +762,10 @@ pub(crate) async fn provision_session(
     };
     let runtime = agent.clone();
     tracing::debug!(agent = %agent, runtime = %runtime, "resolved agent runtime");
-    // The resolved launch environment: global agent_env < per-repo repo_env < the
-    // repo file's [env]. It is needed before provisioning so a real agent launch
-    // can stop cleanly when neither the user nor the deployment provides GH_TOKEN.
+    // The resolved launch environment: selected profile < per-repo repo_env <
+    // the repo file's [env]. It is needed before provisioning so a real agent
+    // launch can stop cleanly when neither the user nor an environment layer
+    // provides GH_TOKEN.
     let mut extra_env = launch_env_for_profile(
         &st.db,
         &repo_root,
@@ -755,7 +785,8 @@ pub(crate) async fn provision_session(
     // GH_TOKEN (design §6.3, "Level B"). See `apply_user_github_token` for the
     // precedence rules. This happens before preflight. Ordinary sessions export
     // it; a restricted ACP launch removes it from the adapter environment and
-    // the server-side GitHub tool resolves the same user's token on demand.
+    // its server-side GitHub tool independently resolves an App or profile
+    // credential.
     apply_user_github_token(&st.db, &mut extra_env, created_by.as_deref()).await;
 
     // Normalize and validate the model / effort selections through the resolved
@@ -800,7 +831,19 @@ pub(crate) async fn provision_session(
         .unwrap_or(&launch_profile.mode)
         .to_string();
     tracing::debug!(model = %model, effort = %effort, protocol = %protocol, "resolved and validated model/effort/protocol");
-    ensure_github_token_available(&st.db, &extra_env, created_by.as_deref(), &runtime).await?;
+    let restricted_github_app = if launch_profile.restricted && managed_slug.is_some() {
+        st.trigger.app()
+    } else {
+        None
+    };
+    ensure_github_token_available(
+        &st.db,
+        &extra_env,
+        created_by.as_deref(),
+        &runtime,
+        restricted_github_app,
+    )
+    .await?;
     tracing::debug!(runtime = %runtime, "github token availability check passed");
 
     // Build title/goal/description; an optional GitHub issue seeds all three.
@@ -814,7 +857,7 @@ pub(crate) async fn provision_session(
     let mut github_issue: Option<i64> = None;
     if let Some(number) = req.issue {
         tracing::info!(issue = number, repo = %repo_root.display(), "fetching github issue to seed session");
-        let issue = github::fetch_issue(&repo_root, number)
+        let issue = fetch_launch_issue(&st, &repo_root, managed_slug.as_ref(), number)
             .await
             .map_err(|e| AppError::bad_request(format!("issue #{number}: {e}")))?;
         if title.is_none() {
@@ -829,17 +872,16 @@ pub(crate) async fn provision_session(
         }
         description = issue.body.clone();
         github_issue = Some(number);
-        github_repo = github::repo_slug(&repo_root).await.ok();
+        github_repo = match managed_slug.as_ref() {
+            Some(repo) => Some(repo.slug()),
+            None => github::repo_slug(&repo_root).await.ok(),
+        };
         tracing::debug!(issue = number, github_repo = ?github_repo, "seeded session fields from github issue");
     } else if let Some(number) = req.github_issue {
         // The caller already holds the thread (the `@loom` trigger): record the
         // GitHub link on the tracking issue without the fetch-and-seed above.
         github_issue = Some(number);
-        github_repo = req
-            .repo
-            .as_deref()
-            .and_then(|r| crate::repo::parse_slug(r).ok())
-            .map(|s| s.slug());
+        github_repo = managed_slug.as_ref().map(|repo| repo.slug());
     }
 
     // Claiming an existing weaver issue seeds the same three fields from it.
@@ -2946,8 +2988,16 @@ pub(super) async fn handoff_session(
     let mut extra_env = resume_environment(&st.db, &session, &repo_root, &repo_cfg).await;
     rotate_session_token(&st.db, &session, &mut extra_env).await?;
     apply_user_github_token(&st.db, &mut extra_env, session.created_by.as_deref()).await;
-    ensure_github_token_available(&st.db, &extra_env, session.created_by.as_deref(), &runtime)
-        .await?;
+    // Restricted sessions return before this handoff path, so an App credential
+    // cannot be relevant here.
+    ensure_github_token_available(
+        &st.db,
+        &extra_env,
+        session.created_by.as_deref(),
+        &runtime,
+        None,
+    )
+    .await?;
     let blocks = crate::chat::list(&st.db, &session.id).await?;
     let prompt = crate::chat::handoff_prompt(&branch.goal, &blocks, HANDOFF_HISTORY_CHARS);
     let prompt_file = db::run_dir(&session.id).join("handoff.txt");
@@ -3644,6 +3694,7 @@ mod tests {
             &[("FOO".to_string(), "bar".to_string())],
             Some("alice"),
             "codex",
+            None,
         )
         .await
         .unwrap_err();
@@ -3661,7 +3712,7 @@ mod tests {
         crate::user_token::set(&db, "alice", "ghp_alice")
             .await
             .unwrap();
-        ensure_github_token_available(&db, &[], Some("alice"), "claude")
+        ensure_github_token_available(&db, &[], Some("alice"), "claude", None)
             .await
             .unwrap();
 
@@ -3671,6 +3722,7 @@ mod tests {
             &[("GH_TOKEN".to_string(), "ghp_shared".to_string())],
             Some("alice"),
             "codex",
+            None,
         )
         .await
         .unwrap();
@@ -3688,6 +3740,7 @@ mod tests {
             &[("GH_TOKEN".to_string(), " ".to_string())],
             Some("alice"),
             "codex",
+            None,
         )
         .await
         .unwrap_err();
@@ -3701,11 +3754,44 @@ mod tests {
 
         // A custom (non-builtin) agent is exempt — it may never touch GitHub, and
         // the operator supplies any credentials it needs via env.
-        ensure_github_token_available(&db, &[], Some("alice"), "my-custom-agent")
+        ensure_github_token_available(&db, &[], Some("alice"), "my-custom-agent", None)
             .await
             .unwrap();
         // A webhook launch carries an attribution string, not an approved user.
-        ensure_github_token_available(&db, &[], Some("github-webhook (octo)"), "codex")
+        ensure_github_token_available(&db, &[], Some("github-webhook (octo)"), "codex", None)
+            .await
+            .unwrap();
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn restricted_builtin_accepts_configured_github_app() {
+        let _env = EnvVarGuard::unset("GH_TOKEN");
+        let db = crate::db::connect_in_memory().await.unwrap();
+        seed_user(&db, "alice").await;
+        weaver_core::config::apply(
+            &db,
+            &[
+                (
+                    crate::github_app::APP_ID_KEY.to_string(),
+                    Some("123456".to_string()),
+                ),
+                (
+                    crate::github_app::APP_PRIVATE_KEY_KEY.to_string(),
+                    Some("configured-for-preflight".to_string()),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+        let app = crate::github_app::GithubApp::new(db.clone());
+
+        let err = ensure_github_token_available(&db, &[], Some("alice"), "claude", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status(), StatusCode::PRECONDITION_REQUIRED);
+
+        ensure_github_token_available(&db, &[], Some("alice"), "claude", Some(&app))
             .await
             .unwrap();
     }

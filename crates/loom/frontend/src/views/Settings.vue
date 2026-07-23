@@ -75,7 +75,7 @@ const categories: CategoryItem[] = [
   {
     id: 'environment',
     label: 'Environment',
-    summary: 'Environment variables exported into future agent sessions.',
+    summary: 'Readable environment variables exported into future default-profile sessions.',
   },
   {
     id: 'access',

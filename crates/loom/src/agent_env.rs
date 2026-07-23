@@ -1,14 +1,12 @@
 //! Compatibility facade for the default profile's environment variables.
 //!
-//! These are exported into every interactive agent session loom launches —
-//! alongside loom's own `WEAVER_*` / `LOOM_TOKEN` — so the operator can add a
-//! registry token, a `GH_HOST`, an `ANTHROPIC_BASE_URL`, etc. at runtime from
-//! the settings pane, without rebuilding the image or editing the deploy env
-//! file. The one-shot judgement agent runs env-stripped and gets none of them
-//! (see [`crate::agent`]); watch scripts are likewise stripped but do receive
-//! `GH_TOKEN` (via [`get`]), since loom's *own* GitHub reads — the PR poll loop
-//! and github watches' `gh` calls — run in the server process, which has no
-//! ambient GitHub auth of its own.
+//! These are the protected `default` profile's environment. They are exported
+//! only into sessions launched with that profile, alongside loom's own
+//! `WEAVER_*` / `LOOM_TOKEN`. Other profiles have independent environment
+//! stores, and restricted profiles never inherit these values. The one-shot
+//! judgement agent runs env-stripped and gets none of them (see
+//! [`crate::agent`]); watch scripts are likewise stripped but do receive
+//! `GH_TOKEN` (via [`get`]) for legacy App-less GitHub reads.
 //!
 //! This remains a flat name/value API for existing settings, setup, GitHub,
 //! watch, and shell callers, but storage lives in `profile_env` under the

@@ -79,7 +79,11 @@ async function saveMyGithubToken() {
 }
 
 async function clearMyGithubToken() {
-  if (!confirm('Remove your GitHub token? Your sessions will fall back to the shared token.'))
+  if (
+    !confirm(
+      "Remove your personal GitHub token? New interactive sessions will use their profile's credential, if configured.",
+    )
+  )
     return;
   busy.value = true;
   try {
@@ -258,15 +262,20 @@ onMounted(() => {
       </h2>
       <div class="rounded-md border border-line bg-surface px-3 py-2.5">
         <p class="text-xs text-muted mb-2">
-          A fine-grained token your sessions use for <code class="font-mono">git push</code> and
-          <code class="font-mono">gh</code>, so your agents act as you.
+          A fine-grained token your ordinary interactive sessions use for
+          <code class="font-mono">git push</code> and <code class="font-mono">gh</code>, so your
+          agents act as you. Restricted automation uses the GitHub App instead.
           <a class="text-accent underline" :href="PAT_CREATE_URL" target="_blank" rel="noopener">
             Create one</a
           >
           with <span class="font-medium">Contents</span> and
           <span class="font-medium">Pull requests</span> read/write on the repos you work in.
           <span :class="ghTokenStatus?.set ? 'text-accent' : 'text-faint'">
-            {{ ghTokenStatus?.set ? 'Set.' : 'Not set — sessions use the shared token.' }}
+            {{
+              ghTokenStatus?.set
+                ? 'Set.'
+                : 'Not set — interactive sessions use their profile credential, if configured.'
+            }}
           </span>
         </p>
         <div class="flex flex-wrap items-center gap-2">

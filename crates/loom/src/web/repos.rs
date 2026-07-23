@@ -277,8 +277,9 @@ async fn handle_trigger(
 
     // Resolve the commenter to their loom user (proven to exist by `authorize`).
     // Attributing the launch to them makes their personal GitHub token the
-    // session's `GH_TOKEN` — so its push / `gh` act as them — with the ambient
-    // token as the fallback (see `apply_user_github_token`).
+    // session's `GH_TOKEN` — so its push / `gh` act as them — while preserving
+    // any credential supplied by the selected profile when no personal token
+    // is stored (see `apply_user_github_token`).
     let username = match crate::auth::user_by_github(&st.db, &author).await {
         Ok(Some(u)) => u.username,
         _ => {

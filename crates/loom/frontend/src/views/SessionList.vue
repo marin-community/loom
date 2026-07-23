@@ -496,10 +496,12 @@ async function handleCreated() {
           >Add your GitHub token</RouterLink
         >
         or configure
-        <RouterLink class="text-accent underline" :to="{ path: '/settings', query: { tab: 'env' } }"
-          >GH_TOKEN</RouterLink
+        <RouterLink
+          class="text-accent underline"
+          :to="{ path: '/settings', query: { tab: 'profiles' } }"
+          >the selected profile</RouterLink
         >
-        before creating an agent session.
+        with a write-only <code class="font-mono">GH_TOKEN</code> before creating an agent session.
       </template>
       <template v-else>{{ error }}</template>
     </div>
