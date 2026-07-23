@@ -772,6 +772,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
 
     /// The id the mock stamps on every created comment.
     const MOCK_COMMENT_ID: i64 = 4242;
+    pub(crate) const MOCK_INSTALLATION_TOKEN: &str = "ghs_installation_token";
     /// A comment id the mock's PATCH route answers with 404, standing in for a
     /// comment a human deleted.
     const MOCK_DELETED_COMMENT_ID: i64 = 404_404;
@@ -779,7 +780,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     async fn mock_access_tokens(State(s): State<Arc<MockState>>) -> Json<Value> {
         s.token_mints.fetch_add(1, Ordering::SeqCst);
         let exp = Utc::now() + Duration::seconds(s.expiry_offset_secs);
-        Json(json!({ "token": "ghs_installation_token", "expires_at": exp.to_rfc3339() }))
+        Json(json!({ "token": MOCK_INSTALLATION_TOKEN, "expires_at": exp.to_rfc3339() }))
     }
 
     async fn mock_installation(
@@ -984,7 +985,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
 
         let t1 = app.installation_token(42).await.unwrap();
         let t2 = app.installation_token(42).await.unwrap();
-        assert_eq!(t1, "ghs_installation_token");
+        assert_eq!(t1, MOCK_INSTALLATION_TOKEN);
         assert_eq!(t1, t2);
         assert_eq!(
             mock.token_mints.load(Ordering::SeqCst),
@@ -1033,7 +1034,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         // The request carried the minted installation token, not the App JWT.
         assert_eq!(
             mock.last_comment_auth.lock().unwrap().clone(),
-            Some("Bearer ghs_installation_token".to_string()),
+            Some(format!("Bearer {MOCK_INSTALLATION_TOKEN}")),
         );
     }
 
@@ -1067,7 +1068,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         assert_eq!(updates[0]["body"], "On it — now with a trail");
         assert_eq!(
             mock.last_comment_auth.lock().unwrap().clone(),
-            Some("Bearer ghs_installation_token".to_string()),
+            Some(format!("Bearer {MOCK_INSTALLATION_TOKEN}")),
         );
 
         // A 404 (the comment was deleted) is a clean `false`, not an error —

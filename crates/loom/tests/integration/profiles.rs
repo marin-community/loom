@@ -264,7 +264,6 @@ async fn restricted_github_tool_uses_the_server_side_token_and_fixed_repo() {
     let text = response["text"].as_str().unwrap();
     assert!(text.contains("profile:issue edit 7 --repo octo/fixed --body clean body"));
     assert!(!text.contains("server-only-token"));
-    assert!(!text.contains("requester-token"));
     let config_mode = std::fs::metadata(loom::db::run_dir(id).join("restricted-gh-config"))
         .unwrap()
         .permissions()

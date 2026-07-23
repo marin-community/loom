@@ -291,9 +291,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_ne!(
-            resolved, "profile-token",
-            "the profile credential must not override a configured App"
+        assert_eq!(
+            resolved,
+            crate::github_app::tests::MOCK_INSTALLATION_TOKEN,
+            "the App credential must override the configured profile credential"
         );
 
         let uninstalled = crate::repo::parse_slug("uninstalled/loom").unwrap();
