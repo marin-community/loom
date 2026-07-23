@@ -15,6 +15,27 @@ const envName = ref('');
 const envValue = ref('');
 
 const current = computed(() => profiles.value.find((profile) => profile.name === selected.value));
+const selectedAgent = computed(() =>
+  agents.value.find((agent) => agent.kind === draft.value?.agent_kind),
+);
+
+function changeAgent(event: Event) {
+  const profile = draft.value;
+  if (!profile) return;
+  profile.agent_kind = (event.target as HTMLSelectElement).value;
+  const metadata = agents.value.find((agent) => agent.kind === profile.agent_kind);
+  if (!metadata) return;
+  if (
+    profile.model &&
+    !metadata.accepts_raw_model &&
+    !metadata.models.some((choice) => choice.id === profile.model)
+  ) {
+    profile.model = '';
+  }
+  if (profile.effort && !metadata.efforts.some((choice) => choice.id === profile.effort)) {
+    profile.effort = '';
+  }
+}
 
 function editable(profile: Profile): ProfileInput {
   const {
@@ -176,8 +197,9 @@ onMounted(load);
             >Agent
             <select
               data-testid="profile-agent"
-              v-model="draft.agent_kind"
+              :value="draft.agent_kind"
               class="mt-1 w-full rounded bg-input px-2 py-1.5"
+              @change="changeAgent"
             >
               <option v-for="agent in agents" :key="agent.kind" :value="agent.kind">
                 {{ agent.label }}
@@ -190,19 +212,37 @@ onMounted(load);
           </label>
           <label class="text-xs"
             >Model
-            <input
+            <select
               data-testid="profile-model"
               v-model="draft.model"
               class="mt-1 w-full rounded bg-input px-2 py-1.5"
-            />
+            >
+              <option value="">Agent default</option>
+              <option
+                v-for="model in selectedAgent?.models ?? []"
+                :key="model.id"
+                :value="model.id"
+              >
+                {{ model.label }}
+              </option>
+            </select>
           </label>
           <label class="text-xs"
             >Effort
-            <input
+            <select
               data-testid="profile-effort"
               v-model="draft.effort"
               class="mt-1 w-full rounded bg-input px-2 py-1.5"
-            />
+            >
+              <option value="">Agent default</option>
+              <option
+                v-for="effort in selectedAgent?.efforts ?? []"
+                :key="effort.id"
+                :value="effort.id"
+              >
+                {{ effort.label }}
+              </option>
+            </select>
           </label>
           <label class="text-xs"
             >Protocol

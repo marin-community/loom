@@ -25,8 +25,18 @@ test.describe("settings · profiles", () => {
     ]);
 
     await agent.selectOption("codex");
-    await page.getByTestId("profile-model").fill(codex.models[0].id);
-    await page.getByTestId("profile-effort").fill(codex.efforts[0].id);
+    const model = page.getByTestId("profile-model");
+    const effort = page.getByTestId("profile-effort");
+    await expect(model.locator("option")).toContainText([
+      "Agent default",
+      ...codex.models.map((choice) => choice.label),
+    ]);
+    await expect(effort.locator("option")).toContainText([
+      "Agent default",
+      ...codex.efforts.map((choice) => choice.label),
+    ]);
+    await model.selectOption(codex.models[0].id);
+    await effort.selectOption(codex.efforts[0].id);
     await page.getByTestId("profile-save").click();
     await expect(page.getByText("Saved default.")).toBeVisible();
 
