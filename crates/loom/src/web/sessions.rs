@@ -3087,14 +3087,14 @@ pub(super) async fn send_session(
     Json(req): Json<SendReq>,
 ) -> ApiResult<Json<Value>> {
     let (session, branch) = require_session(&st.db, &key).await?;
-    // For an ACP session a send is a prompt (steered into a supported live turn,
-    // otherwise queued): delegate to the ACP task while keeping the same `nudge`
-    // audit. This makes `loom session send` uniform across both backends.
+    // A cross-session send must not sit behind an ACP turn indefinitely. Steer
+    // a supported live turn; otherwise cancel it and immediately start this
+    // message as a fresh turn, while keeping the same `nudge` audit.
     if session.protocol == "acp" {
         let handle = require_acp_task(&st, &session)?;
         let by = author_or_manual(req.by.as_deref());
         let ack = handle
-            .prompt(req.text.clone(), Some(by.clone()), false, Vec::new())
+            .send_now(req.text.clone(), Some(by.clone()), Vec::new())
             .await
             .map_err(|e| AppError::conflict(e.to_string()))?;
         events::record(

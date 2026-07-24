@@ -277,7 +277,7 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `GET /api/sessions/{id}/{diff,log,events}` | reads + SSE stream |
 | `GET /api/sessions/{id}/conversation` | the agent conversation as a normalized iris log (live transcript, else the archive capture); 404 when there is none — backs the Conversation tab |
 | `GET /api/sessions/{id}/terminal` | WebSocket: xterm.js ⇄ the session's tapestry PTY (the interaction surface) |
-| `POST /api/sessions/{id}/send` | type `{text}` into the agent's terminal (`submit`, default true, follows it with Enter); for an `acp` session it delegates to the prompt path (steering a supported live turn, otherwise queueing), keeping the same `nudge` audit |
+| `POST /api/sessions/{id}/send` | deliver `{text}` to the agent (`submit`, default true, follows terminal input with Enter); for an `acp` session a live turn is steered when supported, otherwise cancelled and immediately replaced by a new turn, keeping the same `nudge` audit |
 | `POST /api/sessions/{id}/interrupt` | stop the current turn — a break (Escape) to the terminal for a `terminal` session, `session/cancel` for an `acp` one |
 | `GET /api/sessions/{id}/preview?lines=N` | capture the screen as `{screen}`; `lines` adds scrollback above the visible screen (for an `acp` session, `{screen}` is the last `lines` journal blocks rendered as compact text) |
 | `GET /api/sessions/{id}/chat` | The newest 200 blocks of the ACP session's DB-backed journal, `older_cursor`, live-turn state, pending prompt, effective mode, and composer metadata; pass the cursor as `before_turn` + `before_seq` to page backward |
@@ -382,8 +382,9 @@ uniformly. For a `terminal` session each requires a live terminal (else 409). An
 `acp` session has no PTY, so the same verbs map onto the protocol — keeping the
 CLI (`loom session {send,break,preview}`) and its `nudge` audit uniform across
 backends: `send` delegates to the prompt path (steered when supported, otherwise
-queued while a turn is live), `interrupt` is a `session/cancel`, and `preview` renders the
-last journal blocks as compact plain text instead of a vt100 screen capture.
+cancelled and restarted with the message), `interrupt` is a `session/cancel`,
+and `preview` renders the last journal blocks as compact plain text instead of
+a vt100 screen capture.
 
 ## Runtime conventions
 

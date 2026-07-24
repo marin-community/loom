@@ -97,7 +97,7 @@ loom session launch "Fix the flaky test" --repo ~/code/other       # a local che
 loom session launch "How do I run this?" --repo acme/widgets       # a GitHub repo — cloned on first use
 loom session poll <session>           # one-shot status (lifecycle + attention)
 loom session wait <session>           # block until it finishes or needs you
-loom session send <session> "try the curl again"   # type a message + Enter (trigger an agent round)
+loom session send <session> "try the curl again"   # deliver now (steer ACP, or interrupt + restart)
 loom session break <session>          # send Escape — interrupt the current turn
 loom session preview <session>        # print the recent terminal screen
 loom session url [<session>]          # its dashboard URL (yours by default) — the link to share
@@ -141,10 +141,11 @@ pin a parent with `--base` (also a field in the web create form).
 
 Once a session is up, the other verbs interact with it: `loom session poll`
 reads its status, `loom session wait` blocks until it finishes or raises
-attention, `loom session send` types a message into the agent's terminal (and
-submits it to trigger a round), `loom session break` sends Escape to interrupt
-the current turn, and `loom session preview` prints the recent terminal screen.
-Each takes a session key — an id, branch id, branch name, or `repo:branch`.
+attention, `loom session send` delivers a message immediately (typing and
+submitting it for a terminal agent; steering or restarting an ACP turn),
+`loom session break` interrupts the current turn, and `loom session preview`
+prints the recent terminal screen. Each takes a session key — an id, branch id,
+branch name, or `repo:branch`.
 
 `loom session url` prints a session's dashboard URL — the link to hand a person,
 resolved against loom's externally-visible address (the `auth.base_url` setting,
@@ -243,6 +244,8 @@ next turn. Unseen queued feedback can be pulled back into the composer with its
 **Edit** action or ArrowUp from an empty composer. The live status names visible
 thinking, writing, or tool activity and reports how long it has been since the
 agent produced an observable update; quiet time is not guessed to mean stuck.
+Cross-session `loom session send` is immediate control input instead: it steers
+a supported live turn, or cancels that turn and starts the message as a new one.
 
 Whenever a session is archived — by the Archive button or automatically on merge
 — loom first captures that conversation to disk: it finds the agent's transcript

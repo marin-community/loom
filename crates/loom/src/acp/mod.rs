@@ -197,12 +197,40 @@ impl AcpHandle {
         force_steer: bool,
         resources: Vec<Value>,
     ) -> Result<PromptAck> {
+        let delivery = if force_steer {
+            PromptDelivery::ForceSteer
+        } else {
+            PromptDelivery::Queue
+        };
+        self.send_prompt(text, by, delivery, resources).await
+    }
+
+    /// Deliver a cross-session send without leaving it behind a live turn:
+    /// steer when the adapter supports it, otherwise cancel the current turn
+    /// and start the message normally.
+    pub async fn send_now(
+        &self,
+        text: String,
+        by: Option<String>,
+        resources: Vec<Value>,
+    ) -> Result<PromptAck> {
+        self.send_prompt(text, by, PromptDelivery::Immediate, resources)
+            .await
+    }
+
+    async fn send_prompt(
+        &self,
+        text: String,
+        by: Option<String>,
+        delivery: PromptDelivery,
+        resources: Vec<Value>,
+    ) -> Result<PromptAck> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::Prompt {
                 text,
                 by,
-                force_steer,
+                delivery,
                 resources,
                 reply: tx,
             })
@@ -538,11 +566,21 @@ pub async fn attach(state: &AppState, session_id: &str) -> Result<()> {
 // Commands (REST → task)
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PromptDelivery {
+    /// Preserve the conversation composer's queue-first behavior.
+    Queue,
+    /// Require the adapter's steering extension and surface rejection.
+    ForceSteer,
+    /// Cross-session control: steer, or cancel and restart as a fallback.
+    Immediate,
+}
+
 enum Command {
     Prompt {
         text: String,
         by: Option<String>,
-        force_steer: bool,
+        delivery: PromptDelivery,
         resources: Vec<Value>,
         reply: oneshot::Sender<Result<PromptAck>>,
     },
@@ -726,14 +764,15 @@ struct PendingSteer {
     text: String,
     by: Option<String>,
     turn: i64,
-    forced: bool,
+    delivery: PromptDelivery,
     /// Exact durable queue prefix promoted by this request. Consumed only after
     /// the adapter accepts steering, preserving messages appended behind it.
     promoted_queue: Option<String>,
     resources: Vec<Value>,
-    /// Forced steering waits for the adapter's final answer. An ordinary send is
-    /// acknowledged as durably queued before steering starts, so it carries no
-    /// waiting HTTP reply and cannot lock the composer behind a private RPC.
+    /// Forced and immediate delivery wait for the adapter's final answer. An
+    /// ordinary composer prompt is acknowledged as durably queued before
+    /// steering starts, so it carries no waiting HTTP reply and cannot lock the
+    /// composer behind a private RPC.
     reply: Option<oneshot::Sender<Result<PromptAck>>>,
 }
 
@@ -1761,15 +1800,25 @@ impl Task {
                     ?error,
                     "steering failed"
                 );
-                if pending.forced {
-                    let detail = error
-                        .map(|e| e.to_string())
-                        .unwrap_or_else(|| format!("adapter returned {outcome:?}"));
-                    if let Some(reply) = pending.reply {
-                        let _ = reply.send(Err(anyhow!("adapter rejected forced steer: {detail}")));
+                match pending.delivery {
+                    PromptDelivery::Queue => self.fallback_prompt(pending).await,
+                    PromptDelivery::ForceSteer => {
+                        let detail = error
+                            .map(|e| e.to_string())
+                            .unwrap_or_else(|| format!("adapter returned {outcome:?}"));
+                        if let Some(reply) = pending.reply {
+                            let _ =
+                                reply.send(Err(anyhow!("adapter rejected forced steer: {detail}")));
+                        }
                     }
-                } else {
-                    self.fallback_prompt(pending).await;
+                    PromptDelivery::Immediate => {
+                        let result = self
+                            .restart_prompt(pending.text, pending.by, pending.resources)
+                            .await;
+                        if let Some(reply) = pending.reply {
+                            let _ = reply.send(result);
+                        }
+                    }
                 }
             }
         }
@@ -1824,6 +1873,18 @@ impl Task {
         if let Some(reply) = pending.reply {
             let _ = reply.send(ack);
         }
+    }
+
+    async fn restart_prompt(
+        &mut self,
+        text: String,
+        by: Option<String>,
+        resources: Vec<Value>,
+    ) -> Result<PromptAck> {
+        if self.turn_live {
+            self.cancel_live_turn().await?;
+        }
+        self.start_prompt(text, by, resources).await
     }
 
     async fn queue_prompt(&self, text: &str, resources: &[Value]) -> Result<PromptAck> {
@@ -2266,7 +2327,7 @@ impl Task {
             Command::Prompt {
                 text,
                 by,
-                force_steer,
+                delivery,
                 resources,
                 reply,
             } => {
@@ -2281,7 +2342,7 @@ impl Task {
                             method::SESSION_STEERING,
                             wire::steering_params(&self.acp_session_id, &text, &resources),
                         );
-                        if force_steer {
+                        if delivery != PromptDelivery::Queue {
                             // Explicit steering reports the adapter's real answer
                             // and does not also leave a queued copy behind if the
                             // private extension is rejected.
@@ -2293,7 +2354,7 @@ impl Task {
                                             text,
                                             by,
                                             turn: self.current_turn,
-                                            forced: true,
+                                            delivery,
                                             promoted_queue: None,
                                             resources,
                                             reply: Some(reply),
@@ -2301,7 +2362,12 @@ impl Task {
                                     );
                                 }
                                 Err(error) => {
-                                    let _ = reply.send(Err(error));
+                                    let result = if delivery == PromptDelivery::Immediate {
+                                        self.restart_prompt(text, by, resources).await
+                                    } else {
+                                        Err(error)
+                                    };
+                                    let _ = reply.send(result);
                                 }
                             }
                         } else {
@@ -2320,7 +2386,7 @@ impl Task {
                                                     text,
                                                     by,
                                                     turn: self.current_turn,
-                                                    forced: false,
+                                                    delivery,
                                                     promoted_queue: Some(promoted_queue),
                                                     resources,
                                                     reply: None,
@@ -2339,18 +2405,28 @@ impl Task {
                                 }
                             }
                         }
-                    } else if force_steer {
-                        let message = if self.steering_cap {
-                            "another steer is still pending; retry when it settles"
-                        } else {
-                            "this agent does not support steering; queue the feedback or stop and send it"
-                        };
-                        let _ = reply.send(Err(anyhow!(message)));
                     } else {
-                        // A failed queue write must surface — a 202 that silently
-                        // dropped the prompt would be worse than an error.
-                        let ack = self.queue_prompt(&text, &resources).await;
-                        let _ = reply.send(ack);
+                        match delivery {
+                            PromptDelivery::Queue => {
+                                // A failed queue write must surface — a 202 that
+                                // silently dropped the prompt would be worse
+                                // than an error.
+                                let ack = self.queue_prompt(&text, &resources).await;
+                                let _ = reply.send(ack);
+                            }
+                            PromptDelivery::ForceSteer => {
+                                let message = if self.steering_cap {
+                                    "another steer is still pending; retry when it settles"
+                                } else {
+                                    "this agent does not support steering; queue the feedback or stop and send it"
+                                };
+                                let _ = reply.send(Err(anyhow!(message)));
+                            }
+                            PromptDelivery::Immediate => {
+                                let ack = self.restart_prompt(text, by, resources).await;
+                                let _ = reply.send(ack);
+                            }
+                        }
                     }
                 } else {
                     let ack = self.start_prompt(text, by, resources).await;
@@ -2397,7 +2473,7 @@ impl Task {
                                         text: queued.clone(),
                                         by,
                                         turn: self.current_turn,
-                                        forced: true,
+                                        delivery: PromptDelivery::ForceSteer,
                                         promoted_queue: Some(queued),
                                         resources: Vec::new(),
                                         reply: Some(reply),

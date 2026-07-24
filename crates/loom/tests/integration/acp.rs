@@ -1265,6 +1265,105 @@ async fn prompt_stops_and_sends_queue_without_steering_capability() {
     }));
 }
 
+/// Cross-session `/send` is control-plane input, not ordinary composer
+/// feedback. Without steering support it must cancel a live turn and start the
+/// message immediately instead of leaving it in the durable next-turn queue.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_send_restarts_a_live_turn_without_steering() {
+    let ts = TestServer::start().await;
+    start_new(&ts, "acp-send-restart", None, None).await;
+
+    ts.client
+        .post(
+            "/api/sessions/acp-send-restart/prompt",
+            json!({ "text": "wait:1200|say:stale" }),
+        )
+        .await
+        .unwrap();
+    let sent = ts
+        .client
+        .post(
+            "/api/sessions/acp-send-restart/send",
+            json!({ "text": "say:take this now" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent["queued"], false, "response: {sent}");
+    assert_eq!(sent["steered"], false, "response: {sent}");
+    assert_eq!(sent["turn"], 1, "the replacement opens the next turn");
+
+    let chat = poll_chat(&ts, "acp-send-restart", Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|block| {
+            block["kind"] == "agent_message" && block["payload"]["text"] == "take this now"
+        })
+    })
+    .await;
+    assert!(chat["pending_prompt"].is_null());
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert!(blocks.iter().any(|block| {
+        block["turn"] == 0
+            && block["kind"] == "turn_end"
+            && block["payload"]["stop_reason"] == "cancelled"
+    }));
+    assert!(blocks.iter().any(|block| {
+        block["turn"] == 1
+            && block["kind"] == "user_message"
+            && block["payload"]["text"] == "say:take this now"
+    }));
+}
+
+/// A steering-capable ACP adapter receives cross-session `/send` input in the
+/// live turn, preserving its work while still avoiding the next-turn queue.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_send_steers_a_live_turn_when_supported() {
+    let ts = TestServer::start().await;
+    start_new_with_env(
+        &ts,
+        "acp-send-steer",
+        None,
+        None,
+        vec![("FAKE_ACP_STEERING".to_string(), "1".to_string())],
+    )
+    .await;
+
+    ts.client
+        .post(
+            "/api/sessions/acp-send-steer/prompt",
+            json!({ "text": "wait:1200|say:first" }),
+        )
+        .await
+        .unwrap();
+    let sent = ts
+        .client
+        .post(
+            "/api/sessions/acp-send-steer/send",
+            json!({ "text": "say:changed course" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent["queued"], false, "response: {sent}");
+    assert_eq!(sent["steered"], true, "response: {sent}");
+    assert_eq!(sent["turn"], 0);
+
+    let chat = poll_chat(&ts, "acp-send-steer", Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|block| {
+            block["kind"] == "agent_message" && block["payload"]["text"] == "changed coursefirst"
+        })
+    })
+    .await;
+    assert!(chat["pending_prompt"].is_null());
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert_eq!(count_kind(blocks, "turn_end"), 1);
+    assert!(blocks.iter().any(|block| {
+        block["turn"] == 0
+            && block["kind"] == "user_message"
+            && block["payload"]["text"] == "say:changed course"
+            && block["payload"]["steered"] == true
+    }));
+}
+
 /// Composer-selected files are resolved inside the worktree and forwarded as
 /// ACP resource_link blocks, not left as adapter-specific `@file` prose.
 #[serial]
