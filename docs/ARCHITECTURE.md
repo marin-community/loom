@@ -170,6 +170,8 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
     blocked by its predecessor), `recent_repos`,
     `branch_github` (per-branch PR snapshot), `chat_blocks` (the ACP
     [chat journal](#rest-api): one row per `(session_id, turn, seq)` block),
+    `session_acp_metadata` (the latest provider-advertised composer controls,
+    retained when its live task exits or Loom restarts),
     and the auth tables `users` (the approved-operator allowlist, seeded with
     the owner), `api_tokens` (hashed bearer tokens), and `auth_sessions`
     (hashed login cookies). See [Authentication](#authentication). Loom-owned
@@ -281,7 +283,7 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `POST /api/sessions/{id}/send` | deliver `{text}` to the agent (`submit`, default true, follows terminal input with Enter); for an `acp` session a live turn is steered when supported, otherwise cancelled and immediately replaced by a new turn, keeping the same `nudge` audit |
 | `POST /api/sessions/{id}/interrupt` | stop the current turn — a break (Escape) to the terminal for a `terminal` session, `session/cancel` for an `acp` one |
 | `GET /api/sessions/{id}/preview?lines=N` | capture the screen as `{screen}`; `lines` adds scrollback above the visible screen (for an `acp` session, `{screen}` is the last `lines` journal blocks rendered as compact text) |
-| `GET /api/sessions/{id}/chat` | The newest 200 blocks of the ACP session's DB-backed journal, `older_cursor`, live-turn state, pending prompt, effective mode, and composer metadata; pass the cursor as `before_turn` + `before_seq` to page backward |
+| `GET /api/sessions/{id}/chat` | The newest 200 blocks of the ACP session's DB-backed journal, `older_cursor`, live-turn state, pending prompt, effective mode, and durable composer metadata (the last provider-advertised controls remain after provider exit/restart); pass the cursor as `before_turn` + `before_seq` to page backward |
 | `GET /api/sessions/{id}/chat/stream` | SSE tail of the live journal: `block` (a committed block), `delta` (a streaming message/thought chunk), `tool` (a live tool-call update), `turn` (started / ended) |
 | `POST /api/sessions/{id}/prompt` | `{text}` → 202 `{queued, steered, turn}` — dispatch a user message as a `session/prompt`; a live turn uses the advertised codex-acp steering extension, with the durable next-turn queue as fallback |
 | `DELETE /api/sessions/{id}/prompt` | atomically retract unseen next-turn feedback and return `{text}` for editing; 409 when the current ACP state has no queue available to retract |

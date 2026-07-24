@@ -348,6 +348,66 @@ async fn composer_metadata_and_config_options_round_trip() {
     assert_eq!(changed["value"], true);
 }
 
+/// Composer controls belong to the durable conversation, not only the live
+/// ACP task. A provider that exits after an account/resource error must leave
+/// its last model, effort, command, and config snapshot inspectable.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn composer_metadata_survives_live_task_loss() {
+    let ts = TestServer::start().await;
+    start_new(&ts, "acp-durable-metadata", None, None).await;
+    poll_metadata(&ts, "acp-durable-metadata", Duration::from_secs(5)).await;
+
+    ts.client
+        .put(
+            "/api/sessions/acp-durable-metadata/config/model",
+            json!({ "value": "fake-deep" }),
+        )
+        .await
+        .expect("model config changes");
+    ts.client
+        .put(
+            "/api/sessions/acp-durable-metadata/config/thought_level",
+            json!({ "value": "high" }),
+        )
+        .await
+        .expect("effort config changes");
+
+    assert!(ts.state.acp.stop("acp-durable-metadata"));
+    let chat = ts
+        .client
+        .get("/api/sessions/acp-durable-metadata/chat")
+        .await
+        .expect("durable chat remains available");
+    let options = chat["metadata"]["config_options"].as_array().unwrap();
+    assert!(options
+        .iter()
+        .any(|option| option["id"] == "model" && option["currentValue"] == "fake-deep"));
+    assert!(options.iter().any(|option| {
+        option["category"] == "thought_level" && option["currentValue"] == "high"
+    }));
+    assert!(!chat["metadata"]["commands"].as_array().unwrap().is_empty());
+
+    // A Loom restart re-attaches to the surviving relay without another ACP
+    // handshake. The new live handle must start with the durable snapshot
+    // instead of masking it with an empty in-memory value.
+    acp::attach(&ts.state, "acp-durable-metadata")
+        .await
+        .expect("relay re-attaches");
+    let attached = ts
+        .client
+        .get("/api/sessions/acp-durable-metadata/chat")
+        .await
+        .expect("re-attached chat remains available");
+    let attached_options = attached["metadata"]["config_options"].as_array().unwrap();
+    assert!(attached_options
+        .iter()
+        .any(|option| option["id"] == "model" && option["currentValue"] == "fake-deep"));
+    assert!(attached_options.iter().any(|option| {
+        option["category"] == "thought_level" && option["currentValue"] == "high"
+    }));
+}
+
 /// Launch selectors can already be active in the underlying runtime while an
 /// adapter's initial configOptions still reflect its own defaults. The
 /// handshake reconciles both selectors through ACP before exposing metadata.

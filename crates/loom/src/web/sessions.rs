@@ -3587,11 +3587,13 @@ pub(super) async fn get_session_chat(
     } else {
         None
     };
-    let metadata = st
-        .acp
-        .get(&session.id)
-        .map(|handle| handle.metadata())
-        .unwrap_or_default();
+    let metadata = match st.acp.get(&session.id) {
+        Some(handle) => handle.metadata(),
+        None => match session_mod::get_acp_metadata(&st.db, &session.id).await? {
+            Some(raw) => serde_json::from_str(&raw)?,
+            None => crate::acp::AcpMetadata::default(),
+        },
+    };
     // Storage uses '' for compatibility with long-lived NOT NULL databases;
     // keep that sentinel out of the public conversation contract.
     let pending_prompt = session

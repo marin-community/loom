@@ -559,10 +559,39 @@ pub async fn set_current_mode(db: &Db, id: &str, mode_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Store the latest complete provider-owned ACP composer metadata. It remains
+/// available after the live task or loom process disappears, and is replaced
+/// atomically whenever the adapter advertises a refreshed control surface.
+pub async fn set_acp_metadata(db: &Db, id: &str, metadata: &str) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO session_acp_metadata (session_id, metadata, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE
+         SET metadata = excluded.metadata, updated_at = excluded.updated_at",
+    )
+    .bind(id)
+    .bind(metadata)
+    .bind(now_iso())
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Read the last complete provider-owned ACP composer metadata snapshot.
+pub async fn get_acp_metadata(db: &Db, id: &str) -> Result<Option<String>> {
+    Ok(
+        sqlx::query_scalar("SELECT metadata FROM session_acp_metadata WHERE session_id = ?")
+            .bind(id)
+            .fetch_optional(db)
+            .await?,
+    )
+}
+
 /// Clear state owned by one ACP adapter process after setup fails. The stable
 /// loom session, journal, runtime profile, and durable human prompt queue stay
 /// intact so the failed session can be inspected or handed off.
 pub async fn clear_acp_state(db: &Db, id: &str) -> Result<()> {
+    let mut tx = db.begin().await?;
     sqlx::query(
         "UPDATE sessions
          SET acp_session_id = NULL, acp_ack_seq = 0, acp_inflight = NULL,
@@ -570,8 +599,13 @@ pub async fn clear_acp_state(db: &Db, id: &str) -> Result<()> {
          WHERE id = ?",
     )
     .bind(id)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    sqlx::query("DELETE FROM session_acp_metadata WHERE session_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -596,6 +630,7 @@ pub async fn prepare_handoff(
     effort: &str,
     status: &str,
 ) -> Result<()> {
+    let mut tx = db.begin().await?;
     sqlx::query(
         "UPDATE sessions
          SET agent_kind = ?, model = ?, effort = ?, status = ?,
@@ -608,8 +643,13 @@ pub async fn prepare_handoff(
     .bind(effort)
     .bind(status)
     .bind(id)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    sqlx::query("DELETE FROM session_acp_metadata WHERE session_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     tracing::info!(session = %id, agent_kind, model, effort, status, "session runtime handed off");
     Ok(())
 }
