@@ -78,7 +78,7 @@ async fn run_filtered_adapter(adapter: &str, tools: &[&str]) -> Vec<Value> {
 
 #[tokio::test]
 async fn every_builtin_speaks_mcp_stdio() {
-    for (adapter, expected_tools) in [("github", 6), ("messaging", 2)] {
+    for (adapter, expected_tools) in [("github", 6), ("history", 2), ("messaging", 2)] {
         let (values, status) = run_adapter(adapter).await;
         assert!(status.success(), "{adapter} did not exit cleanly");
         assert_eq!(values.len(), 4, "{adapter} replied to a notification");
@@ -286,4 +286,82 @@ async fn messaging_status_tool_uses_the_session_scoped_status_route() {
             .unwrap()
             .unwrap();
     assert_eq!(attention.value, "attention");
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn history_tools_resolve_self_and_call_the_rest_contract() {
+    let ts = TestServer::start().await;
+    let branch = loom::branch::upsert(&ts.state.db, &ts.cwd(), "weaver/mcp-history", "main")
+        .await
+        .unwrap();
+    loom::session::insert(
+        &ts.state.db,
+        &loom::session::NewSession {
+            id: "mcphistorysession".to_string(),
+            branch_id: branch.id.clone(),
+            work_dir: ts.cwd(),
+            term_session: "weaver-mcp-history".to_string(),
+            agent_kind: "claude".to_string(),
+            model: String::new(),
+            effort: String::new(),
+            status: "running".to_string(),
+            github_repo: None,
+            parent_branch_id: None,
+            managed_by: None,
+            created_by: None,
+            protocol: "acp".to_string(),
+            origin: "user".to_string(),
+            class: "interactive".to_string(),
+            tracking_issue_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    loom::chat::insert(
+        &ts.state.db,
+        "mcphistorysession",
+        0,
+        0,
+        loom::chat::kind::AGENT_MESSAGE,
+        &json!({ "text": "the searchable answer" }),
+    )
+    .await
+    .unwrap();
+    let token =
+        loom::auth::create_session_token(&ts.state.db, None, "mcphistorysession", &branch.id)
+            .await
+            .unwrap();
+
+    let mut child = Command::new(loom_bin())
+        .args(["mcp", "serve", "history"])
+        .env("WEAVER_API", format!("http://{}", ts.addr))
+        .env("LOOM_TOKEN", token)
+        .env("LOOM_SESSION_ID", "mcphistorysession")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"history\",\"arguments\":{\"limit\":1}}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"search\",\"arguments\":{\"q\":\"SEARCHABLE\",\"kinds\":[\"message\"]}}}\n",
+        )
+        .await
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    for id in [1, 2] {
+        let response: Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(response["id"], id);
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        let page: Value =
+            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(page["source"], "acp");
+        assert_eq!(page["records"][0]["content"], "the searchable answer");
+    }
+    assert!(child.wait().await.unwrap().success());
 }

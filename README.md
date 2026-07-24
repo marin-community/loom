@@ -254,6 +254,13 @@ plus a readable `chat.md` under `session.log_dir`
 (default `~/.iris/logs/sessions/<branch>/`). `weaver chatlog` renders the same
 log for a live session on the command line.
 
+Agents can page or literally search that same normalized history through
+session-scoped REST. ACP reads its durable journal; terminal agents normalize
+their native transcript on read and use the archived Iris capture as fallback.
+The optional `mcp/history/self@v1` capability is a thin self-only facade over
+those routes. See [Session history and search](docs/session-history.md) for the
+record, cursor, source, and authorization contract.
+
 Once a branch's PR merges, loom archives the session automatically — tearing
 down its terminal and worktree while keeping the branch and its weaver history,
 the same as the Archive button. To keep one session until you archive it
@@ -471,8 +478,9 @@ Notable settings:
   `--mcp`. Saving pins the exact capabilities to that profile revision; editing
   the registry cannot silently widen it, and saving the profile again is the
   explicit reconciliation point. The builtins cover fixed-repository GitHub
-  work, durable status updates, and fixed-thread Slack replies; all reuse Loom's existing
-  session-scoped routes, so provider credentials remain server-side.
+  work, durable status updates, fixed-thread Slack replies, and normalized
+  self-history/search; all reuse Loom's existing session-scoped routes, so
+  provider credentials remain server-side.
   Provider-specific runtime permission rules remain an implementation detail of
   the selected agent, rather than the vocabulary used to name MCP access.
 - Administrators can add Python MCP servers under identities such as

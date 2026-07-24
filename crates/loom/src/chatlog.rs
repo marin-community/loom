@@ -322,7 +322,7 @@ pub async fn journal_to_log(db: &Db, session: &Session) -> Option<Log> {
 
 /// Flatten a `tool_call` block's `content` array into readable result text: text
 /// parts verbatim, diff parts as a compact `path` + `- old` / `+ new` snippet.
-fn tool_content_text(content: Option<&Value>) -> String {
+pub(crate) fn tool_content_text(content: Option<&Value>) -> String {
     let Some(arr) = content.and_then(Value::as_array) else {
         return String::new();
     };
@@ -348,7 +348,7 @@ fn tool_content_text(content: Option<&Value>) -> String {
 
 /// A one-line context note for an ACP-only block kind, flattened into the iris
 /// export as injected context.
-fn context_note(kind: &str, p: &Value) -> String {
+pub(crate) fn context_note(kind: &str, p: &Value) -> String {
     match kind {
         kind::PLAN => {
             let entries = p.get("entries").and_then(Value::as_array);

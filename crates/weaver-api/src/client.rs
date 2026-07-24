@@ -15,10 +15,10 @@ use crate::dto::{
     AutomationTokenView, BranchStatusReq, BranchView, CommentDto, CreateEventReq, CreateIssueReq,
     CreateRepoIssueReq, CreateReq, CreateTokenReq, CreateWatchReq, CreatedTokenView, CustomMcpReq,
     CustomMcpView, DeploymentReq, DeploymentView, DiagnosticsView, EffectiveProfileView,
-    FederationReq, FederationView, HandoffReq, IssueView, McpRegistryView, NewCommentBody,
-    NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq, ProfileProbeView, ProfileReq,
-    ProfileView, PutProfileEnvReq, ReadinessView, RunReq, RunView, RunWatchReq, SendReq,
-    SessionView, SetTagsReq, SettingsEnvelope, TagReq, ThreadDto, TokenView, WatchView,
+    FederationReq, FederationView, HandoffReq, HistoryPageView, IssueView, McpRegistryView,
+    NewCommentBody, NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq, ProfileProbeView,
+    ProfileReq, ProfileView, PutProfileEnvReq, ReadinessView, RunReq, RunView, RunWatchReq,
+    SendReq, SessionView, SetTagsReq, SettingsEnvelope, TagReq, ThreadDto, TokenView, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -157,6 +157,69 @@ impl Client {
     pub async fn get_session(&self, key: &str) -> Result<SessionView> {
         self.get_typed(&format!("/api/sessions/{}", Self::seg(key)))
             .await
+    }
+
+    /// Page normalized records for one session
+    /// (`GET /api/sessions/{key}/history`). `before` is the exclusive opaque
+    /// cursor returned by the preceding page.
+    pub async fn get_session_history(
+        &self,
+        key: &str,
+        before: Option<&str>,
+        limit: Option<usize>,
+        kinds: &[String],
+    ) -> Result<HistoryPageView> {
+        let query = Self::history_query(before, limit, kinds, None);
+        self.get_typed(&format!("/api/sessions/{}/history{query}", Self::seg(key)))
+            .await
+    }
+
+    /// Case-insensitive literal search over one session's normalized records
+    /// (`GET /api/sessions/{key}/history/search`).
+    pub async fn search_session_history(
+        &self,
+        key: &str,
+        search: &str,
+        before: Option<&str>,
+        limit: Option<usize>,
+        kinds: &[String],
+    ) -> Result<HistoryPageView> {
+        let query = Self::history_query(before, limit, kinds, Some(search));
+        self.get_typed(&format!(
+            "/api/sessions/{}/history/search{query}",
+            Self::seg(key)
+        ))
+        .await
+    }
+
+    fn history_query(
+        before: Option<&str>,
+        limit: Option<usize>,
+        kinds: &[String],
+        search: Option<&str>,
+    ) -> String {
+        let encode = |value: &str| {
+            percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC)
+                .to_string()
+        };
+        let mut fields = Vec::new();
+        if let Some(search) = search {
+            fields.push(format!("q={}", encode(search)));
+        }
+        if let Some(before) = before {
+            fields.push(format!("before={}", encode(before)));
+        }
+        if let Some(limit) = limit {
+            fields.push(format!("limit={limit}"));
+        }
+        if !kinds.is_empty() {
+            fields.push(format!("kinds={}", encode(&kinds.join(","))));
+        }
+        if fields.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", fields.join("&"))
+        }
     }
 
     /// Launch a new session (`POST /api/sessions`).

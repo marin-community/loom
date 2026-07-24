@@ -120,6 +120,7 @@ returns the provider-neutral name.
 | Identity / group | Purpose | Credential and routing boundary |
 |---|---|---|
 | `mcp/github/comment@v1` / `github` | Issue/PR view, comment, and edit | Existing repository-fixed REST bridge and server-side GitHub credential path from PRs #179/#191 |
+| `mcp/history/self@v1` / `history` | Page and literally search normalized self-history | Existing session history REST routes; the adapter fixes the target to `LOOM_SESSION_ID` and carries only its session token |
 | `mcp/messaging/status@v1` / `messaging` | Update the session’s Weaver status | Existing branch-status API; its durable event is mirrored to wired GitHub and Slack threads |
 | `mcp/slack/message@v1` / `messaging` | Post in the session-bound Slack thread | Existing fixed-thread route; the workspace bot token stays in Loom |
 

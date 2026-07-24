@@ -25,6 +25,7 @@ pub mod github;
 pub mod github_app;
 pub mod github_manifest;
 pub mod github_trigger;
+pub mod history;
 pub mod ide;
 pub mod launch_gate;
 pub mod logs;

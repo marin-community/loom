@@ -14,6 +14,7 @@ use std::{collections::HashSet, future::Future, pin::Pin};
 use weaver_api::{McpAdapterView, McpCapabilitySetView, McpRegistryView};
 
 pub(crate) mod github;
+pub(crate) mod history;
 pub(crate) mod messaging;
 
 type ServeFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
@@ -41,7 +42,7 @@ pub(crate) struct CapabilitySet {
     pub tools: &'static [&'static str],
 }
 
-const ADAPTERS: &[Adapter] = &[github::ADAPTER, messaging::ADAPTER];
+const ADAPTERS: &[Adapter] = &[github::ADAPTER, history::ADAPTER, messaging::ADAPTER];
 pub(crate) const ALLOWED_TOOLS_ENV: &str = "LOOM_MCP_ALLOWED_TOOLS";
 
 pub(crate) fn is_tool_set(name: &str) -> bool {
