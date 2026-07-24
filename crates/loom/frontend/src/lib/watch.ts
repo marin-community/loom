@@ -11,7 +11,14 @@ export const CAPABILITIES = [
   'interrupt',
   'launch',
 ] as const;
-export const GRANTABLE_CAPABILITIES = ['mark', 'escalate', 'nudge', 'interrupt', 'launch'] as const;
+export const GRANTABLE_CAPABILITIES = [
+  'judge',
+  'mark',
+  'escalate',
+  'nudge',
+  'interrupt',
+  'launch',
+] as const;
 
 // Final path segment of a repo root, for a short chip label.
 export function repoLabel(path: string): string {

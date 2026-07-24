@@ -370,6 +370,7 @@ def test_observe_is_implicit_and_writes_are_gated():
         lambda: c.set_tags("s", []),
         lambda: c.clear_tag("s", "triage"),
         lambda: c.mark("s", "blocked"),
+        lambda: c.agent("judge"),
         lambda: c.nudge("s", "hello"),
         lambda: c.interrupt("s"),
     ):
@@ -382,6 +383,7 @@ def test_observe_is_implicit_and_writes_are_gated():
 def test_capabilities_constant_matches_the_ladder():
     assert CAPABILITIES == [
         "observe",
+        "judge",
         "mark",
         "escalate",
         "nudge",
@@ -447,7 +449,7 @@ def test_nudge_carries_by_for_the_audit_event():
 
 
 def test_agent_returns_output_or_none():
-    c = StubClient(replies={"/agent/oneshot": {"output": "blocked: judged"}})
+    c = StubClient(capabilities=["judge"], replies={"/agent/oneshot": {"output": "blocked: judged"}})
     assert c.agent("look", model="haiku", effort="low") == "blocked: judged"
     assert c.requests[-1] == (
         "POST",
@@ -461,7 +463,7 @@ def test_agent_returns_output_or_none():
         {"prompt": "look", "model": "", "effort": "", "agent": "codex"},
     )
     # A degraded daemon reply ({output: null}) reads as None, not an error.
-    absent = StubClient(replies={"/agent/oneshot": {"output": None}})
+    absent = StubClient(capabilities=["judge"], replies={"/agent/oneshot": {"output": None}})
     assert absent.agent("look") is None
 
 

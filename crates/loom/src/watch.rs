@@ -54,6 +54,12 @@ use weaver_core::watch::{self as watch_store, Watch};
 /// promptly without the loop being a busy spinner.
 const TICK: Duration = Duration::from_millis(1500);
 
+/// An automatic agent-backed watch may run at most once in this window. Model
+/// use is identified by the explicit `judge` capability, so the guard applies
+/// equally to builtins and custom programs. Manual runs remain available for
+/// authoring and diagnosis.
+pub const AGENTIC_MIN_COOLDOWN_SECS: i64 = 15 * 60;
+
 /// Read an integer setting, falling back to `default` on absence or parse
 /// failure. `weaver_core::config` has bool/string getters but no int getter, so
 /// the engine parses the raw value itself.
@@ -102,8 +108,8 @@ impl Drop for InFlightGuard {
 // Builtin seeding
 // ---------------------------------------------------------------------------
 
-/// Ensure every builtin program has its watch row, enabled and on the
-/// program's suggested defaults. Runs at engine start, keyed by name: a watch
+/// Ensure every builtin program has its watch row on the program's suggested
+/// enabled/config defaults. Runs at engine start, keyed by name: a watch
 /// the user has since reconfigured or disabled is left exactly as it is (the
 /// row exists), and a deleted one comes back on the next boot — builtins are
 /// stock; the off switch is the enabled toggle, not deletion.
@@ -123,7 +129,7 @@ pub async fn seed_builtins(db: &crate::Db) -> anyhow::Result<()> {
                 .iter()
                 .map(|c| c.to_string())
                 .collect(),
-            enabled: true,
+            enabled: b.default_enabled,
             ..Default::default()
         };
         let w = watch_store::create(db, &new).await?;
@@ -530,8 +536,9 @@ async fn triggering_session(state: &AppState, ev: &events::Event) -> Option<Stri
 /// 1. **no-overlap** — a re-fire while a round of the same watch is in
 ///    flight is dropped (no run row); the in-flight set is the gate.
 /// 2. **cooldown** — a fire inside `max(cooldown_secs, default_cooldown_secs)`
-///    of the last run is recorded `skipped`. A `manual`/`run-now`, and a watch's
-///    own self-scheduled `wake`, bypass it (the wake's delay is the gap).
+///    of the last run is recorded `skipped`. Agentic (`judge`) watches also
+///    have a 15-minute floor. A `manual`/`run-now` bypasses it; a mechanical
+///    watch's self-scheduled `wake` does too because the wake chose its gap.
 /// 3. **timeout** — the program is wrapped in a wall-clock budget; an overrun
 ///    is recorded `error`.
 /// 4. **no-recursion** — the survey ([`run_program`]) excludes watch warm
@@ -559,16 +566,20 @@ pub async fn fire(
     };
 
     let manual = trigger_reason == "manual" || trigger_reason.starts_with("run");
-    // A self-scheduled wake bypasses cooldown too: its backoff delay is the
-    // watch's own chosen gap, so a global cooldown must not strand the recheck.
-    let bypass_cooldown = manual || trigger_reason == "wake";
+    let agentic = o.capabilities().iter().any(|cap| cap == "judge");
+    // Mechanical self-wakes choose their own pacing and bypass the global
+    // default. Agentic self-wakes remain subject to the 15-minute floor.
+    let bypass_cooldown = manual || (trigger_reason == "wake" && !agentic);
     let now = Utc::now();
 
     // 2. Cooldown: a re-fire inside the gap is recorded `skipped` (a manual run
-    //    or a self-scheduled wake bypasses it).
-    let cooldown = o
+    //    bypasses it; a mechanical self-wake does too).
+    let mut cooldown = o
         .cooldown_secs
         .max(get_int(&state.db, "watch.default_cooldown_secs", 0).await);
+    if agentic {
+        cooldown = cooldown.max(AGENTIC_MIN_COOLDOWN_SECS);
+    }
     if !bypass_cooldown && cooldown > 0 {
         if let Some(last) = o.last_run_at.as_deref().and_then(parse_iso) {
             if (now - last).num_seconds() < cooldown {
@@ -1454,17 +1465,22 @@ mod tests {
 
     use crate::builtins::python3_available;
 
-    /// Boot seeding gives every builtin program a watch row, enabled and on
-    /// its suggested defaults — and leaves existing rows exactly as they are
+    /// Boot seeding gives every builtin program a watch row on its suggested
+    /// enabled/default state — and leaves existing rows exactly as they are
     /// on a re-run, so a user's disable/reconfigure survives restarts.
     #[tokio::test]
-    async fn seed_builtins_is_idempotent_and_enables_by_default() {
+    async fn seed_builtins_is_idempotent_and_uses_program_defaults() {
         let db = crate::db::connect_in_memory().await.unwrap();
         seed_builtins(&db).await.unwrap();
         let all = watch_store::list(&db).await.unwrap();
         assert_eq!(all.len(), crate::builtins::BUILTINS.len());
         for w in &all {
-            assert!(w.enabled, "{}: builtins seed enabled", w.name);
+            let builtin = crate::builtins::find(&w.program).unwrap();
+            assert_eq!(
+                w.enabled, builtin.default_enabled,
+                "{}: builtin enabled default",
+                w.name
+            );
             assert_eq!(w.program, format!("builtin:{}", w.name));
         }
 
@@ -1482,7 +1498,9 @@ mod tests {
         seed_builtins(&db).await.unwrap();
         let restored = watch_store::list(&db).await.unwrap();
         assert_eq!(restored.len(), all.len());
-        assert!(restored.iter().any(|w| w.name == all[0].name && w.enabled));
+        let restored_watch = restored.iter().find(|w| w.name == all[0].name).unwrap();
+        let builtin = crate::builtins::find(&restored_watch.program).unwrap();
+        assert_eq!(restored_watch.enabled, builtin.default_enabled);
     }
 
     /// An `AppState` over a fresh in-memory db plus a watch registered on
@@ -1700,6 +1718,83 @@ rnd.finish("counted to %d" % n)
         let outcome = |id| runs.iter().find(|r| r.id == id).unwrap().outcome.as_str();
         assert_eq!(outcome(cron_id), "skipped", "cron is gated by cooldown");
         assert_ne!(outcome(wake_id), "skipped", "wake bypasses cooldown");
+    }
+
+    /// Holding `judge` makes a watch agentic: automatic cron and dynamic-wake
+    /// rounds both respect the engine's 15-minute floor even when the watch and
+    /// global default request no cooldown. A manual authoring run still bypasses
+    /// the floor.
+    #[tokio::test]
+    async fn agentic_watch_has_a_non_bypassable_automatic_cooldown() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not on PATH");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("agentic-noop.py");
+        std::fs::write(
+            &script,
+            "from weaver_loom import Round\nRound().finish('ok')\n",
+        )
+        .unwrap();
+        let (state, _) = script_fixture(&script.display().to_string()).await;
+        let o = watch_store::create(
+            &state.db,
+            &watch_store::NewWatch {
+                name: "agentic-gated".to_string(),
+                program: script.display().to_string(),
+                capabilities: vec!["observe".to_string(), "judge".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        fire(
+            &state,
+            &new_in_flight(),
+            &o,
+            "manual",
+            false,
+            &TriggerCtx::manual(),
+        )
+        .await
+        .unwrap();
+        let o = watch_store::get(&state.db, &o.id).await.unwrap().unwrap();
+        let cron_id = fire(
+            &state,
+            &new_in_flight(),
+            &o,
+            "cron",
+            false,
+            &TriggerCtx::scheduled(),
+        )
+        .await
+        .unwrap();
+        let wake_id = fire(
+            &state,
+            &new_in_flight(),
+            &o,
+            "wake",
+            false,
+            &TriggerCtx::scheduled(),
+        )
+        .await
+        .unwrap();
+
+        let runs = watch_store::recent_runs(&state.db, &o.id, 10)
+            .await
+            .unwrap();
+        for id in [cron_id, wake_id] {
+            let run = runs.iter().find(|r| r.id == id).unwrap();
+            assert_eq!(run.outcome, "skipped");
+            assert!(
+                run.summary
+                    .contains(&format!("cooldown: {AGENTIC_MIN_COOLDOWN_SECS}s")),
+                "agentic floor is recorded: {}",
+                run.summary
+            );
+        }
     }
 
     /// A due `wake_at` makes the timer emit one `cron` tick for that watch

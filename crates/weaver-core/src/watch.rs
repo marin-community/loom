@@ -253,6 +253,7 @@ impl Watch {
 /// ladder). `observe` is implicit; the rest are explicit grants.
 pub const CAPABILITIES: &[&str] = &[
     "observe",
+    "judge",
     "mark",
     "escalate",
     "nudge",

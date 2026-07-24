@@ -88,6 +88,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "watches",
         include_str!("../migrations/0013_watches.sql"),
     ),
+    (
+        14,
+        "calibrate_watches",
+        include_str!("../migrations/0014_calibrate_watches.sql"),
+    ),
 ];
 
 /// Latest core schema version compiled into this binary.
@@ -476,6 +481,76 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, MIGRATIONS.len() as i64);
+    }
+
+    #[tokio::test]
+    async fn watch_calibration_migrates_stock_rows_without_overwriting_copies() {
+        let pool = empty_pool().await;
+        run(&pool).await.unwrap();
+        for (name, program, trigger) in [
+            ("status", "builtin:status", r#"{"on":["session.idle"]}"#),
+            ("status-copy", "builtin:status", r#"{"cron":"0 * * * *"}"#),
+            ("pr-label", "builtin:pr-label", r#"{"on":["pr.opened"]}"#),
+            (
+                "archive-merged",
+                "builtin:archive-merged",
+                r#"{"on":["pr.merged"]}"#,
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO watches
+                    (id, name, enabled, trigger_spec, scope, program, params,
+                     capabilities, model, effort, cooldown_secs)
+                 VALUES (?, ?, 1, ?, '{}', ?, '{}', '[\"observe\",\"mark\"]', '', '', 0)",
+            )
+            .bind(format!("{name}-id"))
+            .bind(name)
+            .bind(trigger)
+            .bind(program)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let migration = MIGRATIONS.iter().find(|(v, _, _)| *v == 14).unwrap().2;
+        for stmt in split_statements(migration) {
+            sqlx::query(&stmt).execute(&pool).await.unwrap();
+        }
+
+        let stock: (bool, String, String) = sqlx::query_as(
+            "SELECT enabled, trigger_spec, capabilities FROM watches WHERE name = 'status'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!stock.0);
+        assert_eq!(stock.1, r#"{"on":["session.stale"]}"#);
+        assert!(serde_json::from_str::<Vec<String>>(&stock.2)
+            .unwrap()
+            .iter()
+            .any(|cap| cap == "judge"));
+
+        let copy: (bool, String, String) = sqlx::query_as(
+            "SELECT enabled, trigger_spec, capabilities FROM watches WHERE name = 'status-copy'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(copy.0, "a user-created copy keeps its enabled state");
+        assert_eq!(copy.1, r#"{"cron":"0 * * * *"}"#);
+        assert!(serde_json::from_str::<Vec<String>>(&copy.2)
+            .unwrap()
+            .iter()
+            .any(|cap| cap == "judge"));
+
+        for name in ["pr-label", "archive-merged"] {
+            let enabled: bool = sqlx::query_scalar("SELECT enabled FROM watches WHERE name = ?")
+                .bind(name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert!(!enabled, "{name} stock row becomes opt-in");
+        }
     }
 
     #[tokio::test]

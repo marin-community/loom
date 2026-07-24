@@ -827,9 +827,10 @@ A round runs the **program** the watch names:
 
 - **Builtin scripts** — real Python files in `crates/loom/watches/`,
   embedded into the binary and registered in `loom::builtins`:
-  `builtin:status` (stamp a `triage` mark on each in-scope session, judging
+  `builtin:status` (an opt-in agentic watch that stamps a `triage` mark on a
+  stale in-scope session, judging
   via the configured `prompt` through the daemon's one-shot agent when
-  available, else mirroring the agent's own `attention` tag),
+  available, otherwise leaving its marks untouched),
   `builtin:review-wait` (park a session whose open, non-draft PR awaits an
   external review — `review_decision` `REVIEW_REQUIRED` — under a quiet
   `awaiting: review` mark that sinks it below the calm default in the fleet
@@ -838,7 +839,9 @@ A round runs the **program** the watch names:
   and `builtin:archive-merged` (flag live sessions whose PR has merged, excluding
   those with `auto-archive: disabled`). The last two are **read-only**: they
   record `would:` actions and mutate nothing — the actual archive is still
-  `github.archive_on_merge`, above. The Watch
+  `github.archive_on_merge`, above — and are opt-in. Watches granted the
+  `judge` capability are agentic and the engine limits their automatic rounds
+  to at most one every 15 minutes; manual runs still bypass the interval. The Watch
   panel and `loom watch programs` list the registry; script sources
   render read-only (they ship with the binary).
 - **A custom program file** — an absolute path, conventionally

@@ -117,7 +117,15 @@ pub(super) async fn create_watch(
     let defaults = watch_store::NewWatch::default();
     let program = req.program.unwrap_or(defaults.program);
     validate_program(&program)?;
-    let capabilities = req.capabilities.unwrap_or(defaults.capabilities);
+    let capabilities = req.capabilities.unwrap_or_else(|| {
+        crate::builtins::find(&program).map_or(defaults.capabilities, |builtin| {
+            builtin
+                .default_capabilities
+                .iter()
+                .map(|cap| (*cap).to_string())
+                .collect()
+        })
+    });
     validate_capabilities(&capabilities)?;
     let params = json_text(req.params, &defaults.params);
 

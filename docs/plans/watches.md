@@ -388,7 +388,7 @@ flowchart TD
 
     stock --> api
     pyprog --> api
-    api["capability-gated API:<br/>sessions · preview · mark · nudge · run_agent · warm_session"]
+    api["capability-gated API:<br/>sessions · preview · judge · mark · nudge · warm_session"]
 
     api -->|observe / nudge / break| fleet["Fleet sessions<br/>(daemon = sole tmux owner)"]
     api -->|mark| triage["triage tag on branch"]
@@ -473,7 +473,7 @@ The motivating case, end to end. The **zero-code** form is a stock program:
 ```
 loom watch add status-check \
   --cron "0 * * * *" --scope "attention != ok" \
-  --capabilities observe,mark,escalate,nudge \
+  --capabilities observe,judge,mark,escalate,nudge \
   --program builtin:status \
   --prompt "If a session is progressing, mark it ok. If it looks stuck (same \
     action repeating, an unhandled error, no movement), mark it attention with a \

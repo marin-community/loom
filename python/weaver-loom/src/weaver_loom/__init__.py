@@ -59,7 +59,7 @@ import urllib.request
 DEFAULT_BASE = "http://127.0.0.1:7878"
 
 #: The intervention ladder, calm → loud. ``observe`` is implicit.
-CAPABILITIES = ["observe", "mark", "escalate", "nudge", "interrupt", "launch"]
+CAPABILITIES = ["observe", "judge", "mark", "escalate", "nudge", "interrupt", "launch"]
 
 #: Lifecycle states with no live session behind them.
 TERMINAL_STATUSES = {"done", "error", "archived"}
@@ -382,7 +382,9 @@ class Client:
         """Run a fresh ACP prompt in the daemon and return its text, or ``None``
         when the runtime is absent or failed. ``runtime`` defaults to Claude for
         compatibility. A judgement primitive: pair with
-        :func:`parse_judgement`."""
+        :func:`parse_judgement`. Needs ``judge``; watches holding that capability
+        are paced by the engine to at most one automatic round per 15 minutes."""
+        self._gate("judge")
         body = {"prompt": prompt, "model": model or "", "effort": effort or ""}
         if runtime:
             body["agent"] = runtime
