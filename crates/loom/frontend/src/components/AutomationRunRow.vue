@@ -1,9 +1,16 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import type { AutomationRun } from '../types';
 import { exactTime, timeAgo } from '../lib/time';
 import StatusBadge from './StatusBadge.vue';
 
-defineProps<{ run: AutomationRun; intervention: boolean }>();
+const props = defineProps<{ run: AutomationRun; intervention: boolean; history?: boolean }>();
+
+const title = computed(() => {
+  if (props.intervention) return `Launch ${props.run.status}`;
+  if (props.history) return `Run ${props.run.status}`;
+  return 'Provisioning session';
+});
 </script>
 
 <template>
@@ -20,7 +27,7 @@ defineProps<{ run: AutomationRun; intervention: boolean }>();
     <div class="min-w-0 flex-1">
       <div class="flex flex-wrap items-center gap-2">
         <span class="font-serif text-[15px] font-semibold text-fg">
-          {{ intervention ? `Launch ${run.status}` : 'Provisioning session' }}
+          {{ title }}
         </span>
         <StatusBadge :status="run.status" />
       </div>

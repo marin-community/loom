@@ -47,3 +47,7 @@ export function unmatchedAutomationRuns(
 export function runNeedsIntervention(run: AutomationRun): boolean {
   return run.status === 'failed';
 }
+
+export function isAutomationRunHistory(run: AutomationRun): boolean {
+  return run.status === 'cancelled' || run.status === 'completed';
+}

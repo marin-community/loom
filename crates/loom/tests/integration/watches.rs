@@ -42,6 +42,7 @@ async fn engine_state(ts: &TestServer) -> AppState {
         addr: ts.addr.to_string(),
         ide: std::sync::Arc::new(loom::ide::IdeManager::new(loom::ide::ide_home())),
         acp: loom::acp::AcpRegistry::new(),
+        launch_gate: loom::launch_gate::RepoLaunchGate::default(),
     }
 }
 

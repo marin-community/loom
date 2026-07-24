@@ -5,6 +5,7 @@ import { exactTime, timeAgo } from '../lib/time';
 import { messageOf, signalChips } from '../lib/sessionState';
 import SignalChip from './SignalChip.vue';
 import StatusBadge from './StatusBadge.vue';
+import SessionRowActions from './SessionRowActions.vue';
 
 const props = defineProps<{
   session: Session;
@@ -13,7 +14,7 @@ const props = defineProps<{
   clearingTag: string;
 }>();
 
-const emit = defineEmits<{ clearTag: [key: string] }>();
+const emit = defineEmits<{ clearTag: [key: string]; changed: []; error: [message: string] }>();
 
 const dotClass = computed(() => {
   if (props.tone === 'intervention') return 'bg-block-line';
@@ -24,7 +25,7 @@ const dotClass = computed(() => {
 
 <template>
   <li
-    class="relative flex items-start gap-3 border-b border-line px-3 py-2.5 last:border-0"
+    class="group relative flex items-start gap-3 border-b border-line px-3 py-2.5 last:border-0"
     :class="tone === 'history' && 'opacity-70 hover:opacity-100'"
     data-testid="automation-session"
     :data-session-id="session.id"
@@ -74,5 +75,10 @@ const dotClass = computed(() => {
         {{ timeAgo(session.last_activity_at) }}
       </time>
     </div>
+    <SessionRowActions
+      :ws="session"
+      @changed="emit('changed')"
+      @error="(message) => emit('error', message)"
+    />
   </li>
 </template>

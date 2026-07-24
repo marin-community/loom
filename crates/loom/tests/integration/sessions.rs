@@ -109,6 +109,53 @@ async fn create_lists_and_tears_down() {
     assert_eq!(recent[0]["active_branches"], 0);
 }
 
+/// New-session provisioning waits at the repository boundary before it fetches,
+/// selects a branch, or creates a worktree. Holding the same gate here gives the
+/// route a deterministic concurrency test without racing real git subprocesses.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_creation_waits_for_the_repository_launch_gate() {
+    let ts = TestServer::start().await;
+    let repo = ts.repo_path().canonicalize().unwrap();
+    let permit = ts.state.launch_gate.acquire(&repo).await;
+    let client = weaver_api::Client::new(format!("http://{}", ts.addr));
+    let cwd = ts.cwd();
+
+    let launch = tokio::spawn(async move {
+        client
+            .post(
+                "/api/sessions",
+                json!({
+                    "goal": "wait for repository",
+                    "cwd": cwd,
+                    "agent": "shell",
+                }),
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !launch.is_finished(),
+        "launch should wait while the repository permit is held"
+    );
+    assert!(
+        !ts.repo_path().join(".worktrees").exists(),
+        "git provisioning must not begin before the permit is acquired"
+    );
+
+    drop(permit);
+    let session = tokio::time::timeout(std::time::Duration::from_secs(5), launch)
+        .await
+        .expect("launch should resume when the repository is ready")
+        .unwrap()
+        .unwrap();
+    let id = session["id"].as_str().unwrap();
+    ts.client
+        .delete(&format!("/api/sessions/{id}"))
+        .await
+        .unwrap();
+}
+
 /// A real agent launch needs either the launching user's GitHub token or a
 /// default GH_TOKEN source. Without one, reject before provisioning anything.
 #[serial]

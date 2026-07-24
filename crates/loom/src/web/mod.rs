@@ -155,6 +155,9 @@ pub struct AppState {
     /// `/chat`, `/prompt`, `/permissions`, `/mode`, and `/interrupt` routes drive
     /// an `acp` session through, and subscribe to its SSE stream on.
     pub acp: crate::acp::AcpRegistry,
+    /// Serializes new-session provisioning within one repository while allowing
+    /// unrelated repositories to launch independently.
+    pub launch_gate: crate::launch_gate::RepoLaunchGate,
 }
 
 // ---------------------------------------------------------------------------

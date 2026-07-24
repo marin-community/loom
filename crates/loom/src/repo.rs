@@ -251,6 +251,32 @@ pub enum ResolveError {
     Clone(String),
 }
 
+async fn registration(
+    db: &Db,
+    input: &str,
+) -> std::result::Result<(RepoSlug, ManagedRepo), ResolveError> {
+    let slug = parse_slug(input).map_err(ResolveError::BadRequest)?;
+    let slug_str = slug.slug();
+    let registered = get_registered(db, &slug_str)
+        .await
+        .map_err(|e| ResolveError::Clone(e.to_string()))?
+        .ok_or_else(|| {
+            tracing::info!(repo = %slug_str, "repo not registered; refusing clone");
+            ResolveError::BadRequest(format!(
+                "repo '{slug_str}' is not registered — register it via POST /api/repos first"
+            ))
+        })?;
+    Ok((slug, registered))
+}
+
+/// Resolve a managed-repo reference to its registered on-disk path without
+/// touching the clone. Session provisioning uses this stable path as its gate
+/// key so clone/fetch itself is serialized with the rest of launch.
+pub async fn registered_path(db: &Db, input: &str) -> std::result::Result<PathBuf, ResolveError> {
+    let (_, registered) = registration(db, input).await?;
+    Ok(PathBuf::from(registered.path))
+}
+
 /// Resolve a managed-repo reference to its on-disk clone, ensuring it is present.
 /// `input` is a slug or URL; it is parsed strictly (traversal rejected), looked
 /// up in the registered allowlist (an unregistered repo is refused — the trigger
@@ -267,17 +293,8 @@ pub async fn resolve_clone(
     app: Option<&crate::github_app::GithubApp>,
 ) -> std::result::Result<PathBuf, ResolveError> {
     tracing::debug!(input, "resolving managed repo clone");
-    let slug = parse_slug(input).map_err(ResolveError::BadRequest)?;
+    let (slug, registered) = registration(db, input).await?;
     let slug_str = slug.slug();
-    let registered = get_registered(db, &slug_str)
-        .await
-        .map_err(|e| ResolveError::Clone(e.to_string()))?
-        .ok_or_else(|| {
-            tracing::info!(repo = %slug_str, "repo not registered; refusing clone");
-            ResolveError::BadRequest(format!(
-                "repo '{slug_str}' is not registered — register it via POST /api/repos first"
-            ))
-        })?;
     let dest = PathBuf::from(&registered.path);
     let token = match app {
         Some(app) => match app.token_for_repo(&slug.owner, &slug.name).await {

@@ -1483,6 +1483,7 @@ mod tests {
             addr: "127.0.0.1:0".to_string(),
             ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
             acp: crate::acp::AcpRegistry::new(),
+            launch_gate: crate::launch_gate::RepoLaunchGate::default(),
         };
         let o = watch_store::create(
             &state.db,
@@ -1701,6 +1702,7 @@ rnd.finish("counted to %d" % n)
             addr: "127.0.0.1:0".to_string(),
             ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
             acp: crate::acp::AcpRegistry::new(),
+            launch_gate: crate::launch_gate::RepoLaunchGate::default(),
         };
         // A reactive watch (no cron) — the scheduled half of the timer skips
         // it; only the wake half should fire it.

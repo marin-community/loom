@@ -373,6 +373,46 @@ fn stale_before() -> String {
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+/// Close the durable run when its session is deliberately removed. Keeping the
+/// reservation preserves idempotency/audit history; changing its status keeps
+/// it out of the active provisioning queue.
+pub async fn cancel_for_session(db: &Db, session_id: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE automation_runs
+         SET status = 'cancelled', outcome = 'cancelled',
+             summary = 'session removed by user', updated_at = ?
+         WHERE session_id = ?
+           AND status IN ('creating', 'waiting', 'delivering', 'running', 'failed')",
+    )
+    .bind(now_iso())
+    .bind(session_id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Repair reservations whose provisioning request or session disappeared.
+/// A fresh `creating` lease may still belong to an older server draining during
+/// a rolling restart, so only the same five-minute stale lease accepted by
+/// [`claim_stale`] is abandoned. A `running` run must already have inserted its
+/// session and is inconsistent immediately when that row is absent.
+pub async fn reconcile_missing_sessions(db: &Db) -> Result<u64> {
+    Ok(sqlx::query(
+        "UPDATE automation_runs
+         SET status = 'cancelled', outcome = 'cancelled',
+             summary = 'session provisioning was interrupted', updated_at = ?
+         WHERE (status = 'running' OR (status = 'creating' AND updated_at <= ?))
+           AND NOT EXISTS (
+               SELECT 1 FROM sessions WHERE sessions.id = automation_runs.session_id
+           )",
+    )
+    .bind(now_iso())
+    .bind(stale_before())
+    .execute(db)
+    .await?
+    .rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,7 +491,6 @@ mod tests {
         assert!(claim_stale(&db, &run.id).await.unwrap());
         assert!(!claim_stale(&db, &run.id).await.unwrap());
     }
-
     #[tokio::test]
     async fn channel_waits_for_its_owner_and_replaces_a_failed_launch() {
         let db = crate::db::connect_in_memory().await.unwrap();
@@ -506,5 +545,99 @@ mod tests {
             route_channel(&db, &second.id).await.unwrap(),
             ChannelAction::Launch(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn startup_reconciles_reservations_without_sessions() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let run = match reserve(
+            &db,
+            NewRun {
+                subject: "subject",
+                source: "ops",
+                service_tag: "grafana",
+                profile: "default",
+                idempotency_key: "missing-session",
+                channel: None,
+                request_json: "{}",
+            },
+        )
+        .await
+        .unwrap()
+        {
+            Reservation::Created(run) => run,
+            Reservation::Existing(_) => unreachable!(),
+        };
+        launched(&db, &run.id, &run.session_id).await.unwrap();
+
+        assert_eq!(reconcile_missing_sessions(&db).await.unwrap(), 1);
+        let repaired = get(&db, &run.id).await.unwrap().unwrap();
+        assert_eq!(repaired.status, "cancelled");
+        assert_eq!(repaired.outcome.as_deref(), Some("cancelled"));
+        assert_eq!(repaired.summary, "session provisioning was interrupted");
+    }
+
+    #[tokio::test]
+    async fn removing_a_session_cancels_its_durable_run() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let run = match reserve(
+            &db,
+            NewRun {
+                subject: "subject",
+                source: "ops",
+                service_tag: "grafana",
+                profile: "default",
+                idempotency_key: "removed-session",
+                channel: None,
+                request_json: "{}",
+            },
+        )
+        .await
+        .unwrap()
+        {
+            Reservation::Created(run) => run,
+            Reservation::Existing(_) => unreachable!(),
+        };
+        launched(&db, &run.id, &run.session_id).await.unwrap();
+
+        cancel_for_session(&db, &run.session_id).await.unwrap();
+        let cancelled = get(&db, &run.id).await.unwrap().unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+        assert_eq!(cancelled.outcome.as_deref(), Some("cancelled"));
+        assert_eq!(cancelled.summary, "session removed by user");
+    }
+
+    #[tokio::test]
+    async fn startup_preserves_fresh_creating_leases_but_cancels_stale_ones() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let run = match reserve(
+            &db,
+            NewRun {
+                subject: "subject",
+                source: "ops",
+                service_tag: "grafana",
+                profile: "default",
+                idempotency_key: "creating-session",
+                channel: None,
+                request_json: "{}",
+            },
+        )
+        .await
+        .unwrap()
+        {
+            Reservation::Created(run) => run,
+            Reservation::Existing(_) => unreachable!(),
+        };
+
+        assert_eq!(reconcile_missing_sessions(&db).await.unwrap(), 0);
+        sqlx::query("UPDATE automation_runs SET updated_at = '2000-01-01T00:00:00.000Z'")
+            .execute(&db)
+            .await
+            .unwrap();
+        assert_eq!(reconcile_missing_sessions(&db).await.unwrap(), 1);
+        assert_eq!(
+            get(&db, &run.id).await.unwrap().unwrap().status,
+            "cancelled"
+        );
     }
 }

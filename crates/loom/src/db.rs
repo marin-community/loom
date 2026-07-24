@@ -97,6 +97,7 @@ async fn migrate_loom(pool: &Db) -> Result<()> {
     crate::profile::backfill_mcp_policies(pool).await?;
     crate::profile::normalize_default(pool).await?;
     crate::profile::seed_stock_profiles(pool).await?;
+    crate::runs::reconcile_missing_sessions(pool).await?;
 
     // Configuration-dependent seeding is intentionally not a migration. If the
     // first start has no owner configured, a later restart must retry it.

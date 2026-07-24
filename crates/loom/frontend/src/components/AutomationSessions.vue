@@ -4,6 +4,7 @@ import type { AutomationRun, Session } from '../types';
 import {
   byAutomationPriority,
   isAutomationHistory,
+  isAutomationRunHistory,
   needsAutomationIntervention,
   runNeedsIntervention,
   unmatchedAutomationRuns,
@@ -22,6 +23,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   toggleHistory: [];
   clearTag: [sessionId: string, key: string];
+  changed: [];
+  error: [message: string];
 }>();
 
 const interventions = computed(() =>
@@ -45,7 +48,12 @@ const failedRuns = computed(() =>
 );
 const creatingRuns = computed(() =>
   unmatched.value
-    .filter((run) => !runNeedsIntervention(run))
+    .filter((run) => !runNeedsIntervention(run) && !isAutomationRunHistory(run))
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at)),
+);
+const historyRuns = computed(() =>
+  unmatched.value
+    .filter(isAutomationRunHistory)
     .sort((a, b) => b.updated_at.localeCompare(a.updated_at)),
 );
 
@@ -87,6 +95,8 @@ const parentById = computed(() => {
           tone="intervention"
           :clearing-tag="clearingTag"
           @clear-tag="(key) => emit('clearTag', session.id, key)"
+          @changed="emit('changed')"
+          @error="(message) => emit('error', message)"
         />
 
         <AutomationRunRow v-for="run in failedRuns" :key="run.id" :run="run" intervention />
@@ -122,6 +132,8 @@ const parentById = computed(() => {
           tone="active"
           :clearing-tag="clearingTag"
           @clear-tag="(key) => emit('clearTag', session.id, key)"
+          @changed="emit('changed')"
+          @error="(message) => emit('error', message)"
         />
 
         <AutomationRunRow
@@ -149,7 +161,9 @@ const parentById = computed(() => {
           >▸</span
         >
         <span id="automation-history-heading">History</span>
-        <span class="font-mono lowercase tracking-normal">{{ history.length }}</span>
+        <span class="font-mono lowercase tracking-normal">{{
+          history.length + historyRuns.length
+        }}</span>
         <span class="h-px flex-1 bg-line"></span>
       </button>
 
@@ -166,8 +180,20 @@ const parentById = computed(() => {
           :parent="session.parent_id ? parentById.get(session.parent_id) : undefined"
           tone="history"
           :clearing-tag="clearingTag"
+          @changed="emit('changed')"
+          @error="(message) => emit('error', message)"
         />
-        <li v-if="!history.length" class="px-3 py-4 text-center text-sm text-muted">
+        <AutomationRunRow
+          v-for="run in historyRuns"
+          :key="run.id"
+          :run="run"
+          :intervention="false"
+          history
+        />
+        <li
+          v-if="!history.length && !historyRuns.length"
+          class="px-3 py-4 text-center text-sm text-muted"
+        >
           No automation history yet.
         </li>
       </ul>

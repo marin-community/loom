@@ -15,6 +15,7 @@ import AutomationSessions from '../components/AutomationSessions.vue';
 import { timeAgo } from '../lib/time';
 import {
   isAutomationHistory,
+  isAutomationRunHistory,
   needsAutomationIntervention,
   runNeedsIntervention,
   unmatchedAutomationRuns,
@@ -86,7 +87,7 @@ const unmatchedRuns = computed(() => unmatchedAutomationRuns(runs.value, automat
 const liveAutomationCount = computed(
   () =>
     automationSessions.value.filter((session) => !isAutomationHistory(session)).length +
-    unmatchedRuns.value.length,
+    unmatchedRuns.value.filter((run) => !isAutomationRunHistory(run)).length,
 );
 const automationInterventionCount = computed(
   () =>
@@ -952,6 +953,8 @@ async function handleCreated() {
       :clearing-tag="clearingTag"
       @toggle-history="toggleAutomationHistory"
       @clear-tag="clearTag"
+      @changed="refresh"
+      @error="error = $event"
     />
   </div>
 </template>

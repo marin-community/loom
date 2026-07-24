@@ -63,6 +63,7 @@ impl Env {
             ide: std::sync::Arc::new(loom::ide::IdeManager::new(loom::ide::ide_home())),
             trigger,
             acp: loom::acp::AcpRegistry::new(),
+            launch_gate: loom::launch_gate::RepoLaunchGate::default(),
         };
         tokio::spawn(server::serve(state, listener));
 

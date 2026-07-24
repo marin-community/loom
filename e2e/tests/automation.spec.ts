@@ -248,6 +248,37 @@ test.describe("automation session surface", () => {
     await expect(page.getByTestId("automation-history")).toBeVisible();
   });
 
+  test("automation sessions expose the same lifecycle controls as workspace sessions", async ({
+    page,
+    weaver,
+  }) => {
+    const session = await seedAutomationSession(
+      weaver.baseUrl,
+      weaver.repoPath,
+      {
+        name: "administer-run",
+        goal: "Administer this automation",
+      },
+    );
+
+    await page.goto(`${weaver.baseUrl}/?view=automation`);
+    const active = page
+      .getByTestId("automation-active")
+      .locator(`[data-session-id="${session.id}"]`);
+    await active.hover();
+    await active.getByTestId("row-actions").click();
+    page.once("dialog", (dialog) => dialog.accept());
+    await active.getByTestId("row-action-archive").click();
+    await expect(active).toHaveCount(0);
+
+    await page.getByTestId("automation-history-toggle").click();
+    await expect(
+      page
+        .getByTestId("automation-history")
+        .locator(`[data-session-id="${session.id}"]`),
+    ).toBeVisible();
+  });
+
   test("a failed launch with no session remains visible", async ({
     page,
     weaver,
@@ -304,10 +335,26 @@ test.describe("automation session surface", () => {
             service_tag: "comment-rewriter",
             profile: "default",
             idempotency_key: "running-reservation",
+            channel: null,
             session_id: "not-yet-visible",
             status: "running",
             outcome: null,
             summary: "",
+            created_at: now,
+            updated_at: now,
+          },
+          {
+            id: "cancelled-reservation",
+            actor_subject: "automation:test",
+            source: "actions",
+            service_tag: "comment-rewriter",
+            profile: "default",
+            idempotency_key: "cancelled-reservation",
+            channel: null,
+            session_id: "removed-session",
+            status: "cancelled",
+            outcome: "cancelled",
+            summary: "session removed by user",
             created_at: now,
             updated_at: now,
           },
@@ -321,10 +368,14 @@ test.describe("automation session surface", () => {
       0,
     );
     await expect(
-      page
-        .getByTestId("automation-active")
-        .getByTestId("automation-run-only"),
+      page.getByTestId("automation-active").getByTestId("automation-run-only"),
     ).toContainText("running");
     await expect(page.getByTestId("automation-interventions")).toHaveCount(0);
+    await page.getByTestId("automation-history-toggle").click();
+    await expect(
+      page
+        .getByTestId("automation-history")
+        .getByTestId("automation-run-only"),
+    ).toContainText("Run cancelled");
   });
 });

@@ -26,6 +26,7 @@ pub mod github_app;
 pub mod github_manifest;
 pub mod github_trigger;
 pub mod ide;
+pub mod launch_gate;
 pub mod logs;
 pub mod loom_config;
 pub mod mcp;

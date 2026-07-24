@@ -665,15 +665,6 @@ pub(crate) async fn provision_session(
             "strict profile '{profile_name}' does not allow launch overrides"
         )));
     }
-    if launch_profile.max_concurrent > 0
-        && crate::profile::active_count(&st.db, &profile_name).await?
-            >= launch_profile.max_concurrent
-    {
-        return Err(AppError::conflict(format!(
-            "profile '{profile_name}' has reached its max_concurrent limit ({})",
-            launch_profile.max_concurrent
-        )));
-    }
     // The session's class — automation machinery vs interactive fleet work. An
     // explicit request value wins (validated); otherwise derived from the origin.
     // github/slack default to interactive deliberately: a person asked for that
@@ -697,12 +688,12 @@ pub(crate) async fn provision_session(
             _ => launch_profile.class.clone(),
         },
     };
-    // Resolve the repo root. An explicit managed `repo` (a slug/URL) is
-    // allowlist-checked and cloned-if-absent into the managed store, then used
-    // directly; otherwise fork from `cwd`'s repo (the default). The traversal /
-    // allowlist gate lives in `repo::resolve_clone`.
-    let repo_root = match req.repo.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(input) => repo::resolve_clone(&st.db, input, st.trigger.app())
+    let managed_repo = req.repo.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    // Resolve the stable repository identity without mutating it, then hold its
+    // launch permit through clone/fetch, worktree setup, and agent startup. A
+    // different repository gets a different permit and remains independent.
+    let repo_key = match managed_repo {
+        Some(input) => repo::registered_path(&st.db, input)
             .await
             .map_err(|e| match e {
                 repo::ResolveError::BadRequest(m) => AppError::bad_request(m),
@@ -714,6 +705,35 @@ pub(crate) async fn provision_session(
                 .await
                 .map_err(|e| AppError::bad_request(e.to_string()))?
         }
+    };
+    let repo_key = repo_key.canonicalize().unwrap_or(repo_key);
+    tracing::debug!(repo = %repo_key.display(), "waiting for repository launch gate");
+    let launch_permit = st.launch_gate.acquire(&repo_key).await;
+    tracing::debug!(repo = %repo_key.display(), "acquired repository launch gate");
+
+    // Recheck capacity only after reaching the front of the repository queue.
+    // Earlier launches have inserted their live session rows by this point, so
+    // a burst cannot all observe the same stale count and over-admit itself.
+    if launch_profile.max_concurrent > 0
+        && crate::profile::active_count(&st.db, &profile_name).await?
+            >= launch_profile.max_concurrent
+    {
+        return Err(AppError::conflict(format!(
+            "profile '{profile_name}' has reached its max_concurrent limit ({})",
+            launch_profile.max_concurrent
+        )));
+    }
+
+    // Now acquire the managed clone (inside the gate), or reuse the local root
+    // resolved above. The traversal / allowlist boundary lives in `repo`.
+    let repo_root = match managed_repo {
+        Some(input) => repo::resolve_clone(&st.db, input, st.trigger.app())
+            .await
+            .map_err(|e| match e {
+                repo::ResolveError::BadRequest(m) => AppError::bad_request(m),
+                repo::ResolveError::Clone(m) => AppError::new(StatusCode::BAD_GATEWAY, m),
+            })?,
+        None => repo_key,
     };
     // Canonicalize so repo identity matches the `weaver` CLI's resolver — issues
     // are keyed on this path and the two binaries must agree on it.
@@ -1448,6 +1468,9 @@ pub(crate) async fn provision_session(
         session
     };
     tracing::debug!(session = %session.id, status = %status, "inserted session row");
+    // The next launch may begin once this agent is live. The remaining writes
+    // are bookkeeping and do not touch repository or worktree state.
+    drop(launch_permit);
 
     if let Err(e) = repo::record_use(&st.db, &branch.repo_root).await {
         tracing::warn!(branch = %branch.id, error = %e, "failed to record recent repo");
@@ -1771,6 +1794,7 @@ pub(super) async fn delete_session(
         .await
         .ok();
     crate::auth::revoke_session_tokens(&st.db, &session.id).await?;
+    crate::runs::cancel_for_session(&st.db, &session.id).await?;
     session_mod::delete(&st.db, &session.id).await?;
     // Release this branch's claimed issues back to the repo backlog before the
     // branch row goes away — issues are repo-owned and must outlive teardown.
@@ -2004,6 +2028,7 @@ pub(crate) async fn create_warm_session(
     let repo_root = repo_root
         .canonicalize()
         .unwrap_or_else(|_| repo_root.to_path_buf());
+    let launch_permit = st.launch_gate.acquire(&repo_root).await;
     let repo_root_str = repo_root.display().to_string();
     let base = git::default_base(&repo_root).await?;
 
@@ -2176,6 +2201,7 @@ pub(crate) async fn create_warm_session(
         ));
     }
     tracing::info!(watch = %watch.id, session = %session_id, "warm session agent terminal launched");
+    drop(launch_permit);
 
     repo::record_use(&st.db, &repo_root_str).await.ok();
     tracing::info!(
@@ -3819,6 +3845,7 @@ mod tests {
             ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
             trigger: crate::github_trigger::GithubTrigger::production(db.clone()),
             acp: crate::acp::AcpRegistry::new(),
+            launch_gate: crate::launch_gate::RepoLaunchGate::default(),
         };
         let child = branch_mod::upsert(&db, "/r", "weaver/child", "main")
             .await

@@ -112,6 +112,7 @@ async fn hook_event_drives_session_status() {
         ide: std::sync::Arc::new(loom::ide::IdeManager::new(loom::ide::ide_home())),
         trigger: loom::github_trigger::GithubTrigger::production(pool.clone()),
         acp: loom::acp::AcpRegistry::new(),
+        launch_gate: loom::launch_gate::RepoLaunchGate::default(),
     };
     tokio::spawn(server::serve(state, listener));
 

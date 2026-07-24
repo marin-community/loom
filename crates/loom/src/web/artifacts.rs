@@ -434,6 +434,7 @@ mod tests {
             ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
             trigger: crate::github_trigger::GithubTrigger::production(db),
             acp: crate::acp::AcpRegistry::new(),
+            launch_gate: crate::launch_gate::RepoLaunchGate::default(),
         }
     }
 

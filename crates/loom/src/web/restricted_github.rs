@@ -284,6 +284,7 @@ mod tests {
             ide: Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
             trigger: crate::github_trigger::GithubTrigger::with_app(app),
             acp: crate::acp::AcpRegistry::new(),
+            launch_gate: crate::launch_gate::RepoLaunchGate::default(),
         };
         let repo = crate::repo::parse_slug("marin-community/loom").unwrap();
 
