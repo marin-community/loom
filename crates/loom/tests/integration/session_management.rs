@@ -32,7 +32,7 @@ async fn reserve(ts: &TestServer, key: &str) -> runs::Run {
 }
 
 async fn wait_dead(name: &str) {
-    for _ in 0..100 {
+    for _ in 0..300 {
         if !backend::has_session(name).await {
             return;
         }

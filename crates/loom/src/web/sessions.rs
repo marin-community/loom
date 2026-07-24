@@ -1948,7 +1948,9 @@ async fn remove_locked(
     // Cancellation is the durable boundary: an automation request that
     // finishes provisioning after this point cannot promote itself.
     crate::runs::cancel_for_session(&st.db, &session.id).await?;
-    backend::kill_session_and_wait(&session.term_session).await?;
+    if let Err(error) = backend::kill_session_and_wait(&session.term_session).await {
+        warnings.push(format!("terminal remove: {error}"));
+    }
     if session.protocol == "acp" {
         st.acp.stop(&session.id);
     }
