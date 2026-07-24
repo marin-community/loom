@@ -282,8 +282,15 @@ async fn reap_automation(state: &AppState, sessions: &[Session], now: DateTime<U
         };
         tracing::info!(id = %session.id, branch = %branch.branch, ?reason,
             "reaping automation session");
-        if let Err(e) = crate::web::archive(state, session, &branch).await {
-            tracing::warn!(id = %session.id, error = %e.message(), "reaper: archive failed");
+        match crate::web::auto_archive(state, session, &branch).await {
+            Ok(Some(_)) => {}
+            Ok(None) => tracing::info!(
+                id = %session.id,
+                "reaper: automatic archive disabled by session tag"
+            ),
+            Err(e) => {
+                tracing::warn!(id = %session.id, error = %e.message(), "reaper: archive failed")
+            }
         }
     }
 }

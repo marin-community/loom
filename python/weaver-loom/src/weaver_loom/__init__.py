@@ -414,6 +414,18 @@ class Client:
             body["by"] = by
         return self._request("PUT", f"/sessions/{key}/tags/{tag_key}", body)
 
+    def set_tags(self, key, tags, by=None, clear=None):
+        """Atomically replace this author's complete tag set on a session.
+
+        ``clear`` contains exact ``{"key", "value"}`` lifecycle marks to
+        remove in the same transaction. Needs ``mark``.
+        """
+        self._gate("mark")
+        body = {"tags": tags, "clear": clear or []}
+        if by is not None:
+            body["by"] = by
+        return self._request("PUT", f"/sessions/{key}/tags", body)
+
     def clear_tag(self, key, tag_key, by=None):
         """Clear a tag — how a loud axis returns to calm; needs ``mark``.
         ``by`` attributes the clear (a watch name)."""

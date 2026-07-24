@@ -1527,6 +1527,61 @@ async fn interrupt_cancels_the_turn() {
     );
 }
 
+/// Some adapters emit a presentation-only "Conversation interrupted" chunk
+/// after acknowledging cancellation. If the user immediately starts another
+/// turn, that late chunk must not become durable agent prose at the new
+/// conversation tail.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupt_notice_does_not_leak_below_the_restarted_turn() {
+    let ts = TestServer::start().await;
+    start_new_with_env(
+        &ts,
+        "acp-int-restart",
+        None,
+        None,
+        vec![("FAKE_ACP_CANCEL_NOTICE".to_string(), "1".to_string())],
+    )
+    .await;
+
+    ts.client
+        .post(
+            "/api/sessions/acp-int-restart/prompt",
+            json!({ "text": "wait:3000|say:unreached" }),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    ts.client
+        .post("/api/sessions/acp-int-restart/interrupt", json!({}))
+        .await
+        .unwrap();
+    ts.client
+        .post(
+            "/api/sessions/acp-int-restart/prompt",
+            json!({ "text": "wait:100|tool:other:continued work|say:continued" }),
+        )
+        .await
+        .unwrap();
+
+    let chat = poll_chat(&ts, "acp-int-restart", Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|block| {
+            block["kind"] == "agent_message" && block["payload"]["text"] == "continued"
+        })
+    })
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert!(
+        !blocks.iter().any(|block| {
+            block["kind"] == "agent_message"
+                && block["payload"]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("Conversation interrupted"))
+        }),
+        "the adapter's late cancel notice must not be journaled under the restarted turn: {blocks:?}"
+    );
+}
+
 /// Stop is a user-owned boundary: unseen feedback stays queued instead of
 /// immediately making the session work again, and can be sent explicitly from
 /// the idle state.

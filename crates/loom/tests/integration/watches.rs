@@ -1075,15 +1075,30 @@ async fn builtin_scripts_report_merged_and_unlabelled_prs() {
     let ts = TestServer::start().await;
     let state = engine_state(&ts).await;
     let (merged_id, merged_branch, _repo) = make_session(&ts, "merged work").await;
+    let (_kept_id, kept_branch, _repo) = make_session(&ts, "kept merged work").await;
     let (open_id, open_branch, _repo) = make_session(&ts, "open work").await;
     loom::github::upsert_status(&state.db, &merged_branch, &pr_snapshot("MERGED", 41))
         .await
         .unwrap();
+    loom::github::upsert_status(&state.db, &kept_branch, &pr_snapshot("MERGED", 43))
+        .await
+        .unwrap();
+    weaver_core::tags::set(
+        &state.db,
+        &kept_branch,
+        weaver_core::tags::AUTO_ARCHIVE_KEY,
+        weaver_core::tags::AUTO_ARCHIVE_DISABLED_VALUE,
+        "keep it",
+        "manual",
+    )
+    .await
+    .unwrap();
     loom::github::upsert_status(&state.db, &open_branch, &pr_snapshot("OPEN", 42))
         .await
         .unwrap();
 
-    // archive-merged: exactly the merged session is reported, as a would-do.
+    // archive-merged: exactly the merged session without the per-session
+    // automatic-retention opt-out is reported, as a would-do.
     enabled_watch(
         &state,
         watch_store::NewWatch {

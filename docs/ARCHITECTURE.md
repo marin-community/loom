@@ -264,7 +264,8 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `GET POST /api/runs`; `GET /api/runs/{id}` | durable, subject-scoped automation runs with idempotency reservation; an optional channel routes distinct deliveries through one live ACP session, and verified GitHub callers may provide a validated deterministic key or use the workflow run/attempt |
 | `POST /api/sessions/{id}/restricted-github/{tool}` | session-token-scoped fixed GitHub operations for a restricted session; checks stamped tool policy, fixes the target repository and thread from the session, and resolves a GitHub App token or explicit App-less profile token server-side |
 | `GET PATCH DELETE /api/sessions/{id}` | session CRUD (status, title, goal, description) |
-| `PUT DELETE /api/sessions/{id}/tags/{key}` | set (upsert) / clear a branch tag — the well-known `attention` and `triage` keys plus any free-form key |
+| `PUT DELETE /api/sessions/{id}/tags/{key}` | set (upsert) / clear one branch tag — the well-known `attention` and `triage` keys plus any free-form key |
+| `PUT /api/sessions/{id}/tags` | atomically replace one author's complete tag set, with optional exact `(key, value)` clears for lifecycle marks; the watch-safe write path |
 | `GET /api/sessions/{id}/url` | the session's dashboard URL as `{url}`, built from the externally-visible origin (`auth.base_url`, else the request's own Host) — what `loom session url` prints, so an agent can link a PR back to its session without inventing a loopback link |
 | `POST /api/sessions/{id}/{archive,adopt}` | actions |
 | `POST /api/sessions/{id}/handoff` | replace an idle ACP session's agent runtime/profile while preserving its loom session, worktree, branch, and canonical chat journal; the new provider receives a bounded dialogue replay and the journal records a compact handoff boundary |
@@ -511,13 +512,17 @@ wins, so an explicit declaration overrides the hook-inferred default. The
 general `weaver tag set|rm|ls` group writes any key the same way, over the
 branch-scoped `PUT`/`DELETE /api/branches/{key}/tags/{key}` routes; the
 session-scoped `PUT`/`DELETE /api/sessions/{id}/tags/{key}` routes serve the
-UI and the [watch](plans/watches.md). The builtin status watch, when a
-session goes idle (the agent's finished-turn hook), asks the judge model for the
-set of tags the session warrants and reconciles its own typed marks to that set
-— never mirroring the agent's own `attention`. When the judge names a genuine
-need, that session is actively waiting, not resting, so the watch *replaces* the
-soothing `idle` mark with the real loud status; a "nothing needed" verdict leaves
-`idle` in place.
+UI. Watches replace their complete author-scoped set through one
+`PUT /api/sessions/{id}/tags` transaction. The transaction removes only rows
+still attributed to that watch, so a stale round cannot delete a key another
+actor took over after the round's fleet snapshot; exact `(key, value)` clears
+handle lifecycle marks such as `idle: idle` without a key-only race. The builtin
+status watch, when a session goes idle (the agent's finished-turn hook), asks the
+judge model for the set of tags the session warrants and reconciles its own
+typed marks to that set — never mirroring the agent's own `attention`. When the
+judge names a genuine need, that session is actively waiting, not resting, so
+the watch *replaces* the soothing `idle` mark with the real loud status; a
+"nothing needed" verdict leaves `idle` in place.
 
 Archiving a session clears its loud tags **and** the soothing `idle` mark: the
 agent is gone, so a torn-down workstream can't still "need me" nor is it
@@ -557,6 +562,14 @@ once the terminal is gone (orphaned/done/archived), leaving the read-only log.
 Orphan detection is independent: if the session's supervisor is no longer alive,
 the session becomes `orphaned` and is eligible for `loom adopt`.
 
+Archive and recovery serialize their external supervisor/worktree changes.
+Archive waits for the supervisor to disappear before committing `archived`;
+recovery first moves `archived → created` with a compare-and-set, which reserves
+the branch's unique active-session slot before it rebuilds or launches anything.
+A failed recovery cleans up its new external state before restoring `archived`.
+Recovery also repairs historical partial archives by adopting an already-live
+supervisor instead of leaving the row in an unusable in-between state.
+
 **Automation lifecycle.** A `class = automation` session — every session not
 launched interactively by a human, excluding a watch's own warm sessions —
 carries a turn cap (`automation.turn_cap`, default `100`, `0` disables)
@@ -566,7 +579,9 @@ reaps automation sessions: one is archived once its `tracking_issue_id`
 closes, or after `automation.idle_archive_secs` (default `28800`, `0`
 disables) of inactivity — both guarded by a no-live-turn check and a grace
 period, so a session mid-turn or only just gone quiet is never torn down out
-from under it. The `automation.*` settings live in
+from under it. Every automatic retention path skips a branch carrying the exact
+quiet tag `auto-archive: disabled`; the session Manage menu toggles it, while a
+manual Archive deliberately ignores it. The `automation.*` settings live in
 `weaver-core::config::registry()` under the **Automation** group.
 
 ## GitHub integration
@@ -599,11 +614,13 @@ the source of truth for that association.
 
 **Archive on merge.** When a poll finds a branch's PR has merged and
 `github.archive_on_merge` is on (the default), loom archives the session
-automatically — the same teardown as the Archive button (`web::archive`, shared
-code): the terminal killed, worktree removed, branch and weaver history kept. The
-worktree is removed with `--force`, so any uncommitted work in it is discarded;
-a merged PR is taken to mean the workstream is done. Turn the behaviour off with
-`loom config set github.archive_on_merge false` (or in the settings pane).
+automatically — the same teardown as the Archive button: the terminal killed,
+worktree removed, branch and weaver history kept. The worktree is removed with
+`--force`, so any uncommitted work in it is discarded; a merged PR is taken to
+mean the workstream is done. The session-level `auto-archive: disabled` tag
+suppresses this without changing the global policy. Turn the behaviour off
+globally with `loom config set github.archive_on_merge false` (or in the
+settings pane).
 Both settings live in `weaver-core::config::registry()` under the **GitHub**
 group.
 
@@ -797,9 +814,10 @@ A round runs the **program** the watch names:
   `awaiting: review` mark that sinks it below the calm default in the fleet
   sort, and clear it once review lands, the PR merges, or it un-drafts; needs
   `mark`), `builtin:pr-label` (flag sessions whose open PR lacks the loom label)
-  and `builtin:archive-merged` (flag live sessions whose PR has merged). The
-  last two are **read-only**: they record `would:` actions and mutate nothing —
-  the actual archive is still `github.archive_on_merge`, above. The Watch
+  and `builtin:archive-merged` (flag live sessions whose PR has merged, excluding
+  those with `auto-archive: disabled`). The last two are **read-only**: they
+  record `would:` actions and mutate nothing — the actual archive is still
+  `github.archive_on_merge`, above. The Watch
   panel and `loom watch programs` list the registry; script sources
   render read-only (they ship with the binary).
 - **A custom program file** — an absolute path, conventionally

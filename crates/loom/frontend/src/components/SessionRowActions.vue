@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import type { Session } from '../types';
-import { lifecycleActions, shelved } from '../lib/sessionState';
+import { autoArchiveDisabled, lifecycleActions, shelved } from '../lib/sessionState';
 import { useSessionActions } from '../lib/sessionActions';
 
 // A fleet-list row's ⋯ menu: every lifecycle verb that applies to the session
@@ -25,13 +25,14 @@ const actions = computed(() => lifecycleActions(props.ws));
 // a resting one returns. Archived rows read through their own reveal, not here.
 const isShelved = computed(() => shelved(props.ws));
 const canPark = computed(() => props.ws.status !== 'archived');
+const keepsSession = computed(() => autoArchiveDisabled(props.ws));
 
 function togglePark() {
   open.value = false;
   emit('park', isShelved.value ? 'active' : 'parked');
 }
 
-const { busy, error, run } = useSessionActions(
+const { busy, error, setAutoArchiveDisabled, run } = useSessionActions(
   () => props.ws.id,
   () => emit('changed'),
 );
@@ -39,6 +40,12 @@ const { busy, error, run } = useSessionActions(
 async function invoke(verb: Parameters<typeof run>[0]) {
   open.value = false;
   await run(verb);
+  if (error.value) emit('error', error.value);
+}
+
+async function toggleAutoArchive() {
+  await setAutoArchiveDisabled(!keepsSession.value);
+  open.value = false;
   if (error.value) emit('error', error.value);
 }
 </script>
@@ -81,6 +88,31 @@ async function invoke(verb: Parameters<typeof run>[0]) {
         <span class="block text-2xs text-faint">{{
           isShelved ? 'Return it to the live list' : 'Rest it on the shelf — kept, not archived'
         }}</span>
+      </button>
+      <button
+        v-if="ws.status !== 'archived'"
+        type="button"
+        data-testid="row-action-auto-archive"
+        :disabled="!!busy"
+        class="block w-full border-b border-line px-3 py-1.5 text-left text-fg transition-colors hover:bg-subtle disabled:opacity-60"
+        @click="toggleAutoArchive"
+      >
+        <span class="block text-xs font-medium">
+          {{
+            busy === 'auto-archive'
+              ? 'Saving…'
+              : keepsSession
+                ? 'Enable auto-archive'
+                : 'Disable auto-archive'
+          }}
+        </span>
+        <span class="block text-2xs text-faint">
+          {{
+            keepsSession
+              ? 'Allow automatic cleanup again.'
+              : 'Keep this session until you archive it.'
+          }}
+        </span>
       </button>
       <button
         v-for="a in actions"

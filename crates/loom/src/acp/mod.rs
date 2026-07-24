@@ -595,6 +595,11 @@ struct ChunkBuf {
     first_seq: u64,
 }
 
+/// Presentation-only prose some adapters emit after `session/cancel`. Loom's
+/// durable `turn_end(cancelled)` block is the canonical interruption boundary;
+/// keeping this late notice as agent prose can attach it to the next turn.
+const ADAPTER_INTERRUPT_NOTICE: &str = "Conversation interrupted";
+
 /// The last-known state of a tool call, tracked from `tool_call`/`tool_call_update`
 /// until it reaches a terminal status.
 struct LiveTool {
@@ -781,6 +786,10 @@ struct Task {
     /// end is taken from codex-acp's `session_info_update` idle edge.
     external_turn: bool,
     pending_external: Option<PendingSteer>,
+    /// A cancelled turn may be followed by the adapter's presentation-only
+    /// "Conversation interrupted" prose after the next turn has already begun.
+    /// Consume that one notice rather than journaling it under the wrong turn.
+    pending_interrupt_notice_through: Option<i64>,
     /// Latched for the duration of a `session/load` replay: the adapter re-streams
     /// the whole conversation as `session/update` notifications, but we already
     /// hold it in the journal, so journal writes are suppressed (and the seq
@@ -836,6 +845,7 @@ impl Task {
             pending_steers: HashMap::new(),
             external_turn: false,
             pending_external: None,
+            pending_interrupt_notice_through: None,
             suppress_journal: false,
             highest_seq: 0,
             acked: 0,
@@ -912,6 +922,7 @@ impl Task {
             pending_steers: HashMap::new(),
             external_turn,
             pending_external: None,
+            pending_interrupt_notice_through: None,
             suppress_journal: false,
             highest_seq: session.acp_ack_seq.max(0) as u64,
             acked: session.acp_ack_seq.max(0) as u64,
@@ -1482,6 +1493,18 @@ impl Task {
     async fn flush_buf(&mut self) {
         let Some(b) = self.buf.take() else { return };
         let (kind, payload) = match b.kind {
+            kind::AGENT_MESSAGE
+                if self
+                    .pending_interrupt_notice_through
+                    .is_some_and(|through| self.current_turn <= through)
+                    && b.text.trim() == ADAPTER_INTERRUPT_NOTICE =>
+            {
+                self.pending_interrupt_notice_through = None;
+                // Journal an empty block so the ordinary `block` SSE clears the
+                // already-streamed shadow in connected browsers. Empty agent
+                // prose is ignored by the renderer and handoff history.
+                (kind::AGENT_MESSAGE, json!({ "text": "" }))
+            }
             kind::AGENT_MESSAGE => (kind::AGENT_MESSAGE, json!({ "text": b.text })),
             kind::THOUGHT => (kind::THOUGHT, json!({ "text": b.text, "ms": Value::Null })),
             _ => return,
@@ -1875,6 +1898,12 @@ impl Task {
             return;
         }
         self.current_turn = turn;
+        if self
+            .pending_interrupt_notice_through
+            .is_some_and(|through| self.current_turn > through)
+        {
+            self.pending_interrupt_notice_through = None;
+        }
         self.next_seq = 0;
         self.turns_dispatched += 1;
         self.turn_live = true;
@@ -2000,6 +2029,12 @@ impl Task {
         if self.turns_dispatched > 0 {
             self.current_turn += 1;
             self.next_seq = 0;
+        }
+        if self
+            .pending_interrupt_notice_through
+            .is_some_and(|through| self.current_turn > through)
+        {
+            self.pending_interrupt_notice_through = None;
         }
         self.turns_dispatched += 1;
         self.turn_live = true;
@@ -2187,6 +2222,11 @@ impl Task {
             ))
             .await;
         if result.is_ok() && self.turn_live {
+            // The adapter notice belongs to the cancelled turn even when it
+            // arrives after an immediate restart. Bound suppression to that
+            // turn and its direct successor so unrelated future prose is never
+            // mistaken for adapter chrome if this adapter emits no notice.
+            self.pending_interrupt_notice_through = Some(self.current_turn + 1);
             for (_, pending) in self.pending_steers.drain() {
                 if let Some(reply) = pending.reply {
                     let _ = reply.send(Err(anyhow!("turn was cancelled")));

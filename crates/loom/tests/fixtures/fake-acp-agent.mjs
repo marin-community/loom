@@ -24,6 +24,9 @@
 //
 // The turn ends with stop reason `end_turn`, or `cancelled` if a `session/cancel`
 // arrived (or a pending permission was answered `cancelled`) while it ran.
+// `FAKE_ACP_CANCEL_NOTICE=1` additionally emits the presentation-only
+// "Conversation interrupted" agent chunk shortly after cancellation, matching
+// adapters that can race that notice against the next prompt.
 
 import { createInterface } from "node:readline";
 
@@ -362,6 +365,14 @@ function handleMessage(msg) {
       break;
     case "session/cancel":
       cancelled = true;
+      if (process.env.FAKE_ACP_CANCEL_NOTICE === "1") {
+        setTimeout(() => {
+          notify({
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "Conversation interrupted" },
+          });
+        }, 25);
+      }
       break;
     default:
       // Unknown request: answer with an empty result so nothing hangs.

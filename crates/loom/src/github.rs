@@ -912,20 +912,26 @@ pub(crate) async fn apply_snapshot(
         && !session_mod::is_terminal(&session.status)
         && !recovered
     {
-        // Archive releases the branch's issue claims back to the backlog. Close
-        // the shipped work first so the existing merge lifecycle still finds
-        // those issues; archive then clears ownership from the closed rows too.
-        close_claimed_issues(state, branch, snap.pr_number).await;
+        // Snapshot the shipped work before archive releases its claims. It is
+        // closed only after auto_archive has rechecked the per-session opt-out
+        // and successfully torn the session down.
+        let claimed = claimed_issues(state, branch).await;
         // The merge is already on the record as a `github` event (above) and the
         // archive records a `status` event, so no extra log line is needed.
-        match crate::web::archive(state, session, branch).await {
-            Ok(_) => {
+        match crate::web::auto_archive(state, session, branch).await {
+            Ok(Some(_)) => {
+                close_claimed_issues(state, branch, snap.pr_number, &claimed).await;
                 tracing::info!(
                     branch = %branch.branch,
                     pr = snap.pr_number,
                     "archived session after PR merge"
                 );
             }
+            Ok(None) => tracing::info!(
+                branch = %branch.branch,
+                pr = snap.pr_number,
+                "archive-on-merge skipped by session tag"
+            ),
             Err(e) => tracing::warn!(
                 branch = %branch.branch,
                 error = %e.message(),
@@ -1005,38 +1011,51 @@ async fn maybe_post_backlink(
     tracing::info!(session = %session.id, repo = %slug, pr = snap.pr_number, "posted loom back-link comment on PR");
 }
 
-/// Close every open weaver issue the merged branch was working and log each
-/// closure to its activity feed. The session is being torn down because its PR
-/// shipped, so the tracking issues it claimed close out with it — emitting the
-/// same `issue_closed` event `weaver issue close` records, so the dashboard
-/// reacts identically whether a person or the merge closed them. Best-effort: a
-/// hiccup here only loses the auto-close and must not prevent the session
-/// archive that follows.
-async fn close_claimed_issues(state: &AppState, branch: &Branch, pr: i64) {
-    let closed = match weaver_core::issue::close_for_branch(
-        &state.db,
-        &branch.repo_root,
-        &branch.branch,
-    )
-    .await
+/// Snapshot the open issues a branch owns before archive releases its claims.
+/// Best-effort: issue cleanup must never prevent the session teardown.
+async fn claimed_issues(state: &AppState, branch: &Branch) -> Vec<weaver_core::issue::Issue> {
+    match weaver_core::issue::list_for_branch(&state.db, &branch.repo_root, &branch.branch, false)
+        .await
     {
-        Ok(ids) => ids,
+        Ok(issues) => issues,
         Err(e) => {
-            tracing::warn!(branch = %branch.branch, error = %e, "closing claimed issues on PR merge failed");
-            return;
+            tracing::warn!(branch = %branch.branch, error = %e, "could not inspect claimed issues before merge archive");
+            Vec::new()
         }
-    };
-    for id in closed {
+    }
+}
+
+/// Close the issues captured before a successful merge archive and log each
+/// closure to its activity feed. Re-read each row first: archive unclaimed it,
+/// but another session may already have picked it up, in which case it is no
+/// longer ours to close.
+async fn close_claimed_issues(
+    state: &AppState,
+    branch: &Branch,
+    pr: i64,
+    claimed: &[weaver_core::issue::Issue],
+) {
+    for captured in claimed {
+        let Ok(Some(current)) = weaver_core::issue::get(&state.db, captured.id).await else {
+            continue;
+        };
+        if current.status != "open" || current.claimed_branch.is_some() {
+            continue;
+        }
+        if let Err(e) = weaver_core::issue::close(&state.db, current.id).await {
+            tracing::warn!(branch = %branch.branch, issue = current.id, error = %e, "could not close claimed issue after merge");
+            continue;
+        }
         events::record(
             &state.db,
             &state.bus,
             &branch.id,
             "issue_closed",
-            json!({ "id": id, "reason": "pr_merged", "pr": pr }),
+            json!({ "id": current.id, "reason": "pr_merged", "pr": pr }),
         )
         .await
         .ok();
-        tracing::info!(branch = %branch.branch, issue = id, pr, "closed claimed issue after PR merge");
+        tracing::info!(branch = %branch.branch, issue = current.id, pr, "closed claimed issue after PR merge");
     }
 }
 
@@ -1460,6 +1479,47 @@ mod tests {
         )
         .await
         .unwrap();
+        apply_snapshot(&f.state, &f.session, &f.branch, &snapshot("MERGED"), true)
+            .await
+            .unwrap();
+
+        let session = session_mod::get(&f.state.db, &f.session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.status, "running");
+        assert!(f.work_dir.exists());
+        let open_issue = weaver_core::issue::get(&f.state.db, issue.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(open_issue.status, "open");
+    }
+
+    #[tokio::test]
+    async fn merged_pr_respects_the_session_auto_archive_opt_out() {
+        let f = fixture().await;
+        tags::set(
+            &f.state.db,
+            &f.branch.id,
+            tags::AUTO_ARCHIVE_KEY,
+            tags::AUTO_ARCHIVE_DISABLED_VALUE,
+            "keep this session",
+            "manual",
+        )
+        .await
+        .unwrap();
+        let issue = weaver_core::issue::add(
+            &f.state.db,
+            &weaver_core::issue::NewIssue {
+                repo_root: f.branch.repo_root.clone(),
+                claimed_branch: Some(f.branch.branch.clone()),
+                title: "keep working".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 
         apply_snapshot(&f.state, &f.session, &f.branch, &snapshot("MERGED"), true)
             .await
@@ -1476,6 +1536,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(open_issue.status, "open");
+        assert_eq!(
+            open_issue.claimed_branch.as_deref(),
+            Some(f.branch.branch.as_str())
+        );
     }
 
     #[tokio::test]

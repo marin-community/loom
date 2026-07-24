@@ -86,7 +86,11 @@ def main(rnd):
             note = f"PR #{pr} review required — waiting on an external reviewer"
             parked += 1
             if can_mark and not rnd.dry_run:
-                rnd.client.set_tag(sid, AWAITING_KEY, REVIEW_VALUE, note, by=rnd.name)
+                rnd.client.set_tags(
+                    sid,
+                    [{"key": AWAITING_KEY, "value": REVIEW_VALUE, "note": note}],
+                    by=rnd.name,
+                )
                 rnd.did("park", session=sid, key=AWAITING_KEY, value=REVIEW_VALUE, note=note)
             else:
                 rnd.would("park", session=sid, key=AWAITING_KEY, value=REVIEW_VALUE, note=note)
@@ -95,7 +99,7 @@ def main(rnd):
             # un-park so the row returns to its normal slot.
             cleared += 1
             if can_mark and not rnd.dry_run:
-                rnd.client.clear_tag(sid, AWAITING_KEY, by=rnd.name)
+                rnd.client.set_tags(sid, [], by=rnd.name)
                 rnd.did("unpark", session=sid, key=AWAITING_KEY)
             else:
                 rnd.would("unpark", session=sid, key=AWAITING_KEY)

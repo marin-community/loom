@@ -421,6 +421,24 @@ pub async fn set_status(db: &Db, id: &str, status: &str) -> Result<()> {
     Ok(())
 }
 
+/// Atomically reserve an archived session's branch slot for recovery.
+///
+/// `archived` rows do not participate in the one-active-session-per-branch
+/// index. Moving to `created` before rebuilding a worktree or launching a
+/// supervisor makes SQLite arbitrate a concurrent re-let of that slot before
+/// any external state is touched. Returns false when the row is no longer
+/// archived (including a concurrent recovery that already claimed it).
+pub async fn claim_recovery(db: &Db, id: &str) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE sessions SET status = 'created'
+         WHERE id = ? AND status = 'archived'",
+    )
+    .bind(id)
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
 /// Count one completed agent turn: increment [`Session::turn_count`] and return
 /// the new total. Called at each turn boundary (the monitor's terminal turn
 /// detection, the ACP task's turn end).
@@ -823,6 +841,47 @@ mod tests {
         assert!(
             !mark_orphaned(&db, "orphan").await.unwrap(),
             "an already-orphaned row does not emit another edge"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_claim_is_compare_and_set() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let branch = branch_id(&db, "weaver/recover-claim").await;
+        let mut archived = new_session("recover-claim", &branch, None);
+        archived.status = "archived".to_string();
+        insert(&db, &archived).await.unwrap();
+
+        assert!(claim_recovery(&db, "recover-claim").await.unwrap());
+        assert_eq!(
+            get(&db, "recover-claim").await.unwrap().unwrap().status,
+            "created"
+        );
+        assert!(
+            !claim_recovery(&db, "recover-claim").await.unwrap(),
+            "a second recovery cannot claim the same archived row"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_claim_loses_to_an_active_session_on_the_same_branch() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let branch = branch_id(&db, "weaver/recover-slot").await;
+        let mut archived = new_session("recover-slot-old", &branch, None);
+        archived.status = "archived".to_string();
+        insert(&db, &archived).await.unwrap();
+        insert(&db, &new_session("recover-slot-live", &branch, None))
+            .await
+            .unwrap();
+
+        assert!(
+            claim_recovery(&db, "recover-slot-old").await.is_err(),
+            "the unique active-branch index arbitrates the recovery claim"
+        );
+        assert_eq!(
+            get(&db, "recover-slot-old").await.unwrap().unwrap().status,
+            "archived",
+            "a failed claim leaves the archived row unchanged"
         );
     }
 

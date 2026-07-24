@@ -117,20 +117,26 @@ def main(rnd):
             continue
 
         tagged += len(desired)
-        for t in desired:
-            if rnd.dry_run:
+        cleared = sorted(stale) + ([IDLE_KEY] if replace_idle else [])
+        if rnd.dry_run:
+            for t in desired:
                 rnd.would("tag", session=sid, **t)
-            else:
-                rnd.client.set_tag(sid, t["key"], t["value"], t["note"], by=rnd.name)
-                rnd.did("tag", session=sid, **t)
-        # Reconcile: clear the watch's own marks the new judgement dropped, plus
-        # the calm `idle` mark when a real status replaces it.
-        for key in sorted(stale) + ([IDLE_KEY] if replace_idle else []):
-            if rnd.dry_run:
+            for key in cleared:
                 rnd.would("clear", session=sid, key=key)
-            else:
-                rnd.client.clear_tag(sid, key, by=rnd.name)
-                rnd.did("clear", session=sid, key=key)
+            continue
+
+        # One author-scoped replacement makes the judgement atomic: a stale
+        # fleet snapshot cannot clear a key another actor took over before this
+        # write landed. The lifecycle `idle` clear is exact-match for the same
+        # reason — only the canonical `(idle, idle)` mark is replaced.
+        exact_clear = (
+            [{"key": IDLE_KEY, "value": IDLE_VALUE}] if replace_idle else []
+        )
+        rnd.client.set_tags(sid, desired, by=rnd.name, clear=exact_clear)
+        for t in desired:
+            rnd.did("tag", session=sid, **t)
+        for key in cleared:
+            rnd.did("clear", session=sid, key=key)
 
     if rnd.surveyed == 0:
         rnd.finish("surveyed 0 sessions in scope", outcome="noop")

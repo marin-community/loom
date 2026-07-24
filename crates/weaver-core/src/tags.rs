@@ -72,6 +72,13 @@ pub const RECOVERED_KEY: &str = "recovered";
 /// The fixed value the [`RECOVERED_KEY`] tag carries.
 pub const RECOVERED_VALUE: &str = "true";
 
+/// A quiet operator override that keeps automatic retention paths from
+/// archiving this branch's live session. Manual Archive remains available.
+pub const AUTO_ARCHIVE_KEY: &str = "auto-archive";
+
+/// The fixed opt-out value carried by [`AUTO_ARCHIVE_KEY`].
+pub const AUTO_ARCHIVE_DISABLED_VALUE: &str = "disabled";
+
 /// Branch tag wiring a session to a GitHub thread; the value is
 /// `owner/name#number` (an issue or a PR — GitHub comments treat them alike).
 /// Quiet. While present, loom mirrors every `weaver status` write onto one
@@ -218,6 +225,97 @@ pub async fn clear(db: &Db, branch_id: &str, key: &str) -> Result<()> {
     Ok(())
 }
 
+/// One desired tag in an atomic author-scoped replacement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagInput {
+    pub key: String,
+    pub value: String,
+    pub note: String,
+}
+
+/// One exact `(key, value)` tag to clear alongside an author-scoped
+/// replacement. Exact matching keeps a stale lifecycle clear from deleting a
+/// newer, unrelated value that reused the same key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagMatch {
+    pub key: String,
+    pub value: String,
+}
+
+/// The before/after state of an atomic tag replacement.
+#[derive(Debug)]
+pub struct TagReplacement {
+    pub before: Vec<Tag>,
+    pub after: Vec<Tag>,
+}
+
+/// Replace every tag currently authored by `set_by` with `desired`, and apply
+/// the additional exact-match clears, in one transaction.
+///
+/// Watches use this instead of a sequence of per-key upserts and deletes. A
+/// stale watch snapshot can therefore no longer clear a key another actor
+/// replaced after the snapshot: only rows still attributed to this author (or
+/// rows matching an explicit `(key, value)` lifecycle clear) are removed.
+pub async fn replace_by(
+    db: &Db,
+    branch_id: &str,
+    set_by: &str,
+    desired: &[TagInput],
+    clear: &[TagMatch],
+) -> Result<TagReplacement> {
+    let mut tx = db.begin().await?;
+    let before = sqlx::query_as::<_, Tag>(
+        "SELECT key, value, note, set_by, set_at FROM tags
+         WHERE branch_id = ? ORDER BY key",
+    )
+    .bind(branch_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    sqlx::query("DELETE FROM tags WHERE branch_id = ? AND set_by = ?")
+        .bind(branch_id)
+        .bind(set_by)
+        .execute(&mut *tx)
+        .await?;
+    for tag in clear {
+        sqlx::query("DELETE FROM tags WHERE branch_id = ? AND key = ? AND value = ?")
+            .bind(branch_id)
+            .bind(&tag.key)
+            .bind(&tag.value)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    let set_at = now_iso();
+    for tag in desired {
+        sqlx::query(
+            "INSERT INTO tags (branch_id, key, value, note, set_by, set_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(branch_id, key) DO UPDATE SET
+               value = excluded.value, note = excluded.note,
+               set_by = excluded.set_by, set_at = excluded.set_at",
+        )
+        .bind(branch_id)
+        .bind(&tag.key)
+        .bind(&tag.value)
+        .bind(&tag.note)
+        .bind(set_by)
+        .bind(&set_at)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    let after = sqlx::query_as::<_, Tag>(
+        "SELECT key, value, note, set_by, set_at FROM tags
+         WHERE branch_id = ? ORDER BY key",
+    )
+    .bind(branch_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(TagReplacement { before, after })
+}
+
 /// Fetch one tag by key, or `None` when the branch has no tag for that key.
 pub async fn get(db: &Db, branch_id: &str, key: &str) -> Result<Option<Tag>> {
     let row = sqlx::query_as::<_, Tag>(
@@ -229,6 +327,13 @@ pub async fn get(db: &Db, branch_id: &str, key: &str) -> Result<Option<Tag>> {
     .fetch_optional(db)
     .await?;
     Ok(row)
+}
+
+/// Whether this branch explicitly opts out of automatic archive paths.
+pub async fn auto_archive_disabled(db: &Db, branch_id: &str) -> Result<bool> {
+    Ok(get(db, branch_id, AUTO_ARCHIVE_KEY)
+        .await?
+        .is_some_and(|tag| tag.value == AUTO_ARCHIVE_DISABLED_VALUE))
 }
 
 /// Every tag on a branch, ordered by key for a stable presentation.
@@ -272,6 +377,12 @@ mod tests {
         assert!(!is_loud(RECOVERED_KEY));
         assert!(!is_loud_value(RECOVERED_VALUE));
         assert!(is_valid_value(RECOVERED_KEY, RECOVERED_VALUE));
+        assert!(!is_loud(AUTO_ARCHIVE_KEY));
+        assert!(!is_loud_value(AUTO_ARCHIVE_DISABLED_VALUE));
+        assert!(is_valid_value(
+            AUTO_ARCHIVE_KEY,
+            AUTO_ARCHIVE_DISABLED_VALUE
+        ));
 
         // Loudness is value-driven: any key holding a ladder value is loud (a
         // watch's typed `review`/`stuck`), while a quiet value never is.
@@ -402,5 +513,71 @@ mod tests {
             get(&db, &b.id, ATTENTION_KEY).await.unwrap().unwrap().value,
             "blocked"
         );
+    }
+
+    #[tokio::test]
+    async fn replace_by_is_atomic_and_author_scoped() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let b = crate::branch::upsert(&db, "/r", "main", "main")
+            .await
+            .unwrap();
+        set(&db, &b.id, "stuck", "blocked", "", "watch")
+            .await
+            .unwrap();
+        set(&db, &b.id, "manual", "keep", "", "manual")
+            .await
+            .unwrap();
+        set(&db, &b.id, IDLE_KEY, IDLE_VALUE, "", "agent")
+            .await
+            .unwrap();
+
+        replace_by(
+            &db,
+            &b.id,
+            "watch",
+            &[TagInput {
+                key: "review".to_string(),
+                value: "attention".to_string(),
+                note: "ready".to_string(),
+            }],
+            &[TagMatch {
+                key: IDLE_KEY.to_string(),
+                value: IDLE_VALUE.to_string(),
+            }],
+        )
+        .await
+        .unwrap();
+
+        let tags = list(&db, &b.id).await.unwrap();
+        assert!(tags.iter().all(|tag| tag.key != "stuck"));
+        assert!(tags.iter().all(|tag| tag.key != IDLE_KEY));
+        assert!(tags
+            .iter()
+            .any(|tag| tag.key == "manual" && tag.set_by == "manual"));
+        assert!(tags
+            .iter()
+            .any(|tag| tag.key == "review" && tag.set_by == "watch"));
+    }
+
+    #[tokio::test]
+    async fn replace_by_does_not_clear_a_key_another_author_took_over() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let b = crate::branch::upsert(&db, "/r", "main", "main")
+            .await
+            .unwrap();
+        set(&db, &b.id, "stuck", "blocked", "", "watch")
+            .await
+            .unwrap();
+        // The watch's caller still has the old snapshot, but a person replaced
+        // the key before its batch mutation reached the server.
+        set(&db, &b.id, "stuck", "keep", "", "manual")
+            .await
+            .unwrap();
+
+        replace_by(&db, &b.id, "watch", &[], &[]).await.unwrap();
+
+        let tag = get(&db, &b.id, "stuck").await.unwrap().unwrap();
+        assert_eq!(tag.value, "keep");
+        assert_eq!(tag.set_by, "manual");
     }
 }

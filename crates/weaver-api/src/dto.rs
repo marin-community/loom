@@ -1276,6 +1276,37 @@ pub struct TagReq {
     pub by: Option<String>,
 }
 
+/// One desired tag in `PUT /api/sessions/{id}/tags`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TagInput {
+    pub key: String,
+    pub value: String,
+    /// One-line reason accompanying the tag.
+    #[serde(default)]
+    pub note: String,
+}
+
+/// One exact `(key, value)` tag to clear in the same atomic replacement.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TagMatch {
+    pub key: String,
+    pub value: String,
+}
+
+/// Body for `PUT /api/sessions/{id}/tags`: atomically replace the tags authored
+/// by `by` with `tags`. `clear` is reserved for exact-match lifecycle marks such
+/// as `idle: idle` that the caller is explicitly replacing too.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetTagsReq {
+    #[serde(default)]
+    pub tags: Vec<TagInput>,
+    #[serde(default)]
+    pub clear: Vec<TagMatch>,
+    /// The author whose existing tag set is replaced. Defaults to `manual`.
+    #[serde(default)]
+    pub by: Option<String>,
+}
+
 /// Body for `POST /api/sessions/{id}/send`: type a message into the agent pane.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendReq {

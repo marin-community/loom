@@ -30,6 +30,15 @@ function parkOf(value: string | undefined): number {
 // longer reads as needing the user. The status watch may replace it with a real
 // loud status. Mirrors weaver-core's `IDLE_KEY`.
 export const IDLE_KEY = 'idle';
+export const AUTO_ARCHIVE_KEY = 'auto-archive';
+export const AUTO_ARCHIVE_DISABLED_VALUE = 'disabled';
+
+/** Whether this session carries the exact user-controlled retention opt-out. */
+export function autoArchiveDisabled(s: Session): boolean {
+  return (s.branch.tags ?? []).some(
+    (t) => t.key === AUTO_ARCHIVE_KEY && t.value === AUTO_ARCHIVE_DISABLED_VALUE,
+  );
+}
 
 // Loom's machine bookkeeping for its GitHub/Slack side-effects (the PR
 // back-link mark, the status-card comment/message id). Not user-meaningful,

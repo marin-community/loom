@@ -9,6 +9,7 @@ import {
   lifecycleActions,
   signalChips,
   quietTags,
+  autoArchiveDisabled,
   TONE_TEXT,
 } from '../lib/sessionState';
 import { timeAgo } from '../lib/time';
@@ -49,7 +50,7 @@ const actions = useSessionActions(
   () => emit('reload'),
   () => router.push(fleetHref.value),
 );
-const { busy, notice, error, rename, clearTag, run } = actions;
+const { busy, notice, error, rename, clearTag, setAutoArchiveDisabled, run } = actions;
 
 // The lifecycle verbs the ⋯ manage menu offers — the same policy the fleet
 // list's row menu renders, so the two surfaces can't drift.
@@ -113,6 +114,7 @@ const lastActivity = computed(() => timeAgo(props.ws.last_activity_at));
 // means here; clearing a chip DELETEs that tag (there is no "Mark OK" verb).
 const signals = computed(() => signalChips(props.ws));
 const quiet = computed(() => quietTags(props.ws));
+const keepsSession = computed(() => autoArchiveDisabled(props.ws));
 
 // Provider handoff is an ACP-only, between-turn server operation. The manage
 // menu exposes the profile picker for a live ACP fleet session; the endpoint is
@@ -322,6 +324,31 @@ async function submitHandoff() {
                     {{ handoffBusy ? 'Handing off…' : 'Hand off now' }}
                   </button>
                 </form>
+                <button
+                  v-if="ws.status !== 'archived'"
+                  type="button"
+                  data-testid="action-auto-archive"
+                  :disabled="!!busy"
+                  class="block w-full rounded px-2 py-1.5 text-left text-fg transition-colors hover:bg-subtle disabled:opacity-60"
+                  @click="setAutoArchiveDisabled(!keepsSession)"
+                >
+                  <span class="block text-xs font-medium">
+                    {{
+                      busy === 'auto-archive'
+                        ? 'Saving…'
+                        : keepsSession
+                          ? 'Enable auto-archive'
+                          : 'Disable auto-archive'
+                    }}
+                  </span>
+                  <span class="block text-2xs text-faint">
+                    {{
+                      keepsSession
+                        ? 'Allow automatic cleanup again.'
+                        : 'Keep this session until you archive it.'
+                    }}
+                  </span>
+                </button>
                 <button
                   v-for="a in lifecycle"
                   :key="a.verb"

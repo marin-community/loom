@@ -11,10 +11,22 @@ from weaver_loom import Round
 
 #: Wake only on a PR merging — the engine reads this in register mode.
 TRIGGERS = {"on": ["pr.merged"]}
+AUTO_ARCHIVE_KEY = "auto-archive"
+AUTO_ARCHIVE_DISABLED = "disabled"
+
+
+def auto_archive_disabled(session):
+    return any(
+        tag.get("key") == AUTO_ARCHIVE_KEY
+        and tag.get("value") == AUTO_ARCHIVE_DISABLED
+        for tag in (session.get("branch") or {}).get("tags") or []
+    )
 
 
 def main(rnd):
     for session in rnd.triggered_sessions():
+        if auto_archive_disabled(session):
+            continue
         github = (session.get("branch") or {}).get("github") or {}
         if github.get("pr_state") != "MERGED":
             continue

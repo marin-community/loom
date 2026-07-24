@@ -300,6 +300,80 @@ async fn triage_axis_marks_a_session() {
     client.delete(&format!("/api/sessions/{id}")).await.unwrap();
 }
 
+/// A watch replaces its complete authored tag set in one request. The
+/// replacement clears dropped watch marks and an exact lifecycle mark, while
+/// preserving foreign tags — including a key another actor took over after the
+/// watch's snapshot went stale.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn batch_tags_replace_one_authors_set_atomically() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+    let session = client
+        .post(
+            "/api/sessions",
+            json!({ "goal": "reconcile labels", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let id = session["id"].as_str().unwrap();
+
+    for (key, value, by) in [
+        ("stuck", "blocked", "status-check"),
+        ("owner", "alice", "manual"),
+        ("idle", "idle", "agent"),
+    ] {
+        client
+            .put(
+                &format!("/api/sessions/{id}/tags/{key}"),
+                json!({ "value": value, "by": by }),
+            )
+            .await
+            .unwrap();
+    }
+
+    let replaced = client
+        .put(
+            &format!("/api/sessions/{id}/tags"),
+            json!({
+                "by": "status-check",
+                "tags": [
+                    { "key": "review", "value": "attention", "note": "ready" }
+                ],
+                "clear": [{ "key": "idle", "value": "idle" }]
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(branch_tag(&replaced, "stuck").is_none());
+    assert!(branch_tag(&replaced, "idle").is_none());
+    assert_eq!(branch_tag_value(&replaced, "owner"), "alice");
+    assert_eq!(branch_tag_value(&replaced, "review"), "attention");
+
+    // The watch still holds a snapshot in which it owns `review`, but a person
+    // has since replaced that key. Its next empty replacement must not delete
+    // the person's newer value.
+    client
+        .put(
+            &format!("/api/sessions/{id}/tags/review"),
+            json!({ "value": "keep", "by": "manual" }),
+        )
+        .await
+        .unwrap();
+    let calm = client
+        .put(
+            &format!("/api/sessions/{id}/tags"),
+            json!({ "by": "status-check", "tags": [] }),
+        )
+        .await
+        .unwrap();
+    let review = branch_tag(&calm, "review").expect("manual takeover survives");
+    assert_eq!(review["value"], "keep");
+    assert_eq!(review["set_by"], "manual");
+
+    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+}
+
 /// Attaching to an existing branch reuses its worktree if one exists, creates
 /// `.worktrees/<slug>` otherwise, and rejects a branch that doesn't exist.
 #[serial]

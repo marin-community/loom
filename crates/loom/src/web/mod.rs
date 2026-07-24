@@ -6,9 +6,10 @@
 //!   terminal + one agent attached to a branch).
 //! * `/api/sessions/{id}` — GET / PATCH / DELETE a single session, plus the
 //!   action subroutes `/archive`, `/adopt`, `/recover` (rebuild the worktree of
-//!   an archived session and resume its agent), `/tags/{key}` (PUT to set a tag,
-//!   DELETE to clear it), `/log`, `/events`, and `/terminal` (a WebSocket
-//!   bridged to the session's terminal via a PTY — see `crate::terminal`).
+//!   an archived session and resume its agent), `/tags` (PUT to atomically
+//!   replace one author's tag set), `/tags/{key}` (PUT to set a tag, DELETE to
+//!   clear it), `/log`, `/events`, and `/terminal` (a WebSocket bridged to the
+//!   session's terminal via a PTY — see `crate::terminal`).
 //!   Interacting with the agent (keystrokes, keys, TUIs) happens entirely over
 //!   `/terminal`.
 //! * `/api/branches` — list every tracked branch (with or without an active
@@ -107,10 +108,10 @@ use settings::*;
 use watches::*;
 
 // Re-exported so the rest of the crate (server.rs, github.rs, watch.rs)
-// can keep calling these as `crate::web::{archive, adopt, create_warm_session}`
+// can keep calling these as `crate::web::{auto_archive, adopt, create_warm_session}`
 // — they're session lifecycle operations, but not routed through this file's
 // `router()`, so the glob imports above don't cover them.
-pub(crate) use sessions::{adopt, archive, create_warm_session};
+pub(crate) use sessions::{adopt, auto_archive, create_warm_session};
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -685,6 +686,7 @@ pub fn router(state: AppState) -> Router {
             "/sessions/{id}/tags/{key}",
             axum::routing::put(set_session_tag).delete(clear_session_tag),
         )
+        .route("/sessions/{id}/tags", axum::routing::put(set_session_tags))
         // Branches & issues
         .route("/branches", get(list_branches))
         .route("/branches/{id}", get(get_branch).patch(patch_branch))

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::path::{Component, PathBuf};
 use std::pin::Pin;
@@ -24,7 +25,9 @@ use crate::{
     agent, agent_env, backend, config, custom_agents, db, events, git, github, repo, repo_env,
     setup,
 };
-use weaver_api::{CreateReq, HandoffReq, PatchSessionReq, SendReq, SessionView, TagReq};
+use weaver_api::{
+    CreateReq, HandoffReq, PatchSessionReq, SendReq, SessionView, SetTagsReq, TagReq,
+};
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::Branch;
 use weaver_core::tags;
@@ -36,6 +39,13 @@ use super::{ApiResult, AppError, AppState};
 
 const MISSING_GITHUB_TOKEN_MESSAGE: &str = "No GitHub token configured. Add your personal GitHub token in Settings > Account, or configure a write-only GH_TOKEN on the selected profile.";
 const HANDOFF_HISTORY_CHARS: usize = 64 * 1024;
+
+/// External lifecycle work (terminal supervisors + git worktrees) cannot share
+/// a SQLite transaction. Serialize those operations process-wide, then use
+/// compare-and-set database transitions at their commit boundaries. The app
+/// manages only hundreds of sessions, so a coarse lock keeps the invariant
+/// legible without adding a per-session lock registry.
+static LIFECYCLE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Resolve an optional per-request ACP permission posture over the workspace
 /// default. Empty request values behave like omission, matching model/effort.
@@ -1681,6 +1691,107 @@ pub(super) async fn set_session_tag(
     Ok(Json(session_view(&st.db, &session, &branch).await?))
 }
 
+/// Atomically replace one author's complete tag set on a session branch.
+///
+/// This is the watch-safe counterpart to the per-key routes: rows still
+/// authored by `by` are replaced as one transaction, so a stale round cannot
+/// DELETE a key another actor took over after its fleet snapshot. Exact-match
+/// `clear` entries let a real status replace lifecycle marks such as
+/// `(idle, idle)` without making a key-only stale delete.
+pub(super) async fn set_session_tags(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Json(req): Json<SetTagsReq>,
+) -> ApiResult<Json<SessionView>> {
+    let (session, branch) = require_session(&st.db, &key).await?;
+    let by = author_or_manual(req.by.as_deref());
+    let mut seen = HashSet::new();
+    let mut desired = Vec::with_capacity(req.tags.len());
+    for tag in req.tags {
+        let tag_key = tag.key.trim();
+        let value = tag.value.trim();
+        if tag_key.is_empty() {
+            return Err(AppError::bad_request("tag key must be non-empty"));
+        }
+        if !seen.insert(tag_key.to_string()) {
+            return Err(AppError::bad_request(format!(
+                "duplicate tag key '{tag_key}'"
+            )));
+        }
+        if crate::github::is_reserved_tag(tag_key) {
+            return Err(AppError::bad_request(format!(
+                "'{tag_key}' is loom-internal bookkeeping — it can be cleared, not set by hand"
+            )));
+        }
+        if tag_key == tags::GITHUB_KEY && crate::github::parse_wiring(value).is_none() {
+            return Err(AppError::bad_request(format!(
+                "invalid value '{value}' for '{tag_key}' — expected owner/name#number"
+            )));
+        }
+        if !tags::is_valid_value(tag_key, value) {
+            return Err(AppError::bad_request(if tags::is_loud(tag_key) {
+                format!(
+                    "invalid value '{value}' for '{tag_key}' — expected one of {} (omit the tag to return to calm)",
+                    tags::ATTENTION_VALUES.join(", ")
+                )
+            } else {
+                format!("invalid value '{value}' for '{tag_key}' — must be non-empty")
+            }));
+        }
+        desired.push(tags::TagInput {
+            key: tag_key.to_string(),
+            value: value.to_string(),
+            note: tag.note.trim().to_string(),
+        });
+    }
+    let mut clear = Vec::with_capacity(req.clear.len());
+    for tag in req.clear {
+        let tag_key = tag.key.trim();
+        let value = tag.value.trim();
+        if tag_key.is_empty() || value.is_empty() {
+            return Err(AppError::bad_request(
+                "exact tag clears require non-empty key and value",
+            ));
+        }
+        clear.push(tags::TagMatch {
+            key: tag_key.to_string(),
+            value: value.to_string(),
+        });
+    }
+
+    let replaced = tags::replace_by(&st.db, &branch.id, &by, &desired, &clear).await?;
+    for old in &replaced.before {
+        if !replaced.after.iter().any(|new| new.key == old.key) {
+            events::record_tag(&st.db, &st.bus, &branch.id, &old.key, "", "", &by)
+                .await
+                .ok();
+        }
+    }
+    for new in &replaced.after {
+        let unchanged = replaced.before.iter().any(|old| {
+            old.key == new.key
+                && old.value == new.value
+                && old.note == new.note
+                && old.set_by == new.set_by
+        });
+        if !unchanged {
+            events::record_tag(
+                &st.db,
+                &st.bus,
+                &branch.id,
+                &new.key,
+                &new.value,
+                &new.note,
+                &new.set_by,
+            )
+            .await
+            .ok();
+        }
+    }
+    let (session, branch) = require_session(&st.db, &session.id).await?;
+    Ok(Json(session_view(&st.db, &session, &branch).await?))
+}
+
 /// Clear a tag on a session's branch — delete the row and broadcast a `tag`
 /// event with an empty value (the cleared signal). How a loud axis returns to
 /// calm (`ok`). A no-op when the tag is already absent. DELETE carries no
@@ -1827,6 +1938,50 @@ pub(super) async fn delete_session(
 pub(crate) async fn archive(
     st: &AppState,
     session: &Session,
+    _branch: &Branch,
+) -> Result<Vec<String>, AppError> {
+    let _lifecycle = LIFECYCLE_LOCK.lock().await;
+    let Some((current_session, current_branch)) =
+        session_mod::with_branch(&st.db, &session.id).await?
+    else {
+        return Err(AppError::not_found("session"));
+    };
+    archive_locked(st, &current_session, &current_branch).await
+}
+
+/// Archive from a retention/integration path unless this branch carries the
+/// explicit `auto-archive: disabled` opt-out. The check and teardown share the
+/// lifecycle lock, so setting the label before an automatic operation acquires
+/// the lock reliably prevents that operation; manual [`archive`] ignores it.
+pub(crate) async fn auto_archive(
+    st: &AppState,
+    session: &Session,
+    _branch: &Branch,
+) -> Result<Option<Vec<String>>, AppError> {
+    let _lifecycle = LIFECYCLE_LOCK.lock().await;
+    let Some((current_session, current_branch)) =
+        session_mod::with_branch(&st.db, &session.id).await?
+    else {
+        return Err(AppError::not_found("session"));
+    };
+    if tags::auto_archive_disabled(&st.db, &current_branch.id).await? {
+        tracing::info!(
+            session = %current_session.id,
+            branch = %current_branch.id,
+            "automatic archive skipped by auto-archive: disabled tag"
+        );
+        return Ok(None);
+    }
+    archive_locked(st, &current_session, &current_branch)
+        .await
+        .map(Some)
+}
+
+/// Shared teardown after the caller has acquired [`LIFECYCLE_LOCK`] and
+/// refreshed the session row.
+async fn archive_locked(
+    st: &AppState,
+    session: &Session,
     branch: &Branch,
 ) -> Result<Vec<String>, AppError> {
     tracing::info!(session = %session.id, branch = %branch.id, "archiving session");
@@ -1839,12 +1994,15 @@ pub(crate) async fn archive(
     warnings.extend(log_warnings);
     tracing::debug!(session = %session.id, "captured conversation transcript before teardown");
 
-    // Stop the ACP task (drops its handle so the task winds down) before killing
-    // the relay supervisor below — for a terminal session this is a no-op.
+    // The row must never say `archived` while its supervisor is still live.
+    // A tapestry kill is acknowledged before the socket disappears, so wait
+    // for teardown and fail without flipping the row if it cannot complete.
+    backend::kill_session_and_wait(&session.term_session).await?;
+    // The killed relay makes its ACP task exit; remove any handle that has not
+    // observed that edge yet. For a terminal session this is a no-op.
     if session.protocol == "acp" {
         st.acp.stop(&session.id);
     }
-    backend::kill_session(&session.term_session).await.ok();
     crate::auth::revoke_session_tokens(&st.db, &session.id).await?;
     crate::shell::kill_debug_all(&session.id).await;
     st.ide.kill(&session.id);
@@ -2240,8 +2398,16 @@ async fn require_branch_slot_free(
 pub(crate) async fn adopt(
     st: &AppState,
     session: &Session,
-    branch: &Branch,
+    _branch: &Branch,
 ) -> Result<(), AppError> {
+    let _lifecycle = LIFECYCLE_LOCK.lock().await;
+    let Some((current_session, current_branch)) =
+        session_mod::with_branch(&st.db, &session.id).await?
+    else {
+        return Err(AppError::not_found("session"));
+    };
+    let session = &current_session;
+    let branch = &current_branch;
     require_branch_slot_free(st, session, branch).await?;
     if session.protocol == "acp" {
         return adopt_acp(st, session, branch, "session adopted").await;
@@ -2588,53 +2754,139 @@ pub(super) async fn adopt_session(
 /// recover checks that branch back out at the same worktree path and re-launches
 /// the agent (resuming the prior Claude conversation with `--continue`, exactly as
 /// [`adopt`] does). The session rejoins the active fleet.
-async fn recover(st: &AppState, session: &Session, branch: &Branch) -> Result<(), AppError> {
+async fn recover(st: &AppState, session: &Session, _branch: &Branch) -> Result<(), AppError> {
+    let _lifecycle = LIFECYCLE_LOCK.lock().await;
+    let Some((current_session, current_branch)) =
+        session_mod::with_branch(&st.db, &session.id).await?
+    else {
+        return Err(AppError::not_found("session"));
+    };
+    let session = &current_session;
+    let branch = &current_branch;
     tracing::info!(session = %session.id, branch = %branch.id, "recovering archived session");
+    if session.status != "archived" {
+        return Err(AppError::conflict(format!(
+            "session is '{}', not archived",
+            session.status
+        )));
+    }
     require_branch_slot_free(st, session, branch).await?;
-    if backend::has_session(&session.term_session).await {
-        return Err(AppError::conflict(
-            "session already has a running terminal process",
-        ));
+    // Reserve the active branch slot in SQLite before touching the worktree or
+    // supervisor. This is the atomic boundary a read-then-launch guard cannot
+    // provide: a concurrent new session either owns the unique slot or this
+    // recovery does, never both after external state has been created.
+    match session_mod::claim_recovery(&st.db, &session.id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(AppError::conflict(
+                "session is no longer archived — another lifecycle action won",
+            ))
+        }
+        Err(error) => {
+            if let Some(other) = session_mod::active_for_branch(&st.db, &branch.id).await? {
+                if other.id != session.id {
+                    return Err(AppError::conflict(format!(
+                        "branch '{}' already has an active session ({})",
+                        branch.branch, other.id
+                    )));
+                }
+            }
+            return Err(error.into());
+        }
     }
     let repo_root = PathBuf::from(&branch.repo_root);
     let work_dir = PathBuf::from(&session.work_dir);
+    let mut rebuilt_worktree = false;
 
-    // Rebuild the worktree if archive removed it. Archive keeps the branch, but a
-    // later manual `git branch -D` could have deleted it — refuse clearly rather
-    // than let the checkout fail cryptically.
-    if !work_dir.exists() {
-        if !git::branch_exists(&repo_root, &branch.branch).await {
-            return Err(AppError::bad_request(format!(
-                "branch '{}' no longer exists — cannot recover",
-                branch.branch
-            )));
+    let result: Result<(), AppError> = async {
+        // Rebuild the worktree if archive removed it. Archive keeps the branch,
+        // but a later manual `git branch -D` could have deleted it — refuse
+        // clearly rather than let the checkout fail cryptically.
+        if !work_dir.exists() {
+            if !git::branch_exists(&repo_root, &branch.branch).await {
+                return Err(AppError::bad_request(format!(
+                    "branch '{}' no longer exists — cannot recover",
+                    branch.branch
+                )));
+            }
+            // Clear any stale worktree registration at this path first:
+            // archive's forced remove deregisters, but a manual `rm -rf` of the
+            // dir would leave git's admin entry behind and reject re-adding it.
+            git::worktree_prune(&repo_root).await.ok();
+            tokio::fs::create_dir_all(repo_root.join(".worktrees")).await?;
+            git::ensure_excluded(&repo_root, ".worktrees/")
+                .await
+                .ok();
+            tracing::info!(session = %session.id, branch = %branch.id, work_dir = %work_dir.display(), "rebuilding worktree for recovered session");
+            // Mark this attempt as the owner before invoking git: a failed
+            // `worktree add` may still have created the directory or registry
+            // entry, both of which belong in this attempt's rollback.
+            rebuilt_worktree = true;
+            git::worktree_add_existing(&repo_root, &work_dir, &branch.branch)
+                .await
+                .map_err(|e| AppError::bad_request(e.to_string()))?;
+        } else {
+            tracing::debug!(session = %session.id, "worktree still present, skipping rebuild");
         }
-        // Clear any stale worktree registration at this path first: archive's
-        // forced remove deregisters, but a manual `rm -rf` of the dir would leave
-        // git's admin entry behind and reject re-adding the same path.
-        git::worktree_prune(&repo_root).await.ok();
-        tokio::fs::create_dir_all(repo_root.join(".worktrees")).await?;
-        git::ensure_excluded(&repo_root, ".worktrees/").await.ok();
-        tracing::info!(session = %session.id, branch = %branch.id, work_dir = %work_dir.display(), "rebuilding worktree for recovered session");
-        git::worktree_add_existing(&repo_root, &work_dir, &branch.branch)
+
+        tracing::debug!(session = %session.id, branch = %branch.id, protocol = %session.protocol, "resuming recovered agent");
+        if session.protocol == "acp" {
+            adopt_acp(st, session, branch, "session recovered").await
+        } else if backend::has_session(&session.term_session).await {
+            // Repair an old partial archive without killing the agent that is
+            // still doing useful work. New archives cannot create this state:
+            // they wait for the supervisor to disappear before writing
+            // `archived`.
+            let status = agent::initial_status(&st.db, &session.agent_kind).await;
+            session_mod::set_status(&st.db, &session.id, status).await?;
+            events::record(
+                &st.db,
+                &st.bus,
+                &branch.id,
+                "status",
+                json!({ "status": status, "reason": "session recovered" }),
+            )
             .await
-            .map_err(|e| AppError::bad_request(e.to_string()))?;
-    } else {
-        tracing::debug!(session = %session.id, "worktree still present, skipping rebuild");
+            .ok();
+            Ok(())
+        } else {
+            resume_agent(st, session, branch, "session recovered").await
+        }
+    }
+    .await;
+
+    if let Err(error) = result {
+        // Recovery is all-or-nothing. Tear down anything this attempt launched
+        // before restoring `archived`; if teardown itself fails, keep the
+        // non-terminal reservation rather than recreating the forbidden
+        // archived+live-supervisor state.
+        st.acp.stop(&session.id);
+        if let Err(cleanup) = backend::kill_session_and_wait(&session.term_session).await {
+            return Err(AppError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "recovery failed: {}; cleanup also failed: {cleanup}",
+                    error.message()
+                ),
+            ));
+        }
+        if rebuilt_worktree {
+            if work_dir.exists() && git::worktree_remove(&repo_root, &work_dir).await.is_err() {
+                tokio::fs::remove_dir_all(&work_dir).await.ok();
+            }
+            // Also clear a registry entry left by a partially successful
+            // `worktree add` whose directory never became visible.
+            git::worktree_prune(&repo_root).await.ok();
+        }
+        session_mod::set_status(&st.db, &session.id, "archived").await?;
+        return Err(error);
     }
 
-    tags::set(
+    // Stamp the durable opt-out from immediate merge re-archive only after the
+    // live side committed. A bookkeeping failure must not roll back a healthy
+    // recovered agent.
+    match tags::set(
         &st.db,
-        &branch.id,
-        tags::RECOVERED_KEY,
-        tags::RECOVERED_VALUE,
-        "session recovered",
-        "loom",
-    )
-    .await?;
-    events::record_tag(
-        &st.db,
-        &st.bus,
         &branch.id,
         tags::RECOVERED_KEY,
         tags::RECOVERED_VALUE,
@@ -2642,12 +2894,23 @@ async fn recover(st: &AppState, session: &Session, branch: &Branch) -> Result<()
         "loom",
     )
     .await
-    .ok();
-    tracing::debug!(session = %session.id, branch = %branch.id, protocol = %session.protocol, "marked session recovered, resuming agent");
-    if session.protocol == "acp" {
-        adopt_acp(st, session, branch, "session recovered").await?;
-    } else {
-        resume_agent(st, session, branch, "session recovered").await?;
+    {
+        Ok(()) => {
+            events::record_tag(
+                &st.db,
+                &st.bus,
+                &branch.id,
+                tags::RECOVERED_KEY,
+                tags::RECOVERED_VALUE,
+                "session recovered",
+                "loom",
+            )
+            .await
+            .ok();
+        }
+        Err(error) => {
+            tracing::warn!(session = %session.id, %error, "could not stamp recovered tag");
+        }
     }
     Ok(())
 }

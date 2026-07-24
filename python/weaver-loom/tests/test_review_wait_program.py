@@ -43,11 +43,8 @@ class StubClient:
     def sessions(self):
         return self._sessions
 
-    def set_tag(self, key, tag_key, value, note="", by=None):
-        self.calls.append(("set_tag", key, tag_key, value, note, by))
-
-    def clear_tag(self, key, tag_key, by=None):
-        self.calls.append(("clear_tag", key, tag_key, by))
+    def set_tags(self, key, tags, by=None, clear=None):
+        self.calls.append(("set_tags", key, tags, by, clear or []))
 
 
 def session(id, *, pr_state="OPEN", draft=False, review=None, pr=42,
@@ -76,12 +73,8 @@ def run_main(client, capsys, **config):
     return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
 
 
-def sets(client):
-    return [c for c in client.calls if c[0] == "set_tag"]
-
-
-def clears(client):
-    return [c for c in client.calls if c[0] == "clear_tag"]
+def batches(client):
+    return [c for c in client.calls if c[0] == "set_tags"]
 
 
 # -- the registry mirror -------------------------------------------------------
@@ -118,8 +111,15 @@ def test_parks_a_session_awaiting_external_review(capsys):
     )
     result = run_main(client, capsys)
     note = "PR #7 review required — waiting on an external reviewer"
-    assert ("set_tag", "s", "awaiting", "review", note, NAME) in client.calls
-    assert clears(client) == []
+    assert batches(client) == [
+        (
+            "set_tags",
+            "s",
+            [{"key": "awaiting", "value": "review", "note": note}],
+            NAME,
+            [],
+        )
+    ]
     assert {"action": "park", "session": "s", "key": "awaiting",
             "value": "review", "note": note} in result["actions"]
     assert result["outcome"] == "ok"
@@ -133,7 +133,7 @@ def test_already_parked_is_idempotent(capsys):
         sessions=[session("s", review="REVIEW_REQUIRED", marked_by=NAME)],
     )
     result = run_main(client, capsys)
-    assert sets(client) == [] and clears(client) == []
+    assert batches(client) == []
     assert result == {"outcome": "noop",
                       "summary": "surveyed 1, parked 0, cleared 0", "actions": []}
 
@@ -145,8 +145,7 @@ def test_unparks_once_review_lands(capsys):
         sessions=[session("s", review="APPROVED", marked_by=NAME)],
     )
     result = run_main(client, capsys)
-    assert ("clear_tag", "s", "awaiting", NAME) in client.calls
-    assert sets(client) == []
+    assert batches(client) == [("set_tags", "s", [], NAME, [])]
     assert {"action": "unpark", "session": "s", "key": "awaiting"} in result["actions"]
     assert result["summary"] == "surveyed 1, parked 0, cleared 1"
 
@@ -157,7 +156,7 @@ def test_unparks_on_merge(capsys):
         sessions=[session("s", pr_state="MERGED", marked_by=NAME)],
     )
     run_main(client, capsys)
-    assert ("clear_tag", "s", "awaiting", NAME) in client.calls
+    assert batches(client) == [("set_tags", "s", [], NAME, [])]
 
 
 def test_changes_requested_is_not_parked(capsys):
@@ -167,14 +166,14 @@ def test_changes_requested_is_not_parked(capsys):
         sessions=[session("s", review="CHANGES_REQUESTED")],
     )
     result = run_main(client, capsys)
-    assert sets(client) == [] and clears(client) == []
+    assert batches(client) == []
     assert result["outcome"] == "noop"
 
 
 def test_session_without_a_pr_is_a_noop(capsys):
     client = StubClient(capabilities=["mark"], sessions=[session("s", has_pr=False)])
     result = run_main(client, capsys)
-    assert sets(client) == [] and clears(client) == []
+    assert batches(client) == []
     assert result["outcome"] == "noop"
 
 
@@ -189,7 +188,7 @@ def test_leaves_a_foreign_awaiting_mark_untouched(capsys):
         sessions=[session("s", review="APPROVED", marked_by="manual")],
     )
     result = run_main(client, capsys)
-    assert clears(client) == []
+    assert batches(client) == []
     assert result["outcome"] == "noop"
 
 
@@ -199,7 +198,7 @@ def test_leaves_a_foreign_awaiting_mark_untouched(capsys):
 def test_without_mark_capability_only_reports_would(capsys):
     client = StubClient(sessions=[session("s", review="REVIEW_REQUIRED")])
     result = run_main(client, capsys)
-    assert sets(client) == [] and clears(client) == []
+    assert batches(client) == []
     assert result["actions"][0]["would"] == "park"
     assert result["summary"] == "surveyed 1, would park 1, would clear 0"
 
@@ -213,7 +212,7 @@ def test_dry_run_records_would_and_mutates_nothing(capsys):
         ],
     )
     result = run_main(client, capsys, dry_run=True)
-    assert sets(client) == [] and clears(client) == []
+    assert batches(client) == []
     woulds = {(a["would"], a["session"]) for a in result["actions"]}
     assert woulds == {("park", "a"), ("unpark", "b")}
     assert result["summary"] == "surveyed 2, would park 1, would clear 1"

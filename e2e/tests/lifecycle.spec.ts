@@ -61,12 +61,12 @@ test.describe('session lifecycle actions', () => {
       expect(dialog.type()).toBe('confirm');
       dialog.accept();
     });
-    await page.getByRole('button', { name: 'Archive' }).click();
+    await page.getByTestId('action-archive').click();
 
     // The header reloads into the archived state: the lifecycle badge appears
     // and the popover's Archive button goes away (archiving twice is a no-op).
     await expect(page.getByTestId('status-badge')).toHaveText(/archived/i);
-    await expect(page.getByRole('button', { name: 'Archive' })).toHaveCount(0);
+    await expect(page.getByTestId('action-archive')).toHaveCount(0);
 
     // Server-side the session row survives — archived, not deleted.
     const updated = await weaver.getSession(s.id);
@@ -84,8 +84,11 @@ test.describe('session lifecycle actions', () => {
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
     await page.getByRole('button', { name: 'manage' }).click();
 
-    for (const name of ['Archive', 'Remove']) {
-      const box = await page.getByRole('button', { name }).boundingBox();
+    for (const [name, id] of [
+      ['Archive', 'action-archive'],
+      ['Remove', 'action-remove'],
+    ]) {
+      const box = await page.getByTestId(id).boundingBox();
       expect(box, `${name} button should render`).not.toBeNull();
       expect(box!.y).toBeGreaterThanOrEqual(0);
       expect(box!.y + box!.height).toBeLessThanOrEqual(300);
@@ -122,6 +125,30 @@ test.describe('session lifecycle actions', () => {
     // Archived server-side — and we never left the list.
     await expect.poll(async () => (await weaver.getSession(s.id)).status).toBe('archived');
     await expect(page).toHaveURL(/\/$/);
+  });
+
+  test('a session can opt out of automatic archive from its manage menu', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({ goal: 'Keep me live', name: 'no-auto-archive' });
+
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await page.getByRole('button', { name: 'manage' }).click();
+    await page.getByTestId('action-auto-archive').click();
+
+    await expect(page.getByTestId('tag-pill')).toContainText('auto-archive: disabled');
+    await expect
+      .poll(async () => (await weaver.getSession(s.id)).branch.tags)
+      .toContainEqual(expect.objectContaining({ key: 'auto-archive', value: 'disabled' }));
+
+    await expect(page.getByTestId('action-auto-archive')).toContainText('Enable auto-archive');
+    await page.getByTestId('action-auto-archive').click();
+
+    await expect(page.getByTestId('tag-pill')).toHaveCount(0);
+    await expect
+      .poll(async () => (await weaver.getSession(s.id)).branch.tags)
+      .not.toContainEqual(expect.objectContaining({ key: 'auto-archive' }));
   });
 
   test('an archived session offers Recover next to its badge, on both surfaces', async ({

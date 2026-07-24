@@ -252,9 +252,19 @@ plus a readable `chat.md` under `session.log_dir`
 log for a live session on the command line.
 
 Once a branch's PR merges, loom archives the session automatically — tearing
-down its terminal and worktree while keeping the branch and its weaver history, the
-same as the Archive button. Turn either behaviour off in **Settings** or from
-the CLI:
+down its terminal and worktree while keeping the branch and its weaver history,
+the same as the Archive button. To keep one session until you archive it
+yourself, choose **Disable auto-archive** from that session's **Manage** menu, or
+set its quiet opt-out label:
+
+```sh
+weaver tag set auto-archive disabled
+weaver tag rm auto-archive                    # allow automatic archive again
+```
+
+The opt-out also applies to automation cleanup and the other background
+retention paths; a manual Archive still works. Turn the global merge behaviour
+or GitHub polling off in **Settings** or from the CLI:
 
 ```sh
 loom config set github.archive_on_merge false   # keep the worktree after merge
@@ -285,6 +295,7 @@ Loom serves a JSON API under `/api`; the Vue SPA is the primary consumer.
   (admin-only operational inventory used by Settings → Diagnostics)
 - `GET POST /api/sessions`, `GET PATCH DELETE /api/sessions/{id}`,
   `POST /api/sessions/{id}/{note,archive,adopt,github}`,
+  `PUT /api/sessions/{id}/tags` (atomic author-scoped replacement),
   `GET /api/sessions/{id}/{diff,log,events}`,
   `GET /api/sessions/{id}/terminal` (WebSocket: xterm.js ⇄ the tapestry PTY)
 - `GET /api/mcps`, `GET POST /api/mcps/custom`, and

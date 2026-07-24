@@ -141,6 +141,15 @@ async fn archive_keeps_branch_and_history() {
         )
         .await
         .unwrap();
+    // The per-session opt-out gates automatic retention only. An explicit
+    // operator Archive must still tear the session down.
+    client
+        .put(
+            &format!("/api/sessions/{arch_id}/tags/auto-archive"),
+            json!({ "value": "disabled", "by": "manual" }),
+        )
+        .await
+        .unwrap();
     client
         .patch(
             &format!("/api/sessions/{arch_id}"),
@@ -193,6 +202,11 @@ async fn archive_keeps_branch_and_history() {
     assert!(
         branch_tag(&view, "idle").is_none(),
         "archive should clear the soothing idle mark too"
+    );
+    assert_eq!(
+        branch_tag(&view, "auto-archive").unwrap()["value"],
+        "disabled",
+        "manual archive ignores and preserves the quiet automatic-retention override"
     );
     assert_eq!(
         view["branch"]["description"], "Waiting for input",

@@ -1,6 +1,6 @@
 import { ref } from 'vue';
-import { post, patch, del } from '../api';
-import type { LifecycleVerb } from './sessionState';
+import { post, patch, put, del } from '../api';
+import { AUTO_ARCHIVE_DISABLED_VALUE, AUTO_ARCHIVE_KEY, type LifecycleVerb } from './sessionState';
 
 // The session's write surface, shared by every place that can act on a session:
 // the detail page's header and the fleet list's per-row menu.
@@ -62,6 +62,23 @@ export function useSessionActions(
       await reload();
     });
 
+  const setAutoArchiveDisabled = (disabled: boolean) =>
+    act('auto-archive', async () => {
+      const path = `/sessions/${getId()}/tags/${AUTO_ARCHIVE_KEY}`;
+      if (disabled) {
+        await put(path, {
+          value: AUTO_ARCHIVE_DISABLED_VALUE,
+          note: 'automatic archive disabled by user',
+          by: 'manual',
+        });
+        notice.value = 'Automatic archive disabled for this session.';
+      } else {
+        await del(path);
+        notice.value = 'Automatic archive enabled for this session.';
+      }
+      await reload();
+    });
+
   const adopt = () =>
     act('adopt', async () => {
       await post(`/sessions/${getId()}/adopt`);
@@ -103,5 +120,5 @@ export function useSessionActions(
   // is the whole surface and the individual verbs stay internal.
   const run = (verb: LifecycleVerb) => ({ adopt, recover, archive, remove })[verb]();
 
-  return { busy, notice, error, rename, clearTag, run };
+  return { busy, notice, error, rename, clearTag, setAutoArchiveDisabled, run };
 }

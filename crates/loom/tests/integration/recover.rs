@@ -93,11 +93,12 @@ async fn recover_rebuilds_worktree_and_resumes() {
     );
 }
 
-/// Recovering a session whose terminal is still live is refused — recover is for
-/// a torn-down session, not a hijack of a running one (the same guard adopt uses).
+/// Repair an old partial archive whose row says `archived` even though its
+/// terminal supervisor survived. New archives wait for teardown before flipping
+/// the row, but recovery must self-heal rows written by older loom versions.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn recover_refuses_a_live_session() {
+async fn recover_repairs_an_archived_row_with_a_live_terminal() {
     let ts = TestServer::start().await;
     let client = &ts.client;
 
@@ -109,13 +110,61 @@ async fn recover_refuses_a_live_session() {
         .await
         .unwrap();
     let id = sess["id"].as_str().unwrap().to_string();
+    let term_session = sess["term_session"].as_str().unwrap().to_string();
 
-    let err = client
+    // Recreate the historical bad state directly: the row was flipped even
+    // though teardown failed and the supervisor remained live.
+    loom::session::set_status(&ts.state.db, &id, "archived")
+        .await
+        .unwrap();
+    assert!(backend::has_session(&term_session).await);
+
+    let recovered = client
         .post(&format!("/api/sessions/{id}/recover"), json!({}))
         .await
-        .unwrap_err();
+        .unwrap();
+    assert_eq!(recovered["status"], "running");
     assert!(
-        err.to_string().contains("running terminal"),
-        "recover should reject a session with a live terminal: {err}"
+        backend::has_session(&term_session).await,
+        "repair keeps the already-live agent"
     );
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_recovery_rolls_back_to_a_fully_archived_session() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    let sess = client
+        .post(
+            "/api/sessions",
+            json!({ "goal": "cannot recover", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let id = sess["id"].as_str().unwrap().to_string();
+    let branch = sess["branch"]["branch"].as_str().unwrap().to_string();
+    let term_session = sess["term_session"].as_str().unwrap().to_string();
+    let work_dir = sess["work_dir"].as_str().unwrap().to_string();
+
+    client
+        .post(&format!("/api/sessions/{id}/archive"), json!({}))
+        .await
+        .unwrap();
+    weaver_core::git::delete_branch(ts.repo_path(), &branch)
+        .await
+        .unwrap();
+
+    assert!(
+        client
+            .post(&format!("/api/sessions/{id}/recover"), json!({}))
+            .await
+            .is_err(),
+        "a deleted kept branch makes recovery fail"
+    );
+    let view = client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    assert_eq!(view["status"], "archived");
+    assert!(!Path::new(&work_dir).exists());
+    assert!(!backend::has_session(&term_session).await);
 }

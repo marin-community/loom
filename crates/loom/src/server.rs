@@ -279,9 +279,13 @@ pub async fn reconcile_managed_sessions(state: &AppState) {
             if session_mod::is_terminal(&session.status) {
                 continue;
             }
-            match web::archive(state, &session, &branch).await {
-                Ok(_) => tracing::info!(
+            match web::auto_archive(state, &session, &branch).await {
+                Ok(Some(_)) => tracing::info!(
                     "warm-adopt: archived orphaned managed session {} (owner gone)",
+                    session.id
+                ),
+                Ok(None) => tracing::info!(
+                    "warm-adopt: automatic archive disabled for owner-less session {}",
                     session.id
                 ),
                 Err(e) => tracing::warn!(

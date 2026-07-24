@@ -367,6 +367,7 @@ def test_observe_is_implicit_and_writes_are_gated():
     c.sessions()  # a read never gates
     for call in (
         lambda: c.set_tag("s", "triage", "blocked"),
+        lambda: c.set_tags("s", []),
         lambda: c.clear_tag("s", "triage"),
         lambda: c.mark("s", "blocked"),
         lambda: c.nudge("s", "hello"),
@@ -411,6 +412,27 @@ def test_mark_ok_clears_via_delete_with_by_query():
     assert c.requests == [
         ("DELETE", "/sessions/s1/tags/triage?by=watch", None),
         ("DELETE", "/sessions/s1/tags/triage", None),
+    ]
+
+
+def test_set_tags_replaces_one_authors_set_with_exact_clears():
+    c = StubClient(capabilities=["mark"])
+    c.set_tags(
+        "s1",
+        [{"key": "review", "value": "attention", "note": "ready"}],
+        by="watch",
+        clear=[{"key": "idle", "value": "idle"}],
+    )
+    assert c.requests == [
+        (
+            "PUT",
+            "/sessions/s1/tags",
+            {
+                "tags": [{"key": "review", "value": "attention", "note": "ready"}],
+                "clear": [{"key": "idle", "value": "idle"}],
+                "by": "watch",
+            },
+        )
     ]
 
 

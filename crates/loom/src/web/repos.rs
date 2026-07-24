@@ -18,7 +18,7 @@ use crate::session::{self as session_mod, Session};
 use weaver_core::branch as branch_mod;
 
 use super::auth::public_base;
-use super::sessions::archive;
+use super::sessions::auto_archive;
 use super::{ApiResult, AppError, AppState};
 
 // ---------------------------------------------------------------------------
@@ -409,12 +409,21 @@ async fn handle_trigger(
                     repo = %slug.slug(),
                     "github webhook: session terminal unreachable; archiving it and launching a fresh session"
                 );
-                if let Err(e) = archive(&st, &sess, &b).await {
-                    tracing::warn!(session = %sess.id, error = ?e, "github webhook: archiving unreachable session failed");
-                    return Err(format!(
-                        "archiving unreachable session {} failed: {e:?}",
-                        sess.id
-                    ));
+                match auto_archive(&st, &sess, &b).await {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        return Err(format!(
+                            "session {} is unreachable and automatic archive is disabled",
+                            sess.id
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::warn!(session = %sess.id, error = ?e, "github webhook: archiving unreachable session failed");
+                        return Err(format!(
+                            "archiving unreachable session {} failed: {e:?}",
+                            sess.id
+                        ));
+                    }
                 }
             }
         }

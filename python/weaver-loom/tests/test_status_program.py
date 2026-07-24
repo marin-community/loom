@@ -58,11 +58,8 @@ class StubClient:
         self.calls.append(("agent", prompt, model, effort))
         return self.agent_reply
 
-    def set_tag(self, key, tag_key, value, note="", by=None):
-        self.calls.append(("set_tag", key, tag_key, value, note, by))
-
-    def clear_tag(self, key, tag_key, by=None):
-        self.calls.append(("clear_tag", key, tag_key, by))
+    def set_tags(self, key, tags, by=None, clear=None):
+        self.calls.append(("set_tags", key, tags, by, clear or []))
 
 
 def session(id, attention=None, watch=None, status="running", idle=False):
@@ -90,12 +87,8 @@ def run_main(client, capsys, **config):
     return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
 
 
-def sets(client):
-    return [c for c in client.calls if c[0] == "set_tag"]
-
-
-def clears(client):
-    return [c for c in client.calls if c[0] == "clear_tag"]
+def batches(client):
+    return [c for c in client.calls if c[0] == "set_tags"]
 
 
 # -- judge: parse the agent's tag set, no-judgement vs calm verdict ------------
@@ -166,8 +159,15 @@ def test_applies_tags_and_reconciles_its_own_dropped_marks(capsys):
         sessions=[session("s", watch={"stuck": "blocked"})],
     )
     result = run_main(client, capsys)
-    assert ("set_tag", "s", "review", "attention", "looks done", "watch") in client.calls
-    assert ("clear_tag", "s", "stuck", "watch") in client.calls
+    assert batches(client) == [
+        (
+            "set_tags",
+            "s",
+            [{"key": "review", "value": "attention", "note": "looks done"}],
+            "watch",
+            [],
+        )
+    ]
     assert result["outcome"] == "ok"
     assert result["summary"] == "assessed 1 of 1, applied 1 tag(s)"
 
@@ -179,8 +179,7 @@ def test_empty_verdict_clears_the_watchs_own_marks(capsys):
         sessions=[session("s", watch={"review": "attention"})],
     )
     result = run_main(client, capsys)
-    assert sets(client) == []
-    assert ("clear_tag", "s", "review", "watch") in client.calls
+    assert batches(client) == [("set_tags", "s", [], "watch", [])]
     assert result["summary"] == "assessed 1 of 1, applied 0 tag(s)"
 
 
@@ -192,7 +191,7 @@ def test_no_judgement_leaves_every_mark_untouched(capsys):
         sessions=[session("s", watch={"review": "attention"})],
     )
     result = run_main(client, capsys)
-    assert sets(client) == [] and clears(client) == []
+    assert batches(client) == []
     assert result == {
         "outcome": "noop",
         "summary": "assessed 0 of 1, applied 0 tag(s)",
@@ -209,14 +208,13 @@ def test_never_touches_the_agents_own_self_report(capsys):
         sessions=[session("s", attention="attention")],
     )
     run_main(client, capsys)
-    assert not any(c[0] == "clear_tag" and c[2] == "attention" for c in client.calls)
-    assert clears(client) == []
+    assert batches(client) == [("set_tags", "s", [], "watch", [])]
 
 
 def test_without_mark_capability_only_observes(capsys):
     client = StubClient(agent_reply=TAGS, sessions=[session("s")])
     result = run_main(client, capsys)
-    assert sets(client) == [] and clears(client) == []
+    assert batches(client) == []
     assert result["actions"] == [
         {"action": "observe", "session": "s", "key": "review",
          "value": "attention", "note": "looks done"}
@@ -230,7 +228,7 @@ def test_dry_run_records_would_and_mutates_nothing(capsys):
         sessions=[session("s", watch={"stuck": "blocked"})],
     )
     result = run_main(client, capsys, dry_run=True)
-    assert sets(client) == [] and clears(client) == []
+    assert batches(client) == []
     assert {"would": "tag", "session": "s", "key": "review",
             "value": "attention", "note": "looks done"} in result["actions"]
     assert {"would": "clear", "session": "s", "key": "stuck"} in result["actions"]
@@ -251,8 +249,15 @@ def test_real_status_replaces_the_soothing_idle_mark(capsys):
         sessions=[session("s", idle=True)],
     )
     run_main(client, capsys)
-    assert ("set_tag", "s", "review", "attention", "looks done", "watch") in client.calls
-    assert ("clear_tag", "s", "idle", "watch") in client.calls
+    assert batches(client) == [
+        (
+            "set_tags",
+            "s",
+            [{"key": "review", "value": "attention", "note": "looks done"}],
+            "watch",
+            [{"key": "idle", "value": "idle"}],
+        )
+    ]
 
 
 def test_calm_verdict_leaves_the_idle_mark(capsys):
@@ -264,7 +269,7 @@ def test_calm_verdict_leaves_the_idle_mark(capsys):
         sessions=[session("s", idle=True)],
     )
     run_main(client, capsys)
-    assert not any(c[0] == "clear_tag" and c[2] == "idle" for c in client.calls)
+    assert batches(client) == [("set_tags", "s", [], "watch", [])]
 
 
 def test_no_idle_mark_means_nothing_to_replace(capsys):
@@ -276,7 +281,7 @@ def test_no_idle_mark_means_nothing_to_replace(capsys):
         sessions=[session("s")],
     )
     run_main(client, capsys)
-    assert not any(c[0] == "clear_tag" and c[2] == "idle" for c in client.calls)
+    assert batches(client)[0][4] == []
 
 
 def test_stray_idle_keyed_tag_is_not_cleared(capsys):
@@ -292,7 +297,7 @@ def test_stray_idle_keyed_tag_is_not_cleared(capsys):
     }
     client = StubClient(capabilities=["mark"], agent_reply=TAGS, sessions=[sess])
     run_main(client, capsys)
-    assert not any(c[0] == "clear_tag" and c[2] == "idle" for c in client.calls)
+    assert batches(client)[0][4] == []
 
 
 def test_dry_run_would_clear_the_idle_mark(capsys):
@@ -302,7 +307,7 @@ def test_dry_run_would_clear_the_idle_mark(capsys):
         sessions=[session("s", idle=True)],
     )
     result = run_main(client, capsys, dry_run=True)
-    assert sets(client) == [] and clears(client) == []
+    assert batches(client) == []
     assert {"would": "clear", "session": "s", "key": "idle"} in result["actions"]
 
 

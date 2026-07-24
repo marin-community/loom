@@ -18,7 +18,7 @@ use crate::dto::{
     FederationReq, FederationView, HandoffReq, IssueView, McpRegistryView, NewCommentBody,
     NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq, ProfileProbeView, ProfileReq,
     ProfileView, PutProfileEnvReq, ReadinessView, RunReq, RunView, RunWatchReq, SendReq,
-    SessionView, SettingsEnvelope, TagReq, ThreadDto, TokenView, WatchView,
+    SessionView, SetTagsReq, SettingsEnvelope, TagReq, ThreadDto, TokenView, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -211,6 +211,17 @@ impl Client {
                 Self::seg(tag_key)
             ),
             Some(&req),
+        )
+        .await
+    }
+
+    /// Atomically replace every tag authored by `by` on a session. Exact
+    /// `(key, value)` entries in `clear` are removed in the same transaction.
+    pub async fn set_tags(&self, key: &str, req: &SetTagsReq) -> Result<SessionView> {
+        self.send_typed(
+            Method::PUT,
+            &format!("/api/sessions/{}/tags", Self::seg(key)),
+            Some(req),
         )
         .await
     }
