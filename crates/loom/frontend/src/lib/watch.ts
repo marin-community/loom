@@ -5,6 +5,7 @@ import type { Watch, WatchTrigger, WatchScope } from '../types';
 // the explicit grants below it.
 export const CAPABILITIES = [
   'observe',
+  'judge',
   'mark',
   'escalate',
   'nudge',

@@ -832,7 +832,8 @@ struct AddOpts {
     /// The stock-program judgement prompt; stored as `params.prompt`.
     #[arg(long)]
     prompt: Option<String>,
-    /// Comma-separated capability set (default `observe,judge,mark,escalate`).
+    /// Comma-separated capability set (default `observe,judge,mark` for
+    /// `builtin:status`).
     /// Drawn from observe, judge, mark, escalate, nudge, interrupt, launch.
     #[arg(long, value_delimiter = ',')]
     capabilities: Option<Vec<String>>,
