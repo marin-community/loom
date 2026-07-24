@@ -649,6 +649,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/sessions/{id}/log", get(log_session))
         .route("/sessions/{id}/conversation", get(conversation_session))
+        .route("/sessions/{id}/history", get(session_history))
+        .route("/sessions/{id}/history/search", get(search_session_history))
         .route("/sessions/{id}/files", get(list_session_files))
         .route("/sessions/{id}/events", get(events_sse))
         .route("/sessions/{id}/terminal", get(crate::terminal::terminal_ws))

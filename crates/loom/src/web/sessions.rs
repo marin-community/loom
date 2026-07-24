@@ -26,7 +26,8 @@ use crate::{
     setup,
 };
 use weaver_api::{
-    CreateReq, HandoffReq, PatchSessionReq, SendReq, SessionView, SetTagsReq, TagReq,
+    CreateReq, HandoffReq, HistoryPageView, PatchSessionReq, SendReq, SessionView, SetTagsReq,
+    TagReq,
 };
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::Branch;
@@ -3173,6 +3174,89 @@ pub(super) async fn conversation_session(
     // than letting a large response stall unrelated async routes.
     let body = tokio::task::spawn_blocking(move || serde_json::to_vec(&log)).await??;
     Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct HistoryPageQuery {
+    before: Option<String>,
+    limit: Option<usize>,
+    /// Comma-separated normalized record kinds.
+    kinds: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct HistorySearchQuery {
+    q: String,
+    before: Option<String>,
+    limit: Option<usize>,
+    /// Comma-separated normalized record kinds.
+    kinds: Option<String>,
+}
+
+fn history_kinds(value: Option<&str>) -> Vec<String> {
+    value
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn history_error(error: crate::history::PageError) -> AppError {
+    match error {
+        crate::history::PageError::BadRequest(message) => AppError::bad_request(message),
+        crate::history::PageError::Internal(error) => error.into(),
+    }
+}
+
+/// A provider-neutral page of this session's conversation records. ACP reads
+/// its durable journal; terminal sessions normalize their native transcript on
+/// read and fall back to the archived Iris capture.
+pub(super) async fn session_history(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Query(query): Query<HistoryPageQuery>,
+) -> ApiResult<Json<HistoryPageView>> {
+    let (session, branch) = require_session(&st.db, &key).await?;
+    let page = crate::history::page(
+        &st.db,
+        &session,
+        &branch,
+        crate::history::PageOptions {
+            before: query.before,
+            limit: query.limit,
+            kinds: history_kinds(query.kinds.as_deref()),
+            query: None,
+        },
+    )
+    .await
+    .map_err(history_error)?;
+    Ok(Json(page))
+}
+
+/// Case-insensitive literal search over the same normalized, session-scoped
+/// records and cursor contract as [`session_history`].
+pub(super) async fn search_session_history(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Query(query): Query<HistorySearchQuery>,
+) -> ApiResult<Json<HistoryPageView>> {
+    let (session, branch) = require_session(&st.db, &key).await?;
+    let page = crate::history::page(
+        &st.db,
+        &session,
+        &branch,
+        crate::history::PageOptions {
+            before: query.before,
+            limit: query.limit,
+            kinds: history_kinds(query.kinds.as_deref()),
+            query: Some(query.q),
+        },
+    )
+    .await
+    .map_err(history_error)?;
+    Ok(Json(page))
 }
 
 pub(super) async fn events_sse(

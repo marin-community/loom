@@ -226,6 +226,15 @@ async fn session_token_is_limited_to_its_tree_and_work_items() {
         loom::auth::create_session_token(&ts.state.db, Some("rjpower"), session_id, branch_id)
             .await
             .unwrap();
+    let sibling = ts
+        .client
+        .post(
+            "/api/sessions",
+            json!({ "cwd": ts.cwd(), "goal": "scoped sibling", "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let sibling_id = sibling["id"].as_str().unwrap().to_string();
 
     let unrelated = weaver_core::issue::add(
         &ts.state.db,
@@ -257,6 +266,13 @@ async fn session_token_is_limited_to_its_tree_and_work_items() {
         .await
         .unwrap();
     assert_eq!(issue.status(), StatusCode::OK);
+    let own_history = http
+        .get(url(&ts, &format!("/api/sessions/{session_id}/history")))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(own_history.status(), StatusCode::OK);
 
     let child = http
         .post(url(&ts, "/api/sessions"))
@@ -280,6 +296,22 @@ async fn session_token_is_limited_to_its_tree_and_work_items() {
         .await
         .unwrap();
     assert_eq!(unrelated.status(), StatusCode::FORBIDDEN);
+    for path in [
+        format!("/api/sessions/{sibling_id}/history"),
+        format!("/api/sessions/{sibling_id}/history/search?q=secret"),
+    ] {
+        let sibling_history = http
+            .get(url(&ts, &path))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            sibling_history.status(),
+            StatusCode::FORBIDDEN,
+            "session token read sibling history through {path}"
+        );
+    }
     let admin = http
         .get(url(&ts, "/api/auth/tokens"))
         .bearer_auth(&token)

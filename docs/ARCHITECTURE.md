@@ -54,12 +54,13 @@ other `weaver` subcommand.
 | `crates/loom/src/builtins.rs` | the builtin watch program registry; the script programs are real Python files in `crates/loom/watches/`, embedded into the binary |
 | `python/weaver-loom/` | the pure-Python layer over the loom REST API (`weaver_loom`: client + watch round context); stdlib-only, uv-buildable, vendored onto every script's `PYTHONPATH` by the engine; server-free contract tests in `tests/` (`uv run pytest`, CI's `python-binding` job) |
 | `crates/loom/src/agent.rs` | launching agents: resolving the execution `protocol`, launching a `terminal` agent into a per-session PTY (installing its `.claude/settings.local.json` hooks) or building an `acp` launch (`build_acp_launch` — the adapter command, `_meta` options, and goal), plus the one-shot headless agent behind `POST /api/agent/oneshot` |
-| `crates/loom/src/mcp/` | trusted builtin MCP registry and stdio adapters: provider-neutral versioned capability sets, exact permission translation, and the fixed GitHub/messaging bridges |
+| `crates/loom/src/mcp/` | trusted builtin MCP registry and stdio adapters: provider-neutral versioned capability sets, exact permission translation, and the fixed GitHub/messaging/self-history bridges |
 | `crates/loom/src/custom_mcp.rs` | operator-authored MCP definitions: grouped path identities, immutable sqlite revisions, bounded `uv` validation, and exact session-snapshot execution |
 | `crates/loom/src/profile.rs` | named launch policy, including provider-neutral `mcp_access` resolution and the restricted-profile trust boundary |
 | `crates/loom/src/session.rs` | `Session` row + sqlx queries |
 | `crates/loom/src/session_manager.rs` | database-backed ownership reconciliation for detached agent/debug supervisors; removes Loom-namespaced runtimes without a live session or active launch-reservation owner |
 | `crates/loom/src/chatlog.rs` | conversation log: capture at archive (write the iris `chat.json` + rendered `chat.md` under `session.log_dir`) and serve it for the Conversation tab (`conversation()` — a terminal session's live transcript, an acp session's chat journal mapped to iris (`journal_to_log`), else the capture) |
+| `crates/loom/src/history.rs` | provider-neutral session-history records and bounded paging/literal search across the ACP journal or terminal Iris normalization; optional fields describe only source-supplied data |
 | `crates/loom/src/backend.rs` | the terminal-management seam: every programmatic terminal op (create/has/capture/send/kill/list) drives the session's `tapestry` supervisor. Also the ACP transport seam — `new_relay_session`/`subscribe_relay`/`relay_write`/`relay_ack` drive a session's tapestry **relay** supervisor (a durable JSON-RPC frame spool) |
 | `crates/tapestry/` | the per-session detached supervisor that outlives loom. Two modes: a **terminal** (PTY + vt100 screen emulator + unix control socket, streaming raw PTY bytes so an attached xterm owns its own scrollback/search), and a **relay** (a headless stdio subprocess whose stdout is split into newline-delimited frames, spooled with monotonic seqs, and replayed to a subscriber from any cursor — the durable transport under `loom::acp`) |
 | `crates/loom/src/terminal.rs` | WebSocket ⇄ live-terminal bridge: xterm.js ⇄ the tapestry session socket |
@@ -277,6 +278,8 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `GET PUT /api/sessions/{id}/artifacts/{name}` | read content + projected refs (`rev=N` for a revision) / write a user edit as a new revision |
 | `GET /api/sessions/{id}/{diff,log,events}` | reads + SSE stream |
 | `GET /api/sessions/{id}/conversation` | the agent conversation as a normalized iris log (live transcript, else the archive capture); 404 when there is none — backs the Conversation tab |
+| `GET /api/sessions/{id}/history` | a bounded newest-tail page of provider-neutral records in chronological display order; `before`, `limit`, and `kinds` own backward pagination/filtering |
+| `GET /api/sessions/{id}/history/search` | case-insensitive literal `q` search over the same session-scoped records and cursor/filter contract |
 | `GET /api/sessions/{id}/terminal` | WebSocket: xterm.js ⇄ the session's tapestry PTY (the interaction surface) |
 | `POST /api/sessions/{id}/send` | deliver `{text}` to the agent (`submit`, default true, follows terminal input with Enter); for an `acp` session a live turn is steered when supported, otherwise cancelled and immediately replaced by a new turn, keeping the same `nudge` audit |
 | `POST /api/sessions/{id}/interrupt` | stop the current turn — a break (Escape) to the terminal for a `terminal` session, `session/cancel` for an `acp` one |
@@ -567,6 +570,13 @@ composer at its foot sends a new prompt straight to the agent pane via `POST
 agent's lifecycle edges (the `status`/`tag` SSE events that fire at each
 turn boundary), so a reply lands without a manual reload. The composer hides
 once the terminal is gone (orphaned/done/archived), leaving the read-only log.
+
+Agent recall uses the related
+[normalized history/search contract](session-history.md). ACP records come
+directly from `chat_blocks`; terminal records reuse the fingerprint-cached Iris
+normalizer on read and the archived `chat.json` fallback. The trusted
+`mcp/history/self@v1` adapter resolves only its own `LOOM_SESSION_ID` and calls
+these REST routes, so it adds no parallel data model or authorization path.
 
 Orphan detection is independent: if the session's supervisor is no longer alive,
 the session becomes `orphaned` and is eligible for `loom adopt`.

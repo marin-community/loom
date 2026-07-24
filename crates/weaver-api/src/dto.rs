@@ -201,6 +201,57 @@ pub struct SessionView {
     pub branch: BranchView,
 }
 
+/// One provider-neutral conversation record returned by the session history
+/// API. Optional fields are capability claims, not placeholders: notably,
+/// `tool_input` is absent when the source protocol did not provide invocation
+/// arguments (ACP currently provides only tool title/status/content/locations).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryRecordView {
+    /// Opaque, source-stable position used as the exclusive paging cursor.
+    pub cursor: String,
+    /// `message`, `reasoning`, `tool_call`, `tool_result`, `context`, `event`,
+    /// or `image`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_input: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_error: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locations: Vec<HistoryLocationView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+}
+
+/// A source-provided file location attached to a normalized history record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryLocationView {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u64>,
+}
+
+/// One newest-tail page of normalized session history. Records are returned in
+/// chronological display order; pass `older_cursor` as `before` to continue
+/// backward. The same envelope is used by literal search.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryPageView {
+    /// Normalizer/source label (`acp`, `claude`, `codex`, ...).
+    pub source: String,
+    pub records: Vec<HistoryRecordView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub older_cursor: Option<String>,
+}
+
 /// Cumulative session cost optionally reported alongside ACP context usage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AcpCost {

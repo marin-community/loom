@@ -998,6 +998,30 @@ export interface IrisLog {
   messages: IrisMessage[];
 }
 
+/** One provider-neutral record from `GET /sessions/{id}/history[/search]`.
+ * Optional fields are present only when the source transcript supplies them;
+ * ACP tool activity, in particular, does not claim invocation arguments. */
+export interface HistoryRecord {
+  cursor: string;
+  kind: 'message' | 'reasoning' | 'tool_call' | 'tool_result' | 'context' | 'event' | 'image';
+  role?: string;
+  content?: string;
+  tool_name?: string;
+  tool_input?: unknown;
+  tool_status?: string;
+  is_error?: boolean;
+  event_name?: string;
+  locations?: Array<{ path: string; line?: number }>;
+  timestamp?: string;
+}
+
+/** A newest-tail page returned in chronological display order. */
+export interface HistoryPage {
+  source: string;
+  records: HistoryRecord[];
+  older_cursor?: string;
+}
+
 /** One captured server log line. Mirrors `loom::logs::LogLine`. */
 export interface LogLine {
   seq: number;
