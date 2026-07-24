@@ -51,7 +51,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tapestry::RelayEvent;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -155,7 +155,8 @@ pub struct SseEvent {
 /// kept as ACP-shaped JSON: command inputs and session config options are an
 /// extensible protocol surface, and loom forwards fields it does not yet render
 /// instead of narrowing the wire contract and making adapters stale again.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct AcpMetadata {
     pub commands: Vec<Value>,
     pub config_options: Vec<Value>,
@@ -843,6 +844,19 @@ struct Task {
 }
 
 impl Task {
+    async fn load_persisted_metadata(db: &Db, session_id: &str) -> Result<AcpMetadata> {
+        let Some(stored) = session::get_acp_metadata(db, session_id).await? else {
+            return Ok(AcpMetadata::default());
+        };
+        serde_json::from_str(&stored).context("decoding persisted ACP metadata")
+    }
+
+    async fn persist_metadata(&self) -> Result<()> {
+        let metadata = self.metadata.lock().unwrap().clone();
+        let encoded = serde_json::to_string(&metadata)?;
+        session::set_acp_metadata(&self.db, &self.session_id, &encoded).await
+    }
+
     async fn fresh(
         state: &AppState,
         session: &session::Session,
@@ -930,6 +944,8 @@ impl Task {
         let next_seq = max_seq + 1;
         let turns_dispatched = if max_seq < 0 { 0 } else { current_turn + 1 };
 
+        let metadata = Self::load_persisted_metadata(&state.db, &session.id).await?;
+        let steering_cap = metadata.steering_supported;
         Ok(Self {
             db: state.db.clone(),
             bus: state.bus.clone(),
@@ -953,11 +969,11 @@ impl Task {
             // applying a newer session selection to an older turn.
             effective_mode,
             current_mode: session.current_mode.clone(),
-            metadata: Arc::new(Mutex::new(AcpMetadata::default())),
+            metadata: Arc::new(Mutex::new(metadata)),
             pending_mode: HashMap::new(),
             pending_config: HashMap::new(),
             load_session_cap: false,
-            steering_cap: false,
+            steering_cap,
             pending_steers: HashMap::new(),
             external_turn,
             pending_external: None,
@@ -1240,6 +1256,7 @@ impl Task {
         if let Some(mode) = &self.current_mode {
             session::set_current_mode(&self.db, &self.session_id, mode).await?;
         }
+        self.persist_metadata().await?;
 
         if let Some(goal) = &launch.goal {
             match handoff {
@@ -1500,9 +1517,15 @@ impl Task {
             }
             SessionUpdate::AvailableCommandsUpdate { available_commands } => {
                 self.replace_commands(available_commands, true);
+                if let Err(error) = self.persist_metadata().await {
+                    tracing::warn!(session = %self.session_id, %error, "failed to persist acp metadata");
+                }
             }
             SessionUpdate::ConfigOptionUpdate { config_options } => {
                 self.replace_config_options(config_options, true);
+                if let Err(error) = self.persist_metadata().await {
+                    tracing::warn!(session = %self.session_id, %error, "failed to persist acp metadata");
+                }
                 if let Some(mode) = &self.current_mode {
                     let _ = session::set_current_mode(&self.db, &self.session_id, mode).await;
                 }
@@ -1613,11 +1636,15 @@ impl Task {
                 {
                     Some(updated) => {
                         self.replace_config_options(updated.config_options, true);
+                        let persisted = self.persist_metadata().await;
                         if let Some(mode) = &self.current_mode {
                             let _ =
                                 session::set_current_mode(&self.db, &self.session_id, mode).await;
                         }
-                        Ok(self.metadata.lock().unwrap().clone())
+                        match persisted {
+                            Ok(()) => Ok(self.metadata.lock().unwrap().clone()),
+                            Err(error) => Err(error),
+                        }
                     }
                     None => Err(anyhow!(
                         "session/set_config_option returned an invalid response"
