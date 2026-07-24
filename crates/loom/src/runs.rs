@@ -1,5 +1,7 @@
 //! Durable, idempotent automation-run reservations.
 
+use std::collections::HashSet;
+
 use anyhow::Result;
 use sqlx::FromRow;
 use weaver_api::RunView;
@@ -128,6 +130,12 @@ pub async fn route_channel(db: &Db, run_id: &str) -> Result<ChannelAction> {
         .bind(run_id)
         .fetch_one(&mut *tx)
         .await?;
+    // Idempotent redelivery observes a terminal attempt; it must never reclaim
+    // the channel and turn an operator cancellation back into provisioning.
+    if matches!(run.status.as_str(), "failed" | "cancelled" | "completed") {
+        tx.commit().await?;
+        return Ok(ChannelAction::Ready(run));
+    }
     let channel = run
         .channel
         .clone()
@@ -303,17 +311,24 @@ pub async fn list_for(db: &Db, subject: Option<&str>) -> Result<Vec<Run>> {
     }
 }
 
-pub async fn launched(db: &Db, id: &str, session_id: &str) -> Result<()> {
-    sqlx::query(
+/// Mark a launch reservation live only while it still owns the launch.
+///
+/// Archive/remove first make a reservation terminal. A provisioning request
+/// that finishes after that cancellation must not resurrect it as `running`;
+/// the caller uses the `false` result to tear down its late-created session.
+pub async fn launched(db: &Db, id: &str, session_id: &str) -> Result<bool> {
+    Ok(sqlx::query(
         "UPDATE automation_runs SET status = 'running', updated_at = ?
-         WHERE id = ? AND session_id = ?",
+         WHERE id = ? AND session_id = ?
+           AND status IN ('creating', 'waiting', 'delivering')",
     )
     .bind(now_iso())
     .bind(id)
     .bind(session_id)
     .execute(db)
-    .await?;
-    Ok(())
+    .await?
+    .rows_affected()
+        == 1)
 }
 
 /// Claim a reservation abandoned while provisioning. A live request keeps its
@@ -347,25 +362,32 @@ pub async fn claim_stale_delivery(db: &Db, id: &str) -> Result<bool> {
         == 1)
 }
 
-pub async fn waiting(db: &Db, id: &str) -> Result<()> {
-    sqlx::query("UPDATE automation_runs SET status = 'waiting', updated_at = ? WHERE id = ?")
-        .bind(now_iso())
-        .bind(id)
-        .execute(db)
-        .await?;
-    Ok(())
+pub async fn waiting(db: &Db, id: &str) -> Result<bool> {
+    Ok(sqlx::query(
+        "UPDATE automation_runs SET status = 'waiting', updated_at = ?
+         WHERE id = ? AND status IN ('creating', 'delivering', 'waiting')",
+    )
+    .bind(now_iso())
+    .bind(id)
+    .execute(db)
+    .await?
+    .rows_affected()
+        == 1)
 }
 
-pub async fn failed(db: &Db, id: &str, summary: &str) -> Result<()> {
-    sqlx::query(
-        "UPDATE automation_runs SET status = 'failed', outcome = 'failed', summary = ?, updated_at = ? WHERE id = ?",
+pub async fn failed(db: &Db, id: &str, summary: &str) -> Result<bool> {
+    Ok(sqlx::query(
+        "UPDATE automation_runs
+         SET status = 'failed', outcome = 'failed', summary = ?, updated_at = ?
+         WHERE id = ? AND status IN ('creating', 'waiting', 'delivering', 'running')",
     )
     .bind(summary)
     .bind(now_iso())
     .bind(id)
     .execute(db)
-    .await?;
-    Ok(())
+    .await?
+    .rows_affected()
+        == 1)
 }
 
 fn stale_before() -> String {
@@ -377,18 +399,124 @@ fn stale_before() -> String {
 /// reservation preserves idempotency/audit history; changing its status keeps
 /// it out of the active provisioning queue.
 pub async fn cancel_for_session(db: &Db, session_id: &str) -> Result<()> {
-    sqlx::query(
+    cancel_for_session_with_summary(db, session_id, "session removed by user").await?;
+    Ok(())
+}
+
+/// Make every run that references a reserved session id terminal.
+///
+/// This is the launch-attempt equivalent of session archive: the idempotency
+/// and audit row stays, but it no longer owns a runtime and cannot be promoted
+/// back to `running` by a late provisioning response.
+pub async fn cancel_for_session_with_summary(
+    db: &Db,
+    session_id: &str,
+    summary: &str,
+) -> Result<u64> {
+    Ok(sqlx::query(
         "UPDATE automation_runs
          SET status = 'cancelled', outcome = 'cancelled',
-             summary = 'session removed by user', updated_at = ?
+             summary = ?, updated_at = ?
          WHERE session_id = ?
            AND status IN ('creating', 'waiting', 'delivering', 'running', 'failed')",
     )
+    .bind(summary)
     .bind(now_iso())
     .bind(session_id)
     .execute(db)
+    .await?
+    .rows_affected())
+}
+
+/// Every run record for one reserved session id, newest first.
+pub async fn list_for_session(db: &Db, session_id: &str) -> Result<Vec<Run>> {
+    Ok(sqlx::query_as::<_, Run>(
+        "SELECT * FROM automation_runs WHERE session_id = ? ORDER BY created_at DESC",
+    )
+    .bind(session_id)
+    .fetch_all(db)
+    .await?)
+}
+
+/// Session ids whose unmatched automation reservations may still be
+/// provisioning. The external-runtime reconciler preserves these names during
+/// rolling restarts; terminal run history owns no supervisor.
+pub async fn runtime_owner_ids(db: &Db) -> Result<HashSet<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT session_id
+         FROM automation_runs
+         WHERE status = 'creating'
+           AND NOT EXISTS (
+               SELECT 1 FROM sessions WHERE sessions.id = automation_runs.session_id
+           )",
+    )
+    .fetch_all(db)
+    .await?
+    .into_iter()
+    .collect())
+}
+
+/// Non-terminal sessions that materialized after their launch attempt lost
+/// ownership.
+///
+/// The request path normally notices a cancelled promotion and removes the
+/// late session immediately. This query closes the crash window between
+/// session creation and that check: the periodic resource reconciler marks the
+/// recorded session `error` and tears down its runtime, leaving a visible,
+/// removable DB record rather than an unowned agent.
+pub async fn invalidate_sessions_from_cancelled_launches(db: &Db) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "UPDATE sessions
+         SET status = 'error'
+         WHERE automation_run_id IS NOT NULL
+           AND status NOT IN ('done', 'error', 'archived')
+           AND (
+               NOT EXISTS (
+                   SELECT 1 FROM automation_runs r
+                   WHERE r.id = sessions.automation_run_id
+               )
+               OR EXISTS (
+                   SELECT 1 FROM automation_runs r
+                   WHERE r.id = sessions.automation_run_id
+                     AND r.status = 'cancelled'
+                     AND r.summary IN (
+                         'launch attempt archived by user',
+                         'launch attempt removed by user'
+                     )
+               )
+           )
+         RETURNING id",
+    )
+    .fetch_all(db)
+    .await?)
+}
+
+/// Remove every launch-attempt record for a reserved session id.
+///
+/// Channel ownership rows refer to automation runs without `ON DELETE CASCADE`,
+/// so release those first. This is deliberately separate from cancellation:
+/// callers terminalize the run before external teardown, then remove history
+/// only after teardown has been attempted.
+pub async fn delete_for_session(db: &Db, session_id: &str) -> Result<u64> {
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
+    sqlx::query(
+        "DELETE FROM automation_channels
+         WHERE session_id = ?
+            OR owner_run_id IN (
+                SELECT id FROM automation_runs WHERE session_id = ?
+            )",
+    )
+    .bind(session_id)
+    .bind(session_id)
+    .execute(&mut *tx)
     .await?;
-    Ok(())
+    let deleted = sqlx::query("DELETE FROM automation_runs WHERE session_id = ?")
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    Ok(deleted)
 }
 
 /// Repair reservations whose provisioning request or session disappeared.
@@ -548,6 +676,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_channel_delivery_cannot_reclaim_its_channel() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let run = match reserve(
+            &db,
+            NewRun {
+                subject: "subject",
+                source: "grafana",
+                service_tag: "grafana",
+                profile: "default",
+                idempotency_key: "cancelled-channel",
+                channel: Some("operator"),
+                request_json: "{}",
+            },
+        )
+        .await
+        .unwrap()
+        {
+            Reservation::Created(run) => run,
+            Reservation::Existing(_) => unreachable!(),
+        };
+        assert!(matches!(
+            route_channel(&db, &run.id).await.unwrap(),
+            ChannelAction::Launch(_)
+        ));
+        cancel_for_session_with_summary(&db, &run.session_id, "launch attempt archived by user")
+            .await
+            .unwrap();
+
+        let ChannelAction::Ready(cancelled) = route_channel(&db, &run.id).await.unwrap() else {
+            panic!("cancelled delivery must remain terminal");
+        };
+        assert_eq!(cancelled.status, "cancelled");
+        assert_eq!(
+            get(&db, &run.id).await.unwrap().unwrap().status,
+            "cancelled"
+        );
+    }
+
+    #[tokio::test]
     async fn startup_reconciles_reservations_without_sessions() {
         let db = crate::db::connect_in_memory().await.unwrap();
         let run = match reserve(
@@ -605,6 +772,44 @@ mod tests {
         assert_eq!(cancelled.status, "cancelled");
         assert_eq!(cancelled.outcome.as_deref(), Some("cancelled"));
         assert_eq!(cancelled.summary, "session removed by user");
+    }
+
+    #[tokio::test]
+    async fn cancellation_wins_over_a_late_launch_promotion() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let run = match reserve(
+            &db,
+            NewRun {
+                subject: "subject",
+                source: "ops",
+                service_tag: "grafana",
+                profile: "default",
+                idempotency_key: "cancelled-race",
+                channel: None,
+                request_json: "{}",
+            },
+        )
+        .await
+        .unwrap()
+        {
+            Reservation::Created(run) => run,
+            Reservation::Existing(_) => unreachable!(),
+        };
+
+        cancel_for_session_with_summary(&db, &run.session_id, "operator cancelled")
+            .await
+            .unwrap();
+        assert!(
+            !launched(&db, &run.id, &run.session_id).await.unwrap(),
+            "a late create response must not resurrect a cancelled run"
+        );
+        let cancelled = get(&db, &run.id).await.unwrap().unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+        assert_eq!(cancelled.summary, "operator cancelled");
+        assert!(!runtime_owner_ids(&db)
+            .await
+            .unwrap()
+            .contains(&run.session_id));
     }
 
     #[tokio::test]

@@ -11,7 +11,7 @@ use tokio::net::TcpListener;
 use crate::events::EventBus;
 use crate::session as session_mod;
 use crate::web::AppState;
-use crate::{backend, config, db, github, monitor, runner, watch, web};
+use crate::{backend, config, db, github, monitor, runner, session_manager, watch, web};
 use weaver_core::branch as branch_mod;
 use weaver_core::watch as watch_store;
 
@@ -105,6 +105,19 @@ pub async fn run(addr: &str) -> Result<()> {
         acp: crate::acp::AcpRegistry::new(),
         launch_gate: crate::launch_gate::RepoLaunchGate::default(),
     };
+
+    // Detached supervisors outlive this control process. Before reattaching or
+    // adopting anything, remove only Loom-namespaced runtimes that have no
+    // durable session/active-reservation owner. This is the inverse of the
+    // monitor's missing-supervisor -> orphaned transition.
+    match session_manager::reconcile_supervisors(&state.db).await {
+        Ok(report) if !report.warnings.is_empty() => tracing::warn!(
+            warnings = report.warnings.len(),
+            "session resource reconciliation completed with warnings"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "initial session resource reconciliation failed"),
+    }
 
     let server_state = ServerState {
         pid: std::process::id(),
@@ -325,6 +338,7 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
         Err(e) => tracing::warn!("could not prepare the machine-local token: {e}"),
     }
     tokio::spawn(monitor::run(state.clone()));
+    tokio::spawn(session_manager::run(state.db.clone()));
     // The GitHub poller is always spawned; it self-gates on the `github.poll`
     // setting and on `gh` being available, so it idles cheaply when GitHub
     // integration is off or unavailable.
@@ -339,7 +353,9 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     // presence and the `slack.enabled` switch, so an unconfigured loom idles
     // here cheaply.
     tokio::spawn(crate::slack::run(state.clone()));
-    tracing::debug!("background tasks spawned (monitor, github poll, watch, ide reaper, slack)");
+    tracing::debug!(
+        "background tasks spawned (monitor, session reconciler, github poll, watch, ide reaper, slack)"
+    );
     // `into_make_service_with_connect_info` surfaces the peer `SocketAddr` to the
     // auth middleware, which uses it to recognise (and optionally trust) loopback.
     axum::serve(

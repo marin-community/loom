@@ -80,15 +80,17 @@ export const uploadSessionScratch = (id: string, file: File) =>
 
 // --- Sessions ----------------------------------------------------------------
 
-/** The fleet: every session, optionally widened past the two default-hidden
+/** The fleet: every session, optionally widened past the default-hidden
  *  categories. `archived` includes torn-down sessions; `automation` includes
- *  agent/system-launched sessions (`class: 'automation'`) — background work a
- *  person didn't start, hidden from the fleet list by default. Symmetric flags,
- *  both off by default (`GET /api/sessions`). */
-export const listSessions = (opts: { archived?: boolean; automation?: boolean } = {}) => {
+ *  background work; admin-only `managed` includes watch-owned warm sessions.
+ *  All are off by default (`GET /api/sessions`). */
+export const listSessions = (
+  opts: { archived?: boolean; automation?: boolean; managed?: boolean } = {},
+) => {
   const params = new URLSearchParams();
   if (opts.archived) params.set('archived', 'true');
-  if (opts.automation) params.set('automation', 'true');
+  if (opts.automation || opts.managed) params.set('automation', 'true');
+  if (opts.managed) params.set('managed', 'true');
   const qs = params.toString();
   return get(`/sessions${qs ? `?${qs}` : ''}`) as Promise<Session[]>;
 };

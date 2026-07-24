@@ -58,6 +58,7 @@ other `weaver` subcommand.
 | `crates/loom/src/custom_mcp.rs` | operator-authored MCP definitions: grouped path identities, immutable sqlite revisions, bounded `uv` validation, and exact session-snapshot execution |
 | `crates/loom/src/profile.rs` | named launch policy, including provider-neutral `mcp_access` resolution and the restricted-profile trust boundary |
 | `crates/loom/src/session.rs` | `Session` row + sqlx queries |
+| `crates/loom/src/session_manager.rs` | database-backed ownership reconciliation for detached agent/debug supervisors; removes Loom-namespaced runtimes without a live session or active launch-reservation owner |
 | `crates/loom/src/chatlog.rs` | conversation log: capture at archive (write the iris `chat.json` + rendered `chat.md` under `session.log_dir`) and serve it for the Conversation tab (`conversation()` — a terminal session's live transcript, an acp session's chat journal mapped to iris (`journal_to_log`), else the capture) |
 | `crates/loom/src/backend.rs` | the terminal-management seam: every programmatic terminal op (create/has/capture/send/kill/list) drives the session's `tapestry` supervisor. Also the ACP transport seam — `new_relay_session`/`subscribe_relay`/`relay_write`/`relay_ack` drive a session's tapestry **relay** supervisor (a durable JSON-RPC frame spool) |
 | `crates/tapestry/` | the per-session detached supervisor that outlives loom. Two modes: a **terminal** (PTY + vt100 screen emulator + unix control socket, streaming raw PTY bytes so an attached xterm owns its own scrollback/search), and a **relay** (a headless stdio subprocess whose stdout is split into newline-delimited frames, spooled with monotonic seqs, and replayed to a subscriber from any cursor — the durable transport under `loom::acp`) |
@@ -253,7 +254,7 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `GET /api/ready` | public structured readiness: database access plus core and loom migration versions; optional future remote runner degradation will be reported without failing the whole API |
 | `GET /metrics` | public OpenMetrics scrape derived from durable session/profile/run/migration state; labels are bounded operational dimensions and never contain session/branch/path/user/token/error values (deployments normally restrict this at the public edge) |
 | `GET /api/diagnostics` | admin-only redacted counts, profile capacity, automation failures/staleness, orphan/error inventory, migration state, and non-secret federation metadata; backs Settings → Diagnostics |
-| `GET /api/sessions` / `POST /api/sessions` | list / create sessions (list takes `archived` — default `false` — and `automation` — default `false`; create resolves `profile` or `default`, permits launch selectors only when the profile is non-strict, stamps the resolved profile revision/policy, opens a tracking issue, and returns its id as `tracking_issue`; views include the exact source-redacted MCP audit snapshot) |
+| `GET /api/sessions` / `POST /api/sessions` | list / create sessions (list takes `archived` — default `false` — `automation` — default `false` — and admin-only `managed` — default `false`; create resolves `profile` or `default`, permits launch selectors only when the profile is non-strict, stamps the resolved profile revision/policy, opens a tracking issue, and returns its id as `tracking_issue`; views include the exact source-redacted MCP audit snapshot) |
 | `GET POST /api/profiles`; `GET PUT DELETE /api/profiles/{name}` | named launch-policy CRUD, including provider-neutral `mcp_access`, prelude, and the runtime-permission compatibility escape hatch; profile secret values are never returned |
 | `GET /api/profiles/{name}/effective`; `POST /api/profiles/{name}/probe` | inspect the exact profile-revision capability sets, custom revisions, runtime permission translation, and MCP processes without launching; probe also reports retired builtins and removed/disabled pinned custom definitions |
 | `GET /api/mcps` | merged trusted-builtin and operator-authored MCP registry |
@@ -263,11 +264,11 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `POST /api/auth/federate` | exchange an exact mapped, signature-verified GitHub or Google OIDC identity for a ten-minute Ed25519-signed, profile-scoped Loom automation token |
 | `GET POST /api/runs`; `GET /api/runs/{id}` | durable, subject-scoped automation runs with idempotency reservation; an optional channel routes distinct deliveries through one live ACP session, and verified GitHub callers may provide a validated deterministic key or use the workflow run/attempt |
 | `POST /api/sessions/{id}/restricted-github/{tool}` | session-token-scoped fixed GitHub operations for a restricted session; checks stamped tool policy, fixes the target repository and thread from the session, and resolves a GitHub App token or explicit App-less profile token server-side |
-| `GET PATCH DELETE /api/sessions/{id}` | session CRUD (status, title, goal, description) |
+| `GET PATCH DELETE /api/sessions/{id}` | session CRUD (status, title, goal, description); DELETE also accepts an unmatched automation run's reserved session id, tearing down and removing the failed launch attempt |
 | `PUT DELETE /api/sessions/{id}/tags/{key}` | set (upsert) / clear one branch tag — the well-known `attention` and `triage` keys plus any free-form key |
 | `PUT /api/sessions/{id}/tags` | atomically replace one author's complete tag set, with optional exact `(key, value)` clears for lifecycle marks; the watch-safe write path |
 | `GET /api/sessions/{id}/url` | the session's dashboard URL as `{url}`, built from the externally-visible origin (`auth.base_url`, else the request's own Host) — what `loom session url` prints, so an agent can link a PR back to its session without inventing a loopback link |
-| `POST /api/sessions/{id}/{archive,adopt}` | actions |
+| `POST /api/sessions/{id}/{archive,adopt}` | actions; archive also accepts an unmatched automation run's reserved session id, cancelling its runtime while preserving run history |
 | `POST /api/sessions/{id}/handoff` | replace an idle ACP session's agent runtime/profile while preserving its loom session, worktree, branch, and canonical chat journal; the new provider receives a bounded dialogue replay and the journal records a compact handoff boundary |
 | `POST /api/sessions/{id}/github` | re-poll the branch's GitHub PR now and return the updated session |
 | `GET POST DELETE /api/sessions/{id}/scratch` | list / drop / remove worktree `scratch/` reference files |
@@ -350,8 +351,8 @@ is off, there is no PR, or `gh` is unavailable. See [GitHub
 integration](#github-integration).
 
 Status is two orthogonal axes. The session's `status` is the **lifecycle**
-(orchestrator-owned, mechanical): `created` / `launching` / `running` /
-`orphaned` / `done` / `error`. The branch's **`attention` tag** (value
+(orchestrator-owned, mechanical): `created` / `running` / `orphaned` / `done` /
+`error` / `archived`. The branch's **`attention` tag** (value
 `attention` | `blocked`, absent ⇒ calm) plus its `description` (a one-line
 current-state message) are the **agent-declared** "does this need me?" signal,
 both set via `weaver status`. The dashboard resolves and filters on the
@@ -410,6 +411,13 @@ a vt100 screen capture.
   journal keeps flowing; adopt re-attaches when the relay outlived a crashed task,
   or respawns the adapter and reopens the conversation via `session/load` (falling
   back to a fresh session re-oriented from the goal) when the relay is gone too.
+- **No unowned session runtimes:** the database is the ownership authority for
+  detached supervisors. Startup and periodic reconciliation remove
+  `weaver-<id>` agent supervisors and `loom-shell-<id>-<index>` debug shells
+  without a non-archived session/active-launch-reservation owner; inspectable
+  `done`/`error` sessions remain owners, and the monitor handles the
+  inverse mismatch by marking a session row with no supervisor `orphaned`.
+  See [Session lifecycle](session-lifecycle.md).
 
 ## Status & tags
 

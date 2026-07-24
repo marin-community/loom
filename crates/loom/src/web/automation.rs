@@ -127,6 +127,32 @@ enum LaunchFailure {
     Retryable,
 }
 
+/// Tear down a session that finished provisioning after its automation
+/// reservation was archived or removed. Cancellation wins: a late response may
+/// not resurrect the run or leave its worktree/supervisor detached from the
+/// operator-visible lifecycle record.
+async fn remove_late_session(st: &AppState, session_id: &str) {
+    let Ok(Some((session, branch))) = crate::session::with_branch(&st.db, session_id).await else {
+        return;
+    };
+    match super::sessions::remove(st, &session, &branch, false).await {
+        Ok(warnings) if !warnings.is_empty() => tracing::warn!(
+            session = session_id,
+            warnings = warnings.len(),
+            "late cancelled automation session removed with warnings"
+        ),
+        Ok(_) => tracing::info!(
+            session = session_id,
+            "removed session that completed after automation cancellation"
+        ),
+        Err(error) => tracing::warn!(
+            session = session_id,
+            error = %error.message(),
+            "could not remove session that completed after automation cancellation"
+        ),
+    }
+}
+
 async fn launch_run(
     st: &AppState,
     req: RunReq,
@@ -144,19 +170,44 @@ async fn launch_run(
     );
     match crate::runtime::create_session(st.clone(), req.session, actor).await {
         Ok(session) => {
-            crate::runs::launched(&st.db, &run.id, &session.id).await?;
-            run_view(st, &run.id).await
+            if crate::runs::launched(&st.db, &run.id, &session.id).await? {
+                run_view(st, &run.id).await
+            } else {
+                remove_late_session(st, &session.id).await;
+                Err(AppError::conflict(
+                    "automation launch was archived or removed while provisioning",
+                ))
+            }
         }
         Err(error) => {
-            match failure {
+            let still_owned = match failure {
                 LaunchFailure::Final => {
-                    crate::runs::failed(&st.db, &run.id, &format!("{error:?}"))
-                        .await
-                        .ok();
+                    match crate::runs::failed(&st.db, &run.id, &format!("{error:?}")).await {
+                        Ok(owned) => owned,
+                        Err(record_error) => {
+                            tracing::warn!(
+                                run = %run.id,
+                                error = %record_error,
+                                "could not record automation launch failure"
+                            );
+                            true
+                        }
+                    }
                 }
-                LaunchFailure::Retryable => {
-                    crate::runs::waiting(&st.db, &run.id).await.ok();
-                }
+                LaunchFailure::Retryable => match crate::runs::waiting(&st.db, &run.id).await {
+                    Ok(owned) => owned,
+                    Err(record_error) => {
+                        tracing::warn!(
+                            run = %run.id,
+                            error = %record_error,
+                            "could not return automation launch to waiting"
+                        );
+                        true
+                    }
+                },
+            };
+            if !still_owned {
+                remove_late_session(st, &run.session_id).await;
             }
             Err(error)
         }
@@ -214,7 +265,11 @@ async fn prompt_channel_run(
     )
     .await
     .ok();
-    crate::runs::launched(&st.db, &run.id, &session.id).await?;
+    if !crate::runs::launched(&st.db, &run.id, &session.id).await? {
+        return Err(AppError::conflict(
+            "automation delivery was archived or removed while running",
+        ));
+    }
     run_view(st, &run.id).await
 }
 
@@ -340,7 +395,10 @@ pub(super) async fn create_run(
                 return Ok(Json(run.into()));
             }
             crate::runs::Reservation::Existing(run)
-                if matches!(run.status.as_str(), "running" | "failed") =>
+                if matches!(
+                    run.status.as_str(),
+                    "running" | "failed" | "cancelled" | "completed"
+                ) =>
             {
                 return Ok(Json(run.into()));
             }

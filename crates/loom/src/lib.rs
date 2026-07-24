@@ -39,6 +39,7 @@ pub mod runs;
 pub(crate) mod runtime;
 pub mod server;
 pub mod session;
+pub mod session_manager;
 pub mod setup;
 pub mod shell;
 pub mod slack;
