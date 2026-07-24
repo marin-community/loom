@@ -88,6 +88,11 @@ pub(super) struct ListSessionsQuery {
     /// opts in with `?automation=true`, symmetric with `archived`.
     #[serde(default)]
     automation: bool,
+    /// Include engine-managed warm sessions. This is an operator inventory
+    /// escape hatch: normal fleet/survey callers must not see a watcher's own
+    /// infrastructure and recurse into it.
+    #[serde(default)]
+    managed: bool,
     /// Case-insensitive substring filter over a session's title, branch name,
     /// and goal (`loom session ls --search auth`). Absent/blank matches everything.
     #[serde(default)]
@@ -96,8 +101,15 @@ pub(super) struct ListSessionsQuery {
 
 pub(super) async fn list_sessions(
     State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Query(q): Query<ListSessionsQuery>,
 ) -> ApiResult<Json<Vec<SessionView>>> {
+    if q.managed && !principal.is_admin() {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "admin grant required to list managed sessions",
+        ));
+    }
     // The fleet listing shows work, not infrastructure: engine-managed (warm)
     // sessions are excluded here, so neither the dashboard nor a watch
     // round's survey (scripts read this route) ever sees a watcher's own
@@ -116,10 +128,14 @@ pub(super) async fn list_sessions(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_lowercase);
-    let sessions = session_mod::list_visible(&st.db).await?;
+    let sessions = if q.managed {
+        session_mod::list(&st.db).await?
+    } else {
+        session_mod::list_visible(&st.db).await?
+    };
     let mut views: Vec<SessionView> = Vec::with_capacity(sessions.len());
     for s in sessions {
-        if warm.contains(&s.id) {
+        if !q.managed && warm.contains(&s.id) {
             continue;
         }
         // Archived sessions are torn down — hidden unless the caller opts in.
@@ -1881,11 +1897,61 @@ pub(super) async fn delete_session(
     Path(key): Path<String>,
     Query(q): Query<DeleteQuery>,
 ) -> ApiResult<Json<Value>> {
-    let (session, branch) = require_session(&st.db, &key).await?;
-    tracing::info!(session = %session.id, branch = %branch.id, keep_branch = q.keep_branch, "deleting session");
+    let (session, branch) = match require_session(&st.db, &key).await {
+        Ok(found) => found,
+        Err(error) if error.is_not_found() => {
+            return delete_launch_attempt(&st, &key).await;
+        }
+        Err(error) => return Err(error),
+    };
+    let warnings = remove(&st, &session, &branch, q.keep_branch).await?;
+    Ok(Json(json!({
+        "deleted": true,
+        "kind": "session",
+        "warnings": warnings
+    })))
+}
+
+/// Fully remove one durable session and all resources it owns.
+///
+/// Shared by the session route and automation cancellation races. External
+/// teardown is intentionally idempotent: a missing terminal/worktree is
+/// already removed, while failures are returned as warnings after the durable
+/// ownership rows have been released.
+pub(crate) async fn remove(
+    st: &AppState,
+    session: &Session,
+    _branch: &Branch,
+    keep_branch: bool,
+) -> Result<Vec<String>, AppError> {
+    let _lifecycle = LIFECYCLE_LOCK.lock().await;
+    let Some((current_session, current_branch)) =
+        session_mod::with_branch(&st.db, &session.id).await?
+    else {
+        // A competing remove already achieved the requested end state.
+        return Ok(Vec::new());
+    };
+    remove_locked(st, &current_session, &current_branch, keep_branch).await
+}
+
+/// Shared deletion after the caller has acquired [`LIFECYCLE_LOCK`] and
+/// refreshed the session row.
+async fn remove_locked(
+    st: &AppState,
+    session: &Session,
+    branch: &Branch,
+    keep_branch: bool,
+) -> Result<Vec<String>, AppError> {
+    tracing::info!(session = %session.id, branch = %branch.id, keep_branch, "deleting session");
     let mut warnings: Vec<String> = Vec::new();
 
-    backend::kill_session(&session.term_session).await.ok();
+    // Cancellation is the durable boundary: an automation request that
+    // finishes provisioning after this point cannot promote itself.
+    crate::runs::cancel_for_session(&st.db, &session.id).await?;
+    backend::kill_session_and_wait(&session.term_session).await?;
+    if session.protocol == "acp" {
+        st.acp.stop(&session.id);
+    }
     crate::shell::kill_debug_all(&session.id).await;
     st.ide.kill(&session.id);
     let repo_root = PathBuf::from(&branch.repo_root);
@@ -1895,7 +1961,7 @@ pub(super) async fn delete_session(
         warnings.push(format!("worktree remove: {e}"));
         tokio::fs::remove_dir_all(&work_dir).await.ok();
     }
-    if !q.keep_branch {
+    if !keep_branch {
         tracing::debug!(session = %session.id, branch_name = %branch.branch, "deleting git branch");
         if let Err(e) = git::delete_branch(&repo_root, &branch.branch).await {
             warnings.push(format!("delete branch: {e}"));
@@ -1905,7 +1971,6 @@ pub(super) async fn delete_session(
         .await
         .ok();
     crate::auth::revoke_session_tokens(&st.db, &session.id).await?;
-    crate::runs::cancel_for_session(&st.db, &session.id).await?;
     session_mod::delete(&st.db, &session.id).await?;
     // Release this branch's claimed issues back to the repo backlog before the
     // branch row goes away — issues are repo-owned and must outlive teardown.
@@ -1915,11 +1980,42 @@ pub(super) async fn delete_session(
     // Drop the branch row too — deleting a session takes its branch with it.
     branch_mod::delete(&st.db, &branch.id).await?;
     if warnings.is_empty() {
-        tracing::info!(session = %session.id, branch = %branch.id, keep_branch = q.keep_branch, "session deleted");
+        tracing::info!(session = %session.id, branch = %branch.id, keep_branch, "session deleted");
     } else {
         tracing::warn!(branch = %branch.id, warnings = warnings.len(), "session removed with warnings");
     }
-    Ok(Json(json!({ "deleted": true, "warnings": warnings })))
+    Ok(warnings)
+}
+
+/// Remove a launch reservation that failed before a `sessions` row existed.
+///
+/// `loom session rm <reserved-session-id>` therefore has the same escape hatch
+/// as a real session. Terminalize first so an in-flight create cannot promote
+/// the run after the operator removes it.
+async fn delete_launch_attempt(st: &AppState, session_id: &str) -> ApiResult<Json<Value>> {
+    if crate::runs::list_for_session(&st.db, session_id)
+        .await?
+        .is_empty()
+    {
+        return Err(AppError::not_found("session"));
+    }
+    crate::runs::cancel_for_session_with_summary(
+        &st.db,
+        session_id,
+        "launch attempt removed by user",
+    )
+    .await?;
+    let warnings = crate::session_manager::teardown_reserved_runtime(session_id).await;
+    st.ide.kill(session_id);
+    crate::auth::revoke_session_tokens(&st.db, session_id)
+        .await
+        .ok();
+    crate::runs::delete_for_session(&st.db, session_id).await?;
+    Ok(Json(json!({
+        "deleted": true,
+        "kind": "launch_attempt",
+        "warnings": warnings
+    })))
 }
 
 // ---------------------------------------------------------------------------
@@ -1994,6 +2090,9 @@ async fn archive_locked(
     warnings.extend(log_warnings);
     tracing::debug!(session = %session.id, "captured conversation transcript before teardown");
 
+    // Cancellation is the durable boundary: an automation request that
+    // finishes provisioning after this point cannot promote itself.
+    crate::runs::cancel_for_session_with_summary(&st.db, &session.id, "session archived").await?;
     // The row must never say `archived` while its supervisor is still live.
     // A tapestry kill is acknowledged before the socket disappears, so wait
     // for teardown and fail without flipping the row if it cannot complete.
@@ -2057,12 +2156,49 @@ pub(super) async fn archive_session(
     State(st): State<AppState>,
     Path(key): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let (session, branch) = require_session(&st.db, &key).await?;
+    let (session, branch) = match require_session(&st.db, &key).await {
+        Ok(found) => found,
+        Err(error) if error.is_not_found() => {
+            return archive_launch_attempt(&st, &key).await;
+        }
+        Err(error) => return Err(error),
+    };
     tracing::debug!(key = %key, session = %session.id, "handling archive session request");
     let warnings = archive(&st, &session, &branch).await?;
-    Ok(Json(
-        json!({ "archived": true, "branch": branch.branch, "warnings": warnings }),
-    ))
+    Ok(Json(json!({
+        "archived": true,
+        "kind": "session",
+        "branch": branch.branch,
+        "warnings": warnings
+    })))
+}
+
+/// Archive an unmatched launch attempt: tear down any deterministic reserved
+/// runtime and preserve the now-cancelled automation row as history.
+async fn archive_launch_attempt(st: &AppState, session_id: &str) -> ApiResult<Json<Value>> {
+    if crate::runs::list_for_session(&st.db, session_id)
+        .await?
+        .is_empty()
+    {
+        return Err(AppError::not_found("session"));
+    }
+    crate::runs::cancel_for_session_with_summary(
+        &st.db,
+        session_id,
+        "launch attempt archived by user",
+    )
+    .await?;
+    let warnings = crate::session_manager::teardown_reserved_runtime(session_id).await;
+    st.ide.kill(session_id);
+    crate::auth::revoke_session_tokens(&st.db, session_id)
+        .await
+        .ok();
+    Ok(Json(json!({
+        "archived": true,
+        "kind": "launch_attempt",
+        "branch": session_id,
+        "warnings": warnings
+    })))
 }
 
 /// `GET /api/sessions/{id}/shells` — the live worktree debug-shell indices for a

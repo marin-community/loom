@@ -337,6 +337,12 @@ enum SessionCmd {
         /// Include archived (torn-down) sessions.
         #[arg(long)]
         archived: bool,
+        /// Include automation-class sessions.
+        #[arg(long)]
+        automation: bool,
+        /// Include engine-managed watch sessions (admin only; implies automation).
+        #[arg(long)]
+        managed: bool,
         /// Case-insensitive substring filter over title / branch / goal.
         #[arg(long)]
         search: Option<String>,
@@ -352,7 +358,10 @@ enum SessionCmd {
     Show { branch: String },
     /// Attach your terminal to a session (also `loom attach`).
     Attach { branch: String },
-    /// Archive a session: tear down terminal + worktree, keep branch + history.
+    /// Archive a session or failed launch: tear down runtime, keep history.
+    ///
+    /// An unmatched automation launch is addressed by its reserved session id,
+    /// the same id shown in the Automation pane/API.
     Archive { branch: String },
     /// Recreate the terminal session for an orphaned session.
     Adopt { branch: String },
@@ -376,7 +385,7 @@ enum SessionCmd {
         #[arg(long)]
         mode: Option<String>,
     },
-    /// Remove a session (worktree + terminal + DB row).
+    /// Remove a session or unmatched launch attempt and its runtime.
     Rm {
         branch: String,
         #[arg(long)]
@@ -937,7 +946,7 @@ async fn run() -> Result<()> {
         Cmd::Setup { cmd } => run_setup(cmd).await,
         Cmd::Config { cmd } => run_config(cmd).await,
         Cmd::Launch(opts) => cmd_launch(opts.into()).await,
-        Cmd::Ps => cmd_ps(false, None).await,
+        Cmd::Ps => cmd_ps(false, false, false, None).await,
         Cmd::Attach { branch } => cmd_attach(branch).await,
         Cmd::Open => cmd_open().await,
         Cmd::Completions { shell } => {
@@ -989,7 +998,12 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
         } => cmd_session_send(session, message.join(" "), !no_enter).await,
         SessionCmd::Break { session } => cmd_session_break(session).await,
         SessionCmd::Preview { session, lines } => cmd_session_preview(session, lines).await,
-        SessionCmd::Ls { archived, search } => cmd_ps(archived, search).await,
+        SessionCmd::Ls {
+            archived,
+            automation,
+            managed,
+            search,
+        } => cmd_ps(archived, automation, managed, search).await,
         SessionCmd::Rename { session, title } => cmd_session_rename(session, title.join(" ")).await,
         SessionCmd::Show { branch } => cmd_show(branch).await,
         SessionCmd::Attach { branch } => cmd_attach(branch).await,
@@ -3091,13 +3105,24 @@ async fn cmd_session_preview(key: String, lines: usize) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_ps(archived: bool, search: Option<String>) -> Result<()> {
+async fn cmd_ps(
+    archived: bool,
+    automation: bool,
+    managed: bool,
+    search: Option<String>,
+) -> Result<()> {
     let client = client::default()?;
     // Hide archived sessions by default; `--search` narrows by substring. Both
     // ride the same query the dashboard uses, so the CLI and UI stay one surface.
     let mut query = Vec::new();
     if archived {
         query.push("archived=true".to_string());
+    }
+    if automation || managed {
+        query.push("automation=true".to_string());
+    }
+    if managed {
+        query.push("managed=true".to_string());
     }
     if let Some(s) = search.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         query.push(format!("q={}", encode_query(s)));
@@ -3310,10 +3335,14 @@ async fn cmd_archive(key: String) -> Result<()> {
             json!({}),
         )
         .await?;
-    println!(
-        "archived {} (terminal + worktree removed; branch and history kept)",
-        str_field(&res, "branch")
-    );
+    if str_field(&res, "kind") == "launch_attempt" {
+        println!("archived launch attempt {key} (reserved runtime removed; history kept)");
+    } else {
+        println!(
+            "archived {} (terminal + worktree removed; branch and history kept)",
+            str_field(&res, "branch")
+        );
+    }
     if let Some(warnings) = res.get("warnings").and_then(Value::as_array) {
         for w in warnings {
             if let Some(w) = w.as_str() {

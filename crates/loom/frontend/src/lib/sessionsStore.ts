@@ -30,7 +30,7 @@ async function refresh(): Promise<void> {
   inflight = (async () => {
     try {
       const [nextSessions, nextRuns] = await Promise.all([
-        listSessions({ archived: true, automation: true }),
+        listSessions({ archived: true, automation: true, managed: true }),
         listRuns(),
       ]);
       sessions.value = nextSessions;

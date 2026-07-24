@@ -279,7 +279,7 @@ test.describe("automation session surface", () => {
     ).toBeVisible();
   });
 
-  test("a failed launch with no session remains visible", async ({
+  test("a failed launch with no session can be archived and removed", async ({
     page,
     weaver,
   }) => {
@@ -318,6 +318,24 @@ test.describe("automation session surface", () => {
     await expect(failed).toContainText("Launch failed");
     await expect(failed).toContainText("ops");
     await expect(failed).toContainText("default");
+
+    await failed.hover();
+    await failed.getByTestId("run-actions").click();
+    page.once("dialog", (dialog) => dialog.accept());
+    await failed.getByTestId("run-action-archive").click();
+    await expect(page.getByTestId("automation-interventions")).toHaveCount(0);
+
+    await page.getByTestId("automation-history-toggle").click();
+    const archived = page
+      .getByTestId("automation-history")
+      .getByTestId("automation-run-only");
+    await expect(archived).toContainText("Run cancelled");
+
+    await archived.hover();
+    await archived.getByTestId("run-actions").click();
+    page.once("dialog", (dialog) => dialog.accept());
+    await archived.getByTestId("run-action-remove").click();
+    await expect(archived).toHaveCount(0);
   });
 
   test("an unmatched running reservation remains active", async ({

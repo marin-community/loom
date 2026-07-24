@@ -212,6 +212,9 @@ impl AppError {
     pub fn message(&self) -> &str {
         &self.message
     }
+    fn is_not_found(&self) -> bool {
+        self.status == StatusCode::NOT_FOUND
+    }
     #[cfg(test)]
     fn status(&self) -> StatusCode {
         self.status

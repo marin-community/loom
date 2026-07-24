@@ -99,7 +99,14 @@ const parentById = computed(() => {
           @error="(message) => emit('error', message)"
         />
 
-        <AutomationRunRow v-for="run in failedRuns" :key="run.id" :run="run" intervention />
+        <AutomationRunRow
+          v-for="run in failedRuns"
+          :key="run.id"
+          :run="run"
+          intervention
+          @changed="emit('changed')"
+          @error="(message) => emit('error', message)"
+        />
       </ul>
       <p v-else class="rounded-md border border-dashed border-line px-3 py-3 text-sm text-muted">
         No automation needs intervention.
@@ -141,6 +148,8 @@ const parentById = computed(() => {
           :key="run.id"
           :run="run"
           :intervention="false"
+          @changed="emit('changed')"
+          @error="(message) => emit('error', message)"
         />
       </ul>
       <p v-else class="rounded-md border border-dashed border-line px-3 py-3 text-sm text-muted">
@@ -189,6 +198,8 @@ const parentById = computed(() => {
           :run="run"
           :intervention="false"
           history
+          @changed="emit('changed')"
+          @error="(message) => emit('error', message)"
         />
         <li
           v-if="!history.length && !historyRuns.length"
