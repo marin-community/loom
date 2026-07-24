@@ -30,8 +30,10 @@
 //! - `usage`          `{ used, size, cost? }` (or an internal null marker at a
 //!   provider boundary).
 //! - `turn_end`       `{ stop_reason }`.
-//! - `handoff`        `{ from, to, model, effort }` — the provider boundary
-//!   that replaces the synthetic bootstrap prompt in the visible journal.
+//! - `handoff`        `{ from, to, model, effort, prompt_version,
+//!   summary_status, summary_model, summary, through_turn, through_seq }` — the
+//!   provider boundary and best-effort digest provenance that replace the
+//!   synthetic bootstrap prompt in the visible journal.
 //!
 //! ## Acking
 //!
@@ -331,10 +333,11 @@ impl AcpHandle {
             .map_err(|_| anyhow!("acp task dropped the reply"))?
     }
 
-    /// Atomically quiesce an idle task for provider replacement. The command is
-    /// ordered with prompts on the same channel; acknowledgement arrives only
-    /// after the task has removed its registry slot and will accept no more work.
-    pub async fn prepare_handoff(&self) -> Result<()> {
+    /// Atomically snapshot and quiesce an idle task for provider replacement.
+    /// The command is ordered with prompts on the same channel; acknowledgement
+    /// arrives only after the task has removed its registry slot and will accept
+    /// no more work. The returned journal cannot race a later completed turn.
+    pub async fn prepare_handoff(&self) -> Result<Vec<ChatBlockView>> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::PrepareHandoff { reply: tx })
@@ -612,7 +615,7 @@ enum Command {
         reply: oneshot::Sender<Result<AcpMetadata>>,
     },
     PrepareHandoff {
-        reply: oneshot::Sender<Result<()>>,
+        reply: oneshot::Sender<Result<Vec<ChatBlockView>>>,
     },
 }
 
@@ -1384,8 +1387,15 @@ impl Task {
                         if self.turn_live || !pending.trim().is_empty() {
                             let _ = reply.send(Err(anyhow!("cannot hand off while a turn or queued prompt is active")));
                         } else {
-                            handoff_reply = Some(reply);
-                            break;
+                            match chat::list(&self.db, &self.session_id).await {
+                                Ok(snapshot) => {
+                                    handoff_reply = Some((reply, snapshot));
+                                    break;
+                                }
+                                Err(error) => {
+                                    let _ = reply.send(Err(error));
+                                }
+                            }
                         }
                     }
                     Some(c) => self.on_command(c).await,
@@ -1394,8 +1404,8 @@ impl Task {
             }
         }
         self.registry.remove_own(&self.session_id, self.generation);
-        if let Some(reply) = handoff_reply {
-            let _ = reply.send(Ok(()));
+        if let Some((reply, snapshot)) = handoff_reply {
+            let _ = reply.send(Ok(snapshot));
         }
         tracing::info!(session = %self.session_id, "acp task stopped");
     }

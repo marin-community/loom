@@ -2122,6 +2122,12 @@ async fn handoff_replaces_provider_and_continues_the_journal() {
     assert_eq!(handoffs[0]["seq"], 0);
     assert_eq!(handoffs[0]["payload"]["from"], "fake-a");
     assert_eq!(handoffs[0]["payload"]["to"], "fake-b");
+    assert_eq!(handoffs[0]["payload"]["prompt_version"], 2);
+    assert_eq!(handoffs[0]["payload"]["summary_status"], "unavailable");
+    assert_eq!(handoffs[0]["payload"]["summary_model"], Value::Null);
+    assert_eq!(handoffs[0]["payload"]["summary"], Value::Null);
+    assert!(handoffs[0]["payload"]["through_turn"].is_number());
+    assert!(handoffs[0]["payload"]["through_seq"].is_number());
     assert_eq!(
         count_kind(blocks, "user_message"),
         1,

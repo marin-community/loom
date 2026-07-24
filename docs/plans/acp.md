@@ -274,7 +274,7 @@ chat_blocks(id, session_id, turn, seq, kind, payload TEXT (JSON), created_at,
 ```
 
 `kind` ∈ `user_message | agent_message | thought | tool_call | plan |
-permission_request | mode_change | usage | turn_end`. Loom's ACP client
+permission_request | mode_change | usage | turn_end | handoff`. Loom's ACP client
 consolidates chunk deltas in memory and writes a row per *block* (a message,
 a tool call reaching a terminal state, a permission resolution, a turn end)
 — blocks, not per-token deltas. Payloads carry the upstream ids
@@ -283,6 +283,15 @@ ingestion is idempotent. Recovery is layered: the relay spool (ack cursor =
 last journaled block) is the primary, exactly-once path; `session/load`
 reconciliation at adopt — idempotent on upstream ids, journal winning
 mid-turn — is the belt-and-braces repair for spool loss.
+
+An idle provider handoff snapshots this journal on the task command channel,
+then asks the incoming provider's cheap tier (Claude/Haiku or Codex/Luna) for a
+best-effort digest. The replacement receives that digest, the last eight
+authored blocks, and the session-scoped `/chat` retrieval command. The visible
+`handoff` block replaces the synthetic bootstrap prompt and records the digest
+status/model plus the `(turn, seq)` cutoff; a later handoff builds from the
+latest successful digest. Custom providers and summarizer failures use the
+recent tail without making provider replacement fail.
 
 Live deltas ride a per-session in-memory broadcast →
 `GET /api/sessions/{id}/chat/stream` (SSE). A client renders by fetching
