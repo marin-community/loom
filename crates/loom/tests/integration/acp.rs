@@ -2587,6 +2587,81 @@ async fn legacy_handoff_preserves_stamped_policy_after_template_retirement() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acp_recovery_rejects_a_recreated_profile_lifetime() {
+    let ts = TestServer::start().await;
+    seed_acp_agent(&ts, "acp-lifetime-agent").await;
+    let profile_body = json!({
+        "name": "acp-recovery-lifetime",
+        "agent_kind": "acp-lifetime-agent",
+        "protocol": "acp",
+        "mode": "default",
+        "class": "interactive",
+        "mcp_access": { "mode": "none", "groups": [] }
+    });
+    let original = ts
+        .client
+        .post("/api/profiles", profile_body.clone())
+        .await
+        .unwrap();
+    let created = ts
+        .client
+        .post(
+            "/api/sessions",
+            json!({
+                "cwd": ts.cwd(),
+                "goal": "say:acp lifetime",
+                "profile": "acp-recovery-lifetime"
+            }),
+        )
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap();
+    let work_dir = created["work_dir"].as_str().unwrap();
+    poll_chat(&ts, id, Duration::from_secs(15), |blocks| {
+        blocks.iter().any(|block| block["kind"] == "turn_end")
+    })
+    .await;
+    ts.client
+        .post(&format!("/api/sessions/{id}/archive"), json!({}))
+        .await
+        .unwrap();
+    ts.client
+        .delete("/api/profiles/acp-recovery-lifetime")
+        .await
+        .unwrap();
+    let replacement = ts.client.post("/api/profiles", profile_body).await.unwrap();
+    assert_ne!(replacement["lifetime"], original["lifetime"]);
+    ts.client
+        .put(
+            "/api/profiles/acp-recovery-lifetime/env/REPLACEMENT_ONLY",
+            json!({ "value": "must-not-be-loaded" }),
+        )
+        .await
+        .unwrap();
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/api/sessions/{id}/recover", ts.addr))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    assert!(
+        !std::path::Path::new(work_dir).exists(),
+        "lifetime conflict occurs before rebuilding the worktree"
+    );
+    assert_eq!(
+        loom::session::get(&ts.state.db, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "archived"
+    );
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn error_session_gets_no_phantom_same_profile_capacity_credit() {
     let ts = TestServer::start().await;
     seed_acp_agent(&ts, "capacity-agent").await;
@@ -3166,6 +3241,166 @@ async fn archive_and_delete_win_against_a_waiting_handoff_without_resurrection()
                 .is_none());
         }
     }
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn manual_status_patch_orders_after_waiting_handoff_without_resurrection() {
+    let ts = TestServer::start().await;
+    seed_acp_agent(&ts, "patch-fence-source").await;
+    seed_acp_agent(&ts, "patch-fence-target").await;
+
+    for final_status in ["done", "archived"] {
+        let source = rest_create(
+            &ts,
+            "patch-fence-source",
+            &format!("say:{final_status} patch fence"),
+        )
+        .await;
+        let id = source["id"].as_str().unwrap().to_string();
+        poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
+            blocks.iter().any(|block| block["kind"] == "turn_end")
+        })
+        .await;
+
+        // Handoff has passed its initial route read and acquired the source /
+        // lifecycle boundaries when it reaches this profile permit. PATCH must
+        // wait behind it, then its newer generation wins deterministically.
+        let profile_permit = ts.state.launch_gate.acquire_profile("default").await;
+        let handoff_url = format!("http://{}/api/sessions/{id}/handoff", ts.addr);
+        let handoff = tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(handoff_url)
+                .json(&json!({ "agent": "patch-fence-target" }))
+                .send()
+                .await
+                .unwrap()
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!handoff.is_finished());
+        let patch_url = format!("http://{}/api/sessions/{id}", ts.addr);
+        let status = final_status.to_string();
+        let patch = tokio::spawn(async move {
+            reqwest::Client::new()
+                .patch(patch_url)
+                .json(&json!({ "status": status }))
+                .send()
+                .await
+                .unwrap()
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!patch.is_finished());
+        drop(profile_permit);
+
+        let handoff = tokio::time::timeout(Duration::from_secs(30), handoff)
+            .await
+            .unwrap()
+            .unwrap();
+        let handoff_status = handoff.status();
+        let handoff_body = handoff.text().await.unwrap();
+        let after_handoff = loom::session::get(&ts.state.db, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            handoff_status.is_success(),
+            "handoff returned {handoff_status}: {handoff_body}; row status={} generation={}",
+            after_handoff.status,
+            after_handoff.mutation_revision
+        );
+        assert!(tokio::time::timeout(Duration::from_secs(10), patch)
+            .await
+            .unwrap()
+            .unwrap()
+            .status()
+            .is_success());
+        let row = loom::session::get(&ts.state.db, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, final_status);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            loom::session::get(&ts.state.db, &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            final_status,
+            "the replacement task must not write running after the newer PATCH"
+        );
+    }
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn goal_change_orders_after_a_waiting_handoff_without_stale_commit() {
+    let ts = TestServer::start().await;
+    seed_acp_agent(&ts, "goal-fence-source").await;
+    seed_acp_agent(&ts, "goal-fence-target").await;
+    let source = rest_create(&ts, "goal-fence-source", "say:original goal").await;
+    let id = source["id"].as_str().unwrap().to_string();
+    let branch_id = source["branch"]["id"].as_str().unwrap().to_string();
+    poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
+        blocks.iter().any(|block| block["kind"] == "turn_end")
+    })
+    .await;
+
+    let profile_permit = ts.state.launch_gate.acquire_profile("default").await;
+    let handoff_url = format!("http://{}/api/sessions/{id}/handoff", ts.addr);
+    let handoff = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(handoff_url)
+            .json(&json!({ "agent": "goal-fence-target" }))
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!handoff.is_finished());
+
+    let patch_url = format!("http://{}/api/branches/{branch_id}", ts.addr);
+    let patch = tokio::spawn(async move {
+        reqwest::Client::new()
+            .patch(patch_url)
+            .json(&json!({ "goal": "superseding goal" }))
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!patch.is_finished());
+    drop(profile_permit);
+
+    let handoff = tokio::time::timeout(Duration::from_secs(20), handoff)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(handoff.status().is_success());
+    let patch = tokio::time::timeout(Duration::from_secs(10), patch)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(patch.status().is_success());
+    let changed: serde_json::Value = patch.json().await.unwrap();
+    assert_eq!(changed["goal"], "superseding goal");
+    let session = loom::session::get(&ts.state.db, &id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.agent_kind, "goal-fence-target");
+    assert_eq!(
+        loom::branch::current_goal(
+            &ts.state.db,
+            &loom::branch::get(&ts.state.db, &branch_id)
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .await
+        .unwrap(),
+        "superseding goal"
+    );
 }
 
 /// A missing task is a supported recovery state: close its abandoned turn,

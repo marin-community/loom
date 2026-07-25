@@ -105,6 +105,35 @@ test.describe('creating a session via the UI form', () => {
     expect(calls).toEqual(['register', 'create']);
   });
 
+  test('delayed repository registration cannot replace newer input', async ({ page, weaver }) => {
+    let release!: () => void;
+    const delayed = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route('**/api/repos', async (route) => {
+      if (route.request().method() !== 'POST') return route.continue();
+      await delayed;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          slug: 'octo/slow',
+          remote_url: 'https://github.com/octo/slow.git',
+          path: '/managed/octo/slow',
+          created_at: '2026-07-25T00:00:00Z',
+        }),
+      });
+    });
+    await page.goto(`${weaver.baseUrl}/sessions/new`);
+    const repoInput = page.getByPlaceholder(repoPlaceholder);
+    await repoInput.fill('octo/slow');
+    await page.getByTestId('clone-repo').click();
+    await repoInput.fill('octo/newer');
+    release();
+
+    await expect(repoInput).toHaveValue('octo/newer');
+  });
+
   test('falls back to shared Scratch limits when limits observability is unavailable', async ({
     page,
     weaver,
@@ -397,6 +426,9 @@ test.describe('creating a session via the UI form', () => {
     const editor = page.getByTestId('profile-editor');
     await editor.getByLabel('Name', { exact: true }).fill('ui-environment-target');
     const environment = page.getByTestId('profile-environment-editor');
+    const inherit = environment.getByLabel('Start with the source profile’s write-only values');
+    await expect(inherit).not.toBeChecked();
+    await inherit.check();
     await environment.getByLabel(/REMOVE_ME/).uncheck();
     await environment.getByLabel('Environment name').fill('ADDED');
     await environment.getByLabel('Environment value', { exact: true }).fill('new write-only value');
@@ -419,6 +451,131 @@ test.describe('creating a session via the UI form', () => {
     ).json()) as { env: { name: string; source: string }[] };
     expect(saved.env.map((entry) => entry.name)).toEqual(['ADDED', 'EMPTY', 'KEEP']);
     expect(JSON.stringify(saved)).not.toContain('new write-only value');
+  });
+
+  test('does not open a clone editor from a stale cached source revision', async ({
+    page,
+    weaver,
+  }) => {
+    const source = {
+      name: 'clone-revision-source',
+      description: 'revision one',
+      agent_kind: 'shell',
+      model: '',
+      effort: '',
+      protocol: 'terminal',
+      mode: 'auto',
+      class: 'interactive',
+      strict: false,
+      env_clear: false,
+      ambient_allowlist: [],
+      max_concurrent: 0,
+      prelude: 'weaver',
+      restricted: false,
+      runtime_permissions: [],
+      mcp_access: { mode: 'none', groups: [] },
+    };
+    await fetch(`${weaver.baseUrl}/api/profiles`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(source),
+    });
+    await page.goto(`${weaver.baseUrl}/sessions/new`);
+    await page.getByTestId(`profile-option-${source.name}`).click();
+    await expect(page.getByTestId('provenance-agent')).toBeVisible();
+    const current = (await (
+      await fetch(`${weaver.baseUrl}/api/profiles/${source.name}`)
+    ).json()) as { revision: number };
+    await fetch(`${weaver.baseUrl}/api/profiles/${source.name}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ...source,
+        description: 'revision two',
+        expected_revision: current.revision,
+      }),
+    });
+
+    await page.getByTestId('clone-profile-open').click();
+    await expect(page.getByTestId('profile-editor')).toHaveCount(0);
+    await expect(
+      page.getByText(
+        'The source profile changed after this preview. Review the fresh resolution before saving.',
+      ),
+    ).toBeVisible();
+    await expect(page.getByTestId('clone-profile-open')).toBeEnabled();
+  });
+
+  test('ignores a delayed clone conflict after selecting another profile', async ({
+    page,
+    weaver,
+  }) => {
+    for (const [profileName, description] of [
+      ['clone-delayed-a', 'source A'],
+      ['clone-delayed-b', 'source B'],
+    ]) {
+      await fetch(`${weaver.baseUrl}/api/profiles`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          name: profileName,
+          description,
+          agent_kind: 'shell',
+          model: '',
+          effort: '',
+          protocol: 'terminal',
+          mode: 'auto',
+          class: 'interactive',
+          strict: false,
+          env_clear: false,
+          ambient_allowlist: [],
+          max_concurrent: 0,
+          prelude: 'weaver',
+          restricted: false,
+          runtime_permissions: [],
+          mcp_access: { mode: 'none', groups: [] },
+        }),
+      });
+    }
+    let release!: () => void;
+    const delayed = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let previewA: unknown;
+    await page.route('**/api/profiles/clone-delayed-a/clone', async (route) => {
+      await delayed;
+      await route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'source changed', preview: previewA }),
+      });
+    });
+
+    await page.goto(`${weaver.baseUrl}/sessions/new`);
+    await page.getByTestId('profile-option-clone-delayed-a').click();
+    await expect(page.getByTestId('provenance-agent')).toBeVisible();
+    previewA = await page.evaluate(async () => {
+      const response = await fetch('/api/session-launches/resolve', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          selection: { profile: 'clone-delayed-a', overrides: {} },
+        }),
+      });
+      return response.json();
+    });
+    await page.getByTestId('clone-profile-open').click();
+    await page
+      .getByTestId('profile-editor')
+      .getByLabel('Name', { exact: true })
+      .fill('clone-delayed-result');
+    await page.getByTestId('clone-profile').click();
+    await page.getByTestId('profile-option-clone-delayed-b').click();
+    release();
+
+    await expect(page.getByTestId('profile-option-clone-delayed-b').locator('input')).toBeChecked();
+    await expect(page.getByTestId('resolved-launch-summary')).toContainText('ready');
+    await expect(page.getByTestId('profile-editor')).toHaveCount(0);
   });
 
   test('ignores a branch response after the repository is cleared', async ({ page, weaver }) => {

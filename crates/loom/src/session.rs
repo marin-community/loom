@@ -103,6 +103,11 @@ pub struct Session {
     pub profile: String,
     pub launch_mode: String,
     pub profile_revision: i64,
+    /// Stable profile lifetime accepted at launch. Zero means an upgraded row
+    /// whose relationship to the current same-name profile cannot be proven.
+    pub profile_lifetime: i64,
+    /// Immutable environment precedence chosen at launch.
+    pub policy_strict: bool,
     pub policy_env_clear: bool,
     pub policy_ambient_allowlist: String,
     pub policy_idle_archive_secs: Option<i64>,
@@ -120,6 +125,8 @@ pub struct Session {
     /// Immutable session ancestry for authorization; branch ancestry remains UI.
     pub parent_session_id: Option<String>,
     pub automation_run_id: Option<String>,
+    /// Optimistic generation for lifecycle/status/goal ordering.
+    pub mutation_revision: i64,
 }
 
 fn default_protocol() -> String {
@@ -191,6 +198,8 @@ pub struct SessionLaunchPolicy {
     pub profile: String,
     pub launch_mode: String,
     pub profile_revision: i64,
+    pub profile_lifetime: i64,
+    pub strict: bool,
     pub env_clear: bool,
     pub ambient_allowlist: String,
     pub idle_archive_secs: Option<i64>,
@@ -209,9 +218,14 @@ pub struct SessionLaunchPolicy {
 /// Resolved profile/security metadata replaced during an ACP handoff. Creator
 /// identity and session ancestry remain immutable.
 pub struct SessionHandoffPolicy {
+    pub agent_kind: String,
+    pub model: String,
+    pub effort: String,
     pub profile: String,
     pub launch_mode: String,
     pub profile_revision: i64,
+    pub profile_lifetime: i64,
+    pub strict: bool,
     pub env_clear: bool,
     pub ambient_allowlist: String,
     pub idle_archive_secs: Option<i64>,
@@ -238,6 +252,8 @@ impl SessionLaunchPolicy {
             profile: crate::profile::DEFAULT_PROFILE.to_string(),
             launch_mode: crate::agent::DEFAULT_ACP_MODE.to_string(),
             profile_revision: 1,
+            profile_lifetime: 1,
+            strict: false,
             env_clear: false,
             ambient_allowlist: "[]".to_string(),
             idle_archive_secs: None,
@@ -276,12 +292,13 @@ pub async fn insert_with_policy(
          (id, branch_id, work_dir, term_session, agent_kind, model, effort, status,
           github_repo, parent_branch_id, managed_by, created_by, protocol,
           origin, class, tracking_issue_id, last_activity_at, created_at,
-          profile, launch_mode, profile_revision, policy_env_clear,
+          profile, launch_mode, profile_revision, profile_lifetime, policy_strict,
+          policy_env_clear,
           policy_ambient_allowlist, policy_idle_archive_secs, policy_turn_budget,
           policy_prelude, policy_restricted, policy_allowed_tools, policy_mcp_access,
           launch_snapshot, creator_kind, creator_subject, parent_session_id, automation_run_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&s.id)
     .bind(&s.branch_id)
@@ -304,6 +321,8 @@ pub async fn insert_with_policy(
     .bind(&policy.profile)
     .bind(&policy.launch_mode)
     .bind(policy.profile_revision)
+    .bind(policy.profile_lifetime)
+    .bind(policy.strict)
     .bind(policy.env_clear)
     .bind(&policy.ambient_allowlist)
     .bind(policy.idle_archive_secs)
@@ -430,17 +449,35 @@ pub async fn set_status(db: &Db, id: &str, status: &str) -> Result<()> {
         .fetch_optional(db)
         .await
         .unwrap_or(None);
-    sqlx::query("UPDATE sessions SET status = ? WHERE id = ?")
-        .bind(status)
-        .bind(id)
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "UPDATE sessions
+         SET status = ?, mutation_revision = mutation_revision + 1
+         WHERE id = ?",
+    )
+    .bind(status)
+    .bind(id)
+    .execute(db)
+    .await?;
     tracing::info!(
         %id,
         old = old.as_deref().unwrap_or("?"),
         new = %status,
         "session status changed"
     );
+    Ok(())
+}
+
+/// Join a branch-goal mutation to the same optimistic ordering boundary as
+/// status/lifecycle changes.
+pub async fn bump_mutation_revision(db: &Db, id: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE sessions
+         SET mutation_revision = mutation_revision + 1
+         WHERE id = ?",
+    )
+    .bind(id)
+    .execute(db)
+    .await?;
     Ok(())
 }
 
@@ -453,7 +490,8 @@ pub async fn set_status(db: &Db, id: &str, status: &str) -> Result<()> {
 /// archived (including a concurrent recovery that already claimed it).
 pub async fn claim_recovery(db: &Db, id: &str) -> Result<bool> {
     let result = sqlx::query(
-        "UPDATE sessions SET status = 'created'
+        "UPDATE sessions
+         SET status = 'created', mutation_revision = mutation_revision + 1
          WHERE id = ? AND status = 'archived'",
     )
     .bind(id)
@@ -485,7 +523,8 @@ pub async fn increment_turn_count(db: &Db, id: &str) -> Result<i64> {
 /// Returns whether this call performed the transition.
 pub async fn mark_orphaned(db: &Db, id: &str) -> Result<bool> {
     let result = sqlx::query(
-        "UPDATE sessions SET status = 'orphaned'
+        "UPDATE sessions
+         SET status = 'orphaned', mutation_revision = mutation_revision + 1
          WHERE id = ?
            AND status NOT IN ('orphaned', 'done', 'error', 'archived')",
     )
@@ -641,40 +680,66 @@ pub fn acp_inflight_turn(session: &Session) -> Option<i64> {
         .and_then(|value| value.get("turn").and_then(serde_json::Value::as_i64))
 }
 
-/// Replace an ACP session's runtime profile and clear every piece of
-/// provider-private relay/session state. The journal and durable prompt queue
-/// are deliberately untouched: both belong to loom's stable session and must
-/// continue across a disconnected handoff.
+/// Atomically claim the reviewed source generation for provider replacement
+/// and clear the previous provider's private relay/session state.
+pub async fn claim_handoff(db: &Db, id: &str, expected_mutation_revision: i64) -> Result<bool> {
+    let mut tx = db.begin().await?;
+    let result = sqlx::query(
+        "UPDATE sessions
+         SET status = 'running',
+             acp_session_id = NULL, acp_ack_seq = 0, acp_inflight = NULL,
+             current_mode = NULL,
+             mutation_revision = mutation_revision + 1
+         WHERE id = ? AND mutation_revision = ?",
+    )
+    .bind(id)
+    .bind(expected_mutation_revision)
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    sqlx::query("DELETE FROM session_acp_metadata WHERE session_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// Commit the replacement runtime policy and final lifecycle status only while
+/// the handoff still owns its claimed mutation generation. Provider-private
+/// state written by the new ACP task is deliberately preserved.
 pub async fn prepare_handoff(
     db: &Db,
     id: &str,
-    agent_kind: &str,
-    model: &str,
-    effort: &str,
     status: &str,
     policy: &SessionHandoffPolicy,
-) -> Result<()> {
-    let mut tx = db.begin().await?;
-    sqlx::query(
+    expected_mutation_revision: i64,
+) -> Result<bool> {
+    let result = sqlx::query(
         "UPDATE sessions
          SET agent_kind = ?, model = ?, effort = ?, status = ?,
              profile = ?, launch_mode = ?, profile_revision = ?,
-             policy_env_clear = ?, policy_ambient_allowlist = ?,
+             profile_lifetime = ?, policy_strict = ?, policy_env_clear = ?,
+             policy_ambient_allowlist = ?,
              policy_idle_archive_secs = ?, policy_turn_budget = ?,
              policy_prelude = ?, policy_restricted = ?,
              policy_allowed_tools = ?, policy_mcp_access = ?,
              launch_snapshot = ?,
-             acp_session_id = NULL, acp_ack_seq = 0, acp_inflight = NULL,
-             current_mode = NULL
-         WHERE id = ?",
+             mutation_revision = mutation_revision + 1
+         WHERE id = ? AND mutation_revision = ?",
     )
-    .bind(agent_kind)
-    .bind(model)
-    .bind(effort)
+    .bind(&policy.agent_kind)
+    .bind(&policy.model)
+    .bind(&policy.effort)
     .bind(status)
     .bind(&policy.profile)
     .bind(&policy.launch_mode)
     .bind(policy.profile_revision)
+    .bind(policy.profile_lifetime)
+    .bind(policy.strict)
     .bind(policy.env_clear)
     .bind(&policy.ambient_allowlist)
     .bind(policy.idle_archive_secs)
@@ -685,15 +750,21 @@ pub async fn prepare_handoff(
     .bind(&policy.mcp_access)
     .bind(&policy.launch_snapshot)
     .bind(id)
-    .execute(&mut *tx)
+    .bind(expected_mutation_revision)
+    .execute(db)
     .await?;
-    sqlx::query("DELETE FROM session_acp_metadata WHERE session_id = ?")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    tracing::info!(session = %id, agent_kind, model, effort, status, "session runtime handed off");
-    Ok(())
+    let changed = result.rows_affected() == 1;
+    if changed {
+        tracing::info!(
+            session = %id,
+            agent_kind = %policy.agent_kind,
+            model = %policy.model,
+            effort = %policy.effort,
+            status,
+            "session runtime handed off"
+        );
+    }
+    Ok(changed)
 }
 
 /// Append `text` to the durable prompt queue as a new paragraph (the queue holds
@@ -1003,9 +1074,14 @@ mod tests {
             .unwrap();
 
         let policy = SessionHandoffPolicy {
+            agent_kind: "codex".to_string(),
+            model: "gpt-5.4".to_string(),
+            effort: "high".to_string(),
             profile: "default".to_string(),
             launch_mode: "auto".to_string(),
             profile_revision: 1,
+            profile_lifetime: 1,
+            strict: false,
             env_clear: false,
             ambient_allowlist: "[]".to_string(),
             idle_archive_secs: None,
@@ -1017,11 +1093,10 @@ mod tests {
                 .to_string(),
             launch_snapshot: r#"{"agent":"codex"}"#.to_string(),
         };
-        prepare_handoff(
-            &db, "handoff", "codex", "gpt-5.4", "high", "running", &policy,
-        )
-        .await
-        .unwrap();
+        assert!(claim_handoff(&db, "handoff", 1).await.unwrap());
+        assert!(prepare_handoff(&db, "handoff", "running", &policy, 2)
+            .await
+            .unwrap());
         let session = get(&db, "handoff").await.unwrap().unwrap();
         assert_eq!(session.agent_kind, "codex");
         assert_eq!(session.model, "gpt-5.4");
@@ -1033,6 +1108,48 @@ mod tests {
         assert!(session.acp_inflight.is_none());
         assert!(session.current_mode.is_none());
         assert_eq!(session.pending_prompt.as_deref(), Some("queued"));
+        assert_eq!(session.mutation_revision, 3);
+    }
+
+    #[tokio::test]
+    async fn handoff_final_commit_loses_to_newer_status_generation() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let branch = branch_id(&db, "weaver/handoff-cas").await;
+        let mut input = new_session("handoff-cas", &branch, None);
+        input.agent_kind = "claude".to_string();
+        input.protocol = "acp".to_string();
+        insert(&db, &input).await.unwrap();
+        assert!(claim_handoff(&db, "handoff-cas", 1).await.unwrap());
+        set_status(&db, "handoff-cas", "done").await.unwrap();
+
+        let policy = SessionHandoffPolicy {
+            agent_kind: "codex".to_string(),
+            model: "gpt-5.6".to_string(),
+            effort: "high".to_string(),
+            profile: "replacement".to_string(),
+            launch_mode: "plan".to_string(),
+            profile_revision: 9,
+            profile_lifetime: 4,
+            strict: true,
+            env_clear: true,
+            ambient_allowlist: "[]".to_string(),
+            idle_archive_secs: None,
+            turn_budget: 0,
+            prelude: "none".to_string(),
+            restricted: false,
+            allowed_tools: "[]".to_string(),
+            mcp_access: r#"{"selection":{"mode":"none","groups":[]},"capability_sets":[]}"#
+                .to_string(),
+            launch_snapshot: r#"{"agent":"codex"}"#.to_string(),
+        };
+        assert!(!prepare_handoff(&db, "handoff-cas", "running", &policy, 2)
+            .await
+            .unwrap());
+        let session = get(&db, "handoff-cas").await.unwrap().unwrap();
+        assert_eq!(session.status, "done");
+        assert_eq!(session.agent_kind, "claude");
+        assert_eq!(session.profile, crate::profile::DEFAULT_PROFILE);
+        assert_eq!(session.mutation_revision, 3);
     }
 
     /// Regression: the queue clears to `''`, never NULL. `sessions.pending_prompt`

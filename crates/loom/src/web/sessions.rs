@@ -340,18 +340,6 @@ async fn layer_launch_environment(
     env
 }
 
-async fn automation_policy_defaults(db: &Db) -> (i64, i64) {
-    let idle = config::get(db, "automation.idle_archive_secs")
-        .await
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(config::DEFAULT_AUTOMATION_IDLE_ARCHIVE_SECS);
-    let turns = config::get(db, "automation.turn_cap")
-        .await
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(config::DEFAULT_AUTOMATION_TURN_CAP);
-    (idle, turns)
-}
-
 /// Build the explicit ambient baseline used when Tapestry clears inheritance.
 /// Profile/repo values win over baseline and allowlisted ambient values; loom's
 /// own session variables are injected later by `agent::session_env`.
@@ -366,7 +354,7 @@ async fn resume_environment(
         repo_root,
         cfg,
         &session.profile,
-        session.policy_env_clear,
+        session.policy_strict,
         session.policy_restricted,
     )
     .await;
@@ -870,7 +858,9 @@ pub(crate) async fn provision_session(
     let current_profile = crate::profile::get(&st.db, &resolved.profile.name)
         .await?
         .ok_or_else(|| AppError::bad_request("selected profile was removed after preview"))?;
-    if current_profile.revision != resolved.view.profile_revision {
+    if current_profile.revision != resolved.view.profile_revision
+        || current_profile.lifetime != resolved.view.profile_lifetime
+    {
         let fresh = super::launches::resolve_launch(&st, &selection, &options).await?;
         return Err(AppError::conflict(
             "launch profile changed while resolving its environment; review the fresh resolution",
@@ -1262,6 +1252,8 @@ pub(crate) async fn provision_session(
         profile: profile_name.clone(),
         launch_mode: mode.clone(),
         profile_revision: launch_profile.revision,
+        profile_lifetime: launch_profile.lifetime,
+        strict: launch_profile.strict,
         env_clear: launch_profile.env_clear,
         ambient_allowlist: launch_profile.ambient_allowlist.clone(),
         idle_archive_secs: resolved.view.policy.idle_archive_secs,
@@ -1965,12 +1957,21 @@ pub(super) async fn patch_session(
     Path(key): Path<String>,
     Json(req): Json<PatchSessionReq>,
 ) -> ApiResult<Json<SessionView>> {
-    let (session, branch) = require_session(&st.db, &key).await?;
+    let (initial_session, _) = require_session(&st.db, &key).await?;
+    let _source_permit = st.launch_gate.acquire_session(&initial_session.id).await;
+    let _lifecycle = LIFECYCLE_LOCK.lock().await;
+    let Some((session, branch)) = session_mod::with_branch(&st.db, &initial_session.id).await?
+    else {
+        return Err(AppError::conflict(
+            "session changed while the update was waiting; review it again",
+        ));
+    };
     if let Some(title) = &req.title {
         branch_mod::set_title(&st.db, &branch.id, title).await?;
     }
     if let Some(goal) = &req.goal {
         branch_mod::set_goal(&st.db, &branch.id, goal, "user").await?;
+        session_mod::bump_mutation_revision(&st.db, &session.id).await?;
         tokio::fs::write(db::run_dir(&session.id).join("goal.txt"), goal)
             .await
             .ok();
@@ -2449,6 +2450,68 @@ pub(crate) async fn create_warm_session(
     let repo_root = repo_root
         .canonicalize()
         .unwrap_or_else(|_| repo_root.to_path_buf());
+    let selected_profile = match watch.profile.trim() {
+        "" => crate::profile::DEFAULT_PROFILE,
+        name => name,
+    };
+    let _profile_permit = st.launch_gate.acquire_profile(selected_profile).await;
+    let _resolver_permit = st.launch_gate.acquire_resolver().await;
+    let selection = LaunchSelection {
+        profile: selected_profile.to_string(),
+        overrides: LaunchOverrides {
+            model: (!watch.model.trim().is_empty()).then(|| watch.model.trim().to_string()),
+            effort: (!watch.effort.trim().is_empty()).then(|| watch.effort.trim().to_string()),
+            ..Default::default()
+        },
+    };
+    let resolved = super::launches::resolve_launch(
+        st,
+        &selection,
+        &crate::launch::ResolveOptions {
+            default_class: Some("automation".to_string()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    if !resolved.view.valid {
+        return Err(AppError::conflict(
+            resolved
+                .view
+                .errors
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "warm session launch is not currently admissible".to_string()),
+        )
+        .with_fields(json!({ "preview": resolved.view })));
+    }
+    let profile_environment = crate::profile::env_pairs(&st.db, &resolved.profile.name)
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let current_profile = crate::profile::get(&st.db, &resolved.profile.name)
+        .await?
+        .ok_or_else(|| AppError::conflict("watch profile changed during warm launch"))?;
+    if current_profile.revision != resolved.view.profile_revision
+        || current_profile.lifetime != resolved.view.profile_lifetime
+    {
+        return Err(AppError::conflict(
+            "watch profile changed during warm launch; retry against a fresh resolution",
+        ));
+    }
+    let launch_snapshot = serde_json::to_string(&resolved.view)
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let custom_agent = resolved.custom_agent.clone();
+    let launch_profile = resolved.profile;
+    let agent = resolved.view.agent;
+    let model = resolved.view.model;
+    let effort = resolved.view.effort;
+    let protocol = resolved.view.protocol;
+    let mode = resolved.view.mode;
+    let class = resolved.view.class;
+    let stamped_allowed_tools = serde_json::to_string(&resolved.runtime_permissions)
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let stamped_mcp_access = serde_json::to_string(&resolved.mcp_policy)
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+
     let launch_permit = st.launch_gate.acquire(&repo_root).await;
     let repo_root_str = repo_root.display().to_string();
     let base = git::default_base(&repo_root).await?;
@@ -2485,25 +2548,6 @@ pub(crate) async fn create_warm_session(
     tokio::fs::create_dir_all(&run_dir).await?;
     tracing::debug!(watch = %watch.id, session = %session_id, "allocated warm session id and run dir");
 
-    // Warm infrastructure resolves the profile selected by the watch. Its
-    // runtime/model/policy are authoritative; the watch's non-empty model and
-    // effort remain per-watch overrides.
-    let launch_profile = crate::profile::get(&st.db, &watch.profile)
-        .await?
-        .ok_or_else(|| {
-            AppError::bad_request(format!("watch profile '{}' is missing", watch.profile))
-        })?;
-    let agent = launch_profile.agent_kind.clone();
-    let model = if watch.model.trim().is_empty() {
-        launch_profile.model.clone()
-    } else {
-        watch.model.clone()
-    };
-    let effort = if watch.effort.trim().is_empty() {
-        launch_profile.effort.clone()
-    } else {
-        watch.effort.clone()
-    };
     let goal_file = match watch
         .params()
         .get("prompt")
@@ -2520,11 +2564,12 @@ pub(crate) async fn create_warm_session(
 
     let term_session = format!("weaver-{session_id}");
     let repo_cfg = repo_cfg_or_default(&repo_root);
-    let mut extra_env = launch_env_for_profile(
+    let mut extra_env = layer_launch_environment(
         &st.db,
         &repo_root,
         &repo_cfg,
         &launch_profile.name,
+        profile_environment,
         launch_profile.strict,
         launch_profile.restricted,
     )
@@ -2540,25 +2585,6 @@ pub(crate) async fn create_warm_session(
     // deliberately requires a live bound session, so an eager agent cannot hit
     // a transient authentication failure during startup.
     let status = agent::initial_status(&st.db, &agent).await;
-    let (inherited_idle, inherited_turn_budget) = automation_policy_defaults(&st.db).await;
-    let mcp_policy = launch_profile
-        .mcp_policy_snapshot()
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
-    let mcp_errors = crate::mcp::snapshot_errors(&st.db, &mcp_policy).await?;
-    if !mcp_errors.is_empty() {
-        return Err(AppError::bad_request(format!(
-            "profile MCP policy is unavailable: {}",
-            mcp_errors.join("; ")
-        )));
-    }
-    let stamped_allowed_tools = serde_json::to_string(
-        &launch_profile
-            .effective_allowed_tool_rules_for(&mcp_policy)
-            .map_err(|error| AppError::bad_request(error.to_string()))?,
-    )
-    .map_err(|error| AppError::bad_request(error.to_string()))?;
-    let stamped_mcp_access = serde_json::to_string(&mcp_policy)
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
     let session = session_mod::insert_with_policy(
         &st.db,
         &NewSession {
@@ -2574,24 +2600,26 @@ pub(crate) async fn create_warm_session(
             parent_branch_id: None,
             managed_by: Some(watch.id.clone()),
             created_by: None,
-            protocol: "terminal".to_string(),
+            protocol: protocol.clone(),
             origin: "watch".to_string(),
-            class: "automation".to_string(),
+            class: class.clone(),
             tracking_issue_id: None,
         },
         &session_mod::SessionLaunchPolicy {
             profile: launch_profile.name.clone(),
-            launch_mode: launch_profile.mode.clone(),
+            launch_mode: mode.clone(),
             profile_revision: launch_profile.revision,
+            profile_lifetime: launch_profile.lifetime,
+            strict: launch_profile.strict,
             env_clear: launch_profile.env_clear,
             ambient_allowlist: launch_profile.ambient_allowlist.clone(),
-            idle_archive_secs: Some(launch_profile.idle_archive_secs.unwrap_or(inherited_idle)),
-            turn_budget: launch_profile.turn_budget.unwrap_or(inherited_turn_budget),
+            idle_archive_secs: resolved.view.policy.idle_archive_secs,
+            turn_budget: resolved.view.policy.turn_budget.unwrap_or(0),
             prelude: launch_profile.prelude.clone(),
             restricted: launch_profile.restricted,
-            allowed_tools: stamped_allowed_tools,
+            allowed_tools: stamped_allowed_tools.clone(),
             mcp_access: stamped_mcp_access,
-            launch_snapshot: String::new(),
+            launch_snapshot,
             creator_kind: "system".to_string(),
             creator_subject: format!("watch:{}", watch.id),
             parent_session_id: None,
@@ -2602,38 +2630,71 @@ pub(crate) async fn create_warm_session(
     let session_token =
         crate::auth::create_session_token(&st.db, None, &session_id, &branch.id).await?;
     set_env(&mut extra_env, "LOOM_TOKEN", session_token);
-    tracing::info!(watch = %watch.id, session = %session_id, agent = %agent, work_dir = %work_dir.display(), "launching warm session agent terminal");
-    if let Err(error) = agent::launch(
-        &st.db,
-        &agent::LaunchSpec {
-            branch_id: &branch.id,
-            runtime: &agent,
-            work_dir: &work_dir,
-            term_session: &term_session,
-            goal_file: goal_file.as_deref(),
-            primer_file: None,
-            prelude: &launch_profile.prelude,
-            server_addr: &st.addr,
-            model: &model,
-            effort: &effort,
-            extra_env: &extra_env,
-            env_clear: launch_profile.env_clear,
-            custom: None,
-        },
-        agent::LaunchMode::Fresh,
-    )
-    .await
-    {
+    tracing::info!(watch = %watch.id, session = %session_id, agent = %agent, protocol = %protocol, work_dir = %work_dir.display(), "launching warm session agent");
+    let launch_result = if protocol == "acp" {
+        match agent::build_acp_launch(
+            &st.db,
+            &agent::AcpLaunchSpec {
+                session_id: &session.id,
+                branch_id: &branch.id,
+                runtime: &agent,
+                work_dir: &work_dir,
+                server_addr: &st.addr,
+                model: &model,
+                effort: &effort,
+                goal_file: goal_file.as_deref(),
+                primer_file: None,
+                extra_env: &extra_env,
+                env_clear: launch_profile.env_clear,
+                mode: &mode,
+                prelude: &launch_profile.prelude,
+                restricted: launch_profile.restricted,
+                allowed_tools: &stamped_allowed_tools,
+                mcp_access: &session.policy_mcp_access,
+                custom: custom_agent.as_ref(),
+            },
+            agent::AcpOpen::Fresh,
+        )
+        .await
+        {
+            Ok(launch) => crate::acp::start(st, &session.id, launch).await,
+            Err(error) => Err(error),
+        }
+    } else {
+        agent::launch(
+            &st.db,
+            &agent::LaunchSpec {
+                branch_id: &branch.id,
+                runtime: &agent,
+                work_dir: &work_dir,
+                term_session: &term_session,
+                goal_file: goal_file.as_deref(),
+                primer_file: None,
+                prelude: &launch_profile.prelude,
+                server_addr: &st.addr,
+                model: &model,
+                effort: &effort,
+                extra_env: &extra_env,
+                env_clear: launch_profile.env_clear,
+                custom: custom_agent.as_ref(),
+            },
+            agent::LaunchMode::Fresh,
+        )
+        .await
+    };
+    if let Err(error) = launch_result {
         crate::auth::revoke_session_tokens(&st.db, &session_id)
             .await
             .ok();
+        st.acp.stop(&session_id);
+        backend::kill_session(&term_session).await.ok();
         session_mod::delete(&st.db, &session_id).await.ok();
         return Err(AppError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             error.to_string(),
         ));
     }
-    tracing::info!(watch = %watch.id, session = %session_id, "warm session agent terminal launched");
+    tracing::info!(watch = %watch.id, session = %session_id, "warm session agent launched");
     drop(launch_permit);
 
     repo::record_use(&st.db, &repo_root_str).await.ok();
@@ -2666,6 +2727,30 @@ async fn require_branch_slot_free(
     Ok(())
 }
 
+/// Prove that a respawn still targets the profile lifetime accepted by this
+/// session. A same-lifetime edit, credential rotation, or retirement remains
+/// valid; a recreate under the same name does not.
+async fn require_session_profile_lifetime(
+    db: &Db,
+    session: &Session,
+) -> ApiResult<crate::profile::Profile> {
+    let profile = crate::profile::get_including_retired(db, &session.profile)
+        .await?
+        .ok_or_else(|| {
+            AppError::conflict(format!(
+                "session '{}' profile lifetime is no longer available",
+                session.profile
+            ))
+        })?;
+    if session.profile_lifetime == 0 || profile.lifetime != session.profile_lifetime {
+        return Err(AppError::conflict(format!(
+            "session '{}' belongs to an unavailable profile lifetime; create a canonical replacement instead of reusing same-name credentials",
+            session.id
+        )));
+    }
+    Ok(profile)
+}
+
 /// Recreate an orphaned session's terminal and resume its agent. The worktree is
 /// expected to still be on disk (an orphaned session only lost its terminal); a
 /// missing worktree is an error here — recovering a *torn-down* (archived)
@@ -2683,6 +2768,7 @@ pub(crate) async fn adopt(
     };
     let session = &current_session;
     let branch = &current_branch;
+    require_session_profile_lifetime(&st.db, session).await?;
     require_branch_slot_free(st, session, branch).await?;
     if session.protocol == "acp" {
         return adopt_acp(st, session, branch, "session adopted").await;
@@ -3046,6 +3132,7 @@ async fn recover(st: &AppState, session: &Session, _branch: &Branch) -> Result<(
             session.status
         )));
     }
+    require_session_profile_lifetime(&st.db, session).await?;
     require_branch_slot_free(st, session, branch).await?;
     // Reserve the active branch slot in SQLite before touching the worktree or
     // supervisor. This is the atomic boundary a read-then-launch guard cannot
@@ -3591,6 +3678,7 @@ struct HandoffPlan {
     mode: String,
     profile: String,
     profile_revision: i64,
+    profile_lifetime: i64,
     env_clear: bool,
     ambient_allowlist: String,
     idle_archive_secs: Option<i64>,
@@ -3699,11 +3787,6 @@ async fn legacy_handoff_plan(
             "invalid handoff mode '{mode}'"
         )));
     }
-    let snapshot =
-        serde_json::from_str::<weaver_api::ResolvedLaunchView>(&session.launch_snapshot).ok();
-    let strict = snapshot
-        .as_ref()
-        .is_some_and(|snapshot| snapshot.policy.strict);
     let lifetime = crate::profile::get_including_retired(&st.db, &session.profile)
         .await?
         .ok_or_else(|| {
@@ -3711,9 +3794,7 @@ async fn legacy_handoff_plan(
                 "the session's original profile lifetime is unavailable; review a canonical handoff preview",
             )
         })?;
-    let original_lifetime = lifetime.revision == session.profile_revision
-        || (lifetime.retired && lifetime.revision == session.profile_revision + 1);
-    if !original_lifetime {
+    if session.profile_lifetime == 0 || lifetime.lifetime != session.profile_lifetime {
         return Err(AppError::conflict(
             "the session's profile name now refers to a different template lifetime; review a canonical handoff preview",
         ));
@@ -3738,13 +3819,14 @@ async fn legacy_handoff_plan(
         mode: mode.clone(),
         profile: session.profile.clone(),
         profile_revision: session.profile_revision,
+        profile_lifetime: session.profile_lifetime,
         env_clear: session.policy_env_clear,
         ambient_allowlist: session.policy_ambient_allowlist.clone(),
         idle_archive_secs: session.policy_idle_archive_secs,
         turn_budget: session.policy_turn_budget,
         prelude: session.policy_prelude.clone(),
         restricted: session.policy_restricted,
-        strict,
+        strict: session.policy_strict,
         allowed_tools: session.policy_allowed_tools.clone(),
         mcp_access: session.policy_mcp_access.clone(),
         launch_snapshot: legacy_handoff_snapshot(session, target, &model, &effort, &mode)?,
@@ -3785,8 +3867,10 @@ pub(super) async fn handoff_session(
         && session.effort == initial_session.effort
         && session.profile == initial_session.profile
         && session.profile_revision == initial_session.profile_revision
+        && session.profile_lifetime == initial_session.profile_lifetime
         && session.launch_mode == initial_session.launch_mode
-        && session.launch_snapshot == initial_session.launch_snapshot;
+        && session.launch_snapshot == initial_session.launch_snapshot
+        && session.mutation_revision == initial_session.mutation_revision;
     if !unchanged_source {
         return Err(AppError::conflict(
             "session changed while the handoff request was waiting; review it again",
@@ -3847,6 +3931,7 @@ pub(super) async fn handoff_session(
             mode: resolved.view.mode.clone(),
             profile: resolved.profile.name.clone(),
             profile_revision: resolved.profile.revision,
+            profile_lifetime: resolved.profile.lifetime,
             env_clear: resolved.profile.env_clear,
             ambient_allowlist: resolved.profile.ambient_allowlist.clone(),
             idle_archive_secs: resolved.view.policy.idle_archive_secs,
@@ -3881,9 +3966,14 @@ pub(super) async fn handoff_session(
         ));
     }
     let handoff_policy = session_mod::SessionHandoffPolicy {
+        agent_kind: target.clone(),
+        model: model.clone(),
+        effort: effort.clone(),
         profile: plan.profile.clone(),
         launch_mode: mode.clone(),
         profile_revision: plan.profile_revision,
+        profile_lifetime: plan.profile_lifetime,
+        strict: plan.strict,
         env_clear: plan.env_clear,
         ambient_allowlist: plan.ambient_allowlist.clone(),
         idle_archive_secs: plan.idle_archive_secs,
@@ -3981,6 +4071,7 @@ pub(super) async fn handoff_session(
             "handing off without a live ACP task; using persisted recovery state");
         None
     };
+    let source_task_quiesced = snapshot.is_some();
     // Re-read after the task handshake: it may have vanished after our initial
     // route snapshot while persisting a newer in-flight turn.
     let persisted = session_mod::get(&st.db, &session.id)
@@ -3993,8 +4084,9 @@ pub(super) async fn handoff_session(
         Some(blocks) => blocks,
         None => crate::chat::list(&st.db, &session.id).await?,
     };
+    let current_goal = branch_mod::current_goal(&st.db, &branch).await?;
     let context = crate::chat::handoff_context(
-        &branch.goal,
+        &current_goal,
         &blocks,
         HANDOFF_SUMMARY_CHARS,
         HANDOFF_RECENT_MESSAGES,
@@ -4009,22 +4101,34 @@ pub(super) async fn handoff_session(
         )
         .await;
     launch.goal = Some(crate::chat::handoff_prompt(
-        &branch.goal,
+        &current_goal,
         digest.text.as_deref(),
         &context.recent_dialogue,
     ));
+    let claimed_generation = session.mutation_revision + 1;
+    if !session_mod::claim_handoff(&st.db, &session.id, session.mutation_revision).await? {
+        if source_task_quiesced {
+            let current = session_mod::get(&st.db, &session.id).await?;
+            if current
+                .as_ref()
+                .is_some_and(|current| !session_mod::is_terminal(&current.status))
+            {
+                crate::acp::attach(&st, &session.id).await.map_err(|error| {
+                    AppError::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!(
+                            "session changed before provider replacement, and its source task could not be restored: {error}"
+                        ),
+                    )
+                })?;
+            }
+        }
+        return Err(AppError::conflict(
+            "session changed before the handoff could replace its provider; review it again",
+        ));
+    }
     backend::kill_session_and_wait(&session.term_session).await?;
     crate::chat::reset_usage(&st.db, &session.id).await?;
-    session_mod::prepare_handoff(
-        &st.db,
-        &session.id,
-        &target,
-        &model,
-        &effort,
-        "running",
-        &handoff_policy,
-    )
-    .await?;
 
     let boundary = json!({
         "from": session.agent_kind,
@@ -4041,29 +4145,44 @@ pub(super) async fn handoff_session(
     if let Err(e) = crate::acp::start_handoff(&st, &session.id, launch, boundary).await {
         st.acp.stop(&session.id);
         backend::kill_session(&session.term_session).await.ok();
-        session_mod::prepare_handoff(
+        let failure_committed = session_mod::prepare_handoff(
             &st.db,
             &session.id,
-            &target,
-            &model,
-            &effort,
             "error",
             &handoff_policy,
+            claimed_generation,
         )
         .await
-        .ok();
-        events::record(
-            &st.db,
-            &st.bus,
-            &branch.id,
-            "status",
-            json!({ "status": "error", "reason": "agent handoff failed" }),
-        )
-        .await
-        .ok();
+        .unwrap_or(false);
+        if failure_committed {
+            events::record(
+                &st.db,
+                &st.bus,
+                &branch.id,
+                "status",
+                json!({ "status": "error", "reason": "agent handoff failed" }),
+            )
+            .await
+            .ok();
+        }
         return Err(AppError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("agent handoff failed: {e}"),
+        ));
+    }
+    if !session_mod::prepare_handoff(
+        &st.db,
+        &session.id,
+        "running",
+        &handoff_policy,
+        claimed_generation,
+    )
+    .await?
+    {
+        st.acp.stop(&session.id);
+        backend::kill_session(&session.term_session).await.ok();
+        return Err(AppError::conflict(
+            "session changed while the replacement provider was starting; the newer state was preserved",
         ));
     }
 
@@ -4589,6 +4708,36 @@ mod tests {
         assert_eq!(
             env,
             vec![("GH_TOKEN".to_string(), "profile-token".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn stamped_strict_environment_keeps_profile_first_precedence() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        crate::profile::env_set(&db, "default", "SHARED_TOKEN", "profile")
+            .await
+            .unwrap();
+        crate::repo_env::set(
+            &db,
+            &repo.display().to_string(),
+            "SHARED_TOKEN",
+            "repository",
+        )
+        .await
+        .unwrap();
+        let mut cfg = weaver_core::repo_config::RepoConfig::default();
+        cfg.env
+            .insert("SHARED_TOKEN".to_string(), "committed".to_string());
+
+        let env = launch_env_for_profile(&db, repo, &cfg, "default", true, false).await;
+
+        assert_eq!(
+            env.iter()
+                .find(|(name, _)| name == "SHARED_TOKEN")
+                .map(|(_, value)| value.as_str()),
+            Some("profile")
         );
     }
 

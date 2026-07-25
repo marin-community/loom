@@ -74,6 +74,7 @@ pub(super) async fn view(st: &AppState, profile: Profile) -> ApiResult<ProfileVi
         restricted: profile.restricted,
         runtime_permissions,
         mcp_access,
+        lifetime: profile.lifetime,
         revision: profile.revision,
         created_at: profile.created_at,
         updated_at: profile.updated_at,

@@ -60,6 +60,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "launch-snapshot",
         include_str!("../migrations/0010_launch_snapshot.sql"),
     ),
+    (
+        11,
+        "profile-lifetimes",
+        include_str!("../migrations/0011_profile_lifetimes.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -290,10 +295,11 @@ mod tests {
                 .fetch_all(&db)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
 
         let profile_columns = table_columns(&db, "profiles").await.unwrap();
         assert!(profile_columns.iter().any(|column| column == "retired"));
+        assert!(profile_columns.iter().any(|column| column == "lifetime"));
 
         let columns = table_columns(&db, "sessions").await.unwrap();
         for expected in [
@@ -313,6 +319,9 @@ mod tests {
             "policy_allowed_tools",
             "policy_mcp_access",
             "launch_snapshot",
+            "profile_lifetime",
+            "policy_strict",
+            "mutation_revision",
         ] {
             assert!(
                 columns.iter().any(|column| column == expected),
@@ -374,6 +383,68 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn lifetime_migration_preserves_strict_precedence_when_provable() {
+        let db = core_connect_in_memory().await.unwrap();
+        for (_, _, migration) in LOOM_MIGRATIONS.iter().take(10) {
+            for statement in split_statements(migration) {
+                sqlx::query(&statement).execute(&db).await.unwrap();
+            }
+        }
+        insert_branch(&db, "strict-branch").await;
+        sqlx::query("UPDATE profiles SET strict = 1, revision = 7 WHERE name = 'default'")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions
+             (id, branch_id, work_dir, term_session, status, profile,
+              profile_revision, launch_snapshot)
+             VALUES
+             ('provable', 'strict-branch', '/w1', 'term-1', 'running',
+              'default', 7, ''),
+             ('unknown', 'strict-branch', '/w2', 'term-2', 'archived',
+              'default', 3, ''),
+             ('snapshot', 'strict-branch', '/w3', 'term-3', 'done',
+              'default', 7, '{\"policy\":{\"strict\":true}}')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        for statement in split_statements(LOOM_MIGRATIONS[10].2) {
+            sqlx::query(&statement).execute(&db).await.unwrap();
+        }
+
+        let provable = sqlx::query(
+            "SELECT profile_lifetime, policy_strict, mutation_revision
+             FROM sessions WHERE id = 'provable'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(provable.get::<i64, _>("profile_lifetime"), 1);
+        assert!(provable.get::<bool, _>("policy_strict"));
+        assert_eq!(provable.get::<i64, _>("mutation_revision"), 1);
+        let unknown: i64 =
+            sqlx::query_scalar("SELECT profile_lifetime FROM sessions WHERE id = 'unknown'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            unknown, 0,
+            "an ambiguous upgraded lifetime must fail closed"
+        );
+        let snapshot_lifetime: i64 = sqlx::query_scalar(
+            "SELECT json_extract(launch_snapshot, '$.profile_lifetime')
+             FROM sessions WHERE id = 'snapshot'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(snapshot_lifetime, 1);
+    }
+
     /// Regression for the on-disk upgrade path: loom once opened the shared
     /// five-connection pool after core migrations, then changed the sessions
     /// schema through that pool. Connections cached different table widths and
@@ -425,7 +496,7 @@ mod tests {
                 .fetch_all(&db)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
         let index_sql: String = sqlx::query_scalar(
             "SELECT sql FROM sqlite_master
              WHERE type = 'index' AND name = 'idx_sessions_active_branch'",
@@ -499,7 +570,7 @@ mod tests {
             .fetch_one(&db)
             .await
             .unwrap();
-        assert_eq!(count, 10);
+        assert_eq!(count, 11);
 
         // Adoption replaced the historical index predicate: archived history
         // no longer prevents a new active session from claiming the branch.

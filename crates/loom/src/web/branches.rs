@@ -5,10 +5,9 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use weaver_api::{BranchStatusReq, BranchView, CreateEventReq, TagReq};
-use weaver_core::branch as branch_mod;
-use weaver_core::tags;
+use weaver_core::{branch as branch_mod, tags};
 
-use crate::events;
+use crate::{events, session as session_mod};
 
 use super::sessions::ByQuery;
 use super::{author_or_manual, branch_view, require_branch};
@@ -48,12 +47,25 @@ pub(super) async fn patch_branch(
     Path(key): Path<String>,
     Json(req): Json<PatchBranchReq>,
 ) -> ApiResult<Json<BranchView>> {
-    let branch = require_branch(&st.db, &key).await?;
+    let initial_branch = require_branch(&st.db, &key).await?;
+    let goal_session = if req.goal.is_some() {
+        session_mod::active_for_branch(&st.db, &initial_branch.id).await?
+    } else {
+        None
+    };
+    let _goal_permit = match goal_session.as_ref() {
+        Some(session) => Some(st.launch_gate.acquire_session(&session.id).await),
+        None => None,
+    };
+    let branch = require_branch(&st.db, &initial_branch.id).await?;
     if let Some(title) = &req.title {
         branch_mod::set_title(&st.db, &branch.id, title).await?;
     }
     if let Some(goal) = &req.goal {
         branch_mod::set_goal(&st.db, &branch.id, goal, "user").await?;
+        if let Some(session) = goal_session.as_ref() {
+            session_mod::bump_mutation_revision(&st.db, &session.id).await?;
+        }
     }
     if let Some(description) = &req.description {
         branch_mod::set_description(&st.db, &branch.id, description).await?;

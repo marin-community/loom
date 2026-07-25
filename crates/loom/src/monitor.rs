@@ -649,6 +649,8 @@ mod tests {
             profile: "default".to_string(),
             launch_mode: "auto".to_string(),
             profile_revision: 1,
+            profile_lifetime: 1,
+            policy_strict: false,
             policy_env_clear: false,
             policy_ambient_allowlist: "[]".to_string(),
             policy_idle_archive_secs: None,
@@ -663,6 +665,7 @@ mod tests {
             creator_subject: "owner".to_string(),
             parent_session_id: None,
             automation_run_id: None,
+            mutation_revision: 1,
         }
     }
 

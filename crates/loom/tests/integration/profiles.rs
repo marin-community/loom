@@ -1564,3 +1564,79 @@ async fn deployment_manifest_reconciles_profiles_secret_refs_and_workload_identi
         .unwrap();
     assert_eq!(profile.status(), StatusCode::NOT_FOUND);
 }
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deployment_reconcile_serializes_with_registry_mutation() {
+    let ts = TestServer::start().await;
+    let resolver = ts.state.launch_gate.acquire_resolver().await;
+    let reconcile_url = format!("http://{}/api/deployment/reconcile", ts.addr);
+    let reconcile = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(reconcile_url)
+            .json(&json!({
+                "profiles": [{
+                    "profile": {
+                        "name": "deployment-registry-barrier",
+                        "agent_kind": "shell",
+                        "protocol": "terminal",
+                        "mode": "auto",
+                        "class": "interactive",
+                        "mcp_access": { "mode": "none", "groups": [] }
+                    },
+                    "env": []
+                }],
+                "federations": [],
+                "prune": false
+            }))
+            .send()
+            .await
+            .unwrap()
+    });
+    let mutation_url = format!("http://{}/api/agents/custom/shell", ts.addr);
+    let mutation = tokio::spawn(async move {
+        reqwest::Client::new()
+            .put(mutation_url)
+            .json(&json!({
+                "label": "Shell changed to ACP",
+                "setup": "",
+                "launch": "node fake-acp.mjs",
+                "resume": "",
+                "reports_status": false,
+                "protocol": "acp"
+            }))
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!reconcile.is_finished());
+    assert!(!mutation.is_finished());
+    drop(resolver);
+
+    let reconciled = tokio::time::timeout(std::time::Duration::from_secs(10), reconcile)
+        .await
+        .unwrap()
+        .unwrap();
+    let mutated = tokio::time::timeout(std::time::Duration::from_secs(10), mutation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(mutated.status().is_success());
+    if reconciled.status().is_success() {
+        let profile = loom::profile::get(&ts.state.db, "deployment-registry-barrier")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(profile.protocol, "terminal");
+    } else {
+        assert_eq!(reconciled.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            loom::profile::get(&ts.state.db, "deployment-registry-barrier")
+                .await
+                .unwrap()
+                .is_none(),
+            "validation from the newer registry generation must not partly persist"
+        );
+    }
+}

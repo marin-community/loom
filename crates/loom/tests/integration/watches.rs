@@ -1611,6 +1611,13 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
     assert_eq!(warm.profile, "watch");
     assert_eq!(warm.agent_kind, "shell");
     assert!(
+        !warm.launch_snapshot.is_empty(),
+        "warm creation stamps the canonical resolver snapshot"
+    );
+    let snapshot: serde_json::Value = serde_json::from_str(&warm.launch_snapshot).unwrap();
+    assert_eq!(snapshot["profile_lifetime"], warm.profile_lifetime);
+    assert_eq!(snapshot["profile_revision"], warm.profile_revision);
+    assert!(
         backend::has_session(&warm.term_session).await,
         "the warm session has a live terminal"
     );
@@ -1687,6 +1694,52 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
         !backend::has_session(&orphaned.term_session).await,
         "an archived warm session has no terminal (not re-adopted)"
     );
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warm_sessions_use_profile_capacity_admission() {
+    let ts = TestServer::start().await;
+    let state = engine_state(&ts).await;
+    set_watch_profile_agent(&state, "shell").await;
+    let mut profile = loom::profile::get(&state.db, "watch")
+        .await
+        .unwrap()
+        .unwrap()
+        .as_input()
+        .unwrap();
+    profile.max_concurrent = 1;
+    loom::profile::upsert(&state.db, &profile).await.unwrap();
+    let repo_root = ts.repo_path().canonicalize().unwrap().display().to_string();
+    let make_watch = |name: &str| watch_store::NewWatch {
+        name: name.to_string(),
+        trigger_spec: json!({ "cron": "0 * * * *" }).to_string(),
+        scope: json!({ "repo": repo_root.clone() }).to_string(),
+        params: json!({ "warm": true }).to_string(),
+        program: survey_program(),
+        ..Default::default()
+    };
+    let first = enabled_watch(&state, make_watch("capacity-warm-one")).await;
+    let second = enabled_watch(&state, make_watch("capacity-warm-two")).await;
+
+    let first_id = watch::ensure_warm_session(&state, &first)
+        .await
+        .unwrap()
+        .unwrap();
+    let error = watch::ensure_warm_session(&state, &second)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("max_concurrent"));
+    assert_eq!(
+        loom::profile::active_count(&state.db, "watch")
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(session_mod::list_managed(&state.db).await.unwrap().len(), 1);
+    if let Some(session) = session_mod::get(&state.db, &first_id).await.unwrap() {
+        backend::kill_session(&session.term_session).await.ok();
+    }
 }
 
 /// T12: the engine reuses one warm session across rounds — asked twice to ensure

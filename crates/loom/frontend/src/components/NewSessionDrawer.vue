@@ -66,10 +66,13 @@ const resolveError = ref('');
 const advanced = ref(false);
 const cloneDraft = ref<ProfileInput | null>(null);
 const cloneEnvironment = ref<CloneProfileEnvironment | null>(null);
+const cloneSourceEnvironment = ref<Profile['env']>([]);
 const clonePreviewKey = ref('');
 const cloneBusy = ref(false);
 const cloneNotice = ref('');
 const cloningRepo = ref(false);
+const repoError = ref('');
+let repoRegistrationReq = 0;
 
 // Show the platform's submit modifier (⌘ on macOS, Ctrl elsewhere). Both are
 // wired up on the form; this is only the label.
@@ -167,18 +170,29 @@ async function loadManagedRepos() {
 async function addAndCloneRepo() {
   const q = cloneCandidate.value;
   if (!q) return;
+  const request = ++repoRegistrationReq;
   cloningRepo.value = true;
+  repoError.value = '';
   try {
     const added = await registerRepo(q);
     await loadManagedRepos();
+    if (request !== repoRegistrationReq || repo.value.trim() !== q) return;
     repo.value = added.slug;
     repoFocused.value = false;
   } catch (e) {
-    error.value = (e as Error).message;
+    if (request === repoRegistrationReq && repo.value.trim() === q) {
+      repoError.value = (e as Error).message;
+    }
   } finally {
-    cloningRepo.value = false;
+    if (request === repoRegistrationReq) cloningRepo.value = false;
   }
 }
+
+watch(repo, () => {
+  ++repoRegistrationReq;
+  cloningRepo.value = false;
+  repoError.value = '';
+});
 
 function pickBranch(b: RepoBranch) {
   existingBranch.value = b.name;
@@ -272,11 +286,13 @@ function resetForm() {
   advanced.value = false;
   cloneDraft.value = null;
   cloneEnvironment.value = null;
+  cloneSourceEnvironment.value = [];
   clonePreviewKey.value = '';
   cloneNotice.value = '';
   error.value = '';
   resolveError.value = '';
   branchesError.value = '';
+  repoError.value = '';
   scratchError.value = '';
   ++resolveRequest;
   resolved.value = null;
@@ -300,6 +316,7 @@ function scheduleResolution() {
   resolved.value = null;
   cloneDraft.value = null;
   cloneEnvironment.value = null;
+  cloneSourceEnvironment.value = [];
   clonePreviewKey.value = '';
   resolving.value = true;
   resolveError.value = '';
@@ -355,15 +372,44 @@ const cloneStaticValid = computed(
 function previewKey(preview: ResolvedLaunch): string {
   return JSON.stringify({
     selection: preview.selection,
+    profile_lifetime: preview.profile_lifetime,
     profile_revision: preview.profile_revision,
     resolver_revision: preview.resolver_revision,
   });
 }
 
-function beginSaveAsNew() {
+async function beginSaveAsNew() {
   const preview = resolved.value;
   if (!preview || !cloneStaticValid.value) return;
-  const source = profiles.value.find((item) => item.name === preview.selection.profile);
+  cloneBusy.value = true;
+  error.value = '';
+  let source: Profile | undefined;
+  try {
+    const refreshed = await listProfiles();
+    if (
+      !resolved.value ||
+      preview !== resolved.value ||
+      previewKey(preview) !== previewKey(resolved.value)
+    )
+      return;
+    profiles.value = refreshed;
+    source = refreshed.find((item) => item.name === preview.selection.profile);
+    if (
+      !source ||
+      source.revision !== preview.profile_revision ||
+      source.lifetime !== preview.profile_lifetime
+    ) {
+      error.value =
+        'The source profile changed after this preview. Review the fresh resolution before saving.';
+      scheduleResolution();
+      return;
+    }
+  } catch (cause) {
+    error.value = (cause as Error).message;
+    return;
+  } finally {
+    cloneBusy.value = false;
+  }
   if (!source) return;
   cloneDraft.value = {
     name: `${source.name}-copy`,
@@ -388,10 +434,11 @@ function beginSaveAsNew() {
     mcp_access: { ...source.mcp_access, groups: [...source.mcp_access.groups] },
   };
   cloneEnvironment.value = {
-    inherit: true,
+    inherit: false,
     remove: [],
     set: [],
   };
+  cloneSourceEnvironment.value = source.env.map((entry) => ({ ...entry }));
   clonePreviewKey.value = previewKey(preview);
   cloneNotice.value = '';
 }
@@ -407,6 +454,7 @@ async function saveAsNewProfile() {
   ) {
     cloneDraft.value = null;
     cloneEnvironment.value = null;
+    cloneSourceEnvironment.value = [];
     clonePreviewKey.value = '';
     error.value = 'Launch settings changed. Review the fresh resolution before saving a profile.';
     return;
@@ -414,6 +462,8 @@ async function saveAsNewProfile() {
   cloneBusy.value = true;
   cloneNotice.value = '';
   error.value = '';
+  const submittedKey = previewKey(preview);
+  const submittedGeneration = resolveRequest;
   try {
     const saved = await cloneProfile(preview.selection.profile, {
       name: target,
@@ -425,21 +475,37 @@ async function saveAsNewProfile() {
       environment: cloneEnvironment.value,
     });
     profiles.value = await listProfiles();
+    if (
+      submittedGeneration !== resolveRequest ||
+      !resolved.value ||
+      submittedKey !== previewKey(resolved.value)
+    ) {
+      cloneNotice.value = `Saved ${saved.name}; launch settings have since changed.`;
+      return;
+    }
     chooseProfile(saved.name);
     cloneDraft.value = null;
     cloneEnvironment.value = null;
+    cloneSourceEnvironment.value = [];
     clonePreviewKey.value = '';
     cloneNotice.value = `Saved ${saved.name} without changing ${preview.selection.profile}.`;
   } catch (cause) {
     const preview = cause instanceof ApiError ? cause.body.preview : undefined;
-    if (preview && typeof preview === 'object') {
+    const stillCurrent =
+      submittedGeneration === resolveRequest &&
+      resolved.value !== null &&
+      submittedKey === previewKey(resolved.value);
+    if (preview && typeof preview === 'object' && stillCurrent) {
       resolved.value = preview as ResolvedLaunch;
       cloneDraft.value = null;
       cloneEnvironment.value = null;
+      cloneSourceEnvironment.value = [];
       clonePreviewKey.value = '';
       error.value = `${(cause as Error).message} Review the fresh resolution and reopen the new-profile editor.`;
-    } else {
+    } else if (stillCurrent) {
       error.value = (cause as Error).message;
+    } else {
+      cloneNotice.value = `The save from the previous launch selection failed: ${(cause as Error).message}`;
     }
   } finally {
     cloneBusy.value = false;
@@ -664,6 +730,7 @@ onActivated(() => void refreshLaunchData());
               </li>
             </ul>
           </div>
+          <p v-if="repoError" class="text-xs text-block" role="alert">{{ repoError }}</p>
         </section>
 
         <section class="space-y-3 border-t border-line pt-3">
@@ -909,9 +976,7 @@ onActivated(() => void refreshLaunchData());
               v-model:environment="cloneEnvironment"
               :agents="agents"
               :mcp-registry="mcpRegistry"
-              :source-environment="
-                profiles.find((item) => item.name === resolved?.selection.profile)?.env ?? []
-              "
+              :source-environment="cloneSourceEnvironment"
               :disabled="cloneBusy"
             />
             <div class="flex flex-wrap gap-2">
@@ -931,6 +996,7 @@ onActivated(() => void refreshLaunchData());
                 @click="
                   cloneDraft = null;
                   cloneEnvironment = null;
+                  cloneSourceEnvironment = [];
                   clonePreviewKey = '';
                 "
               >

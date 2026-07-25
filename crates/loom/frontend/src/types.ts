@@ -133,6 +133,9 @@ export interface Session {
   usage: AcpUsage | null;
   profile: string;
   profile_revision: number;
+  profile_lifetime: number;
+  policy_strict: boolean;
+  mutation_revision: number;
   launch_mode: string;
   /** Immutable, source-redacted launch resolution stamped by the server. */
   resolved_launch: ResolvedLaunch | null;
@@ -894,6 +897,7 @@ export interface Profile {
   restricted: boolean;
   runtime_permissions: string[];
   mcp_access: McpAccess;
+  lifetime: number;
   revision: number;
   created_at: string;
   updated_at: string;
@@ -969,6 +973,7 @@ export interface ResolvedLaunchPolicy {
 
 export interface ResolvedLaunch {
   selection: LaunchSelection;
+  profile_lifetime: number;
   profile_revision: number;
   resolver_revision: string;
   agent: string;
@@ -1080,7 +1085,10 @@ export type CustomMcpInput = Pick<
   'identity' | 'label' | 'description' | 'enabled' | 'source' | 'test_source'
 >;
 
-export type ProfileInput = Omit<Profile, 'revision' | 'created_at' | 'updated_at' | 'env'> & {
+export type ProfileInput = Omit<
+  Profile,
+  'lifetime' | 'revision' | 'created_at' | 'updated_at' | 'env'
+> & {
   expected_revision?: number;
 };
 

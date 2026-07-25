@@ -278,6 +278,7 @@ pub async fn resolve(
             profile: profile_name.to_string(),
             overrides: selection.overrides.clone(),
         },
+        profile_lifetime: profile.lifetime,
         profile_revision: profile.revision,
         resolver_revision,
         agent,

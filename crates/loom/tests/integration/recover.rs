@@ -168,3 +168,148 @@ async fn failed_recovery_rolls_back_to_a_fully_archived_session() {
     assert!(!Path::new(&work_dir).exists());
     assert!(!backend::has_session(&term_session).await);
 }
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn respawn_accepts_same_profile_lifetime_and_rejects_recreate() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+    let profile_body = json!({
+        "name": "respawn-lifetime",
+        "agent_kind": "shell",
+        "protocol": "terminal",
+        "mode": "auto",
+        "class": "interactive",
+        "mcp_access": { "mode": "none", "groups": [] }
+    });
+    let profile = client
+        .post("/api/profiles", profile_body.clone())
+        .await
+        .unwrap();
+    client
+        .put(
+            "/api/profiles/respawn-lifetime/env/LIFETIME_TOKEN",
+            json!({ "value": "at-launch" }),
+        )
+        .await
+        .unwrap();
+
+    let recoverable = client
+        .post(
+            "/api/sessions",
+            json!({
+                "goal": "recover lifetime",
+                "cwd": ts.cwd(),
+                "profile": "respawn-lifetime"
+            }),
+        )
+        .await
+        .unwrap();
+    let adoptable = client
+        .post(
+            "/api/sessions",
+            json!({
+                "goal": "adopt lifetime",
+                "cwd": ts.cwd(),
+                "profile": "respawn-lifetime"
+            }),
+        )
+        .await
+        .unwrap();
+    let recover_id = recoverable["id"].as_str().unwrap();
+    let adopt_id = adoptable["id"].as_str().unwrap();
+    let adopt_term = adoptable["term_session"].as_str().unwrap();
+    let current = client.get("/api/profiles/respawn-lifetime").await.unwrap();
+    let edited = client
+        .put(
+            "/api/profiles/respawn-lifetime",
+            json!({
+                "name": "respawn-lifetime",
+                "description": "same lifetime edit after launch",
+                "agent_kind": "shell",
+                "protocol": "terminal",
+                "mode": "auto",
+                "class": "interactive",
+                "mcp_access": { "mode": "none", "groups": [] },
+                "expected_revision": current["revision"]
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(edited["lifetime"], profile["lifetime"]);
+    let rotated = client
+        .put(
+            "/api/profiles/respawn-lifetime/env/LIFETIME_TOKEN",
+            json!({ "value": "rotated-after-launch" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rotated["lifetime"], profile["lifetime"]);
+    client
+        .post(&format!("/api/sessions/{recover_id}/archive"), json!({}))
+        .await
+        .unwrap();
+    backend::kill_session(adopt_term).await.unwrap();
+    client
+        .patch(
+            &format!("/api/sessions/{adopt_id}"),
+            json!({ "status": "error" }),
+        )
+        .await
+        .unwrap();
+    client
+        .delete("/api/profiles/respawn-lifetime")
+        .await
+        .unwrap();
+
+    let recovered = client
+        .post(&format!("/api/sessions/{recover_id}/recover"), json!({}))
+        .await
+        .unwrap();
+    assert_eq!(recovered["profile_lifetime"], profile["lifetime"]);
+    let adopted = client
+        .post(&format!("/api/sessions/{adopt_id}/adopt"), json!({}))
+        .await
+        .unwrap();
+    assert_eq!(adopted["profile_lifetime"], profile["lifetime"]);
+
+    client
+        .post(&format!("/api/sessions/{recover_id}/archive"), json!({}))
+        .await
+        .unwrap();
+    backend::kill_session(adopt_term).await.unwrap();
+    client
+        .patch(
+            &format!("/api/sessions/{adopt_id}"),
+            json!({ "status": "error" }),
+        )
+        .await
+        .unwrap();
+    let replacement = client.post("/api/profiles", profile_body).await.unwrap();
+    assert_ne!(replacement["lifetime"], profile["lifetime"]);
+    client
+        .put(
+            "/api/profiles/respawn-lifetime/env/LIFETIME_TOKEN",
+            json!({ "value": "replacement-lifetime" }),
+        )
+        .await
+        .unwrap();
+
+    for path in [
+        format!("/api/sessions/{recover_id}/recover"),
+        format!("/api/sessions/{adopt_id}/adopt"),
+    ] {
+        let response = reqwest::Client::new()
+            .post(format!("http://{}{}", ts.addr, path))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("unavailable profile lifetime"));
+    }
+}

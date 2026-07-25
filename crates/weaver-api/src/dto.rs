@@ -192,6 +192,16 @@ pub struct SessionView {
     /// Revision of the profile whose non-secret policy was stamped at launch.
     #[serde(default)]
     pub profile_revision: i64,
+    /// Stable identity of the profile lifetime accepted at launch. Zero means
+    /// an upgraded row whose same-name relationship could not be proven.
+    #[serde(default)]
+    pub profile_lifetime: i64,
+    /// Immutable environment precedence accepted at launch.
+    #[serde(default)]
+    pub policy_strict: bool,
+    /// Monotonic lifecycle/goal mutation generation used to fence handoff.
+    #[serde(default)]
+    pub mutation_revision: i64,
     /// Resolved launch permission posture, immutable for this session.
     #[serde(default)]
     pub launch_mode: String,
@@ -323,6 +333,7 @@ pub struct ProfileView {
     pub runtime_permissions: Vec<String>,
     #[serde(default)]
     pub mcp_access: McpAccess,
+    pub lifetime: i64,
     pub revision: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -599,6 +610,8 @@ pub struct ResolvedLaunchPolicyView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedLaunchView {
     pub selection: LaunchSelection,
+    #[serde(default)]
+    pub profile_lifetime: i64,
     pub profile_revision: i64,
     pub resolver_revision: String,
     pub agent: String,

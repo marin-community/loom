@@ -48,6 +48,9 @@ pub struct Profile {
     pub mcp_policy: String,
     /// Retired profiles remain only to support recovery of historical sessions.
     pub retired: bool,
+    /// Stable identity for one selectable profile lifetime. Ordinary edits,
+    /// environment rotation, and retirement preserve it; recreate advances it.
+    pub lifetime: i64,
     pub revision: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -478,7 +481,8 @@ pub async fn create(db: &Db, input: &ProfileInput) -> Result<CreateProfileOutcom
              mode = ?, class = ?, strict = ?, env_clear = ?, ambient_allowlist = ?,
              idle_archive_secs = ?, max_concurrent = ?, turn_budget = ?, prelude = ?,
              restricted = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
-             retired = 0, revision = revision + 1, updated_at = ?
+             retired = 0, lifetime = lifetime + 1,
+             revision = revision + 1, updated_at = ?
              WHERE name = ? AND retired = 1",
         )
         .bind(&normalized.description)
@@ -584,6 +588,12 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
         }
     }
     let now = now_iso();
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
+    let reviving_retired: bool = sqlx::query_scalar("SELECT retired FROM profiles WHERE name = ?")
+        .bind(name)
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or(false);
     sqlx::query(
         "INSERT INTO profiles
          (name, description, agent_kind, model, effort, protocol, mode, class,
@@ -601,6 +611,10 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
           prelude=excluded.prelude, restricted=excluded.restricted,
           allowed_tools=excluded.allowed_tools, mcp_access=excluded.mcp_access,
           mcp_policy=excluded.mcp_policy, retired=0,
+          lifetime=CASE
+            WHEN profiles.retired = 1 THEN profiles.lifetime + 1
+            ELSE profiles.lifetime
+          END,
           revision=profiles.revision + 1, updated_at=excluded.updated_at",
     )
     .bind(name)
@@ -624,11 +638,24 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
     .bind(allowed_tools)
     .bind(mcp_access)
     .bind(mcp_policy_json)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
-    get(db, name)
-        .await?
-        .ok_or_else(|| anyhow!("profile vanished after upsert"))
+    if reviving_retired {
+        // Every revival is a new lifetime. Tombstoned credentials belong to
+        // the previous lifetime and may only return through an explicit new
+        // environment proposal.
+        sqlx::query("DELETE FROM profile_env WHERE profile_name = ?")
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+    }
+    let updated =
+        sqlx::query_as::<_, Profile>("SELECT * FROM profiles WHERE name = ? AND retired = 0")
+            .bind(name)
+            .fetch_one(&mut *tx)
+            .await?;
+    tx.commit().await?;
+    Ok(updated)
 }
 
 pub enum UpdateProfileOutcome {
@@ -843,7 +870,8 @@ pub(crate) async fn create_clone_prepared(
              mode = ?, class = ?, strict = ?, env_clear = ?, ambient_allowlist = ?,
              idle_archive_secs = ?, max_concurrent = ?, turn_budget = ?, prelude = ?,
              restricted = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
-             retired = 0, revision = revision + 1, updated_at = ?
+             retired = 0, lifetime = lifetime + 1,
+             revision = revision + 1, updated_at = ?
              WHERE name = ? AND retired = 1",
         )
         .bind(&normalized.description)
@@ -1714,10 +1742,14 @@ mod tests {
             .as_input()
             .unwrap();
         input.name = "recreated".to_string();
-        let first = match create(&db, &input).await.unwrap() {
-            CreateProfileOutcome::Created(profile) => profile,
+        match create(&db, &input).await.unwrap() {
+            CreateProfileOutcome::Created(_) => {}
             CreateProfileOutcome::Exists(_) => panic!("new name unexpectedly existed"),
-        };
+        }
+        env_set(&db, &input.name, "OLD_SECRET", "previous-lifetime")
+            .await
+            .unwrap();
+        let first = get(&db, &input.name).await.unwrap().unwrap();
         assert!(remove(&db, &input.name).await.unwrap());
         let tombstone = get_including_retired(&db, &input.name)
             .await
@@ -1725,6 +1757,15 @@ mod tests {
             .unwrap();
         assert!(tombstone.retired);
         assert_eq!(tombstone.revision, first.revision + 1);
+        assert_eq!(tombstone.lifetime, first.lifetime);
+        assert_eq!(
+            env_get(&db, &input.name, "OLD_SECRET")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("previous-lifetime"),
+            "retirement preserves credentials for same-lifetime recovery"
+        );
 
         input.description = "unrelated replacement".to_string();
         let replacement = match create(&db, &input).await.unwrap() {
@@ -1733,6 +1774,54 @@ mod tests {
         };
         assert_eq!(replacement.revision, tombstone.revision + 1);
         assert_ne!(replacement.revision, first.revision);
+        assert_eq!(replacement.lifetime, first.lifetime + 1);
+        assert!(
+            env_meta(&db, &input.name).await.unwrap().is_empty(),
+            "recreate must not revive tombstoned credentials"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_retired_revival_advances_lifetime_and_clears_environment() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let source = get(&db, DEFAULT_PROFILE).await.unwrap().unwrap();
+        let mut input = source.as_input().unwrap();
+        input.name = "revive-upsert".to_string();
+        let created = match create(&db, &input).await.unwrap() {
+            CreateProfileOutcome::Created(profile) => profile,
+            CreateProfileOutcome::Exists(_) => panic!("new profile unexpectedly existed"),
+        };
+        env_set(&db, &input.name, "TOKEN", "old").await.unwrap();
+        remove(&db, &input.name).await.unwrap();
+        let revived = upsert(&db, &input).await.unwrap();
+        assert_eq!(revived.lifetime, created.lifetime + 1);
+        assert!(env_meta(&db, &input.name).await.unwrap().is_empty());
+
+        let mut target_input = source.as_input().unwrap();
+        target_input.name = "revive-clone".to_string();
+        let target = match create(&db, &target_input).await.unwrap() {
+            CreateProfileOutcome::Created(profile) => profile,
+            CreateProfileOutcome::Exists(_) => panic!("new clone target unexpectedly existed"),
+        };
+        env_set(&db, &target_input.name, "TOKEN", "old")
+            .await
+            .unwrap();
+        remove(&db, &target_input.name).await.unwrap();
+        let current_source = get(&db, DEFAULT_PROFILE).await.unwrap().unwrap();
+        let cloned = create_clone(
+            &db,
+            DEFAULT_PROFILE,
+            current_source.revision,
+            &target_input,
+            false,
+        )
+        .await
+        .unwrap();
+        let CloneProfileOutcome::Created(cloned) = cloned else {
+            panic!("retired clone target was not revived")
+        };
+        assert_eq!(cloned.lifetime, target.lifetime + 1);
+        assert!(env_meta(&db, &target_input.name).await.unwrap().is_empty());
     }
 
     #[tokio::test]

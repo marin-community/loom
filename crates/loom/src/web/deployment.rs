@@ -60,6 +60,9 @@ pub(super) async fn reconcile_deployment(
         .launch_gate
         .acquire_profiles(serialized_profile_names.iter().map(String::as_str))
         .await;
+    // Keep the common lock order (profiles, then registry generation). Profile
+    // validation and persistence must observe one custom-agent/MCP generation.
+    let _resolver_permit = st.launch_gate.acquire_resolver().await;
 
     for declared in &req.profiles {
         let input = super::profiles::input(
