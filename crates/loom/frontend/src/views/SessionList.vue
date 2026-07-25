@@ -443,6 +443,15 @@ async function handleCreated() {
     error.value = (e as Error).message;
   }
 }
+
+function recordSessionLinkOpen(event: MouseEvent, sessionId: string) {
+  // Vue Router leaves modified clicks to the browser so they can open another
+  // tab/window. Start the in-tab timer only for the activation this page owns;
+  // keyboard Enter produces an unmodified primary click and remains covered.
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+    return;
+  beginSessionOpen(sessionId);
+}
 </script>
 
 <template>
@@ -709,7 +718,7 @@ async function handleCreated() {
             <router-link
               :to="`/s/${s.id}`"
               class="stretched-link truncate text-[15px] font-semibold text-fg hover:text-accent"
-              @click="beginSessionOpen(s.id)"
+              @click="recordSessionLinkOpen($event, s.id)"
             >
               {{ s.branch.title || s.branch.name }}
             </router-link>
@@ -894,7 +903,7 @@ async function handleCreated() {
               <router-link
                 :to="`/s/${s.id}`"
                 class="stretched-link truncate text-[15px] font-medium text-fg hover:text-accent"
-                @click="beginSessionOpen(s.id)"
+                @click="recordSessionLinkOpen($event, s.id)"
               >
                 {{ s.branch.title || s.branch.name }}
               </router-link>

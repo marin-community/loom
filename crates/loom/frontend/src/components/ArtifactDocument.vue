@@ -66,7 +66,7 @@ function scrollKey(): string {
   return `${props.id}:${props.artifactName}:${props.rev}`;
 }
 
-function storeScroll(key = activeScrollKey): void {
+function cacheScroll(key = activeScrollKey): number | undefined {
   if (!key || !scrollerEl.value) return;
   const top = scrollerEl.value.scrollTop;
   if (!scrollPositions.has(key) && scrollPositions.size >= MAX_SCROLL_POSITIONS) {
@@ -74,6 +74,12 @@ function storeScroll(key = activeScrollKey): void {
     if (oldest) scrollPositions.delete(oldest);
   }
   scrollPositions.set(key, top);
+  return top;
+}
+
+function persistScroll(key = activeScrollKey): void {
+  const top = cacheScroll(key);
+  if (top === undefined) return;
   // Dock/pop can load the same SFC through separate async bundle instances.
   // One tab-local handoff record keeps that transition correct without making
   // the reading position durable or sending document identity anywhere.
@@ -105,7 +111,7 @@ async function restoreScroll(key: string): Promise<void> {
 watch(
   () => [props.id, props.artifactName, props.rev] as const,
   (_next, previous) => {
-    if (previous) storeScroll(`${previous[0]}:${previous[1]}:${previous[2]}`);
+    if (previous) persistScroll(`${previous[0]}:${previous[1]}:${previous[2]}`);
     activeScrollKey = scrollKey();
     void restoreScroll(activeScrollKey);
   },
@@ -424,7 +430,7 @@ async function onCommentEvent(
 }
 
 function snapshotScroll(): void {
-  storeScroll();
+  persistScroll();
 }
 
 defineExpose({ onCommentEvent, snapshotScroll });
@@ -442,7 +448,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
-  storeScroll();
+  persistScroll();
   document.removeEventListener('selectionchange', onSelectionChange);
   document.removeEventListener('mousedown', onDocMouseDown, true);
   clearHighlights();
@@ -606,7 +612,7 @@ const DocBody = () => {
       ref="scrollerEl"
       class="h-full min-h-0 w-full overflow-auto bg-surface"
       data-testid="artifact-scroll"
-      @scroll.passive="storeScroll()"
+      @scroll.passive="cacheScroll()"
     >
       <p
         v-if="error"

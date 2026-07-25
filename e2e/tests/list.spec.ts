@@ -270,6 +270,13 @@ test.describe('session list view', () => {
     });
 
     const link = page.locator(`[data-session-id="${s.id}"]`).locator(`a[href="/s/${s.id}"]`);
+    await link.dispatchEvent('click', { ctrlKey: true });
+    await expect
+      .poll(() =>
+        page.evaluate(() => performance.getEntriesByName('weaver:list-open-start', 'mark').length),
+      )
+      .toBe(0);
+
     await link.focus();
     await link.press('Enter');
     await expect(page).toHaveURL(new RegExp(`/s/${s.id}$`));
