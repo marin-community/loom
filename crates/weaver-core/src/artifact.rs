@@ -126,10 +126,20 @@ pub async fn write(db: &Db, new: &NewRevision<'_>) -> Result<Artifact> {
             id
         }
         None => {
-            let row: (i64,) = sqlx::query_as(
-                "INSERT INTO artifacts (repo_root, branch_id, name, kind, title, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+            let artifact_id: i64 = sqlx::query_scalar(
+                "UPDATE artifact_id_sequence
+                 SET next_id = next_id + 1
+                 WHERE singleton = 1
+                 RETURNING next_id - 1",
             )
+            .fetch_one(&mut *tx)
+            .await?;
+            let row: (i64,) = sqlx::query_as(
+                "INSERT INTO artifacts
+                    (id, repo_root, branch_id, name, kind, title, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+            )
+            .bind(artifact_id)
             .bind(repo_root)
             .bind(branch_id)
             .bind(name)

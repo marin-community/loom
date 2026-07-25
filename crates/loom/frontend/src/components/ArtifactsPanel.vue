@@ -106,11 +106,12 @@ const showComments = computed(
   () => !!view.value && isMarkdown.value && viewMode.value === 'preview' && !editing.value,
 );
 
-function togglePop() {
+async function togglePop() {
   // Snapshot before the parent changes layouts. Waiting for child unmount made
   // restoration sensitive to Vue's patch order when docked and rail instances
-  // swap in the same render.
-  commentsRef.value?.snapshotScroll();
+  // swap in the same render. Flush private review state too: draft mutations
+  // have no branch-wide SSE event that could repair a replacement mount.
+  if (commentsRef.value && !(await commentsRef.value.prepareLayoutSwap())) return;
   emit('togglePop');
 }
 

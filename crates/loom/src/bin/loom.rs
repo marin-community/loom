@@ -294,6 +294,8 @@ enum IssueCmd {
 enum ReviewCmd {
     /// List reviews for one artifact in a session.
     Ls { session: String, artifact: String },
+    /// Show the exact server-authoritative review envelope and delivery preview.
+    Show { review_id: i64 },
     /// Add a pending comment, creating the caller's draft when needed.
     Add {
         session: String,
@@ -364,6 +366,13 @@ enum ReviewCmd {
     Discard {
         review_id: i64,
         /// Draft revision shown by `loom review ls` or the previous mutation.
+        #[arg(long)]
+        revision: i64,
+    },
+    /// Move an overall-only draft target to the artifact's current revision.
+    Retarget {
+        review_id: i64,
+        /// Draft revision shown by `loom review show` or the previous mutation.
         #[arg(long)]
         revision: i64,
     },
@@ -1347,6 +1356,11 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
             }
             Ok(())
         }
+        ReviewCmd::Show { review_id } => {
+            let review = client.get_review(review_id).await?;
+            println!("{}", serde_json::to_string_pretty(&review)?);
+            Ok(())
+        }
         ReviewCmd::Add {
             session,
             artifact,
@@ -1538,6 +1552,19 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
         } => {
             client.discard_review(review_id, revision).await?;
             println!("discarded review {review_id}");
+            Ok(())
+        }
+        ReviewCmd::Retarget {
+            review_id,
+            revision,
+        } => {
+            let review = client
+                .retarget_review_to_current(review_id, revision)
+                .await?;
+            println!(
+                "review {} targets artifact revision {} · draft revision {}",
+                review.id, review.subject.version, review.draft_revision
+            );
             Ok(())
         }
         ReviewCmd::Submit {
@@ -4984,6 +5011,7 @@ mod tests {
 
         for args in [
             vec!["loom", "review", "ls", "session-1", "design"],
+            vec!["loom", "review", "show", "4"],
             vec![
                 "loom",
                 "review",
@@ -5029,6 +5057,7 @@ mod tests {
             vec!["loom", "review", "resolve", "4", "9"],
             vec!["loom", "review", "reopen", "4", "9"],
             vec!["loom", "review", "discard", "4", "--revision", "2"],
+            vec!["loom", "review", "retarget", "4", "--revision", "2"],
             vec![
                 "loom",
                 "review",

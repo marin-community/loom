@@ -459,6 +459,11 @@ export const submitReview = (
   body: { expected_revision: number; acknowledge_outdated: boolean },
 ) => post(`/reviews/${reviewId}/submit`, body) as Promise<Review>;
 
+export const retargetReviewToCurrent = (reviewId: number, expectedRevision: number) =>
+  post(`/reviews/${reviewId}/retarget-current`, {
+    expected_revision: expectedRevision,
+  }) as Promise<Review>;
+
 export const retryReviewDelivery = (reviewId: number) =>
   post(`/reviews/${reviewId}/retry-delivery`, {}) as Promise<Review>;
 

@@ -222,7 +222,7 @@ export function ensureBuilt() {
   execFileSync("cargo", ["build"], {
     cwd: WEAVER_ROOT,
     stdio: "inherit",
-    env: process.env,
+    env: { ...process.env, CARGO_TARGET_DIR: TARGET_DIR },
   });
   if (!existsSync(LOOM_BINARY)) {
     throw new Error(`loom binary missing after build: ${LOOM_BINARY}`);

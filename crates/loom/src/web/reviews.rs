@@ -93,6 +93,19 @@ fn review_dto(review: &review::Review, current_version: &str) -> ReviewDto {
     }
 }
 
+async fn durable_review_dto(st: &AppState, item: &review::Review) -> ApiResult<ReviewDto> {
+    let artifact_id = item
+        .subject_id
+        .parse::<i64>()
+        .map_err(|_| AppError::bad_request("invalid artifact review subject"))?;
+    let current_version = artifact::get_by_id(&st.db, artifact_id)
+        .await?
+        .filter(|artifact| artifact.repo_root == item.repo_root)
+        .map(|artifact| artifact.rev.to_string())
+        .unwrap_or_else(|| item.subject_version.clone());
+    Ok(review_dto(item, &current_version))
+}
+
 fn legacy_review_dto(
     thread: &discussion::Thread,
     session_id: &str,
@@ -159,17 +172,27 @@ async fn artifact_subject(
     branch: &Branch,
     name: &str,
     version: &str,
-) -> ApiResult<Artifact> {
+) -> ApiResult<(Artifact, String)> {
     let artifact = artifact::get(&st.db, &branch.repo_root, &branch.id, name)
         .await?
         .ok_or_else(|| AppError::not_found("artifact"))?;
+    let version = require_artifact_version(st, &artifact, version, "artifact review").await?;
+    Ok((artifact, version))
+}
+
+async fn require_artifact_version(
+    st: &AppState,
+    artifact: &Artifact,
+    version: &str,
+    label: &str,
+) -> ApiResult<String> {
     let rev = version
         .parse::<i64>()
-        .map_err(|_| AppError::bad_request("artifact review version must be a revision number"))?;
+        .map_err(|_| AppError::bad_request(format!("{label} version must be a revision number")))?;
     if artifact::version(&st.db, artifact.id, rev).await?.is_none() {
         return Err(AppError::not_found("artifact revision"));
     }
-    Ok(artifact)
+    Ok(rev.to_string())
 }
 
 async fn review_artifact(st: &AppState, review: &review::Review) -> ApiResult<Artifact> {
@@ -214,7 +237,7 @@ async fn list_for(
         &branch.id,
         &session.id,
         "artifact",
-        &artifact.name,
+        &artifact.id.to_string(),
         viewer,
     )
     .await?;
@@ -275,7 +298,8 @@ async fn create_for(
             "only artifact reviews are supported in this release",
         ));
     }
-    let artifact = artifact_subject(st, branch, &body.subject_key, &body.subject_version).await?;
+    let (artifact, subject_version) =
+        artifact_subject(st, branch, &body.subject_key, &body.subject_version).await?;
     let review = review::get_or_create(
         &st.db,
         &review::NewReview {
@@ -286,7 +310,7 @@ async fn create_for(
             subject_id: &artifact.id.to_string(),
             subject_key: &artifact.name,
             subject_label: &artifact.name,
-            subject_version: &body.subject_version,
+            subject_version: &subject_version,
             created_by: &principal.username,
         },
     )
@@ -339,6 +363,30 @@ async fn creator_review(
         .filter(|review| review.created_by == principal.username)
         .ok_or_else(|| AppError::not_found("review"))?;
     Ok(review)
+}
+
+async fn submitted_operator_review(
+    st: &AppState,
+    principal: &Principal,
+    review_id: i64,
+) -> ApiResult<review::Review> {
+    require_operator(principal)?;
+    review::get(&st.db, review_id)
+        .await?
+        .filter(|review| review.status == "submitted")
+        .ok_or_else(|| AppError::not_found("submitted review"))
+}
+
+pub(super) async fn get_review(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path(review_id): Path<i64>,
+) -> ApiResult<Json<ReviewDto>> {
+    require_operator(&principal)?;
+    let item = review::get_visible(&st.db, review_id, &principal.username)
+        .await?
+        .ok_or_else(|| AppError::not_found("review"))?;
+    Ok(Json(durable_review_dto(&st, &item).await?))
 }
 
 fn text_anchor(anchor: &ArtifactTextAnchorDto) -> review::ArtifactTextAnchor {
@@ -407,13 +455,8 @@ pub(super) async fn add_review_comment(
         return Err(submitted_draft_conflict(&st, &item).await);
     }
     let artifact = review_artifact(&st, &item).await?;
-    let rev = body
-        .subject_version
-        .parse::<i64>()
-        .map_err(|_| AppError::bad_request("comment revision must be a number"))?;
-    if artifact::version(&st.db, artifact.id, rev).await?.is_none() {
-        return Err(AppError::not_found("artifact revision"));
-    }
+    let subject_version =
+        require_artifact_version(&st, &artifact, &body.subject_version, "comment").await?;
     require_text_anchor_kind(&body.anchor_kind)?;
     let updated = match review::add_comment(
         &st.db,
@@ -421,7 +464,7 @@ pub(super) async fn add_review_comment(
         &principal.username,
         body.expected_revision,
         &review::NewComment {
-            subject_version: &body.subject_version,
+            subject_version: &subject_version,
             anchor: &text_anchor(&body.anchor),
             body: &body.body,
         },
@@ -444,15 +487,12 @@ pub(super) async fn update_review_comment(
     if item.status != "draft" {
         return Err(submitted_draft_conflict(&st, &item).await);
     }
-    if let Some(version) = &body.subject_version {
+    let subject_version = if let Some(version) = &body.subject_version {
         let artifact = review_artifact(&st, &item).await?;
-        let rev = version
-            .parse::<i64>()
-            .map_err(|_| AppError::bad_request("comment revision must be a number"))?;
-        if artifact::version(&st.db, artifact.id, rev).await?.is_none() {
-            return Err(AppError::not_found("artifact revision"));
-        }
-    }
+        Some(require_artifact_version(&st, &artifact, version, "comment").await?)
+    } else {
+        None
+    };
     if let Some(kind) = &body.anchor_kind {
         require_text_anchor_kind(kind)?;
     }
@@ -477,7 +517,7 @@ pub(super) async fn update_review_comment(
         &principal.username,
         body.expected_revision,
         &review::CommentPatch {
-            subject_version: body.subject_version.as_deref(),
+            subject_version: subject_version.as_deref(),
             anchor: anchor.as_ref(),
             body: body.body.as_deref(),
         },
@@ -523,21 +563,10 @@ pub(super) async fn resolve_review_comment(
     Path((review_id, comment_id)): Path<(i64, i64)>,
     Json(body): Json<ResolveReviewCommentReq>,
 ) -> ApiResult<Json<ReviewCommentDto>> {
-    let item = creator_review(&st, &principal, review_id).await?;
-    if item.status != "submitted" {
-        return Err(AppError::conflict(
-            "submit the review before resolving its comments",
-        ));
-    }
-    let comment = review::set_comment_resolved(
-        &st.db,
-        item.id,
-        comment_id,
-        &principal.username,
-        body.resolved,
-    )
-    .await
-    .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let item = submitted_operator_review(&st, &principal, review_id).await?;
+    let comment = review::set_comment_resolved(&st.db, item.id, comment_id, body.resolved)
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
     events::emit(
         &st.bus,
         &item.branch_id,
@@ -565,14 +594,10 @@ pub(super) async fn update_review(
         return Err(submitted_draft_conflict(&st, &item).await);
     }
     let artifact = review_artifact(&st, &item).await?;
-    if let Some(version) = &body.subject_version {
-        let rev = version
-            .parse::<i64>()
-            .map_err(|_| AppError::bad_request("review revision must be a number"))?;
-        if artifact::version(&st.db, artifact.id, rev).await?.is_none() {
-            return Err(AppError::not_found("artifact revision"));
-        }
-    }
+    let subject_version = match &body.subject_version {
+        Some(version) => Some(require_artifact_version(&st, &artifact, version, "review").await?),
+        None => None,
+    };
     let updated = match review::update_draft(
         &st.db,
         item.id,
@@ -580,7 +605,7 @@ pub(super) async fn update_review(
         body.expected_revision,
         &review::DraftPatch {
             summary: body.summary.as_deref(),
-            subject_version: body.subject_version.as_deref(),
+            subject_version: subject_version.as_deref(),
         },
     )
     .await
@@ -607,6 +632,31 @@ pub(super) async fn discard_review(
         return Err(draft_mutation_error(&st, &item, error).await);
     }
     Ok(Json(json!({ "discarded": true })))
+}
+
+pub(super) async fn retarget_review_to_current(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path(review_id): Path<i64>,
+    Json(body): Json<ExpectedReviewRevisionReq>,
+) -> ApiResult<Json<ReviewDto>> {
+    let item = creator_review(&st, &principal, review_id).await?;
+    if item.status != "draft" {
+        return Err(submitted_draft_conflict(&st, &item).await);
+    }
+    let updated = match review::retarget_draft_to_current(
+        &st.db,
+        item.id,
+        &principal.username,
+        body.expected_revision,
+    )
+    .await
+    {
+        Ok(updated) => updated,
+        Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
+    };
+    let artifact = review_artifact(&st, &updated).await?;
+    Ok(Json(review_dto(&updated, &artifact.rev.to_string())))
 }
 
 pub(super) async fn submit_review(
@@ -658,18 +708,13 @@ pub(super) async fn retry_review_delivery(
     Extension(principal): Extension<Principal>,
     Path(review_id): Path<i64>,
 ) -> ApiResult<Json<ReviewDto>> {
-    let item = creator_review(&st, &principal, review_id).await?;
-    if item.status != "submitted" {
-        return Err(AppError::conflict(
-            "submit the review before retrying delivery",
-        ));
-    }
+    let item = submitted_operator_review(&st, &principal, review_id).await?;
     if item.delivery_state != "failed" {
         return Err(AppError::conflict(
             "only failed review deliveries can be retried",
         ));
     }
-    review::retry_delivery(&st.db, item.id, &principal.username)
+    review::retry_delivery(&st.db, item.id)
         .await
         .map_err(|error| AppError::conflict(error.to_string()))?;
     if let Err(error) = crate::review_delivery::deliver_review(&st, item.id).await {
@@ -678,6 +723,5 @@ pub(super) async fn retry_review_delivery(
     let refreshed = review::get(&st.db, item.id)
         .await?
         .ok_or_else(|| AppError::not_found("review"))?;
-    let artifact = review_artifact(&st, &refreshed).await?;
-    Ok(Json(review_dto(&refreshed, &artifact.rev.to_string())))
+    Ok(Json(durable_review_dto(&st, &refreshed).await?))
 }

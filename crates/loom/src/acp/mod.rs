@@ -773,6 +773,41 @@ impl AcpRegistry {
         generation
     }
 
+    #[cfg(test)]
+    pub(crate) fn register_review_wake_probe(
+        &self,
+        session_id: &str,
+        acknowledge: bool,
+        wakes: Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let (events_tx, _) = broadcast::channel(8);
+        self.register(
+            session_id,
+            AcpHandle {
+                cmd_tx,
+                events_tx,
+                metadata: Arc::new(Mutex::new(AcpMetadata::default())),
+            },
+        );
+        tokio::spawn(async move {
+            while let Some(command) = cmd_rx.recv().await {
+                if let Command::NotifyPending { reply } = command {
+                    wakes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if acknowledge {
+                        let _ = reply.send(Ok(PromptAck {
+                            queued: false,
+                            steered: false,
+                            turn: Some(0),
+                        }));
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                }
+            }
+        });
+    }
+
     /// Remove the session's slot only if it still holds `generation` — a task
     /// that has been superseded leaves the newer registration untouched.
     fn remove_own(&self, session_id: &str, generation: u64) {
@@ -2148,46 +2183,39 @@ impl Task {
         let Some(item) = item else {
             return false;
         };
-        match self.start_turn(item.payload, None, Vec::new()).await {
-            Ok(()) => {
-                if let Err(error) = crate::review_delivery::complete_review_inbox(
-                    &self.db,
-                    &item.delivery_key,
-                    &item.claim_token,
-                )
-                .await
-                {
-                    tracing::error!(
-                        session = %self.session_id,
-                        delivery_key = %item.delivery_key,
-                        %error,
-                        "dispatched protected review feedback but could not complete its receipt"
-                    );
-                }
-                true
-            }
+        match self.start_review_turn(&item).await {
+            Ok(()) => true,
             Err(error) => {
-                if let Err(release_error) = crate::review_delivery::release_review_inbox(
+                let released = crate::review_delivery::release_review_inbox(
                     &self.db,
                     &item.delivery_key,
                     &item.claim_token,
                 )
-                .await
-                {
-                    tracing::error!(
-                        session = %self.session_id,
-                        delivery_key = %item.delivery_key,
-                        error = %release_error,
-                        "could not release protected review feedback after dispatch failure"
-                    );
-                }
+                .await;
                 tracing::error!(
                     session = %self.session_id,
                     delivery_key = %item.delivery_key,
                     %error,
                     "could not start protected review feedback turn"
                 );
-                false
+                match released {
+                    Ok(true) => false,
+                    Ok(false) => {
+                        // The durable turn boundary committed before a later
+                        // transport error. Never let this task fall through and
+                        // dispatch another queue item over the live turn.
+                        true
+                    }
+                    Err(release_error) => {
+                        tracing::error!(
+                            session = %self.session_id,
+                            delivery_key = %item.delivery_key,
+                            error = %release_error,
+                            "could not release protected review feedback after dispatch failure"
+                        );
+                        false
+                    }
+                }
             }
         }
     }
@@ -2504,6 +2532,91 @@ impl Task {
             json!({ "text": text, "by": by_v, "resources": resources }),
         )
         .await
+    }
+
+    async fn start_review_turn(
+        &mut self,
+        item: &crate::review_delivery::ReviewInboxItem,
+    ) -> Result<()> {
+        self.refuse_if_turn_capped().await?;
+        let turn = if self.turns_dispatched > 0 {
+            self.current_turn + 1
+        } else {
+            self.current_turn
+        };
+        let seq = if self.turns_dispatched > 0 {
+            0
+        } else {
+            self.next_seq
+        };
+        let effective_mode = self.current_mode.clone();
+        let id = self.next_id();
+        let inflight = json!({
+            "prompt_id": id,
+            "turn": turn,
+            "mode": effective_mode,
+            "delivery_key": item.delivery_key,
+        })
+        .to_string();
+        let opening_payload = json!({
+            "text": item.payload,
+            "by": Value::Null,
+            "resources": [],
+            "delivery_key": item.delivery_key,
+        });
+        let started = crate::review_delivery::start_review_inbox_turn(
+            &self.db,
+            item,
+            &self.session_id,
+            turn,
+            seq,
+            &opening_payload,
+            &inflight,
+        )
+        .await?;
+        if !started {
+            bail!("protected review inbox claim is no longer current");
+        }
+
+        self.stream
+            .write(&wire::request_line(
+                id,
+                method::SESSION_PROMPT,
+                wire::prompt_params(&self.acp_session_id, &item.payload, &[]),
+            ))
+            .await?;
+
+        self.current_turn = turn;
+        self.next_seq = seq + 1;
+        self.turns_dispatched += 1;
+        self.turn_live = true;
+        self.effective_mode = effective_mode;
+        if self
+            .pending_interrupt_notice_through
+            .is_some_and(|through| self.current_turn > through)
+        {
+            self.pending_interrupt_notice_through = None;
+        }
+        self.emit(
+            "turn",
+            json!({
+                "turn": self.current_turn,
+                "state": "started",
+                "effective_mode": self.effective_mode,
+            }),
+        );
+        let view = ChatBlockView {
+            turn,
+            seq,
+            kind: kind::USER_MESSAGE.to_string(),
+            payload: opening_payload,
+            created_at: now_iso(),
+        };
+        self.emit("block", serde_json::to_value(&view).unwrap_or(Value::Null));
+        self.inflight_prompt = Some((id, turn));
+        crate::monitor::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "working")
+            .await;
+        Ok(())
     }
 
     async fn start_handoff_turn(&mut self, text: String, payload: Value) -> Result<()> {

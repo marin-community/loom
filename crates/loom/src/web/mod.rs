@@ -818,7 +818,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/reviews/{id}",
-            axum::routing::patch(update_review).delete(discard_review),
+            get(get_review).patch(update_review).delete(discard_review),
         )
         .route("/reviews/{id}/comments", post(add_review_comment))
         .route(
@@ -828,6 +828,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/reviews/{id}/comments/{comment_id}/resolve",
             post(resolve_review_comment),
+        )
+        .route(
+            "/reviews/{id}/retarget-current",
+            post(retarget_review_to_current),
         )
         .route("/reviews/{id}/submit", post(submit_review))
         .route("/reviews/{id}/retry-delivery", post(retry_review_delivery))

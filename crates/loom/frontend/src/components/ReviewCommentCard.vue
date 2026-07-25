@@ -21,21 +21,56 @@ const emit = defineEmits<{
 
 const body = ref(props.comment.body);
 const editing = ref(false);
+const saving = ref(false);
 const cardEl = ref<HTMLElement | null>(null);
 const editEl = ref<HTMLButtonElement | null>(null);
+const resolutionEl = ref<HTMLButtonElement | null>(null);
+const closeEl = ref<HTMLButtonElement | null>(null);
 const textareaEl = ref<HTMLTextAreaElement | null>(null);
 
 watch(
   () => props.comment.body,
   (next) => {
     body.value = next;
+    if (saving.value) {
+      saving.value = false;
+      editing.value = false;
+      void nextTick(() => editEl.value?.focus());
+    }
   },
 );
 
 watch(
   () => props.active,
   (active) => {
-    if (active) void nextTick(() => cardEl.value?.focus());
+    if (active) {
+      void nextTick(() => {
+        (editEl.value ?? resolutionEl.value ?? closeEl.value ?? cardEl.value)?.focus();
+      });
+    } else {
+      editing.value = false;
+      saving.value = false;
+    }
+  },
+  { immediate: true },
+);
+
+watch(
+  () => props.reanchoring,
+  (reanchoring, previous) => {
+    if (!reanchoring && previous) {
+      void nextTick(() => (editEl.value ?? closeEl.value ?? cardEl.value)?.focus());
+    }
+  },
+);
+
+watch(
+  () => props.error,
+  (error) => {
+    if (error && saving.value) {
+      saving.value = false;
+      void nextTick(() => textareaEl.value?.focus());
+    }
   },
 );
 
@@ -47,13 +82,17 @@ function beginEdit() {
 function save() {
   const next = body.value.trim();
   if (!next) return;
+  if (next === props.comment.body) {
+    cancelEdit();
+    return;
+  }
+  saving.value = true;
   emit('edit', { commentId: props.comment.id, body: next });
-  editing.value = false;
-  void nextTick(() => editEl.value?.focus());
 }
 
 function cancelEdit() {
   body.value = props.comment.body;
+  saving.value = false;
   editing.value = false;
   void nextTick(() => editEl.value?.focus());
 }
@@ -88,7 +127,12 @@ function cancelEdit() {
       }}
     </span>
     <span class="min-w-0 flex-1 truncate">{{ comment.body }}</span>
-    <span v-if="review.outdated" class="shrink-0 text-2xs text-block">Stale</span>
+    <span
+      v-if="comment.subject_version !== review.subject.current_version"
+      class="shrink-0 text-2xs text-block"
+    >
+      Stale
+    </span>
   </button>
 
   <div
@@ -104,14 +148,14 @@ function cancelEdit() {
     :data-testid="`review-comment-${comment.id}`"
     :data-review-card="comment.id"
     @click.stop
-    @keydown.esc.stop.prevent="emit('close', comment.id)"
+    @keydown.esc.stop.prevent="reanchoring ? emit('cancelReanchor') : emit('close', comment.id)"
   >
     <div class="mb-1.5 flex items-start gap-2">
       <div class="min-w-0 flex-1 truncate italic text-muted" :title="comment.anchor.quote">
         &ldquo;{{ comment.anchor.quote }}&rdquo;
       </div>
       <span
-        v-if="review.outdated || comment.subject_version !== review.subject.current_version"
+        v-if="comment.subject_version !== review.subject.current_version"
         class="shrink-0 rounded bg-block-soft px-1.5 py-0.5 text-2xs font-medium text-block"
       >
         Revision {{ comment.subject_version }} · stale
@@ -155,9 +199,10 @@ function cancelEdit() {
           v-if="editing"
           type="button"
           class="btn-primary px-2 py-1 text-2xs"
+          :disabled="saving"
           @click.stop="save"
         >
-          Save
+          {{ saving ? 'Saving…' : 'Save' }}
         </button>
         <button
           v-if="editing"
@@ -193,6 +238,7 @@ function cancelEdit() {
       </template>
       <button
         v-if="!review.legacy && review.status === 'submitted'"
+        ref="resolutionEl"
         type="button"
         class="btn-secondary px-2 py-1 text-2xs"
         @click.stop="emit('resolution', comment.id, comment.status !== 'resolved')"
@@ -201,6 +247,7 @@ function cancelEdit() {
       </button>
       <button
         v-if="review.legacy && comment.status === 'open'"
+        ref="resolutionEl"
         type="button"
         class="btn-secondary px-2 py-1 text-2xs"
         @click.stop="emit('resolution', comment.id, true)"
@@ -208,6 +255,7 @@ function cancelEdit() {
         Resolve
       </button>
       <button
+        ref="closeEl"
         type="button"
         class="btn-secondary ml-auto px-2 py-1 text-2xs"
         @click.stop="emit('close', comment.id)"

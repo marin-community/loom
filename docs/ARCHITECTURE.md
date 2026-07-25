@@ -294,13 +294,14 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `PUT /api/sessions/{id}/file?path=…` | write raw bytes to a worktree file (the editor save primitive) |
 | `GET /api/sessions/{id}/artifacts` | list the branch's [artifacts](artifacts.md) plus repo-shared ones |
 | `GET PUT /api/sessions/{id}/artifacts/{name}` | read content + projected refs (`rev=N` for a revision) / write a user edit as a new revision |
-| `GET POST /api/sessions/{id}/reviews` | list submitted reviews plus the caller's private draft / create or recover a draft for a versioned subject |
+| `GET POST /api/sessions/{id}/reviews` | resolve the public artifact name to its immutable ID, then list submitted reviews plus the caller's private draft / create or recover a draft for that exact versioned subject |
 | `GET POST /api/branches/{id}/reviews` | the same review operations for CLI callers that identify both branch and delivery session |
-| `PATCH /api/reviews/{id}` | persist a draft's overall summary or advance its target revision after every older anchor has been re-anchored |
+| `GET PATCH /api/reviews/{id}` | inspect a review by stable ID (including historical delivery after artifact deletion) / persist a draft's overall summary or advance its target revision after every older anchor has been re-anchored |
+| `POST /api/reviews/{id}/retarget-current` | guarded overall-only draft mutation that moves its target to the immutable artifact's actual latest revision |
 | `POST /api/reviews/{id}/comments` / `PATCH DELETE /api/reviews/{id}/comments/{comment_id}` | add, edit/re-anchor, or delete pending review comments; every draft mutation carries the current `expected_revision` |
-| `POST /api/reviews/{id}/comments/{comment_id}/resolve` | resolve or reopen the one mutable lifecycle bit on an otherwise immutable submitted comment |
+| `POST /api/reviews/{id}/comments/{comment_id}/resolve` | any authenticated operator may resolve or reopen the one mutable lifecycle bit on an otherwise immutable submitted comment |
 | `DELETE /api/reviews/{id}` / `POST /api/reviews/{id}/submit` | guarded discard / atomically check the artifact revision, freeze the exact server-rendered message, record its event, and enqueue it |
-| `POST /api/reviews/{id}/retry-delivery` | retry a failed submitted-review delivery using its stable delivery key |
+| `POST /api/reviews/{id}/retry-delivery` | any authenticated operator may retry a failed submitted-review delivery using its stable delivery key |
 | `GET /api/sessions/{id}/{diff,log,events}` | reads + SSE stream |
 | `GET /api/sessions/{id}/conversation` | the agent conversation as a normalized iris log (live transcript, else the archive capture); 404 when there is none — backs the Conversation tab |
 | `GET /api/sessions/{id}/history` | a bounded newest-tail page of provider-neutral records in chronological display order; `before`, `limit`, and `kinds` own backward pagination/filtering |

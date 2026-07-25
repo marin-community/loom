@@ -7,7 +7,7 @@
 //! Terminal delivery is necessarily at-least-once at the external PTY edge.
 
 use anyhow::{Context, Result};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::{backend, events, session, AppState};
@@ -177,31 +177,76 @@ pub async fn claim_review_inbox(
     Ok(item)
 }
 
-pub async fn complete_review_inbox(
+/// Atomically establish the protected feedback's ACP turn boundary. The
+/// delivery key is persisted in the opening journal block in the same
+/// transaction that consumes the inbox claim and records the in-flight prompt.
+/// A crash after this commit can recover the turn, but can never reclaim and
+/// start the same immutable feedback as a second turn.
+pub async fn start_review_inbox_turn(
     db: &crate::db::Db,
-    delivery_key: &str,
-    claim_token: &str,
+    item: &ReviewInboxItem,
+    session_id: &str,
+    turn: i64,
+    seq: i64,
+    opening_payload: &Value,
+    inflight: &str,
 ) -> Result<bool> {
-    Ok(sqlx::query(
+    let now = crate::db::now_iso();
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
+    let consumed = sqlx::query(
         "UPDATE review_conversation_inbox
-         SET state = 'consumed', consumed_at = ?, claim_token = NULL
+         SET state = 'consumed', consumed_at = ?, claimed_session_id = ?,
+             claim_token = NULL
          WHERE delivery_key = ? AND state = 'delivering' AND claim_token = ?",
     )
-    .bind(crate::db::now_iso())
-    .bind(delivery_key)
-    .bind(claim_token)
-    .execute(db)
+    .bind(&now)
+    .bind(session_id)
+    .bind(&item.delivery_key)
+    .bind(&item.claim_token)
+    .execute(&mut *tx)
     .await?
     .rows_affected()
-        == 1)
+        == 1;
+    if !consumed {
+        return Ok(false);
+    }
+    let journaled = sqlx::query(
+        "INSERT INTO chat_blocks (session_id, turn, seq, kind, payload, created_at)
+         VALUES (?, ?, ?, 'user_message', ?, ?)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(session_id)
+    .bind(turn)
+    .bind(seq)
+    .bind(opening_payload.to_string())
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+    if journaled.rows_affected() != 1 {
+        return Err(anyhow::anyhow!(
+            "protected review turn journal position is already occupied"
+        ));
+    }
+    let session = sqlx::query("UPDATE sessions SET acp_inflight = ? WHERE id = ?")
+        .bind(inflight)
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await?;
+    if session.rows_affected() != 1 {
+        return Err(anyhow::anyhow!(
+            "protected review target session disappeared"
+        ));
+    }
+    tx.commit().await?;
+    Ok(true)
 }
 
 pub async fn release_review_inbox(
     db: &crate::db::Db,
     delivery_key: &str,
     claim_token: &str,
-) -> Result<()> {
-    sqlx::query(
+) -> Result<bool> {
+    let released = sqlx::query(
         "UPDATE review_conversation_inbox
          SET state = 'queued', claim_token = NULL, claimed_at = NULL
          WHERE delivery_key = ? AND state = 'delivering' AND claim_token = ?",
@@ -210,7 +255,29 @@ pub async fn release_review_inbox(
     .bind(claim_token)
     .execute(db)
     .await?;
-    Ok(())
+    Ok(released.rows_affected() == 1)
+}
+
+pub async fn consume_review_inbox(
+    db: &crate::db::Db,
+    delivery_key: &str,
+    claim_token: &str,
+    session_id: &str,
+) -> Result<bool> {
+    Ok(sqlx::query(
+        "UPDATE review_conversation_inbox
+         SET state = 'consumed', consumed_at = ?, claimed_session_id = ?,
+             claim_token = NULL
+         WHERE delivery_key = ? AND state = 'delivering' AND claim_token = ?",
+    )
+    .bind(crate::db::now_iso())
+    .bind(session_id)
+    .bind(delivery_key)
+    .bind(claim_token)
+    .execute(db)
+    .await?
+    .rows_affected()
+        == 1)
 }
 
 pub async fn deliver_review(state: &AppState, review_id: i64) -> Result<()> {
@@ -227,7 +294,9 @@ pub async fn deliver_review(state: &AppState, review_id: i64) -> Result<()> {
     }
     let Some(target) = delivery_session(state, &review).await? else {
         // Honest offline state: keep the outbox queued until this branch has a
-        // conversation again.
+        // conversation again. An expired prior owner must not leave the public
+        // state stuck at `delivering`.
+        review::release_expired_delivery(&state.db, review.id).await?;
         return Ok(());
     };
     let Some(lease) = review::claim_delivery(&state.db, review.id).await? else {
@@ -340,6 +409,10 @@ pub async fn deliver_review(state: &AppState, review_id: i64) -> Result<()> {
 }
 
 pub async fn drain(state: &AppState) -> Result<()> {
+    drain_with_timeout(state, TRANSPORT_TIMEOUT).await
+}
+
+async fn drain_with_timeout(state: &AppState, transport_timeout: Duration) -> Result<()> {
     for item in review::ready_outbox(&state.db, BATCH).await? {
         if let Err(error) = deliver_review(state, item.review_id).await {
             tracing::warn!(
@@ -352,15 +425,64 @@ pub async fn drain(state: &AppState) -> Result<()> {
     }
     let branches: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT branch_id FROM review_conversation_inbox
-         WHERE state IN ('queued', 'delivering')",
+         WHERE state IN ('queued', 'delivering')
+         ORDER BY branch_id",
     )
     .fetch_all(&state.db)
     .await?;
     for branch_id in branches {
         if let Some(target) = session::active_for_branch(&state.db, &branch_id).await? {
-            if target.status == "running" && target.protocol == "acp" {
+            if !usable_session(state, &target).await {
+                continue;
+            }
+            if target.protocol == "acp" {
                 if let Some(handle) = state.acp.get(&target.id) {
-                    let _ = handle.notify_pending().await;
+                    // A wedged ACP task must not pin the single delivery sweep
+                    // and starve every later branch.
+                    let _ = tokio::time::timeout(transport_timeout, handle.notify_pending()).await;
+                }
+                continue;
+            }
+            let Some(item) = claim_review_inbox(&state.db, &branch_id, &target.id).await? else {
+                continue;
+            };
+            let sent = tokio::time::timeout(transport_timeout, async {
+                backend::paste(&target.term_session, &item.payload)
+                    .await
+                    .context("pasting protected review feedback")?;
+                backend::send_enter(&target.term_session)
+                    .await
+                    .context("submitting protected review feedback")
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("protected review transport timed out"))
+            .and_then(|result| result);
+            match sent {
+                Ok(()) => {
+                    if !consume_review_inbox(
+                        &state.db,
+                        &item.delivery_key,
+                        &item.claim_token,
+                        &target.id,
+                    )
+                    .await?
+                    {
+                        tracing::warn!(
+                            delivery_key = %item.delivery_key,
+                            session = %target.id,
+                            "protected review transport completed after its inbox claim was lost"
+                        );
+                    }
+                }
+                Err(error) => {
+                    let _ = release_review_inbox(&state.db, &item.delivery_key, &item.claim_token)
+                        .await;
+                    tracing::warn!(
+                        delivery_key = %item.delivery_key,
+                        session = %target.id,
+                        %error,
+                        "protected review terminal rehome failed"
+                    );
                 }
             }
         }
@@ -374,5 +496,280 @@ pub async fn run(state: AppState) {
             tracing::warn!(%error, "review delivery sweep failed");
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    async fn claimed_inbox() -> (crate::db::Db, ReviewInboxItem) {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let branch = weaver_core::branch::upsert(&db, "/repo", "weaver/review-inbox", "main")
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions
+                (id, branch_id, work_dir, term_session, status, protocol)
+             VALUES ('acp-review', ?, '/repo', 'relay', 'running', 'acp')",
+        )
+        .bind(&branch.id)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO reviews
+                (id, repo_root, branch_id, session_id, subject_kind, subject_id,
+                 subject_key, subject_label, subject_version, status, created_by,
+                 delivery_state, delivery_key)
+             VALUES
+                (1, '/repo', ?, 'acp-review', 'artifact', '1',
+                 'design', 'design', '1', 'submitted', 'alice',
+                 'delivered', 'review:stable')",
+        )
+        .bind(&branch.id)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO review_conversation_inbox
+                (delivery_key, review_id, branch_id, preferred_session_id, payload)
+             VALUES ('review:stable', 1, ?, 'acp-review', 'immutable')",
+        )
+        .bind(&branch.id)
+        .execute(&db)
+        .await
+        .unwrap();
+        let item = claim_review_inbox(&db, &branch.id, "acp-review")
+            .await
+            .unwrap()
+            .unwrap();
+        (db, item)
+    }
+
+    #[tokio::test]
+    async fn turn_journal_and_inbox_consumption_are_one_crash_boundary() {
+        let (db, item) = claimed_inbox().await;
+        sqlx::query(
+            "CREATE TRIGGER fail_review_inflight
+             BEFORE UPDATE OF acp_inflight ON sessions
+             BEGIN SELECT RAISE(ABORT, 'injected failure after journal insert'); END",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let payload = json!({
+            "text": item.payload,
+            "by": Value::Null,
+            "resources": [],
+            "delivery_key": item.delivery_key,
+        });
+        let error = start_review_inbox_turn(
+            &db,
+            &item,
+            "acp-review",
+            1,
+            0,
+            &payload,
+            r#"{"prompt_id":7,"turn":1,"delivery_key":"review:stable"}"#,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("injected failure"));
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM review_conversation_inbox WHERE delivery_key = 'review:stable'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(state, "delivering");
+        let blocks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_blocks")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            blocks, 0,
+            "the failed transaction must not leak a journal marker"
+        );
+
+        sqlx::query("DROP TRIGGER fail_review_inflight")
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(start_review_inbox_turn(
+            &db,
+            &item,
+            "acp-review",
+            1,
+            0,
+            &payload,
+            r#"{"prompt_id":7,"turn":1,"delivery_key":"review:stable"}"#,
+        )
+        .await
+        .unwrap());
+        assert!(
+            !start_review_inbox_turn(
+                &db,
+                &item,
+                "acp-review",
+                2,
+                0,
+                &payload,
+                r#"{"prompt_id":8,"turn":2,"delivery_key":"review:stable"}"#,
+            )
+            .await
+            .unwrap(),
+            "a consumed or lost claim is never accepted as another turn"
+        );
+        let row: (String, i64, String) = sqlx::query_as(
+            "SELECT i.state, COUNT(b.id), b.payload
+             FROM review_conversation_inbox i
+             JOIN chat_blocks b
+               ON json_extract(b.payload, '$.delivery_key') = i.delivery_key
+             WHERE i.delivery_key = 'review:stable'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "consumed");
+        assert_eq!(row.1, 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&row.2).unwrap()["delivery_key"],
+            "review:stable"
+        );
+    }
+
+    #[tokio::test]
+    async fn lost_claim_cannot_create_a_turn_or_complete_the_inbox() {
+        let (db, item) = claimed_inbox().await;
+        sqlx::query(
+            "UPDATE review_conversation_inbox
+             SET claim_token = 'new-owner' WHERE delivery_key = ?",
+        )
+        .bind(&item.delivery_key)
+        .execute(&db)
+        .await
+        .unwrap();
+        let started = start_review_inbox_turn(
+            &db,
+            &item,
+            "acp-review",
+            1,
+            0,
+            &json!({
+                "text": item.payload,
+                "delivery_key": item.delivery_key,
+            }),
+            r#"{"prompt_id":7,"turn":1}"#,
+        )
+        .await
+        .unwrap();
+        assert!(!started);
+        let blocks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_blocks")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(blocks, 0);
+        let state: (String, String) = sqlx::query_as(
+            "SELECT state, claim_token
+             FROM review_conversation_inbox WHERE delivery_key = 'review:stable'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(state, ("delivering".to_string(), "new-owner".to_string()));
+    }
+
+    #[tokio::test]
+    async fn wedged_acp_wake_does_not_block_later_branches() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let mut branches = vec![
+            weaver_core::branch::upsert(&db, "/repo", "a-wedged", "main")
+                .await
+                .unwrap(),
+            weaver_core::branch::upsert(&db, "/repo", "b-ready", "main")
+                .await
+                .unwrap(),
+        ];
+        branches.sort_by(|left, right| left.id.cmp(&right.id));
+        for (index, branch) in branches.into_iter().enumerate() {
+            let (session_id, key) = if index == 0 {
+                ("acp-wedged", "review:wedged")
+            } else {
+                ("acp-ready", "review:ready")
+            };
+            let review_id = index as i64 + 1;
+            sqlx::query(
+                "INSERT INTO sessions
+                    (id, branch_id, work_dir, term_session, status, protocol)
+                 VALUES (?, ?, '/repo', ?, 'running', 'acp')",
+            )
+            .bind(session_id)
+            .bind(&branch.id)
+            .bind(session_id)
+            .execute(&db)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO reviews
+                    (id, repo_root, branch_id, session_id, subject_kind, subject_id,
+                     subject_key, subject_label, subject_version, status, created_by,
+                     delivery_state, delivery_key)
+                 VALUES (?, '/repo', ?, ?, 'artifact', ?, 'design', 'design', '1',
+                         'submitted', 'alice', 'delivered', ?)",
+            )
+            .bind(review_id)
+            .bind(&branch.id)
+            .bind(session_id)
+            .bind(review_id.to_string())
+            .bind(key)
+            .execute(&db)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO review_conversation_inbox
+                    (delivery_key, review_id, branch_id, preferred_session_id, payload)
+                 VALUES (?, ?, ?, ?, 'immutable')",
+            )
+            .bind(key)
+            .bind(review_id)
+            .bind(&branch.id)
+            .bind(session_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        let state = AppState {
+            db: db.clone(),
+            bus: crate::events::EventBus::new(),
+            addr: "127.0.0.1:0".to_string(),
+            ide: Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
+            trigger: crate::github_trigger::GithubTrigger::production(db),
+            acp: crate::acp::AcpRegistry::new(),
+            launch_gate: crate::launch_gate::RepoLaunchGate::default(),
+        };
+        let wedged_wakes = Arc::new(AtomicUsize::new(0));
+        let ready_wakes = Arc::new(AtomicUsize::new(0));
+        state
+            .acp
+            .register_review_wake_probe("acp-wedged", false, Arc::clone(&wedged_wakes));
+        state
+            .acp
+            .register_review_wake_probe("acp-ready", true, Arc::clone(&ready_wakes));
+
+        drain_with_timeout(&state, Duration::from_millis(10))
+            .await
+            .unwrap();
+
+        assert_eq!(wedged_wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            ready_wakes.load(Ordering::SeqCst),
+            1,
+            "the sweep must continue after the bounded wake times out"
+        );
     }
 }

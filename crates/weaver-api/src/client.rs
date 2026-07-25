@@ -911,6 +911,10 @@ impl Client {
         .await
     }
 
+    pub async fn get_review(&self, review_id: i64) -> Result<ReviewDto> {
+        self.get_typed(&format!("/api/reviews/{review_id}")).await
+    }
+
     pub async fn update_review_comment(
         &self,
         review_id: i64,
@@ -962,6 +966,19 @@ impl Client {
             Method::POST,
             &format!("/api/reviews/{review_id}/submit"),
             Some(req),
+        )
+        .await
+    }
+
+    pub async fn retarget_review_to_current(
+        &self,
+        review_id: i64,
+        expected_revision: i64,
+    ) -> Result<ReviewDto> {
+        self.send_typed(
+            Method::POST,
+            &format!("/api/reviews/{review_id}/retarget-current"),
+            Some(&ExpectedReviewRevisionReq { expected_revision }),
         )
         .await
     }

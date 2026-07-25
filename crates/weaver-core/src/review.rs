@@ -260,19 +260,19 @@ pub async fn list_visible(
     branch_id: &str,
     session_id: &str,
     subject_kind: &str,
-    subject_key: &str,
+    subject_id: &str,
     viewer: &str,
 ) -> Result<Vec<Review>> {
     let rows = sqlx::query_as::<_, Review>(&format!(
         "{SELECT_REVIEW}
-         WHERE branch_id = ? AND session_id = ? AND subject_kind = ? AND subject_key = ?
+         WHERE branch_id = ? AND session_id = ? AND subject_kind = ? AND subject_id = ?
            AND (status != 'draft' OR created_by = ?)
          ORDER BY (status = 'draft') DESC, id"
     ))
     .bind(branch_id)
     .bind(session_id)
     .bind(subject_kind)
-    .bind(subject_key)
+    .bind(subject_id)
     .bind(viewer)
     .fetch_all(db)
     .await?;
@@ -310,13 +310,13 @@ pub async fn get_or_create(db: &Db, new: &NewReview<'_>) -> Result<Review> {
 
     let review = sqlx::query_as::<_, Review>(&format!(
         "{SELECT_REVIEW}
-         WHERE created_by = ? AND session_id = ? AND subject_kind = ? AND subject_key = ?
+         WHERE created_by = ? AND session_id = ? AND subject_kind = ? AND subject_id = ?
            AND status = 'draft'"
     ))
     .bind(new.created_by)
     .bind(new.session_id)
     .bind(new.subject_kind)
-    .bind(new.subject_key)
+    .bind(new.subject_id)
     .fetch_one(db)
     .await?;
     attach_comments(db, review).await
@@ -589,24 +589,61 @@ pub async fn update_draft(
     Ok(review)
 }
 
+pub async fn retarget_draft_to_current(
+    db: &Db,
+    review_id: i64,
+    creator: &str,
+    expected_revision: i64,
+) -> Result<Review> {
+    let mut tx = crate::db::begin_immediate(db).await?;
+    let review = require_creator_draft(&mut tx, review_id, creator, expected_revision).await?;
+    let comment_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM review_comments WHERE review_id = ?")
+            .bind(review_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if comment_count != 0 {
+        bail!("re-anchor every comment before advancing the review revision");
+    }
+    let artifact_id = review
+        .subject_id
+        .parse::<i64>()
+        .context("invalid artifact review subject id")?;
+    let current = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT MAX(rev) FROM artifact_versions WHERE artifact_id = ?",
+    )
+    .bind(artifact_id)
+    .fetch_one(&mut *tx)
+    .await?
+    .ok_or_else(|| anyhow!("artifact review subject not found"))?
+    .to_string();
+    sqlx::query("UPDATE reviews SET subject_version = ? WHERE id = ?")
+        .bind(current)
+        .bind(review_id)
+        .execute(&mut *tx)
+        .await?;
+    let now = now_iso();
+    let review = finish_draft_mutation(&mut tx, review_id, expected_revision, &now).await?;
+    tx.commit().await?;
+    Ok(review)
+}
+
 /// Resolution is the one mutable bit of submitted thread state. Feedback
 /// content and anchors remain frozen.
 pub async fn set_comment_resolved(
     db: &Db,
     review_id: i64,
     comment_id: i64,
-    creator: &str,
     resolved: bool,
 ) -> Result<ReviewComment> {
     let mut tx = crate::db::begin_immediate(db).await?;
     let review_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(
            SELECT 1 FROM reviews
-           WHERE id = ? AND created_by = ? AND status = 'submitted'
+           WHERE id = ? AND status = 'submitted'
          )",
     )
     .bind(review_id)
-    .bind(creator)
     .fetch_one(&mut *tx)
     .await?;
     if !review_exists {
@@ -676,6 +713,12 @@ pub async fn submit(
             .ok_or_else(|| anyhow!("review not found"))?;
     let comments = comments_for(&mut *tx, review_id).await?;
 
+    if review.draft_revision != expected_revision {
+        return Err(anyhow!(DraftRevisionConflict {
+            expected: expected_revision,
+            actual: review.draft_revision,
+        }));
+    }
     // A retried submission is a read: never insert another event or outbox row.
     if review.status == "submitted" {
         review.comments = comments;
@@ -687,12 +730,6 @@ pub async fn submit(
     }
     if review.status != "draft" {
         bail!("review is not editable");
-    }
-    if review.draft_revision != expected_revision {
-        return Err(anyhow!(DraftRevisionConflict {
-            expected: expected_revision,
-            actual: review.draft_revision,
-        }));
     }
     if comments.is_empty() && review.summary.trim().is_empty() {
         bail!("add a comment or overall note before submitting");
@@ -860,6 +897,36 @@ pub async fn claim_delivery(db: &Db, review_id: i64) -> Result<Option<DeliveryLe
     Ok(claimed)
 }
 
+/// Return an expired ownerless lease to the honest queued state without
+/// counting an attempt. This is used when no live conversation transport
+/// exists after the lease deadline.
+pub async fn release_expired_delivery(db: &Db, review_id: i64) -> Result<bool> {
+    let now = now_iso();
+    let mut tx = crate::db::begin_immediate(db).await?;
+    let released = sqlx::query(
+        "UPDATE review_delivery_outbox
+         SET state = 'queued', next_attempt_at = ?, lease_token = NULL
+         WHERE review_id = ? AND state = 'delivering' AND next_attempt_at <= ?",
+    )
+    .bind(&now)
+    .bind(review_id)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+    if released.rows_affected() == 1 {
+        sqlx::query(
+            "UPDATE reviews
+             SET delivery_state = 'queued', delivery_error = NULL
+             WHERE id = ? AND delivery_state = 'delivering'",
+        )
+        .bind(review_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(released.rows_affected() == 1)
+}
+
 pub async fn mark_retry(
     db: &Db,
     review_id: i64,
@@ -934,19 +1001,18 @@ pub async fn mark_delivered(db: &Db, review_id: i64, lease_token: &str) -> Resul
     Ok(updated.rows_affected() == 1)
 }
 
-pub async fn retry_delivery(db: &Db, review_id: i64, creator: &str) -> Result<()> {
+pub async fn retry_delivery(db: &Db, review_id: i64) -> Result<()> {
     let mut tx = crate::db::begin_immediate(db).await?;
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(
            SELECT 1
            FROM reviews r
            JOIN review_delivery_outbox o ON o.review_id = r.id
-           WHERE r.id = ? AND r.created_by = ? AND r.status = 'submitted'
+           WHERE r.id = ? AND r.status = 'submitted'
              AND r.delivery_state = 'failed' AND o.state = 'failed'
          )",
     )
     .bind(review_id)
-    .bind(creator)
     .fetch_one(&mut *tx)
     .await?;
     if !exists {
@@ -1112,7 +1178,7 @@ mod tests {
                 artifact.branch_id.as_deref().unwrap(),
                 "session-1",
                 "artifact",
-                &artifact.name,
+                &artifact.id.to_string(),
                 "bob",
             )
             .await
@@ -1120,6 +1186,87 @@ mod tests {
             .len(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn recreated_artifact_does_not_recover_reviews_from_old_identity() {
+        let (db, artifact) = seeded().await;
+        let old_draft = draft(&db, &artifact, "alice").await;
+        artifact::delete(&db, artifact.id).await.unwrap();
+        let replacement = artifact::write(
+            &db,
+            &NewRevision {
+                repo_root: "/repo",
+                branch_id: artifact.branch_id.as_deref(),
+                name: "design",
+                kind: "markdown",
+                title: "Replacement",
+                content: "Unrelated replacement content",
+                author: "agent",
+            },
+        )
+        .await
+        .unwrap();
+        assert_ne!(replacement.id, artifact.id);
+
+        let replacement_draft = draft(&db, &replacement, "alice").await;
+        assert_ne!(replacement_draft.id, old_draft.id);
+        let visible = list_visible(
+            &db,
+            replacement.branch_id.as_deref().unwrap(),
+            "session-1",
+            "artifact",
+            &replacement.id.to_string(),
+            "alice",
+        )
+        .await
+        .unwrap();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, replacement_draft.id);
+        assert_eq!(visible[0].subject_id, replacement.id.to_string());
+    }
+
+    #[tokio::test]
+    async fn overall_only_draft_retargets_to_current_with_one_guarded_revision() {
+        let (db, artifact) = seeded().await;
+        let draft = draft(&db, &artifact, "alice").await;
+        let draft = update_draft(
+            &db,
+            draft.id,
+            "alice",
+            draft.draft_revision,
+            &DraftPatch {
+                summary: Some("Review the current design"),
+                subject_version: None,
+            },
+        )
+        .await
+        .unwrap();
+        artifact::write(
+            &db,
+            &NewRevision {
+                repo_root: "/repo",
+                branch_id: artifact.branch_id.as_deref(),
+                name: "design",
+                kind: "markdown",
+                title: "Design",
+                content: "A newer design",
+                author: "agent",
+            },
+        )
+        .await
+        .unwrap();
+
+        let moved = retarget_draft_to_current(&db, draft.id, "alice", draft.draft_revision)
+            .await
+            .unwrap();
+        assert_eq!(moved.subject_version, "2");
+        assert_eq!(moved.summary, "Review the current design");
+        assert_eq!(moved.draft_revision, draft.draft_revision + 1);
+        let stale = retarget_draft_to_current(&db, draft.id, "alice", draft.draft_revision)
+            .await
+            .unwrap_err();
+        assert!(stale.downcast_ref::<DraftRevisionConflict>().is_some());
     }
 
     #[tokio::test]
@@ -1177,7 +1324,21 @@ mod tests {
         assert_eq!(submitted.review.status, "submitted");
         assert!(submitted.review.acknowledged_outdated);
 
-        let retried = submit(&db, first_draft.id, "alice", 0, true).await.unwrap();
+        let stale_retry = submit(&db, first_draft.id, "alice", 0, true)
+            .await
+            .unwrap_err();
+        assert!(stale_retry
+            .downcast_ref::<DraftRevisionConflict>()
+            .is_some());
+        let retried = submit(
+            &db,
+            first_draft.id,
+            "alice",
+            first_draft.draft_revision,
+            true,
+        )
+        .await
+        .unwrap();
         assert!(retried.event.is_none());
         let events: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM events WHERE branch_id = ? AND kind = 'review_submitted'",
@@ -1195,17 +1356,12 @@ mod tests {
         assert_eq!(events, 1);
         assert_eq!(outbox, 1);
 
-        let resolved = set_comment_resolved(
-            &db,
-            first_draft.id,
-            submitted.review.comments[0].id,
-            "alice",
-            true,
-        )
-        .await
-        .unwrap();
+        let resolved =
+            set_comment_resolved(&db, first_draft.id, submitted.review.comments[0].id, true)
+                .await
+                .unwrap();
         assert_eq!(resolved.status, "resolved");
-        let reopened = set_comment_resolved(&db, first_draft.id, resolved.id, "alice", false)
+        let reopened = set_comment_resolved(&db, first_draft.id, resolved.id, false)
             .await
             .unwrap();
         assert_eq!(reopened.status, "submitted");
@@ -1258,6 +1414,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(state, "delivered");
+    }
+
+    #[tokio::test]
+    async fn expired_ownerless_delivery_returns_to_queue_without_an_attempt() {
+        let (db, artifact) = seeded().await;
+        let draft = add(&db, &draft(&db, &artifact, "alice").await, "queue this").await;
+        submit(&db, draft.id, "alice", draft.draft_revision, false)
+            .await
+            .unwrap();
+        claim_delivery(&db, draft.id).await.unwrap().unwrap();
+        assert!(!release_expired_delivery(&db, draft.id).await.unwrap());
+        sqlx::query(
+            "UPDATE review_delivery_outbox
+             SET next_attempt_at = '1970-01-01T00:00:00.000Z'
+             WHERE review_id = ?",
+        )
+        .bind(draft.id)
+        .execute(&db)
+        .await
+        .unwrap();
+        assert!(release_expired_delivery(&db, draft.id).await.unwrap());
+        let outbox: (String, i64, Option<String>) = sqlx::query_as(
+            "SELECT state, attempts, lease_token
+             FROM review_delivery_outbox WHERE review_id = ?",
+        )
+        .bind(draft.id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(outbox, ("queued".to_string(), 0, None));
+        let state: String = sqlx::query_scalar("SELECT delivery_state FROM reviews WHERE id = ?")
+            .bind(draft.id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(state, "queued");
     }
 
     #[tokio::test]
@@ -1321,7 +1513,7 @@ mod tests {
             .await
             .unwrap();
 
-        let error = retry_delivery(&db, draft.id, "alice").await.unwrap_err();
+        let error = retry_delivery(&db, draft.id).await.unwrap_err();
         assert!(error.to_string().contains("failed review delivery"));
         for (index, expected) in ["retrying", "retrying", "failed"].into_iter().enumerate() {
             sqlx::query(
@@ -1343,8 +1535,8 @@ mod tests {
             );
         }
 
-        retry_delivery(&db, draft.id, "alice").await.unwrap();
-        let error = retry_delivery(&db, draft.id, "alice").await.unwrap_err();
+        retry_delivery(&db, draft.id).await.unwrap();
+        let error = retry_delivery(&db, draft.id).await.unwrap_err();
         assert!(error.to_string().contains("failed review delivery"));
         let state: String = sqlx::query_scalar("SELECT delivery_state FROM reviews WHERE id = ?")
             .bind(draft.id)

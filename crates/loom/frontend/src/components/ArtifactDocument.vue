@@ -21,6 +21,7 @@ import {
   discardReview,
   listArtifactReviews,
   retryReviewDelivery,
+  retargetReviewToCurrent,
   resolveThread,
   setReviewCommentResolution,
   submitReview,
@@ -140,6 +141,7 @@ watch(
     void restoreScroll(activeScrollKey);
     void loadReviews();
   },
+  { flush: 'sync' },
 );
 
 const { body, error, tokens, ctx } = useMarkdownDoc(props, () => {
@@ -157,6 +159,7 @@ const reviewNotice = ref('');
 const composerError = ref('');
 const trayError = ref('');
 const commentErrors = ref<Record<number, string>>({});
+const deliveryErrors = ref<Record<number, string>>({});
 const activeId = ref<number | null>(null);
 const trayOpen = ref(false);
 const overallNote = ref('');
@@ -165,6 +168,8 @@ const summaryHydrating = ref(false);
 const summaryDirty = ref(false);
 let summarySaveTimer: ReturnType<typeof setTimeout> | null = null;
 let summarySavePromise: Promise<Review | null> | null = null;
+let draftMutationsInFlight = 0;
+let draftMutationWaiters: Array<() => void> = [];
 const acknowledgeOutdated = ref(false);
 const submitting = ref(false);
 const discardConfirm = ref(false);
@@ -204,6 +209,23 @@ const allEntries = computed<ReviewEntry[]>(() => {
   return entries;
 });
 
+function beginDraftMutation() {
+  draftMutationsInFlight += 1;
+}
+
+function finishDraftMutation() {
+  draftMutationsInFlight = Math.max(0, draftMutationsInFlight - 1);
+  if (draftMutationsInFlight !== 0) return;
+  const waiters = draftMutationWaiters;
+  draftMutationWaiters = [];
+  for (const resolve of waiters) resolve();
+}
+
+async function waitForDraftMutations() {
+  if (draftMutationsInFlight === 0) return;
+  await new Promise<void>((resolve) => draftMutationWaiters.push(resolve));
+}
+
 function replaceReview(next: Review) {
   const index = reviews.value.findIndex((review) => review.id === next.id);
   if (index === -1) reviews.value = [next, ...reviews.value];
@@ -233,6 +255,12 @@ function conflictReview(error: unknown): Review | null {
   const review = fresh as Review;
   replaceReview(review);
   hydrateSummary(review.status === 'draft' ? review : null, true);
+  const liveIds = new Set(allEntries.value.map((entry) => entry.comment.id));
+  if (activeId.value != null && !liveIds.has(activeId.value)) activeId.value = null;
+  if (reanchorCommentId.value != null && !liveIds.has(reanchorCommentId.value)) {
+    reanchorCommentId.value = null;
+  }
+  void nextTick(locateCycle);
   return review;
 }
 
@@ -241,6 +269,15 @@ function mutationMessage(error: unknown): string {
     return 'This draft changed elsewhere. The latest review is loaded; review it before retrying.';
   }
   return (error as Error).message;
+}
+
+function setCommentMutationError(commentId: number, error: unknown) {
+  const message = mutationMessage(error);
+  if (allEntries.value.some((entry) => entry.comment.id === commentId)) {
+    commentErrors.value[commentId] = message;
+  } else {
+    trayError.value = message;
+  }
 }
 
 async function loadReviews() {
@@ -261,7 +298,7 @@ async function loadReviews() {
 watch(overallNote, () => {
   if (summaryHydrating.value) return;
   summaryDirty.value = true;
-  if (!draft.value) return;
+  if (!draft.value && !overallNote.value.trim()) return;
   if (summarySaveTimer) clearTimeout(summarySaveTimer);
   summarySaveTimer = setTimeout(() => {
     summarySaveTimer = null;
@@ -311,10 +348,11 @@ function locateCycle() {
   }
   locatedEntries.value = located.map(({ entry, range }) => ({ entry, range }));
 
+  const paintable = located.filter(({ entry }) => entry.comment.status !== 'resolved');
   const activeRange =
-    located.find(({ entry }) => entry.comment.id === activeId.value)?.range ?? null;
+    paintable.find(({ entry }) => entry.comment.id === activeId.value)?.range ?? null;
   paintHighlights(
-    located.map(({ range }) => range),
+    paintable.map(({ range }) => range),
     activeRange,
   );
 
@@ -350,6 +388,7 @@ const selectionButton = ref<{
   left: number;
 } | null>(null);
 const buttonEl = ref<HTMLElement | null>(null);
+const trayToggleEl = ref<HTMLButtonElement | null>(null);
 
 function updateSelectionButton() {
   const root = body.value;
@@ -398,6 +437,55 @@ function onSelectionChange() {
   updateSelectionButton();
 }
 
+function firstDocumentText(root: HTMLElement): Text | null {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (!(node as Text).data.length) return NodeFilter.FILTER_REJECT;
+      return node.parentElement?.closest(`[${COMMENT_UI_ATTR}]`)
+        ? NodeFilter.FILTER_REJECT
+        : NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  return walker.nextNode() as Text | null;
+}
+
+function onArticleKeydown(event: KeyboardEvent) {
+  const root = body.value;
+  if (!root) return;
+  if (event.key === 'Escape') {
+    if (reanchorCommentId.value != null) cancelReanchor();
+    window.getSelection()?.removeAllRanges();
+    selectionButton.value = null;
+    return;
+  }
+  if (!event.shiftKey || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+
+  const selection = window.getSelection();
+  if (!selection) return;
+  const current = selection.rangeCount ? selection.getRangeAt(0) : null;
+  if (
+    !current ||
+    !root.contains(current.startContainer) ||
+    (current.collapsed && current.startContainer.nodeType !== Node.TEXT_NODE)
+  ) {
+    const text = firstDocumentText(root);
+    if (!text) return;
+    const range = document.createRange();
+    const offset = event.key === 'ArrowLeft' ? text.data.length : 0;
+    range.setStart(text, offset);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+  const directional = selection as Selection & {
+    modify?: (alter: string, direction: string, granularity: string) => void;
+  };
+  if (!directional.modify) return;
+  event.preventDefault();
+  directional.modify('extend', event.key === 'ArrowLeft' ? 'backward' : 'forward', 'character');
+  updateSelectionButton();
+}
+
 function onDocMouseDown(event: MouseEvent) {
   const target = event.target as Node;
   if (buttonEl.value?.contains(target)) return;
@@ -415,6 +503,7 @@ async function useSelection() {
   if (reanchorCommentId.value != null && draft.value) {
     const commentId = reanchorCommentId.value;
     commentErrors.value[commentId] = '';
+    beginDraftMutation();
     try {
       if (!(await saveOverallNote())) return;
       if (!draft.value) return;
@@ -435,7 +524,9 @@ async function useSelection() {
       await nextTick();
       locateCycle();
     } catch (e) {
-      commentErrors.value[commentId] = mutationMessage(e);
+      setCommentMutationError(commentId, e);
+    } finally {
+      finishDraftMutation();
     }
     return;
   }
@@ -591,6 +682,7 @@ async function createPendingComment() {
   if (!pending.value || !text || savingComment.value) return;
   const pendingComment = pending.value;
   savingComment.value = true;
+  beginDraftMutation();
   composerError.value = '';
   try {
     const saved = await saveOverallNote();
@@ -616,6 +708,7 @@ async function createPendingComment() {
     composerError.value = mutationMessage(e);
   } finally {
     savingComment.value = false;
+    finishDraftMutation();
   }
 }
 
@@ -624,11 +717,13 @@ function cancelPendingComment() {
   pendingRange = null;
   pendingDraft.value = '';
   locateCycle();
+  void nextTick(() => trayToggleEl.value?.focus());
 }
 
 async function editComment(payload: { commentId: number; body: string }) {
   if (!draft.value) return;
   commentErrors.value[payload.commentId] = '';
+  beginDraftMutation();
   try {
     if (!(await saveOverallNote())) return;
     if (!draft.value) return;
@@ -639,13 +734,16 @@ async function editComment(payload: { commentId: number; body: string }) {
     replaceReview(updated);
     reviewNotice.value = 'Pending comment updated.';
   } catch (e) {
-    commentErrors.value[payload.commentId] = mutationMessage(e);
+    setCommentMutationError(payload.commentId, e);
+  } finally {
+    finishDraftMutation();
   }
 }
 
 async function removeComment(commentId: number) {
   if (!draft.value) return;
   commentErrors.value[commentId] = '';
+  beginDraftMutation();
   try {
     if (!(await saveOverallNote())) return;
     if (!draft.value) return;
@@ -661,11 +759,15 @@ async function removeComment(commentId: number) {
     await nextTick();
     locateCycle();
   } catch (e) {
-    commentErrors.value[commentId] = mutationMessage(e);
+    setCommentMutationError(commentId, e);
+  } finally {
+    finishDraftMutation();
   }
 }
 
 async function setResolution(review: Review, commentId: number, resolved: boolean) {
+  commentErrors.value[commentId] = '';
+  beginDraftMutation();
   try {
     if (review.legacy) {
       if (!resolved) return;
@@ -680,7 +782,9 @@ async function setResolution(review: Review, commentId: number, resolved: boolea
     }
     reviewNotice.value = resolved ? 'Review comment resolved.' : 'Review comment reopened.';
   } catch (e) {
-    reviewError.value = (e as Error).message;
+    setCommentMutationError(commentId, e);
+  } finally {
+    finishDraftMutation();
   }
 }
 
@@ -690,9 +794,16 @@ function beginReanchor(commentId: number) {
   reviewNotice.value = 'Select replacement text in the artifact.';
 }
 
+function cancelReanchor() {
+  reanchorCommentId.value = null;
+  selectionButton.value = null;
+  reviewNotice.value = 'Re-anchor cancelled.';
+}
+
 async function discardDraft() {
   if (!draft.value) return;
   trayError.value = '';
+  beginDraftMutation();
   try {
     const reviewId = draft.value.id;
     await discardReview(reviewId, draft.value.draft_revision);
@@ -709,12 +820,33 @@ async function discardDraft() {
     locateCycle();
   } catch (e) {
     trayError.value = mutationMessage(e);
+  } finally {
+    finishDraftMutation();
+  }
+}
+
+async function retargetDraft() {
+  if (!draft.value || draft.value.comments.length) return;
+  trayError.value = '';
+  beginDraftMutation();
+  try {
+    const saved = await saveOverallNote();
+    if (!saved || !draft.value) return;
+    const updated = await retargetReviewToCurrent(draft.value.id, draft.value.draft_revision);
+    replaceReview(updated);
+    acknowledgeOutdated.value = false;
+    reviewNotice.value = `Review target moved to revision ${updated.subject.version}.`;
+  } catch (error) {
+    trayError.value = mutationMessage(error);
+  } finally {
+    finishDraftMutation();
   }
 }
 
 async function submitDraft() {
   if (!draft.value || submitting.value) return;
   submitting.value = true;
+  beginDraftMutation();
   trayError.value = '';
   try {
     const saved = await saveOverallNote();
@@ -739,10 +871,13 @@ async function submitDraft() {
     trayError.value = mutationMessage(e);
   } finally {
     submitting.value = false;
+    finishDraftMutation();
   }
 }
 
 async function retryDelivery(review: Review) {
+  deliveryErrors.value[review.id] = '';
+  beginDraftMutation();
   try {
     const updated = await retryReviewDelivery(review.id);
     replaceReview(updated);
@@ -751,7 +886,9 @@ async function retryDelivery(review: Review) {
         ? 'Review delivered to the conversation.'
         : 'Review delivery retry queued.';
   } catch (e) {
-    reviewError.value = (e as Error).message;
+    deliveryErrors.value[review.id] = (e as Error).message;
+  } finally {
+    finishDraftMutation();
   }
 }
 
@@ -777,11 +914,19 @@ async function onCommentEvent(
   await loadReviews();
 }
 
-function snapshotScroll(): void {
+async function prepareLayoutSwap(): Promise<boolean> {
+  if (summarySaveTimer) {
+    clearTimeout(summarySaveTimer);
+    summarySaveTimer = null;
+  }
+  if (summaryDirty.value && !(await saveOverallNote())) return false;
+  await waitForDraftMutations();
+  if (summaryDirty.value && !(await saveOverallNote())) return false;
   persistScroll();
+  return true;
 }
 
-defineExpose({ onCommentEvent, snapshotScroll });
+defineExpose({ onCommentEvent, prepareLayoutSwap });
 
 // --- lifecycle --------------------------------------------------------------
 
@@ -836,9 +981,7 @@ function renderCard(entry: ReviewEntry): VNode {
       onEdit: editComment,
       onDelete: removeComment,
       onReanchor: beginReanchor,
-      onCancelReanchor: () => {
-        reanchorCommentId.value = null;
-      },
+      onCancelReanchor: cancelReanchor,
       onResolution: (commentId: number, resolved: boolean) =>
         setResolution(entry.review, commentId, resolved),
     }),
@@ -874,7 +1017,6 @@ function renderComposer(): VNode {
           if (event.key === 'Escape') {
             event.preventDefault();
             cancelPendingComment();
-            buttonEl.value?.focus();
           }
           if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
             event.preventDefault();
@@ -978,13 +1120,16 @@ const DocBody = () => {
         v-if="reviewError"
         class="mx-auto mt-3 max-w-3xl rounded border border-block-line bg-block-soft px-3 py-2 text-xs text-block"
         data-testid="review-error"
+        role="alert"
       >
         {{ reviewError }}
       </p>
       <article
         ref="body"
         class="markdown-body mx-auto max-w-3xl px-6 pb-32 pt-5"
+        tabindex="0"
         @click="onArticleClick"
+        @keydown="onArticleKeydown"
         @mouseup="onMouseUp"
       >
         <DocBody />
@@ -1005,6 +1150,7 @@ const DocBody = () => {
       :style="{ top: selectionButton.top + 'px', left: selectionButton.left + 'px' }"
       @mousedown.prevent
       @click="useSelection"
+      @keydown.esc.stop.prevent="cancelReanchor"
     >
       {{ reanchorCommentId == null ? '＋ Add comment' : '↪ Re-anchor selection' }}
     </button>
@@ -1016,6 +1162,7 @@ const DocBody = () => {
     >
       <div class="flex min-h-10 items-center gap-1.5 px-2">
         <button
+          ref="trayToggleEl"
           type="button"
           class="min-w-0 flex-1 px-1 py-2 text-left text-xs font-semibold text-fg"
           data-testid="review-tray-toggle"
@@ -1086,6 +1233,13 @@ const DocBody = () => {
             >
               Retry delivery
             </button>
+            <p
+              v-if="deliveryErrors[item.id]"
+              class="mt-2 rounded bg-surface/70 px-2 py-1 text-2xs text-block"
+              role="alert"
+            >
+              {{ deliveryErrors[item.id] }}
+            </p>
           </div>
         </div>
 
@@ -1098,6 +1252,16 @@ const DocBody = () => {
             This artifact is now revision {{ draft.subject.current_version }}. Stale anchors are
             preserved; re-anchor them, or acknowledge the older context before submitting.
           </p>
+          <button
+            v-if="draft.outdated && !draft.comments.length"
+            type="button"
+            class="btn-secondary mb-3 px-2 py-1 text-xs"
+            data-testid="review-retarget-current"
+            :disabled="summarySaving"
+            @click="retargetDraft"
+          >
+            Move review target to revision {{ draft.subject.current_version }}
+          </button>
 
           <div class="space-y-1.5" aria-label="Pending comments">
             <button
