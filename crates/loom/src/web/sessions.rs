@@ -329,25 +329,8 @@ async fn launch_env_for_profile(
         repo_env::layer(&mut env, repo_pairs);
         repo_env::layer(&mut env, config_pairs);
     }
-    apply_repo_env_defaults(&mut env, repo_root);
     tracing::debug!(repo = %repo_root_str, profile = profile_name, strict, env_vars = env.len(), "layered launch environment");
     env
-}
-
-/// Defaults shared by every ordinary worktree for one repository. Cargo's
-/// normal worktree-local `target/` defeats incremental reuse across Weaver
-/// sessions; pinning it to the primary repository root gives every branch the
-/// same cache. An explicit profile, per-repo, or committed config value wins.
-///
-/// Restricted profiles deliberately skip repo-derived defaults along with the
-/// other repository environment layers.
-fn apply_repo_env_defaults(env: &mut Vec<(String, String)>, repo_root: &std::path::Path) {
-    if !env.iter().any(|(name, _)| name == "CARGO_TARGET_DIR") {
-        env.push((
-            "CARGO_TARGET_DIR".to_string(),
-            repo_root.join("target").display().to_string(),
-        ));
-    }
 }
 
 async fn automation_policy_defaults(db: &Db) -> (i64, i64) {
@@ -4128,42 +4111,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ordinary_environment_shares_cargo_target_at_the_repo_root() {
+    async fn ordinary_environment_keeps_cargo_target_worktree_local() {
         let db = crate::db::connect_in_memory().await.unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path();
         let cfg = weaver_core::repo_config::RepoConfig::default();
 
-        let env = launch_env_for_profile(&db, repo, &cfg, "default", false, false).await;
+        let env = launch_env_for_profile(&db, dir.path(), &cfg, "default", false, false).await;
 
-        assert!(env.iter().any(|(name, value)| {
-            name == "CARGO_TARGET_DIR" && value == &repo.join("target").display().to_string()
-        }));
-    }
-
-    #[tokio::test]
-    async fn explicit_cargo_target_overrides_the_repo_default() {
-        let db = crate::db::connect_in_memory().await.unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path();
-        crate::repo_env::set(
-            &db,
-            &repo.display().to_string(),
-            "CARGO_TARGET_DIR",
-            "/custom/cargo-target",
-        )
-        .await
-        .unwrap();
-        let cfg = weaver_core::repo_config::RepoConfig::default();
-
-        let env = launch_env_for_profile(&db, repo, &cfg, "default", false, false).await;
-        let targets: Vec<_> = env
-            .iter()
-            .filter(|(name, _)| name == "CARGO_TARGET_DIR")
-            .collect();
-
-        assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].1, "/custom/cargo-target");
+        assert!(!env.iter().any(|(name, _)| name == "CARGO_TARGET_DIR"));
     }
 
     #[test]

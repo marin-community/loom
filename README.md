@@ -26,11 +26,20 @@ this repo in Claude Code (or your agent of choice) and tell it to *"set weaver u
 for me — follow the Getting Started steps in the README."* The steps below are
 written for it to run; do them yourself if you'd rather.
 
-1. **Get a Rust toolchain.** If `cargo` isn't already on the PATH, install it
-   via [rustup](https://rustup.rs):
+1. **Get a Rust toolchain and sccache.** If `cargo` isn't already on the PATH,
+   install it via [rustup](https://rustup.rs):
 
    ```sh
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   ```
+
+   Weaver keeps Cargo artifacts isolated in each worktree and uses
+   [`sccache`](https://github.com/mozilla/sccache) to reuse compilation results
+   safely across them. Install `sccache` separately and ensure its binary is on
+   the PATH; for example:
+
+   ```sh
+   cargo install sccache --locked
    ```
 
 2. **Build the tooling.** From the repo root:
@@ -499,10 +508,6 @@ Notable settings:
   [MCP/profile design](docs/plans/mcp-profiles.md).
 - Profile environment values are write-only: API, CLI, and Settings responses
   expose names and update times, never secret values.
-- Ordinary sessions default `CARGO_TARGET_DIR` to the primary repository's
-  `target/` directory, so Rust builds are reused across its Weaver worktrees.
-  A profile, per-repo environment value, or committed `[env]` entry can override
-  it; restricted profiles receive no repository-derived defaults.
 - `server.auto_adopt` — adopt every recoverable session on daemon startup.
 - `github.poll` — poll GitHub (via `gh`) for each session's PR, review, and
   check status (on by default; a no-op without `gh` or a GitHub remote).
