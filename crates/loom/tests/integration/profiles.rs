@@ -616,6 +616,41 @@ async fn strict_profile_crud_withholds_secrets_and_stamps_sessions() {
         .await
         .unwrap();
     assert_eq!(delete.status(), StatusCode::BAD_REQUEST);
+
+    let id = session["id"].as_str().unwrap();
+    ts.client
+        .post(&format!("/api/sessions/{id}/archive"), json!({}))
+        .await
+        .unwrap();
+
+    let delete = reqwest::Client::new()
+        .delete(format!("http://{}/api/profiles/actions", ts.addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+    assert!(ts.client.get("/api/profiles/actions").await.is_err());
+    assert_eq!(
+        loom::profile::env_pairs(&ts.state.db, "actions")
+            .await
+            .unwrap(),
+        vec![(
+            "SECRET_TOKEN".to_string(),
+            "must-not-round-trip".to_string()
+        )]
+    );
+
+    let archived = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    assert_eq!(archived["profile"], "actions");
+    assert_eq!(archived["profile_revision"], 1);
+
+    let recovered = ts
+        .client
+        .post(&format!("/api/sessions/{id}/recover"), json!({}))
+        .await
+        .unwrap();
+    assert_eq!(recovered["status"], "running");
+    assert_eq!(recovered["profile"], "actions");
 }
 
 #[serial]

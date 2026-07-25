@@ -50,6 +50,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "acp-metadata",
         include_str!("../migrations/0008_acp_metadata.sql"),
     ),
+    (
+        9,
+        "retired-profiles",
+        include_str!("../migrations/0009_retired_profiles.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -280,7 +285,10 @@ mod tests {
                 .fetch_all(&db)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+
+        let profile_columns = table_columns(&db, "profiles").await.unwrap();
+        assert!(profile_columns.iter().any(|column| column == "retired"));
 
         let columns = table_columns(&db, "sessions").await.unwrap();
         for expected in [
@@ -411,7 +419,7 @@ mod tests {
                 .fetch_all(&db)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
         let index_sql: String = sqlx::query_scalar(
             "SELECT sql FROM sqlite_master
              WHERE type = 'index' AND name = 'idx_sessions_active_branch'",
@@ -485,7 +493,7 @@ mod tests {
             .fetch_one(&db)
             .await
             .unwrap();
-        assert_eq!(count, 8);
+        assert_eq!(count, 9);
 
         // Adoption replaced the historical index predicate: archived history
         // no longer prevents a new active session from claiming the branch.

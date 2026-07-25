@@ -46,6 +46,8 @@ pub struct Profile {
     pub mcp_access: String,
     /// Exact resolved registry snapshot pinned to this profile revision.
     pub mcp_policy: String,
+    /// Retired profiles remain only to support recovery of historical sessions.
+    pub retired: bool,
     pub revision: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -361,6 +363,15 @@ pub async fn active_count(db: &Db, name: &str) -> Result<i64> {
 
 pub async fn list(db: &Db) -> Result<Vec<Profile>> {
     Ok(
+        sqlx::query_as::<_, Profile>("SELECT * FROM profiles WHERE retired = 0 ORDER BY name")
+            .fetch_all(db)
+            .await?,
+    )
+}
+
+/// Include retired profiles when checking resources needed to recover sessions.
+pub async fn list_including_retired(db: &Db) -> Result<Vec<Profile>> {
+    Ok(
         sqlx::query_as::<_, Profile>("SELECT * FROM profiles ORDER BY name")
             .fetch_all(db)
             .await?,
@@ -369,7 +380,7 @@ pub async fn list(db: &Db) -> Result<Vec<Profile>> {
 
 pub async fn get(db: &Db, name: &str) -> Result<Option<Profile>> {
     Ok(
-        sqlx::query_as::<_, Profile>("SELECT * FROM profiles WHERE name = ?")
+        sqlx::query_as::<_, Profile>("SELECT * FROM profiles WHERE name = ? AND retired = 0")
             .bind(name)
             .fetch_optional(db)
             .await?,
@@ -445,7 +456,7 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
           max_concurrent=excluded.max_concurrent, turn_budget=excluded.turn_budget,
           prelude=excluded.prelude, restricted=excluded.restricted,
           allowed_tools=excluded.allowed_tools, mcp_access=excluded.mcp_access,
-          mcp_policy=excluded.mcp_policy,
+          mcp_policy=excluded.mcp_policy, retired=0,
           revision=profiles.revision + 1, updated_at=excluded.updated_at",
     )
     .bind(name)
@@ -493,18 +504,40 @@ pub async fn remove(db: &Db, name: &str) -> Result<bool> {
     if name == DEFAULT_PROFILE {
         bail!("the default profile cannot be removed");
     }
-    let session_referenced: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE profile = ?)")
-            .bind(name)
-            .fetch_one(db)
-            .await?;
     let watch_referenced: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM watches WHERE profile = ?)")
             .bind(name)
             .fetch_one(db)
             .await?;
-    if session_referenced || watch_referenced {
-        bail!("profile '{name}' is referenced by sessions or watches");
+    if watch_referenced {
+        bail!("profile '{name}' is selected by watches");
+    }
+    let active_session_referenced: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM sessions
+            WHERE profile = ? AND status NOT IN ('done', 'error', 'archived')
+        )",
+    )
+    .bind(name)
+    .fetch_one(db)
+    .await?;
+    if active_session_referenced {
+        bail!("profile '{name}' is referenced by non-terminal sessions");
+    }
+    let session_referenced: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE profile = ?)")
+            .bind(name)
+            .fetch_one(db)
+            .await?;
+    if session_referenced {
+        return Ok(
+            sqlx::query("UPDATE profiles SET retired = 1 WHERE name = ?")
+                .bind(name)
+                .execute(db)
+                .await?
+                .rows_affected()
+                > 0,
+        );
     }
     Ok(sqlx::query("DELETE FROM profiles WHERE name = ?")
         .bind(name)

@@ -426,7 +426,7 @@ pub async fn remove(db: &Db, identity: &str) -> Result<bool> {
     let Some(target) = get(db, identity).await? else {
         return Ok(false);
     };
-    for profile in crate::profile::list(db).await? {
+    for profile in crate::profile::list_including_retired(db).await? {
         if profile
             .mcp_policy_snapshot()?
             .custom_servers
@@ -445,7 +445,7 @@ pub async fn remove(db: &Db, identity: &str) -> Result<bool> {
         .iter()
         .any(|server| server.identity != identity && server.group == target.group);
     if !group_has_other_server {
-        for profile in crate::profile::list(db).await? {
+        for profile in crate::profile::list_including_retired(db).await? {
             let access = profile.mcp_access()?;
             if access.mode == "groups" && access.groups.contains(&target.group) {
                 bail!(
