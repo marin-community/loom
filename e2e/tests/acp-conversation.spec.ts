@@ -651,7 +651,9 @@ test.describe('acp conversation', () => {
       steering: false,
     });
     const input = page.getByTestId('acp-composer-input');
-    await input.fill('wait:5000|say:first turn done');
+    // Keep the turn live comfortably beyond parallel-run scheduling jitter so
+    // this test exercises retraction, not the next-turn queue drain.
+    await input.fill('wait:30000|say:first turn done');
     await page.getByTestId('acp-composer-send').click();
     await expect(page.getByTestId('acp-working')).toBeVisible({
       timeout: 15_000,
@@ -659,7 +661,8 @@ test.describe('acp conversation', () => {
 
     await input.fill('say:before edit');
     await page.getByTestId('acp-composer-send').click();
-    await expect(page.getByTestId('acp-edit-queued')).toBeVisible();
+    const editQueued = page.getByTestId('acp-edit-queued');
+    await expect(editQueued).toBeEnabled();
 
     // Empty-composer ArrowUp follows chat-history convention, but only recalls
     // the message the agent has not seen yet.
@@ -675,7 +678,8 @@ test.describe('acp conversation', () => {
     await expect(pending).not.toContainText('say:before edit');
 
     // The visible action provides the same flow without a keyboard shortcut.
-    await page.getByTestId('acp-edit-queued').click();
+    await expect(editQueued).toBeEnabled();
+    await editQueued.click();
     await expect(pending).toBeHidden();
     await expect(input).toHaveValue('say:after edit');
     await expect(input).toBeFocused();

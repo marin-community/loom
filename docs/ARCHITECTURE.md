@@ -296,9 +296,10 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `GET PUT /api/sessions/{id}/artifacts/{name}` | read content + projected refs (`rev=N` for a revision) / write a user edit as a new revision |
 | `GET POST /api/sessions/{id}/reviews` | list submitted reviews plus the caller's private draft / create or recover a draft for a versioned subject |
 | `GET POST /api/branches/{id}/reviews` | the same review operations for CLI callers that identify both branch and delivery session |
-| `POST /api/reviews/{id}/comments` / `PATCH DELETE /api/reviews/{id}/comments/{comment_id}` | add, edit/re-anchor, or delete pending review comments |
+| `PATCH /api/reviews/{id}` | persist a draft's overall summary or advance its target revision after every older anchor has been re-anchored |
+| `POST /api/reviews/{id}/comments` / `PATCH DELETE /api/reviews/{id}/comments/{comment_id}` | add, edit/re-anchor, or delete pending review comments; every draft mutation carries the current `expected_revision` |
 | `POST /api/reviews/{id}/comments/{comment_id}/resolve` | resolve or reopen the one mutable lifecycle bit on an otherwise immutable submitted comment |
-| `DELETE /api/reviews/{id}` / `POST /api/reviews/{id}/submit` | discard a draft / atomically freeze and enqueue one structured feedback message |
+| `DELETE /api/reviews/{id}` / `POST /api/reviews/{id}/submit` | guarded discard / atomically check the artifact revision, freeze the exact server-rendered message, record its event, and enqueue it |
 | `POST /api/reviews/{id}/retry-delivery` | retry a failed submitted-review delivery using its stable delivery key |
 | `GET /api/sessions/{id}/{diff,log,events}` | reads + SSE stream |
 | `GET /api/sessions/{id}/conversation` | the agent conversation as a normalized iris log (live transcript, else the archive capture); 404 when there is none — backs the Conversation tab |
@@ -334,6 +335,18 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `GET POST /api/watches` / `GET PATCH DELETE /api/watches/{id}` | watch CRUD (see [Watches](#watches)) |
 | `GET /api/watches/programs` | the builtin program registry: titles, suggested defaults, read-only script sources |
 | `POST /api/watches/{id}/run` / `GET /api/watches/{id}/runs` | fire a round now (`{dry_run}` stubs mutations) / the round-history audit |
+
+Review drafts are REST-private and emit no branch-wide event until submission;
+other tabs refresh the creator's draft when they regain focus. `ReviewDto`
+separates the subject's internal `id` from its public round-trippable `key`,
+returns a monotonic `draft_revision`, and exposes the exact server-rendered
+`message`. A 409 optimistic-revision response carries the fresh review under
+`details.review`. ACP delivery commits into `review_conversation_inbox`, a
+stable-key, branch-addressable immutable lane consumed at turn boundaries.
+That lane is distinct from `sessions.pending_prompt`, so the prompt retraction
+route can never expose submitted feedback. Delivery workers claim fenced lease
+tokens, leave offline targets at zero attempts, and may rehome queued feedback
+to the branch's next usable conversation.
 
 `SessionView` (`/api/sessions[/...]`) returns session-specific fields
 top-level (`id`, `status`, `work_dir`, `term_session`, `agent_kind`, `model`,

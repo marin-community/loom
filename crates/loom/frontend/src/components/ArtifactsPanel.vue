@@ -294,12 +294,7 @@ function openStream() {
     const d = JSON.parse((e as MessageEvent).data).data as { artifact?: string; thread?: number };
     commentsRef.value?.onCommentEvent('comment_resolved', d);
   });
-  for (const kind of [
-    'review_draft_changed',
-    'review_submitted',
-    'review_delivery',
-    'review_comment_resolved',
-  ]) {
+  for (const kind of ['review_submitted', 'review_delivery', 'review_comment_resolved']) {
     source.addEventListener(kind, (e) => {
       const d = JSON.parse((e as MessageEvent).data).data as {
         subject_key?: string;

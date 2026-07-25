@@ -16,16 +16,17 @@ use crate::dto::{
     CommentDto, CreateEventReq, CreateIssueReq, CreateRepoIssueReq, CreateReq, CreateReviewReq,
     CreateSessionGroupReq, CreateSessionSpaceReq, CreateTokenReq, CreateWatchReq, CreatedTokenView,
     CustomMcpReq, CustomMcpView, DeleteSessionGroupReq, DeleteSessionSpaceReq, DeploymentReq,
-    DeploymentView, DiagnosticsView, EffectiveProfileView, FederationReq, FederationView,
-    HandoffReq, HistoryPageView, IssueActionsReq, IssueActionsResult, IssueView, McpRegistryView,
-    MoveSessionsReq, NewCommentBody, NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq,
-    ProfileProbeView, ProfileReq, ProfileView, PutProfileEnvReq, ReadinessView,
-    ReorderSessionLayoutReq, ResolveLaunchReq, ResolveReviewCommentReq, ResolvedLaunchView,
-    RestoreSessionGroupsReq, ReviewCommentDto, ReviewDto, RunReq, RunView, RunWatchReq,
-    ScratchLimitsView, SearchSessionsOptions, SendReq, SessionGroupPreferenceReq,
+    DiagnosticsView, EffectiveProfileView, ExpectedReviewRevisionReq, FederationReq,
+    FederationView, HandoffReq, HistoryPageView, IssueActionsReq, IssueActionsResult, IssueView,
+    McpRegistryView, MoveSessionsReq, NewCommentBody, NewThreadBody, PatchIssueReq,
+    PatchSessionReq, PatchWatchReq, ProfileProbeView, ProfileReq, ProfileView, PutProfileEnvReq,
+    ReadinessView, ReorderSessionLayoutReq, ResolveLaunchReq, ResolveReviewCommentReq,
+    ResolvedLaunchView, RestoreSessionGroupsReq, ReviewCommentDto, ReviewDto, RunReq, RunView,
+    RunWatchReq, ScratchLimitsView, SearchSessionsOptions, SendReq, SessionGroupPreferenceReq,
     SessionLayoutView, SessionPlacementSelectorKind, SessionView, SetSessionPlacementDefaultReq,
     SetTagsReq, SettingsEnvelope, SubmitReviewReq, TagReq, ThreadDto, TokenView,
-    UpdateReviewCommentReq, UpdateSessionGroupReq, UpdateSessionSpaceReq, WatchView,
+    UpdateReviewCommentReq, UpdateReviewReq, UpdateSessionGroupReq, UpdateSessionSpaceReq,
+    WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -901,7 +902,7 @@ impl Client {
         &self,
         review_id: i64,
         req: &AddReviewCommentReq,
-    ) -> Result<ReviewCommentDto> {
+    ) -> Result<ReviewDto> {
         self.send_typed(
             Method::POST,
             &format!("/api/reviews/{review_id}/comments"),
@@ -915,7 +916,7 @@ impl Client {
         review_id: i64,
         comment_id: i64,
         req: &UpdateReviewCommentReq,
-    ) -> Result<ReviewCommentDto> {
+    ) -> Result<ReviewDto> {
         self.send_typed(
             Method::PATCH,
             &format!("/api/reviews/{review_id}/comments/{comment_id}"),
@@ -924,13 +925,36 @@ impl Client {
         .await
     }
 
-    pub async fn delete_review_comment(&self, review_id: i64, comment_id: i64) -> Result<Value> {
-        self.delete(&format!("/api/reviews/{review_id}/comments/{comment_id}"))
-            .await
+    pub async fn update_review(&self, review_id: i64, req: &UpdateReviewReq) -> Result<ReviewDto> {
+        self.send_typed(
+            Method::PATCH,
+            &format!("/api/reviews/{review_id}"),
+            Some(req),
+        )
+        .await
     }
 
-    pub async fn discard_review(&self, review_id: i64) -> Result<Value> {
-        self.delete(&format!("/api/reviews/{review_id}")).await
+    pub async fn delete_review_comment(
+        &self,
+        review_id: i64,
+        comment_id: i64,
+        expected_revision: i64,
+    ) -> Result<ReviewDto> {
+        self.send_typed(
+            Method::DELETE,
+            &format!("/api/reviews/{review_id}/comments/{comment_id}"),
+            Some(&ExpectedReviewRevisionReq { expected_revision }),
+        )
+        .await
+    }
+
+    pub async fn discard_review(&self, review_id: i64, expected_revision: i64) -> Result<Value> {
+        self.send_typed(
+            Method::DELETE,
+            &format!("/api/reviews/{review_id}"),
+            Some(&ExpectedReviewRevisionReq { expected_revision }),
+        )
+        .await
     }
 
     pub async fn submit_review(&self, review_id: i64, req: &SubmitReviewReq) -> Result<ReviewDto> {

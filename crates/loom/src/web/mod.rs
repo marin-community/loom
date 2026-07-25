@@ -816,7 +816,10 @@ pub fn router(state: AppState) -> Router {
             "/branches/{id}/issues",
             get(list_branch_issues).post(create_branch_issue),
         )
-        .route("/reviews/{id}", delete(discard_review))
+        .route(
+            "/reviews/{id}",
+            axum::routing::patch(update_review).delete(discard_review),
+        )
         .route("/reviews/{id}/comments", post(add_review_comment))
         .route(
             "/reviews/{id}/comments/{comment_id}",

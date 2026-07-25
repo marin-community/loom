@@ -1421,6 +1421,9 @@ pub struct NewCommentBody {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewSubjectDto {
     pub kind: String,
+    /// Stable internal artifact envelope id.
+    pub id: String,
+    /// Stable public subject key: the artifact name accepted by list/create.
     pub key: String,
     pub label: String,
     pub version: String,
@@ -1428,11 +1431,23 @@ pub struct ReviewSubjectDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactTextAnchorDto {
+    pub quote: String,
+    #[serde(default)]
+    pub prefix: String,
+    #[serde(default)]
+    pub suffix: String,
+    #[serde(default)]
+    pub block_index: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewCommentDto {
     pub id: i64,
     pub subject_version: String,
     pub anchor_kind: String,
-    pub anchor: Value,
+    pub anchor: ArtifactTextAnchorDto,
     pub body: String,
     pub status: String,
     pub created_at: String,
@@ -1446,6 +1461,10 @@ pub struct ReviewDto {
     pub subject: ReviewSubjectDto,
     pub status: String,
     pub summary: String,
+    /// Monotonic optimistic revision for the editable draft envelope.
+    pub draft_revision: i64,
+    /// Server-authoritative exact conversation payload preview.
+    pub message: String,
     pub created_by: String,
     pub outdated: bool,
     pub acknowledged_outdated: bool,
@@ -1474,31 +1493,51 @@ pub struct CreateReviewReq {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AddReviewCommentReq {
+    pub expected_revision: i64,
     pub subject_version: String,
     pub anchor_kind: String,
-    pub anchor: Value,
+    pub anchor: ArtifactTextAnchorDto,
     pub body: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateReviewCommentReq {
+    pub expected_revision: i64,
     #[serde(default)]
     pub subject_version: Option<String>,
     #[serde(default)]
     pub anchor_kind: Option<String>,
     #[serde(default)]
-    pub anchor: Option<Value>,
+    pub anchor: Option<ArtifactTextAnchorDto>,
     #[serde(default)]
     pub body: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubmitReviewReq {
-    #[serde(default)]
-    pub summary: String,
+    pub expected_revision: i64,
     #[serde(default)]
     pub acknowledge_outdated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateReviewReq {
+    pub expected_revision: i64,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub subject_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectedReviewRevisionReq {
+    pub expected_revision: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

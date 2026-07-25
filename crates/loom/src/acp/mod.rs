@@ -617,10 +617,9 @@ impl AcpHandle {
             .map_err(|_| anyhow!("acp task dropped the reply"))?
     }
 
-    /// Notice feedback another durable subsystem already appended to
-    /// `sessions.pending_prompt`. Start it when idle; while a turn is live,
-    /// leave it queued for the normal turn boundary. This never appends text,
-    /// so a stable-key producer can wake the task without duplicating payload.
+    /// Notice immutable submitted feedback in the protected conversation inbox.
+    /// Start it when idle; while a turn is live, leave it queued for the normal
+    /// turn boundary. The editable prompt lane is never read or modified here.
     pub async fn notify_pending(&self) -> Result<PromptAck> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -1167,6 +1166,7 @@ struct Task {
     /// This task's registry generation — used to remove only its own slot on exit.
     generation: u64,
     session_id: String,
+    branch_id: String,
     #[allow(dead_code)]
     relay_name: String,
     acp_session_id: String,
@@ -1255,6 +1255,7 @@ impl Task {
             registry: state.acp.clone(),
             generation: 0,
             session_id: session.id.clone(),
+            branch_id: session.branch_id.clone(),
             relay_name,
             acp_session_id: String::new(),
             events_tx,
@@ -1332,6 +1333,7 @@ impl Task {
             registry: state.acp.clone(),
             generation: 0,
             session_id: session.id.clone(),
+            branch_id: session.branch_id.clone(),
             relay_name,
             acp_session_id,
             events_tx,
@@ -2122,11 +2124,84 @@ impl Task {
         self.dispatch_pending_prompt().await;
     }
 
+    async fn dispatch_review_inbox(&mut self) -> bool {
+        if self.refuse_if_turn_capped().await.is_err() {
+            return false;
+        }
+        let item = match crate::review_delivery::claim_review_inbox(
+            &self.db,
+            &self.branch_id,
+            &self.session_id,
+        )
+        .await
+        {
+            Ok(item) => item,
+            Err(error) => {
+                tracing::error!(
+                    session = %self.session_id,
+                    %error,
+                    "could not claim protected review feedback"
+                );
+                return false;
+            }
+        };
+        let Some(item) = item else {
+            return false;
+        };
+        match self.start_turn(item.payload, None, Vec::new()).await {
+            Ok(()) => {
+                if let Err(error) = crate::review_delivery::complete_review_inbox(
+                    &self.db,
+                    &item.delivery_key,
+                    &item.claim_token,
+                )
+                .await
+                {
+                    tracing::error!(
+                        session = %self.session_id,
+                        delivery_key = %item.delivery_key,
+                        %error,
+                        "dispatched protected review feedback but could not complete its receipt"
+                    );
+                }
+                true
+            }
+            Err(error) => {
+                if let Err(release_error) = crate::review_delivery::release_review_inbox(
+                    &self.db,
+                    &item.delivery_key,
+                    &item.claim_token,
+                )
+                .await
+                {
+                    tracing::error!(
+                        session = %self.session_id,
+                        delivery_key = %item.delivery_key,
+                        error = %release_error,
+                        "could not release protected review feedback after dispatch failure"
+                    );
+                }
+                tracing::error!(
+                    session = %self.session_id,
+                    delivery_key = %item.delivery_key,
+                    %error,
+                    "could not start protected review feedback turn"
+                );
+                false
+            }
+        }
+    }
+
     async fn dispatch_pending_prompt(&mut self) {
         // A lingering superseded task's deferred turn boundary can fire after a
         // handoff has re-let the session; letting it drain the queue would lose
         // the prompt against its dead relay.
         if !self.registry.is_current(&self.session_id, self.generation) {
+            return;
+        }
+        // Submitted review feedback is immutable and gets its own turn. It is
+        // never concatenated with or exposed through the editable queue.
+        if self.dispatch_review_inbox().await {
             return;
         }
         // The cap gate runs before the durable queue is consumed, so a refused
@@ -2904,25 +2979,25 @@ impl Task {
                 }
             }
             Command::NotifyPending { reply } => {
-                let queued = match session::read_pending_prompt(&self.db, &self.session_id).await {
-                    Ok(queued) => queued,
-                    Err(error) => {
-                        let _ = reply.send(Err(error));
-                        return;
-                    }
-                };
-                if queued.trim().is_empty() {
-                    let _ = reply.send(Err(anyhow!("there is no queued feedback to send")));
-                } else if self.turn_live {
-                    self.emit_queue(Some(&queued));
+                // Submitted review feedback lives in the protected inbox, not
+                // the user-editable pending prompt. A live task picks it up at
+                // its next turn boundary; an idle task can start it now.
+                if self.turn_live {
                     let _ = reply.send(Ok(PromptAck {
                         queued: true,
                         steered: false,
                         turn: Some(self.current_turn),
                     }));
+                } else if self.dispatch_review_inbox().await {
+                    let _ = reply.send(Ok(PromptAck {
+                        queued: false,
+                        steered: false,
+                        turn: Some(self.current_turn),
+                    }));
                 } else {
-                    let result = self.start_pending_prompt(None).await;
-                    let _ = reply.send(result);
+                    let _ = reply.send(Err(anyhow!(
+                        "there is no protected review feedback ready to send"
+                    )));
                 }
             }
             Command::RetractPending { reply } => {

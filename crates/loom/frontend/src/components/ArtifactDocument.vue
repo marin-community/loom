@@ -24,7 +24,9 @@ import {
   resolveThread,
   setReviewCommentResolution,
   submitReview,
+  updateReview,
   updateReviewComment,
+  ApiError,
 } from '../api';
 import {
   captureAnchor,
@@ -40,7 +42,8 @@ import ReviewCommentCard from './ReviewCommentCard.vue';
 // Dock/pop swaps mounts of the same document. Keep a small in-memory scroll
 // ledger keyed by session + artifact + revision so the document remains where
 // the reader left it across that layout change.
-const scrollPositions = new Map<string, number>();
+type ScrollSnapshot = { top: number; block?: number; offset?: number };
+const scrollPositions = new Map<string, ScrollSnapshot>();
 const MAX_SCROLL_POSITIONS = 100;
 const LAST_SCROLL_POSITION = 'loom.artifactScrollPosition';
 
@@ -66,22 +69,32 @@ function scrollKey(): string {
   return `${props.id}:${props.artifactName}:${props.rev}`;
 }
 
-function cacheScroll(key = activeScrollKey): number | undefined {
+function cacheScroll(key = activeScrollKey): ScrollSnapshot | undefined {
   if (!key || !scrollerEl.value) return;
-  const top = scrollerEl.value.scrollTop;
+  const scroller = scrollerEl.value;
+  const viewportTop = scroller.getBoundingClientRect().top;
+  const visible = [...scroller.querySelectorAll<HTMLElement>('[data-block]')].find(
+    (element) => element.getBoundingClientRect().bottom > viewportTop,
+  );
+  const snapshot: ScrollSnapshot = { top: scroller.scrollTop };
+  const block = visible?.getAttribute('data-block');
+  if (visible && block != null) {
+    snapshot.block = Number(block);
+    snapshot.offset = visible.getBoundingClientRect().top - viewportTop;
+  }
   if (!scrollPositions.has(key) && scrollPositions.size >= MAX_SCROLL_POSITIONS) {
     const oldest = scrollPositions.keys().next().value;
     if (oldest) scrollPositions.delete(oldest);
   }
-  scrollPositions.set(key, top);
-  return top;
+  scrollPositions.set(key, snapshot);
+  return snapshot;
 }
 
 function persistScroll(key = activeScrollKey): void {
-  const top = cacheScroll(key);
-  if (top === undefined) return;
+  const snapshot = cacheScroll(key);
+  if (snapshot === undefined) return;
   try {
-    sessionStorage.setItem(LAST_SCROLL_POSITION, JSON.stringify({ key, top }));
+    sessionStorage.setItem(LAST_SCROLL_POSITION, JSON.stringify({ key, ...snapshot }));
   } catch {
     // The in-module ledger still covers ordinary dock/pop swaps.
   }
@@ -90,19 +103,33 @@ function persistScroll(key = activeScrollKey): void {
 async function restoreScroll(key: string): Promise<void> {
   await nextTick();
   if (key !== activeScrollKey || !scrollerEl.value) return;
-  let top = scrollPositions.get(key);
-  if (top === undefined) {
+  let snapshot = scrollPositions.get(key);
+  if (snapshot === undefined) {
     try {
       const last = JSON.parse(sessionStorage.getItem(LAST_SCROLL_POSITION) ?? 'null') as {
         key?: string;
         top?: number;
+        block?: number;
+        offset?: number;
       } | null;
-      if (last?.key === key && typeof last.top === 'number') top = last.top;
+      if (last?.key === key && typeof last.top === 'number') {
+        snapshot = { top: last.top, block: last.block, offset: last.offset };
+      }
     } catch {
       // Invalid tab-local state is equivalent to no saved position.
     }
   }
-  scrollerEl.value.scrollTop = top ?? 0;
+  const scroller = scrollerEl.value;
+  scroller.scrollTop = snapshot?.top ?? 0;
+  if (snapshot?.block != null && snapshot.offset != null) {
+    const sentinel = scroller.querySelector<HTMLElement>(`[data-block="${snapshot.block}"]`);
+    if (sentinel) {
+      scroller.scrollTop +=
+        sentinel.getBoundingClientRect().top -
+        scroller.getBoundingClientRect().top -
+        snapshot.offset;
+    }
+  }
 }
 
 watch(
@@ -127,9 +154,17 @@ type ReviewEntry = { review: Review; comment: ReviewComment };
 const reviews = ref<Review[]>([]);
 const reviewError = ref('');
 const reviewNotice = ref('');
+const composerError = ref('');
+const trayError = ref('');
+const commentErrors = ref<Record<number, string>>({});
 const activeId = ref<number | null>(null);
 const trayOpen = ref(false);
 const overallNote = ref('');
+const summarySaving = ref(false);
+const summaryHydrating = ref(false);
+const summaryDirty = ref(false);
+let summarySaveTimer: ReturnType<typeof setTimeout> | null = null;
+let summarySavePromise: Promise<Review | null> | null = null;
 const acknowledgeOutdated = ref(false);
 const submitting = ref(false);
 const discardConfirm = ref(false);
@@ -154,18 +189,7 @@ const draftEntries = computed<ReviewEntry[]>(() =>
   (draft.value?.comments ?? []).map((comment) => ({ review: draft.value!, comment })),
 );
 const feedbackPreview = computed(() => {
-  const item = draft.value;
-  if (!item) return '';
-  let message = `The user submitted feedback on artifact \`${item.subject.label}\`, revision ${item.subject.version}.`;
-  if (overallNote.value.trim()) message += `\n\nOverall:\n${overallNote.value.trim()}`;
-  item.comments.forEach((comment, index) => {
-    const quote = String(comment.anchor.quote ?? '').replaceAll('\n', ' ');
-    message += `\n\n${index + 1}. Revision ${comment.subject_version}, ${comment.anchor_kind} anchor`;
-    if (quote) message += ` “${quote}”`;
-    message += `:\n${comment.body}`;
-  });
-  message += `\n\n[review_id: ${item.id}; delivery_key: ${item.delivery_key}]`;
-  return message;
+  return draft.value?.message ?? '';
 });
 const allEntries = computed<ReviewEntry[]>(() => {
   const entries: ReviewEntry[] = [];
@@ -190,9 +214,39 @@ function replaceReview(next: Review) {
   }
 }
 
+function hydrateSummary(next: Review | null, force = false) {
+  if (summaryDirty.value && !force) return;
+  summaryHydrating.value = true;
+  overallNote.value = next?.summary ?? '';
+  summaryDirty.value = false;
+  nextTick(() => {
+    summaryHydrating.value = false;
+  });
+}
+
+function conflictReview(error: unknown): Review | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  const details = error.body.details;
+  if (!details || typeof details !== 'object') return null;
+  const fresh = (details as { review?: unknown }).review;
+  if (!fresh || typeof fresh !== 'object' || typeof (fresh as Review).id !== 'number') return null;
+  const review = fresh as Review;
+  replaceReview(review);
+  hydrateSummary(review.status === 'draft' ? review : null, true);
+  return review;
+}
+
+function mutationMessage(error: unknown): string {
+  if (conflictReview(error)) {
+    return 'This draft changed elsewhere. The latest review is loaded; review it before retrying.';
+  }
+  return (error as Error).message;
+}
+
 async function loadReviews() {
   try {
     reviews.value = await listArtifactReviews(props.id, props.artifactName);
+    hydrateSummary(reviews.value.find((review) => review.status === 'draft') ?? null);
     reviewError.value = '';
     if (activeId.value != null && !allEntries.value.some((x) => x.comment.id === activeId.value)) {
       activeId.value = null;
@@ -203,6 +257,17 @@ async function loadReviews() {
   await nextTick();
   locateCycle();
 }
+
+watch(overallNote, () => {
+  if (summaryHydrating.value) return;
+  summaryDirty.value = true;
+  if (!draft.value) return;
+  if (summarySaveTimer) clearTimeout(summarySaveTimer);
+  summarySaveTimer = setTimeout(() => {
+    summarySaveTimer = null;
+    void saveOverallNote();
+  }, 400);
+});
 
 // --- locate + paint + group -------------------------------------------------
 
@@ -348,25 +413,29 @@ async function useSelection() {
   selectionButton.value = null;
 
   if (reanchorCommentId.value != null && draft.value) {
+    const commentId = reanchorCommentId.value;
+    commentErrors.value[commentId] = '';
     try {
-      const updated = await updateReviewComment(draft.value.id, reanchorCommentId.value, {
+      if (!(await saveOverallNote())) return;
+      if (!draft.value) return;
+      const updated = await updateReviewComment(draft.value.id, commentId, {
+        expected_revision: draft.value.draft_revision,
         subject_version: subjectVersion,
         anchor_kind: 'text',
         anchor,
       });
-      const review = { ...draft.value };
-      review.comments = review.comments.map((comment) =>
-        comment.id === updated.id ? updated : comment,
-      );
-      replaceReview(review);
-      activeId.value = updated.id;
+      replaceReview(updated);
+      activeId.value = commentId;
       reanchorCommentId.value = null;
-      reviewNotice.value = `Comment re-anchored to revision ${subjectVersion}.`;
+      reviewNotice.value =
+        updated.subject.version === subjectVersion
+          ? `Comment re-anchored; review target is now revision ${subjectVersion}.`
+          : `Comment re-anchored to revision ${subjectVersion}; older anchors still remain.`;
       selection?.removeAllRanges();
       await nextTick();
       locateCycle();
     } catch (e) {
-      reviewError.value = (e as Error).message;
+      commentErrors.value[commentId] = mutationMessage(e);
     }
     return;
   }
@@ -418,20 +487,34 @@ function onArticleClick(event: MouseEvent) {
   if (hit) focusComment(hit.entry.comment.id);
 }
 
-function focusComment(commentId: number) {
-  activeId.value = activeId.value === commentId ? null : commentId;
-  if (activeId.value == null) return;
+async function focusComment(commentId: number) {
+  activeId.value = commentId;
+  await nextTick();
   const located = locatedEntries.value.find((entry) => entry.entry.comment.id === commentId);
   const scroller = scrollerEl.value;
-  if (!located || !scroller) return;
+  if (!scroller) return;
+  if (!located) {
+    const card = scroller.querySelector<HTMLElement>(`[data-review-card="${commentId}"]`);
+    card?.scrollIntoView({ block: 'center' });
+    card?.focus();
+    return;
+  }
   const scrollerRect = scroller.getBoundingClientRect();
   const rect = located.range.getBoundingClientRect();
-  if (rect.top >= scrollerRect.top && rect.bottom <= scrollerRect.bottom) return;
-  const element =
-    located.range.startContainer.nodeType === Node.TEXT_NODE
-      ? located.range.startContainer.parentElement
-      : (located.range.startContainer as Element);
-  element?.scrollIntoView({ block: 'center' });
+  if (rect.top < scrollerRect.top || rect.bottom > scrollerRect.bottom) {
+    const element =
+      located.range.startContainer.nodeType === Node.TEXT_NODE
+        ? located.range.startContainer.parentElement
+        : (located.range.startContainer as Element);
+    element?.scrollIntoView({ block: 'center' });
+  }
+  scroller.querySelector<HTMLElement>(`[data-review-card="${commentId}"]`)?.focus();
+}
+
+async function closeComment(commentId: number) {
+  if (activeId.value === commentId) activeId.value = null;
+  await nextTick();
+  scrollerEl.value?.querySelector<HTMLElement>(`[data-review-collapsed="${commentId}"]`)?.focus();
 }
 
 function navigateDraft(direction: number) {
@@ -439,8 +522,7 @@ function navigateDraft(direction: number) {
   if (!entries.length) return;
   const current = entries.findIndex((entry) => entry.comment.id === activeId.value);
   const next = (current + direction + entries.length) % entries.length;
-  activeId.value = null;
-  nextTick(() => focusComment(entries[next].comment.id));
+  void focusComment(entries[next].comment.id);
 }
 
 // --- draft mutation ---------------------------------------------------------
@@ -456,28 +538,73 @@ async function ensureDraft(subjectVersion: string): Promise<Review> {
   return created;
 }
 
+async function saveOverallNote(): Promise<Review | null> {
+  if (summaryHydrating.value) return draft.value;
+  if (summarySaveTimer) {
+    clearTimeout(summarySaveTimer);
+    summarySaveTimer = null;
+  }
+  while (summarySavePromise) await summarySavePromise;
+  if (!summaryDirty.value) return draft.value;
+
+  const saving = (async () => {
+    const summary = overallNote.value;
+    let item = draft.value;
+    if (!item) {
+      if (!summary.trim()) {
+        summaryDirty.value = false;
+        return null;
+      }
+      item = await ensureDraft(String(props.rev));
+    }
+    if (item.summary === summary) {
+      summaryDirty.value = false;
+      return item;
+    }
+    summarySaving.value = true;
+    trayError.value = '';
+    try {
+      const updated = await updateReview(item.id, {
+        expected_revision: item.draft_revision,
+        summary,
+      });
+      replaceReview(updated);
+      if (overallNote.value === summary) summaryDirty.value = false;
+      return updated;
+    } catch (error) {
+      trayError.value = mutationMessage(error);
+      return null;
+    } finally {
+      summarySaving.value = false;
+    }
+  })();
+  summarySavePromise = saving;
+  try {
+    return await saving;
+  } finally {
+    if (summarySavePromise === saving) summarySavePromise = null;
+  }
+}
+
 async function createPendingComment() {
   const text = pendingDraft.value.trim();
   if (!pending.value || !text || savingComment.value) return;
   const pendingComment = pending.value;
   savingComment.value = true;
-  reviewError.value = '';
+  composerError.value = '';
   try {
+    const saved = await saveOverallNote();
+    if (draft.value && !saved) return;
     const review = await ensureDraft(pendingComment.subjectVersion);
-    const comment = await addReviewComment(review.id, {
+    const updated = await addReviewComment(review.id, {
+      expected_revision: review.draft_revision,
       subject_version: pendingComment.subjectVersion,
       anchor_kind: 'text',
       anchor: pendingComment.anchor,
       body: text,
     });
-    const updated = { ...review, comments: [...review.comments, comment] };
-    // The current version is returned when the envelope is created. Existing
-    // drafts are refreshed by list/revision events.
-    updated.outdated =
-      updated.subject.version !== updated.subject.current_version ||
-      updated.comments.some((item) => item.subject_version !== updated.subject.current_version);
     replaceReview(updated);
-    activeId.value = comment.id;
+    activeId.value = updated.comments.at(-1)?.id ?? null;
     pending.value = null;
     pendingRange = null;
     pendingDraft.value = '';
@@ -486,7 +613,7 @@ async function createPendingComment() {
     await nextTick();
     locateCycle();
   } catch (e) {
-    reviewError.value = (e as Error).message;
+    composerError.value = mutationMessage(e);
   } finally {
     savingComment.value = false;
   }
@@ -501,37 +628,40 @@ function cancelPendingComment() {
 
 async function editComment(payload: { commentId: number; body: string }) {
   if (!draft.value) return;
+  commentErrors.value[payload.commentId] = '';
   try {
+    if (!(await saveOverallNote())) return;
+    if (!draft.value) return;
     const updated = await updateReviewComment(draft.value.id, payload.commentId, {
+      expected_revision: draft.value.draft_revision,
       body: payload.body,
     });
-    replaceReview({
-      ...draft.value,
-      comments: draft.value.comments.map((comment) =>
-        comment.id === updated.id ? updated : comment,
-      ),
-    });
+    replaceReview(updated);
     reviewNotice.value = 'Pending comment updated.';
   } catch (e) {
-    reviewError.value = (e as Error).message;
+    commentErrors.value[payload.commentId] = mutationMessage(e);
   }
 }
 
 async function removeComment(commentId: number) {
   if (!draft.value) return;
+  commentErrors.value[commentId] = '';
   try {
-    await deleteReviewComment(draft.value.id, commentId);
-    replaceReview({
-      ...draft.value,
-      comments: draft.value.comments.filter((comment) => comment.id !== commentId),
-    });
+    if (!(await saveOverallNote())) return;
+    if (!draft.value) return;
+    const updated = await deleteReviewComment(
+      draft.value.id,
+      commentId,
+      draft.value.draft_revision,
+    );
+    replaceReview(updated);
     if (activeId.value === commentId) activeId.value = null;
     if (reanchorCommentId.value === commentId) reanchorCommentId.value = null;
     reviewNotice.value = 'Pending comment deleted.';
     await nextTick();
     locateCycle();
   } catch (e) {
-    reviewError.value = (e as Error).message;
+    commentErrors.value[commentId] = mutationMessage(e);
   }
 }
 
@@ -562,13 +692,15 @@ function beginReanchor(commentId: number) {
 
 async function discardDraft() {
   if (!draft.value) return;
+  trayError.value = '';
   try {
     const reviewId = draft.value.id;
-    await discardReview(reviewId);
+    await discardReview(reviewId, draft.value.draft_revision);
     reviews.value = reviews.value.filter((review) => review.id !== reviewId);
     activeId.value = null;
     reanchorCommentId.value = null;
     overallNote.value = '';
+    summaryDirty.value = false;
     acknowledgeOutdated.value = false;
     discardConfirm.value = false;
     trayOpen.value = false;
@@ -576,23 +708,26 @@ async function discardDraft() {
     await nextTick();
     locateCycle();
   } catch (e) {
-    reviewError.value = (e as Error).message;
+    trayError.value = mutationMessage(e);
   }
 }
 
 async function submitDraft() {
   if (!draft.value || submitting.value) return;
   submitting.value = true;
-  reviewError.value = '';
+  trayError.value = '';
   try {
+    const saved = await saveOverallNote();
+    if (!saved || !draft.value) return;
     const submitted = await submitReview(draft.value.id, {
-      summary: overallNote.value,
+      expected_revision: draft.value.draft_revision,
       acknowledge_outdated: acknowledgeOutdated.value,
     });
     replaceReview(submitted);
     activeId.value = null;
     reanchorCommentId.value = null;
     overallNote.value = '';
+    summaryDirty.value = false;
     acknowledgeOutdated.value = false;
     reviewNotice.value =
       submitted.delivery_state === 'delivered'
@@ -601,7 +736,7 @@ async function submitDraft() {
     await nextTick();
     locateCycle();
   } catch (e) {
-    reviewError.value = (e as Error).message;
+    trayError.value = mutationMessage(e);
   } finally {
     submitting.value = false;
   }
@@ -632,7 +767,6 @@ async function onCommentEvent(
     ![
       'comment_added',
       'comment_resolved',
-      'review_draft_changed',
       'review_submitted',
       'review_delivery',
       'review_comment_resolved',
@@ -651,18 +785,30 @@ defineExpose({ onCommentEvent, snapshotScroll });
 
 // --- lifecycle --------------------------------------------------------------
 
+function refreshPrivateDraft() {
+  if (document.visibilityState === 'visible') void loadReviews();
+}
+
 onMounted(() => {
   activeScrollKey = scrollKey();
   void restoreScroll(activeScrollKey);
   document.addEventListener('selectionchange', onSelectionChange);
   document.addEventListener('mousedown', onDocMouseDown, true);
+  document.addEventListener('visibilitychange', refreshPrivateDraft);
+  window.addEventListener('focus', refreshPrivateDraft);
   void loadReviews();
 });
 
 onBeforeUnmount(() => {
   persistScroll();
+  if (summarySaveTimer) clearTimeout(summarySaveTimer);
+  if (!summaryHydrating.value && overallNote.value !== draft.value?.summary) {
+    void saveOverallNote();
+  }
   document.removeEventListener('selectionchange', onSelectionChange);
   document.removeEventListener('mousedown', onDocMouseDown, true);
+  document.removeEventListener('visibilitychange', refreshPrivateDraft);
+  window.removeEventListener('focus', refreshPrivateDraft);
   clearHighlights();
 });
 
@@ -684,7 +830,9 @@ function renderCard(entry: ReviewEntry): VNode {
       comment: entry.comment,
       active: entry.comment.id === activeId.value,
       reanchoring: entry.comment.id === reanchorCommentId.value,
+      error: commentErrors.value[entry.comment.id] ?? '',
       onFocus: focusComment,
+      onClose: closeComment,
       onEdit: editComment,
       onDelete: removeComment,
       onReanchor: beginReanchor,
@@ -723,6 +871,11 @@ function renderComposer(): VNode {
           pendingDraft.value = (event.target as HTMLTextAreaElement).value;
         },
         onKeydown: (event: KeyboardEvent) => {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            cancelPendingComment();
+            buttonEl.value?.focus();
+          }
           if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
             event.preventDefault();
             void createPendingComment();
@@ -752,6 +905,16 @@ function renderComposer(): VNode {
           'Cancel',
         ),
       ]),
+      composerError.value
+        ? h(
+            'p',
+            {
+              class: 'mt-1.5 rounded bg-block-soft px-2 py-1 text-2xs text-block',
+              role: 'alert',
+            },
+            composerError.value,
+          )
+        : null,
     ],
   );
 }
@@ -847,7 +1010,6 @@ const DocBody = () => {
     </button>
 
     <aside
-      v-if="draft || recentSubmitted"
       class="absolute bottom-3 right-3 z-20 w-[min(28rem,calc(100%-1.5rem))] rounded-lg border border-line bg-surface shadow-xl"
       data-testid="review-tray"
       aria-label="Review tray"
@@ -870,7 +1032,10 @@ const DocBody = () => {
           <template v-else-if="failedSubmissions.length">
             Review delivery · {{ failedSubmissions.length }} failed
           </template>
-          <template v-else>Review submitted · {{ recentSubmitted?.delivery_state }}</template>
+          <template v-else-if="recentSubmitted">
+            Review submitted · {{ recentSubmitted.delivery_state }}
+          </template>
+          <template v-else>Review artifact</template>
         </button>
         <template v-if="draft?.comments.length">
           <button
@@ -963,7 +1128,11 @@ const DocBody = () => {
             class="mt-1 w-full resize-y rounded border border-line bg-input p-2 text-xs text-fg outline-none focus:border-accent"
             placeholder="Feedback that applies to the artifact as a whole…"
             data-testid="review-overall-note"
+            @blur="saveOverallNote"
           ></textarea>
+          <p v-if="summarySaving" class="mt-1 text-2xs text-faint" aria-live="polite">
+            Saving overall note…
+          </p>
 
           <label
             v-if="draft.outdated"
@@ -988,6 +1157,13 @@ const DocBody = () => {
           </div>
 
           <div class="mt-3 flex flex-wrap items-center gap-2">
+            <p
+              v-if="trayError"
+              class="w-full rounded bg-block-soft px-2 py-1 text-2xs text-block"
+              role="alert"
+            >
+              {{ trayError }}
+            </p>
             <template v-if="discardConfirm">
               <span class="text-xs text-block">Discard all pending comments?</span>
               <button type="button" class="btn-danger px-2 py-1 text-xs" @click="discardDraft">
@@ -1015,6 +1191,7 @@ const DocBody = () => {
               data-testid="submit-review"
               :disabled="
                 submitting ||
+                summarySaving ||
                 (!draft.comments.length && !overallNote.trim()) ||
                 (draft.outdated && !acknowledgeOutdated)
               "
@@ -1025,19 +1202,42 @@ const DocBody = () => {
           </div>
         </template>
 
-        <template
-          v-else-if="
-            recentSubmitted &&
-            !failedSubmissions.some((review) => review.id === recentSubmitted?.id)
-          "
-        >
-          <div class="text-xs text-muted">
+        <template v-else>
+          <div
+            v-if="
+              recentSubmitted &&
+              !failedSubmissions.some((review) => review.id === recentSubmitted?.id)
+            "
+            class="mb-3 text-xs text-muted"
+          >
             <p class="font-medium text-fg">Review {{ recentSubmitted.id }} submitted</p>
             <p class="mt-1">
               Delivery:
               <span class="text-accent">{{ recentSubmitted.delivery_state }}</span>
             </p>
           </div>
+          <label class="block text-xs font-medium text-muted" for="review-new-overall-note">
+            Start a new review with an overall note
+          </label>
+          <textarea
+            id="review-new-overall-note"
+            v-model="overallNote"
+            rows="3"
+            class="mt-1 w-full resize-y rounded border border-line bg-input p-2 text-xs text-fg outline-none focus:border-accent"
+            placeholder="Feedback that applies to the artifact as a whole…"
+            data-testid="review-overall-note"
+            @blur="saveOverallNote"
+          ></textarea>
+          <p v-if="summarySaving" class="mt-1 text-2xs text-faint" aria-live="polite">
+            Saving overall note…
+          </p>
+          <p
+            v-if="trayError"
+            class="mt-2 rounded bg-block-soft px-2 py-1 text-2xs text-block"
+            role="alert"
+          >
+            {{ trayError }}
+          </p>
         </template>
       </div>
     </aside>

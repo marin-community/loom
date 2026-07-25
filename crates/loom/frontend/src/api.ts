@@ -207,6 +207,7 @@ import type {
   CreateReviewBody,
   AddReviewCommentBody,
   UpdateReviewCommentBody,
+  UpdateReviewBody,
   IdeInfo,
   AgentMetadata,
   CustomAgent,
@@ -430,22 +431,32 @@ export const createArtifactReview = (id: string, body: CreateReviewBody) =>
   post(`/sessions/${id}/reviews`, body) as Promise<Review>;
 
 export const addReviewComment = (reviewId: number, body: AddReviewCommentBody) =>
-  post(`/reviews/${reviewId}/comments`, body) as Promise<ReviewComment>;
+  post(`/reviews/${reviewId}/comments`, body) as Promise<Review>;
 
 export const updateReviewComment = (
   reviewId: number,
   commentId: number,
   body: UpdateReviewCommentBody,
-) => patch(`/reviews/${reviewId}/comments/${commentId}`, body) as Promise<ReviewComment>;
+) => patch(`/reviews/${reviewId}/comments/${commentId}`, body) as Promise<Review>;
 
-export const deleteReviewComment = (reviewId: number, commentId: number) =>
-  del(`/reviews/${reviewId}/comments/${commentId}`);
+export const updateReview = (reviewId: number, body: UpdateReviewBody) =>
+  patch(`/reviews/${reviewId}`, body) as Promise<Review>;
 
-export const discardReview = (reviewId: number) => del(`/reviews/${reviewId}`);
+export const deleteReviewComment = (
+  reviewId: number,
+  commentId: number,
+  expectedRevision: number,
+) =>
+  destroy(`/reviews/${reviewId}/comments/${commentId}`, {
+    expected_revision: expectedRevision,
+  }) as Promise<Review>;
+
+export const discardReview = (reviewId: number, expectedRevision: number) =>
+  destroy(`/reviews/${reviewId}`, { expected_revision: expectedRevision });
 
 export const submitReview = (
   reviewId: number,
-  body: { summary: string; acknowledge_outdated: boolean },
+  body: { expected_revision: number; acknowledge_outdated: boolean },
 ) => post(`/reviews/${reviewId}/submit`, body) as Promise<Review>;
 
 export const retryReviewDelivery = (reviewId: number) =>

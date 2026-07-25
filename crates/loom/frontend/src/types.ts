@@ -678,6 +678,9 @@ export interface NewCommentBody {
 
 export interface ReviewSubject {
   kind: string;
+  /** Stable internal subject id. */
+  id: string;
+  /** Public round-trippable key; artifact reviews use the artifact name. */
   key: string;
   label: string;
   version: string;
@@ -688,7 +691,7 @@ export interface ReviewComment {
   id: number;
   subject_version: string;
   anchor_kind: string;
-  anchor: Anchor & Record<string, unknown>;
+  anchor: Anchor;
   body: string;
   status: string;
   created_at: string;
@@ -702,6 +705,10 @@ export interface Review {
   /** `draft` | `submitted`. */
   status: string;
   summary: string;
+  /** Monotonic optimistic revision for every editable draft mutation. */
+  draft_revision: number;
+  /** Exact server-rendered payload that will be delivered on submit. */
+  message: string;
   created_by: string;
   outdated: boolean;
   acknowledged_outdated: boolean;
@@ -723,17 +730,25 @@ export interface CreateReviewBody {
 }
 
 export interface AddReviewCommentBody {
+  expected_revision: number;
   subject_version: string;
   anchor_kind: 'text';
-  anchor: Anchor & Record<string, unknown>;
+  anchor: Anchor;
   body: string;
 }
 
 export interface UpdateReviewCommentBody {
+  expected_revision: number;
   subject_version?: string;
   anchor_kind?: 'text';
-  anchor?: Anchor & Record<string, unknown>;
+  anchor?: Anchor;
   body?: string;
+}
+
+export interface UpdateReviewBody {
+  expected_revision: number;
+  summary?: string;
+  subject_version?: string;
 }
 
 export interface RecentRepo {

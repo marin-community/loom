@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { nextTick, ref, watch } from 'vue';
 import type { Review, ReviewComment } from '../types';
 
 const props = defineProps<{
@@ -7,9 +7,11 @@ const props = defineProps<{
   comment: ReviewComment;
   active: boolean;
   reanchoring: boolean;
+  error: string;
 }>();
 const emit = defineEmits<{
   focus: [commentId: number];
+  close: [commentId: number];
   edit: [payload: { commentId: number; body: string }];
   delete: [commentId: number];
   reanchor: [commentId: number];
@@ -19,6 +21,9 @@ const emit = defineEmits<{
 
 const body = ref(props.comment.body);
 const editing = ref(false);
+const cardEl = ref<HTMLElement | null>(null);
+const editEl = ref<HTMLButtonElement | null>(null);
+const textareaEl = ref<HTMLTextAreaElement | null>(null);
 
 watch(
   () => props.comment.body,
@@ -27,11 +32,30 @@ watch(
   },
 );
 
+watch(
+  () => props.active,
+  (active) => {
+    if (active) void nextTick(() => cardEl.value?.focus());
+  },
+);
+
+function beginEdit() {
+  editing.value = true;
+  void nextTick(() => textareaEl.value?.focus());
+}
+
 function save() {
   const next = body.value.trim();
   if (!next) return;
   emit('edit', { commentId: props.comment.id, body: next });
   editing.value = false;
+  void nextTick(() => editEl.value?.focus());
+}
+
+function cancelEdit() {
+  body.value = props.comment.body;
+  editing.value = false;
+  void nextTick(() => editEl.value?.focus());
 }
 </script>
 
@@ -46,6 +70,7 @@ function save() {
         : 'border-line bg-subtle/50 text-muted hover:border-accent/60'
     "
     :data-testid="`review-comment-${comment.id}`"
+    :data-review-collapsed="comment.id"
     @click.stop="emit('focus', comment.id)"
   >
     <span
@@ -68,6 +93,8 @@ function save() {
 
   <div
     v-else
+    ref="cardEl"
+    tabindex="-1"
     class="my-2 rounded border p-2 text-xs ring-1"
     :class="
       review.status === 'draft'
@@ -75,7 +102,9 @@ function save() {
         : 'border-accent bg-subtle/40 ring-accent/30'
     "
     :data-testid="`review-comment-${comment.id}`"
+    :data-review-card="comment.id"
     @click.stop
+    @keydown.esc.stop.prevent="emit('close', comment.id)"
   >
     <div class="mb-1.5 flex items-start gap-2">
       <div class="min-w-0 flex-1 truncate italic text-muted" :title="comment.anchor.quote">
@@ -107,12 +136,14 @@ function save() {
     <template v-else-if="review.status === 'draft'">
       <textarea
         v-if="editing"
+        ref="textareaEl"
         v-model="body"
         rows="3"
         class="w-full resize-y rounded border border-line bg-input p-1.5 text-xs text-fg outline-none focus:border-accent"
         data-testid="review-comment-edit"
         @keydown.ctrl.enter.prevent="save"
         @keydown.meta.enter.prevent="save"
+        @keydown.esc.stop.prevent="cancelEdit"
       ></textarea>
       <div v-else class="whitespace-pre-wrap text-fg">{{ comment.body }}</div>
     </template>
@@ -132,18 +163,16 @@ function save() {
           v-if="editing"
           type="button"
           class="btn-secondary px-2 py-1 text-2xs"
-          @click.stop="
-            body = comment.body;
-            editing = false;
-          "
+          @click.stop="cancelEdit"
         >
           Cancel
         </button>
         <button
           v-if="!editing"
+          ref="editEl"
           type="button"
           class="btn-secondary px-2 py-1 text-2xs"
-          @click.stop="editing = true"
+          @click.stop="beginEdit"
         >
           Edit
         </button>
@@ -181,11 +210,14 @@ function save() {
       <button
         type="button"
         class="btn-secondary ml-auto px-2 py-1 text-2xs"
-        @click.stop="emit('focus', comment.id)"
+        @click.stop="emit('close', comment.id)"
       >
         Close
       </button>
     </div>
+    <p v-if="error" class="mt-2 rounded bg-block-soft px-2 py-1 text-2xs text-block" role="alert">
+      {{ error }}
+    </p>
     <p v-if="reanchoring" class="mt-2 rounded bg-subtle px-2 py-1 text-2xs text-accent">
       Select the replacement text in this artifact, then choose Re-anchor selection.
     </p>

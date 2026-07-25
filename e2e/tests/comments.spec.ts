@@ -125,12 +125,28 @@ test.describe("staged artifact reviews", () => {
 
     const second = cards.nth(1);
     await expect(second).toContainText("captured context");
-    await second.getByRole("button", { name: "Edit" }).click();
+    await second.focus();
+    await page.keyboard.press("Enter");
+    await expect(second).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(second.getByRole("button", { name: "Edit" })).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(second.getByTestId("review-comment-edit")).toBeFocused();
+    await second
+      .getByTestId("review-comment-edit")
+      .fill("Explain prefix and suffix recovery.");
+    await page.keyboard.press("Escape");
+    await expect(second.getByRole("button", { name: "Edit" })).toBeFocused();
+    await page.keyboard.press("Enter");
     await second
       .getByTestId("review-comment-edit")
       .fill("Explain prefix and suffix recovery.");
     await second.getByRole("button", { name: "Save" }).click();
+    await expect(second.getByRole("button", { name: "Edit" })).toBeFocused();
     await expect(second).toContainText("Explain prefix and suffix recovery.");
+    await page.keyboard.press("Escape");
+    await expect(second).toHaveAttribute("data-review-collapsed");
+    await expect(second).toBeFocused();
 
     // Durable server-side draft state comes back after a full document reload.
     await page.reload();
@@ -187,10 +203,19 @@ test.describe("staged artifact reviews", () => {
     await expect(page.getByTestId("review-stale-anchors")).toBeVisible();
 
     const staleCard = page.locator('[data-testid^="review-comment-"]').first();
+    await tray
+      .getByRole("button", {
+        name: /This statement needs an explicit boundary/,
+      })
+      .click();
+    await expect(staleCard).toBeFocused();
+    await expect(staleCard).toBeInViewport();
     await staleCard.getByRole("button", { name: "Re-anchor" }).click();
     await selectPhrase(page, "staged review feedback");
     await page.getByTestId("review-selection-button").click();
-    await expect(staleCard).toContainText("Revision 2");
+    await expect(staleCard).toContainText("staged review feedback");
+    await expect(staleCard).not.toContainText("stale");
+    await expect(page.getByTestId("review-stale-warning")).toBeHidden();
 
     await page
       .getByTestId("review-overall-note")
@@ -201,9 +226,8 @@ test.describe("staged artifact reviews", () => {
       "This statement needs an explicit boundary.",
     );
 
-    // The review began on revision 1; even after re-anchoring its comment, the
-    // stale envelope requires explicit acknowledgement.
-    await page.getByTestId("review-stale-ack").check();
+    // Re-anchoring the final old comment truthfully advances the envelope, so
+    // the exact preview can submit without a stale acknowledgement.
     const submitRequest = page.waitForRequest(
       (request) =>
         request.method() === "POST" &&
@@ -214,6 +238,58 @@ test.describe("staged artifact reviews", () => {
     await expect(tray).toContainText("Review submitted");
     await expect(tray).toContainText(/queued|delivered/);
     await expect(page.getByTestId("submit-review")).toHaveCount(0);
+  });
+
+  test("persists an overall-only draft through reload and pop, then discards a new draft", async ({
+    page,
+    weaver,
+  }) => {
+    const session = await weaver.seedSession({
+      goal: "overall review",
+      name: "review-overall",
+    });
+    await weaver.writeArtifact(session, "design", DOC, {
+      title: "Design notes",
+    });
+    await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/design`);
+    await page.getByTestId("review-tray-toggle").click();
+    const note = page.getByTestId("review-overall-note");
+    await note.fill("Overall feedback survives every layout.");
+    const save = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PATCH" &&
+        /\/api\/reviews\/\d+$/.test(response.url()),
+    );
+    await note.blur();
+    await save;
+
+    await page.reload();
+    await page.getByTestId("review-tray-toggle").click();
+    await expect(page.getByTestId("review-overall-note")).toHaveValue(
+      "Overall feedback survives every layout.",
+    );
+    await page.getByTestId("artifact-pop").click();
+    await page.getByTestId("review-tray-toggle").click();
+    await expect(page.getByTestId("review-overall-note")).toHaveValue(
+      "Overall feedback survives every layout.",
+    );
+    await page.getByTestId("submit-review").click();
+    await expect(page.getByTestId("review-tray")).toContainText(
+      "Review submitted",
+    );
+
+    await page
+      .getByTestId("review-overall-note")
+      .fill("This second overall-only draft will be discarded.");
+    await page.getByTestId("review-overall-note").blur();
+    await expect(page.getByTestId("review-tray")).toContainText(
+      "Discard draft",
+    );
+    await page.getByRole("button", { name: "Discard draft" }).click();
+    await page.getByRole("button", { name: "Discard", exact: true }).click();
+    await expect(page.getByTestId("review-tray")).not.toContainText(
+      "This second overall-only draft will be discarded.",
+    );
   });
 
   test("keeps the captured revision while a pending selection waits", async ({
@@ -305,6 +381,7 @@ test.describe("staged artifact reviews", () => {
     }));
     expect(before.max).toBeGreaterThan(4_000);
     expect(before.top).toBeGreaterThan(before.max * 0.9);
+    await expect(page.getByText("Final review target")).toBeInViewport();
 
     await page.getByTestId("artifact-pop").click();
     const poppedScroller = page.getByTestId("artifact-scroll");
@@ -312,6 +389,7 @@ test.describe("staged artifact reviews", () => {
     await expect
       .poll(() => poppedScroller.evaluate((element) => element.scrollTop))
       .toBeGreaterThan(before.max * 0.75);
+    await expect(page.getByText("Final review target")).toBeInViewport();
 
     await addPendingComment(
       page,
@@ -329,6 +407,7 @@ test.describe("staged artifact reviews", () => {
           .evaluate((element) => element.scrollTop),
       )
       .toBeGreaterThan(before.max * 0.7);
+    await expect(page.getByText("Final review target")).toBeInViewport();
     await expect(page.getByTestId("review-tray")).toContainText("2 pending");
 
     await page.setViewportSize({ width: 760, height: 680 });

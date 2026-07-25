@@ -10,12 +10,12 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde_json::{json, Value};
 use weaver_api::{
-    AddReviewCommentReq, CreateReviewReq, CreateSessionGroupReq, CreateSessionSpaceReq,
-    DeleteSessionGroupReq, DeleteSessionSpaceReq, IssueAction, IssueActionsReq, MoveSessionsReq,
-    ReorderSessionLayoutReq, RestoreSessionGroupsReq, SearchSessionsOptions,
-    SessionGroupPreferenceReq, SessionLayoutItemKind, SessionLayoutView,
+    AddReviewCommentReq, ArtifactTextAnchorDto, CreateReviewReq, CreateSessionGroupReq,
+    CreateSessionSpaceReq, DeleteSessionGroupReq, DeleteSessionSpaceReq, IssueAction,
+    IssueActionsReq, MoveSessionsReq, ReorderSessionLayoutReq, RestoreSessionGroupsReq,
+    SearchSessionsOptions, SessionGroupPreferenceReq, SessionLayoutItemKind, SessionLayoutView,
     SessionPlacementSelectorKind, SessionSearchAttention, SessionSearchStatus,
-    SetSessionPlacementDefaultReq, SubmitReviewReq, UpdateReviewCommentReq,
+    SetSessionPlacementDefaultReq, SubmitReviewReq, UpdateReviewCommentReq, UpdateReviewReq,
     UpdateSessionGroupReq, UpdateSessionSpaceReq,
 };
 
@@ -315,6 +315,9 @@ enum ReviewCmd {
     Edit {
         review_id: i64,
         comment_id: i64,
+        /// Draft revision shown by `loom review ls` or the previous mutation.
+        #[arg(long)]
+        revision: i64,
         #[arg(required = true)]
         body: Vec<String>,
     },
@@ -322,6 +325,9 @@ enum ReviewCmd {
     Reanchor {
         review_id: i64,
         comment_id: i64,
+        /// Draft revision shown by `loom review ls` or the previous mutation.
+        #[arg(long)]
+        revision: i64,
         #[arg(long)]
         rev: i64,
         #[arg(long)]
@@ -333,17 +339,40 @@ enum ReviewCmd {
         #[arg(long)]
         block: Option<i64>,
     },
+    /// Create or update an overall-note-only draft.
+    Overall {
+        session: String,
+        artifact: String,
+        #[arg(long)]
+        rev: i64,
+        #[arg(required = true)]
+        body: Vec<String>,
+    },
     /// Delete one pending comment.
-    DeleteComment { review_id: i64, comment_id: i64 },
+    DeleteComment {
+        review_id: i64,
+        comment_id: i64,
+        /// Draft revision shown by `loom review ls` or the previous mutation.
+        #[arg(long)]
+        revision: i64,
+    },
     /// Resolve one submitted review comment.
     Resolve { review_id: i64, comment_id: i64 },
     /// Reopen one resolved review comment.
     Reopen { review_id: i64, comment_id: i64 },
     /// Discard a draft and all of its pending comments.
-    Discard { review_id: i64 },
+    Discard {
+        review_id: i64,
+        /// Draft revision shown by `loom review ls` or the previous mutation.
+        #[arg(long)]
+        revision: i64,
+    },
     /// Submit the immutable review and enqueue one structured conversation message.
     Submit {
         review_id: i64,
+        /// Draft revision shown by `loom review ls` or the previous mutation.
+        #[arg(long)]
+        revision: i64,
         #[arg(long, default_value = "")]
         summary: String,
         /// Intentionally submit anchors from an older artifact revision.
@@ -1299,9 +1328,10 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
             for review in reviews {
                 let stale = if review.outdated { " stale" } else { "" };
                 println!(
-                    "#{} {} · {} comments · {}{}",
+                    "#{} {} · draft rev {} · {} comments · {}{}",
                     review.id,
                     review.status,
+                    review.draft_revision,
                     review.comments.len(),
                     review.delivery_state,
                     stale
@@ -1346,24 +1376,34 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
                 .add_review_comment(
                     draft.id,
                     &AddReviewCommentReq {
+                        expected_revision: draft.draft_revision,
                         subject_version: rev.to_string(),
                         anchor_kind: "text".to_string(),
-                        anchor: json!({
-                            "quote": quote,
-                            "prefix": prefix,
-                            "suffix": suffix,
-                            "block_index": block,
-                        }),
+                        anchor: ArtifactTextAnchorDto {
+                            quote,
+                            prefix,
+                            suffix,
+                            block_index: block,
+                        },
                         body,
                     },
                 )
                 .await?;
-            println!("draft review #{} · comment {}", draft.id, comment.id);
+            let comment_id = comment
+                .comments
+                .last()
+                .map(|comment| comment.id)
+                .ok_or_else(|| anyhow!("server returned a draft without the added comment"))?;
+            println!(
+                "draft review #{} · revision {} · comment {}",
+                draft.id, comment.draft_revision, comment_id
+            );
             Ok(())
         }
         ReviewCmd::Edit {
             review_id,
             comment_id,
+            revision,
             body,
         } => {
             let body = body.join(" ").trim().to_string();
@@ -1375,17 +1415,22 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
                     review_id,
                     comment_id,
                     &UpdateReviewCommentReq {
+                        expected_revision: revision,
                         body: Some(body),
                         ..Default::default()
                     },
                 )
                 .await?;
-            println!("updated comment {}", comment.id);
+            println!(
+                "updated comment {comment_id} · draft revision {}",
+                comment.draft_revision
+            );
             Ok(())
         }
         ReviewCmd::Reanchor {
             review_id,
             comment_id,
+            revision,
             rev,
             quote,
             prefix,
@@ -1397,30 +1442,74 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
                     review_id,
                     comment_id,
                     &UpdateReviewCommentReq {
+                        expected_revision: revision,
                         subject_version: Some(rev.to_string()),
                         anchor_kind: Some("text".to_string()),
-                        anchor: Some(json!({
-                            "quote": quote,
-                            "prefix": prefix,
-                            "suffix": suffix,
-                            "block_index": block,
-                        })),
+                        anchor: Some(ArtifactTextAnchorDto {
+                            quote,
+                            prefix,
+                            suffix,
+                            block_index: block,
+                        }),
                         body: None,
                     },
                 )
                 .await?;
             println!(
-                "re-anchored comment {} to revision {}",
-                comment.id, comment.subject_version
+                "re-anchored comment {comment_id} to revision {rev} · draft revision {}",
+                comment.draft_revision
+            );
+            Ok(())
+        }
+        ReviewCmd::Overall {
+            session,
+            artifact,
+            rev,
+            body,
+        } => {
+            let summary = body.join(" ").trim().to_string();
+            if summary.is_empty() {
+                bail!("an overall note is required");
+            }
+            let draft = client
+                .create_session_review(
+                    &session,
+                    &CreateReviewReq {
+                        session_id: None,
+                        subject_kind: "artifact".to_string(),
+                        subject_key: artifact,
+                        subject_version: rev.to_string(),
+                    },
+                )
+                .await?;
+            let draft = client
+                .update_review(
+                    draft.id,
+                    &UpdateReviewReq {
+                        expected_revision: draft.draft_revision,
+                        summary: Some(summary),
+                        subject_version: None,
+                    },
+                )
+                .await?;
+            println!(
+                "draft review #{} · revision {} · overall note saved",
+                draft.id, draft.draft_revision
             );
             Ok(())
         }
         ReviewCmd::DeleteComment {
             review_id,
             comment_id,
+            revision,
         } => {
-            client.delete_review_comment(review_id, comment_id).await?;
-            println!("deleted comment {comment_id}");
+            let review = client
+                .delete_review_comment(review_id, comment_id, revision)
+                .await?;
+            println!(
+                "deleted comment {comment_id} · draft revision {}",
+                review.draft_revision
+            );
             Ok(())
         }
         ReviewCmd::Resolve {
@@ -1443,21 +1532,40 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
             println!("reopened comment {}", comment.id);
             Ok(())
         }
-        ReviewCmd::Discard { review_id } => {
-            client.discard_review(review_id).await?;
+        ReviewCmd::Discard {
+            review_id,
+            revision,
+        } => {
+            client.discard_review(review_id, revision).await?;
             println!("discarded review {review_id}");
             Ok(())
         }
         ReviewCmd::Submit {
             review_id,
+            revision,
             summary,
             acknowledge_outdated,
         } => {
+            let revision = if summary.is_empty() {
+                revision
+            } else {
+                client
+                    .update_review(
+                        review_id,
+                        &UpdateReviewReq {
+                            expected_revision: revision,
+                            summary: Some(summary),
+                            subject_version: None,
+                        },
+                    )
+                    .await?
+                    .draft_revision
+            };
             let review = client
                 .submit_review(
                     review_id,
                     &SubmitReviewReq {
-                        summary,
+                        expected_revision: revision,
                         acknowledge_outdated,
                     },
                 )
@@ -4876,15 +4984,60 @@ mod tests {
 
         for args in [
             vec!["loom", "review", "ls", "session-1", "design"],
-            vec!["loom", "review", "edit", "4", "9", "new body"],
             vec![
-                "loom", "review", "reanchor", "4", "9", "--rev", "4", "--quote", "new text",
+                "loom",
+                "review",
+                "edit",
+                "4",
+                "9",
+                "--revision",
+                "2",
+                "new body",
             ],
-            vec!["loom", "review", "delete-comment", "4", "9"],
+            vec![
+                "loom",
+                "review",
+                "reanchor",
+                "4",
+                "9",
+                "--revision",
+                "2",
+                "--rev",
+                "4",
+                "--quote",
+                "new text",
+            ],
+            vec![
+                "loom",
+                "review",
+                "overall",
+                "session-1",
+                "design",
+                "--rev",
+                "3",
+                "overall note",
+            ],
+            vec![
+                "loom",
+                "review",
+                "delete-comment",
+                "4",
+                "9",
+                "--revision",
+                "2",
+            ],
             vec!["loom", "review", "resolve", "4", "9"],
             vec!["loom", "review", "reopen", "4", "9"],
-            vec!["loom", "review", "discard", "4"],
-            vec!["loom", "review", "submit", "4", "--acknowledge-outdated"],
+            vec!["loom", "review", "discard", "4", "--revision", "2"],
+            vec![
+                "loom",
+                "review",
+                "submit",
+                "4",
+                "--revision",
+                "2",
+                "--acknowledge-outdated",
+            ],
             vec!["loom", "review", "retry", "4"],
         ] {
             assert!(matches!(
