@@ -2962,6 +2962,7 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
     let cfg: Value = serde_json::from_str(&env_of(&launch, "CODEX_CONFIG")[0]).unwrap();
     assert_eq!(cfg["model"], "gpt-5.3-codex");
     assert_eq!(cfg["model_reasoning_effort"], "high");
+    assert_eq!(cfg["features"]["apps"], false);
     assert_eq!(launch.initial_model.as_deref(), Some("gpt-5.3-codex"));
     assert_eq!(launch.initial_effort.as_deref(), Some("high"));
     assert!(
@@ -2974,7 +2975,8 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
         NewOrLoad::Load { .. } => panic!("a fresh launch opens session/new"),
     }
 
-    // An operator-provided CODEX_CONFIG wins; a goalless launch seeds the primer.
+    // Operator config is preserved, except that account-level apps remain
+    // disabled; a goalless launch seeds the primer.
     let operator = [(
         "CODEX_CONFIG".to_string(),
         r#"{"model":"mine"}"#.to_string(),
@@ -2986,7 +2988,9 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
     )
     .await
     .unwrap();
-    assert_eq!(env_of(&launch, "CODEX_CONFIG"), vec![r#"{"model":"mine"}"#]);
+    let cfg: Value = serde_json::from_str(&env_of(&launch, "CODEX_CONFIG")[0]).unwrap();
+    assert_eq!(cfg["model"], "mine");
+    assert_eq!(cfg["features"]["apps"], false);
     assert_eq!(launch.goal.as_deref(), Some("orient first"));
 
     let loaded = loom::agent::build_acp_launch(

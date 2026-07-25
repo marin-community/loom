@@ -265,6 +265,13 @@ if [ "${1:-}" = loom ] && [ "${2:-}" = server ]; then
     [ -x "$HOME/.local/bin/codex" ] \
       || echo "loom: WARNING: native Codex install failed (offline?); the codex runtime is unavailable until a later boot installs it" >&2
   fi
+  if [ -x "$HOME/.local/bin/codex" ]; then
+    # The ChatGPT login is shared for model access, but account-level apps carry
+    # the identity of whoever authorized them. Keep them unavailable to every
+    # Codex process in this multi-user container; Loom supplies GitHub identity.
+    "$HOME/.local/bin/codex" features disable apps >/dev/null \
+      || echo "loom: WARNING: could not disable Codex account-level apps" >&2
+  fi
   if ! command -v claude-agent-acp >/dev/null 2>&1 || ! command -v codex-acp >/dev/null 2>&1; then
     echo "loom: installing the ACP adapters into $HOME/.npm-global ..." >&2
     # The ACP adapters loom's sessions speak through (docs/plans/acp.md). Exact
