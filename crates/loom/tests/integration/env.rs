@@ -15,12 +15,19 @@ async fn env_crud_and_name_validation() {
     // Starts empty.
     let env = client.get("/api/env").await.unwrap();
     assert_eq!(env["env"].as_array().unwrap().len(), 0, "env starts empty");
+    let initial_revision = client.get("/api/profiles/default").await.unwrap()["revision"]
+        .as_i64()
+        .unwrap();
 
     // Upsert two; the reply is the refreshed, name-ordered list.
     client
         .put("/api/env/GH_HOST", json!({ "value": "github.example.com" }))
         .await
         .unwrap();
+    let after_put_revision = client.get("/api/profiles/default").await.unwrap()["revision"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(after_put_revision, initial_revision + 1);
     let env = client
         .put("/api/env/API_TOKEN", json!({ "value": "secret" }))
         .await
@@ -51,6 +58,10 @@ async fn env_crud_and_name_validation() {
     let list = env["env"].as_array().unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0]["name"], "GH_HOST");
+    let after_delete_revision = client.get("/api/profiles/default").await.unwrap()["revision"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(after_delete_revision, after_put_revision + 3);
 
     // Deleting an absent name is a no-op, not an error.
     let env = client.delete("/api/env/API_TOKEN").await.unwrap();

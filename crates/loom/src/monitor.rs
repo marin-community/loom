@@ -13,7 +13,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde_json::json;
 
-use crate::db::Db;
+use crate::db::{now_iso, Db};
 use crate::events::EventBus;
 use crate::session::{self as session_mod, Session};
 use crate::web::AppState;
@@ -444,47 +444,147 @@ fn lifecycle_mutations(kind: &str) -> Option<&'static [(&'static str, &'static s
 async fn promote_lifecycle(db: &Db, bus: &EventBus, session: &Session, kind: &str) -> Option<i64> {
     let mutations = lifecycle_mutations(kind)?;
     let branch_id = session.branch_id.as_str();
-
-    // Turn accounting: every `working` edge is one agent turn, counted for every
-    // session. The cap applies only to automation-class sessions that are not
-    // warm (watch-managed) infrastructure; past it, the branch is marked
-    // `blocked` below instead of returning the attention axis to calm.
-    let mut cap_note: Option<String> = None;
-    if kind == "working" {
-        match session_mod::increment_turn_count(db, &session.id).await {
-            Ok(count) => {
-                let cap = session.policy_turn_budget;
-                if cap > 0
-                    && count > cap
-                    && session.class == "automation"
-                    && session.managed_by.is_none()
-                {
-                    cap_note = Some(format!("turn cap ({cap}) reached"));
-                }
-            }
-            Err(e) => {
-                tracing::warn!(id = %session.id, error = %e, "turn count increment failed")
-            }
-        }
-    }
-
-    // Lifecycle: alive → running. Idempotent once running; never overrides a
-    // terminal state.
     let status_changed = session.status != "running" && !session_mod::is_terminal(&session.status);
-    if status_changed {
-        if session.status == "orphaned" {
-            tracing::info!(id = %session.id, branch = %branch_id, "lifting orphaned session back to running");
-        } else {
-            tracing::debug!(
-                id = %session.id,
-                branch = %branch_id,
-                previous_status = %session.status,
-                "session transitioning to running via lifecycle edge"
-            );
+
+    // One transaction makes the observed session generation the fence for the
+    // entire mechanical edge: status promotion, activity timestamp, turn count,
+    // and tags. A terminal/user/handoff mutation that wins first makes this a
+    // no-op; one that waits commits afterward and is therefore unambiguously
+    // newer than every artifact of this hook.
+    let mut tx = match db.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::warn!(id = %session.id, %error, "lifecycle transaction failed to start");
+            return events::max_id(db).await.ok();
         }
-        let _ = session_mod::set_status(db, &session.id, "running").await;
+    };
+    let increment = i64::from(kind == "working");
+    let promoted = match sqlx::query_scalar::<_, i64>(
+        "UPDATE sessions
+         SET status = 'running',
+             last_activity_at = ?,
+             turn_count = turn_count + ?,
+             mutation_revision = mutation_revision + 1
+         WHERE id = ?
+           AND mutation_revision = ?
+           AND status = ?
+           AND status IN ('created', 'running', 'orphaned')
+         RETURNING turn_count",
+    )
+    .bind(now_iso())
+    .bind(increment)
+    .bind(&session.id)
+    .bind(session.mutation_revision)
+    .bind(&session.status)
+    .fetch_optional(&mut *tx)
+    .await
+    {
+        Ok(Some(turn_count)) => turn_count,
+        Ok(None) => {
+            let _ = tx.rollback().await;
+            tracing::debug!(id = %session.id, kind, "discarding stale lifecycle edge");
+            return events::max_id(db).await.ok();
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            tracing::warn!(id = %session.id, %error, "lifecycle CAS failed");
+            return events::max_id(db).await.ok();
+        }
+    };
+
+    let cap_note = (session.policy_turn_budget > 0
+        && promoted > session.policy_turn_budget
+        && session.class == "automation"
+        && session.managed_by.is_none())
+    .then(|| format!("turn cap ({}) reached", session.policy_turn_budget));
+    let set_at = now_iso();
+    let mut changed_tags = Vec::<(String, String, String)>::new();
+    for &(key, value) in mutations {
+        if cap_note.is_some() && key == tags::ATTENTION_KEY {
+            continue;
+        }
+        let current = sqlx::query_scalar::<_, String>(
+            "SELECT value FROM tags WHERE branch_id = ? AND key = ?",
+        )
+        .bind(branch_id)
+        .bind(key)
+        .fetch_optional(&mut *tx)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        if current == value {
+            continue;
+        }
+        let result = if value.is_empty() {
+            sqlx::query("DELETE FROM tags WHERE branch_id = ? AND key = ?")
+                .bind(branch_id)
+                .bind(key)
+                .execute(&mut *tx)
+                .await
+        } else {
+            sqlx::query(
+                "INSERT INTO tags (branch_id, key, value, note, set_by, set_at)
+                 VALUES (?, ?, ?, '', 'agent', ?)
+                 ON CONFLICT(branch_id, key) DO UPDATE SET
+                   value = excluded.value, note = excluded.note,
+                   set_by = excluded.set_by, set_at = excluded.set_at",
+            )
+            .bind(branch_id)
+            .bind(key)
+            .bind(value)
+            .bind(&set_at)
+            .execute(&mut *tx)
+            .await
+        };
+        if let Err(error) = result {
+            let _ = tx.rollback().await;
+            tracing::warn!(id = %session.id, %error, "lifecycle tag transaction failed");
+            return events::max_id(db).await.ok();
+        }
+        changed_tags.push((key.to_string(), value.to_string(), String::new()));
     }
-    let _ = session_mod::touch(db, &session.id).await;
+    if let Some(note) = &cap_note {
+        let current = sqlx::query_scalar::<_, String>(
+            "SELECT value FROM tags WHERE branch_id = ? AND key = ?",
+        )
+        .bind(branch_id)
+        .bind(tags::ATTENTION_KEY)
+        .fetch_optional(&mut *tx)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        if current != "blocked" {
+            if let Err(error) = sqlx::query(
+                "INSERT INTO tags (branch_id, key, value, note, set_by, set_at)
+                 VALUES (?, ?, 'blocked', ?, 'agent', ?)
+                 ON CONFLICT(branch_id, key) DO UPDATE SET
+                   value = excluded.value, note = excluded.note,
+                   set_by = excluded.set_by, set_at = excluded.set_at",
+            )
+            .bind(branch_id)
+            .bind(tags::ATTENTION_KEY)
+            .bind(note)
+            .bind(&set_at)
+            .execute(&mut *tx)
+            .await
+            {
+                let _ = tx.rollback().await;
+                tracing::warn!(id = %session.id, %error, "lifecycle cap transaction failed");
+                return events::max_id(db).await.ok();
+            }
+            changed_tags.push((
+                tags::ATTENTION_KEY.to_string(),
+                "blocked".to_string(),
+                note.clone(),
+            ));
+        }
+    }
+    if let Err(error) = tx.commit().await {
+        tracing::warn!(id = %session.id, %error, "lifecycle transaction failed to commit");
+        return events::max_id(db).await.ok();
+    }
 
     if status_changed {
         let _ = events::record(
@@ -496,67 +596,8 @@ async fn promote_lifecycle(db: &Db, bus: &EventBus, session: &Session, kind: &st
         )
         .await;
     }
-
-    // Apply each tag mutation only when it actually changes the stored value, so
-    // a repeated edge (e.g. another finished turn while already idle) is a no-op
-    // and dashboards refresh only on a real edge. The author is `agent` — these
-    // are the agent's own lifecycle marks.
-    for &(key, value) in mutations {
-        // A capped session owns the attention axis below: don't let the routine
-        // `working` calm-down clear the tag it is about to raise.
-        if cap_note.is_some() && key == tags::ATTENTION_KEY {
-            continue;
-        }
-        let current = tags::get(db, branch_id, key)
-            .await
-            .ok()
-            .flatten()
-            .map(|t| t.value)
-            .unwrap_or_default();
-        if current == value {
-            continue;
-        }
-        tracing::debug!(branch = %branch_id, key, value, "lifecycle edge applied tag mutation");
-        if value.is_empty() {
-            let _ = tags::clear(db, branch_id, key).await;
-        } else {
-            let _ = tags::set(db, branch_id, key, value, "", "agent").await;
-        }
-        let _ = events::record_tag(db, bus, branch_id, key, value, "", "agent").await;
-    }
-
-    // Cap enforcement: past the cap an automation session reads as `blocked`, so
-    // the fleet surfaces it instead of letting it burn turns quietly. Set once —
-    // a repeated over-cap edge on an already-blocked branch is a no-op.
-    if let Some(note) = cap_note {
-        let already_blocked = tags::get(db, branch_id, tags::ATTENTION_KEY)
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|t| t.value == "blocked");
-        if !already_blocked {
-            tracing::info!(id = %session.id, branch = %branch_id, %note,
-                "automation session over its turn cap; marking blocked");
-            let _ = tags::set(
-                db,
-                branch_id,
-                tags::ATTENTION_KEY,
-                "blocked",
-                &note,
-                "agent",
-            )
-            .await;
-            let _ = events::record_tag(
-                db,
-                bus,
-                branch_id,
-                tags::ATTENTION_KEY,
-                "blocked",
-                &note,
-                "agent",
-            )
-            .await;
-        }
+    for (key, value, note) in changed_tags {
+        let _ = events::record_tag(db, bus, branch_id, &key, &value, &note, "agent").await;
     }
 
     // Advance the watermark past our own freshly-recorded events so the next

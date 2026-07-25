@@ -18,6 +18,7 @@ enum LaunchGateKey {
     Profile(String),
     Resolver,
     Session(String),
+    Managed(String),
     Scratch(PathBuf),
 }
 
@@ -91,6 +92,27 @@ impl RepoLaunchGate {
     /// Serialize destructive runtime replacement for one source session.
     pub async fn acquire_session(&self, session_id: &str) -> RepoLaunchPermit {
         self.acquire_key(LaunchGateKey::Session(session_id.to_string()))
+            .await
+    }
+
+    /// Acquire several source-session mutation permits in stable id order.
+    pub async fn acquire_sessions<'a>(
+        &self,
+        session_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<RepoLaunchPermit> {
+        let mut ids: Vec<&str> = session_ids.into_iter().collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let mut permits = Vec::with_capacity(ids.len());
+        for id in ids {
+            permits.push(self.acquire_session(id).await);
+        }
+        permits
+    }
+
+    /// Serialize ensure/reuse for one engine-managed session identity.
+    pub async fn acquire_managed(&self, managed_by: &str) -> RepoLaunchPermit {
+        self.acquire_key(LaunchGateKey::Managed(managed_by.to_string()))
             .await
     }
 

@@ -61,6 +61,7 @@ const mcpRegistry = ref<McpRegistry | null>(null);
 const profile = ref('default');
 const overrides = ref<LaunchOverrideValues>({});
 const resolved = ref<ResolvedLaunch | null>(null);
+const lastResolved = ref<ResolvedLaunch | null>(null);
 const resolving = ref(false);
 const resolveError = ref('');
 const advanced = ref(false);
@@ -70,9 +71,12 @@ const cloneSourceEnvironment = ref<Profile['env']>([]);
 const clonePreviewKey = ref('');
 const cloneBusy = ref(false);
 const cloneNotice = ref('');
-const cloningRepo = ref(false);
+const repoRegistrations = ref(0);
+const cloningRepo = computed(() => repoRegistrations.value > 0);
 const repoError = ref('');
 let repoRegistrationReq = 0;
+let repoRegistrationTail: Promise<void> = Promise.resolve();
+const registeredRepo = ref<ManagedRepo | null>(null);
 
 // Show the platform's submit modifier (⌘ on macOS, Ctrl elsewhere). Both are
 // wired up on the form; this is only the label.
@@ -159,11 +163,29 @@ function onRepoKeydown(event: KeyboardEvent) {
   }
 }
 
-async function loadManagedRepos() {
+function rememberManagedRepo(added: ManagedRepo) {
+  const next = managedRepos.value.filter(
+    (candidate) => candidate.slug !== added.slug && candidate.remote_url !== added.remote_url,
+  );
+  managedRepos.value = [...next, added];
+  registeredRepo.value = added;
+}
+
+async function registerDraftRepo(candidate: string): Promise<ManagedRepo> {
+  repoRegistrations.value += 1;
+  let release!: () => void;
+  const predecessor = repoRegistrationTail;
+  repoRegistrationTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
   try {
-    managedRepos.value = await listRepos();
-  } catch {
-    // Managed-repo suggestions are a convenience; ignore failures here.
+    await predecessor;
+    const added = await registerRepo(candidate);
+    rememberManagedRepo(added);
+    return added;
+  } finally {
+    release();
+    repoRegistrations.value -= 1;
   }
 }
 
@@ -171,11 +193,9 @@ async function addAndCloneRepo() {
   const q = cloneCandidate.value;
   if (!q) return;
   const request = ++repoRegistrationReq;
-  cloningRepo.value = true;
   repoError.value = '';
   try {
-    const added = await registerRepo(q);
-    await loadManagedRepos();
+    const added = await registerDraftRepo(q);
     if (request !== repoRegistrationReq || repo.value.trim() !== q) return;
     repo.value = added.slug;
     repoFocused.value = false;
@@ -183,14 +203,19 @@ async function addAndCloneRepo() {
     if (request === repoRegistrationReq && repo.value.trim() === q) {
       repoError.value = (e as Error).message;
     }
-  } finally {
-    if (request === repoRegistrationReq) cloningRepo.value = false;
   }
 }
 
 watch(repo, () => {
   ++repoRegistrationReq;
-  cloningRepo.value = false;
+  const current = repo.value.trim();
+  if (
+    registeredRepo.value &&
+    current !== registeredRepo.value.slug &&
+    current !== registeredRepo.value.remote_url
+  ) {
+    registeredRepo.value = null;
+  }
   repoError.value = '';
 });
 
@@ -243,32 +268,6 @@ watch([repo, branchMode], ([, mode]) => {
   if (mode === 'existing') loadBranches();
 });
 
-async function loadRecentRepos() {
-  try {
-    recentRepos.value = (await get('/repos/recent')) as RecentRepo[];
-  } catch {
-    // The recent-repos dropdown is a convenience; ignore failures here.
-  }
-}
-
-async function loadAgents() {
-  try {
-    const [metadata, templates, registry] = await Promise.all([
-      listAgents(),
-      listProfiles(),
-      getMcpRegistry(),
-    ]);
-    agents.value = metadata.agents;
-    profiles.value = templates;
-    mcpRegistry.value = registry;
-    if (!templates.some((item) => item.name === profile.value)) {
-      profile.value = templates[0]?.name ?? 'default';
-    }
-  } catch (e) {
-    error.value = (e as Error).message;
-  }
-}
-
 function resetForm() {
   repo.value = '';
   title.value = '';
@@ -296,6 +295,7 @@ function resetForm() {
   scratchError.value = '';
   ++resolveRequest;
   resolved.value = null;
+  lastResolved.value = null;
   resolving.value = false;
   scratchPicker.value?.resetTransient();
 }
@@ -304,7 +304,7 @@ function cancel() {
   if (creating.value) return;
   resetForm();
   emit('close');
-  void router.push('/');
+  void router.replace('/');
 }
 
 let resolveRequest = 0;
@@ -335,7 +335,10 @@ async function resolveSelection(request: number) {
   }
   try {
     const preview = await resolveSessionLaunch(selection.value);
-    if (request === resolveRequest) resolved.value = preview;
+    if (request === resolveRequest) {
+      resolved.value = preview;
+      lastResolved.value = preview;
+    }
   } catch (cause) {
     if (request !== resolveRequest) return;
     resolved.value = null;
@@ -345,7 +348,9 @@ async function resolveSelection(request: number) {
   }
 }
 
+let activationRequest = 0;
 async function refreshLaunchData() {
+  const activation = ++activationRequest;
   if (resolveTimer) {
     clearTimeout(resolveTimer);
     resolveTimer = undefined;
@@ -353,7 +358,31 @@ async function refreshLaunchData() {
   ++resolveRequest;
   resolved.value = null;
   resolving.value = false;
-  await Promise.all([loadRecentRepos(), loadManagedRepos(), loadAgents()]);
+  try {
+    const [recent, managed, metadata, templates, registry] = await Promise.all([
+      get('/repos/recent').catch(() => recentRepos.value) as Promise<RecentRepo[]>,
+      listRepos().catch(() => managedRepos.value),
+      listAgents(),
+      listProfiles(),
+      getMcpRegistry(),
+    ]);
+    if (activation !== activationRequest) return;
+    recentRepos.value = recent;
+    managedRepos.value = managed;
+    agents.value = metadata.agents;
+    profiles.value = templates;
+    mcpRegistry.value = registry;
+    if (!templates.some((item) => item.name === profile.value)) {
+      profile.value = templates.some((item) => item.name === 'default')
+        ? 'default'
+        : (templates[0]?.name ?? 'default');
+      lastResolved.value = null;
+    }
+  } catch (cause) {
+    if (activation !== activationRequest) return;
+    error.value = (cause as Error).message;
+  }
+  if (activation !== activationRequest) return;
   scheduleResolution();
 }
 
@@ -464,8 +493,9 @@ async function saveAsNewProfile() {
   error.value = '';
   const submittedKey = previewKey(preview);
   const submittedGeneration = resolveRequest;
+  let saved: Profile;
   try {
-    const saved = await cloneProfile(preview.selection.profile, {
+    saved = await cloneProfile(preview.selection.profile, {
       name: target,
       expected_profile_revision: preview.profile_revision,
       expected_resolver_revision: preview.resolver_revision,
@@ -474,21 +504,6 @@ async function saveAsNewProfile() {
       copy_environment: false,
       environment: cloneEnvironment.value,
     });
-    profiles.value = await listProfiles();
-    if (
-      submittedGeneration !== resolveRequest ||
-      !resolved.value ||
-      submittedKey !== previewKey(resolved.value)
-    ) {
-      cloneNotice.value = `Saved ${saved.name}; launch settings have since changed.`;
-      return;
-    }
-    chooseProfile(saved.name);
-    cloneDraft.value = null;
-    cloneEnvironment.value = null;
-    cloneSourceEnvironment.value = [];
-    clonePreviewKey.value = '';
-    cloneNotice.value = `Saved ${saved.name} without changing ${preview.selection.profile}.`;
   } catch (cause) {
     const preview = cause instanceof ApiError ? cause.body.preview : undefined;
     const stillCurrent =
@@ -507,9 +522,40 @@ async function saveAsNewProfile() {
     } else {
       cloneNotice.value = `The save from the previous launch selection failed: ${(cause as Error).message}`;
     }
+    return;
   } finally {
     cloneBusy.value = false;
   }
+
+  // The clone mutation already committed. Adopt its returned row immediately;
+  // a best-effort list refresh below may warn, but can never turn success into
+  // a retry that collides with the newly created name.
+  rememberProfile(saved);
+  const stillCurrent =
+    submittedGeneration === resolveRequest &&
+    resolved.value !== null &&
+    submittedKey === previewKey(resolved.value);
+  cloneDraft.value = null;
+  cloneEnvironment.value = null;
+  cloneSourceEnvironment.value = [];
+  clonePreviewKey.value = '';
+  if (stillCurrent) {
+    chooseProfile(saved.name);
+    cloneNotice.value = `Saved ${saved.name} without changing ${preview.selection.profile}.`;
+  } else {
+    cloneNotice.value = `Saved ${saved.name}; launch settings have since changed.`;
+  }
+  try {
+    profiles.value = await listProfiles();
+  } catch (cause) {
+    cloneNotice.value += ` Profile refresh is temporarily unavailable: ${(cause as Error).message}`;
+  }
+}
+
+function rememberProfile(saved: Profile) {
+  profiles.value = [...profiles.value.filter((item) => item.name !== saved.name), saved].sort(
+    (left, right) => left.name.localeCompare(right.name),
+  );
 }
 
 async function fileToBase64(file: File): Promise<string> {
@@ -546,7 +592,12 @@ async function create() {
       const known = managedRepos.value.find(
         (candidate) => candidate.slug === repoInput || candidate.remote_url === repoInput,
       );
-      const registered = known ?? (await registerRepo(repoInput));
+      const staged =
+        registeredRepo.value &&
+        (registeredRepo.value.slug === repoInput || registeredRepo.value.remote_url === repoInput)
+          ? registeredRepo.value
+          : null;
+      const registered = known ?? staged ?? (await registerDraftRepo(repoInput));
       body.repo = registered.slug;
     } else {
       body.cwd = repoInput;
@@ -574,6 +625,10 @@ async function create() {
     const preview = e instanceof ApiError ? e.body.preview : undefined;
     if (preview && typeof preview === 'object') {
       resolved.value = preview as ResolvedLaunch;
+      lastResolved.value = resolved.value;
+    } else if (e instanceof ApiError && e.status === 409) {
+      resolved.value = null;
+      scheduleResolution();
     }
     const failedSession = e instanceof ApiError ? e.body.session_id : undefined;
     if (typeof failedSession === 'string' && failedSession) {
@@ -607,6 +662,7 @@ const createBlockReason = computed(() => {
   if (branchMode.value === 'existing' && !existingBranch.value.trim())
     return 'Choose the existing branch to reuse.';
   if (scratchError.value) return scratchError.value;
+  if (repoRegistrations.value > 0) return 'Wait for repository registration to finish.';
   if (cloneBusy.value) return 'Wait for the new profile to finish saving.';
   if (resolving.value) return 'Wait for launch settings to finish resolving.';
   if (!resolved.value) return resolveError.value || 'Launch settings have not resolved yet.';
@@ -942,7 +998,8 @@ onActivated(() => void refreshLaunchData());
             v-model="overrides"
             :agents="agents"
             :resolved="resolved"
-            :disabled="Boolean(resolved?.policy.strict)"
+            :fallback="lastResolved"
+            :disabled="resolving || Boolean(resolved?.policy.strict)"
           />
         </section>
 

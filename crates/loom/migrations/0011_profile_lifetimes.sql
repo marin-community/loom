@@ -11,21 +11,17 @@ ALTER TABLE sessions
 ADD COLUMN mutation_revision INTEGER NOT NULL DEFAULT 1;
 
 -- A pre-lifetime session is safe to associate with the current profile row
--- only when its stamped revision proves that row has not crossed a recreate.
--- Retiring a row advances revision once without changing its lifetime.
+-- only when its stamped revision exactly proves that row has not crossed a
+-- recreate. A retired row one revision ahead is ambiguous in released v9:
+-- retire -> revive -> retire can leave a replacement tombstone at that shape.
+-- Fail closed rather than blessing replacement credentials as the old lifetime.
 UPDATE sessions
 SET profile_lifetime = 1
 WHERE EXISTS (
     SELECT 1
     FROM profiles
     WHERE profiles.name = sessions.profile
-      AND (
-          profiles.revision = sessions.profile_revision
-          OR (
-              profiles.retired = 1
-              AND profiles.revision = sessions.profile_revision + 1
-          )
-      )
+      AND profiles.revision = sessions.profile_revision
 );
 
 -- Phase-2 sessions already carry strictness in their immutable snapshot. Rows

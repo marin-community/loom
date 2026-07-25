@@ -211,6 +211,7 @@ const handoffProfiles = ref<Profile[]>([]);
 const handoffProfile = ref('');
 const handoffOverrides = ref<LaunchOverrideValues>({});
 const handoffResolved = ref<ResolvedLaunch | null>(null);
+const lastHandoffResolved = ref<ResolvedLaunch | null>(null);
 const handoffResolving = ref(false);
 const handoffBusy = ref(false);
 const handoffError = ref('');
@@ -242,6 +243,7 @@ function resetHandoff() {
   handoffProfile.value = '';
   handoffOverrides.value = {};
   handoffResolved.value = null;
+  lastHandoffResolved.value = null;
   handoffResolving.value = false;
   handoffError.value = '';
 }
@@ -254,7 +256,10 @@ async function resolveHandoff() {
   handoffError.value = '';
   try {
     const preview = await resolveSessionHandoff(props.ws.id, handoffSelection.value);
-    if (request === handoffResolveRequest) handoffResolved.value = preview;
+    if (request === handoffResolveRequest) {
+      handoffResolved.value = preview;
+      lastHandoffResolved.value = preview;
+    }
   } catch (cause) {
     if (request === handoffResolveRequest) handoffError.value = (cause as Error).message;
   } finally {
@@ -312,8 +317,15 @@ async function submitHandoff() {
     await emit('reload');
   } catch (cause) {
     const preview = cause instanceof ApiError ? cause.body.preview : undefined;
-    if (preview && typeof preview === 'object') handoffResolved.value = preview as ResolvedLaunch;
-    handoffError.value = (cause as Error).message;
+    const message = (cause as Error).message;
+    if (preview && typeof preview === 'object') {
+      handoffResolved.value = preview as ResolvedLaunch;
+      lastHandoffResolved.value = handoffResolved.value;
+    } else {
+      handoffResolved.value = null;
+      await resolveHandoff();
+    }
+    handoffError.value = message;
   } finally {
     handoffBusy.value = false;
   }
@@ -449,7 +461,10 @@ async function submitHandoff() {
                     v-model="handoffOverrides"
                     :agents="handoffAgents"
                     :resolved="handoffResolved"
-                    :disabled="handoffBusy || Boolean(handoffResolved?.policy.strict)"
+                    :fallback="lastHandoffResolved"
+                    :disabled="
+                      handoffBusy || handoffResolving || Boolean(handoffResolved?.policy.strict)
+                    "
                   />
                   <ResolvedLaunchSummary :resolved="handoffResolved" :loading="handoffResolving" />
                   <p class="text-2xs text-faint">

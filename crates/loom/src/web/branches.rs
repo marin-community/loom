@@ -48,22 +48,39 @@ pub(super) async fn patch_branch(
     Json(req): Json<PatchBranchReq>,
 ) -> ApiResult<Json<BranchView>> {
     let initial_branch = require_branch(&st.db, &key).await?;
-    let goal_session = if req.goal.is_some() {
-        session_mod::active_for_branch(&st.db, &initial_branch.id).await?
+    let goal_sessions = if req.goal.is_some() {
+        session_mod::handoff_capable_for_branch(&st.db, &initial_branch.id).await?
     } else {
-        None
+        Vec::new()
     };
-    let _goal_permit = match goal_session.as_ref() {
-        Some(session) => Some(st.launch_gate.acquire_session(&session.id).await),
-        None => None,
-    };
+    let initial_goal_ids: std::collections::BTreeSet<_> = goal_sessions
+        .iter()
+        .map(|session| session.id.clone())
+        .collect();
+    let _goal_permits = st
+        .launch_gate
+        .acquire_sessions(goal_sessions.iter().map(|session| session.id.as_str()))
+        .await;
     let branch = require_branch(&st.db, &initial_branch.id).await?;
+    let current_goal_sessions = if req.goal.is_some() {
+        session_mod::handoff_capable_for_branch(&st.db, &branch.id).await?
+    } else {
+        Vec::new()
+    };
+    if current_goal_sessions
+        .iter()
+        .any(|session| !initial_goal_ids.contains(&session.id))
+    {
+        return Err(AppError::conflict(
+            "the branch's handoff-capable session changed while the goal edit was waiting; retry",
+        ));
+    }
     if let Some(title) = &req.title {
         branch_mod::set_title(&st.db, &branch.id, title).await?;
     }
     if let Some(goal) = &req.goal {
         branch_mod::set_goal(&st.db, &branch.id, goal, "user").await?;
-        if let Some(session) = goal_session.as_ref() {
+        for session in &current_goal_sessions {
             session_mod::bump_mutation_revision(&st.db, &session.id).await?;
         }
     }

@@ -6,6 +6,7 @@ const props = defineProps<{
   agents: AgentMetadata[];
   modelValue: LaunchOverrides;
   resolved: ResolvedLaunch | null;
+  fallback?: ResolvedLaunch | null;
   disabled?: boolean;
 }>();
 
@@ -13,9 +14,10 @@ const emit = defineEmits<{
   'update:modelValue': [LaunchOverrides];
 }>();
 const uid = useId();
+const snapshot = computed(() => props.resolved ?? props.fallback ?? null);
 
 const effectiveAgent = computed(
-  () => props.modelValue.agent ?? props.resolved?.agent ?? props.agents[0]?.kind ?? '',
+  () => props.modelValue.agent ?? snapshot.value?.agent ?? props.agents[0]?.kind ?? '',
 );
 const metadata = computed(() => props.agents.find((agent) => agent.kind === effectiveAgent.value));
 
@@ -24,7 +26,7 @@ function enabled(field: keyof LaunchOverrides): boolean {
 }
 
 function fallback(field: keyof LaunchOverrides): string {
-  const resolved = props.resolved;
+  const resolved = snapshot.value;
   if (!resolved) return '';
   return resolved[field] as string;
 }
@@ -77,7 +79,7 @@ function locked(field: keyof LaunchOverrides): boolean {
         v-if="field === 'agent'"
         :id="`${uid}-${field}-value`"
         :aria-label="`${field} override value`"
-        :value="modelValue.agent ?? resolved?.agent ?? ''"
+        :value="modelValue.agent ?? snapshot?.agent ?? ''"
         :disabled="!enabled(field) || locked(field)"
         :data-testid="`override-${field}`"
         class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
@@ -92,7 +94,7 @@ function locked(field: keyof LaunchOverrides): boolean {
         v-else-if="field === 'model' && metadata?.accepts_raw_model"
         :id="`${uid}-${field}-value`"
         :aria-label="`${field} override value`"
-        :value="modelValue.model ?? resolved?.model ?? ''"
+        :value="modelValue.model ?? snapshot?.model ?? ''"
         :disabled="!enabled(field) || locked(field)"
         :data-testid="`override-${field}`"
         list="launch-model-options"
@@ -108,7 +110,7 @@ function locked(field: keyof LaunchOverrides): boolean {
         v-else-if="field === 'model'"
         :id="`${uid}-${field}-value`"
         :aria-label="`${field} override value`"
-        :value="modelValue.model ?? resolved?.model ?? ''"
+        :value="modelValue.model ?? snapshot?.model ?? ''"
         :disabled="!enabled(field) || locked(field)"
         :data-testid="`override-${field}`"
         class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
@@ -124,7 +126,7 @@ function locked(field: keyof LaunchOverrides): boolean {
         v-else-if="field === 'effort'"
         :id="`${uid}-${field}-value`"
         :aria-label="`${field} override value`"
-        :value="modelValue.effort ?? resolved?.effort ?? ''"
+        :value="modelValue.effort ?? snapshot?.effort ?? ''"
         :disabled="!enabled(field) || locked(field)"
         :data-testid="`override-${field}`"
         class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
@@ -140,7 +142,7 @@ function locked(field: keyof LaunchOverrides): boolean {
         v-else-if="field === 'protocol'"
         :id="`${uid}-${field}-value`"
         :aria-label="`${field} override value`"
-        :value="modelValue.protocol ?? resolved?.protocol ?? ''"
+        :value="modelValue.protocol ?? snapshot?.protocol ?? ''"
         :disabled="!enabled(field) || locked(field)"
         :data-testid="`override-${field}`"
         class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
@@ -154,7 +156,7 @@ function locked(field: keyof LaunchOverrides): boolean {
         v-else-if="field === 'mode'"
         :id="`${uid}-${field}-value`"
         :aria-label="`${field} override value`"
-        :value="modelValue.mode ?? resolved?.mode ?? ''"
+        :value="modelValue.mode ?? snapshot?.mode ?? ''"
         :disabled="!enabled(field) || locked(field)"
         :data-testid="`override-${field}`"
         class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
@@ -173,7 +175,7 @@ function locked(field: keyof LaunchOverrides): boolean {
         v-else
         :id="`${uid}-${field}-value`"
         :aria-label="`${field} override value`"
-        :value="modelValue.class ?? resolved?.class ?? ''"
+        :value="modelValue.class ?? snapshot?.class ?? ''"
         :disabled="!enabled(field) || locked(field)"
         :data-testid="`override-${field}`"
         class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
@@ -185,7 +187,7 @@ function locked(field: keyof LaunchOverrides): boolean {
 
       <span v-if="locked(field)" class="mt-1 block text-faint">Locked by profile policy.</span>
       <span v-else-if="!enabled(field)" class="mt-1 block truncate text-faint">
-        Inherits {{ resolved?.[field] || 'agent default' }}
+        Inherits {{ snapshot?.[field] || 'agent default' }}
       </span>
     </fieldset>
   </div>

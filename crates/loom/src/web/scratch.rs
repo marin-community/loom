@@ -53,7 +53,7 @@ fn scratch_name(raw: &str) -> ApiResult<String> {
             ),
         ));
     }
-    if raw == ".gitignore" {
+    if raw.eq_ignore_ascii_case(".gitignore") {
         return Err(AppError::bad_request(
             "'.gitignore' is reserved for Scratch housekeeping",
         ));
@@ -385,13 +385,15 @@ mod tests {
             content_base64: b64("x"),
         }];
         assert!(write_initial_scratch(dir.path(), &bad_name).await.is_err());
-        let housekeeping = vec![ScratchUpload {
-            name: ".gitignore".into(),
-            content_base64: b64("not an exclusion guard"),
-        }];
-        assert!(write_initial_scratch(dir.path(), &housekeeping)
-            .await
-            .is_err());
+        for name in [".gitignore", ".GITIGNORE"] {
+            let housekeeping = vec![ScratchUpload {
+                name: name.into(),
+                content_base64: b64("not an exclusion guard"),
+            }];
+            assert!(write_initial_scratch(dir.path(), &housekeeping)
+                .await
+                .is_err());
+        }
         for name in [
             "nul\0name.txt".to_string(),
             format!("{}.txt", "x".repeat(MAX_SCRATCH_NAME_BYTES + 1)),

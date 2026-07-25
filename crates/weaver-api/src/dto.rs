@@ -302,6 +302,10 @@ fn default_profile() -> String {
     "default".to_string()
 }
 
+fn default_profile_lifetime() -> i64 {
+    1
+}
+
 fn default_prelude() -> String {
     "weaver".to_string()
 }
@@ -333,6 +337,9 @@ pub struct ProfileView {
     pub runtime_permissions: Vec<String>,
     #[serde(default)]
     pub mcp_access: McpAccess,
+    /// Servers predating profile lifetimes expose only the original selectable
+    /// lifetime, so a newer typed client can safely interpret omission as 1.
+    #[serde(default = "default_profile_lifetime")]
     pub lifetime: i64,
     pub revision: i64,
     pub created_at: String,
@@ -605,6 +612,20 @@ pub struct ResolvedLaunchPolicyView {
     pub mcp_policy: SessionMcpPolicyView,
 }
 
+/// Exact non-secret command/runtime definition accepted for a custom agent.
+/// Builtin agents omit this field. Persisting it makes adopt/recover use the
+/// reviewed runtime even if the mutable registry is later edited or deleted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvedCustomAgentView {
+    pub name: String,
+    pub label: String,
+    pub setup: String,
+    pub launch: String,
+    pub resume: String,
+    pub reports_status: bool,
+    pub protocol: String,
+}
+
 /// Concrete non-secret immutable launch snapshot returned by preview and
 /// stored with the created session (or replacement handoff runtime).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -620,6 +641,8 @@ pub struct ResolvedLaunchView {
     pub protocol: String,
     pub mode: String,
     pub class: String,
+    #[serde(default)]
+    pub custom_agent: Option<ResolvedCustomAgentView>,
     pub locked_fields: Vec<String>,
     pub provenance: LaunchProvenanceView,
     pub capacity: LaunchCapacityView,

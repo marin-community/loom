@@ -432,6 +432,24 @@ pub async fn active_managed_by(db: &Db, watch_id: &str) -> Result<Option<Session
     Ok(row)
 }
 
+/// Every session on a branch that can currently enter provider handoff.
+///
+/// Error rows are intentionally included even though they do not consume
+/// capacity: a branch-goal edit must advance their mutation generation too, or
+/// a handoff can commit a prompt built from the superseded goal.
+pub async fn handoff_capable_for_branch(db: &Db, branch_id: &str) -> Result<Vec<Session>> {
+    Ok(sqlx::query_as::<_, Session>(
+        "SELECT * FROM sessions
+         WHERE branch_id = ?
+           AND protocol = 'acp'
+           AND status IN ('running', 'orphaned', 'error', 'handoff')
+         ORDER BY id",
+    )
+    .bind(branch_id)
+    .fetch_all(db)
+    .await?)
+}
+
 /// `(Session, Branch)` for a session id. None if the session is missing.
 pub async fn with_branch(db: &Db, id: &str) -> Result<Option<(Session, Branch)>> {
     let Some(session) = get(db, id).await? else {
@@ -680,15 +698,46 @@ pub fn acp_inflight_turn(session: &Session) -> Option<i64> {
         .and_then(|value| value.get("turn").and_then(serde_json::Value::as_i64))
 }
 
+/// Provider-owned durable state retained while a handoff tears down its source.
+/// A failed teardown can restore this exact snapshot under the claimed
+/// generation instead of leaving a false `running` row with no provider.
+#[derive(Debug, Clone)]
+pub struct HandoffSourceState {
+    pub status: String,
+    pub acp_session_id: Option<String>,
+    pub acp_ack_seq: i64,
+    pub acp_inflight: Option<String>,
+    pub current_mode: Option<String>,
+    pub metadata: Option<String>,
+}
+
 /// Atomically claim the reviewed source generation for provider replacement
-/// and clear the previous provider's private relay/session state.
-pub async fn claim_handoff(db: &Db, id: &str, expected_mutation_revision: i64) -> Result<bool> {
+/// while preserving the source's durable provider state for fenced rollback.
+pub async fn claim_handoff(
+    db: &Db,
+    id: &str,
+    expected_mutation_revision: i64,
+) -> Result<Option<HandoffSourceState>> {
     let mut tx = db.begin().await?;
+    let Some(session) = sqlx::query_as::<_, Session>(
+        "SELECT * FROM sessions WHERE id = ? AND mutation_revision = ?",
+    )
+    .bind(id)
+    .bind(expected_mutation_revision)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    let metadata =
+        sqlx::query_scalar("SELECT metadata FROM session_acp_metadata WHERE session_id = ?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
     let result = sqlx::query(
         "UPDATE sessions
-         SET status = 'running',
-             acp_session_id = NULL, acp_ack_seq = 0, acp_inflight = NULL,
-             current_mode = NULL,
+         SET status = 'handoff',
              mutation_revision = mutation_revision + 1
          WHERE id = ? AND mutation_revision = ?",
     )
@@ -697,6 +746,126 @@ pub async fn claim_handoff(db: &Db, id: &str, expected_mutation_revision: i64) -
     .execute(&mut *tx)
     .await?;
     if result.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    tx.commit().await?;
+    Ok(Some(HandoffSourceState {
+        status: session.status,
+        acp_session_id: session.acp_session_id,
+        acp_ack_seq: session.acp_ack_seq,
+        acp_inflight: session.acp_inflight,
+        current_mode: session.current_mode,
+        metadata,
+    }))
+}
+
+/// Clear the superseded provider state after its supervisor is gone, while the
+/// handoff still owns the claimed generation. The replacement handshake may
+/// then populate fresh provider state before the final policy commit.
+pub async fn clear_claimed_handoff_source(
+    db: &Db,
+    id: &str,
+    expected_mutation_revision: i64,
+) -> Result<bool> {
+    let mut tx = db.begin().await?;
+    let changed = sqlx::query(
+        "UPDATE sessions
+         SET acp_session_id = NULL, acp_ack_seq = 0, acp_inflight = NULL,
+             current_mode = NULL
+         WHERE id = ? AND mutation_revision = ?",
+    )
+    .bind(id)
+    .bind(expected_mutation_revision)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+    if !changed {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    sqlx::query("DELETE FROM session_acp_metadata WHERE session_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// Restore a source after teardown failed, only while the handoff still owns
+/// its claimed generation. Returns the new generation used by any subsequent
+/// error transition.
+pub async fn rollback_handoff_claim(
+    db: &Db,
+    id: &str,
+    expected_mutation_revision: i64,
+    source: &HandoffSourceState,
+) -> Result<Option<i64>> {
+    let mut tx = db.begin().await?;
+    let next_generation = expected_mutation_revision + 1;
+    let changed = sqlx::query(
+        "UPDATE sessions
+         SET status = ?, acp_session_id = ?, acp_ack_seq = ?,
+             acp_inflight = ?, current_mode = ?,
+             mutation_revision = mutation_revision + 1
+         WHERE id = ? AND mutation_revision = ?",
+    )
+    .bind(&source.status)
+    .bind(&source.acp_session_id)
+    .bind(source.acp_ack_seq)
+    .bind(&source.acp_inflight)
+    .bind(&source.current_mode)
+    .bind(id)
+    .bind(expected_mutation_revision)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+    if !changed {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    sqlx::query("DELETE FROM session_acp_metadata WHERE session_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    if let Some(metadata) = &source.metadata {
+        sqlx::query(
+            "INSERT INTO session_acp_metadata (session_id, metadata, updated_at)
+             VALUES (?, ?, ?)",
+        )
+        .bind(id)
+        .bind(metadata)
+        .bind(now_iso())
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(Some(next_generation))
+}
+
+/// Record an honest provider-less error after the source cannot be restored.
+pub async fn fail_handoff_claim(
+    db: &Db,
+    id: &str,
+    expected_mutation_revision: i64,
+) -> Result<bool> {
+    let mut tx = db.begin().await?;
+    let changed = sqlx::query(
+        "UPDATE sessions
+         SET status = 'error', acp_session_id = NULL, acp_ack_seq = 0,
+             acp_inflight = NULL, current_mode = NULL,
+             mutation_revision = mutation_revision + 1
+         WHERE id = ? AND mutation_revision = ?",
+    )
+    .bind(id)
+    .bind(expected_mutation_revision)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+    if !changed {
         tx.rollback().await?;
         return Ok(false);
     }
@@ -1093,7 +1262,10 @@ mod tests {
                 .to_string(),
             launch_snapshot: r#"{"agent":"codex"}"#.to_string(),
         };
-        assert!(claim_handoff(&db, "handoff", 1).await.unwrap());
+        assert!(claim_handoff(&db, "handoff", 1).await.unwrap().is_some());
+        assert!(clear_claimed_handoff_source(&db, "handoff", 2)
+            .await
+            .unwrap());
         assert!(prepare_handoff(&db, "handoff", "running", &policy, 2)
             .await
             .unwrap());
@@ -1119,7 +1291,10 @@ mod tests {
         input.agent_kind = "claude".to_string();
         input.protocol = "acp".to_string();
         insert(&db, &input).await.unwrap();
-        assert!(claim_handoff(&db, "handoff-cas", 1).await.unwrap());
+        assert!(claim_handoff(&db, "handoff-cas", 1)
+            .await
+            .unwrap()
+            .is_some());
         set_status(&db, "handoff-cas", "done").await.unwrap();
 
         let policy = SessionHandoffPolicy {

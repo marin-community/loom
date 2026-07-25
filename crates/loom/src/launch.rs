@@ -10,7 +10,7 @@ use anyhow::{anyhow, bail, Result};
 use sha2::{Digest as _, Sha256};
 use weaver_api::{
     LaunchCapacityView, LaunchOverrides, LaunchProvenanceView, LaunchSelection, ProfileEnvView,
-    ResolvedLaunchPolicyView, ResolvedLaunchView, SessionMcpPolicyView,
+    ResolvedCustomAgentView, ResolvedLaunchPolicyView, ResolvedLaunchView, SessionMcpPolicyView,
 };
 
 use crate::db::Db;
@@ -39,10 +39,39 @@ pub struct ResolvedLaunch {
     pub mcp_policy: weaver_api::McpPolicySnapshot,
     pub runtime_permissions: Vec<String>,
     /// Exact custom runtime definition used to derive `view` and its resolver
-    /// revision. Kept internal because launch commands are operator data, not
-    /// part of the browser-safe preview.
+    /// revision.
     pub custom_agent: Option<crate::custom_agents::CustomAgent>,
     pub view: ResolvedLaunchView,
+}
+
+pub(crate) fn custom_agent_view(
+    custom: &crate::custom_agents::CustomAgent,
+) -> ResolvedCustomAgentView {
+    ResolvedCustomAgentView {
+        name: custom.name.clone(),
+        label: custom.label.clone(),
+        setup: custom.setup.clone(),
+        launch: custom.launch.clone(),
+        resume: custom.resume.clone(),
+        reports_status: custom.reports_status,
+        protocol: custom.protocol.clone(),
+    }
+}
+
+pub(crate) fn custom_agent_from_view(
+    custom: &ResolvedCustomAgentView,
+) -> crate::custom_agents::CustomAgent {
+    crate::custom_agents::CustomAgent {
+        name: custom.name.clone(),
+        label: custom.label.clone(),
+        setup: custom.setup.clone(),
+        launch: custom.launch.clone(),
+        resume: custom.resume.clone(),
+        reports_status: custom.reports_status,
+        protocol: custom.protocol.clone(),
+        created_at: String::new(),
+        updated_at: String::new(),
+    }
 }
 
 fn selected(value: &Option<String>) -> Option<&str> {
@@ -287,6 +316,7 @@ pub async fn resolve(
         protocol,
         mode,
         class,
+        custom_agent: custom_agent.as_ref().map(custom_agent_view),
         locked_fields,
         provenance: LaunchProvenanceView {
             agent: if overrides.agent.is_some() {

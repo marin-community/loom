@@ -1287,14 +1287,14 @@ pub async fn deployment_managed_names(db: &Db) -> Result<Vec<String>> {
     .await?)
 }
 
-/// Seed reviewed stock profile manifests when they are absent. Existing rows
-/// remain operator-editable: startup never overwrites a profile after its first
-/// seed, and deployment reconciliation can still take explicit ownership.
+/// Seed reviewed stock profile manifests only when no lifetime has ever existed
+/// under that name. Existing rows remain operator-editable, and an explicit
+/// tombstone is a durable opt-out rather than first-run absence.
 pub async fn seed_stock_profiles(db: &Db) -> Result<()> {
     for (source, contents) in STOCK_PROFILES {
         let input: ProfileInput = serde_json::from_str(contents)
             .with_context(|| format!("parsing stock profile {source}"))?;
-        if get(db, &input.name).await?.is_none() {
+        if get_including_retired(db, &input.name).await?.is_none() {
             upsert(db, &input)
                 .await
                 .with_context(|| format!("seeding stock profile {source}"))?;
@@ -1460,6 +1460,31 @@ mod tests {
                 .unwrap()
                 .description,
             "operator-edited description"
+        );
+
+        env_set(&db, "github_comment", "STOCK_SECRET", "write-only")
+            .await
+            .unwrap();
+        let before_delete = get(&db, "github_comment").await.unwrap().unwrap();
+        remove(&db, "github_comment").await.unwrap();
+        seed_stock_profiles(&db).await.unwrap();
+        assert!(
+            get(&db, "github_comment").await.unwrap().is_none(),
+            "an explicitly deleted stock profile stays unselectable after restart seeding"
+        );
+        let tombstone = get_including_retired(&db, "github_comment")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(tombstone.retired);
+        assert_eq!(tombstone.lifetime, before_delete.lifetime);
+        assert_eq!(
+            env_get(&db, "github_comment", "STOCK_SECRET")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("write-only"),
+            "startup does not revive or clear a tombstoned lifetime"
         );
     }
 
