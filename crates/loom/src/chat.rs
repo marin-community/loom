@@ -127,8 +127,11 @@ pub fn handoff_context(
     let (mut recent_dialogue, recent_omitted) =
         bounded_records_tail(&dialogue[first..], recent_chars);
     if recent_omitted {
-        let marker =
-            "[Some recent message content was omitted; inspect the canonical journal.]\n\n";
+        let marker: String =
+            "[Some recent message content was omitted; inspect the canonical journal.]\n\n"
+                .chars()
+                .take(recent_chars)
+                .collect();
         let room = recent_chars.saturating_sub(marker.chars().count());
         recent_dialogue = format!(
             "{marker}{}",
@@ -163,13 +166,16 @@ pub fn handoff_prompt(goal: &str, summary: Option<&str>, recent_dialogue: &str) 
         "You are taking over an existing coding session from another agent provider. Continue \
          the work in the current worktree; do not restart completed work.\n\n\
          Goal:\n{}\n\nHandoff summary:\n{}\n\nRecent conversation:\n{}\n\n\
-         Full history:\nThe canonical ACP journal contains the available tool/command activity, \
-         outputs, and older dialogue. Fetch its newest page with:\n\n\
+         Full history:\nIf the self-history MCP is available, use \
+         `mcp__loom_history__history` to page this session or \
+         `mcp__loom_history__search` for case-insensitive literal search. Otherwise fetch the \
+         newest normalized page with:\n\n\
          `curl -fsS -H \"Authorization: Bearer $LOOM_TOKEN\" \
-         \"$WEAVER_API/api/sessions/$LOOM_SESSION_ID/chat\"`\n\n\
-         Follow `older_cursor` from the response to page backward. Tool records only contain \
-         the invocation detail supplied by the provider; do not assume exact command arguments \
-         are available.",
+         \"$WEAVER_API/api/sessions/$LOOM_SESSION_ID/history\"`\n\n\
+         Follow `older_cursor` from the response to page backward. Search is also available at \
+         `/api/sessions/$LOOM_SESSION_ID/history/search?q=<literal>`. Tool records only contain \
+         invocation detail supplied by the provider; do not assume exact command arguments are \
+         available.",
         goal.trim(),
         summary,
         recent
@@ -1097,7 +1103,8 @@ mod tests {
         assert!(prompt.contains("Goal:\nfinish it"));
         assert!(prompt.contains("recent answer"));
         assert!(prompt.contains("Tests pass; update the route."));
-        assert!(prompt.contains("$LOOM_SESSION_ID/chat"));
+        assert!(prompt.contains("$LOOM_SESSION_ID/history"));
+        assert!(prompt.contains("mcp__loom_history__history"));
         assert!(prompt.contains("older_cursor"));
     }
 

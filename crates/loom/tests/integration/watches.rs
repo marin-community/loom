@@ -351,20 +351,45 @@ async fn stale_session_emits_one_event_and_wakes_a_reactive_watch() {
         .unwrap();
 }
 
-/// Write a one-shot fake judge agent that ignores its stdin (the composed
-/// prompt) and prints `out`, point `WEAVER_WATCH_AGENT_CMD` at it, and
-/// return its path. Robust where `cat` is not: the round feeds a real terminal
-/// screen into the prompt, and a shell screen can carry brackets that would
-/// corrupt an echo-then-parse. Reused paths overwrite, so a test can re-stub
-/// between fires. Restore `WEAVER_WATCH_AGENT_CMD=true` after.
-fn fake_judge_agent(name: &str, out: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let path = std::env::temp_dir().join(name);
-    let script = format!("#!/bin/sh\ncat >/dev/null 2>&1\ncat <<'WEAVER_EOF'\n{out}\nWEAVER_EOF\n");
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::env::set_var("WEAVER_WATCH_AGENT_CMD", path.to_str().unwrap());
-    path
+/// Point the built-in Claude ACP adapter setting at the scripted test adapter
+/// with a fixed response. Base64 keeps arbitrary judgement JSON out of the
+/// shell command's quoting surface.
+fn fake_judge_agent(_name: &str, out: &str) -> EnvVarGuard {
+    fake_judge_runtime("WEAVER_CLAUDE_ACP_CMD", out)
+}
+
+fn fake_judge_runtime(variable: &'static str, out: &str) -> EnvVarGuard {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(out);
+    EnvVarGuard::set(
+        variable,
+        &format!(
+            "FAKE_ACP_FIXED_OUTPUT_B64={encoded} {}",
+            crate::fixtures::fake_acp_agent_cmd()
+        ),
+    )
+}
+
+struct EnvVarGuard {
+    name: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(name: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(name);
+        std::env::set_var(name, value);
+        Self { name, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(self.name, value),
+            None => std::env::remove_var(self.name),
+        }
+    }
 }
 
 /// The status program's wiring proof: an idle-triggered round asks the judge for
@@ -460,8 +485,6 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
         "the empty verdict clears the watch's own mark"
     );
 
-    // Restore the fixture's no-op agent for the tests that follow.
-    std::env::set_var("WEAVER_WATCH_AGENT_CMD", "true");
     ts.client
         .delete(&format!("/api/sessions/{session_id}"))
         .await
@@ -1263,10 +1286,10 @@ async fn review_wait_parks_and_unparks_a_session_awaiting_review() {
 
 /// The LLM judgement path end to end: the status script calls the daemon's
 /// `POST /api/agent/oneshot` for its verdict and applies the parsed tag set.
-/// First drives the endpoint directly (a stubbed `cat` echoes the prompt; an
-/// empty prompt 400s), then runs a round whose stubbed judge recommends a
-/// `blocked` mark on an otherwise-calm session — the tag lands attributed,
-/// proving the verdict (not a mirror) drove it.
+/// First drives the endpoint directly against configured Claude and Codex ACP
+/// adapters (an empty prompt 400s), then runs a round whose stubbed judge
+/// recommends a `blocked` mark on an otherwise-calm session — the tag lands
+/// attributed, proving the verdict (not a mirror) drove it.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_judgement_uses_the_oneshot_agent() {
@@ -1276,14 +1299,27 @@ async fn status_judgement_uses_the_oneshot_agent() {
     }
     let ts = TestServer::start().await;
 
-    // The endpoint itself: `cat` echoes the prompt; an empty prompt 400s.
-    std::env::set_var("WEAVER_WATCH_AGENT_CMD", "cat");
+    // The endpoint itself returns the adapter's fixed text; an empty prompt 400s.
+    let _endpoint_agent = fake_judge_agent("weaver-fake-judge-endpoint", "ping");
     let reply = ts
         .client
         .post("/api/agent/oneshot", json!({ "prompt": "ping" }))
         .await
         .unwrap();
     assert_eq!(reply["output"], "ping", "the stub agent echoes the prompt");
+    let _codex_agent = fake_judge_runtime("WEAVER_CODEX_ACP_CMD", "codex selected");
+    let reply = ts
+        .client
+        .post(
+            "/api/agent/oneshot",
+            json!({ "prompt": "ping", "agent": "codex" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reply["output"], "codex selected",
+        "the request selects a registered ACP runtime"
+    );
     assert!(
         ts.client
             .post("/api/agent/oneshot", json!({ "prompt": "" }))
@@ -1330,8 +1366,6 @@ async fn status_judgement_uses_the_oneshot_agent() {
     // weaver_loom; here only the through-the-stack outcome matters.)
     assert_eq!(branch_tag(&view, "stuck").unwrap()["set_by"], "judge-watch");
 
-    // Restore the fixture's no-op agent for the tests that follow.
-    std::env::set_var("WEAVER_WATCH_AGENT_CMD", "true");
     ts.client
         .delete(&format!("/api/sessions/{session_id}"))
         .await

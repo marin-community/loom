@@ -39,7 +39,9 @@ use super::{author_or_manual, require_branch, require_session, session_view};
 use super::{ApiResult, AppError, AppState};
 
 const MISSING_GITHUB_TOKEN_MESSAGE: &str = "No GitHub token configured. Add your personal GitHub token in Settings > Account, or configure a write-only GH_TOKEN on the selected profile.";
-const HANDOFF_SUMMARY_CHARS: usize = 64 * 1024;
+// A Unicode scalar occupies at most four UTF-8 bytes, so this character bound
+// also fits the ACP transient prompt's 128 KiB byte ceiling.
+const HANDOFF_SUMMARY_CHARS: usize = 32 * 1024;
 const HANDOFF_RECENT_MESSAGES: usize = 8;
 const HANDOFF_RECENT_CHARS: usize = 16 * 1024;
 const HANDOFF_SUMMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
@@ -3597,13 +3599,14 @@ pub(super) async fn handoff_session(
         HANDOFF_RECENT_MESSAGES,
         HANDOFF_RECENT_CHARS,
     );
-    let digest = agent::summarize_handoff(
-        target,
-        &context.summary_request,
-        &launch.env,
-        HANDOFF_SUMMARY_TIMEOUT,
-    )
-    .await;
+    let digest = agent::AgentManager::new(&st.db)
+        .summarize_handoff(
+            target,
+            &context.summary_request,
+            &launch,
+            HANDOFF_SUMMARY_TIMEOUT,
+        )
+        .await;
     launch.goal = Some(crate::chat::handoff_prompt(
         &branch.goal,
         digest.text.as_deref(),

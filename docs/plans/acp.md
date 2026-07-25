@@ -285,13 +285,18 @@ reconciliation at adopt — idempotent on upstream ids, journal winning
 mid-turn — is the belt-and-braces repair for spool loss.
 
 An idle provider handoff snapshots this journal on the task command channel,
-then asks the incoming provider's cheap tier (Claude/Haiku or Codex/Luna) for a
-best-effort digest. The replacement receives that digest, the last eight
-authored blocks, and the session-scoped `/chat` retrieval command. The visible
-`handoff` block replaces the synthetic bootstrap prompt and records the digest
-status/model plus the `(turn, seq)` cutoff; a later handoff builds from the
-latest successful digest. Custom providers and summarizer failures use the
-recent tail without making provider replacement fail.
+then resolves the incoming runtime through the agent registry and starts its
+configured ACP adapter in a transient relay. The adapter's live
+`configOptions`—not provider CLI flags—select a Haiku/Luna-class model and low
+effort; an advertised plan/read-only mode is applied before the one summary
+prompt. The relay is torn down before the real replacement starts, so the raw
+summary input does not consume its context. The replacement receives that
+digest, the last eight authored blocks, and instructions for the normalized
+self-history MCP plus its `/history` REST fallback. The visible `handoff` block
+replaces the synthetic bootstrap prompt and records the digest status/model plus
+the `(turn, seq)` cutoff; a later handoff builds from the latest successful
+digest. Providers without an advertised cheap-tier value and summarizer
+failures use the recent tail without making provider replacement fail.
 
 Live deltas ride a per-session in-memory broadcast →
 `GET /api/sessions/{id}/chat/stream` (SSE). A client renders by fetching
@@ -577,10 +582,12 @@ throughout:
   because the weaver workflow depends on it.
 - **`session/load` completeness** for long sessions. The journal being
   primary bounds the blast radius to fresh adopts.
-- **One-shot judgement calls** (`POST /api/agent/oneshot`, watches; the
-  lint reviewer shells out to `claude -p` directly) stay exactly as they
-  are — env-stripped, transcript-isolated `claude -p`. Headless one-shots
-  gain nothing from a session protocol.
+- **One-shot judgement calls** (`POST /api/agent/oneshot`, watches) use the
+  same `AgentManager` and configured ACP adapter as interactive launches. They
+  open a transient session with no MCP servers, apply requested model/effort
+  through advertised `configOptions`, prefer plan/read-only mode, and tear the
+  relay down after one response. The repository lint script remains an
+  independent development tool, not a Loom API path.
 
 ## Rejected alternatives
 

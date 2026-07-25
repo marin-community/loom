@@ -53,7 +53,7 @@ other `weaver` subcommand.
 | `crates/loom/src/watch.rs` | the watch engine: cron timer + event dispatcher + the round executor (the script subprocess executor every program runs on) |
 | `crates/loom/src/builtins.rs` | the builtin watch program registry; the script programs are real Python files in `crates/loom/watches/`, embedded into the binary |
 | `python/weaver-loom/` | the pure-Python layer over the loom REST API (`weaver_loom`: client + watch round context); stdlib-only, uv-buildable, vendored onto every script's `PYTHONPATH` by the engine; server-free contract tests in `tests/` (`uv run pytest`, CI's `python-binding` job) |
-| `crates/loom/src/agent.rs` | launching agents: resolving the execution `protocol`, launching a `terminal` agent into a per-session PTY (installing its `.claude/settings.local.json` hooks) or building an `acp` launch (`build_acp_launch` — the adapter command, `_meta` options, and goal), plus the one-shot headless agent behind `POST /api/agent/oneshot` |
+| `crates/loom/src/agent.rs` | `AgentManager` plus launch mapping: resolves registered runtimes, launches terminal agents, builds ACP launches, and runs transient ACP judgement prompts for handoff summaries and `POST /api/agent/oneshot` |
 | `crates/loom/src/mcp/` | trusted builtin MCP registry and stdio adapters: provider-neutral versioned capability sets, exact permission translation, and the fixed GitHub/messaging/self-history bridges |
 | `crates/loom/src/custom_mcp.rs` | operator-authored MCP definitions: grouped path identities, immutable sqlite revisions, bounded `uv` validation, and exact session-snapshot execution |
 | `crates/loom/src/profile.rs` | named launch policy, including provider-neutral `mcp_access` resolution and the restricted-profile trust boundary |
@@ -272,7 +272,7 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `PUT /api/sessions/{id}/tags` | atomically replace one author's complete tag set, with optional exact `(key, value)` clears for lifecycle marks; the watch-safe write path |
 | `GET /api/sessions/{id}/url` | the session's dashboard URL as `{url}`, built from the externally-visible origin (`auth.base_url`, else the request's own Host) — what `loom session url` prints, so an agent can link a PR back to its session without inventing a loopback link |
 | `POST /api/sessions/{id}/{archive,adopt}` | actions; archive also accepts an unmatched automation run's reserved session id, cancelling its runtime while preserving run history |
-| `POST /api/sessions/{id}/handoff` | replace an idle ACP session's agent runtime/profile while preserving its loom session, worktree, branch, and canonical chat journal; after an atomic idle snapshot, the incoming provider's cheap model (Claude/Haiku or Codex/Luna) produces a best-effort digest, the replacement receives it plus the last eight authored messages and instructions for paging `/chat`, and the journal boundary records summary provenance/cutoff (custom or failed summarizers fall back without blocking handoff) |
+| `POST /api/sessions/{id}/handoff` | replace an idle ACP session's agent runtime/profile while preserving its loom session, worktree, branch, and canonical chat journal; after an atomic idle snapshot, `AgentManager` opens the incoming runtime's configured ACP adapter in a transient relay, selects an advertised Haiku/Luna-class model through ACP `configOptions`, and requests a best-effort digest; the clean replacement receives it plus the last eight authored messages and instructions for the self-history MCP or normalized `/history` fallback, and the journal boundary records summary provenance/cutoff (missing cheap tiers and ACP failures fall back without blocking handoff) |
 | `POST /api/sessions/{id}/github` | re-poll the branch's GitHub PR now and return the updated session |
 | `GET POST DELETE /api/sessions/{id}/scratch` | list / drop / remove worktree `scratch/` reference files |
 | `PUT /api/sessions/{id}/file?path=…` | write raw bytes to a worktree file (the editor save primitive) |
@@ -882,5 +882,4 @@ builtins are stdlib-only and need neither).
 | `LOOM_GITHUB_CLIENT_ID` / `LOOM_GITHUB_CLIENT_SECRET` | GitHub OAuth app credentials (override the settings-stored values) | — |
 | `WEAVER_TAPESTRY_DIR` | directory holding tapestry's per-session control sockets | `$WEAVER_HOME/sock` |
 | `WEAVER_TAPESTRY_BIN` | the `tapestry` supervisor binary loom re-execs (else a sibling of `loom`); set by the tests | sibling of `loom` |
-| `WEAVER_WATCH_AGENT_CMD` | the one-shot headless agent command behind `POST /api/agent/oneshot` (judgement calls) | `claude -p` |
 | `RUST_LOG` / `EnvFilter` | tracing filter | `loom=info,weaver_core=info,tower_http=warn` |

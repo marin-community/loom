@@ -814,7 +814,7 @@ async fn uv_available() -> bool {
 }
 
 /// Run a **script program**: an env-stripped subprocess (the lint-review
-/// precedent, like [`crate::agent::run_oneshot`]) that reaches the fleet only
+/// precedent) that reaches the fleet only
 /// through the loom REST API. `$WEAVER_API` carries the daemon's own address
 /// and `$WEAVER_WATCH` the round config (`{id, name, program, params,
 /// scope, capabilities, model, effort, dry_run}`); the vendored `weaver_loom`
@@ -920,8 +920,21 @@ struct ScriptOutput {
     duration_ms: i64,
 }
 
+/// Calling-agent credentials and lifecycle markers that a watch program must
+/// not inherit. Watch scripts receive only their explicit REST capability
+/// token (and the operator's GitHub token when needed).
+const WATCH_SCRIPT_STRIPPED_ENV: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SSE_PORT",
+    "WEAVER_BRANCH",
+];
+
 /// Spawn a script subprocess and capture its output. An env-stripped process
-/// (the lint-review precedent, like [`crate::agent::run_oneshot`]) that reaches
+/// (the lint-review precedent) that reaches
 /// the fleet only through the loom REST API: `$WEAVER_API` carries the daemon's
 /// own address and `$WEAVER_WATCH` the JSON `config`; the vendored
 /// `weaver_loom` module rides `PYTHONPATH` so a program imports the API layer
@@ -998,7 +1011,7 @@ async fn spawn_script(
     if let Some(token) = crate::agent::read_local_token() {
         command.env("LOOM_TOKEN", token);
     }
-    for key in crate::agent::STRIPPED_ENV {
+    for key in WATCH_SCRIPT_STRIPPED_ENV {
         command.env_remove(key);
     }
     // github watches shell out to `gh` (reading PR labels/state) from this

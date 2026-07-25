@@ -378,15 +378,18 @@ class Client:
         """The builtin watch program registry."""
         return self._request("GET", "/watches/programs")
 
-    def agent(self, prompt, model="", effort=""):
-        """Run a one-shot headless agent in the daemon and return its stdout,
-        or ``None`` when the agent is absent or failed (degrade gracefully —
-        the daemon never errors a missing agent). A judgement primitive: pair
-        with :func:`parse_judgement`."""
+    def agent(self, prompt, model="", effort="", runtime=""):
+        """Run a fresh ACP prompt in the daemon and return its text, or ``None``
+        when the runtime is absent or failed. ``runtime`` defaults to Claude for
+        compatibility. A judgement primitive: pair with
+        :func:`parse_judgement`."""
+        body = {"prompt": prompt, "model": model or "", "effort": effort or ""}
+        if runtime:
+            body["agent"] = runtime
         reply = self._request(
             "POST",
             "/agent/oneshot",
-            {"prompt": prompt, "model": model or "", "effort": effort or ""},
+            body,
         )
         return (reply or {}).get("output")
 

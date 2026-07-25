@@ -1388,19 +1388,20 @@ impl SendReq {
     }
 }
 
-/// Body for `POST /api/agent/oneshot`: run a fresh, env-stripped one-shot
-/// headless agent (`claude -p`) with `prompt` on stdin and return its stdout
-/// as `{output}` (`null` when the agent is absent or fails — callers degrade
-/// gracefully). The judgement primitive watch programs reach through the
-/// daemon, which owns the agent command and timeout configuration.
+/// Body for `POST /api/agent/oneshot`: run a fresh ACP prompt through a
+/// registered agent and return its text as `{output}` (`null` when the adapter
+/// is absent or fails — callers degrade gracefully).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentOneshotReq {
     pub prompt: String,
-    /// Model tier override (`haiku` | `sonnet` | `opus` | `fable`); empty
-    /// inherits the agent's default.
+    /// Registered ACP runtime. Empty preserves the historical Claude default.
+    #[serde(default)]
+    pub agent: String,
+    /// Model override advertised by the runtime; empty keeps its ACP default.
     #[serde(default)]
     pub model: String,
-    /// Reasoning effort override; empty inherits.
+    /// Reasoning effort override advertised by the runtime; empty keeps its
+    /// ACP default.
     #[serde(default)]
     pub effort: String,
 }
