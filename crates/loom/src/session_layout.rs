@@ -102,13 +102,17 @@ async fn finish(
 }
 
 pub async fn get_layout(db: &Db, username: &str) -> Result<SessionLayoutView> {
+    // The revision and every row it labels must come from one SQLite snapshot.
+    // Otherwise a writer can commit between these reads and produce revision N
+    // with contents from N+1.
+    let mut tx = db.begin().await?;
     let revision = sqlx::query_scalar("SELECT revision FROM session_layout_state WHERE id = 1")
-        .fetch_one(db)
+        .fetch_one(&mut *tx)
         .await?;
     let spaces = sqlx::query_as::<_, SpaceRow>(
         "SELECT id, name, rank, system_key FROM session_spaces ORDER BY rank, id",
     )
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
     let groups = sqlx::query_as::<_, GroupRow>(
         "SELECT g.id, g.space_id, g.name, g.rank, g.system_key,
@@ -119,7 +123,7 @@ pub async fn get_layout(db: &Db, username: &str) -> Result<SessionLayoutView> {
          ORDER BY g.space_id, g.rank, g.id",
     )
     .bind(username)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
     let mut group_views = Vec::with_capacity(groups.len());
     for group in groups {
@@ -131,7 +135,7 @@ pub async fn get_layout(db: &Db, username: &str) -> Result<SessionLayoutView> {
              ORDER BY placement.rank, placement.session_id",
         )
         .bind(&group.id)
-        .fetch_all(db)
+        .fetch_all(&mut *tx)
         .await?;
         group_views.push(SessionGroupView {
             id: group.id,
@@ -162,7 +166,7 @@ pub async fn get_layout(db: &Db, username: &str) -> Result<SessionLayoutView> {
          FROM session_placement_defaults
          ORDER BY selector_kind, selector_value",
     )
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?
     .into_iter()
     .map(|row| SessionPlacementDefaultView {
@@ -171,11 +175,13 @@ pub async fn get_layout(db: &Db, username: &str) -> Result<SessionLayoutView> {
         group_id: row.get("group_id"),
     })
     .collect();
-    Ok(SessionLayoutView {
+    let layout = SessionLayoutView {
         revision,
         spaces,
         defaults,
-    })
+    };
+    tx.commit().await?;
+    Ok(layout)
 }
 
 pub async fn placement(db: &Db, session_id: &str) -> Result<Option<SessionPlacementView>> {

@@ -98,8 +98,10 @@ const includeHistory = ref(false);
 const searchResults = ref<Session[] | null>(null);
 const searching = ref(false);
 let searchTimer: number | undefined;
+let searchGeneration = 0;
 watch([searchText, includeHistory], () => {
   window.clearTimeout(searchTimer);
+  const generation = ++searchGeneration;
   const query = searchText.value.trim();
   if (!query) {
     searchResults.value = null;
@@ -109,11 +111,12 @@ watch([searchText, includeHistory], () => {
   searching.value = true;
   searchTimer = window.setTimeout(async () => {
     try {
-      searchResults.value = await searchSessions(query, { history: includeHistory.value });
+      const result = await searchSessions(query, { history: includeHistory.value });
+      if (generation === searchGeneration) searchResults.value = result;
     } catch (cause) {
-      error.value = (cause as Error).message;
+      if (generation === searchGeneration) error.value = (cause as Error).message;
     } finally {
-      searching.value = false;
+      if (generation === searchGeneration) searching.value = false;
     }
   }, 160);
 });

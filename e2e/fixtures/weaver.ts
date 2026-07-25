@@ -289,67 +289,46 @@ async function deleteAllSessions(baseUrl: string) {
   }
 }
 
-interface SessionLayoutFixture {
-  revision: number;
-  spaces: {
-    id: string;
-    system_key: string | null;
-    groups: { id: string; system_key: string | null }[];
-  }[];
-}
-
 /** Restore the seeded User/GitHub/Ops layout between tests. Layout is durable
  *  by design, so session cleanup alone would otherwise leak custom/collapsed
  *  groups between tests that share a worker. */
-async function resetSessionLayout(baseUrl: string) {
+function resetSessionLayout(dbPath: string) {
   try {
-    let current = (await fetchJson(
-      `${baseUrl}/api/session-layout`,
-    )) as SessionLayoutFixture;
-    const userInbox = current.spaces
-      .find((space) => space.system_key === "user")
-      ?.groups.find((group) => group.system_key === "inbox")?.id;
-    if (!userInbox) return;
-
-    for (const space of current.spaces.filter((space) => !space.system_key)) {
-      current = (await fetchJson(
-        `${baseUrl}/api/session-layout/spaces/${space.id}`,
-        {
-          method: "DELETE",
-          body: JSON.stringify({
-            destination_group_id: userInbox,
-            expected_revision: current.revision,
-          }),
-        },
-      )) as SessionLayoutFixture;
-    }
-    for (const group of current.spaces
-      .filter((space) => space.system_key)
-      .flatMap((space) => space.groups)
-      .filter((group) => !group.system_key)) {
-      current = (await fetchJson(
-        `${baseUrl}/api/session-layout/groups/${group.id}`,
-        {
-          method: "DELETE",
-          body: JSON.stringify({
-            destination_group_id: userInbox,
-            expected_revision: current.revision,
-          }),
-        },
-      )) as SessionLayoutFixture;
-    }
-    await Promise.all(
-      current.spaces.flatMap((space) =>
-        space.groups.map((group) =>
-          fetchJson(
-            `${baseUrl}/api/session-layout/groups/${group.id}/preference`,
-            {
-              method: "PUT",
-              body: JSON.stringify({ collapsed: false }),
-            },
-          ),
-        ),
-      ),
+    execFileSync(
+      "sqlite3",
+      [
+        dbPath,
+        `PRAGMA busy_timeout=5000;
+         PRAGMA foreign_keys=ON;
+         BEGIN IMMEDIATE;
+         DELETE FROM session_placement_defaults;
+         DELETE FROM user_session_group_state;
+         DELETE FROM session_groups;
+         DELETE FROM session_spaces;
+         INSERT INTO session_spaces (id, name, rank, system_key, created_at, updated_at)
+         VALUES
+           ('space-user', 'User', 0, 'user', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+           ('space-github', 'GitHub', 1, 'github', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+           ('space-ops', 'Ops', 2, 'ops', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+         INSERT INTO session_groups
+           (id, space_id, name, rank, system_key, created_at, updated_at)
+         VALUES
+           ('group-user-inbox', 'space-user', 'Inbox', 0, 'inbox', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+           ('group-github-inbox', 'space-github', 'Inbox', 0, 'inbox', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+           ('group-ops-inbox', 'space-ops', 'Inbox', 0, 'inbox', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+         INSERT INTO session_placement_defaults (selector_kind, selector_value, group_id)
+         VALUES
+           ('origin', '*', 'group-user-inbox'),
+           ('origin', 'user', 'group-user-inbox'),
+           ('origin', 'github', 'group-github-inbox'),
+           ('origin', 'watch', 'group-ops-inbox'),
+           ('origin', 'actions', 'group-ops-inbox'),
+           ('origin', 'ops', 'group-ops-inbox'),
+           ('origin', 'automation', 'group-ops-inbox');
+         UPDATE session_layout_state SET revision = revision + 1 WHERE id = 1;
+         COMMIT;`,
+      ],
+      { stdio: "pipe" },
     );
   } catch {
     // Best effort: a test failure should remain the primary diagnostic.
@@ -769,7 +748,7 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
 
     // Reset for the next test in this worker.
     await deleteAllSessions(baseUrl);
-    await resetSessionLayout(baseUrl);
+    resetSessionLayout(childEnv.WEAVER_DB!);
     deleteAllAutomationRuns(childEnv.WEAVER_DB!);
     await deleteAllWatches(baseUrl);
     await deleteAllIssues(baseUrl);

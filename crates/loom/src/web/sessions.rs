@@ -154,13 +154,51 @@ pub(super) async fn search_sessions(
 }
 
 fn view_attention(view: &SessionView) -> &str {
-    if view.branch.tags.iter().any(|tag| tag.value == "blocked") {
+    if view.status == "archived" {
+        "ok"
+    } else if view.branch.tags.iter().any(|tag| tag.value == "blocked") {
         "blocked"
     } else if view.branch.tags.iter().any(|tag| tag.value == "attention") {
         "attention"
     } else {
         "ok"
     }
+}
+
+fn append_search_values(value: &Value, haystack: &mut String) {
+    match value {
+        Value::Null => {}
+        Value::Bool(value) => {
+            haystack.push(' ');
+            haystack.push_str(if *value { "true" } else { "false" });
+        }
+        Value::Number(value) => {
+            haystack.push(' ');
+            haystack.push_str(&value.to_string());
+        }
+        Value::String(value) => {
+            haystack.push(' ');
+            haystack.push_str(value);
+        }
+        Value::Array(values) => {
+            for value in values {
+                append_search_values(value, haystack);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                append_search_values(value, haystack);
+            }
+        }
+    }
+}
+
+fn search_haystack(view: &SessionView) -> String {
+    let mut haystack = String::new();
+    if let Ok(value) = serde_json::to_value(view) {
+        append_search_values(&value, &mut haystack);
+    }
+    haystack.to_lowercase()
 }
 
 async fn collect_sessions(
@@ -222,11 +260,9 @@ async fn collect_sessions(
             if let Some(needle) = &needle {
                 // The wire view already carries every promised search facet:
                 // qualified placement, title/goal, repo/branch, issue/PR, tags,
-                // status, profile, and provenance. Searching its text keeps the
-                // REST and CLI vocabulary synchronized as fields evolve.
-                let hay = serde_json::to_string(&view)
-                    .unwrap_or_default()
-                    .to_lowercase();
+                // status, profile, and provenance. Searching only its values
+                // keeps that vocabulary synchronized without matching JSON keys.
+                let hay = search_haystack(&view);
                 if !hay.contains(needle) {
                     continue;
                 }

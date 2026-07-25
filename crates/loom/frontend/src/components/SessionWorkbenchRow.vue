@@ -71,19 +71,17 @@ function title() {
     @dragover.stop.prevent="emit('dragOver')"
     @drop.stop.prevent="emit('drop')"
   >
-    <button
+    <span
       v-if="session.status !== 'archived'"
-      type="button"
       draggable="true"
       data-testid="session-drag"
-      :aria-label="`Move ${session.branch.title || session.branch.name}`"
-      class="relative z-10 mt-0.5 cursor-grab text-faint opacity-50 hover:text-fg focus-visible:opacity-100 group-hover:opacity-100"
+      aria-hidden="true"
+      class="relative z-10 mt-0.5 cursor-grab text-faint opacity-50 hover:text-fg group-hover:opacity-100"
       @dragstart="emit('dragStart', $event)"
       @dragend="emit('dragEnd')"
-      @click.prevent
     >
       ⠿
-    </button>
+    </span>
     <span v-else class="w-3" aria-hidden="true"></span>
 
     <input

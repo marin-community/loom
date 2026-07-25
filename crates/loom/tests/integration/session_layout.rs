@@ -142,6 +142,15 @@ async fn layout_crud_moves_conflicts_search_events_and_cli_share_one_contract() 
         .await
         .unwrap();
     assert_eq!(prompt_search.as_array().unwrap().len(), 1);
+    let field_name_search = ts
+        .client
+        .get("/api/sessions/search?q=mcp_policy")
+        .await
+        .unwrap();
+    assert!(
+        field_name_search.as_array().unwrap().is_empty(),
+        "JSON field names are not searchable values"
+    );
     ts.client
         .put(
             &format!("/api/sessions/{first_id}/tags/triage"),
@@ -161,6 +170,16 @@ async fn layout_crud_moves_conflicts_search_events_and_cli_share_one_contract() 
         .await
         .unwrap();
     assert_eq!(needs.as_array().unwrap().len(), 1);
+    let tag_note = ts
+        .client
+        .get("/api/sessions/search?q=needs%20a%20decision")
+        .await
+        .unwrap();
+    assert_eq!(
+        tag_note.as_array().unwrap().len(),
+        1,
+        "nested tag values remain searchable"
+    );
 
     let delete_error = reqwest::Client::new()
         .delete(format!(
@@ -348,6 +367,20 @@ async fn layout_crud_moves_conflicts_search_events_and_cli_share_one_contract() 
         .spaces
         .iter()
         .all(|space| space.id != custom_id));
+
+    ts.client
+        .post(&format!("/api/sessions/{first_id}/archive"), json!({}))
+        .await
+        .unwrap();
+    let archived_needs = ts
+        .client
+        .get("/api/sessions/search?q=&history=true&attention=needs")
+        .await
+        .unwrap();
+    assert!(
+        archived_needs.as_array().unwrap().is_empty(),
+        "archived sessions are calm even when they retain old attention tags"
+    );
 
     for id in [first_id, second_id] {
         ts.client
