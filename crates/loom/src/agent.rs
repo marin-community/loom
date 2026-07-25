@@ -1154,7 +1154,6 @@ fn force_codex_apps_disabled(
     Ok(())
 }
 
-/// Base `CODEX_CONFIG` for the Codex ACP adapter.
 fn codex_acp_config(model: &str, effort: &str) -> Map<String, Value> {
     let mut cfg = Map::new();
     let model = model.trim();
@@ -2005,9 +2004,10 @@ mod tests {
             "",
             "",
         );
-        assert!(
-            fresh.contains("codex --disable apps \"$(cat '/x/goal.txt')\"; "),
-            "got: {fresh}"
+        // This rendered shell command is the terminal runtime contract.
+        assert_eq!(
+            fresh,
+            "codex --disable apps \"$(cat '/x/goal.txt')\"; exec \"${SHELL:-/bin/sh}\""
         );
         // Codex has no scoped resume, so adopt re-launches fresh with the primer.
         let adopt = launch_script(
@@ -2018,9 +2018,9 @@ mod tests {
             "",
             "",
         );
-        assert!(
-            adopt.contains("codex --disable apps \"$(cat '/x/goal.txt')\"; "),
-            "got: {adopt}"
+        assert_eq!(
+            adopt,
+            "codex --disable apps \"$(cat '/x/goal.txt')\"; exec \"${SHELL:-/bin/sh}\""
         );
     }
 
@@ -2036,9 +2036,9 @@ mod tests {
             "",
             "",
         );
-        assert!(
-            fresh.contains("codex --disable apps \"$(cat '/x/primer.txt')\"; "),
-            "got: {fresh}"
+        assert_eq!(
+            fresh,
+            "codex --disable apps \"$(cat '/x/primer.txt')\"; exec \"${SHELL:-/bin/sh}\""
         );
     }
 
@@ -2189,11 +2189,10 @@ mod tests {
             "gpt-5.5",
             "xhigh",
         );
-        assert!(
-            script.contains(
-                "codex --disable apps --model gpt-5.5 -c model_reasoning_effort=\\\"xhigh\\\""
-            ),
-            "got: {script}"
+        assert_eq!(
+            script,
+            "codex --disable apps --model gpt-5.5 -c model_reasoning_effort=\\\"xhigh\\\" \
+             \"$(cat '/x/goal.txt')\"; exec \"${SHELL:-/bin/sh}\""
         );
     }
 
