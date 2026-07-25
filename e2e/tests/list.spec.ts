@@ -319,4 +319,104 @@ test.describe('session list view', () => {
     );
     expect(serialized).not.toContain('Sensitive prompt text');
   });
+
+  test('leaving detail for another surface cancels the backtrack candidate', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({
+      goal: 'Do not miscount navigation',
+      name: 'cancel-backtrack',
+    });
+    await weaver.seedIssue(s, 'Leave for this issue');
+    await page.addInitScript(() => {
+      const target = window as Window & { __workbenchMetrics?: unknown[] };
+      target.__workbenchMetrics = [];
+      window.addEventListener('loom:ui-metric', (event) => {
+        target.__workbenchMetrics!.push((event as CustomEvent).detail);
+      });
+    });
+
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const metrics = (
+            window as Window & {
+              __workbenchMetrics?: Record<string, unknown>[];
+            }
+          ).__workbenchMetrics;
+          return metrics?.find((metric) => metric.name === 'session_open');
+        }),
+      )
+      .toMatchObject({ name: 'session_open', source: 'direct' });
+
+    await page.getByRole('button', { name: /Details/ }).click();
+    await page.getByRole('link', { name: /\d+ open issues?/ }).click();
+    await expect(page).toHaveURL(/\/issues\?/);
+    await page.locator('[data-rail="sessions"]').click();
+    await expect(page).toHaveURL(`${weaver.baseUrl}/`);
+    await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    expect(
+      await page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __workbenchMetrics?: Record<string, unknown>[];
+            }
+          ).__workbenchMetrics?.filter((metric) => metric.name === 'session_backtrack') ?? [],
+      ),
+    ).toHaveLength(0);
+  });
+
+  test('a direct detail-to-list return still records a backtrack', async ({ page, weaver }) => {
+    const s = await weaver.seedSession({
+      goal: 'Count my direct return',
+      name: 'direct-backtrack',
+    });
+    await page.addInitScript(() => {
+      const target = window as Window & { __workbenchMetrics?: unknown[] };
+      target.__workbenchMetrics = [];
+      window.addEventListener('loom:ui-metric', (event) => {
+        target.__workbenchMetrics!.push((event as CustomEvent).detail);
+      });
+    });
+
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          (
+            window as Window & {
+              __workbenchMetrics?: Record<string, unknown>[];
+            }
+          ).__workbenchMetrics?.some((metric) => metric.name === 'session_open'),
+        ),
+      )
+      .toBe(true);
+    await page.getByRole('link', { name: '← sessions' }).click();
+    await expect(page).toHaveURL(`${weaver.baseUrl}/`);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const metrics = (
+            window as Window & {
+              __workbenchMetrics?: Record<string, unknown>[];
+            }
+          ).__workbenchMetrics;
+          return metrics?.find((metric) => metric.name === 'session_backtrack');
+        }),
+      )
+      .toMatchObject({
+        name: 'session_backtrack',
+        session_id: s.id,
+        source: 'direct',
+      });
+  });
 });

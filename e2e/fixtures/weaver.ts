@@ -168,6 +168,9 @@ export interface WeaverFixture {
   /** POST /api/sessions/{id}/archive — tear the session down (branch kept), so a
    *  test can set up the archived state it wants to act on. */
   archiveSession(id: string): Promise<void>;
+  /** Mark a seeded session as engine-managed infrastructure in the worker's
+   *  private database. Normal fleet inventory must hide it. */
+  setManaged(id: string, managedBy?: string): Promise<void>;
   /** Flip a session's status by writing a hook event row via `weaver hook`. */
   hook(session: Session, event: "working" | "waiting" | "idle"): Promise<void>;
   /** Declare the agent's status (level + message) via `weaver status`. It
@@ -255,13 +258,13 @@ async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
 }
 
 /** Delete every session on a server (and its branch/worktree), best-effort.
- *  Includes archived and automation-class sessions (`?archived=true&automation=true`)
- *  — `/api/sessions` hides both by default, so without this such a session survives the per-test wipe and
- *  leaks into the next test, breaking count-based assertions ("0 sessions"). */
+ *  Uses the explicit operator inventory so archived, automation-class, and
+ *  engine-managed rows cannot survive the per-test wipe and leak into later
+ *  count-based assertions. */
 async function deleteAllSessions(baseUrl: string) {
   try {
     const all = (await fetchJson(
-      `${baseUrl}/api/sessions?archived=true&automation=true`,
+      `${baseUrl}/api/sessions?archived=true&automation=true&managed=true`,
     )) as Session[];
     for (const s of all) {
       try {
@@ -625,6 +628,18 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
         await fetchJson(`${baseUrl}/api/sessions/${id}/archive`, {
           method: "POST",
         });
+      },
+
+      async setManaged(id, managedBy = "watch-e2e") {
+        const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
+        execFileSync(
+          "sqlite3",
+          [
+            childEnv.WEAVER_DB!,
+            `PRAGMA busy_timeout=5000; UPDATE sessions SET managed_by = ${quote(managedBy)} WHERE id = ${quote(id)};`,
+          ],
+          { stdio: "pipe" },
+        );
       },
 
       async hook(session, event) {

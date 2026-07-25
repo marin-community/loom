@@ -533,7 +533,7 @@ onUnmounted(() => {
             :source="view.content"
             :refs="view.refs.issues"
             :artifact-name="selected"
-            :rev="view.meta.rev"
+            :rev="viewRev ?? view.meta.rev"
             class="h-full w-full"
           />
 

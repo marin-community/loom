@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, watch } from 'vue';
+import { ref, computed, nextTick } from 'vue';
 import { useRouter } from 'vue-router';
 import type { AgentMetadata, Session, WeaverEvent } from '../types';
 import { handoffSession, listAgents } from '../api';
@@ -41,12 +41,24 @@ const props = withDefaults(
 const emit = defineEmits<{ reload: []; openEditor: [] }>();
 
 const router = useRouter();
-const fleetHref = computed(() =>
-  props.ws.class === 'automation' ? { path: '/', query: { view: 'automation' } } : '/',
-);
-const fleetLabel = computed(() =>
-  props.ws.class === 'automation' ? '← automation' : '← sessions',
-);
+const fleetHref = computed(() => {
+  if (props.ws.class === 'automation') {
+    return {
+      path: '/',
+      query:
+        props.ws.status === 'archived'
+          ? { view: 'automation', history: 'true' }
+          : { view: 'automation' },
+    };
+  }
+  return props.ws.status === 'archived' ? { path: '/', query: { history: 'true' } } : '/';
+});
+const fleetLabel = computed(() => {
+  if (props.ws.class === 'automation') {
+    return props.ws.status === 'archived' ? '← automation history' : '← automation';
+  }
+  return props.ws.status === 'archived' ? '← history' : '← sessions';
+});
 // The detail page's subject is the session itself, so a successful Remove has to
 // leave: route back to the fleet list rather than reload a page that is gone.
 const actions = useSessionActions(
@@ -62,12 +74,21 @@ const lifecycle = computed(() => lifecycleActions(props.ws));
 
 const showDetails = ref(false);
 const detailsButton = ref<HTMLButtonElement | null>(null);
-watch(showDetails, (open, wasOpen) => {
-  if (!open && wasOpen) void nextTick(() => detailsButton.value?.focus());
-});
+type DetailsCloseReason = 'toggle' | 'escape' | 'outside' | 'navigation' | 'action';
+
+function closeDetails(reason: DetailsCloseReason) {
+  if (!showDetails.value) return;
+  showDetails.value = false;
+  if (reason === 'escape') void nextTick(() => detailsButton.value?.focus());
+}
+
+function toggleDetails() {
+  if (showDetails.value) closeDetails('toggle');
+  else showDetails.value = true;
+}
 
 function openEditor() {
-  showDetails.value = false;
+  closeDetails('action');
   emit('openEditor');
 }
 
@@ -113,6 +134,39 @@ const lastActivity = computed(() => timeAgo(props.ws.last_activity_at));
 const signals = computed(() => signalChips(props.ws));
 const quiet = computed(() => quietTags(props.ws));
 const keepsSession = computed(() => autoArchiveDisabled(props.ws));
+
+interface SurfacedLink {
+  href: string;
+  label: string;
+  source: string;
+}
+
+const URL_RE = /https?:\/\/[^\s)\]>"'`]+/g;
+const TEXT_KEYS = ['note', 'text', 'message'] as const;
+const surfacedLinks = computed<SurfacedLink[]>(() => {
+  const links: SurfacedLink[] = [];
+  const seen = new Set<string>();
+  const pushText = (text: unknown, source: string) => {
+    if (typeof text !== 'string') return;
+    for (const raw of text.match(URL_RE) ?? []) {
+      const href = raw.replace(/[.,;:]+$/, '');
+      const key = href.replace(/\/+$/, '');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      links.push({ href, label: href.replace(/^https?:\/\//, ''), source });
+      if (links.length === 12) return;
+    }
+  };
+
+  pushText(statusMessage.value, 'current status');
+  for (const event of [...props.events].reverse()) {
+    for (const key of TEXT_KEYS) {
+      pushText(event.data?.[key], timeAgo(event.created_at));
+      if (links.length === 12) return links;
+    }
+  }
+  return links;
+});
 
 function statusEventLine(event: WeaverEvent): string {
   const data = event.data ?? {};
@@ -197,7 +251,7 @@ async function submitHandoff() {
       effort: handoffEffort.value,
     });
     handoffOpen.value = false;
-    showDetails.value = false;
+    closeDetails('action');
     notice.value = `Handed off to ${handoffAgent.value}.`;
     window.dispatchEvent(new CustomEvent('loom:acp-handoff', { detail: { id: props.ws.id } }));
     await emit('reload');
@@ -287,11 +341,11 @@ async function submitHandoff() {
             :aria-expanded="showDetails"
             aria-controls="session-details-popover"
             class="min-h-7 rounded px-2 text-xs font-medium text-muted hover:bg-subtle hover:text-fg"
-            @click="showDetails = !showDetails"
+            @click="toggleDetails"
           >
             Details ⋯
           </button>
-          <SessionDetailsPopover :ws="ws" v-model:open="showDetails">
+          <SessionDetailsPopover :ws="ws" :open="showDetails" @close="closeDetails">
             <template #actions>
               <div class="space-y-1">
                 <button
@@ -417,7 +471,10 @@ async function submitHandoff() {
             <template #context>
               <div class="space-y-3">
                 <nav class="flex flex-wrap gap-2 text-xs" aria-label="Session resources">
-                  <router-link :to="`/s/${ws.id}/artifacts`" class="text-accent hover:underline"
+                  <router-link
+                    :to="`/s/${ws.id}/artifacts`"
+                    class="text-accent hover:underline"
+                    @click="closeDetails('navigation')"
                     >Artifacts</router-link
                   >
                   <router-link
@@ -427,6 +484,7 @@ async function submitHandoff() {
                       query: { repo_root: ws.branch.repo_root, branch: ws.branch.branch },
                     }"
                     class="text-accent hover:underline"
+                    @click="closeDetails('navigation')"
                     >{{ ws.branch.open_issue_count }} open issue{{
                       ws.branch.open_issue_count === 1 ? '' : 's'
                     }}</router-link
@@ -445,6 +503,29 @@ async function submitHandoff() {
                   >
                     {{ ws.branch.goal }}
                   </p>
+                </details>
+
+                <details v-if="surfacedLinks.length" class="rounded border border-line bg-input">
+                  <summary
+                    class="min-h-7 cursor-pointer px-2 py-1 text-xs font-medium text-muted hover:text-fg"
+                  >
+                    Surfaced links ({{ surfacedLinks.length }})
+                  </summary>
+                  <ul
+                    data-testid="session-links"
+                    class="max-h-32 space-y-1 overflow-y-auto border-t border-line px-2 py-1.5 text-xs"
+                  >
+                    <li v-for="link in surfacedLinks" :key="link.href" class="min-w-0">
+                      <a
+                        :href="link.href"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="block truncate text-accent hover:underline"
+                        >{{ link.label }}</a
+                      >
+                      <span class="text-2xs text-faint">{{ link.source }}</span>
+                    </li>
+                  </ul>
                 </details>
 
                 <GithubAssociations :ws="ws" @reload="emit('reload')" />

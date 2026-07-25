@@ -66,3 +66,8 @@ export function recordSessionListReturn(): void {
   });
   activeSession = null;
 }
+
+/** Abandons a wrong-open candidate after navigation to a different surface. */
+export function cancelSessionBacktrack(): void {
+  activeSession = null;
+}

@@ -270,7 +270,7 @@ record, cursor, source, and authorization contract.
 Once a branch's PR merges, loom archives the session automatically — tearing
 down its terminal and worktree while keeping the branch and its weaver history,
 the same as the Archive button. To keep one session until you archive it
-yourself, choose **Disable auto-archive** from that session's **Manage** menu, or
+yourself, choose **Disable auto-archive** from that session's **Details** popover, or
 set its quiet opt-out label:
 
 ```sh

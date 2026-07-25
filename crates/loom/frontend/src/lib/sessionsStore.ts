@@ -1,5 +1,5 @@
 import { ref } from 'vue';
-import { ApiError, listRuns, listSessions } from '../api';
+import { listRuns, listSessions } from '../api';
 import type { AutomationRun, Session } from '../types';
 
 // One shared snapshot of the fleet. The session list, the status bar, and the
@@ -21,19 +21,6 @@ const online = ref(true);
 
 let inflight: Promise<void> | null = null;
 
-async function listInventory(): Promise<Session[]> {
-  try {
-    return await listSessions({ archived: true, automation: true, managed: true });
-  } catch (error) {
-    // Managed warm sessions are an admin inventory. A narrower principal still
-    // gets the ordinary fleet instead of making the whole UI appear offline.
-    if (error instanceof ApiError && error.status === 403) {
-      return listSessions({ archived: true, automation: true });
-    }
-    throw error;
-  }
-}
-
 // Pull the whole inventory, archived and automation-class sessions included —
 // the superset the Workspace, Automation, and explicit History views need (the
 // status bar and each view project disjoint honest counts). Concurrent callers
@@ -42,7 +29,10 @@ async function refresh(): Promise<void> {
   if (inflight) return inflight;
   inflight = (async () => {
     try {
-      const [nextSessions, nextRuns] = await Promise.all([listInventory(), listRuns()]);
+      const [nextSessions, nextRuns] = await Promise.all([
+        listSessions({ archived: true, automation: true }),
+        listRuns(),
+      ]);
       sessions.value = nextSessions;
       runs.value = nextRuns;
       online.value = true;

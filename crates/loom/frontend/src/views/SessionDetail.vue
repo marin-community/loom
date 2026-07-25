@@ -9,7 +9,7 @@ import {
   onDeactivated,
   onUnmounted,
 } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router';
 import { get, ideInfo } from '../api';
 import type { Session, WeaverEvent } from '../types';
 import SessionTerminals from '../components/SessionTerminals.vue';
@@ -20,7 +20,7 @@ import SessionTabs from '../components/SessionTabs.vue';
 import SessionConversation from '../components/SessionConversation.vue';
 import ArtifactsPanel from '../components/ArtifactsPanel.vue';
 import { useFleet } from '../lib/sessionsStore';
-import { completeSessionOpen } from '../lib/workbenchMetrics';
+import { cancelSessionBacktrack, completeSessionOpen } from '../lib/workbenchMetrics';
 
 // Named + keyed-by-id in App.vue's <keep-alive> so the page (and its live
 // terminal) stays warm: every `/s/:id…` path (the work tabs and the Artifacts
@@ -263,6 +263,10 @@ onActivated(() => {
   requestAnimationFrame(() => completeSessionOpen(props.id));
   loadAll();
   openStream();
+});
+onBeforeRouteLeave((to) => {
+  const staysInSession = to.params.id === props.id && to.path.startsWith(`/s/${props.id}`);
+  if (to.path !== '/' && !staysInSession) cancelSessionBacktrack();
 });
 onDeactivated(closeStream);
 onUnmounted(() => {

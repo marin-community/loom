@@ -851,11 +851,61 @@ test.describe('acp conversation', () => {
     // The fake plan has a completed + an in_progress entry.
     await expect(plan.getByText('first step')).toBeVisible();
     await expect(plan.getByText('second step')).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const active = document.activeElement;
+          return !!active && document.querySelector('[data-testid="acp-rail"]')?.contains(active);
+        }),
+      )
+      .toBe(true);
 
-    await rail.getByRole('button').first().focus();
     await page.keyboard.press('Escape');
     await expect(rail).toHaveCount(0);
     await expect(toggle).toBeFocused();
+  });
+
+  test('expanded ACP details stay reachable in a short viewport', async ({ page, weaver }) => {
+    await openAcp(page, weaver, {
+      goal: `plan|say:${Array.from(
+        { length: 36 },
+        (_, index) => `Operator context line ${index + 1}`,
+      ).join(' ')}`,
+      name: 'short-acp-details',
+    });
+    await page.setViewportSize({ width: 900, height: 320 });
+
+    await page.getByRole('button', { name: /Details/ }).click();
+    const scroller = page.getByTestId('details-scroll');
+    const goalSummary = page.getByText('Goal / prompt', { exact: true });
+    await goalSummary.scrollIntoViewIfNeeded();
+    await goalSummary.click();
+    await page.getByTestId('session-goal-context').scrollIntoViewIfNeeded();
+    await expect(page.getByTestId('session-goal-context')).toBeVisible();
+
+    const handoff = page.getByTestId('action-handoff');
+    await handoff.scrollIntoViewIfNeeded();
+    await handoff.click();
+    const form = page.getByTestId('handoff-form');
+    await form.scrollIntoViewIfNeeded();
+    await expect(form).toBeVisible();
+
+    const bounds = await scroller.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      overflowY: getComputedStyle(element).overflowY,
+    }));
+    expect(bounds.scrollHeight).toBeGreaterThan(bounds.clientHeight);
+    expect(bounds.overflowY).toMatch(/auto|scroll/);
+
+    for (const id of ['action-archive', 'action-remove']) {
+      const action = page.getByTestId(id);
+      await action.scrollIntoViewIfNeeded();
+      const box = await action.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.y).toBeGreaterThanOrEqual(0);
+      expect(box!.y + box!.height).toBeLessThanOrEqual(320);
+    }
   });
 
   test('renders in both themes', async ({ page, weaver }) => {

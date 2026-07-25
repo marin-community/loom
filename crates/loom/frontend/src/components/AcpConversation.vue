@@ -910,6 +910,24 @@ const latestPlan = computed<PlanEntry[]>(() => {
 });
 const contextOpen = ref(false);
 const contextButton = ref<HTMLButtonElement | null>(null);
+const contextRail = ref<HTMLElement | null>(null);
+
+async function toggleContext(event: MouseEvent) {
+  if (contextOpen.value) {
+    contextOpen.value = false;
+    return;
+  }
+  contextOpen.value = true;
+  // Keyboard activation emits a click with detail=0. Move into the disclosure
+  // so an immediate Escape is handled there; pointer activation keeps focus on
+  // the trigger the user clicked.
+  if (event.detail !== 0) return;
+  await nextTick();
+  const first = contextRail.value?.querySelector<HTMLElement>(
+    'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled)',
+  );
+  (first ?? contextRail.value)?.focus();
+}
 
 function closeContext() {
   if (!contextOpen.value) return;
@@ -1283,7 +1301,7 @@ function goTo(anchor: string) {
           data-testid="acp-context-toggle"
           :aria-expanded="contextOpen"
           aria-controls="acp-context-rail"
-          @click="contextOpen = !contextOpen"
+          @click="toggleContext"
         >
           Context
         </button>
@@ -1607,9 +1625,11 @@ function goTo(anchor: string) {
         <nav
           v-if="contextOpen && hasContext"
           id="acp-context-rail"
+          ref="contextRail"
           class="absolute inset-y-0 right-0 z-20 flex w-[min(18rem,85%)] shrink-0 flex-col overflow-auto border-l border-line bg-surface px-3 py-2 shadow-lg lg:static lg:w-56 lg:bg-transparent lg:py-0 lg:pr-0 lg:shadow-none"
           data-testid="acp-rail"
           aria-label="Conversation context"
+          tabindex="-1"
           @keydown.esc.stop.prevent="closeContext"
         >
           <template v-if="model.toc.length">

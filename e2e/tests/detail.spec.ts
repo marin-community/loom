@@ -73,6 +73,83 @@ test.describe('session detail view', () => {
     await expect(page.locator('[data-term-tab="agent"]')).toBeVisible();
   });
 
+  test('outside dismissal preserves the focus target that was clicked', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({
+      goal: 'Dismiss lightly',
+      name: 'outside-focus',
+    });
+
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await page.getByRole('button', { name: /Details/ }).click();
+    await expect(page.getByTestId('details-popover')).toBeVisible();
+
+    const agentTab = page.locator('[data-tab="terminal"]');
+    await agentTab.click();
+    await expect(page.getByTestId('details-popover')).toHaveCount(0);
+    await expect(agentTab).toBeFocused();
+  });
+
+  test('resource navigation closes Details across cached session routes', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({
+      goal: 'Navigate cleanly',
+      name: 'details-navigation',
+    });
+    await weaver.seedIssue(s, 'Scoped navigation');
+
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await page.getByRole('button', { name: /Details/ }).click();
+    await page.getByTestId('details-popover').getByRole('link', { name: 'Artifacts' }).click();
+    await expect(page).toHaveURL(new RegExp(`/s/${s.id}/artifacts`));
+    await expect(page.getByTestId('details-popover')).toHaveCount(0);
+
+    await page.locator('[data-tab="terminal"]').click();
+    await page.getByRole('button', { name: /Details/ }).click();
+    await page
+      .getByTestId('details-popover')
+      .getByRole('link', { name: /\d+ open issues?/ })
+      .click();
+    await expect(page).toHaveURL(/\/issues\?/);
+    await expect(page.getByTestId('details-popover')).toHaveCount(0);
+
+    await page.goBack();
+    await expect(page).toHaveURL(`${weaver.baseUrl}/s/${s.id}`);
+    await expect(page.getByTestId('details-popover')).toHaveCount(0);
+  });
+
+  test('Details preserves bounded, deduplicated surfaced links', async ({ page, weaver }) => {
+    const s = await weaver.seedSession({
+      goal: 'Keep operational links',
+      name: 'surfaced-links',
+    });
+    for (let index = 0; index < 13; index += 1) {
+      await weaver.setStatus(
+        s,
+        'attention',
+        `Review https://example.test/doc/${index} before continuing`,
+      );
+    }
+    await weaver.setStatus(s, 'attention', 'Latest: https://example.test/doc/12.');
+
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await page.getByRole('button', { name: /Details/ }).click();
+    await page.getByText('Surfaced links (12)', { exact: true }).click();
+
+    const links = page.getByTestId('session-links');
+    await expect(links.getByRole('link')).toHaveCount(12);
+    await expect(links.getByRole('link', { name: 'example.test/doc/12' })).toHaveCount(1);
+    await expect(links.getByRole('link', { name: 'example.test/doc/12' })).toHaveAttribute(
+      'href',
+      'https://example.test/doc/12',
+    );
+    await expect(links.getByText('example.test/doc/0', { exact: true })).toHaveCount(0);
+  });
+
   test('sets the browser tab title to the open session', async ({ page, weaver }) => {
     const s = await weaver.seedSession({
       goal: 'Name my tab',

@@ -137,6 +137,57 @@ test.describe('artifacts surface', () => {
     await expect(page.locator('.markdown-body')).toContainText('A user revision.');
   });
 
+  test('each viewed revision keeps an independent reading position', async ({ page, weaver }) => {
+    const session = await weaver.seedSession({
+      goal: 'compare revisions',
+      name: 'artifact-revision-scroll',
+    });
+    await weaver.writeArtifact(
+      session,
+      'notes',
+      longDoc().replace('# Long operational notes', '# Revision one'),
+      { title: 'Notes' },
+    );
+    await weaver.writeArtifact(
+      session,
+      'notes',
+      longDoc().replace('# Long operational notes', '# Revision two'),
+      { title: 'Notes' },
+    );
+
+    await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/notes`);
+    const scroll = page.getByTestId('artifact-scroll');
+    const rev = page.getByTestId('artifact-rev');
+    await expect(page.locator('.markdown-body h1')).toContainText('Revision two');
+
+    await scroll.evaluate((element) => {
+      element.scrollTop = 640;
+    });
+    const latestTop = await scroll.evaluate((element) => element.scrollTop);
+
+    await rev.selectOption('1');
+    await expect(page.locator('.markdown-body h1')).toContainText('Revision one');
+    await scroll.evaluate((element) => {
+      element.scrollTop = 1_420;
+    });
+    const oldTop = await scroll.evaluate((element) => element.scrollTop);
+    expect(oldTop).toBeGreaterThan(latestTop + 500);
+
+    await rev.selectOption('');
+    await expect(page.locator('.markdown-body h1')).toContainText('Revision two');
+    await expect
+      .poll(async () =>
+        Math.abs((await scroll.evaluate((element) => element.scrollTop)) - latestTop),
+      )
+      .toBeLessThanOrEqual(5);
+
+    await rev.selectOption('1');
+    await expect(page.locator('.markdown-body h1')).toContainText('Revision one');
+    await expect
+      .poll(async () => Math.abs((await scroll.evaluate((element) => element.scrollTop)) - oldTop))
+      .toBeLessThanOrEqual(5);
+  });
+
   test('deleting an artifact removes it and falls back to the next', async ({ page, weaver }) => {
     const session = await weaver.seedSession({
       goal: '# Session goal\n\nClean up the docs.',
@@ -237,6 +288,13 @@ test.describe('artifacts surface', () => {
     // Docked: the artifact fills the work area, so the terminal is hidden.
     await expect(page.locator('[data-term-tab="agent"]')).toBeHidden();
 
+    const dockedScroll = page.getByTestId('artifact-scroll');
+    await dockedScroll.evaluate((element) => {
+      element.scrollTop = 800;
+    });
+    const dockedTop = await dockedScroll.evaluate((element) => element.scrollTop);
+    expect(dockedTop).toBeGreaterThan(700);
+
     // Pop out → a rail appears beside the terminal: both visible at once.
     await page.getByTestId('artifact-pop').click();
     await expect(page.getByTestId('artifact-rail-close')).toBeVisible();
@@ -256,13 +314,17 @@ test.describe('artifacts surface', () => {
     expect(bounds.clientHeight).toBeLessThan(await page.evaluate(() => window.innerHeight));
     expect(bounds.scrollHeight).toBeGreaterThan(bounds.clientHeight + 1_000);
     expect(bounds.overflowY).toMatch(/auto|scroll/);
+    await expect
+      .poll(async () =>
+        Math.abs((await poppedScroll.evaluate((element) => element.scrollTop)) - dockedTop),
+      )
+      .toBeLessThanOrEqual(5);
 
     await poppedScroll.evaluate((element) => {
-      element.scrollTop = element.scrollHeight;
+      element.scrollTop = 1_600;
     });
-    await expect
-      .poll(() => poppedScroll.evaluate((element) => element.scrollTop))
-      .toBeGreaterThan(1_000);
+    const poppedTop = await poppedScroll.evaluate((element) => element.scrollTop);
+    expect(poppedTop).toBeGreaterThan(dockedTop + 500);
 
     // Dock back → the rail closes and the artifact returns to the work-area tab
     // at the same reading position, rather than jumping to the top.
@@ -271,8 +333,13 @@ test.describe('artifacts surface', () => {
     await expect(page.locator('[data-term-tab="agent"]')).toBeHidden();
     await expect(page.locator('.markdown-body h1')).toContainText('Long operational notes');
     await expect
-      .poll(() => page.getByTestId('artifact-scroll').evaluate((element) => element.scrollTop))
-      .toBeGreaterThan(1_000);
+      .poll(async () =>
+        Math.abs(
+          (await page.getByTestId('artifact-scroll').evaluate((element) => element.scrollTop)) -
+            poppedTop,
+        ),
+      )
+      .toBeLessThanOrEqual(5);
   });
 
   test('Artifacts is an in-page tab — terminal ⇄ artifacts stays on the session page', async ({
