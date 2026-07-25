@@ -12,7 +12,10 @@ test.describe('issues pane', () => {
     page,
     weaver,
   }) => {
-    const session = await weaver.seedSession({ goal: 'do the thing', name: 'feature' });
+    const session = await weaver.seedSession({
+      goal: 'do the thing',
+      name: 'feature',
+    });
     const issue = await weaver.seedIssue(session, 'wire up the routes');
     await weaver.tagIssue(issue.id, 'priority', 'high');
 
@@ -54,6 +57,192 @@ test.describe('issues pane', () => {
     expect(persisted.find((i) => i.id === issue.id)?.status).toBe('closed');
   });
 
+  test('keeps selection across filtering, pagination, and a kept-alive refresh', async ({
+    page,
+    weaver,
+  }) => {
+    const issues = [];
+    for (let index = 0; index < 27; index++) {
+      issues.push(
+        await weaver.seedBacklogIssue(
+          weaver.repoPath,
+          `triage item ${String(index).padStart(2, '0')}`,
+        ),
+      );
+    }
+
+    await page.goto(`${weaver.baseUrl}/issues`);
+    await expect(page.getByTestId('issues-pagination')).toBeVisible();
+    await page.getByTestId('issues-select-visible').click();
+    await expect(page.getByTestId('issues-selected-count')).toHaveText('25 selected');
+
+    await page.getByTestId('issues-page-next').click();
+    const secondPageRows = page.getByTestId('issue-row');
+    await expect(secondPageRows).toHaveCount(2);
+    await secondPageRows.first().getByTestId('issue-select').click();
+    await expect(page.getByTestId('issues-selected-count')).toHaveText('26 selected');
+
+    await page.getByTestId('issues-search').fill('triage item 26');
+    await expect(page.getByTestId('issue-row')).toHaveCount(1);
+    await expect(page.getByTestId('issues-selected-count')).toHaveText('26 selected');
+    await page.getByTestId('issues-search').fill('');
+    await expect(page.getByTestId('issues-selected-count')).toHaveText('26 selected');
+
+    // The remaining matching item can be added explicitly across the whole
+    // filtered result, not only the current page.
+    await page.getByTestId('issues-select-matching').click();
+    await expect(page.getByTestId('issues-selected-count')).toHaveText('27 selected');
+
+    // Client-side navigation keeps Issues alive; activation performs a fresh
+    // API load without discarding the ID-based selection.
+    await page.getByRole('link', { name: 'loom home' }).click();
+    await page.getByRole('link', { name: 'Issues' }).click();
+    await expect(page.getByTestId('issues-selected-count')).toHaveText('27 selected');
+    expect(issues).toHaveLength(27);
+  });
+
+  test('supports keyboard and shift-range additive selection', async ({ page, weaver }) => {
+    const issues = [];
+    for (let index = 0; index < 4; index++) {
+      issues.push(await weaver.seedBacklogIssue(weaver.repoPath, `range item ${index}`));
+    }
+
+    await page.goto(`${weaver.baseUrl}/issues`);
+    const first = page.locator(`[data-issue-id="${issues[0].id}"]`).getByTestId('issue-select');
+    await first.focus();
+    await page.keyboard.press('Space');
+    await page
+      .locator(`[data-issue-id="${issues[3].id}"]`)
+      .getByTestId('issue-select')
+      .click({ modifiers: ['Shift'] });
+    await expect(page.getByTestId('issues-selected-count')).toHaveText('4 selected');
+
+    await page.locator(`[data-issue-id="${issues[1].id}"]`).getByTestId('issue-select').click();
+    await expect(page.getByTestId('issues-selected-count')).toHaveText('3 selected');
+  });
+
+  test('bulk closes selected issues atomically and refreshes once', async ({ page, weaver }) => {
+    const first = await weaver.seedBacklogIssue(weaver.repoPath, 'bulk close first');
+    const second = await weaver.seedBacklogIssue(weaver.repoPath, 'bulk close second');
+    let issueRefreshes = 0;
+    page.on('request', (request) => {
+      if (request.method() === 'GET' && new URL(request.url()).pathname === '/api/issues') {
+        issueRefreshes++;
+      }
+    });
+
+    await page.goto(`${weaver.baseUrl}/issues`);
+    await expect(page.getByTestId('issue-row')).toHaveCount(2);
+    issueRefreshes = 0;
+    await page.locator(`[data-issue-id="${first.id}"]`).getByTestId('issue-select').click();
+    await page.locator(`[data-issue-id="${second.id}"]`).getByTestId('issue-select').click();
+    await page.getByTestId('issues-bulk-close').click();
+
+    await expect(page.getByTestId('issues-batch-feedback')).toContainText(
+      'Close applied to 2 issues.',
+    );
+    expect(issueRefreshes).toBe(1);
+    await expect(page.getByTestId('issue-row')).toHaveCount(0);
+    const persisted = await weaver.listIssues(true);
+    expect(persisted.find((issue) => issue.id === first.id)?.status).toBe('closed');
+    expect(persisted.find((issue) => issue.id === second.id)?.status).toBe('closed');
+  });
+
+  test('cancels and then confirms an accessible bulk delete dialog', async ({ page, weaver }) => {
+    const first = await weaver.seedBacklogIssue(weaver.repoPath, 'bulk delete first');
+    const second = await weaver.seedBacklogIssue(weaver.repoPath, 'bulk delete second');
+
+    await page.goto(`${weaver.baseUrl}/issues`);
+    await page.getByTestId('issues-select-visible').click();
+    const deleteButton = page.getByTestId('issues-bulk-delete');
+    await deleteButton.click();
+    const dialog = page.getByTestId('confirm-dialog');
+    await expect(dialog).toContainText('Permanently delete 2 selected issues');
+    await expect(dialog.getByTestId('confirm-dialog-cancel')).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(dialog.getByTestId('confirm-dialog-confirm')).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(deleteButton).toBeFocused();
+    await expect(page.getByTestId('issue-row')).toHaveCount(2);
+
+    await deleteButton.click();
+    await page.getByTestId('confirm-dialog-confirm').click();
+    await expect(page.getByTestId('issues-batch-feedback')).toContainText(
+      'Delete applied to 2 issues.',
+    );
+    await expect(page.getByTestId('issue-row')).toHaveCount(0);
+    const persisted = await weaver.listIssues(true);
+    expect(persisted.some((issue) => issue.id === first.id || issue.id === second.id)).toBe(false);
+  });
+
+  test('shows structured atomic failure details and changes nothing', async ({ page, weaver }) => {
+    const open = await weaver.seedBacklogIssue(weaver.repoPath, 'must stay open');
+    const closed = await weaver.seedBacklogIssue(weaver.repoPath, 'already closed');
+    const response = await page.request.patch(`${weaver.baseUrl}/api/issues/${closed.id}`, {
+      data: { status: 'closed' },
+    });
+    expect(response.ok()).toBe(true);
+
+    await page.goto(`${weaver.baseUrl}/issues`);
+    await page.getByTestId('issues-show-closed').check();
+    await page.locator(`[data-issue-id="${open.id}"]`).getByTestId('issue-select').click();
+    await page.locator(`[data-issue-id="${closed.id}"]`).getByTestId('issue-select').click();
+    await page.getByTestId('issues-bulk-close').click();
+
+    const feedback = page.getByTestId('issues-batch-feedback');
+    await expect(feedback).toHaveAttribute('role', 'alert');
+    await expect(feedback).toContainText('No issues were changed');
+    await expect(feedback).toContainText(`#${closed.id} — issue is already closed`);
+    await expect(page.getByTestId('issues-selected-count')).toHaveText('2 selected');
+    const persisted = await weaver.listIssues(true);
+    expect(persisted.find((issue) => issue.id === open.id)?.status).toBe('open');
+    expect(persisted.find((issue) => issue.id === closed.id)?.status).toBe('closed');
+
+    await page.getByTestId('issues-remove-invalid').click();
+    await expect(page.getByTestId('issues-selected-count')).toHaveText('1 selected');
+    await page.getByTestId('issues-batch-retry').click();
+    await expect(page.getByTestId('issues-batch-feedback')).toContainText(
+      'Close applied to 1 issue.',
+    );
+    const retried = await weaver.listIssues(true);
+    expect(retried.find((issue) => issue.id === open.id)?.status).toBe('closed');
+  });
+
+  test('honors and clears URL-backed repository and branch scope', async ({ page, weaver }) => {
+    const firstSession = await weaver.seedSession({
+      goal: 'one',
+      name: 'scope-one',
+    });
+    const secondSession = await weaver.seedSession({
+      goal: 'two',
+      name: 'scope-two',
+    });
+    const first = await weaver.seedIssue(firstSession, 'first scoped issue');
+    const second = await weaver.seedIssue(secondSession, 'second scoped issue');
+    await weaver.seedBacklogIssue('/a/other-repo', 'outside the scoped repository');
+    const query = new URLSearchParams({
+      repo_root: firstSession.branch.repo_root,
+      branch: firstSession.branch.branch,
+    });
+
+    await page.goto(`${weaver.baseUrl}/issues?${query}`);
+    await expect(page.getByTestId('issues-active-scope')).toContainText('scope-one');
+    await expect(page.getByTestId('issues-open-count')).toHaveText('2 open');
+    await expect(page.locator(`[data-issue-id="${first.id}"]`)).toBeVisible();
+    await expect(page.locator(`[data-issue-id="${second.id}"]`)).toHaveCount(0);
+
+    await page.getByTestId('issue-create-toggle').click();
+    await expect(page.getByTestId('issue-create-repo')).toHaveValue(firstSession.branch.repo_root);
+    await page.getByTestId('issue-create-toggle').click();
+
+    await page.locator(`[data-issue-id="${first.id}"]`).getByTestId('issue-select').click();
+    await page.getByTestId('issues-clear-scope').click();
+    await expect(page.getByTestId('issues-active-scope')).toHaveCount(0);
+    await expect(page.getByTestId('issues-bulk-toolbar')).toHaveCount(0);
+    await expect(page.locator(`[data-issue-id="${second.id}"]`)).toBeVisible();
+  });
+
   test('edits an issue title through the inline editor', async ({ page, weaver }) => {
     const session = await weaver.seedSession({ goal: 'g', name: 'feature' });
     const issue = await weaver.seedIssue(session, 'old title');
@@ -86,7 +275,10 @@ test.describe('issues pane', () => {
     expect(persisted?.claimed_branch).toBeNull();
   });
 
-  test('changes and clears an issue GitHub mapping through the inline editor', async ({ page, weaver }) => {
+  test('changes and clears an issue GitHub mapping through the inline editor', async ({
+    page,
+    weaver,
+  }) => {
     const session = await weaver.seedSession({ goal: 'g', name: 'feature' });
     const issue = await weaver.seedIssue(session, 'remappable');
     await page.goto(`${weaver.baseUrl}/issues`);
@@ -136,16 +328,20 @@ test.describe('issues pane', () => {
     await page.goto(`${weaver.baseUrl}/issues`);
     const row = page.locator(`[data-issue-id="${issue.id}"]`);
 
-    // The delete path guards behind a confirm() — accept it.
-    page.on('dialog', (d) => d.accept());
     await row.getByTestId('issue-delete').click();
+    const dialog = page.getByTestId('confirm-dialog');
+    await expect(dialog).toContainText(`Delete issue #${issue.id}?`);
+    await dialog.getByTestId('confirm-dialog-confirm').click();
 
     await expect(row).toHaveCount(0);
     const persisted = await weaver.listIssues(true);
     expect(persisted.find((i) => i.id === issue.id)).toBeUndefined();
   });
 
-  test('creates a backlog issue with a tag through the New issue form', async ({ page, weaver }) => {
+  test('creates a backlog issue with a tag through the New issue form', async ({
+    page,
+    weaver,
+  }) => {
     // A seeded session puts exactly one repo on the board, so the form's repo
     // field is the static-label case and needs no selection.
     await weaver.seedSession({ goal: 'g', name: 'feature' });

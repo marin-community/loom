@@ -103,6 +103,9 @@ export const listRuns = () => get('/runs') as Promise<AutomationRun[]>;
 
 import type {
   Issue,
+  IssueAction,
+  IssueActionsResult,
+  IssueTagInput,
   Session,
   AutomationRun,
   ArtifactMeta,
@@ -228,10 +231,13 @@ export const listIssues = (opts: { all?: boolean; automation?: boolean } = {}) =
 export const launchSessionForIssue = (repoRoot: string, issueId: number) =>
   post('/sessions', { cwd: repoRoot, claim_issue: issueId }) as Promise<Session>;
 
-/** Create an unclaimed repo-level backlog issue. Tags aren't part of the create
- *  body — apply them as follow-up `setIssueTag` upserts on the returned id. */
-export const createRepoIssue = (repoRoot: string, title: string, body = '') =>
-  post('/repos/issues', { repo_root: repoRoot, title, body }) as Promise<Issue>;
+/** Create an unclaimed repo-level backlog issue and its initial tags atomically. */
+export const createRepoIssue = (
+  repoRoot: string,
+  title: string,
+  body = '',
+  tags: IssueTagInput[] = [],
+) => post('/repos/issues', { repo_root: repoRoot, title, body, tags }) as Promise<Issue>;
 
 /** Patch an issue's editable fields. Blank `github` unlinks it;
  *  `claimed_branch: null` returns it to the unclaimed backlog. */
@@ -252,6 +258,10 @@ export const clearSessionGithub = (id: string) => del(`/sessions/${id}/github`) 
 
 /** Delete an issue outright. */
 export const deleteIssue = (id: number) => del(`/issues/${id}`);
+
+/** Apply one action atomically to every issue id. */
+export const issueActions = (ids: number[], action: IssueAction) =>
+  post('/issues/actions', { ids, action }) as Promise<IssueActionsResult>;
 
 /** Set (upsert) a free-form label on an issue. */
 export const setIssueTag = (id: number, key: string, value: string, note = '') =>

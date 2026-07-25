@@ -295,6 +295,7 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `GET /api/branches` / `GET PATCH /api/branches/{id}` | list / inspect / edit tracked branches |
 | `GET POST /api/branches/{id}/issues` | issues claimed by the branch / create one |
 | `GET /api/issues?all=…` | the cross-repo issue board (every repo's issues; `all=true` includes closed, `automation=true` includes automation-class sessions' tracking issues, otherwise hidden) — what the loom Issues pane reads |
+| `POST /api/issues/actions` | atomically close, reopen, tag/untag, or delete a validated set of issue IDs; returns updated views/deleted IDs or structured precondition details with no mutation |
 | `GET PATCH DELETE /api/issues/{id}` | per-issue CRUD |
 | `PUT DELETE /api/issues/{id}/tags/{key}` | set (upsert) / clear a free-form issue label — quiet `(key, value)` pills, no loud `attention`/`triage` ladder |
 | `GET POST /api/repos/issues?repo_root=…` | repo-wide board (`scope=repo\|backlog`) / create a backlog item |
