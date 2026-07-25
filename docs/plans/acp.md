@@ -583,11 +583,12 @@ throughout:
 - **`session/load` completeness** for long sessions. The journal being
   primary bounds the blast radius to fresh adopts.
 - **One-shot judgement calls** (`POST /api/agent/oneshot`, watches) use the
-  same `AgentManager` and configured ACP adapter as interactive launches. They
-  open a transient session with no MCP servers, apply requested model/effort
-  through advertised `configOptions`, prefer plan/read-only mode, and tear the
-  relay down after one response. The repository lint script remains an
-  independent development tool, not a Loom API path.
+  same `AgentManager` and configured ACP adapter as interactive launches. A
+  caller may select an automation-safe ACP profile, which supplies runtime,
+  env policy, mode, tools/MCP policy, and model/effort defaults; explicit
+  model/effort values override those defaults through advertised
+  `configOptions`. The relay is torn down after one response. The repository
+  lint script remains an independent development tool, not a Loom API path.
 
 ## Rejected alternatives
 

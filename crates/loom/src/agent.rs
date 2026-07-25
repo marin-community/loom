@@ -1530,6 +1530,7 @@ impl<'a> AgentManager<'a> {
         prompt: &str,
         model: &str,
         effort: &str,
+        profile: Option<&crate::profile::Profile>,
         timeout: Duration,
     ) -> Option<String> {
         match metadata_for(self.db, runtime).await {
@@ -1562,11 +1563,81 @@ impl<'a> AgentManager<'a> {
                 return None;
             }
         };
-        let mcp_access = match serde_json::to_string(&weaver_api::McpPolicySnapshot::default()) {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::warn!(runtime, %error, "failed to build empty one-shot MCP policy");
-                return None;
+        let (
+            extra_env,
+            env_clear,
+            mode,
+            prelude,
+            restricted,
+            allowed_tools,
+            mcp_access,
+            profile_model,
+            profile_effort,
+        ) = match profile {
+            Some(profile) => {
+                let mut extra_env = match crate::profile::env_pairs(self.db, &profile.name).await {
+                    Ok(env) => env,
+                    Err(error) => {
+                        tracing::warn!(runtime, profile = %profile.name, %error, "failed to resolve one-shot profile environment");
+                        return None;
+                    }
+                };
+                if profile.env_clear {
+                    let allowlist = match profile.ambient_names() {
+                        Ok(names) => names,
+                        Err(error) => {
+                            tracing::warn!(runtime, profile = %profile.name, %error, "failed to resolve one-shot profile ambient allowlist");
+                            return None;
+                        }
+                    };
+                    extra_env = crate::profile::cleared_environment(extra_env, &allowlist);
+                }
+                let allowed_tools = match profile.effective_allowed_tool_rules() {
+                    Ok(rules) => match serde_json::to_string(&rules) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            tracing::warn!(runtime, profile = %profile.name, %error, "failed to serialize one-shot profile tools");
+                            return None;
+                        }
+                    },
+                    Err(error) => {
+                        tracing::warn!(runtime, profile = %profile.name, %error, "failed to resolve one-shot profile tools");
+                        return None;
+                    }
+                };
+                (
+                    extra_env,
+                    profile.env_clear,
+                    profile.mode.as_str(),
+                    profile.prelude.as_str(),
+                    profile.restricted,
+                    allowed_tools,
+                    profile.mcp_policy.clone(),
+                    profile.model.as_str(),
+                    profile.effort.as_str(),
+                )
+            }
+            None => {
+                let mcp_access = match serde_json::to_string(
+                    &weaver_api::McpPolicySnapshot::default(),
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::warn!(runtime, %error, "failed to build empty one-shot MCP policy");
+                        return None;
+                    }
+                };
+                (
+                    Vec::new(),
+                    false,
+                    "plan",
+                    "none",
+                    true,
+                    "[]".to_string(),
+                    mcp_access,
+                    "",
+                    "",
+                )
             }
         };
         let launch = match build_acp_launch(
@@ -1581,12 +1652,12 @@ impl<'a> AgentManager<'a> {
                 effort: "",
                 goal_file: None,
                 primer_file: None,
-                extra_env: &[],
-                env_clear: false,
-                mode: "plan",
-                prelude: "none",
-                restricted: true,
-                allowed_tools: "[]",
+                extra_env: &extra_env,
+                env_clear,
+                mode,
+                prelude,
+                restricted,
+                allowed_tools: &allowed_tools,
                 mcp_access: &mcp_access,
                 custom: custom.as_ref(),
             },
@@ -1600,15 +1671,25 @@ impl<'a> AgentManager<'a> {
                 return None;
             }
         };
-        let preferred_model = if model.trim().is_empty() {
+        let selected_model = if model.trim().is_empty() {
+            profile_model
+        } else {
+            model.trim()
+        };
+        let selected_effort = if effort.trim().is_empty() {
+            profile_effort
+        } else {
+            effort.trim()
+        };
+        let preferred_model = if selected_model.is_empty() {
             crate::acp::AcpPromptModel::Default
         } else {
-            crate::acp::AcpPromptModel::Exact(model.trim())
+            crate::acp::AcpPromptModel::Exact(selected_model)
         };
-        let preferred_effort = if effort.trim().is_empty() {
+        let preferred_effort = if selected_effort.is_empty() {
             crate::acp::AcpPromptEffort::Default
         } else {
-            crate::acp::AcpPromptEffort::Exact(effort.trim())
+            crate::acp::AcpPromptEffort::Exact(selected_effort)
         };
         match crate::acp::prompt_once(
             self.db,

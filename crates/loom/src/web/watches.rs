@@ -117,8 +117,18 @@ pub(super) async fn create_watch(
     let defaults = watch_store::NewWatch::default();
     let program = req.program.unwrap_or(defaults.program);
     validate_program(&program)?;
-    let capabilities = req.capabilities.unwrap_or(defaults.capabilities);
+    let capabilities = req.capabilities.unwrap_or_else(|| {
+        crate::builtins::find(&program).map_or(defaults.capabilities, |builtin| {
+            builtin
+                .default_capabilities
+                .iter()
+                .map(|cap| (*cap).to_string())
+                .collect()
+        })
+    });
     validate_capabilities(&capabilities)?;
+    let profile = req.profile.unwrap_or(defaults.profile);
+    validate_watch_profile(&st.db, &profile).await?;
     let params = json_text(req.params, &defaults.params);
 
     // The script declares what wakes it: evaluate its subscription manifest
@@ -139,6 +149,7 @@ pub(super) async fn create_watch(
         program,
         params,
         capabilities,
+        profile,
         model: req.model.unwrap_or(defaults.model),
         effort: req.effort.unwrap_or(defaults.effort),
         cooldown_secs: req.cooldown_secs.unwrap_or(defaults.cooldown_secs),
@@ -191,6 +202,9 @@ pub(super) async fn patch_watch(
     if let Some(caps) = &req.capabilities {
         validate_capabilities(caps)?;
     }
+    if let Some(profile) = &req.profile {
+        validate_watch_profile(&st.db, profile).await?;
+    }
     if let Some(enabled) = req.enabled {
         watch_store::set_enabled(&st.db, &o.id, enabled).await?;
     }
@@ -215,6 +229,7 @@ pub(super) async fn patch_watch(
         program: req.program,
         params: req.params.map(|v| v.to_string()),
         capabilities: req.capabilities,
+        profile: req.profile,
         model: req.model,
         effort: req.effort,
         cooldown_secs: req.cooldown_secs,
@@ -275,22 +290,60 @@ pub(super) async fn agent_oneshot(
     let budget = ov_engine::get_int(&st.db, "watch.default_timeout_secs", 600)
         .await
         .max(1) as u64;
-    let runtime = req.agent.trim();
-    let runtime = if runtime.is_empty() {
-        "claude"
+    let profile = if req.profile.trim().is_empty() {
+        None
     } else {
-        runtime
+        Some(
+            crate::profile::get(&st.db, req.profile.trim())
+                .await?
+                .ok_or_else(|| {
+                    AppError::bad_request(format!("unknown profile '{}'", req.profile.trim()))
+                })?,
+        )
     };
+    if let Some(profile) = &profile {
+        if !profile.is_automation_safe() || profile.protocol != "acp" {
+            return Err(AppError::bad_request(format!(
+                "profile '{}' is not automation-safe ACP",
+                profile.name
+            )));
+        }
+    }
+    let runtime = req.agent.trim();
+    let runtime = profile
+        .as_ref()
+        .map(|profile| profile.agent_kind.as_str())
+        .unwrap_or_else(|| {
+            if runtime.is_empty() {
+                "claude"
+            } else {
+                runtime
+            }
+        });
     let output = agent::AgentManager::new(&st.db)
         .run_oneshot(
             runtime,
             &req.prompt,
             &req.model,
             &req.effort,
+            profile.as_ref(),
             std::time::Duration::from_secs(budget),
         )
         .await;
     Ok(Json(json!({ "output": output })))
+}
+
+async fn validate_watch_profile(db: &crate::Db, name: &str) -> ApiResult<()> {
+    let name = name.trim();
+    let profile = crate::profile::get(db, name)
+        .await?
+        .ok_or_else(|| AppError::bad_request(format!("unknown profile '{name}'")))?;
+    if !profile.is_automation_safe() || profile.protocol != "acp" {
+        return Err(AppError::bad_request(format!(
+            "watch profile '{name}' must be automation-safe and use ACP"
+        )));
+    }
+    Ok(())
 }
 
 pub(super) async fn watch_runs(

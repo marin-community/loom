@@ -100,8 +100,8 @@ def test_client_retries_one_unauthorized_request_with_refreshed_workload_token(
 class StubClient(Client):
     """A Client whose requests are recorded instead of sent."""
 
-    def __init__(self, capabilities=None, replies=None):
-        super().__init__(base="http://stub", capabilities=capabilities)
+    def __init__(self, capabilities=None, replies=None, profile=""):
+        super().__init__(base="http://stub", capabilities=capabilities, profile=profile)
         self.requests = []
         self.replies = replies or {}
 
@@ -224,7 +224,9 @@ def test_parse_tag_recommendations_none_vs_empty():
 
 def make_round(scope=None, sessions=None, capabilities=None, **config):
     client = StubClient(
-        capabilities=capabilities or [], replies={"/sessions": sessions or []}
+        capabilities=capabilities or [],
+        profile=config.get("profile", ""),
+        replies={"/sessions": sessions or []},
     )
     return Round(
         config={"name": "t", "scope": scope or {}, **config},
@@ -370,6 +372,7 @@ def test_observe_is_implicit_and_writes_are_gated():
         lambda: c.set_tags("s", []),
         lambda: c.clear_tag("s", "triage"),
         lambda: c.mark("s", "blocked"),
+        lambda: c.agent("judge"),
         lambda: c.nudge("s", "hello"),
         lambda: c.interrupt("s"),
     ):
@@ -382,6 +385,7 @@ def test_observe_is_implicit_and_writes_are_gated():
 def test_capabilities_constant_matches_the_ladder():
     assert CAPABILITIES == [
         "observe",
+        "judge",
         "mark",
         "escalate",
         "nudge",
@@ -447,21 +451,31 @@ def test_nudge_carries_by_for_the_audit_event():
 
 
 def test_agent_returns_output_or_none():
-    c = StubClient(replies={"/agent/oneshot": {"output": "blocked: judged"}})
+    c = StubClient(
+        capabilities=["judge"],
+        profile="watch",
+        replies={"/agent/oneshot": {"output": "blocked: judged"}},
+    )
     assert c.agent("look", model="haiku", effort="low") == "blocked: judged"
     assert c.requests[-1] == (
         "POST",
         "/agent/oneshot",
-        {"prompt": "look", "model": "haiku", "effort": "low"},
+        {"prompt": "look", "model": "haiku", "effort": "low", "profile": "watch"},
     )
     assert c.agent("look", runtime="codex") == "blocked: judged"
     assert c.requests[-1] == (
         "POST",
         "/agent/oneshot",
-        {"prompt": "look", "model": "", "effort": "", "agent": "codex"},
+        {
+            "prompt": "look",
+            "model": "",
+            "effort": "",
+            "profile": "watch",
+            "agent": "codex",
+        },
     )
     # A degraded daemon reply ({output: null}) reads as None, not an error.
-    absent = StubClient(replies={"/agent/oneshot": {"output": None}})
+    absent = StubClient(capabilities=["judge"], replies={"/agent/oneshot": {"output": None}})
     assert absent.agent("look") is None
 
 
@@ -471,12 +485,15 @@ def test_agent_returns_output_or_none():
 def test_round_reads_config_and_finish_prints_the_contract(capsys):
     rnd = make_round(
         params={"prompt": "stuck?"},
+        profile="review-watch",
         model="haiku",
         effort="low",
         dry_run=True,
         capabilities=["mark"],
     )
     assert rnd.params == {"prompt": "stuck?"}
+    assert rnd.profile == "review-watch"
+    assert rnd.client.profile == "review-watch"
     assert (rnd.model, rnd.effort, rnd.dry_run) == ("haiku", "low", True)
     assert rnd.can("mark") and not rnd.can("nudge")
 

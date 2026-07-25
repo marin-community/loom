@@ -31,7 +31,7 @@ def load_program(name):
 
 status = load_program("status")
 
-TAGS = '[{"key": "review", "value": "attention", "note": "looks done"}]'
+TAGS = '[{"key": "human-review", "value": "attention", "note": "looks done"}]'
 
 
 class StubClient:
@@ -98,7 +98,7 @@ def test_judge_parses_the_agents_tag_set():
     client = StubClient(agent_reply=TAGS)
     rnd = make_round(client)
     assert status.judge_tags(rnd, session("s")) == [
-        {"key": "review", "value": "attention", "note": "looks done"}
+        {"key": "human-review", "value": "attention", "note": "looks done"}
     ]
 
 
@@ -113,6 +113,20 @@ def test_judge_is_none_without_an_agent():
 def test_judge_empty_array_is_the_calm_verdict():
     rnd = make_round(StubClient(agent_reply="nothing needed: []"))
     assert status.judge_tags(rnd, session("s")) == []
+
+
+def test_judge_drops_unknown_keys_and_mismatched_severity():
+    reply = json.dumps(
+        [
+            {"key": "creative-label", "value": "attention", "note": "vague"},
+            {"key": "human-review", "value": "blocked", "note": "wrong severity"},
+            {"key": "agent-stuck", "value": "blocked", "note": "looping"},
+        ]
+    )
+    rnd = make_round(StubClient(agent_reply=reply))
+    assert status.judge_tags(rnd, session("s")) == [
+        {"key": "agent-stuck", "value": "blocked", "note": "looping"}
+    ]
 
 
 def test_judge_uses_the_default_prompt_with_screen_and_model():
@@ -141,7 +155,7 @@ def test_judge_survives_a_dead_pane():
     client = NoPane(agent_reply=TAGS)
     rnd = make_round(client, params={"prompt": "judge"})
     assert status.judge_tags(rnd, session("s")) == [
-        {"key": "review", "value": "attention", "note": "looks done"}
+        {"key": "human-review", "value": "attention", "note": "looks done"}
     ]
     # The agent was still consulted, with an empty screen.
     assert any(c[0] == "agent" for c in client.calls)
@@ -156,14 +170,14 @@ def test_applies_tags_and_reconciles_its_own_dropped_marks(capsys):
     client = StubClient(
         capabilities=["mark"],
         agent_reply=TAGS,
-        sessions=[session("s", watch={"stuck": "blocked"})],
+        sessions=[session("s", watch={"agent-stuck": "blocked"})],
     )
     result = run_main(client, capsys)
     assert batches(client) == [
         (
             "set_tags",
             "s",
-            [{"key": "review", "value": "attention", "note": "looks done"}],
+            [{"key": "human-review", "value": "attention", "note": "looks done"}],
             "watch",
             [],
         )
@@ -176,7 +190,7 @@ def test_empty_verdict_clears_the_watchs_own_marks(capsys):
     client = StubClient(
         capabilities=["mark"],
         agent_reply="[]",
-        sessions=[session("s", watch={"review": "attention"})],
+        sessions=[session("s", watch={"human-review": "attention"})],
     )
     result = run_main(client, capsys)
     assert batches(client) == [("set_tags", "s", [], "watch", [])]
@@ -188,7 +202,7 @@ def test_no_judgement_leaves_every_mark_untouched(capsys):
     client = StubClient(
         capabilities=["mark"],
         agent_reply=None,
-        sessions=[session("s", watch={"review": "attention"})],
+        sessions=[session("s", watch={"human-review": "attention"})],
     )
     result = run_main(client, capsys)
     assert batches(client) == []
@@ -216,7 +230,7 @@ def test_without_mark_capability_only_observes(capsys):
     result = run_main(client, capsys)
     assert batches(client) == []
     assert result["actions"] == [
-        {"action": "observe", "session": "s", "key": "review",
+        {"action": "observe", "session": "s", "key": "human-review",
          "value": "attention", "note": "looks done"}
     ]
 
@@ -225,13 +239,13 @@ def test_dry_run_records_would_and_mutates_nothing(capsys):
     client = StubClient(
         capabilities=["mark"],
         agent_reply=TAGS,
-        sessions=[session("s", watch={"stuck": "blocked"})],
+        sessions=[session("s", watch={"agent-stuck": "blocked"})],
     )
     result = run_main(client, capsys, dry_run=True)
     assert batches(client) == []
-    assert {"would": "tag", "session": "s", "key": "review",
+    assert {"would": "tag", "session": "s", "key": "human-review",
             "value": "attention", "note": "looks done"} in result["actions"]
-    assert {"would": "clear", "session": "s", "key": "stuck"} in result["actions"]
+    assert {"would": "clear", "session": "s", "key": "agent-stuck"} in result["actions"]
     assert result["summary"] == "assessed 1 of 1, would apply 1 tag(s) (dry run, no writes applied)"
 
 
@@ -253,7 +267,7 @@ def test_real_status_replaces_the_soothing_idle_mark(capsys):
         (
             "set_tags",
             "s",
-            [{"key": "review", "value": "attention", "note": "looks done"}],
+            [{"key": "human-review", "value": "attention", "note": "looks done"}],
             "watch",
             [{"key": "idle", "value": "idle"}],
         )

@@ -243,11 +243,13 @@ warm/fresh/rules distinctions become *library calls inside the program*:
 - `ov.sessions(scope)` / `s.preview()` / `s.diff()` — observe (always allowed).
 - `s.mark(level, note)` — write the `triage` tag.
 - `s.nudge(text)` / `s.interrupt()` — the intervention ladder (capability-gated).
-- `ov.run_agent(prompt)` — run a **fresh**, restricted ACP session for a
-  judgement call through the same registered runtime and adapter Loom uses for
-  interactive agents. Model and effort selectors are applied through the
-  adapter's advertised configuration; the transient relay is torn down after
-  the response.
+- `ov.run_agent(prompt)` — run a **fresh** ACP session for a judgement call
+  through the watch's selected automation-safe profile. The profile supplies
+  runtime, environment, mode, tool/MCP policy, model, and effort; non-empty
+  watch model/effort values override its defaults through the adapter's
+  advertised configuration. The transient relay is torn down after the
+  response. The stock `watch` profile is Codex `gpt-5.6-sol`, medium effort,
+  plan mode, env-cleared, with no profile-granted external tools or MCP servers.
 - `ov.warm_session()` — get the watch's **persistent** session (created on
   first use, reused after), for accumulating judgement across rounds — "still
   stuck since last hour?" The binding handles create-or-reuse; the program just
@@ -388,7 +390,7 @@ flowchart TD
 
     stock --> api
     pyprog --> api
-    api["capability-gated API:<br/>sessions · preview · mark · nudge · run_agent · warm_session"]
+    api["capability-gated API:<br/>sessions · preview · judge · mark · nudge · warm_session"]
 
     api -->|observe / nudge / break| fleet["Fleet sessions<br/>(daemon = sole tmux owner)"]
     api -->|mark| triage["triage tag on branch"]
@@ -409,7 +411,8 @@ through the same `weaver-api` the out-of-process programs use.
   with an optional `repo` filter), `scope` (JSON fleet query, repo-aware),
   `program` (`builtin:status` or a file path under `~/.weaver/watches/`),
   `params` (JSON for a stock program / the prompt), `capabilities` (JSON set),
-  `model`, `effort`, `cooldown_secs`, `last_run_at`, `next_run_at`,
+  `profile` (an automation-safe ACP launch profile; default `watch`), `model`,
+  `effort`, `cooldown_secs`, `last_run_at`, `next_run_at`,
   `warm_session_id` (nullable), `state` (the program's lookaside JSON, carried
   across rounds), `wake_at` (a one-shot dynamic re-trigger a round armed for
   itself, nullable), `created_at`, `updated_at`.
@@ -473,7 +476,8 @@ The motivating case, end to end. The **zero-code** form is a stock program:
 ```
 loom watch add status-check \
   --cron "0 * * * *" --scope "attention != ok" \
-  --capabilities observe,mark,escalate,nudge \
+  --capabilities observe,judge,mark,escalate,nudge \
+  --profile watch \
   --program builtin:status \
   --prompt "If a session is progressing, mark it ok. If it looks stuck (same \
     action repeating, an unhandled error, no movement), mark it attention with a \

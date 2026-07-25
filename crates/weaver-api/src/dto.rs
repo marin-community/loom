@@ -1054,6 +1054,9 @@ pub struct WatchView {
     /// The granted capability set (the intervention ladder). `observe` is
     /// implicit; the rest are explicit grants.
     pub capabilities: Vec<String>,
+    /// Automation-safe launch profile used for agent judgements and warm
+    /// sessions.
+    pub profile: String,
     pub model: String,
     pub effort: String,
     pub cooldown_secs: i64,
@@ -1095,6 +1098,7 @@ impl WatchView {
             program: o.program.clone(),
             params: o.params(),
             capabilities: o.capabilities(),
+            profile: o.profile.clone(),
             model: o.model.clone(),
             effort: o.effort.clone(),
             cooldown_secs: o.cooldown_secs,
@@ -1394,6 +1398,10 @@ impl SendReq {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentOneshotReq {
     pub prompt: String,
+    /// Optional launch profile. When set, its runtime and policy are
+    /// authoritative; model and effort remain optional per-call overrides.
+    #[serde(default)]
+    pub profile: String,
     /// Registered ACP runtime. Empty preserves the historical Claude default.
     #[serde(default)]
     pub agent: String,
@@ -1560,6 +1568,8 @@ pub struct CreateWatchReq {
     #[serde(default)]
     pub capabilities: Option<Vec<String>>,
     #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
@@ -1588,6 +1598,8 @@ pub struct PatchWatchReq {
     pub params: Option<Value>,
     #[serde(default)]
     pub capabilities: Option<Vec<String>>,
+    #[serde(default)]
+    pub profile: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]

@@ -355,7 +355,7 @@ async fn stale_session_emits_one_event_and_wakes_a_reactive_watch() {
 /// with a fixed response. Base64 keeps arbitrary judgement JSON out of the
 /// shell command's quoting surface.
 fn fake_judge_agent(_name: &str, out: &str) -> EnvVarGuard {
-    fake_judge_runtime("WEAVER_CLAUDE_ACP_CMD", out)
+    fake_judge_runtime("WEAVER_CODEX_ACP_CMD", out)
 }
 
 fn fake_judge_runtime(variable: &'static str, out: &str) -> EnvVarGuard {
@@ -364,7 +364,7 @@ fn fake_judge_runtime(variable: &'static str, out: &str) -> EnvVarGuard {
     EnvVarGuard::set(
         variable,
         &format!(
-            "FAKE_ACP_FIXED_OUTPUT_B64={encoded} {}",
+            "FAKE_ACP_MODELS=gpt-5.6-sol,fake-fast FAKE_ACP_FIXED_OUTPUT_B64={encoded} {}",
             crate::fixtures::fake_acp_agent_cmd()
         ),
     )
@@ -392,7 +392,7 @@ impl Drop for EnvVarGuard {
     }
 }
 
-/// The status program's wiring proof: an idle-triggered round asks the judge for
+/// The status program's wiring proof: a stale-triggered round asks the judge for
 /// a set of tags and reconciles its own marks — a recommended tag lands as its
 /// own typed key (never the agent's `attention` axis — no mirror), and a
 /// follow-up "nothing needed" verdict clears it. The program's decision logic
@@ -414,17 +414,21 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
     // The judge model is stubbed: a fixed tag set the round should apply.
     let _agent = fake_judge_agent(
         "weaver-fake-judge-status",
-        r#"[{"key":"review","value":"attention","note":"looks done"}]"#,
+        r#"[{"key":"human-review","value":"attention","note":"looks done"}]"#,
     );
 
     let o = enabled_watch(
         &state,
         watch_store::NewWatch {
             name: "status-check".to_string(),
-            trigger_spec: json!({ "on": ["session.idle"] }).to_string(),
+            trigger_spec: json!({ "on": ["session.stale"] }).to_string(),
             scope: json!({}).to_string(),
             program: "builtin:status".to_string(),
-            capabilities: vec!["observe".to_string(), "mark".to_string()],
+            capabilities: vec![
+                "observe".to_string(),
+                "judge".to_string(),
+                "mark".to_string(),
+            ],
             ..Default::default()
         },
     )
@@ -442,12 +446,12 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
         .await
         .unwrap();
     assert_eq!(
-        branch_tag_value(&view, "review"),
+        branch_tag_value(&view, "human-review"),
         "attention",
         "the round applies the judge's typed tag"
     );
     assert_eq!(
-        branch_tag(&view, "review").unwrap()["set_by"],
+        branch_tag(&view, "human-review").unwrap()["set_by"],
         "status-check"
     );
     assert!(
@@ -466,7 +470,7 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
     assert!(
         arr.iter().any(|a| a["action"] == "tag"
             && a["session"] == session_id.as_str()
-            && a["key"] == "review"),
+            && a["key"] == "human-review"),
         "the run records a tag action: {actions}"
     );
 
@@ -481,7 +485,7 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
         .await
         .unwrap();
     assert!(
-        branch_tag(&view, "review").is_none(),
+        branch_tag(&view, "human-review").is_none(),
         "the empty verdict clears the watch's own mark"
     );
 
@@ -789,7 +793,7 @@ async fn rest_watch_lifecycle_and_validation() {
         .unwrap();
     let _agent = fake_judge_agent(
         "weaver-fake-judge-lifecycle",
-        r#"[{"key":"review","value":"attention","note":"looks done"}]"#,
+        r#"[{"key":"human-review","value":"attention","note":"looks done"}]"#,
     );
 
     // Create: structured trigger/scope/params JSON in, a WatchView out.
@@ -803,7 +807,7 @@ async fn rest_watch_lifecycle_and_validation() {
                 "scope": { "attention": "!ok" },
                 "program": "builtin:status",
                 "params": { "prompt": "is it stuck?" },
-                "capabilities": ["observe", "mark"],
+                "capabilities": ["observe", "judge", "mark"],
             }),
         )
         .await
@@ -815,7 +819,7 @@ async fn rest_watch_lifecycle_and_validation() {
     assert_eq!(created["trigger"]["cron"], "0 * * * *");
     assert_eq!(created["scope"]["attention"], "!ok");
     assert_eq!(created["params"]["prompt"], "is it stuck?");
-    assert_eq!(created["capabilities"][1], "mark");
+    assert_eq!(created["capabilities"][2], "mark");
     assert!(created["last_outcome"].is_null(), "never run yet");
 
     // A duplicate name is rejected (the client surfaces the error status).
@@ -882,7 +886,7 @@ async fn rest_watch_lifecycle_and_validation() {
         .await
         .unwrap();
     assert!(
-        branch_tag(&view, "review").is_none(),
+        branch_tag(&view, "human-review").is_none(),
         "a dry run applies no mark"
     );
 
@@ -1056,11 +1060,11 @@ async fn rest_lists_builtin_programs_and_validates_program_refs() {
         .find(|p| p["program"] == "builtin:status")
         .unwrap();
     assert!(
-        status["source"].as_str().unwrap().contains("session.idle"),
+        status["source"].as_str().unwrap().contains("session.stale"),
         "the status program is a script like every other builtin"
     );
-    // The status builtin wakes on the agent's finished-turn hook, not a timer.
-    assert_eq!(status["defaults"]["trigger"]["on"][0], "session.idle");
+    // The status builtin wakes once after sustained inactivity, not every turn.
+    assert_eq!(status["defaults"]["trigger"]["on"][0], "session.stale");
 
     // An unknown builtin is rejected at create time; a known script accepted.
     let bad = ts
@@ -1300,7 +1304,7 @@ async fn status_judgement_uses_the_oneshot_agent() {
     let ts = TestServer::start().await;
 
     // The endpoint itself returns the adapter's fixed text; an empty prompt 400s.
-    let _endpoint_agent = fake_judge_agent("weaver-fake-judge-endpoint", "ping");
+    let _endpoint_agent = fake_judge_runtime("WEAVER_CLAUDE_ACP_CMD", "ping");
     let reply = ts
         .client
         .post("/api/agent/oneshot", json!({ "prompt": "ping" }))
@@ -1320,6 +1324,19 @@ async fn status_judgement_uses_the_oneshot_agent() {
         reply["output"], "codex selected",
         "the request selects a registered ACP runtime"
     );
+    let reply = ts
+        .client
+        .post(
+            "/api/agent/oneshot",
+            json!({ "prompt": "ping", "profile": "watch" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reply["output"], "codex selected",
+        "the stock watch profile selects Codex"
+    );
+    drop(_codex_agent);
     assert!(
         ts.client
             .post("/api/agent/oneshot", json!({ "prompt": "" }))
@@ -1332,18 +1349,22 @@ async fn status_judgement_uses_the_oneshot_agent() {
     // drove the mark — there is no fallback that would have invented one.
     let state = engine_state(&ts).await;
     let (session_id, _branch_id, _repo_root) = make_session(&ts, "judge me").await;
-    let _agent = fake_judge_agent(
-        "weaver-fake-judge-oneshot",
-        r#"[{"key":"stuck","value":"blocked","note":"the judge says so"}]"#,
+    let _agent = fake_judge_runtime(
+        "WEAVER_CODEX_ACP_CMD",
+        r#"[{"key":"agent-stuck","value":"blocked","note":"the judge says so"}]"#,
     );
     let o = enabled_watch(
         &state,
         watch_store::NewWatch {
             name: "judge-watch".to_string(),
-            trigger_spec: json!({ "on": ["session.idle"] }).to_string(),
+            trigger_spec: json!({ "on": ["session.stale"] }).to_string(),
             program: "builtin:status".to_string(),
             params: json!({ "prompt": "is it stuck?" }).to_string(),
-            capabilities: vec!["observe".to_string(), "mark".to_string()],
+            capabilities: vec![
+                "observe".to_string(),
+                "judge".to_string(),
+                "mark".to_string(),
+            ],
             ..Default::default()
         },
     )
@@ -1358,13 +1379,16 @@ async fn status_judgement_uses_the_oneshot_agent() {
         .await
         .unwrap();
     assert_eq!(
-        branch_tag_value(&view, "stuck"),
+        branch_tag_value(&view, "agent-stuck"),
         "blocked",
         "the judge's verdict lands as a typed mark"
     );
     // (Parsing detail — the JSON tag-set extraction — is pytest-covered in
     // weaver_loom; here only the through-the-stack outcome matters.)
-    assert_eq!(branch_tag(&view, "stuck").unwrap()["set_by"], "judge-watch");
+    assert_eq!(
+        branch_tag(&view, "agent-stuck").unwrap()["set_by"],
+        "judge-watch"
+    );
 
     ts.client
         .delete(&format!("/api/sessions/{session_id}"))
@@ -1383,8 +1407,8 @@ async fn set_config(state: &AppState, key: &str, value: &str) {
         .unwrap();
 }
 
-async fn set_default_profile_agent(state: &AppState, agent: &str) {
-    let mut profile = loom::profile::get(&state.db, loom::profile::DEFAULT_PROFILE)
+async fn set_watch_profile_agent(state: &AppState, agent: &str) {
+    let mut profile = loom::profile::get(&state.db, "watch")
         .await
         .unwrap()
         .unwrap()
@@ -1555,9 +1579,9 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
     // The restart policy under test: fleet auto-adopt off, warm-adopt on.
     set_config(&state, "server.auto_adopt", "false").await;
     set_config(&state, "watch.adopt_warm", "true").await;
-    // Warm sessions launch the default agent; pin it to `shell` so creation is
+    // Warm sessions launch the watch's profile agent; pin it to `shell` so creation is
     // deterministic without a real `claude` on PATH.
-    set_default_profile_agent(&state, "shell").await;
+    set_watch_profile_agent(&state, "shell").await;
 
     let repo_root = ts.repo_path().canonicalize().unwrap().display().to_string();
 
@@ -1584,6 +1608,8 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(warm.profile, "watch");
+    assert_eq!(warm.agent_kind, "shell");
     assert!(
         backend::has_session(&warm.term_session).await,
         "the warm session has a live terminal"
@@ -1671,7 +1697,7 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
 async fn ensure_warm_session_reuses_the_same_session() {
     let ts = TestServer::start().await;
     let state = engine_state(&ts).await;
-    set_default_profile_agent(&state, "shell").await;
+    set_watch_profile_agent(&state, "shell").await;
 
     let repo_root = ts.repo_path().canonicalize().unwrap().display().to_string();
     let o = enabled_watch(

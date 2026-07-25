@@ -827,9 +827,10 @@ A round runs the **program** the watch names:
 
 - **Builtin scripts** — real Python files in `crates/loom/watches/`,
   embedded into the binary and registered in `loom::builtins`:
-  `builtin:status` (stamp a `triage` mark on each in-scope session, judging
+  `builtin:status` (an opt-in agentic watch that stamps a `triage` mark on a
+  stale in-scope session, judging
   via the configured `prompt` through the daemon's one-shot agent when
-  available, else mirroring the agent's own `attention` tag),
+  available, otherwise leaving its marks untouched),
   `builtin:review-wait` (park a session whose open, non-draft PR awaits an
   external review — `review_decision` `REVIEW_REQUIRED` — under a quiet
   `awaiting: review` mark that sinks it below the calm default in the fleet
@@ -838,8 +839,15 @@ A round runs the **program** the watch names:
   and `builtin:archive-merged` (flag live sessions whose PR has merged, excluding
   those with `auto-archive: disabled`). The last two are **read-only**: they
   record `would:` actions and mutate nothing — the actual archive is still
-  `github.archive_on_merge`, above. The Watch
-  panel and `loom watch programs` list the registry; script sources
+  `github.archive_on_merge`, above — and are opt-in. Watches granted the
+  `judge` capability are agentic and the engine limits their automatic rounds
+  to at most one every 15 minutes; manual runs still bypass the interval.
+  Agent judgements use the watch's selected automation-safe ACP profile. The
+  stock `watch` profile is Codex `gpt-5.6-sol` at medium effort, in plan mode
+  with a cleared environment and no profile-granted external tools or MCP
+  servers; a watch's non-empty model/effort fields override the profile
+  defaults. The Watch panel and
+  `loom watch programs` list the registry; script sources
   render read-only (they ship with the binary).
 - **A custom program file** — an absolute path, conventionally
   `~/.weaver/watches/<name>.py` (`loom watch new` scaffolds one).
@@ -851,9 +859,10 @@ loom can do is an HTTP route (including one-shot agent judgement, at
 There is deliberately no privileged in-Rust program shape: a builtin sees
 exactly the API a custom program sees.
 The contract: `$WEAVER_API` carries the daemon's base URL, `$WEAVER_WATCH`
-the round's config (`{id, name, program, params, scope, capabilities, model,
-effort, dry_run}`), and the script prints one JSON object — `{outcome, summary,
-actions}` — as its final stdout line. A non-zero exit, no result object, or a
+the round's config (`{id, name, program, params, scope, capabilities, profile,
+model, effort, dry_run}`), and the script prints one JSON object —
+`{outcome, summary, actions}` — as its final stdout line. A non-zero exit, no
+result object, or a
 blown round budget records the round as an `error`. A mutating program must
 honor `dry_run` (record `{would: …}` actions instead of acting) and stay inside
 its granted capabilities.

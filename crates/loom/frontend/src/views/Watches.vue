@@ -2,7 +2,7 @@
 import { ref, reactive, computed, watch as watchEffect, onMounted, onActivated } from 'vue';
 import { useRouter } from 'vue-router';
 import { get, post, patch, del } from '../api';
-import type { Watch, WatchRun, WatchRunResult, ProgramView } from '../types';
+import type { Watch, WatchRun, WatchRunResult, ProgramView, Profile } from '../types';
 import OutcomeBadge from '../components/OutcomeBadge.vue';
 import AgentTerminal from '../components/AgentTerminal.vue';
 import ToggleSwitch from '../components/ToggleSwitch.vue';
@@ -29,6 +29,7 @@ const router = useRouter();
 
 const watches = ref<Watch[]>([]);
 const programs = ref<ProgramView[]>([]);
+const profiles = ref<Profile[]>([]);
 const loaded = ref(false);
 const error = ref('');
 const busy = ref(false);
@@ -60,6 +61,15 @@ const programInfo = computed(
 );
 
 const activeCount = computed(() => watches.value.filter((w) => w.enabled).length);
+const watchProfiles = computed(() =>
+  profiles.value.filter(
+    (profile) =>
+      profile.class === 'automation' &&
+      profile.strict &&
+      profile.env_clear &&
+      profile.protocol === 'acp',
+  ),
+);
 
 // ── Loading ─────────────────────────────────────────────────────────────────
 async function load() {
@@ -83,6 +93,14 @@ async function loadPrograms() {
     programs.value = (await get('/watches/programs')) as ProgramView[];
   } catch {
     // Supplementary: without the registry a program still shows as its ref.
+  }
+}
+
+async function loadProfiles() {
+  try {
+    profiles.value = (await get('/profiles')) as Profile[];
+  } catch {
+    // Supplementary: the stored profile name remains editable as plain data.
   }
 }
 
@@ -178,6 +196,7 @@ const notice = ref('');
 const draft = reactive({
   prompt: '',
   capabilities: {} as Record<string, boolean>,
+  profile: 'watch',
   model: '',
   effort: '',
   cooldown: 0,
@@ -188,6 +207,7 @@ function syncDraft(w: Watch) {
   draft.capabilities = Object.fromEntries(
     GRANTABLE_CAPABILITIES.map((c) => [c, w.capabilities.includes(c)]),
   );
+  draft.profile = w.profile;
   draft.model = w.model;
   draft.effort = w.effort;
   draft.cooldown = w.cooldown_secs;
@@ -212,6 +232,7 @@ async function saveConfig() {
     const body: Record<string, unknown> = {
       params: draft.prompt.trim() ? { prompt: draft.prompt.trim() } : {},
       capabilities: capabilitiesFrom(draft.capabilities),
+      profile: draft.profile.trim() || 'watch',
       model: draft.model,
       effort: draft.effort,
       cooldown_secs: Number(draft.cooldown) || 0,
@@ -243,6 +264,7 @@ const form = reactive({
   prompt: '',
   scopeAttention: '',
   repo: '',
+  profile: 'watch',
   capabilities: {
     mark: true,
     escalate: true,
@@ -263,6 +285,7 @@ function resetForm() {
   form.prompt = '';
   form.scopeAttention = '';
   form.repo = '';
+  form.profile = 'watch';
   form.capabilities = { mark: true, escalate: true, nudge: false, interrupt: false, launch: false };
 }
 
@@ -329,6 +352,7 @@ async function create() {
       program: programRef || 'builtin:status',
       params,
       capabilities: capabilitiesFrom(form.capabilities),
+      profile: form.profile.trim() || 'watch',
       // New watches go live immediately; the per-row toggle disables later.
       enabled: true,
     };
@@ -373,6 +397,7 @@ watchEffect(selectedId, () => {
 onMounted(() => {
   load().then(loadRuns);
   loadPrograms();
+  loadProfiles();
 });
 // Kept alive across navigation (App.vue): refresh on every return, guarded so
 // the initial mount doesn't fetch twice.
@@ -384,6 +409,7 @@ onActivated(() => {
   }
   load();
   loadRuns();
+  loadProfiles();
 });
 </script>
 
@@ -615,6 +641,20 @@ onActivated(() => {
               spellcheck="false"
               class="w-full rounded bg-input px-2 py-1.5 font-mono text-sm outline-none ring-accent focus:ring-1"
             />
+          </div>
+
+          <div>
+            <label class="mb-1 block text-xs text-muted">
+              Agent profile — automation-safe ACP profile for judgements
+            </label>
+            <select
+              v-model="form.profile"
+              class="w-full rounded bg-input px-2 py-1.5 font-mono text-sm outline-none ring-accent focus:ring-1"
+            >
+              <option v-for="profile in watchProfiles" :key="profile.name" :value="profile.name">
+                {{ profile.name }} — {{ profile.agent_kind }} / {{ profile.model || 'default' }}
+              </option>
+            </select>
           </div>
 
           <div>
@@ -936,6 +976,23 @@ onActivated(() => {
                 <dd class="font-mono">{{ scopeSummary(selected.scope) }}</dd>
                 <dt class="text-faint">Program</dt>
                 <dd class="font-mono">{{ selected.program }}</dd>
+
+                <dt class="text-faint">Agent profile</dt>
+                <dd v-if="!editing" class="font-mono">{{ selected.profile }}</dd>
+                <dd v-else>
+                  <select
+                    v-model="draft.profile"
+                    class="w-40 rounded bg-input px-2 py-1 font-mono text-sm outline-none ring-accent focus:ring-1"
+                  >
+                    <option
+                      v-for="profile in watchProfiles"
+                      :key="profile.name"
+                      :value="profile.name"
+                    >
+                      {{ profile.name }}
+                    </option>
+                  </select>
+                </dd>
 
                 <dt class="pt-1 text-faint">Capabilities</dt>
                 <dd>

@@ -75,7 +75,7 @@ enum Cmd {
     ///
     ///     loom watch programs                 # the builtin programs that ship with loom
     ///     loom watch new test-watch          # scaffold ~/.weaver/watches/test-watch.py
-    ///     loom watch add status --cron "0 * * * *" --capabilities observe,mark,escalate
+    ///     loom watch add status --cron "0 * * * *" --capabilities observe,judge,mark
     ///     loom watch run status --dry-run     # simulate; mutating actions are stubbed
     ///     loom watch enable status            # arm it
     ///     loom watch ls                       # the fleet of watchers
@@ -832,11 +832,15 @@ struct AddOpts {
     /// The stock-program judgement prompt; stored as `params.prompt`.
     #[arg(long)]
     prompt: Option<String>,
-    /// Comma-separated capability set (default `observe,mark,escalate`). Drawn
-    /// from observe, mark, escalate, nudge, interrupt, launch.
+    /// Comma-separated capability set (default `observe,judge,mark` for
+    /// `builtin:status`).
+    /// Drawn from observe, judge, mark, escalate, nudge, interrupt, launch.
     #[arg(long, value_delimiter = ',')]
     capabilities: Option<Vec<String>>,
-    /// Model tier for `run_agent` judgement calls (e.g. sonnet, opus).
+    /// Automation-safe ACP profile for agent judgements (default `watch`).
+    #[arg(long)]
+    profile: Option<String>,
+    /// Model override for agent judgement calls.
     #[arg(long)]
     model: Option<String>,
     /// Reasoning effort for judgement calls.
@@ -3619,6 +3623,9 @@ async fn cmd_watch_add(opts: AddOpts) -> Result<()> {
     if let Some(caps) = &opts.capabilities {
         body.insert("capabilities".into(), json!(caps));
     }
+    if let Some(profile) = &opts.profile {
+        body.insert("profile".into(), json!(profile));
+    }
     if let Some(model) = &opts.model {
         body.insert("model".into(), json!(model));
     }
@@ -3638,6 +3645,7 @@ async fn cmd_watch_add(opts: AddOpts) -> Result<()> {
     println!("  trigger: {}", trigger_summary(&o));
     println!("  program: {}", str_field(&o, "program"));
     println!("  caps:    {}", capabilities_summary(&o));
+    println!("  profile: {}", str_field(&o, "profile"));
     println!(
         "  enabled: no — arm it with `loom watch enable {}`",
         opts.name
@@ -4224,6 +4232,7 @@ mod tests {
             program: None,
             prompt: None,
             capabilities: None,
+            profile: None,
             model: None,
             effort: None,
             cooldown: None,

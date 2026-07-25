@@ -38,6 +38,9 @@ pub struct BuiltinProgram {
     pub default_scope: &'static str,
     pub default_params: &'static str,
     pub default_capabilities: &'static [&'static str],
+    /// Whether the stock watch is live on first seed. Agentic and advisory-only
+    /// programs are opt-in; narrowly mechanical programs start enabled.
+    pub default_enabled: bool,
 }
 
 /// Every builtin program, in the order the panel lists them.
@@ -45,19 +48,22 @@ pub const BUILTINS: &[BuiltinProgram] = &[
     BuiltinProgram {
         name: "status",
         title: "Status check",
-        description: "When a session goes idle (the agent's finished-turn hook), \
+        description: "After a session stays inactive long enough to become stale, \
                       ask the judge model (the daemon's one-shot agent) for the \
                       set of attention tags it warrants and reconcile the watch's \
-                      own marks to that set. Names the kind of attention (review, \
-                      question, stuck, …) rather than a generic mark, and when it \
+                      own marks to that set. Uses a fixed vocabulary (human-review, \
+                      human-decision, agent-stuck) rather than a generic mark, and when it \
                       finds a genuine need it replaces the soothing `idle` mark \
                       with that real status. With no judge model available it \
-                      no-ops, never mirroring the agent's own attention tag.",
+                      no-ops, never mirroring the agent's own attention tag. \
+                      Agentic and opt-in; automatic rounds are paced to at most \
+                      one every 15 minutes.",
         source: include_str!("../watches/status.py"),
-        default_trigger: r#"{"on":["session.idle"]}"#,
+        default_trigger: r#"{"on":["session.stale"]}"#,
         default_scope: "{}",
         default_params: "{}",
-        default_capabilities: &["observe", "mark"],
+        default_capabilities: &["observe", "judge", "mark"],
+        default_enabled: false,
     },
     BuiltinProgram {
         name: "resume",
@@ -75,6 +81,7 @@ pub const BUILTINS: &[BuiltinProgram] = &[
         default_scope: "{}",
         default_params: "{}",
         default_capabilities: &["observe", "nudge", "mark"],
+        default_enabled: true,
     },
     BuiltinProgram {
         name: "pr-label",
@@ -88,6 +95,7 @@ pub const BUILTINS: &[BuiltinProgram] = &[
         default_scope: "{}",
         default_params: r#"{"label":"weaver"}"#,
         default_capabilities: &["observe"],
+        default_enabled: false,
     },
     BuiltinProgram {
         name: "review-wait",
@@ -107,6 +115,7 @@ pub const BUILTINS: &[BuiltinProgram] = &[
         default_scope: "{}",
         default_params: "{}",
         default_capabilities: &["observe", "mark"],
+        default_enabled: true,
     },
     BuiltinProgram {
         name: "archive-merged",
@@ -121,6 +130,7 @@ pub const BUILTINS: &[BuiltinProgram] = &[
         default_scope: "{}",
         default_params: "{}",
         default_capabilities: &["observe"],
+        default_enabled: false,
     },
 ];
 

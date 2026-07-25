@@ -1,0 +1,1 @@
+ALTER TABLE watches ADD COLUMN profile TEXT NOT NULL DEFAULT 'watch';

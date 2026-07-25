@@ -365,28 +365,6 @@ async fn automation_policy_defaults(db: &Db) -> (i64, i64) {
 /// Build the explicit ambient baseline used when Tapestry clears inheritance.
 /// Profile/repo values win over baseline and allowlisted ambient values; loom's
 /// own session variables are injected later by `agent::session_env`.
-fn cleared_environment(
-    explicit: Vec<(String, String)>,
-    ambient_allowlist: &[String],
-) -> Vec<(String, String)> {
-    const BASELINE: &[&str] = &[
-        "PATH", "HOME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME",
-    ];
-    let mut env = Vec::new();
-    for name in BASELINE.iter().copied().chain(
-        ambient_allowlist
-            .iter()
-            .map(String::as_str)
-            .filter(|name| !BASELINE.contains(name)),
-    ) {
-        if let Ok(value) = std::env::var(name) {
-            env.push((name.to_string(), value));
-        }
-    }
-    repo_env::layer(&mut env, explicit);
-    env
-}
-
 async fn resume_environment(
     db: &Db,
     session: &Session,
@@ -407,7 +385,7 @@ async fn resume_environment(
     }
     let allowlist =
         serde_json::from_str::<Vec<String>>(&session.policy_ambient_allowlist).unwrap_or_default();
-    cleared_environment(env, &allowlist)
+    crate::profile::cleared_environment(env, &allowlist)
 }
 
 /// Overlay the launching user's personal GitHub token onto `env` as `GH_TOKEN`,
@@ -831,7 +809,7 @@ pub(crate) async fn provision_session(
         let allowlist = launch_profile
             .ambient_names()
             .map_err(|e| AppError::bad_request(e.to_string()))?;
-        extra_env = cleared_environment(extra_env, &allowlist);
+        extra_env = crate::profile::cleared_environment(extra_env, &allowlist);
     }
     // Select the launching user's GitHub credential by overlaying it as
     // GH_TOKEN (design §6.3, "Level B"). See `apply_user_github_token` for the
@@ -2366,15 +2344,25 @@ pub(crate) async fn create_warm_session(
     tokio::fs::create_dir_all(&run_dir).await?;
     tracing::debug!(watch = %watch.id, session = %session_id, "allocated warm session id and run dir");
 
-    // Warm infrastructure resolves the same authoritative default profile as
-    // ordinary launches. Watches still supply their own model/effort selectors,
-    // but there is no second `agent.*` settings authority.
-    let launch_profile = crate::profile::get(&st.db, crate::profile::DEFAULT_PROFILE)
+    // Warm infrastructure resolves the profile selected by the watch. Its
+    // runtime/model/policy are authoritative; the watch's non-empty model and
+    // effort remain per-watch overrides.
+    let launch_profile = crate::profile::get(&st.db, &watch.profile)
         .await?
         .ok_or_else(|| {
-            AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "default profile missing")
+            AppError::bad_request(format!("watch profile '{}' is missing", watch.profile))
         })?;
     let agent = launch_profile.agent_kind.clone();
+    let model = if watch.model.trim().is_empty() {
+        launch_profile.model.clone()
+    } else {
+        watch.model.clone()
+    };
+    let effort = if watch.effort.trim().is_empty() {
+        launch_profile.effort.clone()
+    } else {
+        watch.effort.clone()
+    };
     let goal_file = match watch
         .params()
         .get("prompt")
@@ -2404,7 +2392,7 @@ pub(crate) async fn create_warm_session(
         let allowlist = launch_profile
             .ambient_names()
             .map_err(|error| AppError::bad_request(error.to_string()))?;
-        extra_env = cleared_environment(extra_env, &allowlist);
+        extra_env = crate::profile::cleared_environment(extra_env, &allowlist);
     }
 
     // Persist before exposing the scoped credential to the child. Token lookup
@@ -2438,8 +2426,8 @@ pub(crate) async fn create_warm_session(
             work_dir: work_dir.display().to_string(),
             term_session: term_session.clone(),
             agent_kind: agent.clone(),
-            model: watch.model.clone(),
-            effort: watch.effort.clone(),
+            model: model.clone(),
+            effort: effort.clone(),
             status: status.to_string(),
             github_repo: None,
             parent_branch_id: None,
@@ -2484,8 +2472,8 @@ pub(crate) async fn create_warm_session(
             primer_file: None,
             prelude: &launch_profile.prelude,
             server_addr: &st.addr,
-            model: &watch.model,
-            effort: &watch.effort,
+            model: &model,
+            effort: &effort,
             extra_env: &extra_env,
             env_clear: launch_profile.env_clear,
         },

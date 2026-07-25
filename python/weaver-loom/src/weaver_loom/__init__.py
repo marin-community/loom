@@ -59,7 +59,7 @@ import urllib.request
 DEFAULT_BASE = "http://127.0.0.1:7878"
 
 #: The intervention ladder, calm → loud. ``observe`` is implicit.
-CAPABILITIES = ["observe", "mark", "escalate", "nudge", "interrupt", "launch"]
+CAPABILITIES = ["observe", "judge", "mark", "escalate", "nudge", "interrupt", "launch"]
 
 #: Lifecycle states with no live session behind them.
 TERMINAL_STATUSES = {"done", "error", "archived"}
@@ -310,10 +310,11 @@ class Client:
     construction. Sessions and branches cross as plain dicts.
     """
 
-    def __init__(self, base=None, capabilities=None, credentials=None):
+    def __init__(self, base=None, capabilities=None, credentials=None, profile=""):
         self.base = _base_url(base)
         self.capabilities = list(capabilities or [])
         self.credentials = credentials
+        self.profile = profile
 
     def can(self, cap):
         """Whether this client holds ``cap`` (``observe`` is always held)."""
@@ -378,12 +379,18 @@ class Client:
         """The builtin watch program registry."""
         return self._request("GET", "/watches/programs")
 
-    def agent(self, prompt, model="", effort="", runtime=""):
+    def agent(self, prompt, model="", effort="", runtime="", profile=""):
         """Run a fresh ACP prompt in the daemon and return its text, or ``None``
-        when the runtime is absent or failed. ``runtime`` defaults to Claude for
-        compatibility. A judgement primitive: pair with
-        :func:`parse_judgement`."""
+        when the profile/runtime is absent or failed. The client profile is used
+        unless ``profile`` overrides it; without either, ``runtime`` defaults to
+        Claude for compatibility. A judgement primitive: pair with
+        :func:`parse_judgement`. Needs ``judge``; watches holding that capability
+        are paced by the engine to at most one automatic round per 15 minutes."""
+        self._gate("judge")
         body = {"prompt": prompt, "model": model or "", "effort": effort or ""}
+        selected_profile = profile or self.profile
+        if selected_profile:
+            body["profile"] = selected_profile
         if runtime:
             body["agent"] = runtime
         reply = self._request(
@@ -462,7 +469,7 @@ class Round:
     """One watch round, as the engine runs it.
 
     Reads the round config from ``$WEAVER_WATCH`` (``{id, name, program,
-    params, scope, capabilities, model, effort, dry_run, state}``), builds a
+    params, scope, capabilities, profile, model, effort, dry_run, state}``), builds a
     :class:`Client` granted that round's capabilities, accumulates the action
     log, and prints the result the engine parses. A mutating program must
     check :attr:`dry_run` (record a :meth:`would` action instead of acting).
@@ -481,6 +488,9 @@ class Round:
         self.name = config.get("name", "")
         self.params = config.get("params") or {}
         self.scope = config.get("scope") or {}
+        #: Automation-safe launch profile used by agent judgements and warm
+        #: sessions. ``watch`` is the stock low-frequency Codex profile.
+        self.profile = config.get("profile") or "watch"
         #: The watch's configured agent model / reasoning effort — pass
         #: these to :meth:`Client.agent` so judgement honours the config.
         self.model = config.get("model", "")
@@ -497,7 +507,7 @@ class Round:
         self.trigger = config.get("trigger") or {}
         self.dry_run = bool(config.get("dry_run")) or self.mode == "register"
         caps = [] if self.mode == "register" else (config.get("capabilities") or [])
-        self.client = client or Client(capabilities=caps)
+        self.client = client or Client(capabilities=caps, profile=self.profile)
         self.actions = []
         #: How many live sessions the last survey admitted.
         self.surveyed = 0

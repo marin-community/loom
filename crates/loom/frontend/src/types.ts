@@ -683,6 +683,8 @@ export interface Watch {
   /** The granted capability set (the intervention ladder). `observe` is
    *  implicit; the rest are explicit grants. */
   capabilities: string[];
+  /** Automation-safe ACP profile used by agent judgements and warm sessions. */
+  profile: string;
   model: string;
   effort: string;
   cooldown_secs: number;

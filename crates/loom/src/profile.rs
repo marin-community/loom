@@ -13,10 +13,13 @@ use crate::db::{now_iso, Db};
 
 pub const DEFAULT_PROFILE: &str = "default";
 
-const STOCK_PROFILES: &[(&str, &str)] = &[(
-    "github_comment.json",
-    include_str!("../profiles/github_comment.json"),
-)];
+const STOCK_PROFILES: &[(&str, &str)] = &[
+    (
+        "github_comment.json",
+        include_str!("../profiles/github_comment.json"),
+    ),
+    ("watch.json", include_str!("../profiles/watch.json")),
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Profile {
@@ -490,13 +493,18 @@ pub async fn remove(db: &Db, name: &str) -> Result<bool> {
     if name == DEFAULT_PROFILE {
         bail!("the default profile cannot be removed");
     }
-    let referenced: bool =
+    let session_referenced: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE profile = ?)")
             .bind(name)
             .fetch_one(db)
             .await?;
-    if referenced {
-        bail!("profile '{name}' is referenced by sessions");
+    let watch_referenced: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM watches WHERE profile = ?)")
+            .bind(name)
+            .fetch_one(db)
+            .await?;
+    if session_referenced || watch_referenced {
+        bail!("profile '{name}' is referenced by sessions or watches");
     }
     Ok(sqlx::query("DELETE FROM profiles WHERE name = ?")
         .bind(name)
@@ -542,6 +550,31 @@ pub async fn env_pairs(db: &Db, profile: &str) -> Result<Vec<(String, String)>> 
         values.push((row.name, value));
     }
     Ok(values)
+}
+
+/// Build the explicit ambient baseline used by an env-cleared profile.
+/// Profile-owned values win over the small process baseline and any explicitly
+/// allowlisted ambient names.
+pub fn cleared_environment(
+    explicit: Vec<(String, String)>,
+    ambient_allowlist: &[String],
+) -> Vec<(String, String)> {
+    const BASELINE: &[&str] = &[
+        "PATH", "HOME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME",
+    ];
+    let mut env = Vec::new();
+    for name in BASELINE.iter().copied().chain(
+        ambient_allowlist
+            .iter()
+            .map(String::as_str)
+            .filter(|name| !BASELINE.contains(name)),
+    ) {
+        if let Ok(value) = std::env::var(name) {
+            env.push((name.to_string(), value));
+        }
+    }
+    crate::repo_env::layer(&mut env, explicit);
+    env
 }
 
 pub async fn env_get(db: &Db, profile: &str, name: &str) -> Result<Option<String>> {
@@ -846,6 +879,13 @@ mod tests {
         let db = crate::db::connect_in_memory().await.unwrap();
         let stock = get(&db, "github_comment").await.unwrap().unwrap();
         assert!(stock.restricted);
+        let watch = get(&db, "watch").await.unwrap().unwrap();
+        assert_eq!(watch.agent_kind, "codex");
+        assert_eq!(watch.model, "gpt-5.6-sol");
+        assert_eq!(watch.effort, "medium");
+        assert_eq!(watch.mode, "plan");
+        assert!(watch.is_automation_safe());
+        assert!(!watch.restricted);
 
         let mut edited = stock.as_input().unwrap();
         edited.description = "operator-edited description".to_string();
@@ -891,6 +931,23 @@ mod tests {
 
         assert_eq!(unchanged.revision, existing.revision);
         assert_eq!(unchanged.updated_at, existing.updated_at);
+    }
+
+    #[tokio::test]
+    async fn profiles_selected_by_watches_cannot_be_removed() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        weaver_core::watch::create(
+            &db,
+            &weaver_core::watch::NewWatch {
+                name: "profile-owner".to_string(),
+                profile: "github_comment".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(remove(&db, "github_comment").await.is_err());
     }
 
     #[tokio::test]

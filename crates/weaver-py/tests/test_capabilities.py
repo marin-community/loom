@@ -14,6 +14,7 @@ import pytest
 def test_module_exposes_the_ladder():
     assert weaver_py.CAPABILITIES == [
         "observe",
+        "judge",
         "mark",
         "escalate",
         "nudge",

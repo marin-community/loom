@@ -1,9 +1,10 @@
 """status — when a session goes quiet, judge it and replace the calm idle mark.
 
-When the agent goes quiet, loom stamps a soothing, *quiet* ``idle`` mark — the
-calm "resting, no one needed" state (so an idle agent never reads as needing the
-user). On the agent's finished-turn hook (``session.idle``) this watch
-re-assesses just that session: it asks the judge model (the daemon's one-shot
+When the agent has stayed quiet long enough to become stale, loom has already
+stamped a soothing, *quiet* ``idle`` mark — the calm "resting, no one needed"
+state (so an idle agent never reads as needing the user). On the one-shot
+inactivity edge (``session.stale``) this watch re-assesses just that session: it
+asks the judge model (the daemon's one-shot
 agent) for advice on a set of attention tags to apply given the recent screen,
 then reconciles its own marks to that set — setting the recommended tags and
 clearing any it set earlier that no longer apply.
@@ -15,8 +16,8 @@ the real loud status it names. A "nothing needed" verdict leaves the soothing
 
 User attention is expensive, so the default prompt tells the model to flag a
 session ONLY when it genuinely needs the human, and to name the *kind* of
-attention (the tag key — `review`, `question`, `stuck`, …) rather than a generic
-"needs attention". The watch never mirrors the agent's own ``attention``
+attention from a fixed vocabulary rather than a generic "needs attention". The
+watch never mirrors the agent's own ``attention``
 self-report; that is the agent's signal, on its own key. With no judge model
 available (no agent, or an empty/garbled reply), the round is a no-op — it leaves
 every mark untouched (including ``idle``) rather than guess. Honours dry_run:
@@ -25,11 +26,19 @@ would-be writes are logged as actions and nothing mutates.
 
 from weaver_loom import IDLE_KEY, IDLE_VALUE, Round, parse_tag_recommendations
 
-#: Wake on the agent's finished-turn hook — "assess when the agent goes quiet".
-TRIGGERS = {"on": ["session.idle"]}
+#: Wake once after sustained inactivity, not after every completed turn.
+TRIGGERS = {"on": ["session.stale"]}
 
 #: Lines of terminal scrollback handed to the judge as context.
 SCREEN_LINES = 200
+
+#: Stable UI vocabulary. Prompting narrows the model; this allowlist enforces
+#: the contract when it still returns a creative key or mismatched severity.
+ALLOWED_TAGS = {
+    "human-review": "attention",
+    "human-decision": "attention",
+    "agent-stuck": "blocked",
+}
 
 #: The default judge prompt, overridable via params.prompt. Asks for a JSON array
 #: of {key, value, note} tags, or [] when the human is not needed.
@@ -42,13 +51,14 @@ DEFAULT_PROMPT = (
     "replaces the calm idle mark with a real status. Read the recent session "
     "screen below and decide which attention tags apply.\n\n"
     "Reply with ONLY a JSON array of objects "
-    '{"key": "<short-type>", "value": "attention" | "blocked", "note": "<one '
+    '{"key": "human-review" | "human-decision" | "agent-stuck", '
+    '"value": "attention" | "blocked", "note": "<direct screen evidence in one '
     'line>"}. Use an empty array [] when the session does not need the human (it '
     "stays calmly idle). The key names the KIND of attention; pick the few that "
     "fit, e.g.:\n"
-    '  - "review"   — work looks finished / a PR is ready to look at (value "attention")\n'
-    '  - "question" — waiting on a decision only the operator can make (value "attention")\n'
-    '  - "stuck"    — looping or erroring with no progress (value "blocked")\n'
+    '  - "human-review"   — work is ready for the operator to review (value "attention")\n'
+    '  - "human-decision" — waiting on a decision only the operator can make (value "attention")\n'
+    '  - "agent-stuck"    — looping or erroring with no progress (value "blocked")\n'
     "Do not invent noise, and do not restate the agent's own self-reported "
     "status — add only what an outside observer would flag."
 )
@@ -65,7 +75,14 @@ def judge_tags(rnd, session):
     out = rnd.client.agent(f"{prompt}\n\nSession screen:\n{screen}\n", rnd.model, rnd.effort)
     if not out:
         return None
-    return parse_tag_recommendations(out)
+    parsed = parse_tag_recommendations(out)
+    if parsed is None:
+        return None
+    return [
+        tag
+        for tag in parsed
+        if ALLOWED_TAGS.get(tag.get("key")) == tag.get("value")
+    ]
 
 
 def watch_tags(rnd, session):
