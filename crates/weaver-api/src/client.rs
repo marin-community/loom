@@ -12,14 +12,15 @@ use serde_json::Value;
 
 use crate::dto::{
     AnchorDto, ArtifactMeta, ArtifactUpsertReq, ArtifactView, AutomationTokenReq,
-    AutomationTokenView, BranchStatusReq, BranchView, CommentDto, CreateEventReq, CreateIssueReq,
-    CreateRepoIssueReq, CreateReq, CreateTokenReq, CreateWatchReq, CreatedTokenView, CustomMcpReq,
-    CustomMcpView, DeploymentReq, DeploymentView, DiagnosticsView, EffectiveProfileView,
-    FederationReq, FederationView, HandoffReq, HistoryPageView, IssueActionsReq,
-    IssueActionsResult, IssueView, McpRegistryView, NewCommentBody, NewThreadBody, PatchIssueReq,
-    PatchSessionReq, PatchWatchReq, ProfileProbeView, ProfileReq, ProfileView, PutProfileEnvReq,
-    ReadinessView, RunReq, RunView, RunWatchReq, SendReq, SessionView, SetTagsReq,
-    SettingsEnvelope, TagReq, ThreadDto, TokenView, WatchView,
+    AutomationTokenView, BranchStatusReq, BranchView, CloneProfileReq, CommentDto, CreateEventReq,
+    CreateIssueReq, CreateRepoIssueReq, CreateReq, CreateTokenReq, CreateWatchReq,
+    CreatedTokenView, CustomMcpReq, CustomMcpView, DeploymentReq, DeploymentView, DiagnosticsView,
+    EffectiveProfileView, FederationReq, FederationView, HandoffReq, HistoryPageView,
+    IssueActionsReq, IssueActionsResult, IssueView, McpRegistryView, NewCommentBody, NewThreadBody,
+    PatchIssueReq, PatchSessionReq, PatchWatchReq, ProfileProbeView, ProfileReq, ProfileView,
+    PutProfileEnvReq, ReadinessView, ResolveLaunchReq, ResolvedLaunchView, RunReq, RunView,
+    RunWatchReq, ScratchLimitsView, SendReq, SessionView, SetTagsReq, SettingsEnvelope, TagReq,
+    ThreadDto, TokenView, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -226,6 +227,15 @@ impl Client {
     /// Launch a new session (`POST /api/sessions`).
     pub async fn create_session(&self, req: &CreateReq) -> Result<SessionView> {
         self.send_typed(Method::POST, "/api/sessions", Some(req))
+            .await
+    }
+
+    /// Resolve and validate a profile selection without launching.
+    pub async fn resolve_session_launch(
+        &self,
+        req: &ResolveLaunchReq,
+    ) -> Result<ResolvedLaunchView> {
+        self.send_typed(Method::POST, "/api/session-launches/resolve", Some(req))
             .await
     }
 
@@ -827,6 +837,22 @@ impl Client {
             Some(req),
         )
         .await
+    }
+
+    /// Clone one profile's policy on the server, optionally copying its
+    /// write-only environment in the same transaction.
+    pub async fn clone_profile(&self, source: &str, req: &CloneProfileReq) -> Result<ProfileView> {
+        self.send_typed(
+            Method::POST,
+            &format!("/api/profiles/{}/clone", Self::seg(source)),
+            Some(req),
+        )
+        .await
+    }
+
+    /// Return the upload limits shared by launch and live-session Scratch.
+    pub async fn scratch_limits(&self) -> Result<ScratchLimitsView> {
+        self.get_typed("/api/scratch/limits").await
     }
 
     pub async fn delete_profile(&self, name: &str) -> Result<Value> {

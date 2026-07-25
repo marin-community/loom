@@ -76,6 +76,7 @@ mod diagnostics;
 mod discussion;
 mod env;
 mod issues;
+mod launches;
 mod logview;
 mod mcps;
 mod profiles;
@@ -97,6 +98,7 @@ use diagnostics::*;
 use discussion::*;
 use env::*;
 use issues::*;
+use launches::*;
 use logview::*;
 use mcps::*;
 use profiles::*;
@@ -329,6 +331,18 @@ pub(crate) async fn session_view(
                 format!("invalid session MCP policy snapshot: {error}"),
             )
         })?;
+    let resolved_launch = if session.launch_snapshot.trim().is_empty() {
+        None
+    } else {
+        Some(
+            serde_json::from_str(&session.launch_snapshot).map_err(|error| {
+                AppError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("invalid session launch snapshot: {error}"),
+                )
+            })?,
+        )
+    };
     Ok(SessionView {
         id: session.id.clone(),
         status: session.status.clone(),
@@ -361,6 +375,7 @@ pub(crate) async fn session_view(
         profile_revision: session.profile_revision,
         launch_mode: session.launch_mode.clone(),
         mcp_policy,
+        resolved_launch,
         branch: bv,
     })
 }
@@ -588,6 +603,8 @@ pub fn router(state: AppState) -> Router {
     let protected = Router::new()
         // Sessions
         .route("/sessions", get(list_sessions).post(create_session))
+        .route("/session-launches/resolve", post(resolve_session_launch))
+        .route("/scratch/limits", get(scratch_limits))
         .route(
             "/sessions/{id}",
             get(get_session).patch(patch_session).delete(delete_session),
@@ -786,6 +803,7 @@ pub fn router(state: AppState) -> Router {
         .route("/profiles", get(list_profiles).post(create_profile))
         .route("/profiles/{name}/effective", get(effective_profile))
         .route("/profiles/{name}/probe", post(probe_profile))
+        .route("/profiles/{name}/clone", post(clone_profile))
         .route(
             "/profiles/{name}",
             get(get_profile).put(put_profile).delete(delete_profile),

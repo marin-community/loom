@@ -3,10 +3,7 @@ import { test, expect } from '../fixtures/weaver';
 test.describe('creating a session via the UI form', () => {
   const repoPlaceholder = 'owner/name or /home/you/code/project';
 
-  test('opens the form, submits, and the session appears in the list', async ({
-    page,
-    weaver,
-  }) => {
+  test('opens the form, submits, and the session appears in the list', async ({ page, weaver }) => {
     await page.goto(weaver.baseUrl);
 
     // Form is hidden until "New session" is clicked.
@@ -19,9 +16,13 @@ test.describe('creating a session via the UI form', () => {
 
     await repoInput.fill(weaver.repoPath);
     await goalInput.fill('Implement the new feature');
-    await page.getByRole('button', { name: 'Create' }).click();
+    await expect(page).toHaveURL(`${weaver.baseUrl}/sessions/new`);
+    await page.getByRole('button', { name: 'Create session' }).click();
 
-    // The list reloads after creation; the new card should show up.
+    // A successful focused launch opens the new session. Returning to the fleet
+    // shows the same persisted row.
+    await expect(page).toHaveURL(/\/s\/[^/]+$/);
+    await page.locator('[data-rail="sessions"]').click();
     const card = page.getByTestId('session-card');
     await expect(card).toHaveCount(1);
     await expect(card.first()).toContainText('Implement the new feature');
@@ -55,40 +56,85 @@ test.describe('creating a session via the UI form', () => {
     await expect(page.getByTestId('recent-repo')).toBeHidden();
   });
 
-  test('attached scratch files land in the new worktree', async ({ page, weaver }) => {
+  test('selects a profile, overrides it, launches, and drops an attachment', async ({ page, weaver }) => {
+    await fetch(`${weaver.baseUrl}/api/profiles`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'ui-launch',
+        description: 'Playwright launch template',
+        agent_kind: 'shell',
+        model: '',
+        effort: '',
+        protocol: 'terminal',
+        mode: 'auto',
+        class: 'interactive',
+        strict: false,
+        env_clear: false,
+        ambient_allowlist: [],
+        max_concurrent: 0,
+        prelude: 'weaver',
+        restricted: false,
+        runtime_permissions: [],
+        mcp_access: { mode: 'none', groups: [] },
+      }),
+    });
     await page.goto(weaver.baseUrl);
     await page.getByRole('button', { name: 'New session' }).click();
 
     await page.getByPlaceholder(repoPlaceholder).fill(weaver.repoPath);
     await page.getByPlaceholder('Add a /health endpoint').fill('Investigate the attached trace');
+    await page.getByTestId('profile-option-ui-launch').click();
+    await page.getByRole('button', { name: /One-launch overrides/ }).click();
+    await page.getByTestId('override-mode-toggle').check();
+    await page.getByTestId('override-mode').selectOption('plan');
+    await expect(page.getByTestId('provenance-mode')).toHaveText('launch override');
 
-    // Drop two reference files via the (hidden) file input behind the dropper.
-    const input = page.getByTestId('scratch-picker-dropzone').locator('input[type=file]');
-    await input.setInputFiles([
-      { name: 'trace.log', mimeType: 'text/plain', buffer: Buffer.from('panic at line 42\n') },
-      { name: 'shot.png', mimeType: 'image/png', buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
-    ]);
-    await expect(page.getByTestId('scratch-picker-file')).toHaveCount(2);
+    // Drop is accepted from files.length even when DataTransfer.types is empty.
+    const dataTransfer = await page.evaluateHandle(() => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(['panic at line 42\n'], 'trace.log', { type: 'text/plain' }));
+      Object.defineProperty(transfer, 'types', { value: [] });
+      return transfer;
+    });
+    await page.getByTestId('scratch-picker-dropzone').dispatchEvent('drop', { dataTransfer });
+    await expect(page.getByTestId('scratch-picker-file')).toContainText('trace.log');
 
-    await page.getByRole('button', { name: 'Create' }).click();
-    await expect(page.getByTestId('session-card')).toHaveCount(1);
+    await page.getByRole('button', { name: 'Create session' }).click();
+    await expect(page).toHaveURL(/\/s\/[^/]+$/);
 
-    // The server dropped them into the worktree's scratch/ dir, exposed via the
-    // per-session scratch endpoint.
     const all = await weaver.listSessions();
+    expect(all[0].profile).toBe('ui-launch');
+    expect(all[0].launch_mode).toBe('plan');
+    expect(all[0].resolved_launch?.provenance.mode).toBe('launch_override');
     const res = await fetch(`${weaver.baseUrl}/api/sessions/${all[0].id}/scratch`);
-    const files = (await res.json()) as { name: string }[];
-    expect(files.map((f) => f.name).sort()).toEqual(['shot.png', 'trace.log']);
+    const files = (await res.json()) as { name: string; bytes: number }[];
+    expect(files).toEqual([{ name: 'trace.log', bytes: Buffer.byteLength('panic at line 42\n') }]);
   });
 
   test('a cached session does not consume new-session file drops', async ({ page, weaver }) => {
-    const existing = await weaver.seedSession({ goal: 'Keep this session warm', name: 'warm' });
+    await page.addInitScript(() => {
+      const original = window.addEventListener.bind(window);
+      (window as Window & { __dropListeners?: number }).__dropListeners = 0;
+      window.addEventListener = ((
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | AddEventListenerOptions,
+      ) => {
+        if (type === 'drop') {
+          (window as Window & { __dropListeners?: number }).__dropListeners! += 1;
+        }
+        return original(type, listener, options);
+      }) as typeof window.addEventListener;
+    });
+    const existing = await weaver.seedSession({
+      goal: 'Keep this session warm',
+      name: 'warm',
+    });
     await page.goto(`${weaver.baseUrl}/s/${existing.id}`);
     await expect(page.getByTestId('scratch-panel')).toBeVisible();
 
-    // SessionDetail is kept alive after returning to the fleet. Its whole-window
-    // scratch drop target must deactivate so the new-session picker owns this
-    // image instead of uploading it into the hidden old session.
+    // SessionDetail remains cached, but both attachment surfaces are bounded.
     await page.locator('[data-rail="sessions"]').click();
     await page.getByRole('button', { name: 'New session' }).click();
     const dropzone = page.getByTestId('scratch-picker-dropzone');
@@ -97,76 +143,68 @@ test.describe('creating a session via the UI form', () => {
       dt.items.add(new File(['image'], 'new-session.png', { type: 'image/png' }));
       return dt;
     });
-    await dropzone.dispatchEvent('dragenter', { dataTransfer });
-    await expect(page.getByTestId('scratch-dropzone')).toHaveCount(0);
     await dropzone.dispatchEvent('drop', { dataTransfer });
     await expect(page.getByTestId('scratch-picker-file')).toContainText('new-session.png');
+    expect(await page.evaluate(() => (window as Window & { __dropListeners?: number }).__dropListeners)).toBe(0);
 
     const oldScratch = await fetch(`${weaver.baseUrl}/api/sessions/${existing.id}/scratch`);
     expect((await oldScratch.json()) as { name: string }[]).toEqual([]);
   });
 
   test('an agent startup failure opens its recoverable session', async ({ page, weaver }) => {
-    const failed = await weaver.seedSession({ goal: 'Recover me', name: 'failed-create' });
+    const failed = await weaver.seedSession({
+      goal: 'Recover me',
+      name: 'failed-create',
+    });
     await page.route('**/api/sessions', async (route) => {
       if (route.request().method() !== 'POST') return route.continue();
       await route.fulfill({
         status: 502,
         contentType: 'application/json',
-        body: JSON.stringify({ error: 'acp launch failed: agent did not respond', session_id: failed.id }),
+        body: JSON.stringify({
+          error: 'acp launch failed: agent did not respond',
+          session_id: failed.id,
+        }),
       });
     });
     await page.goto(weaver.baseUrl);
     await page.getByRole('button', { name: 'New session' }).click();
     await page.getByPlaceholder(repoPlaceholder).fill(weaver.repoPath);
     await page.getByPlaceholder('Add a /health endpoint').fill('Start a limited agent');
-    await page.getByRole('button', { name: 'Create', exact: true }).click();
+    await page.getByRole('button', { name: 'Create session', exact: true }).click();
 
     await expect(page).toHaveURL(new RegExp(`/s/${failed.id}$`));
     await expect(page.getByTestId('new-session-drawer')).toHaveCount(0);
   });
 
-  test('agent selection drives model and effort choices', async ({ page, weaver }) => {
-    const registry = (await (await fetch(`${weaver.baseUrl}/api/agents`)).json()) as {
-      agents: { kind: string; models: { label: string }[]; efforts: { label: string }[] }[];
-    };
-    const codex = registry.agents.find((agent) => agent.kind === 'codex')!;
+  test('launch selectors show profile and default provenance', async ({ page, weaver }) => {
     await page.goto(weaver.baseUrl);
     await page.getByRole('button', { name: 'New session' }).click();
 
-    const form = page.locator('form');
-    await expect(form.getByRole('radio', { name: /Claude/ })).toBeVisible();
-    await expect(form.getByRole('radio', { name: /Codex/ })).toBeVisible();
-    await expect(form.getByRole('radio', { name: /Shell/ })).toBeVisible();
+    await expect(page.getByTestId('profile-selector')).toBeVisible();
+    await expect(page.getByTestId('provenance-agent')).toHaveText('profile');
+    await expect(page.getByTestId('provenance-model')).toHaveText(/profile|agent default/);
+  });
 
-    await form.getByRole('radio', { name: /Claude/ }).click();
-    await expect(form.getByRole('button', { name: 'Default' }).first()).toBeVisible();
-    await expect(form.getByRole('button', { name: 'Haiku' })).toBeVisible();
-    await expect(form.getByRole('button', { name: 'Sonnet' })).toBeVisible();
-    await expect(form.getByRole('button', { name: 'Opus' })).toBeVisible();
-    await expect(form.getByRole('button', { name: 'Fable' })).toBeVisible();
-    await expect(form.getByRole('button', { name: 'Max' })).toBeVisible();
+  test('keeps the launch draft while profile templates are edited', async ({ page, weaver }) => {
+    await page.goto(`${weaver.baseUrl}/sessions/new`);
+    await page.getByPlaceholder(repoPlaceholder).fill(weaver.repoPath);
+    await page.getByPlaceholder('Add a /health endpoint').fill('Keep this draft');
 
-    await form.getByRole('radio', { name: /Codex/ }).click();
-    for (const model of codex.models) {
-      await expect(form.getByRole('button', { name: model.label, exact: true })).toBeVisible();
-    }
-    for (const effort of codex.efforts) {
-      await expect(form.getByRole('button', { name: effort.label, exact: true })).toBeVisible();
-    }
-    await expect(form.getByRole('button', { name: 'Haiku' })).toHaveCount(0);
-    await expect(form.getByRole('button', { name: 'Sonnet' })).toHaveCount(0);
-    await expect(form.getByRole('button', { name: 'Opus' })).toHaveCount(0);
-    await expect(form.getByRole('button', { name: 'Fable' })).toHaveCount(0);
+    await page.getByRole('link', { name: 'Edit profile templates in Settings' }).click();
+    await expect(page).toHaveURL(`${weaver.baseUrl}/settings`);
+    await expect(page.getByTestId('profile-selector')).toBeVisible();
+    await page.goBack();
+
+    await expect(page.getByPlaceholder(repoPlaceholder)).toHaveValue(weaver.repoPath);
+    await expect(page.getByPlaceholder('Add a /health endpoint')).toHaveValue('Keep this draft');
   });
 
   test('Cancel hides the form again', async ({ page, weaver }) => {
     await page.goto(weaver.baseUrl);
     await page.getByRole('button', { name: 'New session' }).click();
     await expect(page.getByPlaceholder('Add a /health endpoint')).toBeVisible();
-    // There are now two "Cancel" buttons — the top toggle and the form's own
-    // bottom action. Scope to the form so this targets the bottom one uniquely.
     await page.locator('form').getByRole('button', { name: 'Cancel' }).click();
-    await expect(page.getByPlaceholder('Add a /health endpoint')).toBeHidden();
+    await expect(page).toHaveURL(`${weaver.baseUrl}/`);
   });
 });

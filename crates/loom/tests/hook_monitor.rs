@@ -274,6 +274,7 @@ async fn seed_classed_session(
             allowed_tools: "[]".to_string(),
             mcp_access: r#"{"selection":{"mode":"none","groups":[]},"capability_sets":[]}"#
                 .to_string(),
+            launch_snapshot: String::new(),
             creator_kind: "system".to_string(),
             creator_subject: "test".to_string(),
             parent_session_id: None,

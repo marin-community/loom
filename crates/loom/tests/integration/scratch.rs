@@ -13,6 +13,10 @@ use crate::fixtures::TestServer;
 async fn scratch_upload_list_and_delete() {
     let ts = TestServer::start().await;
     let client = &ts.client;
+    let limits = client.get("/api/scratch/limits").await.unwrap();
+    assert_eq!(limits["max_files"], 20);
+    assert_eq!(limits["max_file_bytes"], 25 * 1024 * 1024);
+    assert_eq!(limits["max_total_bytes"], 50 * 1024 * 1024);
 
     let ws = client
         .post(

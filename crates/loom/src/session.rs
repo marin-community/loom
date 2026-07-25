@@ -111,6 +111,9 @@ pub struct Session {
     pub policy_restricted: bool,
     pub policy_allowed_tools: String,
     pub policy_mcp_access: String,
+    /// Canonical source-redacted launch resolution JSON. Empty only for rows
+    /// created before the launch-composition contract.
+    pub launch_snapshot: String,
     /// Stable creator identity. `created_by` remains display attribution only.
     pub creator_kind: String,
     pub creator_subject: String,
@@ -196,10 +199,28 @@ pub struct SessionLaunchPolicy {
     pub restricted: bool,
     pub allowed_tools: String,
     pub mcp_access: String,
+    pub launch_snapshot: String,
     pub creator_kind: String,
     pub creator_subject: String,
     pub parent_session_id: Option<String>,
     pub automation_run_id: Option<String>,
+}
+
+/// Resolved profile/security metadata replaced during an ACP handoff. Creator
+/// identity and session ancestry remain immutable.
+pub struct SessionHandoffPolicy {
+    pub profile: String,
+    pub launch_mode: String,
+    pub profile_revision: i64,
+    pub env_clear: bool,
+    pub ambient_allowlist: String,
+    pub idle_archive_secs: Option<i64>,
+    pub turn_budget: i64,
+    pub prelude: String,
+    pub restricted: bool,
+    pub allowed_tools: String,
+    pub mcp_access: String,
+    pub launch_snapshot: String,
 }
 
 impl SessionLaunchPolicy {
@@ -226,6 +247,7 @@ impl SessionLaunchPolicy {
             allowed_tools: "[]".to_string(),
             mcp_access: r#"{"selection":{"mode":"none","groups":[]},"capability_sets":[]}"#
                 .to_string(),
+            launch_snapshot: String::new(),
             creator_kind: creator_kind.to_string(),
             creator_subject: s.created_by.clone().unwrap_or_else(|| s.origin.clone()),
             parent_session_id: None,
@@ -257,9 +279,9 @@ pub async fn insert_with_policy(
           profile, launch_mode, profile_revision, policy_env_clear,
           policy_ambient_allowlist, policy_idle_archive_secs, policy_turn_budget,
           policy_prelude, policy_restricted, policy_allowed_tools, policy_mcp_access,
-          creator_kind, creator_subject, parent_session_id, automation_run_id)
+          launch_snapshot, creator_kind, creator_subject, parent_session_id, automation_run_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&s.id)
     .bind(&s.branch_id)
@@ -290,6 +312,7 @@ pub async fn insert_with_policy(
     .bind(policy.restricted)
     .bind(&policy.allowed_tools)
     .bind(&policy.mcp_access)
+    .bind(&policy.launch_snapshot)
     .bind(&policy.creator_kind)
     .bind(&policy.creator_subject)
     .bind(&policy.parent_session_id)
@@ -629,11 +652,18 @@ pub async fn prepare_handoff(
     model: &str,
     effort: &str,
     status: &str,
+    policy: &SessionHandoffPolicy,
 ) -> Result<()> {
     let mut tx = db.begin().await?;
     sqlx::query(
         "UPDATE sessions
          SET agent_kind = ?, model = ?, effort = ?, status = ?,
+             profile = ?, launch_mode = ?, profile_revision = ?,
+             policy_env_clear = ?, policy_ambient_allowlist = ?,
+             policy_idle_archive_secs = ?, policy_turn_budget = ?,
+             policy_prelude = ?, policy_restricted = ?,
+             policy_allowed_tools = ?, policy_mcp_access = ?,
+             launch_snapshot = ?,
              acp_session_id = NULL, acp_ack_seq = 0, acp_inflight = NULL,
              current_mode = NULL
          WHERE id = ?",
@@ -642,6 +672,18 @@ pub async fn prepare_handoff(
     .bind(model)
     .bind(effort)
     .bind(status)
+    .bind(&policy.profile)
+    .bind(&policy.launch_mode)
+    .bind(policy.profile_revision)
+    .bind(policy.env_clear)
+    .bind(&policy.ambient_allowlist)
+    .bind(policy.idle_archive_secs)
+    .bind(policy.turn_budget)
+    .bind(&policy.prelude)
+    .bind(policy.restricted)
+    .bind(&policy.allowed_tools)
+    .bind(&policy.mcp_access)
+    .bind(&policy.launch_snapshot)
     .bind(id)
     .execute(&mut *tx)
     .await?;
@@ -960,14 +1002,32 @@ mod tests {
             .await
             .unwrap();
 
-        prepare_handoff(&db, "handoff", "codex", "gpt-5.4", "high", "running")
-            .await
-            .unwrap();
+        let policy = SessionHandoffPolicy {
+            profile: "default".to_string(),
+            launch_mode: "auto".to_string(),
+            profile_revision: 1,
+            env_clear: false,
+            ambient_allowlist: "[]".to_string(),
+            idle_archive_secs: None,
+            turn_budget: 0,
+            prelude: "weaver".to_string(),
+            restricted: false,
+            allowed_tools: "[]".to_string(),
+            mcp_access: r#"{"selection":{"mode":"none","groups":[]},"capability_sets":[]}"#
+                .to_string(),
+            launch_snapshot: r#"{"agent":"codex"}"#.to_string(),
+        };
+        prepare_handoff(
+            &db, "handoff", "codex", "gpt-5.4", "high", "running", &policy,
+        )
+        .await
+        .unwrap();
         let session = get(&db, "handoff").await.unwrap().unwrap();
         assert_eq!(session.agent_kind, "codex");
         assert_eq!(session.model, "gpt-5.4");
         assert_eq!(session.effort, "high");
         assert_eq!(session.status, "running");
+        assert_eq!(session.launch_snapshot, r#"{"agent":"codex"}"#);
         assert!(session.acp_session_id.is_none());
         assert_eq!(session.acp_ack_seq, 0);
         assert!(session.acp_inflight.is_none());

@@ -762,6 +762,42 @@ enum ProfileCmd {
     },
     /// Validate and resolve a profile without launching a session.
     Probe { name: String },
+    /// Resolve the exact launch snapshot, including provenance and capacity.
+    Resolve {
+        name: String,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        effort: Option<String>,
+        #[arg(long)]
+        protocol: Option<String>,
+        #[arg(long)]
+        mode: Option<String>,
+        #[arg(long)]
+        class: Option<String>,
+    },
+    /// Save a resolved profile selection as a new template.
+    Clone {
+        source: String,
+        name: String,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        effort: Option<String>,
+        #[arg(long)]
+        protocol: Option<String>,
+        #[arg(long)]
+        mode: Option<String>,
+        #[arg(long)]
+        class: Option<String>,
+        /// Copy the source's write-only environment in the clone transaction.
+        #[arg(long)]
+        copy_environment: bool,
+    },
     /// Remove an unused profile (`default` is protected).
     Rm { name: String },
     /// Manage a profile's write-only environment.
@@ -1467,6 +1503,7 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
                     restricted: opts.restricted,
                     runtime_permissions: opts.runtime_permission,
                     mcp_access: parse_mcp_access(&opts.mcp)?,
+                    expected_revision: None,
                 })
                 .await?;
             println!(
@@ -1502,6 +1539,78 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
             if !probe.ok {
                 bail!("profile probe failed");
             }
+        }
+        ProfileCmd::Resolve {
+            name,
+            agent,
+            model,
+            effort,
+            protocol,
+            mode,
+            class,
+        } => {
+            let resolved = client
+                .resolve_session_launch(&weaver_api::ResolveLaunchReq {
+                    selection: weaver_api::LaunchSelection {
+                        profile: name,
+                        overrides: weaver_api::LaunchOverrides {
+                            agent,
+                            model,
+                            effort,
+                            protocol,
+                            mode,
+                            class,
+                        },
+                    },
+                })
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&resolved)?);
+            if !resolved.valid {
+                bail!("resolved launch is not currently valid");
+            }
+        }
+        ProfileCmd::Clone {
+            source,
+            name,
+            agent,
+            model,
+            effort,
+            protocol,
+            mode,
+            class,
+            copy_environment,
+        } => {
+            let overrides = weaver_api::LaunchOverrides {
+                agent,
+                model,
+                effort,
+                protocol,
+                mode,
+                class,
+            };
+            let resolved = client
+                .resolve_session_launch(&weaver_api::ResolveLaunchReq {
+                    selection: weaver_api::LaunchSelection {
+                        profile: source.clone(),
+                        overrides: overrides.clone(),
+                    },
+                })
+                .await?;
+            let saved = client
+                .clone_profile(
+                    &source,
+                    &weaver_api::CloneProfileReq {
+                        name,
+                        expected_profile_revision: resolved.profile_revision,
+                        overrides,
+                        copy_environment,
+                    },
+                )
+                .await?;
+            println!(
+                "cloned {source} as {} (revision {})",
+                saved.name, saved.revision
+            );
         }
         ProfileCmd::Rm { name } => {
             client.delete_profile(&name).await?;
@@ -2886,11 +2995,11 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
     // A managed repo travels as `repo` (the server registers it and clones it if
     // this is its first use); a local checkout travels as `cwd`. Exactly one is
     // set — the server ignores `cwd` whenever `repo` is present.
-    let (cwd, managed_repo) = match &target {
+    let (cwd, managed_repo) = match target {
         RepoTarget::Local(path) => (path.display().to_string(), None),
-        RepoTarget::Managed(r) => (String::new(), Some(r.as_str())),
+        RepoTarget::Managed(repo) => (String::new(), Some(repo)),
     };
-    if let Some(r) = managed_repo {
+    if let Some(r) = managed_repo.as_deref() {
         println!("repo {r} — cloning it if loom doesn't have it yet...");
     }
     // When an agent in a weaver session runs `loom session launch`,
@@ -2900,33 +3009,50 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
     let parent_branch = std::env::var("WEAVER_BRANCH")
         .ok()
         .filter(|s| !s.is_empty());
-    let ws = client
-        .post(
-            "/api/sessions",
-            json!({
-                "goal": goal,
-                "profile": profile,
-                "title": title,
-                "cwd": cwd,
-                "repo": managed_repo,
-                "base": base,
-                "agent": agent,
-                "name": name,
-                "existing_branch": branch,
-                "issue": issue,
-                "claim_issue": claim,
-                "parent_branch": parent_branch,
-                "model": model,
-                "effort": effort,
-                "protocol": protocol,
-                "mode": mode,
-            }),
-        )
+    let selection = weaver_api::LaunchSelection {
+        profile: profile.unwrap_or_else(|| "default".to_string()),
+        overrides: weaver_api::LaunchOverrides {
+            agent,
+            model,
+            effort,
+            protocol,
+            mode,
+            ..Default::default()
+        },
+    };
+    let preview = client
+        .resolve_session_launch(&weaver_api::ResolveLaunchReq {
+            selection: selection.clone(),
+        })
         .await?;
-    let id = str_field(&ws, "id");
-    println!("launched session {id}  ({})", branch_str(&ws, "name"));
-    println!("  title:  {}", branch_str(&ws, "title"));
-    let g = branch_str(&ws, "goal");
+    if !preview.valid {
+        bail!(
+            "launch settings are not currently valid:\n{}",
+            preview.errors.join("\n")
+        );
+    }
+    let ws = client
+        .create_session(&weaver_api::CreateReq {
+            goal: Some(goal),
+            selection: Some(selection),
+            expected_profile_revision: Some(preview.profile_revision),
+            expected_resolver_revision: Some(preview.resolver_revision),
+            title,
+            cwd,
+            repo: managed_repo,
+            base,
+            name,
+            existing_branch: branch,
+            issue,
+            claim_issue: claim,
+            parent_branch,
+            ..Default::default()
+        })
+        .await?;
+    let id = &ws.id;
+    println!("launched session {id}  ({})", ws.branch.name);
+    println!("  title:  {}", ws.branch.title);
+    let g = &ws.branch.goal;
     println!(
         "  goal:   {}",
         if g.is_empty() {
@@ -2935,17 +3061,15 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
             g
         }
     );
-    println!("  branch: {}", branch_str(&ws, "branch"));
-    let model = str_field(&ws, "model");
-    if !model.is_empty() {
-        println!("  model:  {model}");
+    println!("  branch: {}", ws.branch.branch);
+    if !ws.model.is_empty() {
+        println!("  model:  {}", ws.model);
     }
-    let effort = str_field(&ws, "effort");
-    if !effort.is_empty() {
-        println!("  effort: {effort}");
+    if !ws.effort.is_empty() {
+        println!("  effort: {}", ws.effort);
     }
-    println!("  dir:    {}", str_field(&ws, "work_dir"));
-    if let Some(n) = ws.get("tracking_issue").and_then(Value::as_i64) {
+    println!("  dir:    {}", ws.work_dir);
+    if let Some(n) = ws.tracking_issue {
         // The handle the caller uses to follow this sub-tree: poll it with
         // `weaver issue show <n>`, or block on it with `weaver issue wait <n>`.
         println!("  track:  weaver issue #{n}  (weaver issue show {n} | wait {n})");
@@ -3499,6 +3623,7 @@ async fn cmd_handoff(
                 model,
                 effort,
                 mode,
+                ..Default::default()
             },
         )
         .await?;

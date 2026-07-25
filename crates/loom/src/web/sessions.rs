@@ -26,8 +26,8 @@ use crate::{
     setup,
 };
 use weaver_api::{
-    CreateReq, HandoffReq, HistoryPageView, PatchSessionReq, SendReq, SessionView, SetTagsReq,
-    TagReq,
+    CreateReq, HandoffReq, HistoryPageView, LaunchOverrides, LaunchSelection, PatchSessionReq,
+    SendReq, SessionView, SetTagsReq, TagReq,
 };
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::Branch;
@@ -52,15 +52,6 @@ const HANDOFF_SUMMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// manages only hundreds of sessions, so a coarse lock keeps the invariant
 /// legible without adding a per-session lock registry.
 static LIFECYCLE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// Resolve an optional per-request ACP permission posture over the workspace
-/// default. Empty request values behave like omission, matching model/effort.
-fn launch_mode(requested: Option<&str>, fallback: &str) -> String {
-    if let Some(mode) = requested.map(str::trim).filter(|mode| !mode.is_empty()) {
-        return mode.to_string();
-    }
-    fallback.trim().to_string()
-}
 
 pub(super) async fn list_agents(State(st): State<AppState>) -> ApiResult<Json<Value>> {
     let default_agent = crate::profile::get(&st.db, crate::profile::DEFAULT_PROFILE)
@@ -306,10 +297,22 @@ async fn launch_env_for_profile(
     strict: bool,
     restricted: bool,
 ) -> Vec<(String, String)> {
-    let repo_root_str = repo_root.display().to_string();
-    let mut env = crate::profile::env_pairs(db, profile_name)
+    let env = crate::profile::env_pairs(db, profile_name)
         .await
         .unwrap_or_default();
+    layer_launch_environment(db, repo_root, cfg, profile_name, env, strict, restricted).await
+}
+
+async fn layer_launch_environment(
+    db: &Db,
+    repo_root: &std::path::Path,
+    cfg: &weaver_core::repo_config::RepoConfig,
+    profile_name: &str,
+    mut env: Vec<(String, String)>,
+    strict: bool,
+    restricted: bool,
+) -> Vec<(String, String)> {
+    let repo_root_str = repo_root.display().to_string();
     if restricted {
         tracing::debug!(repo = %repo_root_str, profile = profile_name, "restricted launch uses profile environment only");
         return env;
@@ -601,6 +604,79 @@ fn tail_chars(s: &str, max: usize) -> String {
     format!("…(truncated)\n{tail}")
 }
 
+fn legacy_launch_selection(req: &CreateReq) -> LaunchSelection {
+    let present = |value: &Option<String>| {
+        value
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    LaunchSelection {
+        profile: present(&req.profile)
+            .unwrap_or_else(|| crate::profile::DEFAULT_PROFILE.to_string()),
+        overrides: LaunchOverrides {
+            agent: present(&req.agent),
+            model: present(&req.model),
+            effort: present(&req.effort),
+            protocol: present(&req.protocol),
+            mode: present(&req.mode),
+            class: present(&req.class),
+        },
+    }
+}
+
+fn create_selection(req: &CreateReq) -> ApiResult<LaunchSelection> {
+    let Some(selection) = &req.selection else {
+        return Ok(legacy_launch_selection(req));
+    };
+    let flattened = [
+        &req.profile,
+        &req.agent,
+        &req.model,
+        &req.effort,
+        &req.protocol,
+        &req.mode,
+        &req.class,
+    ]
+    .into_iter()
+    .any(Option::is_some);
+    if flattened {
+        return Err(AppError::bad_request(
+            "canonical `selection` cannot be combined with flattened launch selectors",
+        ));
+    }
+    Ok(selection.clone())
+}
+
+fn handoff_selection(req: &HandoffReq, session: &Session) -> ApiResult<LaunchSelection> {
+    if let Some(selection) = &req.selection {
+        if !req.agent.trim().is_empty()
+            || req.model.is_some()
+            || req.effort.is_some()
+            || req.mode.is_some()
+        {
+            return Err(AppError::bad_request(
+                "canonical handoff selection cannot be combined with flattened agent/model/effort/mode fields",
+            ));
+        }
+        return Ok(selection.clone());
+    }
+    let target = req.agent.trim();
+    if target.is_empty() {
+        return Err(AppError::bad_request("handoff agent is required"));
+    }
+    Ok(LaunchSelection {
+        profile: session.profile.clone(),
+        overrides: LaunchOverrides {
+            agent: Some(target.to_string()),
+            model: req.model.clone(),
+            effort: req.effort.clone(),
+            mode: req.mode.clone(),
+            ..Default::default()
+        },
+    })
+}
+
 /// The session-creation core shared by every producer. The actor supplies trusted
 /// attribution, origin, ancestry, and profile bounds; request fields cannot
 /// impersonate those properties. Returns the view directly so each caller can
@@ -619,16 +695,67 @@ pub(crate) async fn provision_session(
         origin,
         "provision_session: starting session creation"
     );
-    let profile_name = req
-        .profile
+    let selection = create_selection(&req)?;
+    let options = crate::launch::ResolveOptions {
+        default_class: matches!(origin, "watch" | "actions" | "ops")
+            .then(|| "automation".to_string()),
+        ..Default::default()
+    };
+    let resolved = super::launches::resolve_launch(&st, &selection, &options).await?;
+    let stale_profile = req
+        .expected_profile_revision
+        .is_some_and(|expected| expected != resolved.view.profile_revision);
+    let stale_resolver = req
+        .expected_resolver_revision
         .as_deref()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .unwrap_or(crate::profile::DEFAULT_PROFILE)
-        .to_string();
-    let launch_profile = crate::profile::get(&st.db, &profile_name)
+        .is_some_and(|expected| expected != resolved.view.resolver_revision);
+    if stale_profile || stale_resolver {
+        return Err(AppError::conflict(
+            "launch settings changed since preview; review the fresh resolution",
+        )
+        .with_fields(json!({ "preview": resolved.view })));
+    }
+    if !resolved.view.valid {
+        let message = resolved
+            .view
+            .errors
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "launch settings are not valid".to_string());
+        let status = if resolved.view.capacity.allowed {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::CONFLICT
+        };
+        return Err(AppError::new(status, message).with_fields(json!({ "preview": resolved.view })));
+    }
+    // Resolve write-only values once, then confirm the template revision still
+    // matches. Environment mutations advance that revision transactionally, so
+    // provisioning below uses this concrete snapshot instead of silently
+    // reading a value changed after preview.
+    let profile_environment = crate::profile::env_pairs(&st.db, &resolved.profile.name)
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let current_profile = crate::profile::get(&st.db, &resolved.profile.name)
         .await?
-        .ok_or_else(|| AppError::bad_request(format!("unknown profile '{profile_name}'")))?;
+        .ok_or_else(|| AppError::bad_request("selected profile was removed after preview"))?;
+    if current_profile.revision != resolved.view.profile_revision {
+        let fresh = super::launches::resolve_launch(&st, &selection, &options).await?;
+        return Err(AppError::conflict(
+            "launch profile changed while resolving its environment; review the fresh resolution",
+        )
+        .with_fields(json!({ "preview": fresh.view })));
+    }
+    let profile_name = resolved.profile.name.clone();
+    let launch_profile = resolved.profile;
+    let agent = resolved.view.agent.clone();
+    let model = resolved.view.model.clone();
+    let effort = resolved.view.effort.clone();
+    let protocol = resolved.view.protocol.clone();
+    let mode = resolved.view.mode.clone();
+    let class = resolved.view.class.clone();
+    let launch_snapshot = serde_json::to_string(&resolved.view)
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
     if let Some(allowed) = actor.allowed_profiles() {
         if !allowed.iter().any(|name| name == &profile_name) {
             return Err(AppError::new(
@@ -642,46 +769,6 @@ pub(crate) async fn provision_session(
             )));
         }
     }
-    if launch_profile.strict
-        && [
-            req.agent.as_deref(),
-            req.model.as_deref(),
-            req.effort.as_deref(),
-            req.protocol.as_deref(),
-            req.mode.as_deref(),
-            req.class.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|value| !value.trim().is_empty())
-    {
-        return Err(AppError::bad_request(format!(
-            "strict profile '{profile_name}' does not allow launch overrides"
-        )));
-    }
-    // The session's class — automation machinery vs interactive fleet work. An
-    // explicit request value wins (validated); otherwise derived from the origin.
-    // github/slack default to interactive deliberately: a person asked for that
-    // session and expects to find it on their board. Only unattended machinery
-    // (watch rounds, actions, ops) defaults to automation.
-    let class = match req
-        .class
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some("interactive") => "interactive".to_string(),
-        Some("automation") => "automation".to_string(),
-        Some(other) => {
-            return Err(AppError::bad_request(format!(
-                "invalid class '{other}' (expected 'interactive' or 'automation')"
-            )))
-        }
-        None => match origin {
-            "watch" | "actions" | "ops" => "automation".to_string(),
-            _ => launch_profile.class.clone(),
-        },
-    };
     let managed_repo = req.repo.as_deref().map(str::trim).filter(|s| !s.is_empty());
     // Resolve the stable repository identity without mutating it, then hold its
     // launch permit through clone/fetch, worktree setup, and agent startup. A
@@ -766,25 +853,18 @@ pub(crate) async fn provision_session(
         .repo
         .as_deref()
         .and_then(|repo| crate::repo::parse_slug(repo).ok());
-    let agent_overridden = req
-        .agent
-        .as_deref()
-        .is_some_and(|agent| !agent.trim().is_empty());
-    let agent = match req.agent {
-        Some(a) => a.trim().to_string(),
-        None => launch_profile.agent_kind.clone(),
-    };
     let runtime = agent.clone();
     tracing::debug!(agent = %agent, runtime = %runtime, "resolved agent runtime");
     // The resolved launch environment: selected profile < per-repo repo_env <
     // the repo file's [env]. It is needed before provisioning so a real agent
     // launch can stop cleanly when neither the user nor an environment layer
     // provides GH_TOKEN.
-    let mut extra_env = launch_env_for_profile(
+    let mut extra_env = layer_launch_environment(
         &st.db,
         &repo_root,
         &repo_cfg,
         &profile_name,
+        profile_environment,
         launch_profile.strict,
         launch_profile.restricted,
     )
@@ -803,47 +883,6 @@ pub(crate) async fn provision_session(
     // credential.
     apply_user_github_token(&st.db, &mut extra_env, created_by.as_deref()).await;
 
-    // Normalize and validate the model / effort selections through the resolved
-    // agent type. Blank means the agent's own default.
-    let model = match req.model.as_deref().map(str::trim) {
-        Some(model) if !model.is_empty() => model.to_string(),
-        Some(_) => String::new(),
-        None if !agent_overridden => launch_profile.model.clone(),
-        None => String::new(),
-    };
-    let effort = match req.effort.as_deref().map(str::trim) {
-        Some(effort) if !effort.is_empty() => effort.to_string(),
-        Some(_) => String::new(),
-        None if !agent_overridden => launch_profile.effort.clone(),
-        None => String::new(),
-    };
-    // Resolve the execution backend (terminal|acp) from the agent's declared
-    // protocol and the optional request override, validating model/effort against
-    // the same metadata. Stamped on the session row at insert, immutable after.
-    let protocol = match agent::metadata_for(&st.db, &runtime).await? {
-        // Blank model/effort means the agent's own default; a non-empty value must
-        // be one the agent offers. A custom agent offers none, so any explicit
-        // selector is rejected here.
-        Some(meta) => {
-            agent::validate_model(&meta, &model).map_err(AppError::bad_request)?;
-            agent::validate_effort(&meta, &effort).map_err(AppError::bad_request)?;
-            let protocol = req.protocol.as_deref().or_else(|| {
-                (!agent_overridden && !launch_profile.protocol.trim().is_empty())
-                    .then_some(launch_profile.protocol.as_str())
-            });
-            agent::resolve_protocol(&meta, protocol).map_err(AppError::bad_request)?
-        }
-        None => return Err(AppError::bad_request(format!("unknown agent '{runtime}'"))),
-    };
-    // The ACP launch permission posture (ignored for a terminal launch): an
-    // explicit request wins, then the selected profile's mode.
-    let mode = req
-        .mode
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(&launch_profile.mode)
-        .to_string();
     tracing::debug!(model = %model, effort = %effort, protocol = %protocol, "resolved and validated model/effort/protocol");
     let restricted_github_app = if launch_profile.restricted && managed_slug.is_some() {
         st.trigger.app()
@@ -1073,28 +1112,9 @@ pub(crate) async fn provision_session(
             .map(|session| session.id),
         None => None,
     };
-    let (inherited_idle, inherited_turn_budget) = if class == "automation" {
-        automation_policy_defaults(&st.db).await
-    } else {
-        (0, 0)
-    };
-    let mcp_policy = launch_profile
-        .mcp_policy_snapshot()
+    let stamped_allowed_tools = serde_json::to_string(&resolved.runtime_permissions)
         .map_err(|error| AppError::bad_request(error.to_string()))?;
-    let mcp_errors = crate::mcp::snapshot_errors(&st.db, &mcp_policy).await?;
-    if !mcp_errors.is_empty() {
-        return Err(AppError::bad_request(format!(
-            "profile MCP policy is unavailable: {}",
-            mcp_errors.join("; ")
-        )));
-    }
-    let stamped_allowed_tools = serde_json::to_string(
-        &launch_profile
-            .effective_allowed_tool_rules_for(&mcp_policy)
-            .map_err(|error| AppError::bad_request(error.to_string()))?,
-    )
-    .map_err(|error| AppError::bad_request(error.to_string()))?;
-    let stamped_mcp_access = serde_json::to_string(&mcp_policy)
+    let stamped_mcp_access = serde_json::to_string(&resolved.mcp_policy)
         .map_err(|error| AppError::bad_request(error.to_string()))?;
     let (creator_kind, creator_subject) = actor.creator_identity();
     let launch_policy = session_mod::SessionLaunchPolicy {
@@ -1103,12 +1123,13 @@ pub(crate) async fn provision_session(
         profile_revision: launch_profile.revision,
         env_clear: launch_profile.env_clear,
         ambient_allowlist: launch_profile.ambient_allowlist.clone(),
-        idle_archive_secs: Some(launch_profile.idle_archive_secs.unwrap_or(inherited_idle)),
-        turn_budget: launch_profile.turn_budget.unwrap_or(inherited_turn_budget),
+        idle_archive_secs: resolved.view.policy.idle_archive_secs,
+        turn_budget: resolved.view.policy.turn_budget.unwrap_or(0),
         prelude: launch_profile.prelude.clone(),
         restricted: launch_profile.restricted,
         allowed_tools: stamped_allowed_tools.clone(),
         mcp_access: stamped_mcp_access,
+        launch_snapshot,
         creator_kind: creator_kind.to_string(),
         creator_subject,
         parent_session_id,
@@ -2434,6 +2455,7 @@ pub(crate) async fn create_warm_session(
             restricted: launch_profile.restricted,
             allowed_tools: stamped_allowed_tools,
             mcp_access: stamped_mcp_access,
+            launch_snapshot: String::new(),
             creator_kind: "system".to_string(),
             creator_subject: format!("watch:{}", watch.id),
             parent_session_id: None,
@@ -3451,29 +3473,96 @@ pub(super) async fn handoff_session(
         ));
     }
 
-    let target = req.agent.trim();
-    if target.is_empty() {
-        return Err(AppError::bad_request("handoff agent is required"));
+    let selection = handoff_selection(&req, &session)?;
+    let options = crate::launch::ResolveOptions {
+        default_class: Some(session.class.clone()),
+        capacity_credit_profile: Some(session.profile.clone()),
+    };
+    let resolved = super::launches::resolve_launch(&st, &selection, &options).await?;
+    if req
+        .expected_profile_revision
+        .is_some_and(|expected| expected != resolved.view.profile_revision)
+        || req
+            .expected_resolver_revision
+            .as_deref()
+            .is_some_and(|expected| expected != resolved.view.resolver_revision)
+    {
+        return Err(AppError::conflict(
+            "handoff settings changed after preview; review the fresh resolution",
+        )
+        .with_fields(json!({ "preview": resolved.view })));
     }
-    let runtime = target.to_string();
-    let metadata = agent::metadata_for(&st.db, &runtime)
-        .await?
-        .ok_or_else(|| AppError::bad_request(format!("unknown agent '{runtime}'")))?;
-    if !metadata.supports_acp {
+    if !resolved.view.valid {
+        return Err(
+            AppError::conflict("resolved handoff settings are not currently launchable")
+                .with_fields(json!({ "preview": resolved.view })),
+        );
+    }
+    if resolved.view.protocol != "acp" {
         return Err(AppError::bad_request(format!(
-            "agent '{runtime}' does not support ACP handoff"
+            "agent '{}' does not resolve to the ACP protocol required for handoff",
+            resolved.view.agent
         )));
     }
-    let model = req.model.as_deref().unwrap_or("").trim().to_string();
-    let effort = req.effort.as_deref().unwrap_or("").trim().to_string();
-    agent::validate_model(&metadata, &model).map_err(AppError::bad_request)?;
-    agent::validate_effort(&metadata, &effort).map_err(AppError::bad_request)?;
-    if target == session.agent_kind && model == session.model && effort == session.effort {
+    if resolved.view.class != session.class {
+        return Err(AppError::bad_request(
+            "handoff cannot change an existing session's class",
+        ));
+    }
+    if resolved.profile.restricted {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "restricted profiles cannot be applied by handoff",
+        ));
+    }
+    let profile_environment = crate::profile::env_pairs(&st.db, &resolved.profile.name)
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let current_profile = crate::profile::get(&st.db, &resolved.profile.name)
+        .await?
+        .ok_or_else(|| AppError::bad_request("selected profile was removed after preview"))?;
+    if current_profile.revision != resolved.view.profile_revision {
+        let fresh = super::launches::resolve_launch(&st, &selection, &options).await?;
+        return Err(AppError::conflict(
+            "handoff profile changed while resolving its environment; review the fresh resolution",
+        )
+        .with_fields(json!({ "preview": fresh.view })));
+    }
+    let target = resolved.view.agent.clone();
+    let model = resolved.view.model.clone();
+    let effort = resolved.view.effort.clone();
+    let mode = resolved.view.mode.clone();
+    if target == session.agent_kind
+        && model == session.model
+        && effort == session.effort
+        && resolved.profile.name == session.profile
+        && resolved.profile.revision == session.profile_revision
+        && mode == session.launch_mode
+    {
         return Err(AppError::bad_request(
             "handoff target matches the current runtime profile",
         ));
     }
-    let mode = launch_mode(req.mode.as_deref(), &session.launch_mode);
+    let launch_snapshot = serde_json::to_string(&resolved.view)
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let stamped_allowed_tools = serde_json::to_string(&resolved.runtime_permissions)
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let stamped_mcp_access = serde_json::to_string(&resolved.mcp_policy)
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let handoff_policy = session_mod::SessionHandoffPolicy {
+        profile: resolved.profile.name.clone(),
+        launch_mode: mode.clone(),
+        profile_revision: resolved.profile.revision,
+        env_clear: resolved.profile.env_clear,
+        ambient_allowlist: resolved.profile.ambient_allowlist.clone(),
+        idle_archive_secs: resolved.view.policy.idle_archive_secs,
+        turn_budget: resolved.view.policy.turn_budget.unwrap_or(0),
+        prelude: resolved.profile.prelude.clone(),
+        restricted: resolved.profile.restricted,
+        allowed_tools: stamped_allowed_tools,
+        mcp_access: stamped_mcp_access,
+        launch_snapshot,
+    };
 
     // Resolve every fallible launch input before quiescing the current task.
     let repo_root = PathBuf::from(&branch.repo_root);
@@ -3485,7 +3574,23 @@ pub(super) async fn handoff_session(
         )));
     }
     let repo_cfg = repo_cfg_or_default(&repo_root);
-    let mut extra_env = resume_environment(&st.db, &session, &repo_root, &repo_cfg).await;
+    let mut extra_env = layer_launch_environment(
+        &st.db,
+        &repo_root,
+        &repo_cfg,
+        &resolved.profile.name,
+        profile_environment,
+        resolved.profile.strict,
+        resolved.profile.restricted,
+    )
+    .await;
+    if resolved.profile.env_clear {
+        let allowlist = resolved
+            .profile
+            .ambient_names()
+            .map_err(|error| AppError::bad_request(error.to_string()))?;
+        extra_env = crate::profile::cleared_environment(extra_env, &allowlist);
+    }
     rotate_session_token(&st.db, &session, &mut extra_env).await?;
     apply_user_github_token(&st.db, &mut extra_env, session.created_by.as_deref()).await;
     // Restricted sessions return before this handoff path, so an App credential
@@ -3494,14 +3599,14 @@ pub(super) async fn handoff_session(
         &st.db,
         &extra_env,
         session.created_by.as_deref(),
-        &runtime,
+        &target,
         None,
     )
     .await?;
-    let custom = if agent::builtin_agent_type(&runtime).is_some() {
+    let custom = if agent::builtin_agent_type(&target).is_some() {
         None
     } else {
-        custom_agents::get(&st.db, &runtime).await?
+        custom_agents::get(&st.db, &target).await?
     };
     // Build every policy/tool input before stopping the old task. The bootstrap
     // itself is injected in memory after the task returns its atomic snapshot.
@@ -3510,7 +3615,7 @@ pub(super) async fn handoff_session(
         &agent::AcpLaunchSpec {
             session_id: &session.id,
             branch_id: &branch.id,
-            runtime: &runtime,
+            runtime: &target,
             work_dir: &work_dir,
             server_addr: &st.addr,
             model: &model,
@@ -3518,12 +3623,12 @@ pub(super) async fn handoff_session(
             goal_file: None,
             primer_file: None,
             extra_env: &extra_env,
-            env_clear: session.policy_env_clear,
+            env_clear: resolved.profile.env_clear,
             mode: &mode,
-            prelude: &session.policy_prelude,
-            restricted: session.policy_restricted,
-            allowed_tools: &session.policy_allowed_tools,
-            mcp_access: &session.policy_mcp_access,
+            prelude: &resolved.profile.prelude,
+            restricted: resolved.profile.restricted,
+            allowed_tools: &handoff_policy.allowed_tools,
+            mcp_access: &handoff_policy.mcp_access,
             custom: custom.as_ref(),
         },
         agent::AcpOpen::Fresh,
@@ -3573,7 +3678,7 @@ pub(super) async fn handoff_session(
     );
     let digest = agent::AgentManager::new(&st.db)
         .summarize_handoff(
-            target,
+            &target,
             &context.summary_request,
             &launch,
             HANDOFF_SUMMARY_TIMEOUT,
@@ -3586,7 +3691,16 @@ pub(super) async fn handoff_session(
     ));
     backend::kill_session_and_wait(&session.term_session).await?;
     crate::chat::reset_usage(&st.db, &session.id).await?;
-    session_mod::prepare_handoff(&st.db, &session.id, target, &model, &effort, "running").await?;
+    session_mod::prepare_handoff(
+        &st.db,
+        &session.id,
+        &target,
+        &model,
+        &effort,
+        "running",
+        &handoff_policy,
+    )
+    .await?;
 
     let boundary = json!({
         "from": session.agent_kind,
@@ -3603,9 +3717,17 @@ pub(super) async fn handoff_session(
     if let Err(e) = crate::acp::start_handoff(&st, &session.id, launch, boundary).await {
         st.acp.stop(&session.id);
         backend::kill_session(&session.term_session).await.ok();
-        session_mod::prepare_handoff(&st.db, &session.id, target, &model, &effort, "error")
-            .await
-            .ok();
+        session_mod::prepare_handoff(
+            &st.db,
+            &session.id,
+            &target,
+            &model,
+            &effort,
+            "error",
+            &handoff_policy,
+        )
+        .await
+        .ok();
         events::record(
             &st.db,
             &st.bus,

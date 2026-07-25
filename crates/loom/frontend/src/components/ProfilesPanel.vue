@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import * as api from '../api';
 import type { AgentMetadata, McpRegistry, Profile, ProfileInput } from '../types';
+import ProfileSelector from './ProfileSelector.vue';
 
 const profiles = ref<Profile[]>([]);
 const agents = ref<AgentMetadata[]>([]);
@@ -75,6 +76,7 @@ function editable(profile: Profile): ProfileInput {
   // editable draft detached from the server snapshot.
   return {
     ...input,
+    expected_revision: profile.revision,
     ambient_allowlist: [...input.ambient_allowlist],
     runtime_permissions: [...input.runtime_permissions],
     mcp_access: { ...input.mcp_access, groups: [...input.mcp_access.groups] },
@@ -198,16 +200,12 @@ onMounted(load);
 <template>
   <div class="grid gap-4 md:grid-cols-[12rem_minmax(0,1fr)]">
     <aside class="overflow-hidden rounded-md border border-line bg-surface self-start">
-      <button
-        v-for="profile in profiles"
-        :key="profile.name"
-        class="block w-full border-b border-line px-3 py-2 text-left text-sm last:border-0"
-        :class="selected === profile.name ? 'bg-input text-fg' : 'text-muted hover:bg-subtle'"
-        @click="choose(profile.name)"
-      >
-        <span class="block font-medium">{{ profile.name }}</span>
-        <span class="text-2xs text-faint">{{ profile.class }} · r{{ profile.revision }}</span>
-      </button>
+      <ProfileSelector
+        :profiles="profiles"
+        :model-value="selected"
+        layout="list"
+        @update:model-value="choose"
+      />
       <button class="block w-full px-3 py-2 text-left text-xs text-accent" @click="add">
         + Add profile
       </button>

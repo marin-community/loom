@@ -239,14 +239,8 @@ test.describe('session detail view', () => {
     expect(updated.branch.tags.find((t) => t.key === 'attention')).toBeUndefined();
   });
 
-  test('scratch attachments ride the tab row and drop anywhere on the page', async ({
-    page,
-    weaver,
-  }) => {
-    const s = await weaver.seedSession({
-      goal: 'Hold my files',
-      name: 'scratch-task',
-    });
+  test('scratch attachments share one bounded browse and drop target', async ({ page, weaver }) => {
+    const s = await weaver.seedSession({ goal: 'Hold my files', name: 'scratch-task' });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
     const panel = page.getByTestId('scratch-panel');
@@ -260,20 +254,15 @@ test.describe('session detail view', () => {
     });
     await expect(panel.getByText('notes.txt')).toBeVisible();
 
-    // Dragging a file over the window raises the full-page drop cue; dropping
-    // uploads it. Synthesized events (Playwright can't drive native OS drag)
-    // dispatched on body, bubbling up to the panel's window listeners — the
-    // same path a real drag takes (its target is the element under the
-    // cursor); the overlay assertions prove the listeners fired.
+    // The same bounded component accepts a drop from files.length even when
+    // DataTransfer.types does not advertise Files.
     const dataTransfer = await page.evaluateHandle(() => {
       const dt = new DataTransfer();
       dt.items.add(new File(['drop'], 'dropped.txt', { type: 'text/plain' }));
+      Object.defineProperty(dt, 'types', { value: ['text/plain'] });
       return dt;
     });
-    await page.dispatchEvent('body', 'dragenter', { dataTransfer });
-    await expect(page.getByTestId('scratch-dropzone')).toBeVisible();
-    await page.dispatchEvent('body', 'drop', { dataTransfer });
-    await expect(page.getByTestId('scratch-dropzone')).toHaveCount(0);
+    await page.getByTestId('scratch-dropzone').dispatchEvent('drop', { dataTransfer });
     await expect(panel.getByText('dropped.txt')).toBeVisible();
 
     // Both landed server-side in the worktree's scratch/.

@@ -4,8 +4,8 @@ use axum::{
     Json,
 };
 use weaver_api::{
-    EffectiveProfileView, McpServerProcessView, ProfileEnvView, ProfileProbeView, ProfileReq,
-    ProfileView, PutProfileEnvReq,
+    CloneProfileReq, EffectiveProfileView, LaunchSelection, McpServerProcessView, ProfileEnvView,
+    ProfileProbeView, ProfileReq, ProfileView, PutProfileEnvReq,
 };
 
 use crate::profile::{self, Profile, ProfileInput};
@@ -177,10 +177,106 @@ pub(super) async fn put_profile(
     Path(name): Path<String>,
     Json(req): Json<ProfileReq>,
 ) -> ApiResult<Json<ProfileView>> {
+    if let Some(expected) = req.expected_revision {
+        return match profile::update_expected(&st.db, &input(req, name.clone()), expected)
+            .await
+            .map_err(|error| AppError::bad_request(error.to_string()))?
+        {
+            profile::UpdateProfileOutcome::Updated(item) => Ok(Json(view(&st, item).await?)),
+            profile::UpdateProfileOutcome::Stale(current) => {
+                let current = view(&st, current).await?;
+                Err(AppError::conflict(format!(
+                    "profile '{name}' changed from revision {expected} to revision {}",
+                    current.revision
+                ))
+                .with_fields(serde_json::json!({ "profile": current })))
+            }
+            profile::UpdateProfileOutcome::Missing => Err(AppError::not_found("profile")),
+        };
+    }
     let item = profile::upsert(&st.db, &input(req, name))
         .await
         .map_err(|e| AppError::bad_request(e.to_string()))?;
     Ok(Json(view(&st, item).await?))
+}
+
+pub(super) async fn clone_profile(
+    State(st): State<AppState>,
+    Path(source_name): Path<String>,
+    Json(req): Json<CloneProfileReq>,
+) -> ApiResult<(StatusCode, Json<ProfileView>)> {
+    let source = profile::get(&st.db, &source_name)
+        .await?
+        .ok_or_else(|| AppError::not_found("profile"))?;
+    if source.revision != req.expected_profile_revision {
+        let current = view(&st, source).await?;
+        return Err(AppError::conflict(format!(
+            "profile '{source_name}' changed from revision {} to revision {}",
+            req.expected_profile_revision, current.revision
+        ))
+        .with_fields(serde_json::json!({ "profile": current })));
+    }
+    let target_name = req.name.trim().to_string();
+    profile::validate_name(&target_name).map_err(AppError::bad_request)?;
+    if profile::get(&st.db, &target_name).await?.is_some() {
+        return Err(AppError::conflict(format!(
+            "profile '{target_name}' already exists"
+        )));
+    }
+
+    // Resolve the override fields against the exact source revision, but build
+    // the new profile from the server-owned source input. The browser never
+    // round-trips environment values, custom MCP source, or another redacted
+    // policy representation.
+    let resolved = super::launches::resolve_launch(
+        &st,
+        &LaunchSelection {
+            profile: source_name.clone(),
+            overrides: req.overrides,
+        },
+        &crate::launch::ResolveOptions::default(),
+    )
+    .await?;
+    let mut cloned = source
+        .as_input()
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    cloned.name = target_name.clone();
+    cloned.description = if source.description.trim().is_empty() {
+        format!("Copy of {source_name}")
+    } else {
+        source.description.clone()
+    };
+    cloned.agent_kind = resolved.view.agent;
+    cloned.model = resolved.view.model;
+    cloned.effort = resolved.view.effort;
+    cloned.protocol = resolved.view.protocol;
+    cloned.mode = resolved.view.mode;
+    cloned.class = resolved.view.class;
+    match profile::create_clone(
+        &st.db,
+        &source_name,
+        req.expected_profile_revision,
+        &cloned,
+        req.copy_environment,
+    )
+    .await
+    .map_err(|error| AppError::bad_request(error.to_string()))?
+    {
+        profile::CloneProfileOutcome::Created(item) => {
+            Ok((StatusCode::CREATED, Json(view(&st, item).await?)))
+        }
+        profile::CloneProfileOutcome::Stale(current) => {
+            let current = view(&st, current).await?;
+            Err(AppError::conflict(format!(
+                "profile '{source_name}' changed from revision {} to revision {}",
+                req.expected_profile_revision, current.revision
+            ))
+            .with_fields(serde_json::json!({ "profile": current })))
+        }
+        profile::CloneProfileOutcome::TargetExists => Err(AppError::conflict(format!(
+            "profile '{target_name}' already exists"
+        ))),
+    }
 }
 
 pub(super) async fn delete_profile(
@@ -219,9 +315,12 @@ pub(super) async fn delete_profile_env(
     State(st): State<AppState>,
     Path((profile_name, name)): Path<(String, String)>,
 ) -> ApiResult<Json<ProfileView>> {
-    let item = profile::get(&st.db, &profile_name)
+    profile::get(&st.db, &profile_name)
         .await?
         .ok_or_else(|| AppError::not_found("profile"))?;
     profile::env_remove(&st.db, &profile_name, &name).await?;
+    let item = profile::get(&st.db, &profile_name)
+        .await?
+        .ok_or_else(|| AppError::not_found("profile"))?;
     Ok(Json(view(&st, item).await?))
 }

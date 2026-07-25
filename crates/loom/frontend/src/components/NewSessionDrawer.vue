@@ -1,9 +1,31 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
-import { ApiError, get, listAgents, listRepos, post, registerRepo } from '../api';
-import type { AgentMetadata, ManagedRepo, RecentRepo, RepoBranch } from '../types';
-import AgentRuntimePicker from './AgentRuntimePicker.vue';
+import {
+  ApiError,
+  cloneProfile,
+  get,
+  listAgents,
+  listProfiles,
+  listRepos,
+  post,
+  registerRepo,
+  resolveSessionLaunch,
+} from '../api';
+import type {
+  AgentMetadata,
+  LaunchOverrides as LaunchOverrideValues,
+  LaunchSelection,
+  ManagedRepo,
+  Profile,
+  RecentRepo,
+  RepoBranch,
+  ResolvedLaunch,
+  Session,
+} from '../types';
+import LaunchOverrides from './LaunchOverrides.vue';
+import ProfileSelector from './ProfileSelector.vue';
+import ResolvedLaunchSummary from './ResolvedLaunchSummary.vue';
 import ScratchPicker from './ScratchPicker.vue';
 
 const emit = defineEmits<{
@@ -19,25 +41,33 @@ const repo = ref('');
 const repoFocused = ref(false);
 const title = ref('');
 const goal = ref('');
-const agent = ref('');
-const model = ref('');
-const effort = ref('');
 const name = ref('');
 const nameEdited = ref(false);
 const base = ref('');
 const creating = ref(false);
 const scratchFiles = ref<File[]>([]);
 const agents = ref<AgentMetadata[]>([]);
+const profiles = ref<Profile[]>([]);
+const profile = ref('default');
+const overrides = ref<LaunchOverrideValues>({});
+const resolved = ref<ResolvedLaunch | null>(null);
+const resolving = ref(false);
+const resolveError = ref('');
+const advanced = ref(false);
+const cloneName = ref('');
+const copyEnvironment = ref(false);
+const cloneBusy = ref(false);
+const cloneNotice = ref('');
 const cloningRepo = ref(false);
 
 // Show the platform's submit modifier (⌘ on macOS, Ctrl elsewhere). Both are
 // wired up on the form; this is only the label.
 const metaKeyLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
 
-const selectedAgent = computed<AgentMetadata | undefined>(() => {
-  const selected = agent.value || agents.value[0]?.kind || '';
-  return agents.value.find((a) => a.kind === selected);
-});
+const selection = computed<LaunchSelection>(() => ({
+  profile: profile.value || 'default',
+  overrides: { ...overrides.value },
+}));
 
 type BranchMode = 'new' | 'existing';
 const branchMode = ref<BranchMode>('new');
@@ -122,14 +152,6 @@ watch([title, goal], ([t, g]) => {
   if (!nameEdited.value) name.value = slugify(t || g);
 });
 
-watch(selectedAgent, (meta) => {
-  if (!meta) return;
-  if (model.value && !meta.accepts_raw_model && !meta.models.some((m) => m.id === model.value)) {
-    model.value = '';
-  }
-  if (effort.value && !meta.efforts.some((e) => e.id === effort.value)) effort.value = '';
-});
-
 async function loadBranches() {
   const path = repo.value.trim();
   branches.value = [];
@@ -158,12 +180,11 @@ async function loadRecentRepos() {
 
 async function loadAgents() {
   try {
-    const res = await listAgents();
-    agents.value = res.agents;
-    if (!agent.value) {
-      agent.value = agents.value.some((a) => a.kind === res.default_agent)
-        ? res.default_agent
-        : agents.value[0]?.kind || '';
+    const [metadata, templates] = await Promise.all([listAgents(), listProfiles()]);
+    agents.value = metadata.agents;
+    profiles.value = templates;
+    if (!templates.some((item) => item.name === profile.value)) {
+      profile.value = templates[0]?.name ?? 'default';
     }
   } catch (e) {
     error.value = (e as Error).message;
@@ -173,9 +194,10 @@ async function loadAgents() {
 function resetForm() {
   title.value = '';
   goal.value = '';
-  agent.value = agents.value[0]?.kind || '';
-  model.value = '';
-  effort.value = '';
+  profile.value = profiles.value.some((item) => item.name === 'default')
+    ? 'default'
+    : (profiles.value[0]?.name ?? 'default');
+  overrides.value = {};
   name.value = '';
   base.value = '';
   existingBranch.value = '';
@@ -185,8 +207,68 @@ function resetForm() {
 }
 
 function cancel() {
-  resetForm();
   emit('close');
+  void router.push('/');
+}
+
+let resolveRequest = 0;
+let resolveTimer: ReturnType<typeof setTimeout> | undefined;
+watch(
+  selection,
+  () => {
+    if (resolveTimer) clearTimeout(resolveTimer);
+    resolveTimer = setTimeout(() => void resolveSelection(), 120);
+  },
+  { deep: true },
+);
+
+async function resolveSelection() {
+  if (!profiles.value.length) return;
+  const request = ++resolveRequest;
+  resolving.value = true;
+  resolveError.value = '';
+  try {
+    const preview = await resolveSessionLaunch(selection.value);
+    if (request === resolveRequest) resolved.value = preview;
+  } catch (cause) {
+    if (request !== resolveRequest) return;
+    resolved.value = null;
+    resolveError.value = (cause as Error).message;
+  } finally {
+    if (request === resolveRequest) resolving.value = false;
+  }
+}
+
+function chooseProfile(value: string) {
+  profile.value = value;
+  overrides.value = {};
+  cloneNotice.value = '';
+}
+
+async function saveAsNewProfile() {
+  const preview = resolved.value;
+  const target = cloneName.value.trim();
+  if (!preview || !target) return;
+  cloneBusy.value = true;
+  cloneNotice.value = '';
+  error.value = '';
+  try {
+    const saved = await cloneProfile(preview.selection.profile, {
+      name: target,
+      expected_profile_revision: preview.profile_revision,
+      overrides: { ...overrides.value },
+      copy_environment: copyEnvironment.value,
+    });
+    profiles.value = await listProfiles();
+    chooseProfile(saved.name);
+    cloneName.value = '';
+    copyEnvironment.value = false;
+    cloneNotice.value = `Saved ${saved.name} without changing ${preview.selection.profile}.`;
+  } catch (cause) {
+    error.value = (cause as Error).message;
+  } finally {
+    cloneBusy.value = false;
+  }
 }
 
 async function fileToBase64(file: File): Promise<string> {
@@ -200,17 +282,19 @@ async function fileToBase64(file: File): Promise<string> {
 }
 
 async function create() {
+  if (creating.value || resolving.value) return;
   if (!repo.value.trim() || !(title.value.trim() || goal.value.trim())) return;
   if (branchMode.value === 'existing' && !existingBranch.value.trim()) return;
+  if (!resolved.value?.valid) return;
   creating.value = true;
   try {
     const repoInput = repo.value.trim();
     const body: Record<string, unknown> = {
       title: title.value || undefined,
       goal: goal.value,
-      agent: agent.value || undefined,
-      model: model.value || undefined,
-      effort: effort.value || undefined,
+      selection: selection.value,
+      expected_profile_revision: resolved.value?.profile_revision,
+      expected_resolver_revision: resolved.value?.resolver_revision,
     };
     // A remote reference travels as `repo`: the server registers it if it is new
     // and clones it on the way, so an unknown `owner/name` needs no separate
@@ -234,11 +318,16 @@ async function create() {
         })),
       );
     }
-    await post('/sessions', body);
+    const session = (await post('/sessions', body)) as Session;
     resetForm();
     emit('created');
     emit('close');
+    await router.push(`/s/${session.id}`);
   } catch (e) {
+    const preview = e instanceof ApiError ? e.body.preview : undefined;
+    if (preview && typeof preview === 'object') {
+      resolved.value = preview as ResolvedLaunch;
+    }
     const failedSession = e instanceof ApiError ? e.body.session_id : undefined;
     if (typeof failedSession === 'string' && failedSession) {
       // Provisioning succeeded far enough to leave a recoverable session, but
@@ -256,9 +345,15 @@ async function create() {
   }
 }
 
+function onFormKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
+  event.preventDefault();
+  void create();
+}
+
 loadRecentRepos();
 loadManagedRepos();
-loadAgents();
+void loadAgents().then(resolveSelection);
 </script>
 
 <template>
@@ -269,19 +364,23 @@ loadAgents();
     behavior.
   -->
   <form
-    class="mb-4 flex max-h-[calc(100vh-7rem)] max-w-4xl flex-col rounded-md border border-line bg-surface"
+    class="mx-auto flex min-h-full w-full max-w-7xl flex-1 flex-col bg-canvas"
     autocomplete="off"
     data-testid="new-session-drawer"
     @submit.prevent="create"
-    @keydown.enter.meta.prevent="create"
-    @keydown.enter.ctrl.prevent="create"
+    @keydown="onFormKeydown"
   >
-    <div class="border-b border-line px-4 py-3">
-      <h2 class="text-sm font-semibold text-fg">New session</h2>
-      <p class="mt-0.5 text-xs text-faint">Choose the repo, task, runtime, and branch shape.</p>
+    <div class="border-b border-line bg-surface px-5 py-4 sm:px-8">
+      <p class="text-2xs font-semibold uppercase tracking-wider text-muted">Sessions / New</p>
+      <h1 class="mt-1 font-serif text-2xl font-semibold text-fg">Launch a session</h1>
+      <p class="mt-1 text-sm text-muted">
+        Pick a reusable profile, make one-launch changes, and review the server’s exact snapshot.
+      </p>
     </div>
 
-    <div class="grid min-h-0 gap-5 overflow-auto p-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
+    <div
+      class="grid min-h-0 flex-1 gap-6 overflow-auto p-5 sm:p-8 lg:grid-cols-[minmax(0,1fr)_25rem]"
+    >
       <div class="space-y-5">
         <section class="space-y-3">
           <h3 class="text-2xs font-semibold uppercase tracking-wider text-muted">Repository</h3>
@@ -484,45 +583,102 @@ loadAgents();
         </section>
       </div>
 
-      <aside class="space-y-4 border-t border-line pt-4 lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0">
+      <aside class="space-y-4 border-t border-line pt-4 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
         <section class="space-y-3">
           <div>
             <h3 class="text-2xs font-semibold uppercase tracking-wider text-muted">
-              Runtime profile
+              Launch profile
             </h3>
             <p class="mt-1 text-xs text-faint">
-              Agent runtime, model selector, and reasoning effort.
+              Templates stay unchanged unless you explicitly save a new one.
             </p>
           </div>
 
-          <AgentRuntimePicker
-            :agents="agents"
-            :agent-kind="agent"
-            :model="model"
-            :effort="effort"
-            agent-grid-class="grid gap-2"
-            choice-grid-class="grid gap-4"
-            :show-agent-badges="false"
-            show-agent-counts
-            raw-model-id="session-model"
-            raw-model-autocomplete="loom-model"
-            @update:agent="agent = $event"
-            @update:model="model = $event"
-            @update:effort="effort = $event"
+          <ProfileSelector
+            :profiles="profiles"
+            :model-value="profile"
+            layout="list"
+            :disabled="creating"
+            @update:model-value="chooseProfile"
           />
+          <RouterLink to="/settings" class="inline-flex text-xs text-accent hover:underline">
+            Edit profile templates in Settings
+          </RouterLink>
+        </section>
+
+        <section class="space-y-2 rounded-md border border-line bg-surface p-3">
+          <button
+            type="button"
+            class="flex w-full items-center justify-between text-left text-xs font-medium text-fg"
+            :aria-expanded="advanced"
+            @click="advanced = !advanced"
+          >
+            One-launch overrides
+            <span class="text-faint">{{ advanced ? 'Hide' : 'Edit' }}</span>
+          </button>
+          <p v-if="resolved?.policy.strict" class="text-xs text-faint">
+            This strict profile locks every launch selector.
+          </p>
+          <LaunchOverrides
+            v-if="advanced"
+            v-model="overrides"
+            :agents="agents"
+            :resolved="resolved"
+            :disabled="Boolean(resolved?.policy.strict)"
+          />
+        </section>
+
+        <p v-if="resolveError" class="rounded bg-block-soft p-2 text-xs text-block">
+          {{ resolveError }}
+        </p>
+        <ResolvedLaunchSummary :resolved="resolved" :loading="resolving" />
+
+        <section v-if="resolved" class="space-y-2 rounded-md border border-line bg-surface p-3">
+          <h3 class="text-xs font-medium text-fg">Save these settings as a new profile</h3>
+          <p class="text-xs text-faint">
+            The server clones policy from <code>{{ resolved.selection.profile }}</code
+            >; the source template is never overwritten.
+          </p>
+          <div class="flex gap-2">
+            <input
+              v-model="cloneName"
+              data-testid="clone-profile-name"
+              placeholder="profile-name"
+              class="min-w-0 flex-1 rounded bg-input px-2 py-1.5 font-mono text-xs"
+            />
+            <button
+              type="button"
+              data-testid="clone-profile"
+              class="btn-secondary px-2.5 py-1.5 text-xs"
+              :disabled="cloneBusy || !cloneName.trim()"
+              @click="saveAsNewProfile"
+            >
+              {{ cloneBusy ? 'Saving…' : 'Save new' }}
+            </button>
+          </div>
+          <label class="flex items-center gap-2 text-xs text-muted">
+            <input v-model="copyEnvironment" type="checkbox" />
+            Copy write-only environment values
+          </label>
+          <p v-if="cloneNotice" class="text-xs text-ok">{{ cloneNotice }}</p>
         </section>
       </aside>
     </div>
 
-    <p v-if="error" class="border-t border-line px-4 py-2 text-sm text-block">{{ error }}</p>
+    <p v-if="error" class="border-t border-line bg-surface px-5 py-2 text-sm text-block sm:px-8">
+      {{ error }}
+    </p>
 
-    <div class="flex items-center gap-2 border-t border-line px-4 py-3">
+    <div
+      class="sticky bottom-0 flex items-center gap-2 border-t border-line bg-surface px-5 py-3 sm:px-8"
+    >
       <button
         type="submit"
-        :disabled="creating"
+        data-testid="create-session"
+        :disabled="creating || resolving || !resolved?.valid"
         class="btn-primary px-3 py-1.5 text-sm font-medium"
       >
-        {{ creating ? 'Creating...' : 'Create' }}
+        {{ creating ? 'Creating...' : 'Create session' }}
       </button>
       <button type="button" class="btn-secondary px-3 py-1.5 text-sm font-medium" @click="cancel">
         Cancel

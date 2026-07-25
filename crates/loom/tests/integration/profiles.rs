@@ -37,6 +37,191 @@ impl Drop for EnvVarGuard {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn profile_environment_delete_returns_the_incremented_revision() {
+    let ts = TestServer::start().await;
+    let before = ts.client.get("/api/profiles/default").await.unwrap();
+    let before_revision = before["revision"].as_i64().unwrap();
+
+    let after_set = ts
+        .client
+        .put(
+            "/api/profiles/default/env/API_TOKEN",
+            json!({ "value": "write-only" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(after_set["revision"], before_revision + 1);
+
+    let after_delete = ts
+        .client
+        .delete("/api/profiles/default/env/API_TOKEN")
+        .await
+        .unwrap();
+    assert_eq!(after_delete["revision"], before_revision + 2);
+    assert!(after_delete["env"].as_array().unwrap().is_empty());
+}
+
+fn interactive_shell_profile(name: &str) -> serde_json::Value {
+    json!({
+        "name": name,
+        "description": "launch test",
+        "agent_kind": "shell",
+        "model": "",
+        "effort": "",
+        "protocol": "",
+        "mode": "auto",
+        "class": "interactive",
+        "strict": false,
+        "env_clear": false,
+        "ambient_allowlist": [],
+        "max_concurrent": 0,
+        "prelude": "weaver",
+        "restricted": false,
+        "runtime_permissions": [],
+        "mcp_access": { "mode": "none", "groups": [] }
+    })
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn launch_resolution_reports_agent_defaults_and_rejects_environment_revision_drift() {
+    let ts = TestServer::start().await;
+    ts.client
+        .post("/api/profiles", interactive_shell_profile("launch-test"))
+        .await
+        .unwrap();
+    let preview = ts
+        .client
+        .post(
+            "/api/session-launches/resolve",
+            json!({
+                "selection": { "profile": "launch-test", "overrides": {} }
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview["provenance"]["model"], "agent_default");
+    assert_eq!(preview["provenance"]["effort"], "agent_default");
+    // New profile writes normalize protocol; the resolver unit test covers
+    // legacy empty protocol rows and must label those agent_default.
+    assert_eq!(preview["provenance"]["protocol"], "profile");
+    assert_eq!(preview["protocol"], "terminal");
+
+    let edited = ts
+        .client
+        .put(
+            "/api/profiles/launch-test/env/TOKEN",
+            json!({ "value": "changed-after-preview" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        edited["revision"].as_i64().unwrap(),
+        preview["profile_revision"].as_i64().unwrap() + 1
+    );
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/api/sessions", ts.addr))
+        .json(&json!({
+            "cwd": ts.cwd(),
+            "goal": "must not launch drifted env",
+            "selection": { "profile": "launch-test", "overrides": {} },
+            "expected_profile_revision": preview["profile_revision"],
+            "expected_resolver_revision": preview["resolver_revision"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(
+        body["preview"]["profile_revision"], edited["revision"],
+        "the conflict carries the fresh launch snapshot"
+    );
+    assert!(ts
+        .client
+        .get("/api/sessions")
+        .await
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn profile_clone_copies_environment_atomically_and_honors_source_revision() {
+    let ts = TestServer::start().await;
+    ts.client
+        .post("/api/profiles", interactive_shell_profile("clone-source"))
+        .await
+        .unwrap();
+    let source = ts
+        .client
+        .put(
+            "/api/profiles/clone-source/env/TOKEN",
+            json!({ "value": "write-only-source" }),
+        )
+        .await
+        .unwrap();
+    let source_revision = source["revision"].as_i64().unwrap();
+
+    let clone = ts
+        .client
+        .post(
+            "/api/profiles/clone-source/clone",
+            json!({
+                "name": "clone-target",
+                "expected_profile_revision": source_revision,
+                "overrides": { "effort": "" },
+                "copy_environment": true
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(clone["name"], "clone-target");
+    assert_eq!(clone["env"][0]["name"], "TOKEN");
+    assert_eq!(
+        loom::profile::env_pairs(&ts.state.db, "clone-target")
+            .await
+            .unwrap(),
+        vec![("TOKEN".to_string(), "write-only-source".to_string())]
+    );
+
+    ts.client
+        .put(
+            "/api/profiles/clone-source/env/TOKEN",
+            json!({ "value": "newer" }),
+        )
+        .await
+        .unwrap();
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{}/api/profiles/clone-source/clone",
+            ts.addr
+        ))
+        .json(&json!({
+            "name": "stale-clone",
+            "expected_profile_revision": source_revision,
+            "overrides": {},
+            "copy_environment": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(loom::profile::get(&ts.state.db, "stale-clone")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(loom::profile::env_meta(&ts.state.db, "stale-clone")
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stock_github_comment_profile_round_trips_restricted_policy() {
     let ts = TestServer::start().await;
     let profile = ts.client.get("/api/profiles/github_comment").await.unwrap();
@@ -607,7 +792,7 @@ async fn strict_profile_crud_withholds_secrets_and_stamps_sessions() {
         .await
         .unwrap();
     assert_eq!(session["profile"], "actions");
-    assert_eq!(session["profile_revision"], 1);
+    assert_eq!(session["profile_revision"], 2);
     assert_eq!(session["class"], "automation");
 
     let delete = reqwest::Client::new()
@@ -642,7 +827,7 @@ async fn strict_profile_crud_withholds_secrets_and_stamps_sessions() {
 
     let archived = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
     assert_eq!(archived["profile"], "actions");
-    assert_eq!(archived["profile_revision"], 1);
+    assert_eq!(archived["profile_revision"], 2);
 
     let recovered = ts
         .client
@@ -799,7 +984,7 @@ async fn deployment_manifest_reconciles_profiles_secret_refs_and_workload_identi
         .post("/api/deployment/reconcile", manifest.clone())
         .await
         .unwrap();
-    assert_eq!(first["profiles"][0]["revision"], 1);
+    assert_eq!(first["profiles"][0]["revision"], 2);
     assert_eq!(
         first["profiles"][0]["mcp_access"],
         json!({"mode": "groups", "groups": ["messaging"]})
@@ -818,7 +1003,7 @@ async fn deployment_manifest_reconciles_profiles_secret_refs_and_workload_identi
         .post("/api/deployment/reconcile", manifest)
         .await
         .unwrap();
-    assert_eq!(second["profiles"][0]["revision"], 1);
+    assert_eq!(second["profiles"][0]["revision"], 2);
     assert_eq!(second["federations"][0]["id"], mapping_id);
 
     ts.client

@@ -9,7 +9,7 @@ use axum::{
 use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use weaver_api::ScratchUpload;
+use weaver_api::{ScratchLimitsView, ScratchUpload};
 
 use super::require_session;
 use super::{ApiResult, AppError, AppState};
@@ -18,6 +18,10 @@ use super::{ApiResult, AppError, AppState};
 // Scratch files — drag-and-drop reference material dropped into the worktree's
 // `scratch/` directory so the agent can read it (e.g. "see scratch/error.log").
 // ---------------------------------------------------------------------------
+
+pub(crate) const MAX_SCRATCH_FILES: usize = 20;
+pub(crate) const MAX_SCRATCH_FILE_BYTES: usize = 25 * 1024 * 1024;
+pub(crate) const MAX_SCRATCH_TOTAL_BYTES: usize = 50 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ScratchQuery {
@@ -43,6 +47,24 @@ fn scratch_name(raw: &str) -> ApiResult<String> {
     Ok(name.to_string())
 }
 
+pub(super) async fn scratch_limits() -> Json<ScratchLimitsView> {
+    Json(ScratchLimitsView {
+        max_files: MAX_SCRATCH_FILES,
+        max_file_bytes: MAX_SCRATCH_FILE_BYTES,
+        max_total_bytes: MAX_SCRATCH_TOTAL_BYTES,
+    })
+}
+
+fn validate_scratch_size(name: &str, bytes: usize) -> ApiResult<()> {
+    if bytes > MAX_SCRATCH_FILE_BYTES {
+        return Err(AppError::bad_request(format!(
+            "scratch file '{name}' is larger than the {} byte limit",
+            MAX_SCRATCH_FILE_BYTES
+        )));
+    }
+    Ok(())
+}
+
 /// Write launch-time scratch files into `<work_dir>/scratch/`, returning the
 /// bare names written (sorted, de-duplicated). The directory is git-ignored
 /// exactly as [`upload_scratch`] does it, so reference material never enters
@@ -55,25 +77,43 @@ pub(crate) async fn write_initial_scratch(
     if files.is_empty() {
         return Ok(Vec::new());
     }
+    let mut decoded = std::collections::BTreeMap::<String, Vec<u8>>::new();
+    for file in files {
+        let name = scratch_name(&file.name)?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(file.content_base64.trim())
+            .map_err(|error| {
+                AppError::bad_request(format!("scratch file '{name}': invalid base64: {error}"))
+            })?;
+        validate_scratch_size(&name, bytes.len())?;
+        decoded.insert(name, bytes);
+    }
+    if decoded.len() > MAX_SCRATCH_FILES {
+        return Err(AppError::bad_request(format!(
+            "a launch may attach at most {MAX_SCRATCH_FILES} scratch files"
+        )));
+    }
+    let total: usize = decoded.values().map(Vec::len).sum();
+    if total > MAX_SCRATCH_TOTAL_BYTES {
+        return Err(AppError::bad_request(format!(
+            "launch scratch files exceed the {} byte total limit",
+            MAX_SCRATCH_TOTAL_BYTES
+        )));
+    }
+
+    // Validate and decode the entire batch before touching disk. A malformed
+    // later item therefore cannot leave a half-written attachment set.
     let dir = work_dir.join("scratch");
     tokio::fs::create_dir_all(&dir).await?;
     let gitignore = dir.join(".gitignore");
     if !gitignore.exists() {
         tokio::fs::write(&gitignore, "*\n").await?;
     }
-    let mut names: Vec<String> = Vec::with_capacity(files.len());
-    for f in files {
-        let name = scratch_name(&f.name)?;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(f.content_base64.trim())
-            .map_err(|e| {
-                AppError::bad_request(format!("scratch file '{name}': invalid base64: {e}"))
-            })?;
+    let mut names: Vec<String> = Vec::with_capacity(decoded.len());
+    for (name, bytes) in decoded {
         tokio::fs::write(dir.join(&name), &bytes).await?;
         names.push(name);
     }
-    names.sort();
-    names.dedup();
     tracing::info!(files = ?names, "scratch files written");
     Ok(names)
 }
@@ -141,8 +181,40 @@ pub(super) async fn upload_scratch(
 ) -> ApiResult<Json<Value>> {
     let (session, _) = require_session(&st.db, &key).await?;
     let name = scratch_name(&q.name)?;
+    validate_scratch_size(&name, body.len())?;
     let dir = PathBuf::from(&session.work_dir).join("scratch");
     tokio::fs::create_dir_all(&dir).await?;
+    let mut count = 0usize;
+    let mut total = body.len();
+    let mut replacing = false;
+    let mut entries = tokio::fs::read_dir(&dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let metadata = entry.metadata().await?;
+        let entry_name = entry.file_name();
+        let Some(entry_name) = entry_name.to_str() else {
+            continue;
+        };
+        if !metadata.is_file() || entry_name.starts_with('.') {
+            continue;
+        }
+        count += 1;
+        if entry_name == name {
+            replacing = true;
+        } else {
+            total = total.saturating_add(metadata.len() as usize);
+        }
+    }
+    if !replacing && count >= MAX_SCRATCH_FILES {
+        return Err(AppError::bad_request(format!(
+            "a session may attach at most {MAX_SCRATCH_FILES} scratch files"
+        )));
+    }
+    if total > MAX_SCRATCH_TOTAL_BYTES {
+        return Err(AppError::bad_request(format!(
+            "session scratch files exceed the {} byte total limit",
+            MAX_SCRATCH_TOTAL_BYTES
+        )));
+    }
     // Reference material isn't meant to be committed; keep the whole directory
     // out of git so it never shows up in the agent's diff.
     let gitignore = dir.join(".gitignore");
@@ -238,11 +310,21 @@ mod tests {
         }];
         assert!(write_initial_scratch(dir.path(), &bad_name).await.is_err());
         // Malformed base64 is refused — a launch shouldn't half-write garbage.
-        let bad_b64 = vec![ScratchUpload {
-            name: "ok.txt".into(),
-            content_base64: "not!base64!".into(),
-        }];
+        let bad_b64 = vec![
+            ScratchUpload {
+                name: "would-have-been-written.txt".into(),
+                content_base64: b64("valid"),
+            },
+            ScratchUpload {
+                name: "bad.txt".into(),
+                content_base64: "not!base64!".into(),
+            },
+        ];
         assert!(write_initial_scratch(dir.path(), &bad_b64).await.is_err());
+        assert!(
+            !dir.path().join("scratch").exists(),
+            "the batch is validated before any attachment is written"
+        );
         // Nothing to do for an empty batch.
         assert!(write_initial_scratch(dir.path(), &[])
             .await

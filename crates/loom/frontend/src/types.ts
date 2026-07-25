@@ -134,6 +134,8 @@ export interface Session {
   profile: string;
   profile_revision: number;
   launch_mode: string;
+  /** Immutable, source-redacted launch resolution stamped by the server. */
+  resolved_launch: ResolvedLaunch | null;
   /** Exact capability snapshot stamped at launch. Custom source is redacted. */
   mcp_policy: SessionMcpPolicy;
   /** The ACP modes the adapter offers, when the server exposes them. Absent today
@@ -905,6 +907,85 @@ export interface ProfileEnv {
   updated_at: string;
 }
 
+export interface LaunchOverrides {
+  agent?: string;
+  model?: string;
+  effort?: string;
+  protocol?: string;
+  mode?: string;
+  class?: string;
+}
+
+export interface LaunchSelection {
+  profile: string;
+  overrides: LaunchOverrides;
+}
+
+export type LaunchSource =
+  'profile' | 'agent_default' | 'origin_default' | 'policy_default' | 'launch_override';
+
+export interface LaunchProvenance {
+  agent: LaunchSource;
+  model: LaunchSource;
+  effort: LaunchSource;
+  protocol: LaunchSource;
+  mode: LaunchSource;
+  class: LaunchSource;
+  idle_archive_secs: LaunchSource;
+  turn_budget: LaunchSource;
+}
+
+export interface LaunchCapacity {
+  active: number;
+  maximum: number | null;
+  available: number | null;
+  allowed: boolean;
+}
+
+export interface ResolvedLaunchPolicy {
+  strict: boolean;
+  restricted: boolean;
+  env_clear: boolean;
+  environment: ProfileEnv[];
+  ambient_allowlist: string[];
+  idle_archive_secs: number | null;
+  turn_budget: number | null;
+  prelude: string;
+  runtime_permissions: string[];
+  mcp_policy: SessionMcpPolicy;
+}
+
+export interface ResolvedLaunch {
+  selection: LaunchSelection;
+  profile_revision: number;
+  resolver_revision: string;
+  agent: string;
+  model: string;
+  effort: string;
+  protocol: string;
+  mode: string;
+  class: 'interactive' | 'automation';
+  locked_fields: string[];
+  provenance: LaunchProvenance;
+  capacity: LaunchCapacity;
+  policy: ResolvedLaunchPolicy;
+  valid: boolean;
+  errors: string[];
+}
+
+export interface CloneProfileInput {
+  name: string;
+  expected_profile_revision: number;
+  overrides: LaunchOverrides;
+  copy_environment: boolean;
+}
+
+export interface ScratchLimits {
+  max_files: number;
+  max_file_bytes: number;
+  max_total_bytes: number;
+}
+
 /** Trusted MCP registry. Capability-set names are provider-neutral profile
  * policy; a runtime translates their exact tools to its own protocol. */
 export interface McpRegistry {
@@ -971,7 +1052,9 @@ export type CustomMcpInput = Pick<
   'identity' | 'label' | 'description' | 'enabled' | 'source' | 'test_source'
 >;
 
-export type ProfileInput = Omit<Profile, 'revision' | 'created_at' | 'updated_at' | 'env'>;
+export type ProfileInput = Omit<Profile, 'revision' | 'created_at' | 'updated_at' | 'env'> & {
+  expected_revision?: number;
+};
 
 /**
  * The GitHub App / sign-in config (secret withheld). Mirrors `GithubConfigView`.
