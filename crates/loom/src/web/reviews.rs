@@ -536,7 +536,14 @@ pub(super) async fn retry_review_delivery(
             "submit the review before retrying delivery",
         ));
     }
-    review::retry_delivery(&st.db, item.id, &principal.username).await?;
+    if item.delivery_state != "failed" {
+        return Err(AppError::conflict(
+            "only failed review deliveries can be retried",
+        ));
+    }
+    review::retry_delivery(&st.db, item.id, &principal.username)
+        .await
+        .map_err(|error| AppError::conflict(error.to_string()))?;
     if let Err(error) = crate::review_delivery::deliver_review(&st, item.id).await {
         tracing::warn!(review = item.id, %error, "manual review delivery retry failed");
     }

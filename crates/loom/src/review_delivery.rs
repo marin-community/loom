@@ -108,34 +108,37 @@ pub async fn deliver_review(state: &AppState, review_id: i64) -> Result<()> {
         return Ok(());
     }
     let payload = review::structured_message(&review);
-    let result = if target.protocol == "acp" {
-        let appended = enqueue_prompt_once(state, &review, &target.id, &payload).await?;
-        if appended {
-            if let Some(handle) = state.acp.get(&target.id) {
-                // Best-effort wake. The durable queue is already the delivery
-                // boundary; a task race cannot lose or duplicate the review.
-                if let Err(error) = handle.notify_pending().await {
-                    tracing::debug!(
-                        session = %target.id,
-                        review = review.id,
-                        %error,
-                        "review queued; ACP task will pick it up at the next boundary"
-                    );
+    let result: Result<()> = async {
+        if target.protocol == "acp" {
+            let appended = enqueue_prompt_once(state, &review, &target.id, &payload).await?;
+            if appended {
+                if let Some(handle) = state.acp.get(&target.id) {
+                    // Best-effort wake. The durable queue is already the delivery
+                    // boundary; a task race cannot lose or duplicate the review.
+                    if let Err(error) = handle.notify_pending().await {
+                        tracing::debug!(
+                            session = %target.id,
+                            review = review.id,
+                            %error,
+                            "review queued; ACP task will pick it up at the next boundary"
+                        );
+                    }
                 }
             }
+            Ok(())
+        } else if !backend::has_session(&target.term_session).await {
+            Err(anyhow::anyhow!("target terminal is not running"))
+        } else {
+            backend::paste(&target.term_session, &payload)
+                .await
+                .context("pasting review feedback")?;
+            backend::send_enter(&target.term_session)
+                .await
+                .context("submitting review feedback")?;
+            review::mark_delivered(&state.db, review.id).await
         }
-        Ok(())
-    } else if !backend::has_session(&target.term_session).await {
-        Err(anyhow::anyhow!("target terminal is not running"))
-    } else {
-        backend::paste(&target.term_session, &payload)
-            .await
-            .context("pasting review feedback")?;
-        backend::send_enter(&target.term_session)
-            .await
-            .context("submitting review feedback")?;
-        review::mark_delivered(&state.db, review.id).await
-    };
+    }
+    .await;
 
     match result {
         Ok(()) => {
@@ -154,14 +157,15 @@ pub async fn deliver_review(state: &AppState, review_id: i64) -> Result<()> {
             Ok(())
         }
         Err(error) => {
-            review::mark_retry(&state.db, review.id, &error.to_string()).await?;
+            let delivery_state =
+                review::mark_retry(&state.db, review.id, &error.to_string()).await?;
             events::emit(
                 &state.bus,
                 &review.branch_id,
                 "review_delivery",
                 json!({
                     "review_id": review.id,
-                    "delivery_state": "retrying",
+                    "delivery_state": delivery_state,
                     "session_id": review.session_id,
                     "delivery_session_id": target.id,
                     "subject_key": review.subject_key,

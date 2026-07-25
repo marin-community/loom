@@ -142,6 +142,14 @@ const recentSubmitted = computed(
       .filter((review) => review.status === 'submitted' && !review.legacy)
       .sort((a, b) => b.id - a.id)[0] ?? null,
 );
+const failedSubmissions = computed(() =>
+  [...reviews.value]
+    .filter(
+      (review) =>
+        review.status === 'submitted' && !review.legacy && review.delivery_state === 'failed',
+    )
+    .sort((a, b) => b.id - a.id),
+);
 const draftEntries = computed<ReviewEntry[]>(() =>
   (draft.value?.comments ?? []).map((comment) => ({ review: draft.value!, comment })),
 );
@@ -202,7 +210,10 @@ const cardsByBlock = ref<Map<number, ReviewEntry[]>>(new Map());
 const locatedEntries = ref<{ entry: ReviewEntry; range: Range }[]>([]);
 const orphaned = ref<ReviewEntry[]>([]);
 
-const pending = ref<{ anchor: TextAnchor & { block_index?: number | null } } | null>(null);
+const pending = ref<{
+  anchor: TextAnchor & { block_index?: number | null };
+  subjectVersion: string;
+} | null>(null);
 let pendingRange: Range | null = null;
 const pendingBlock = ref(-1);
 const pendingDraft = ref('');
@@ -269,6 +280,7 @@ watch(allEntries, () => nextTick(locateCycle));
 
 const selectionButton = ref<{
   anchor: TextAnchor & { block_index?: number | null };
+  subjectVersion: string;
   top: number;
   left: number;
 } | null>(null);
@@ -307,6 +319,7 @@ function updateSelectionButton() {
   const rect = range.getBoundingClientRect();
   selectionButton.value = {
     anchor,
+    subjectVersion: String(props.rev),
     top: rect.bottom - containerRect.top + 4,
     left: Math.max(0, rect.right - containerRect.left - 150),
   };
@@ -331,12 +344,13 @@ async function useSelection() {
   const selection = window.getSelection();
   const range = selection?.rangeCount ? selection.getRangeAt(0).cloneRange() : null;
   const anchor = selectionButton.value.anchor;
+  const subjectVersion = selectionButton.value.subjectVersion;
   selectionButton.value = null;
 
   if (reanchorCommentId.value != null && draft.value) {
     try {
       const updated = await updateReviewComment(draft.value.id, reanchorCommentId.value, {
-        subject_version: String(props.rev),
+        subject_version: subjectVersion,
         anchor_kind: 'text',
         anchor,
       });
@@ -347,7 +361,7 @@ async function useSelection() {
       replaceReview(review);
       activeId.value = updated.id;
       reanchorCommentId.value = null;
-      reviewNotice.value = `Comment re-anchored to revision ${props.rev}.`;
+      reviewNotice.value = `Comment re-anchored to revision ${subjectVersion}.`;
       selection?.removeAllRanges();
       await nextTick();
       locateCycle();
@@ -358,7 +372,7 @@ async function useSelection() {
   }
 
   pendingRange = range;
-  pending.value = { anchor };
+  pending.value = { anchor, subjectVersion };
   pendingDraft.value = '';
   selection?.removeAllRanges();
   locateCycle();
@@ -431,12 +445,12 @@ function navigateDraft(direction: number) {
 
 // --- draft mutation ---------------------------------------------------------
 
-async function ensureDraft(): Promise<Review> {
+async function ensureDraft(subjectVersion: string): Promise<Review> {
   if (draft.value) return draft.value;
   const created = await createArtifactReview(props.id, {
     subject_kind: 'artifact',
     subject_key: props.artifactName,
-    subject_version: String(props.rev),
+    subject_version: subjectVersion,
   });
   replaceReview(created);
   return created;
@@ -445,14 +459,15 @@ async function ensureDraft(): Promise<Review> {
 async function createPendingComment() {
   const text = pendingDraft.value.trim();
   if (!pending.value || !text || savingComment.value) return;
+  const pendingComment = pending.value;
   savingComment.value = true;
   reviewError.value = '';
   try {
-    const review = await ensureDraft();
+    const review = await ensureDraft(pendingComment.subjectVersion);
     const comment = await addReviewComment(review.id, {
-      subject_version: String(props.rev),
+      subject_version: pendingComment.subjectVersion,
       anchor_kind: 'text',
-      anchor: pending.value.anchor,
+      anchor: pendingComment.anchor,
       body: text,
     });
     const updated = { ...review, comments: [...review.comments, comment] };
@@ -592,10 +607,9 @@ async function submitDraft() {
   }
 }
 
-async function retryDelivery() {
-  if (!recentSubmitted.value) return;
+async function retryDelivery(review: Review) {
   try {
-    const updated = await retryReviewDelivery(recentSubmitted.value.id);
+    const updated = await retryReviewDelivery(review.id);
     replaceReview(updated);
     reviewNotice.value =
       updated.delivery_state === 'delivered'
@@ -849,8 +863,14 @@ const DocBody = () => {
           <template v-if="draft">
             Review · {{ draft.comments.length }} pending
             <span v-if="draft.outdated" class="ml-1 text-block">· stale</span>
+            <span v-if="failedSubmissions.length" class="ml-1 text-block">
+              · {{ failedSubmissions.length }} delivery failed
+            </span>
           </template>
-          <template v-else> Review submitted · {{ recentSubmitted?.delivery_state }} </template>
+          <template v-else-if="failedSubmissions.length">
+            Review delivery · {{ failedSubmissions.length }} failed
+          </template>
+          <template v-else>Review submitted · {{ recentSubmitted?.delivery_state }}</template>
         </button>
         <template v-if="draft?.comments.length">
           <button
@@ -881,6 +901,29 @@ const DocBody = () => {
       </div>
 
       <div v-if="trayOpen" class="max-h-[min(60vh,34rem)] overflow-auto border-t border-line p-3">
+        <div
+          v-if="failedSubmissions.length"
+          class="mb-3 space-y-2"
+          aria-label="Failed review deliveries"
+        >
+          <div
+            v-for="item in failedSubmissions"
+            :key="`failed-${item.id}`"
+            class="rounded border border-block-line bg-block-soft p-2 text-xs"
+            :data-testid="`failed-review-delivery-${item.id}`"
+          >
+            <p class="font-medium text-block">Review {{ item.id }} delivery failed</p>
+            <p v-if="item.delivery_error" class="mt-1 text-block">{{ item.delivery_error }}</p>
+            <button
+              type="button"
+              class="btn-primary mt-2 px-2 py-1 text-xs"
+              @click="retryDelivery(item)"
+            >
+              Retry delivery
+            </button>
+          </div>
+        </div>
+
         <template v-if="draft">
           <p
             v-if="draft.outdated"
@@ -982,30 +1025,18 @@ const DocBody = () => {
           </div>
         </template>
 
-        <template v-else-if="recentSubmitted">
+        <template
+          v-else-if="
+            recentSubmitted &&
+            !failedSubmissions.some((review) => review.id === recentSubmitted?.id)
+          "
+        >
           <div class="text-xs text-muted">
             <p class="font-medium text-fg">Review {{ recentSubmitted.id }} submitted</p>
             <p class="mt-1">
               Delivery:
-              <span
-                :class="recentSubmitted.delivery_state === 'failed' ? 'text-block' : 'text-accent'"
-                >{{ recentSubmitted.delivery_state }}</span
-              >
+              <span class="text-accent">{{ recentSubmitted.delivery_state }}</span>
             </p>
-            <p
-              v-if="recentSubmitted.delivery_error"
-              class="mt-2 rounded bg-block-soft p-2 text-block"
-            >
-              {{ recentSubmitted.delivery_error }}
-            </p>
-            <button
-              v-if="recentSubmitted.delivery_state === 'failed'"
-              type="button"
-              class="btn-primary mt-2 px-2 py-1 text-xs"
-              @click="retryDelivery"
-            >
-              Retry delivery
-            </button>
           </div>
         </template>
       </div>

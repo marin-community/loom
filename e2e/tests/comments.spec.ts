@@ -216,6 +216,60 @@ test.describe("staged artifact reviews", () => {
     await expect(page.getByTestId("submit-review")).toHaveCount(0);
   });
 
+  test("keeps the captured revision while a pending selection waits", async ({
+    page,
+    weaver,
+  }) => {
+    const session = await weaver.seedSession({
+      goal: "revision-safe review",
+      name: "review-captured-revision",
+    });
+    await weaver.writeArtifact(session, "design", DOC, {
+      title: "Design notes",
+    });
+    await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/design`);
+    await expect(page.locator(".markdown-body h1")).toContainText(
+      "Design notes",
+    );
+
+    await selectPhrase(page, "collaborative editing");
+    await page.getByTestId("review-selection-button").click();
+    const composer = page.getByTestId("review-comment-composer");
+    await composer
+      .locator("textarea")
+      .fill("Keep this tied to the text I selected.");
+
+    await weaver.writeArtifact(
+      session,
+      "design",
+      DOC.replace("default, and layer", "default, then layer"),
+      { title: "Design notes" },
+    );
+    await expect(page.locator(".markdown-body")).toContainText(
+      "default, then layer",
+    );
+    await expect(composer).toBeVisible();
+
+    const createRequest = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        request.url().endsWith(`/api/sessions/${session.id}/reviews`),
+    );
+    const commentRequest = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        /\/api\/reviews\/\d+\/comments$/.test(request.url()),
+    );
+    await composer.getByRole("button", { name: "Add pending comment" }).click();
+    const [create, comment] = await Promise.all([
+      createRequest,
+      commentRequest,
+    ]);
+    expect(create.postDataJSON().subject_version).toBe("1");
+    expect(comment.postDataJSON().subject_version).toBe("1");
+    await expect(page.getByTestId("review-tray")).toContainText("stale");
+  });
+
   test("keeps review and long-document position through pop and dock", async ({
     page,
     weaver,

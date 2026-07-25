@@ -15,6 +15,7 @@ use crate::events::Event;
 
 pub const MAX_COMMENTS: i64 = 100;
 pub const MAX_COMMENT_BYTES: usize = 8 * 1024;
+pub const MAX_ANCHOR_BYTES: usize = 8 * 1024;
 pub const MAX_REVIEW_BYTES: i64 = 256 * 1024;
 pub const MAX_SUMMARY_BYTES: usize = 8 * 1024;
 
@@ -123,6 +124,9 @@ fn validate_comment(body: &str, anchor_kind: &str, anchor: &Value) -> Result<()>
     }
     if anchor_kind.trim().is_empty() || !anchor.is_object() {
         bail!("a structured comment anchor is required");
+    }
+    if anchor.to_string().len() > MAX_ANCHOR_BYTES {
+        bail!("comment anchor exceeds the 8 KiB limit");
     }
     Ok(())
 }
@@ -264,6 +268,8 @@ pub async fn add_comment(
     new: &NewComment<'_>,
 ) -> Result<ReviewComment> {
     validate_comment(new.body, new.anchor_kind, new.anchor)?;
+    let body = new.body.trim();
+    let anchor_json = new.anchor.to_string();
     let mut tx = crate::db::begin_immediate(db).await?;
     require_creator_draft(&mut tx, review_id, creator).await?;
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM review_comments WHERE review_id = ?")
@@ -274,14 +280,16 @@ pub async fn add_comment(
         bail!("a review may contain at most 100 comments");
     }
     let total: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(length(CAST(body AS BLOB))), 0)
+        "SELECT COALESCE(SUM(
+             length(CAST(body AS BLOB)) + length(CAST(anchor_json AS BLOB))
+         ), 0)
          FROM review_comments WHERE review_id = ?",
     )
     .bind(review_id)
     .fetch_one(&mut *tx)
     .await?;
-    if total + new.body.len() as i64 > MAX_REVIEW_BYTES {
-        bail!("review comments exceed the 256 KiB total limit");
+    if total + body.len() as i64 + anchor_json.len() as i64 > MAX_REVIEW_BYTES {
+        bail!("review comments and anchors exceed the 256 KiB total limit");
     }
     let now = now_iso();
     let row = sqlx::query_as::<_, ReviewComment>(
@@ -294,8 +302,8 @@ pub async fn add_comment(
     .bind(review_id)
     .bind(new.subject_version)
     .bind(new.anchor_kind)
-    .bind(new.anchor.to_string())
-    .bind(new.body.trim())
+    .bind(anchor_json)
+    .bind(body)
     .bind(&now)
     .bind(&now)
     .fetch_one(&mut *tx)
@@ -351,15 +359,17 @@ pub async fn patch_comment(
         &serde_json::from_str(&anchor_json).unwrap_or(Value::Null),
     )?;
     let total_without: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(length(CAST(body AS BLOB))), 0)
+        "SELECT COALESCE(SUM(
+             length(CAST(body AS BLOB)) + length(CAST(anchor_json AS BLOB))
+         ), 0)
          FROM review_comments WHERE review_id = ? AND id != ?",
     )
     .bind(review_id)
     .bind(comment_id)
     .fetch_one(&mut *tx)
     .await?;
-    if total_without + body.len() as i64 > MAX_REVIEW_BYTES {
-        bail!("review comments exceed the 256 KiB total limit");
+    if total_without + body.len() as i64 + anchor_json.len() as i64 > MAX_REVIEW_BYTES {
+        bail!("review comments and anchors exceed the 256 KiB total limit");
     }
     let now = now_iso();
     let row = sqlx::query_as::<_, ReviewComment>(
@@ -651,19 +661,20 @@ pub async fn claim_delivery(db: &Db, review_id: i64) -> Result<bool> {
     Ok(claimed)
 }
 
-pub async fn mark_retry(db: &Db, review_id: i64, error: &str) -> Result<()> {
+pub async fn mark_retry(db: &Db, review_id: i64, error: &str) -> Result<String> {
     let next = chrono::Utc::now()
         .checked_add_signed(chrono::TimeDelta::minutes(1))
         .map(|instant| instant.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
         .unwrap_or_else(now_iso);
     let mut tx = crate::db::begin_immediate(db).await?;
-    let attempts: i64 =
-        sqlx::query_scalar("SELECT attempts FROM review_delivery_outbox WHERE review_id = ?")
-            .bind(review_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .unwrap_or(0)
-            + 1;
+    let attempts = sqlx::query_scalar::<_, i64>(
+        "SELECT attempts FROM review_delivery_outbox WHERE review_id = ?",
+    )
+    .bind(review_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| anyhow!("review delivery outbox item not found"))?
+        + 1;
     let state = if attempts >= 3 { "failed" } else { "retrying" };
     sqlx::query(
         "UPDATE review_delivery_outbox
@@ -684,7 +695,7 @@ pub async fn mark_retry(db: &Db, review_id: i64, error: &str) -> Result<()> {
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(())
+    Ok(state.to_string())
 }
 
 pub async fn mark_delivered(db: &Db, review_id: i64) -> Result<()> {
@@ -711,8 +722,11 @@ pub async fn retry_delivery(db: &Db, review_id: i64, creator: &str) -> Result<()
     let mut tx = crate::db::begin_immediate(db).await?;
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(
-           SELECT 1 FROM reviews
-           WHERE id = ? AND created_by = ? AND status = 'submitted'
+           SELECT 1
+           FROM reviews r
+           JOIN review_delivery_outbox o ON o.review_id = r.id
+           WHERE r.id = ? AND r.created_by = ? AND r.status = 'submitted'
+             AND r.delivery_state = 'failed' AND o.state = 'failed'
          )",
     )
     .bind(review_id)
@@ -720,7 +734,7 @@ pub async fn retry_delivery(db: &Db, review_id: i64, creator: &str) -> Result<()
     .fetch_one(&mut *tx)
     .await?;
     if !exists {
-        bail!("submitted review not found");
+        bail!("failed review delivery not found");
     }
     sqlx::query(
         "UPDATE review_delivery_outbox
@@ -958,5 +972,70 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(state, "delivering");
+    }
+
+    #[tokio::test]
+    async fn anchors_are_bounded_individually_and_in_the_review_total() {
+        let (db, artifact) = seeded().await;
+        let draft = draft(&db, &artifact, "alice").await;
+        let oversized = json!({"quote": "x".repeat(MAX_ANCHOR_BYTES)});
+        let error = add_comment(&db, draft.id, "alice", &comment("bounded body", &oversized))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("anchor exceeds"));
+
+        let body = "b".repeat(MAX_COMMENT_BYTES);
+        let near_limit = json!({"quote": "x".repeat(MAX_ANCHOR_BYTES - 16)});
+        for _ in 0..16 {
+            add_comment(&db, draft.id, "alice", &comment(&body, &near_limit))
+                .await
+                .unwrap();
+        }
+        let error = add_comment(&db, draft.id, "alice", &comment(&body, &near_limit))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("256 KiB total"));
+    }
+
+    #[tokio::test]
+    async fn delivery_failure_state_and_manual_retry_are_honest() {
+        let (db, artifact) = seeded().await;
+        let draft = draft(&db, &artifact, "alice").await;
+        add_comment(
+            &db,
+            draft.id,
+            "alice",
+            &comment("change this", &json!({"quote": "beta", "block_index": 0})),
+        )
+        .await
+        .unwrap();
+        submit(&db, draft.id, "alice", "", "1", false)
+            .await
+            .unwrap();
+
+        let error = retry_delivery(&db, draft.id, "alice").await.unwrap_err();
+        assert!(error.to_string().contains("failed review delivery"));
+        assert_eq!(
+            mark_retry(&db, draft.id, "first failure").await.unwrap(),
+            "retrying"
+        );
+        assert_eq!(
+            mark_retry(&db, draft.id, "second failure").await.unwrap(),
+            "retrying"
+        );
+        assert_eq!(
+            mark_retry(&db, draft.id, "third failure").await.unwrap(),
+            "failed"
+        );
+
+        retry_delivery(&db, draft.id, "alice").await.unwrap();
+        let error = retry_delivery(&db, draft.id, "alice").await.unwrap_err();
+        assert!(error.to_string().contains("failed review delivery"));
+        let state: String = sqlx::query_scalar("SELECT delivery_state FROM reviews WHERE id = ?")
+            .bind(draft.id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(state, "queued");
     }
 }
