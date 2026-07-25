@@ -39,7 +39,7 @@ written for it to run; do them yourself if you'd rather.
    the PATH; for example:
 
    ```sh
-   cargo install sccache --locked
+   CARGO_BUILD_RUSTC_WRAPPER= cargo install sccache --locked
    ```
 
 2. **Build the tooling.** From the repo root:
