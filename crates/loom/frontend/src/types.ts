@@ -454,6 +454,32 @@ export interface Issue {
   tags: Tag[];
 }
 
+export interface IssueTagInput {
+  key: string;
+  value: string;
+  note?: string;
+  by?: string;
+}
+
+export type IssueAction =
+  | { type: 'close' }
+  | { type: 'reopen' }
+  | { type: 'tag'; key: string; value: string; note?: string; by?: string }
+  | { type: 'untag'; key: string }
+  | { type: 'delete' };
+
+export interface IssueActionsResult {
+  issues: Issue[];
+  deleted_ids: number[];
+}
+
+/** One invalid ID or precondition in an atomic issue action's error details. */
+export interface IssueActionProblem {
+  id: number;
+  code: string;
+  error: string;
+}
+
 // --- Artifacts -------------------------------------------------------------
 // Named, versioned documents an agent (or the user) writes *to weaver*, not to
 // the repo — designs, reports, the `plan`. Scoped like issues (branch-scoped or

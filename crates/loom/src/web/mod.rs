@@ -16,6 +16,7 @@
 //!   session). `/api/branches/{id}` — GET / PATCH (goal / title / description).
 //! * `/api/branches/{id}/issues` — list / POST issues for a branch.
 //! * `/api/issues/{id}` — GET / PATCH / DELETE an issue by id.
+//! * `/api/issues/actions` — validate and atomically mutate a set of issues.
 //! * `/api/health` + `/api/health/live` are process-level liveness;
 //!   `/api/ready` checks the database and migration streams; `/metrics` exposes
 //!   bounded-label OpenMetrics; `/api/diagnostics` is the admin inventory.
@@ -736,6 +737,7 @@ pub fn router(state: AppState) -> Router {
         )
         // The cross-repo issue board (the loom Issues pane consumes this).
         .route("/issues", get(list_all_issues))
+        .route("/issues/actions", post(issue_actions))
         .route(
             "/issues/{id}",
             get(get_issue).patch(patch_issue).delete(delete_issue),

@@ -863,6 +863,63 @@ pub struct IssueView {
     pub github_state: Option<GithubThreadState>,
 }
 
+/// One initial tag supplied while creating an issue.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IssueTagInput {
+    pub key: String,
+    pub value: String,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub by: Option<String>,
+}
+
+/// One command validated and applied atomically to every requested issue.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum IssueAction {
+    Close,
+    Reopen,
+    Tag {
+        key: String,
+        value: String,
+        #[serde(default)]
+        note: String,
+        #[serde(default)]
+        by: Option<String>,
+    },
+    Untag {
+        key: String,
+    },
+    Delete,
+}
+
+/// Body for `POST /api/issues/actions`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueActionsReq {
+    pub ids: Vec<i64>,
+    pub action: IssueAction,
+}
+
+/// One ID or precondition reported in an atomic action error's `details`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueActionProblem {
+    pub id: i64,
+    /// Stable machine-readable category such as `not_found`, `invalid_state`,
+    /// or `missing_tag`.
+    pub code: String,
+    pub error: String,
+}
+
+/// Aggregate outcome from a successful atomic `POST /api/issues/actions`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IssueActionsResult {
+    /// Updated issue views for close, reopen, tag, and untag.
+    pub issues: Vec<IssueView>,
+    /// Deleted IDs for delete. Empty for every other action.
+    pub deleted_ids: Vec<i64>,
+}
+
 /// The minimal live snapshot of a GitHub thread `weaver issue show` renders
 /// beside the weaver ledger: enough to notice "this was closed / re-titled
 /// while I worked". An agent that needs the discussion reads it with `gh`.
@@ -1423,6 +1480,8 @@ pub struct CreateIssueReq {
     pub body: String,
     #[serde(default)]
     pub github_issue: Option<i64>,
+    #[serde(default)]
+    pub tags: Vec<IssueTagInput>,
 }
 
 /// Body for `PATCH /api/issues/{id}`: every mutable field optional.
@@ -1476,6 +1535,8 @@ pub struct CreateRepoIssueReq {
     /// a live branch in this repo, an `issue_added` event is recorded there.
     #[serde(default)]
     pub source_branch: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<IssueTagInput>,
 }
 
 /// Body for `PUT /api/sessions/{id}/artifacts/{name}`: a user edit that appends

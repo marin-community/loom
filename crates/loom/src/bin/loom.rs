@@ -9,6 +9,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde_json::{json, Value};
+use weaver_api::{IssueAction, IssueActionsReq};
 
 use loom::client::{self, Client};
 use weaver_core::db::Db;
@@ -135,7 +136,7 @@ enum Cmd {
         #[command(subcommand)]
         cmd: DeploymentCmd,
     },
-    /// Show the repo's issue board (every issue across branches + backlog).
+    /// Inspect and triage issues with atomic batch actions.
     Issue {
         #[command(subcommand)]
         cmd: IssueCmd,
@@ -227,7 +228,7 @@ enum ServerCmd {
     Status,
 }
 
-/// Subcommands under `loom issue` — the read-only issue board.
+/// Subcommands under `loom issue`.
 #[derive(Subcommand)]
 enum IssueCmd {
     /// Show the repo's issue board (every issue across branches + backlog).
@@ -238,6 +239,40 @@ enum IssueCmd {
         /// Show only the unclaimed backlog.
         #[arg(long)]
         backlog: bool,
+    },
+    /// Close every issue in one atomic command.
+    Close {
+        #[arg(required = true)]
+        ids: Vec<i64>,
+    },
+    /// Reopen every issue in one atomic command.
+    Reopen {
+        #[arg(required = true)]
+        ids: Vec<i64>,
+    },
+    /// Set one tag on every issue in one atomic command.
+    Tag {
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        value: String,
+        #[arg(long, default_value = "")]
+        note: String,
+        #[arg(required = true)]
+        ids: Vec<i64>,
+    },
+    /// Remove one tag from every issue in one atomic command.
+    Untag {
+        #[arg(long)]
+        key: String,
+        #[arg(required = true)]
+        ids: Vec<i64>,
+    },
+    /// Permanently delete every issue in one atomic command.
+    #[command(alias = "rm")]
+    Delete {
+        #[arg(required = true)]
+        ids: Vec<i64>,
     },
 }
 
@@ -976,10 +1011,34 @@ async fn run_server(cmd: ServerCmd) -> Result<()> {
     }
 }
 
-/// Dispatch the `loom issue <verb>` subcommands (the read-only board).
+/// Dispatch the `loom issue <verb>` subcommands.
 async fn run_issue(cmd: IssueCmd) -> Result<()> {
     match cmd {
         IssueCmd::Ls { all, backlog } => cmd_issues(all, backlog).await,
+        IssueCmd::Close { ids } => cmd_issue_action(ids, IssueAction::Close, "closed").await,
+        IssueCmd::Reopen { ids } => cmd_issue_action(ids, IssueAction::Reopen, "reopened").await,
+        IssueCmd::Tag {
+            key,
+            value,
+            note,
+            ids,
+        } => {
+            cmd_issue_action(
+                ids,
+                IssueAction::Tag {
+                    key,
+                    value,
+                    note,
+                    by: Some("manual".to_string()),
+                },
+                "tagged",
+            )
+            .await
+        }
+        IssueCmd::Untag { key, ids } => {
+            cmd_issue_action(ids, IssueAction::Untag { key }, "untagged").await
+        }
+        IssueCmd::Delete { ids } => cmd_issue_action(ids, IssueAction::Delete, "deleted").await,
     }
 }
 
@@ -3205,6 +3264,38 @@ async fn cmd_issues(all: bool, backlog: bool) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_issue_action(ids: Vec<i64>, action: IssueAction, verb: &str) -> Result<()> {
+    let count = ids.len();
+    let result = client::default()?
+        .issue_actions(&IssueActionsReq { ids, action })
+        .await?;
+    let affected = result.issues.len() + result.deleted_ids.len();
+    if affected != count {
+        bail!("server returned {affected} affected issues for a {count}-issue command");
+    }
+    println!(
+        "{verb} {affected} issue{}",
+        if affected == 1 { "" } else { "s" }
+    );
+    let ids = if result.deleted_ids.is_empty() {
+        result
+            .issues
+            .into_iter()
+            .map(|issue| issue.id)
+            .collect::<Vec<_>>()
+    } else {
+        result.deleted_ids
+    };
+    println!(
+        "{}",
+        ids.into_iter()
+            .map(|id| format!("#{id}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    Ok(())
+}
+
 async fn cmd_show(key: String) -> Result<()> {
     let client = client::default()?;
     let ws = client
@@ -3880,6 +3971,31 @@ mod tests {
                 }
             } if name == "production"
         ));
+    }
+
+    #[test]
+    fn issue_bulk_commands_parse_multiple_ids() {
+        let Cli { cmd, .. } = Cli::try_parse_from([
+            "loom", "issue", "tag", "--key", "area", "--value", "ui", "41", "42",
+        ])
+        .unwrap();
+        match cmd {
+            Cmd::Issue {
+                cmd:
+                    IssueCmd::Tag {
+                        key,
+                        value,
+                        note,
+                        ids,
+                    },
+            } => {
+                assert_eq!(key, "area");
+                assert_eq!(value, "ui");
+                assert!(note.is_empty());
+                assert_eq!(ids, vec![41, 42]);
+            }
+            _ => panic!("expected issue tag command"),
+        }
     }
 
     #[test]

@@ -15,10 +15,11 @@ use crate::dto::{
     AutomationTokenView, BranchStatusReq, BranchView, CommentDto, CreateEventReq, CreateIssueReq,
     CreateRepoIssueReq, CreateReq, CreateTokenReq, CreateWatchReq, CreatedTokenView, CustomMcpReq,
     CustomMcpView, DeploymentReq, DeploymentView, DiagnosticsView, EffectiveProfileView,
-    FederationReq, FederationView, HandoffReq, HistoryPageView, IssueView, McpRegistryView,
-    NewCommentBody, NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq, ProfileProbeView,
-    ProfileReq, ProfileView, PutProfileEnvReq, ReadinessView, RunReq, RunView, RunWatchReq,
-    SendReq, SessionView, SetTagsReq, SettingsEnvelope, TagReq, ThreadDto, TokenView, WatchView,
+    FederationReq, FederationView, HandoffReq, HistoryPageView, IssueActionsReq,
+    IssueActionsResult, IssueView, McpRegistryView, NewCommentBody, NewThreadBody, PatchIssueReq,
+    PatchSessionReq, PatchWatchReq, ProfileProbeView, ProfileReq, ProfileView, PutProfileEnvReq,
+    ReadinessView, RunReq, RunView, RunWatchReq, SendReq, SessionView, SetTagsReq,
+    SettingsEnvelope, TagReq, ThreadDto, TokenView, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -696,6 +697,15 @@ impl Client {
     /// Patch an issue's title/body/status (`PATCH /api/issues/{id}`).
     pub async fn patch_issue(&self, id: i64, req: &PatchIssueReq) -> Result<IssueView> {
         self.send_typed(Method::PATCH, &format!("/api/issues/{id}"), Some(req))
+            .await
+    }
+
+    /// Apply one command to a set of issues (`POST /api/issues/actions`).
+    ///
+    /// The server validates every id and precondition before applying the
+    /// command atomically. Validation failure changes nothing.
+    pub async fn issue_actions(&self, req: &IssueActionsReq) -> Result<IssueActionsResult> {
+        self.send_typed(Method::POST, "/api/issues/actions", Some(req))
             .await
     }
 

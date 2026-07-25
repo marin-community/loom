@@ -1032,6 +1032,7 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
                         body: body.unwrap_or_default(),
                         github_issue: github,
                         source_branch: Some(b.branch.clone()),
+                        tags: Vec::new(),
                     })
                     .await?
             } else {
@@ -1042,6 +1043,7 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
                             title: title.clone(),
                             body: body.unwrap_or_default(),
                             github_issue: github,
+                            tags: Vec::new(),
                         },
                     )
                     .await?

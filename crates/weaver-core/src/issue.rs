@@ -14,6 +14,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use std::fmt;
 
 use crate::db::{now_iso, Db};
 use crate::tags::Tag;
@@ -48,8 +49,23 @@ pub struct NewIssue {
     pub github_issue: Option<i64>,
 }
 
+/// One tag to persist with a newly-created issue.
+#[derive(Debug, Clone)]
+pub struct NewIssueTag {
+    pub key: String,
+    pub value: String,
+    pub note: String,
+    pub set_by: String,
+}
+
 /// Create a new issue. Returns the persisted row.
 pub async fn add(db: &Db, new: &NewIssue) -> Result<Issue> {
+    add_with_tags(db, new, &[]).await
+}
+
+/// Create an issue and its initial tags in one transaction.
+pub async fn add_with_tags(db: &Db, new: &NewIssue, tags: &[NewIssueTag]) -> Result<Issue> {
+    let mut tx = crate::db::begin_immediate(db).await?;
     let now = now_iso();
     let row: (i64,) = sqlx::query_as(
         "INSERT INTO issues
@@ -66,13 +82,232 @@ pub async fn add(db: &Db, new: &NewIssue) -> Result<Issue> {
     .bind(new.github_issue)
     .bind(&now)
     .bind(&now)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
-    let issue = get(db, row.0)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("issue vanished after insert"))?;
+    for tag in tags {
+        sqlx::query(
+            "INSERT INTO issue_tags (issue_id, key, value, note, set_by, set_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(row.0)
+        .bind(&tag.key)
+        .bind(&tag.value)
+        .bind(&tag.note)
+        .bind(&tag.set_by)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let issue = sqlx::query_as::<_, Issue>("SELECT * FROM issues WHERE id = ?")
+        .bind(row.0)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
     tracing::info!(issue = issue.id, title = %issue.title, "issue created");
     Ok(issue)
+}
+
+/// One bulk mutation supported by the issue command endpoint.
+#[derive(Debug, Clone)]
+pub enum BulkIssueAction {
+    Close,
+    Reopen,
+    Tag {
+        key: String,
+        value: String,
+        note: String,
+        set_by: String,
+    },
+    Untag {
+        key: String,
+    },
+    Delete,
+}
+
+/// One ID or precondition that makes a bulk issue action invalid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueActionProblem {
+    pub id: i64,
+    pub code: String,
+    pub error: String,
+}
+
+/// Validation failure from [`apply_bulk_action`]. No mutation has occurred.
+#[derive(Debug)]
+pub struct IssueActionValidationError {
+    pub problems: Vec<IssueActionProblem>,
+}
+
+impl fmt::Display for IssueActionValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "issue action validation failed for {} item{}",
+            self.problems.len(),
+            if self.problems.len() == 1 { "" } else { "s" }
+        )
+    }
+}
+
+impl std::error::Error for IssueActionValidationError {}
+
+/// Aggregate result from an atomic issue action. `issues` contains the updated
+/// rows for non-delete actions; deletes return their IDs in `deleted_ids`.
+#[derive(Debug)]
+pub struct BulkIssueActionResult {
+    pub issues: Vec<Issue>,
+    pub deleted_ids: Vec<i64>,
+}
+
+/// Validate every ID and action precondition, then apply the whole command in
+/// one transaction. Any validation or database failure leaves every issue
+/// unchanged.
+pub async fn apply_bulk_action(
+    db: &Db,
+    ids: &[i64],
+    action: &BulkIssueAction,
+) -> Result<BulkIssueActionResult> {
+    let mut tx = crate::db::begin_immediate(db).await?;
+    let mut issues = Vec::with_capacity(ids.len());
+    let mut problems = Vec::new();
+
+    for id in ids {
+        let issue = sqlx::query_as::<_, Issue>("SELECT * FROM issues WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(issue) = issue else {
+            problems.push(IssueActionProblem {
+                id: *id,
+                code: "not_found".to_string(),
+                error: "issue not found".to_string(),
+            });
+            continue;
+        };
+        let state_problem = match action {
+            BulkIssueAction::Close if issue.status != "open" => {
+                Some(("invalid_state", "issue is already closed"))
+            }
+            BulkIssueAction::Reopen if issue.status != "closed" => {
+                Some(("invalid_state", "issue is already open"))
+            }
+            BulkIssueAction::Untag { key } => {
+                let exists: Option<(i64,)> =
+                    sqlx::query_as("SELECT 1 FROM issue_tags WHERE issue_id = ? AND key = ?")
+                        .bind(issue.id)
+                        .bind(key)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                if exists.is_none() {
+                    Some(("missing_tag", "issue does not have this tag"))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some((code, error)) = state_problem {
+            problems.push(IssueActionProblem {
+                id: *id,
+                code: code.to_string(),
+                error: error.to_string(),
+            });
+        }
+        issues.push(issue);
+    }
+
+    if !problems.is_empty() {
+        tx.rollback().await?;
+        return Err(IssueActionValidationError { problems }.into());
+    }
+
+    let now = now_iso();
+    for issue in &issues {
+        match action {
+            BulkIssueAction::Close => {
+                sqlx::query(
+                    "UPDATE issues SET status = 'closed', closed_at = ?, updated_at = ?
+                     WHERE id = ?",
+                )
+                .bind(&now)
+                .bind(&now)
+                .bind(issue.id)
+                .execute(&mut *tx)
+                .await?;
+            }
+            BulkIssueAction::Reopen => {
+                sqlx::query(
+                    "UPDATE issues SET status = 'open', closed_at = NULL, updated_at = ?
+                     WHERE id = ?",
+                )
+                .bind(&now)
+                .bind(issue.id)
+                .execute(&mut *tx)
+                .await?;
+            }
+            BulkIssueAction::Tag {
+                key,
+                value,
+                note,
+                set_by,
+            } => {
+                sqlx::query(
+                    "INSERT INTO issue_tags (issue_id, key, value, note, set_by, set_at)
+                     VALUES (?, ?, ?, ?, ?, ?)
+                     ON CONFLICT(issue_id, key) DO UPDATE SET
+                       value = excluded.value, note = excluded.note,
+                       set_by = excluded.set_by, set_at = excluded.set_at",
+                )
+                .bind(issue.id)
+                .bind(key)
+                .bind(value)
+                .bind(note)
+                .bind(set_by)
+                .bind(&now)
+                .execute(&mut *tx)
+                .await?;
+            }
+            BulkIssueAction::Untag { key } => {
+                sqlx::query("DELETE FROM issue_tags WHERE issue_id = ? AND key = ?")
+                    .bind(issue.id)
+                    .bind(key)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            BulkIssueAction::Delete => {
+                sqlx::query("DELETE FROM issue_tags WHERE issue_id = ?")
+                    .bind(issue.id)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("DELETE FROM issues WHERE id = ?")
+                    .bind(issue.id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+    }
+
+    let deleted_ids = if matches!(action, BulkIssueAction::Delete) {
+        ids.to_vec()
+    } else {
+        Vec::new()
+    };
+    let mut updated = Vec::new();
+    if deleted_ids.is_empty() {
+        for id in ids {
+            updated.push(
+                sqlx::query_as::<_, Issue>("SELECT * FROM issues WHERE id = ?")
+                    .bind(id)
+                    .fetch_one(&mut *tx)
+                    .await?,
+            );
+        }
+    }
+    tx.commit().await?;
+    Ok(BulkIssueActionResult {
+        issues: updated,
+        deleted_ids,
+    })
 }
 
 pub async fn get(db: &Db, id: i64) -> Result<Option<Issue>> {
@@ -600,5 +835,145 @@ mod tests {
         // Deleting the issue clears its remaining tags.
         delete(&db, i.id).await.unwrap();
         assert!(list_tags(&db, i.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_with_tags_persists_the_issue_and_labels_together() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let issue = add_with_tags(
+            &db,
+            &claimed("/r", "feature", "tagged at creation"),
+            &[NewIssueTag {
+                key: "priority".to_string(),
+                value: "high".to_string(),
+                note: "ship first".to_string(),
+                set_by: "manual".to_string(),
+            }],
+        )
+        .await
+        .unwrap();
+
+        let tags = list_tags(&db, issue.id).await.unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].key, "priority");
+        assert_eq!(tags[0].value, "high");
+        assert_eq!(tags[0].note, "ship first");
+    }
+
+    #[tokio::test]
+    async fn create_with_tags_rolls_back_the_issue_if_a_tag_fails() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let duplicate = NewIssueTag {
+            key: "priority".to_string(),
+            value: "high".to_string(),
+            note: String::new(),
+            set_by: "manual".to_string(),
+        };
+        add_with_tags(
+            &db,
+            &claimed("/r", "feature", "must roll back"),
+            &[duplicate.clone(), duplicate],
+        )
+        .await
+        .unwrap_err();
+        assert!(list_for_repo(&db, "/r", true).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bulk_actions_cover_close_reopen_tag_untag_and_delete() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let first = add(&db, &claimed("/r", "feature", "first")).await.unwrap();
+        let second = add(&db, &claimed("/r", "feature", "second")).await.unwrap();
+        let ids = [first.id, second.id];
+
+        let closed = apply_bulk_action(&db, &ids, &BulkIssueAction::Close)
+            .await
+            .unwrap();
+        assert!(closed.issues.iter().all(|issue| issue.status == "closed"));
+        let reopened = apply_bulk_action(&db, &ids, &BulkIssueAction::Reopen)
+            .await
+            .unwrap();
+        assert!(reopened.issues.iter().all(|issue| issue.status == "open"));
+
+        apply_bulk_action(
+            &db,
+            &ids,
+            &BulkIssueAction::Tag {
+                key: "area".to_string(),
+                value: "ui".to_string(),
+                note: String::new(),
+                set_by: "manual".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        for id in ids {
+            assert_eq!(list_tags(&db, id).await.unwrap()[0].value, "ui");
+        }
+
+        apply_bulk_action(
+            &db,
+            &ids,
+            &BulkIssueAction::Untag {
+                key: "area".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        for id in ids {
+            assert!(list_tags(&db, id).await.unwrap().is_empty());
+        }
+
+        let deleted = apply_bulk_action(&db, &ids, &BulkIssueAction::Delete)
+            .await
+            .unwrap();
+        assert_eq!(deleted.deleted_ids, ids);
+        assert!(list_for_repo(&db, "/r", true).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bulk_action_invalid_id_rolls_back_every_mutation() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let issue = add(&db, &claimed("/r", "feature", "valid")).await.unwrap();
+
+        let error = apply_bulk_action(&db, &[issue.id, 999_999], &BulkIssueAction::Close)
+            .await
+            .unwrap_err();
+        let validation = error.downcast_ref::<IssueActionValidationError>().unwrap();
+        assert_eq!(
+            validation.problems,
+            vec![IssueActionProblem {
+                id: 999_999,
+                code: "not_found".to_string(),
+                error: "issue not found".to_string(),
+            }]
+        );
+        assert_eq!(get(&db, issue.id).await.unwrap().unwrap().status, "open");
+
+        apply_bulk_action(&db, &[issue.id, 999_999], &BulkIssueAction::Delete)
+            .await
+            .unwrap_err();
+        assert!(
+            get(&db, issue.id).await.unwrap().is_some(),
+            "a valid issue must survive when any delete target is invalid"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_action_precondition_failure_rolls_back_every_mutation() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let open = add(&db, &claimed("/r", "feature", "open")).await.unwrap();
+        let closed = add(&db, &claimed("/r", "feature", "closed")).await.unwrap();
+        close(&db, closed.id).await.unwrap();
+
+        let error = apply_bulk_action(&db, &[open.id, closed.id], &BulkIssueAction::Close)
+            .await
+            .unwrap_err();
+        let validation = error.downcast_ref::<IssueActionValidationError>().unwrap();
+        assert_eq!(validation.problems.len(), 1);
+        assert_eq!(validation.problems[0].id, closed.id);
+        assert_eq!(validation.problems[0].code, "invalid_state");
+        assert_eq!(get(&db, open.id).await.unwrap().unwrap().status, "open");
+        assert_eq!(get(&db, closed.id).await.unwrap().unwrap().status, "closed");
     }
 }

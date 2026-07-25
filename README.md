@@ -158,6 +158,11 @@ Three flags seed the task from existing work instead of a fresh description:
 from a GitHub issue (via the `gh` CLI), `--claim 7` takes them from an existing
 weaver issue and moves it out of the repo backlog, and `--branch <name>` resumes
 an existing branch. `loom issue ls` prints the repo's board across branches.
+Batch commands use the same atomic API as the Issues pane:
+`loom issue close 7 9`, `loom issue reopen 7 9`,
+`loom issue tag --key area --value ui 7 9`,
+`loom issue untag --key area 7 9`, and `loom issue delete 7 9`.
+If any ID or precondition is invalid, none of the requested issues changes.
 
 Every launch opens a **tracking issue** claimed by the new branch — the task as
 a weaver issue — and the launch prints its number. That number is the handle
