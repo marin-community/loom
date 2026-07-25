@@ -39,6 +39,14 @@ const forceSteeringNewTurn = process.env.FAKE_ACP_STEERING_FORCE_NEW_TURN === "1
 const steeringDelayMs = Number(process.env.FAKE_ACP_STEERING_DELAY_MS || "0");
 const loadPermission = process.env.FAKE_ACP_LOAD_PERMISSION || "";
 const fixedPermissionId = Number(process.env.FAKE_ACP_PERMISSION_ID || "0");
+const fixedOutput =
+  process.env.FAKE_ACP_FIXED_OUTPUT_B64 === undefined
+    ? undefined
+    : Buffer.from(process.env.FAKE_ACP_FIXED_OUTPUT_B64, "base64").toString("utf8");
+const summaryOutput =
+  process.env.FAKE_ACP_SUMMARY_OUTPUT_B64 === undefined
+    ? undefined
+    : Buffer.from(process.env.FAKE_ACP_SUMMARY_OUTPUT_B64, "base64").toString("utf8");
 let promptActive = false;
 let promptResources = [];
 const steeringQueue = [];
@@ -79,7 +87,8 @@ const MODES = [
   { id: "bypassPermissions", name: "Bypass permissions" },
   { id: "plan", name: "Plan" },
 ];
-let currentModel = "fake-fast";
+const modelValues = (process.env.FAKE_ACP_MODELS || "fake-fast,fake-deep").split(",");
+let currentModel = modelValues[0];
 let currentEffort = "medium";
 let currentMode = "default";
 let fastMode = false;
@@ -102,10 +111,7 @@ function configOptions() {
       category: "model",
       type: "select",
       currentValue: currentModel,
-      options: [
-        { value: "fake-fast", name: "Fake fast" },
-        { value: "fake-deep", name: "Fake deep" },
-      ],
+      options: modelValues.map((value) => ({ value, name: value })),
     },
     {
       id: "thought_level",
@@ -265,6 +271,25 @@ async function handlePrompt(id, params) {
     .map((b) => b.text || "")
     .join("")
     .split("\n\n")[0];
+  if (fixedOutput !== undefined) {
+    if (fixedOutput.length > 0) {
+      notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: fixedOutput } });
+    }
+    promptActive = false;
+    if (id !== null) respond(id, { stopReason: "end_turn" });
+    return;
+  }
+  if (summaryOutput !== undefined && text.startsWith("Summarize this coding session")) {
+    if (summaryOutput.length > 0) {
+      notify({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: summaryOutput },
+      });
+    }
+    promptActive = false;
+    if (id !== null) respond(id, { stopReason: "end_turn" });
+    return;
+  }
   for (const tok of text.split("|")) {
     if (cancelled) break;
     if (tok.length === 0) continue;

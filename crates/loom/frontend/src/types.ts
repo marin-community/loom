@@ -331,6 +331,12 @@ export interface HandoffPayload {
   to: string;
   model: string;
   effort: string;
+  prompt_version?: number;
+  summary_status?: 'generated' | 'unavailable';
+  summary_model?: string | null;
+  summary?: string | null;
+  through_turn?: number | null;
+  through_seq?: number | null;
 }
 
 // -- `/chat/stream` SSE events --

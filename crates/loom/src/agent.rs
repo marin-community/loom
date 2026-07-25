@@ -1,11 +1,10 @@
-//! Launching coding agents into per-session terminals, plus the **one-shot
-//! headless agent** (`POST /api/agent/oneshot`) — a fresh, env-stripped agent
-//! run for a judgement call.
+//! Agent registry and launch management for terminal sessions, ACP sessions,
+//! and fresh ACP one-shot judgement calls.
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -1434,86 +1433,252 @@ fn apply_launch_gates(root: &mut Value, seed: &GateSeed) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// The one-shot headless agent
+// Transient ACP prompts
 // ---------------------------------------------------------------------------
 
-/// Markers of a *calling* Claude Code session, stripped before spawning a
-/// subprocess so it runs fresh and isolated (the lint-review precedent).
-/// Mirrors `scripts/lint-review.py`'s `STRIPPED_ENV`. Shared by the one-shot
-/// agent here and the watch script executor.
-///
-/// `WEAVER_BRANCH` is stripped for a subtler reason than the rest. A nested
-/// `claude -p` still reads the worktree's `.claude/settings.local.json` and
-/// fires the weaver lifecycle hooks (`SessionStart`/`Stop`/…) — verified against
-/// a real `claude`; `--settings '{"hooks":{}}'` does *not* suppress them. Left in
-/// the child's env, `$WEAVER_BRANCH` makes each hook write an `idle`/`working`
-/// event attributed to the *parent* branch, mid-turn, corrupting the very signal
-/// the dashboard and `loom session wait` key on. Stripping it makes `weaver hook`
-/// a no-op (it has no branch to key on). These agents are pipe-in/pipe-out — they
-/// never call the `weaver` CLI — so they lose nothing by not carrying it.
-pub const STRIPPED_ENV: &[&str] = &[
-    "ANTHROPIC_API_KEY",
-    "CLAUDECODE",
-    "CLAUDE_CODE_ENTRYPOINT",
-    "CLAUDE_CODE_EXECPATH",
-    "CLAUDE_CODE_SESSION_ID",
-    "CLAUDE_CODE_SSE_PORT",
-    "WEAVER_BRANCH",
-];
+/// Best-effort digest generated through the incoming provider's ACP adapter.
+pub struct HandoffSummary {
+    pub text: Option<String>,
+    pub model: Option<String>,
+    pub status: &'static str,
+}
 
-/// Spawn a one-shot headless agent: write `prompt` to its stdin, capture
-/// stdout, strip the calling session's env markers. Best-effort: returns
-/// `None` when the agent is absent, errors, or exceeds `timeout` — callers
-/// must degrade gracefully, so a missing `claude` never breaks them.
-///
-/// The command is `WEAVER_WATCH_AGENT_CMD` (default `claude -p`); a
-/// non-empty `model`/`effort` is appended as `--model`/`--effort`.
-pub async fn run_oneshot(
-    prompt: &str,
-    model: &str,
-    effort: &str,
-    timeout: std::time::Duration,
-) -> Option<String> {
-    let cmd_str =
-        std::env::var("WEAVER_WATCH_AGENT_CMD").unwrap_or_else(|_| "claude -p".to_string());
-    let mut parts = cmd_str.split_whitespace();
-    let program = parts.next()?;
-    let mut args: Vec<String> = parts.map(str::to_string).collect();
-    if !model.trim().is_empty() {
-        args.push("--model".to_string());
-        args.push(model.trim().to_string());
-    }
-    if !effort.trim().is_empty() {
-        args.push("--effort".to_string());
-        args.push(effort.trim().to_string());
+/// Central agent-resolution and non-interactive prompt surface. Interactive
+/// launches and transient prompts both resolve the same registered runtime;
+/// provider-specific execution remains behind that runtime's ACP adapter.
+pub struct AgentManager<'a> {
+    db: &'a Db,
+}
+
+impl<'a> AgentManager<'a> {
+    pub fn new(db: &'a Db) -> Self {
+        Self { db }
     }
 
-    let mut command = tokio::process::Command::new(program);
-    command
-        .args(&args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    for key in STRIPPED_ENV {
-        command.env_remove(key);
-    }
-
-    let mut child = command.spawn().ok()?; // agent not on PATH → None, caller degrades.
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        let _ = stdin.write_all(prompt.as_bytes()).await;
-        // Drop stdin so the agent sees EOF and proceeds.
-        drop(stdin);
-    }
-
-    let out = tokio::time::timeout(timeout, child.wait_with_output()).await;
-    match out {
-        Ok(Ok(output)) if output.status.success() => {
-            Some(String::from_utf8_lossy(&output.stdout).to_string())
+    /// Ask the incoming runtime's advertised Haiku/Luna-class model for a
+    /// digest over a transient ACP session. The actual incoming launch is
+    /// cloned for adapter/config parity, then stripped of session authority and
+    /// MCP access. Any adapter, model-selection, timeout, or output failure
+    /// degrades to the handoff fallback.
+    pub async fn summarize_handoff(
+        &self,
+        runtime: &str,
+        prompt: &str,
+        incoming: &AcpLaunch,
+        timeout: Duration,
+    ) -> HandoffSummary {
+        let metadata = match metadata_for(self.db, runtime).await {
+            Ok(Some(metadata)) if metadata.supports_acp => metadata,
+            Ok(_) => {
+                return HandoffSummary {
+                    text: None,
+                    model: None,
+                    status: "unavailable",
+                };
+            }
+            Err(error) => {
+                tracing::warn!(runtime, %error, "failed to resolve handoff summarizer");
+                return HandoffSummary {
+                    text: None,
+                    model: None,
+                    status: "unavailable",
+                };
+            }
+        };
+        let launch = transient_prompt_launch(incoming);
+        match crate::acp::prompt_once(
+            self.db,
+            launch,
+            prompt,
+            crate::acp::AcpPromptModel::FirstContaining(&["haiku", "luna"]),
+            crate::acp::AcpPromptEffort::Prefer("low"),
+            timeout,
+        )
+        .await
+        {
+            Ok(Some(output)) => HandoffSummary {
+                text: Some(output.text),
+                model: output.model,
+                status: "generated",
+            },
+            Ok(None) => HandoffSummary {
+                text: None,
+                model: None,
+                status: "unavailable",
+            },
+            Err(error) => {
+                tracing::warn!(
+                    runtime = %metadata.kind,
+                    %error,
+                    "incoming ACP handoff summary unavailable"
+                );
+                HandoffSummary {
+                    text: None,
+                    model: None,
+                    status: "unavailable",
+                }
+            }
         }
-        _ => None,
     }
+
+    /// Run the public judgement-call primitive through a fresh ACP session.
+    /// Empty selectors retain the adapter's advertised defaults; explicit
+    /// selectors must appear in the live ACP `configOptions`.
+    pub async fn run_oneshot(
+        &self,
+        runtime: &str,
+        prompt: &str,
+        model: &str,
+        effort: &str,
+        timeout: Duration,
+    ) -> Option<String> {
+        match metadata_for(self.db, runtime).await {
+            Ok(Some(metadata)) if metadata.supports_acp => {}
+            Ok(_) => return None,
+            Err(error) => {
+                tracing::warn!(runtime, %error, "failed to resolve one-shot ACP runtime");
+                return None;
+            }
+        }
+        let custom = if builtin_agent_type(runtime).is_some() {
+            None
+        } else {
+            match crate::custom_agents::get(self.db, runtime).await {
+                Ok(Some(custom)) => Some(custom),
+                Ok(None) => {
+                    tracing::warn!(runtime, "one-shot ACP runtime disappeared");
+                    return None;
+                }
+                Err(error) => {
+                    tracing::warn!(runtime, %error, "failed to load one-shot ACP runtime");
+                    return None;
+                }
+            }
+        };
+        let work_dir = match std::env::current_dir() {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(runtime, %error, "failed to resolve one-shot ACP working directory");
+                return None;
+            }
+        };
+        let mcp_access = match serde_json::to_string(&weaver_api::McpPolicySnapshot::default()) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(runtime, %error, "failed to build empty one-shot MCP policy");
+                return None;
+            }
+        };
+        let launch = match build_acp_launch(
+            self.db,
+            &AcpLaunchSpec {
+                session_id: "oneshot",
+                branch_id: "oneshot",
+                runtime,
+                work_dir: &work_dir,
+                server_addr: "127.0.0.1:0",
+                model: "",
+                effort: "",
+                goal_file: None,
+                primer_file: None,
+                extra_env: &[],
+                env_clear: false,
+                mode: "plan",
+                prelude: "none",
+                restricted: true,
+                allowed_tools: "[]",
+                mcp_access: &mcp_access,
+                custom: custom.as_ref(),
+            },
+            AcpOpen::Fresh,
+        )
+        .await
+        {
+            Ok(launch) => transient_prompt_launch(&launch),
+            Err(error) => {
+                tracing::warn!(runtime, %error, "failed to build one-shot ACP launch");
+                return None;
+            }
+        };
+        let preferred_model = if model.trim().is_empty() {
+            crate::acp::AcpPromptModel::Default
+        } else {
+            crate::acp::AcpPromptModel::Exact(model.trim())
+        };
+        let preferred_effort = if effort.trim().is_empty() {
+            crate::acp::AcpPromptEffort::Default
+        } else {
+            crate::acp::AcpPromptEffort::Exact(effort.trim())
+        };
+        match crate::acp::prompt_once(
+            self.db,
+            launch,
+            prompt,
+            preferred_model,
+            preferred_effort,
+            timeout,
+        )
+        .await
+        {
+            Ok(Some(output)) => Some(output.text),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(runtime, %error, "one-shot ACP prompt unavailable");
+                None
+            }
+        }
+    }
+}
+
+fn transient_prompt_launch(incoming: &AcpLaunch) -> AcpLaunch {
+    let mut launch = incoming.clone();
+    let mut env = BTreeMap::new();
+    if !launch.env_clear {
+        env.extend(std::env::vars());
+    }
+    env.extend(launch.env.clone());
+    env.retain(|name, _| {
+        !name.starts_with("WEAVER_")
+            && !name.starts_with("LOOM_")
+            && !matches!(
+                name.as_str(),
+                "GH_TOKEN"
+                    | "GITHUB_TOKEN"
+                    | "CLAUDECODE"
+                    | "CLAUDE_CODE_ENTRYPOINT"
+                    | "CLAUDE_CODE_EXECPATH"
+                    | "CLAUDE_CODE_SESSION_ID"
+                    | "CLAUDE_CODE_SSE_PORT"
+                    | "CODEX_CONFIG"
+                    | "INITIAL_AGENT_MODE"
+            )
+    });
+    launch.env = env.into_iter().collect();
+    launch.env_clear = true;
+    launch.mcp_servers.clear();
+    launch.goal = None;
+    launch.mode = Some("plan".to_string());
+    launch.initial_model = None;
+    launch.initial_effort = None;
+    if let NewOrLoad::New {
+        meta: Some(meta), ..
+    } = &mut launch.new_or_load
+    {
+        if let Some(options) = meta
+            .get_mut("claudeCode")
+            .and_then(|claude| claude.get_mut("options"))
+            .and_then(Value::as_object_mut)
+        {
+            options.remove("model");
+            options.remove("appendSystemPrompt");
+            options.insert("permissionMode".to_string(), json!("plan"));
+            options.insert("allowedTools".to_string(), json!([]));
+            options.insert("tools".to_string(), json!([]));
+            options.insert("settingSources".to_string(), json!([]));
+            options.insert("strictMcpConfig".to_string(), json!(true));
+        }
+    }
+    launch
 }
 
 #[cfg(test)]
@@ -1600,17 +1765,6 @@ mod tests {
                 .map(|choice| (choice.id.as_str(), choice.label.as_str()))
                 .collect::<Vec<_>>(),
             vec![("low", "Low"), ("ultra", "Ultra")]
-        );
-    }
-
-    /// A nested headless agent must not carry `$WEAVER_BRANCH`, or it fires the
-    /// worktree's weaver lifecycle hooks against the parent branch (see the
-    /// constant's own docs). Guard the strip so it can't silently regress.
-    #[test]
-    fn stripped_env_drops_the_branch_marker() {
-        assert!(
-            STRIPPED_ENV.contains(&"WEAVER_BRANCH"),
-            "nested agents must not inherit $WEAVER_BRANCH: {STRIPPED_ENV:?}"
         );
     }
 
@@ -1804,6 +1958,113 @@ mod tests {
         assert_eq!(combine_args("", "max"), "--effort max");
         assert_eq!(combine_args("haiku", ""), "--model haiku");
         assert_eq!(combine_args("", ""), "");
+    }
+
+    #[test]
+    fn transient_acp_prompt_keeps_the_adapter_but_drops_session_authority() {
+        let incoming = AcpLaunch {
+            adapter_cmd: "configured-acp-adapter".to_string(),
+            cwd: PathBuf::from("/worktree"),
+            env: vec![
+                ("ANTHROPIC_API_KEY".to_string(), "provider".to_string()),
+                ("LOOM_TOKEN".to_string(), "session".to_string()),
+                ("LOOM_SESSION_ID".to_string(), "session-1".to_string()),
+                ("WEAVER_BRANCH".to_string(), "branch-1".to_string()),
+                ("GH_TOKEN".to_string(), "github".to_string()),
+            ],
+            env_clear: false,
+            mcp_servers: vec![json!({"name":"loom_history"})],
+            new_or_load: NewOrLoad::New {
+                cwd: PathBuf::from("/worktree"),
+                meta: Some(json!({"provider":"options"})),
+            },
+            mode: Some("plan".to_string()),
+            initial_model: Some("expensive".to_string()),
+            initial_effort: Some("high".to_string()),
+            goal: Some("real goal".to_string()),
+            setup_timeout: Duration::from_secs(30),
+        };
+
+        let summary = transient_prompt_launch(&incoming);
+        assert_eq!(summary.adapter_cmd, incoming.adapter_cmd);
+        assert!(summary.env_clear);
+        let NewOrLoad::New { cwd, meta } = summary.new_or_load else {
+            panic!("transient prompt must remain a fresh ACP session");
+        };
+        assert_eq!(cwd, PathBuf::from("/worktree"));
+        assert_eq!(meta, Some(json!({"provider":"options"})));
+        assert!(summary
+            .env
+            .iter()
+            .any(|(name, value)| name == "ANTHROPIC_API_KEY" && value == "provider"));
+        for denied in ["LOOM_TOKEN", "LOOM_SESSION_ID", "WEAVER_BRANCH", "GH_TOKEN"] {
+            assert!(!summary.env.iter().any(|(name, _)| name == denied));
+        }
+        assert!(summary.mcp_servers.is_empty());
+        assert!(summary.goal.is_none());
+        assert_eq!(summary.mode.as_deref(), Some("plan"));
+        assert!(summary.initial_model.is_none());
+        assert!(summary.initial_effort.is_none());
+    }
+
+    #[test]
+    fn transient_claude_prompt_removes_live_session_options() {
+        let incoming = AcpLaunch {
+            adapter_cmd: "configured-acp-adapter".to_string(),
+            cwd: PathBuf::from("/worktree"),
+            env: vec![
+                (
+                    "CODEX_CONFIG".to_string(),
+                    r#"{"model":"expensive"}"#.to_string(),
+                ),
+                ("INITIAL_AGENT_MODE".to_string(), "agent".to_string()),
+                ("CLAUDECODE".to_string(), "1".to_string()),
+            ],
+            env_clear: true,
+            mcp_servers: vec![json!({"name":"github"})],
+            new_or_load: NewOrLoad::New {
+                cwd: PathBuf::from("/worktree"),
+                meta: Some(json!({
+                    "claudeCode": {
+                        "options": {
+                            "model": "opus",
+                            "appendSystemPrompt": "live primer",
+                            "permissionMode": "bypassPermissions",
+                            "allowedTools": ["Bash"],
+                            "tools": ["Bash"],
+                            "settingSources": ["user"]
+                        }
+                    }
+                })),
+            },
+            mode: Some("bypassPermissions".to_string()),
+            initial_model: Some("opus".to_string()),
+            initial_effort: Some("high".to_string()),
+            goal: Some("live goal".to_string()),
+            setup_timeout: Duration::from_secs(30),
+        };
+
+        let transient = transient_prompt_launch(&incoming);
+        assert!(transient.env.iter().all(|(name, _)| !matches!(
+            name.as_str(),
+            "CODEX_CONFIG" | "INITIAL_AGENT_MODE" | "CLAUDECODE"
+        )));
+        let NewOrLoad::New {
+            meta: Some(meta), ..
+        } = transient.new_or_load
+        else {
+            panic!("transient prompt must retain restricted adapter metadata");
+        };
+        assert_eq!(
+            meta["claudeCode"]["options"],
+            json!({
+                "permissionMode": "plan",
+                "allowedTools": [],
+                "tools": [],
+                "settingSources": [],
+                "strictMcpConfig": true
+            })
+        );
     }
 
     #[test]

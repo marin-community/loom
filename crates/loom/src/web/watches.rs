@@ -261,11 +261,9 @@ pub(super) async fn run_watch(
     })))
 }
 
-/// Run a one-shot headless agent and return `{output}` — the judgement
-/// primitive watch programs call. The daemon owns the agent command
-/// (`WEAVER_WATCH_AGENT_CMD`, default `claude -p`) and the timeout
-/// budget. Best-effort by contract: an absent or failing agent returns
-/// `{output: null}` rather than an error, so callers degrade to their
+/// Run a one-shot ACP prompt and return `{output}` — the judgement primitive
+/// watch programs call. Best-effort by contract: an absent or failing runtime
+/// returns `{output: null}` rather than an error, so callers degrade to their
 /// deterministic fallback.
 pub(super) async fn agent_oneshot(
     State(st): State<AppState>,
@@ -277,13 +275,21 @@ pub(super) async fn agent_oneshot(
     let budget = ov_engine::get_int(&st.db, "watch.default_timeout_secs", 600)
         .await
         .max(1) as u64;
-    let output = agent::run_oneshot(
-        &req.prompt,
-        &req.model,
-        &req.effort,
-        std::time::Duration::from_secs(budget),
-    )
-    .await;
+    let runtime = req.agent.trim();
+    let runtime = if runtime.is_empty() {
+        "claude"
+    } else {
+        runtime
+    };
+    let output = agent::AgentManager::new(&st.db)
+        .run_oneshot(
+            runtime,
+            &req.prompt,
+            &req.model,
+            &req.effort,
+            std::time::Duration::from_secs(budget),
+        )
+        .await;
     Ok(Json(json!({ "output": output })))
 }
 

@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use serial_test::serial;
 use tokio::sync::broadcast;
 
-use loom::acp::{self, AcpLaunch, NewOrLoad, SseEvent};
+use loom::acp::{self, AcpLaunch, AcpPromptEffort, AcpPromptModel, NewOrLoad, SseEvent};
 use loom::backend;
 use loom::session::{self as session_mod, NewSession};
 
@@ -109,6 +109,23 @@ async fn start_new_with_env(
         .expect("acp session starts");
 }
 
+fn transient_launch(ts: &TestServer, env: Vec<(String, String)>) -> AcpLaunch {
+    let cwd = ts.repo_path().to_path_buf();
+    AcpLaunch {
+        adapter_cmd: agent_cmd(),
+        cwd: cwd.clone(),
+        env,
+        env_clear: false,
+        mcp_servers: vec![],
+        new_or_load: NewOrLoad::New { cwd, meta: None },
+        mode: None,
+        initial_model: None,
+        initial_effort: None,
+        goal: None,
+        setup_timeout: Duration::from_secs(5),
+    }
+}
+
 /// A live adapter that withholds a setup response must not keep create/start
 /// open forever or leave its detached relay behind.
 #[serial]
@@ -149,6 +166,115 @@ async fn silent_setup_stage_times_out_and_cleans_provider_state() {
     assert!(session.current_mode.is_none());
     assert!(!ts.state.acp.is_live("acp-setup-timeout"));
     assert!(!backend::has_session(&session.term_session).await);
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transient_prompt_uses_acp_and_cleans_its_relay() {
+    let ts = TestServer::start().await;
+    let before = backend::list_sessions().await.unwrap();
+
+    let output = acp::prompt_once(
+        &ts.state.db,
+        transient_launch(&ts, vec![]),
+        "say:summary",
+        AcpPromptModel::Exact("fake-fast"),
+        AcpPromptEffort::Exact("low"),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("transient ACP prompt succeeds")
+    .expect("fake-fast is advertised");
+    assert_eq!(output.text, "summary");
+    assert_eq!(output.model.as_deref(), Some("fake-fast"));
+    assert_eq!(backend::list_sessions().await.unwrap(), before);
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transient_prompt_failures_fall_back_without_leaking_relays() {
+    let ts = TestServer::start().await;
+    let before = backend::list_sessions().await.unwrap();
+
+    let missing_model = acp::prompt_once(
+        &ts.state.db,
+        transient_launch(&ts, vec![]),
+        "say:unused",
+        AcpPromptModel::FirstContaining(&["haiku", "luna"]),
+        AcpPromptEffort::Prefer("low"),
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    assert!(missing_model.is_none());
+
+    let missing_effort = acp::prompt_once(
+        &ts.state.db,
+        transient_launch(&ts, vec![]),
+        "say:unused",
+        AcpPromptModel::Exact("fake-fast"),
+        AcpPromptEffort::Exact("ultra"),
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    assert!(missing_effort.is_none());
+
+    let empty = acp::prompt_once(
+        &ts.state.db,
+        transient_launch(&ts, vec![]),
+        "think:not returned",
+        AcpPromptModel::Exact("fake-fast"),
+        AcpPromptEffort::Exact("low"),
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    assert!(empty.is_none());
+
+    let oversized = acp::prompt_once(
+        &ts.state.db,
+        transient_launch(&ts, vec![]),
+        &format!("say:{}", "x".repeat(33 * 1024)),
+        AcpPromptModel::Exact("fake-fast"),
+        AcpPromptEffort::Exact("low"),
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    assert!(oversized.is_none());
+
+    let cancelled = acp::prompt_once(
+        &ts.state.db,
+        transient_launch(&ts, vec![]),
+        "permission:file.txt",
+        AcpPromptModel::Exact("fake-fast"),
+        AcpPromptEffort::Exact("low"),
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    assert!(cancelled.is_none());
+
+    let timeout = acp::prompt_once(
+        &ts.state.db,
+        transient_launch(
+            &ts,
+            vec![(
+                "FAKE_ACP_IGNORE_METHOD".to_string(),
+                "session/prompt".to_string(),
+            )],
+        ),
+        "say:late",
+        AcpPromptModel::Exact("fake-fast"),
+        AcpPromptEffort::Exact("low"),
+        Duration::from_millis(100),
+    )
+    .await
+    .expect_err("silent prompt times out");
+    assert!(timeout.to_string().contains("timed out"), "{timeout}");
+
+    assert_eq!(backend::list_sessions().await.unwrap(), before);
 }
 
 /// Collect broadcast SSE events until `until` matches one (or the timeout).
@@ -1863,13 +1989,17 @@ async fn chat_routes_reject_terminal_sessions() {
 /// Seed a custom agent whose ACP `launch` command is the scripted fake adapter,
 /// so `POST /api/sessions` resolves `protocol='acp'` and brings it up over a relay.
 async fn seed_acp_agent(ts: &TestServer, name: &str) {
+    seed_acp_agent_with_launch(ts, name, agent_cmd()).await;
+}
+
+async fn seed_acp_agent_with_launch(ts: &TestServer, name: &str, launch: String) {
     loom::custom_agents::set(
         &ts.state.db,
         &loom::custom_agents::CustomAgent {
             name: name.to_string(),
             label: "Fake ACP".to_string(),
             setup: String::new(),
-            launch: agent_cmd(),
+            launch,
             resume: String::new(),
             reports_status: false,
             protocol: "acp".to_string(),
@@ -2084,9 +2214,21 @@ async fn rest_create_failure_exposes_the_recoverable_error_session() {
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handoff_replaces_provider_and_continues_the_journal() {
+    use base64::Engine as _;
+
     let ts = TestServer::start().await;
     seed_acp_agent(&ts, "fake-a").await;
-    seed_acp_agent(&ts, "fake-b").await;
+    let summary = "Incoming Luna digest: prior work is ready.";
+    let encoded = base64::engine::general_purpose::STANDARD.encode(summary);
+    seed_acp_agent_with_launch(
+        &ts,
+        "fake-b",
+        format!(
+            "FAKE_ACP_MODELS=luna FAKE_ACP_SUMMARY_OUTPUT_B64={encoded} {}",
+            agent_cmd()
+        ),
+    )
+    .await;
 
     let created = rest_create(&ts, "fake-a", "say:before").await;
     let id = created["id"].as_str().unwrap().to_string();
@@ -2122,6 +2264,12 @@ async fn handoff_replaces_provider_and_continues_the_journal() {
     assert_eq!(handoffs[0]["seq"], 0);
     assert_eq!(handoffs[0]["payload"]["from"], "fake-a");
     assert_eq!(handoffs[0]["payload"]["to"], "fake-b");
+    assert_eq!(handoffs[0]["payload"]["prompt_version"], 2);
+    assert_eq!(handoffs[0]["payload"]["summary_status"], "generated");
+    assert_eq!(handoffs[0]["payload"]["summary_model"], "luna");
+    assert_eq!(handoffs[0]["payload"]["summary"], summary);
+    assert!(handoffs[0]["payload"]["through_turn"].is_number());
+    assert!(handoffs[0]["payload"]["through_seq"].is_number());
     assert_eq!(
         count_kind(blocks, "user_message"),
         1,

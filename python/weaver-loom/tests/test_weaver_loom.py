@@ -454,6 +454,12 @@ def test_agent_returns_output_or_none():
         "/agent/oneshot",
         {"prompt": "look", "model": "haiku", "effort": "low"},
     )
+    assert c.agent("look", runtime="codex") == "blocked: judged"
+    assert c.requests[-1] == (
+        "POST",
+        "/agent/oneshot",
+        {"prompt": "look", "model": "", "effort": "", "agent": "codex"},
+    )
     # A degraded daemon reply ({output: null}) reads as None, not an error.
     absent = StubClient(replies={"/agent/oneshot": {"output": None}})
     assert absent.agent("look") is None

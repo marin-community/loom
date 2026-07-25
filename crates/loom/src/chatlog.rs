@@ -384,7 +384,15 @@ pub(crate) fn context_note(kind: &str, p: &Value) -> String {
         kind::HANDOFF => {
             let from = p.get("from").and_then(Value::as_str).unwrap_or("agent");
             let to = p.get("to").and_then(Value::as_str).unwrap_or("agent");
-            format!("agent handoff: {from} -> {to}")
+            let summary = p
+                .get("summary")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty());
+            match summary {
+                Some(summary) => format!("agent handoff: {from} -> {to}\n\n{summary}"),
+                None => format!("agent handoff: {from} -> {to}"),
+            }
         }
         _ => kind.to_string(),
     }

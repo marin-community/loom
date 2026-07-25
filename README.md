@@ -106,6 +106,7 @@ loom session show <branch>                    # session detail
 loom attach <branch>                  # attach your terminal to the session (or use the browser terminal)
 loom session archive <branch>                 # tear down terminal + worktree, keep branch + history
 loom session adopt <branch>                   # recreate the terminal for an orphaned session
+loom session handoff <branch> --agent codex   # replace an idle ACP provider; summarize through incoming ACP Luna/Haiku
 loom session rm <branch>                      # remove worktree + terminal + db row
 loom open                             # open the web UI
 

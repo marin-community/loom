@@ -208,11 +208,6 @@ impl TestServer {
         tokio::spawn(server::serve(state, listener));
 
         std::env::set_var("WEAVER_API", format!("http://{addr}"));
-        // Pin the one-shot agent to a fast no-op: `true` exits 0 with empty
-        // output, so a judgement degrades to the deterministic fallback
-        // rather than spawning a real (slow, environment-dependent) claude.
-        // A test exercising the agent path overrides this itself.
-        std::env::set_var("WEAVER_WATCH_AGENT_CMD", "true");
         // The developer or CI process may itself be running inside a loom
         // session and therefore carry a scoped `LOOM_TOKEN`.  That credential
         // belongs to a different database and, correctly, an explicit invalid

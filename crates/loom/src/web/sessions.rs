@@ -39,7 +39,12 @@ use super::{author_or_manual, require_branch, require_session, session_view};
 use super::{ApiResult, AppError, AppState};
 
 const MISSING_GITHUB_TOKEN_MESSAGE: &str = "No GitHub token configured. Add your personal GitHub token in Settings > Account, or configure a write-only GH_TOKEN on the selected profile.";
-const HANDOFF_HISTORY_CHARS: usize = 64 * 1024;
+// A Unicode scalar occupies at most four UTF-8 bytes, so this character bound
+// also fits the ACP transient prompt's 128 KiB byte ceiling.
+const HANDOFF_SUMMARY_CHARS: usize = 32 * 1024;
+const HANDOFF_RECENT_MESSAGES: usize = 8;
+const HANDOFF_RECENT_CHARS: usize = 16 * 1024;
+const HANDOFF_SUMMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// External lifecycle work (terminal supervisors + git worktrees) cannot share
 /// a SQLite transaction. Serialize those operations process-wide, then use
@@ -3521,16 +3526,14 @@ pub(super) async fn handoff_session(
         None,
     )
     .await?;
-    let blocks = crate::chat::list(&st.db, &session.id).await?;
-    let prompt = crate::chat::handoff_prompt(&branch.goal, &blocks, HANDOFF_HISTORY_CHARS);
-    let prompt_file = db::run_dir(&session.id).join("handoff.txt");
-    tokio::fs::write(&prompt_file, prompt).await?;
     let custom = if agent::builtin_agent_type(&runtime).is_some() {
         None
     } else {
         custom_agents::get(&st.db, &runtime).await?
     };
-    let launch = agent::build_acp_launch(
+    // Build every policy/tool input before stopping the old task. The bootstrap
+    // itself is injected in memory after the task returns its atomic snapshot.
+    let mut launch = agent::build_acp_launch(
         &st.db,
         &agent::AcpLaunchSpec {
             session_id: &session.id,
@@ -3540,7 +3543,7 @@ pub(super) async fn handoff_session(
             server_addr: &st.addr,
             model: &model,
             effort: &effort,
-            goal_file: Some(&prompt_file),
+            goal_file: None,
             primer_file: None,
             extra_env: &extra_env,
             env_clear: session.policy_env_clear,
@@ -3559,19 +3562,24 @@ pub(super) async fn handoff_session(
     // A healthy task quiesces on its ordered command channel, preserving the
     // active-turn/queue safety gate. A missing task is the recovery case: settle
     // its persisted in-flight turn, retain the durable queue, and continue.
-    if let Some(handle) = st.acp.get(&session.id) {
-        if let Err(error) = handle.prepare_handoff().await {
-            tokio::task::yield_now().await;
-            if st.acp.is_live(&session.id) {
-                return Err(AppError::conflict(error.to_string()));
+    let snapshot = if let Some(handle) = st.acp.get(&session.id) {
+        match handle.prepare_handoff().await {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                tokio::task::yield_now().await;
+                if st.acp.is_live(&session.id) {
+                    return Err(AppError::conflict(error.to_string()));
+                }
+                tracing::warn!(session = %session.id, %error,
+                    "ACP task vanished while preparing handoff; using persisted recovery state");
+                None
             }
-            tracing::warn!(session = %session.id, %error,
-                "ACP task vanished while preparing handoff; using persisted recovery state");
         }
     } else {
         tracing::warn!(session = %session.id,
             "handing off without a live ACP task; using persisted recovery state");
-    }
+        None
+    };
     // Re-read after the task handshake: it may have vanished after our initial
     // route snapshot while persisting a newer in-flight turn.
     let persisted = session_mod::get(&st.db, &session.id)
@@ -3580,6 +3588,30 @@ pub(super) async fn handoff_session(
     if let Some(turn) = session_mod::acp_inflight_turn(&persisted) {
         crate::chat::close_abandoned_turn(&st.db, &session.id, turn).await?;
     }
+    let blocks = match snapshot {
+        Some(blocks) => blocks,
+        None => crate::chat::list(&st.db, &session.id).await?,
+    };
+    let context = crate::chat::handoff_context(
+        &branch.goal,
+        &blocks,
+        HANDOFF_SUMMARY_CHARS,
+        HANDOFF_RECENT_MESSAGES,
+        HANDOFF_RECENT_CHARS,
+    );
+    let digest = agent::AgentManager::new(&st.db)
+        .summarize_handoff(
+            target,
+            &context.summary_request,
+            &launch,
+            HANDOFF_SUMMARY_TIMEOUT,
+        )
+        .await;
+    launch.goal = Some(crate::chat::handoff_prompt(
+        &branch.goal,
+        digest.text.as_deref(),
+        &context.recent_dialogue,
+    ));
     backend::kill_session_and_wait(&session.term_session).await?;
     crate::chat::reset_usage(&st.db, &session.id).await?;
     session_mod::prepare_handoff(&st.db, &session.id, target, &model, &effort, "running").await?;
@@ -3589,6 +3621,12 @@ pub(super) async fn handoff_session(
         "to": target,
         "model": model,
         "effort": effort,
+        "prompt_version": crate::chat::HANDOFF_PROMPT_VERSION,
+        "summary_status": digest.status,
+        "summary_model": digest.model,
+        "summary": digest.text,
+        "through_turn": context.through.map(|(turn, _)| turn),
+        "through_seq": context.through.map(|(_, seq)| seq),
     });
     if let Err(e) = crate::acp::start_handoff(&st, &session.id, launch, boundary).await {
         st.acp.stop(&session.id);

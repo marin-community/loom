@@ -243,9 +243,11 @@ warm/fresh/rules distinctions become *library calls inside the program*:
 - `ov.sessions(scope)` / `s.preview()` / `s.diff()` — observe (always allowed).
 - `s.mark(level, note)` — write the `triage` tag.
 - `s.nudge(text)` / `s.interrupt()` — the intervention ladder (capability-gated).
-- `ov.run_agent(prompt)` — spawn a **fresh** one-shot agent for a judgement call
-  (the env-stripped `claude -p` pattern from
-  [`scripts/lint-review.py`](../lint.md), behind the API).
+- `ov.run_agent(prompt)` — run a **fresh**, restricted ACP session for a
+  judgement call through the same registered runtime and adapter Loom uses for
+  interactive agents. Model and effort selectors are applied through the
+  adapter's advertised configuration; the transient relay is torn down after
+  the response.
 - `ov.warm_session()` — get the watch's **persistent** session (created on
   first use, reused after), for accumulating judgement across rounds — "still
   stuck since last hour?" The binding handles create-or-reuse; the program just

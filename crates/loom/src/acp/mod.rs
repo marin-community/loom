@@ -30,8 +30,10 @@
 //! - `usage`          `{ used, size, cost? }` (or an internal null marker at a
 //!   provider boundary).
 //! - `turn_end`       `{ stop_reason }`.
-//! - `handoff`        `{ from, to, model, effort }` — the provider boundary
-//!   that replaces the synthetic bootstrap prompt in the visible journal.
+//! - `handoff`        `{ from, to, model, effort, prompt_version,
+//!   summary_status, summary_model, summary, through_turn, through_seq }` — the
+//!   provider boundary and best-effort digest provenance that replace the
+//!   synthetic bootstrap prompt in the visible journal.
 //!
 //! ## Acking
 //!
@@ -120,6 +122,366 @@ pub struct AcpLaunch {
     /// Maximum time to wait for one ACP setup response. Kept on the launch so
     /// integration tests can exercise a silent adapter without a 30-second wait.
     pub setup_timeout: Duration,
+}
+
+const ONE_SHOT_INPUT_MAX_BYTES: usize = 128 * 1024;
+const ONE_SHOT_OUTPUT_MAX_BYTES: usize = 32 * 1024;
+
+/// A completed prompt from a transient ACP session. `model` is the exact
+/// adapter-advertised value used for the prompt, when the adapter exposes one.
+#[derive(Debug)]
+pub struct AcpPromptOutput {
+    pub text: String,
+    pub model: Option<String>,
+}
+
+/// How a transient prompt chooses the model from the adapter's live ACP
+/// configuration. API callers request one exact advertised value; handoff
+/// summarization instead searches for the first economy-class name.
+pub enum AcpPromptModel<'a> {
+    Default,
+    Exact(&'a str),
+    FirstContaining(&'a [&'a str]),
+}
+
+/// Exact effort is part of the public one-shot contract; handoff merely prefers
+/// low effort because some otherwise-valid economy models expose no effort
+/// control.
+pub enum AcpPromptEffort<'a> {
+    Default,
+    Exact(&'a str),
+    Prefer(&'a str),
+}
+
+/// Run one isolated prompt through an ordinary ACP adapter launch. Model and
+/// effort are selected through the adapter's live `configOptions`; this path
+/// never knows or invokes a provider CLI. The relay and provider session are
+/// transient and always torn down, so the prompt does not remain in the real
+/// session that will subsequently take over.
+pub async fn prompt_once(
+    db: &Db,
+    launch: AcpLaunch,
+    prompt: &str,
+    model: AcpPromptModel<'_>,
+    effort: AcpPromptEffort<'_>,
+    timeout: Duration,
+) -> Result<Option<AcpPromptOutput>> {
+    if prompt.len() > ONE_SHOT_INPUT_MAX_BYTES {
+        return Ok(None);
+    }
+    if !matches!(launch.new_or_load, NewOrLoad::New { .. }) {
+        bail!("one-shot ACP prompts require a fresh session");
+    }
+
+    let relay_name = format!("weaver-acp-prompt-{:016x}", rand::random::<u64>());
+    let env: Vec<(&str, &str)> = launch
+        .env
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    crate::backend::new_relay_session(
+        &relay_name,
+        &launch.adapter_cmd,
+        &env,
+        launch.env_clear,
+        &launch.cwd,
+        crate::backend::memory_max_gb(db).await,
+    )
+    .await?;
+
+    let operation = async {
+        let stream = crate::backend::subscribe_relay(&relay_name, 0).await?;
+        AcpPromptClient::new(stream)
+            .run(&launch, prompt, model, effort)
+            .await
+    };
+    let result = match tokio::time::timeout(timeout, operation).await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow!(
+            "timed out waiting for transient ACP prompt after {timeout:?}"
+        )),
+    };
+    let cleanup = crate::backend::kill_session_and_wait(&relay_name).await;
+    match (result, cleanup) {
+        (Ok(output), Ok(())) => Ok(output),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(cleanup)) => Err(cleanup.context("cleaning up transient ACP prompt relay")),
+        (Err(error), Err(cleanup)) => Err(anyhow!(
+            "{error}; failed to clean up transient ACP prompt relay: {cleanup}"
+        )),
+    }
+}
+
+struct AcpPromptClient {
+    stream: tapestry::RelayStream,
+    next_id: u64,
+    session_id: String,
+    output: String,
+    output_oversized: bool,
+}
+
+impl AcpPromptClient {
+    fn new(stream: tapestry::RelayStream) -> Self {
+        Self {
+            stream,
+            next_id: 0,
+            session_id: String::new(),
+            output: String::new(),
+            output_oversized: false,
+        }
+    }
+
+    async fn run(
+        mut self,
+        launch: &AcpLaunch,
+        prompt: &str,
+        model: AcpPromptModel<'_>,
+        effort: AcpPromptEffort<'_>,
+    ) -> Result<Option<AcpPromptOutput>> {
+        self.request(method::INITIALIZE, wire::initialize_params())
+            .await?;
+        let (cwd, meta) = match &launch.new_or_load {
+            NewOrLoad::New { cwd, meta } => (cwd, meta.as_ref()),
+            NewOrLoad::Load { .. } => unreachable!("checked by prompt_once"),
+        };
+        let opened = self
+            .request(
+                method::SESSION_NEW,
+                wire::new_session_params(&cwd.to_string_lossy(), &launch.mcp_servers, meta),
+            )
+            .await?;
+        let opened: wire::NewSessionResult =
+            serde_json::from_value(opened).context("invalid ACP session/new response")?;
+        self.session_id = opened.session_id;
+        let mut options = opened.config_options.unwrap_or_default();
+
+        let model = match model {
+            AcpPromptModel::Default => current_model(&options),
+            AcpPromptModel::Exact(value) => {
+                let Some((model_config, model)) =
+                    preferred_config_value(&options, "model", &[value], false)
+                else {
+                    return Ok(None);
+                };
+                options = self
+                    .set_config_option(&model_config, Value::String(model.clone()))
+                    .await?;
+                Some(model)
+            }
+            AcpPromptModel::FirstContaining(preferences) => {
+                let Some((model_config, model)) =
+                    preferred_config_value(&options, "model", preferences, true)
+                else {
+                    return Ok(None);
+                };
+                options = self
+                    .set_config_option(&model_config, Value::String(model.clone()))
+                    .await?;
+                Some(model)
+            }
+        };
+        match effort {
+            AcpPromptEffort::Default => {}
+            AcpPromptEffort::Exact(value) => {
+                let Some((effort_config, effort)) =
+                    preferred_config_value(&options, "effort", &[value], false)
+                else {
+                    return Ok(None);
+                };
+                self.set_config_option(&effort_config, Value::String(effort))
+                    .await?;
+            }
+            AcpPromptEffort::Prefer(value) => {
+                if let Some((effort_config, effort)) =
+                    preferred_config_value(&options, "effort", &[value], false)
+                {
+                    self.set_config_option(&effort_config, Value::String(effort))
+                        .await?;
+                }
+            }
+        }
+        if let Some(mode) = opened
+            .modes
+            .as_ref()
+            .and_then(|modes| preferred_mode(&modes.available_modes))
+        {
+            self.request(
+                method::SESSION_SET_MODE,
+                wire::set_mode_params(&self.session_id, &mode),
+            )
+            .await?;
+        } else if let Some((mode_config, mode)) =
+            preferred_config_value(&options, "mode", &["plan", "read-only"], false)
+        {
+            self.set_config_option(&mode_config, Value::String(mode))
+                .await?;
+        }
+
+        self.output.clear();
+        self.output_oversized = false;
+        let result = self
+            .request(
+                method::SESSION_PROMPT,
+                wire::prompt_params(&self.session_id, prompt, &[]),
+            )
+            .await?;
+        let result: wire::PromptResult =
+            serde_json::from_value(result).context("invalid ACP session/prompt response")?;
+        if result.stop_reason == "cancelled" || self.output_oversized {
+            return Ok(None);
+        }
+        let text = self.output.trim();
+        if text.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(AcpPromptOutput {
+            text: text.to_string(),
+            model,
+        }))
+    }
+
+    async fn set_config_option(&mut self, id: &str, value: Value) -> Result<Vec<Value>> {
+        let result = self
+            .request(
+                method::SESSION_SET_CONFIG_OPTION,
+                wire::set_config_option_params(&self.session_id, id, value),
+            )
+            .await?;
+        let result: wire::SetConfigOptionResult = serde_json::from_value(result)
+            .context("invalid ACP session/set_config_option response")?;
+        Ok(result.config_options)
+    }
+
+    async fn request(&mut self, method_name: &str, params: Value) -> Result<Value> {
+        self.next_id += 1;
+        let request_id = self.next_id;
+        self.stream
+            .write(&wire::request_line(request_id, method_name, params))
+            .await?;
+        loop {
+            match self.stream.recv().await {
+                Some(RelayEvent::Frame { seq, payload }) => {
+                    let incoming: Incoming = serde_json::from_slice(&payload)
+                        .context("invalid JSON-RPC frame from ACP prompt adapter")?;
+                    if incoming.kind() == IncomingKind::Response
+                        && incoming.id.as_ref().and_then(Value::as_u64) == Some(request_id)
+                    {
+                        self.stream.ack(seq).await?;
+                        if let Some(error) = incoming.error {
+                            bail!("ACP {method_name} failed: {error}");
+                        }
+                        return incoming
+                            .result
+                            .ok_or_else(|| anyhow!("ACP {method_name} returned no result"));
+                    }
+                    self.handle_incoming(incoming).await?;
+                    self.stream.ack(seq).await?;
+                }
+                Some(RelayEvent::Exit { status }) => {
+                    bail!("ACP prompt adapter exited with status {status:?}")
+                }
+                None => bail!("ACP prompt relay closed"),
+            }
+        }
+    }
+
+    async fn handle_incoming(&mut self, incoming: Incoming) -> Result<()> {
+        match incoming.kind() {
+            IncomingKind::Notification
+                if incoming.method.as_deref() == Some(method::SESSION_UPDATE) =>
+            {
+                let notification: SessionNotification =
+                    serde_json::from_value(incoming.params.unwrap_or(Value::Null))?;
+                if let SessionUpdate::AgentMessageChunk { content } = notification.update {
+                    if let Some(text) = content.text() {
+                        if self.output.len() + text.len() <= ONE_SHOT_OUTPUT_MAX_BYTES {
+                            self.output.push_str(text);
+                        } else {
+                            self.output_oversized = true;
+                        }
+                    }
+                }
+            }
+            IncomingKind::Request
+                if incoming.method.as_deref() == Some(method::SESSION_REQUEST_PERMISSION) =>
+            {
+                let id = incoming
+                    .id
+                    .ok_or_else(|| anyhow!("ACP permission request had no id"))?;
+                self.stream
+                    .write(&wire::response_line(&id, wire::permission_cancelled()))
+                    .await?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+fn current_model(config_options: &[Value]) -> Option<String> {
+    config_options.iter().find_map(|option| {
+        let id = option.get("id").and_then(Value::as_str).unwrap_or("");
+        let category = option.get("category").and_then(Value::as_str).unwrap_or("");
+        (category == "model" || id == "model")
+            .then(|| option.get("currentValue").and_then(Value::as_str))
+            .flatten()
+            .map(str::to_string)
+    })
+}
+
+fn preferred_config_value(
+    config_options: &[Value],
+    kind: &str,
+    preferences: &[&str],
+    allow_contains: bool,
+) -> Option<(String, String)> {
+    let option = config_options.iter().find(|option| {
+        let id = option.get("id").and_then(Value::as_str).unwrap_or("");
+        let category = option.get("category").and_then(Value::as_str).unwrap_or("");
+        match kind {
+            "model" => category == "model" || id == "model",
+            "effort" => category == "thought_level" || id == "effort" || id.contains("reasoning"),
+            "mode" => category == "mode" || id == "mode",
+            _ => false,
+        }
+    })?;
+    let id = option.get("id")?.as_str()?.to_string();
+    let values = option
+        .get("options")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(|choice| choice.get("value").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    for preference in preferences {
+        if let Some(value) = values
+            .iter()
+            .find(|value| value.eq_ignore_ascii_case(preference))
+        {
+            return Some((id, (*value).to_string()));
+        }
+    }
+    if allow_contains {
+        for preference in preferences {
+            let preference = preference.to_ascii_lowercase();
+            if let Some(value) = values
+                .iter()
+                .find(|value| value.to_ascii_lowercase().contains(&preference))
+            {
+                return Some((id, (*value).to_string()));
+            }
+        }
+    }
+    None
+}
+
+fn preferred_mode(modes: &[Value]) -> Option<String> {
+    ["plan", "read-only"].into_iter().find_map(|preferred| {
+        modes
+            .iter()
+            .filter_map(|mode| mode.get("id").and_then(Value::as_str))
+            .find(|id| *id == preferred)
+            .map(str::to_string)
+    })
 }
 
 /// How a prompt was accepted plus the turn it belongs to — the `POST /prompt`
@@ -331,10 +693,11 @@ impl AcpHandle {
             .map_err(|_| anyhow!("acp task dropped the reply"))?
     }
 
-    /// Atomically quiesce an idle task for provider replacement. The command is
-    /// ordered with prompts on the same channel; acknowledgement arrives only
-    /// after the task has removed its registry slot and will accept no more work.
-    pub async fn prepare_handoff(&self) -> Result<()> {
+    /// Atomically snapshot and quiesce an idle task for provider replacement.
+    /// The command is ordered with prompts on the same channel; acknowledgement
+    /// arrives only after the task has removed its registry slot and will accept
+    /// no more work. The returned journal cannot race a later completed turn.
+    pub async fn prepare_handoff(&self) -> Result<Vec<ChatBlockView>> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::PrepareHandoff { reply: tx })
@@ -612,7 +975,7 @@ enum Command {
         reply: oneshot::Sender<Result<AcpMetadata>>,
     },
     PrepareHandoff {
-        reply: oneshot::Sender<Result<()>>,
+        reply: oneshot::Sender<Result<Vec<ChatBlockView>>>,
     },
 }
 
@@ -1384,8 +1747,15 @@ impl Task {
                         if self.turn_live || !pending.trim().is_empty() {
                             let _ = reply.send(Err(anyhow!("cannot hand off while a turn or queued prompt is active")));
                         } else {
-                            handoff_reply = Some(reply);
-                            break;
+                            match chat::list(&self.db, &self.session_id).await {
+                                Ok(snapshot) => {
+                                    handoff_reply = Some((reply, snapshot));
+                                    break;
+                                }
+                                Err(error) => {
+                                    let _ = reply.send(Err(error));
+                                }
+                            }
                         }
                     }
                     Some(c) => self.on_command(c).await,
@@ -1394,8 +1764,8 @@ impl Task {
             }
         }
         self.registry.remove_own(&self.session_id, self.generation);
-        if let Some(reply) = handoff_reply {
-            let _ = reply.send(Ok(()));
+        if let Some((reply, snapshot)) = handoff_reply {
+            let _ = reply.send(Ok(snapshot));
         }
         tracing::info!(session = %self.session_id, "acp task stopped");
     }
@@ -2777,7 +3147,10 @@ fn queued_prompt_text(text: &str, resources: &[Value]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{auto_choice, deny_choice, queued_prompt_text, PermissionOption};
+    use super::{
+        auto_choice, deny_choice, preferred_config_value, preferred_mode, queued_prompt_text,
+        PermissionOption,
+    };
     use serde_json::json;
 
     #[test]
@@ -2790,6 +3163,52 @@ mod tests {
         assert_eq!(
             queued_prompt_text("review", &resources),
             "review\n\nReferenced files:\n- src/main.rs\n- https://example.test/context\n"
+        );
+    }
+
+    #[test]
+    fn transient_prompt_selectors_use_advertised_acp_values() {
+        let options = vec![
+            json!({
+                "id":"provider-model",
+                "category":"model",
+                "options":[
+                    {"value":"expensive","name":"Expensive"},
+                    {"value":"claude-haiku-4-5","name":"Haiku"},
+                    {"value":"haiku","name":"Exact Haiku"}
+                ]
+            }),
+            json!({
+                "id":"reasoning",
+                "category":"thought_level",
+                "options":[
+                    {"value":"medium","name":"Medium"},
+                    {"value":"low","name":"Low"}
+                ]
+            }),
+        ];
+        assert_eq!(
+            preferred_config_value(&options, "model", &["haiku", "luna"], true),
+            Some(("provider-model".to_string(), "haiku".to_string()))
+        );
+        assert_eq!(
+            preferred_config_value(&options, "effort", &["low"], false),
+            Some(("reasoning".to_string(), "low".to_string()))
+        );
+        assert_eq!(
+            preferred_config_value(&options, "model", &["claude-haiku"], false),
+            None
+        );
+        assert_eq!(
+            preferred_config_value(&options, "model", &["luna"], true),
+            None
+        );
+        assert_eq!(
+            preferred_mode(&[
+                json!({"id":"agent","name":"Agent"}),
+                json!({"id":"read-only","name":"Read only"})
+            ]),
+            Some("read-only".to_string())
         );
     }
 
