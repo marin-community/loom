@@ -290,19 +290,28 @@ login — e.g. `docker compose exec loom loom token add ci`.
 
 ### Agent authentication
 
-If you did not set `ANTHROPIC_API_KEY`, log in to Claude once interactively; the
-credentials persist in `~/.claude.json` on the `loom_home` volume:
+Loom intentionally shares one Claude account and one Codex account across
+sessions. If you did not set `ANTHROPIC_API_KEY`, log in to Claude once
+interactively; the credentials persist in `~/.claude.json` on the `loom_home`
+volume:
 
 ```sh
 docker compose exec loom claude    # follow the prompts, then exit
 ```
 
-The Codex runtime authenticates the same way — set `OPENAI_API_KEY`, or log in
-once interactively (persisted under `~/.codex` on the same volume):
+Codex authenticates the same way: set `OPENAI_API_KEY`, or log in once
+interactively (persisted under `~/.codex` on the same volume):
 
 ```sh
 docker compose exec loom codex login    # follow the prompts, then exit
 ```
+
+The shared Codex login is used only for model access. At startup, Loom disables
+Codex account-level apps in the container, so a GitHub connector authorized on
+that account cannot become a session's write identity. The terminal and ACP
+launch paths enforce the same setting. GitHub CLI access instead uses the
+credential Loom injects into the agent environment; restricted profiles perform
+GitHub mutations through Loom's server-side tool endpoint.
 
 ## Wire the `@loom` GitHub trigger
 

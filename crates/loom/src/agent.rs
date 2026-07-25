@@ -418,8 +418,11 @@ fn codex_command(ctx: &AgentLaunchContext<'_>) -> String {
         format!(" {args}")
     };
     match ctx.goal_file.or(ctx.primer_file) {
-        Some(f) => format!("codex{args} \"$(cat {})\"", sh_single_quote_path(f)),
-        None => format!("codex{args}"),
+        Some(f) => format!(
+            "codex --disable apps{args} \"$(cat {})\"",
+            sh_single_quote_path(f)
+        ),
+        None => format!("codex --disable apps{args}"),
     }
 }
 
@@ -981,9 +984,7 @@ pub async fn build_acp_launch(
             "DEFAULT_AUTH_REQUEST",
             r#"{"methodId":"api-key"}"#,
         );
-        if let Some(cfg) = codex_acp_config(spec.model, spec.effort) {
-            push_env_default(&mut env, "CODEX_CONFIG", &cfg);
-        }
+        force_codex_apps_disabled(&mut env, spec.model, spec.effort)?;
         push_env_default(&mut env, "INITIAL_AGENT_MODE", &codex_acp_mode(spec.mode));
     }
 
@@ -1119,9 +1120,42 @@ async fn codex_acp_cmd(db: &Db) -> String {
     npm_adapter_cmd("codex-acp", "@agentclientprotocol/codex-acp")
 }
 
-/// The `CODEX_CONFIG` JSON for the codex adapter (merged into the Codex session
-/// config): model and reasoning effort, only when set. `None` when neither is.
-fn codex_acp_config(model: &str, effort: &str) -> Option<String> {
+/// Force Codex's account-level app connectors off while preserving the shared
+/// provider login and any operator-supplied adapter configuration.
+fn force_codex_apps_disabled(
+    env: &mut Vec<(String, String)>,
+    model: &str,
+    effort: &str,
+) -> Result<()> {
+    let mut config = match env
+        .iter()
+        .rev()
+        .find_map(|(name, value)| (name == "CODEX_CONFIG").then_some(value))
+    {
+        Some(value) => serde_json::from_str::<Value>(value).context("invalid CODEX_CONFIG JSON")?,
+        None => Value::Object(codex_acp_config(model, effort)),
+    };
+    let config = config
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("CODEX_CONFIG must be a JSON object"))?;
+    let features = config
+        .entry("features".to_string())
+        .or_insert_with(|| json!({}));
+    let features = features
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("CODEX_CONFIG.features must be a JSON object"))?;
+    features.insert("apps".to_string(), json!(false));
+
+    env.retain(|(name, _)| name != "CODEX_CONFIG");
+    env.push((
+        "CODEX_CONFIG".to_string(),
+        Value::Object(config.clone()).to_string(),
+    ));
+    Ok(())
+}
+
+/// Base `CODEX_CONFIG` for the Codex ACP adapter.
+fn codex_acp_config(model: &str, effort: &str) -> Map<String, Value> {
     let mut cfg = Map::new();
     let model = model.trim();
     if !model.is_empty() {
@@ -1130,10 +1164,7 @@ fn codex_acp_config(model: &str, effort: &str) -> Option<String> {
     if let Some(e) = effort_flag(effort) {
         cfg.insert("model_reasoning_effort".to_string(), json!(e));
     }
-    if cfg.is_empty() {
-        return None;
-    }
-    Some(Value::Object(cfg).to_string())
+    cfg
 }
 
 /// Map the launch mode onto a codex-acp `INITIAL_AGENT_MODE` id. The create API
@@ -1975,7 +2006,7 @@ mod tests {
             "",
         );
         assert!(
-            fresh.contains("codex \"$(cat '/x/goal.txt')\"; "),
+            fresh.contains("codex --disable apps \"$(cat '/x/goal.txt')\"; "),
             "got: {fresh}"
         );
         // Codex has no scoped resume, so adopt re-launches fresh with the primer.
@@ -1988,7 +2019,7 @@ mod tests {
             "",
         );
         assert!(
-            adopt.contains("codex \"$(cat '/x/goal.txt')\"; "),
+            adopt.contains("codex --disable apps \"$(cat '/x/goal.txt')\"; "),
             "got: {adopt}"
         );
     }
@@ -2006,7 +2037,7 @@ mod tests {
             "",
         );
         assert!(
-            fresh.contains("codex \"$(cat '/x/primer.txt')\"; "),
+            fresh.contains("codex --disable apps \"$(cat '/x/primer.txt')\"; "),
             "got: {fresh}"
         );
     }
@@ -2159,7 +2190,9 @@ mod tests {
             "xhigh",
         );
         assert!(
-            script.contains("codex --model gpt-5.5 -c model_reasoning_effort=\\\"xhigh\\\""),
+            script.contains(
+                "codex --disable apps --model gpt-5.5 -c model_reasoning_effort=\\\"xhigh\\\""
+            ),
             "got: {script}"
         );
     }
@@ -2355,17 +2388,35 @@ mod tests {
 
     #[test]
     fn codex_acp_config_carries_only_configured_fields() {
-        assert!(codex_acp_config("", "").is_none());
+        assert!(codex_acp_config("", "").is_empty());
 
-        let cfg: Value =
-            serde_json::from_str(&codex_acp_config("gpt-5.3-codex", "high").unwrap()).unwrap();
+        let cfg = codex_acp_config("gpt-5.3-codex", "high");
         assert_eq!(cfg["model"], "gpt-5.3-codex");
         assert_eq!(cfg["model_reasoning_effort"], "high");
 
-        let model_only: Value =
-            serde_json::from_str(&codex_acp_config("gpt-5.3-codex", " ").unwrap()).unwrap();
+        let model_only = codex_acp_config("gpt-5.3-codex", " ");
         assert_eq!(model_only["model"], "gpt-5.3-codex");
         assert!(model_only.get("model_reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn codex_acp_disables_apps_without_discarding_operator_config() {
+        let mut env = vec![(
+            "CODEX_CONFIG".to_string(),
+            r#"{"model":"operator","features":{"shell_snapshot":true,"apps":true}}"#.to_string(),
+        )];
+
+        force_codex_apps_disabled(&mut env, "ignored", "high").unwrap();
+
+        let config: Value = serde_json::from_str(
+            env.iter()
+                .find_map(|(name, value)| (name == "CODEX_CONFIG").then_some(value))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(config["model"], "operator");
+        assert_eq!(config["features"]["shell_snapshot"], true);
+        assert_eq!(config["features"]["apps"], false);
     }
 
     #[test]
