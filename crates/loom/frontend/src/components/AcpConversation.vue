@@ -908,6 +908,14 @@ const latestPlan = computed<PlanEntry[]>(() => {
   }
   return entries;
 });
+const contextOpen = ref(false);
+const contextButton = ref<HTMLButtonElement | null>(null);
+
+function closeContext() {
+  if (!contextOpen.value) return;
+  contextOpen.value = false;
+  void nextTick(() => contextButton.value?.focus());
+}
 
 const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(() => {
   const rows: Row[] = [];
@@ -1065,6 +1073,7 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
 
   return { rows, toc, usage: currentUsage };
 });
+const hasContext = computed(() => model.value.toc.length > 0 || latestPlan.value.length > 0);
 
 // The empty conversation, styled on purpose — a fresh session has no journal
 // yet, and a bare canvas reads as breakage.
@@ -1265,347 +1274,377 @@ function goTo(anchor: string) {
     <p v-if="state === 'loading'" class="text-sm text-muted">Loading conversation…</p>
     <p v-else-if="state === 'error'" class="text-sm text-block">{{ errorMsg }}</p>
 
-    <div v-else class="flex min-h-0 flex-1 gap-4">
-      <!-- The transcript. -->
-      <div
-        ref="convScroll"
-        data-testid="acp-conversation"
-        class="acp-scroll min-h-0 flex-1 overflow-auto pb-6 pr-1"
-        @scroll.passive="onScroll"
-      >
-        <div ref="convBody">
-          <!-- A fresh session: say so, instead of a blank canvas. -->
-          <div v-if="isEmpty" class="acp-empty" data-testid="acp-empty">
-            <p class="acp-empty-lede">No conversation yet</p>
-            <p class="acp-empty-hint">
-              {{
-                composerVisible
-                  ? 'The transcript appears when the agent takes its first turn — or start one with a message below.'
-                  : 'The transcript appears when the agent takes its first turn.'
-              }}
-            </p>
-          </div>
+    <template v-else>
+      <div v-if="hasContext" class="mb-1 flex shrink-0 justify-end">
+        <button
+          ref="contextButton"
+          type="button"
+          class="btn-secondary min-h-7 px-2 py-0.5 text-xs"
+          data-testid="acp-context-toggle"
+          :aria-expanded="contextOpen"
+          aria-controls="acp-context-rail"
+          @click="contextOpen = !contextOpen"
+        >
+          Context
+        </button>
+      </div>
 
-          <div v-if="olderCursor" class="mb-4 flex justify-center">
-            <div class="text-center">
-              <button
-                type="button"
-                class="btn-secondary px-3 py-1 text-xs"
-                :disabled="loadingOlder"
-                data-testid="acp-load-older"
-                @click="loadOlder"
-              >
-                {{ loadingOlder ? 'Loading earlier conversation…' : 'Load earlier conversation' }}
-              </button>
-              <p v-if="olderError" class="mt-2 text-xs text-block">{{ olderError }}</p>
-            </div>
-          </div>
-
-          <template v-for="row in model.rows" :key="row.key">
-            <!-- Turn rule — dashed hairline between turns. -->
-            <div
-              v-if="row.type === 'turnRule'"
-              class="acp-turn-rule"
-              :class="{ loud: row.loud }"
-              data-testid="acp-turn-rule"
-            >
-              <span
-                >turn {{ row.turn + 1 }} · {{ row.stop
-                }}<template v-if="row.usage">
-                  · {{ formatTokens(row.usage.used) }} /
-                  {{ formatTokens(row.usage.size) }} context</template
-                ></span
-              >
+      <div class="relative flex min-h-0 flex-1 gap-4">
+        <!-- The transcript. -->
+        <div
+          ref="convScroll"
+          data-testid="acp-conversation"
+          class="acp-scroll min-h-0 flex-1 overflow-auto pb-6 pr-1"
+          @scroll.passive="onScroll"
+        >
+          <div ref="convBody">
+            <!-- A fresh session: say so, instead of a blank canvas. -->
+            <div v-if="isEmpty" class="acp-empty" data-testid="acp-empty">
+              <p class="acp-empty-lede">No conversation yet</p>
+              <p class="acp-empty-hint">
+                {{
+                  composerVisible
+                    ? 'The transcript appears when the agent takes its first turn — or start one with a message below.'
+                    : 'The transcript appears when the agent takes its first turn.'
+                }}
+              </p>
             </div>
 
-            <!-- YOU — the human turn. -->
-            <section
-              v-else-if="row.type === 'user'"
-              :id="row.anchor"
-              :data-anchor="row.anchor"
-              class="acp-speaker"
-            >
-              <header class="acp-rule">
-                <span class="acp-label text-accent">You</span>
-                <span v-if="row.steered" class="acp-prompt-state" data-testid="acp-steered"
-                  >steered turn {{ row.turn + 1 }}</span
+            <div v-if="olderCursor" class="mb-4 flex justify-center">
+              <div class="text-center">
+                <button
+                  type="button"
+                  class="btn-secondary px-3 py-1 text-xs"
+                  :disabled="loadingOlder"
+                  data-testid="acp-load-older"
+                  @click="loadOlder"
                 >
-                <span class="acp-time">{{ row.time }}</span>
-              </header>
-              <MarkdownView :id="id" path="" :source="row.text" />
-            </section>
-
-            <!-- AGENT — the model's prose. -->
-            <section v-else-if="row.type === 'agent'" class="acp-speaker">
-              <header class="acp-rule">
-                <span class="acp-label">Agent</span>
-                <span v-if="row.time" class="acp-time">{{ row.time }}</span>
-              </header>
-              <MarkdownView :id="id" path="" :source="row.text" />
-            </section>
-
-            <!-- Only a live thought remains a standalone row; settled thoughts
-                 are folded into the surrounding activity run below. -->
-            <div v-else-if="row.type === 'thought'" class="acp-thought" data-testid="acp-thought">
-              <div class="acp-thought-live-clip">
-                <p class="acp-thought-body">{{ row.text }}</p>
+                  {{ loadingOlder ? 'Loading earlier conversation…' : 'Load earlier conversation' }}
+                </button>
+                <p v-if="olderError" class="mt-2 text-xs text-block">{{ olderError }}</p>
               </div>
             </div>
 
-            <!-- Apparatus: one folded activity line per continuous run of
-                 settled thinking and tool calls. -->
-            <div
-              v-else-if="row.type === 'activity'"
-              class="acp-activity"
-              data-testid="acp-activity"
-            >
-              <button
-                type="button"
-                class="acp-fold-head"
-                data-testid="acp-activity-head"
-                @click="toggleFold(row.key, row.failures > 0)"
+            <template v-for="row in model.rows" :key="row.key">
+              <!-- Turn rule — dashed hairline between turns. -->
+              <div
+                v-if="row.type === 'turnRule'"
+                class="acp-turn-rule"
+                :class="{ loud: row.loud }"
+                data-testid="acp-turn-rule"
               >
-                <span class="chev" :class="{ open: foldOpen(row.key, row.failures > 0) }">▸</span>
                 <span
-                  v-if="row.entries.length === 1 && row.items.length === 1"
-                  class="acp-activity-solo"
+                  >turn {{ row.turn + 1 }} · {{ row.stop
+                  }}<template v-if="row.usage">
+                    · {{ formatTokens(row.usage.used) }} /
+                    {{ formatTokens(row.usage.size) }} context</template
+                  ></span
                 >
-                  <span class="acp-tool-glyph">{{ toolGlyph(row.items[0].tool.tool_kind) }}</span>
-                  <span class="truncate">{{
-                    row.items[0].tool.title || row.items[0].tool.tool_kind
-                  }}</span>
-                </span>
-                <span v-else>{{ activitySummary(row) }}</span>
-                <span
-                  v-if="row.failures"
-                  class="acp-activity-failbadge"
-                  data-testid="acp-activity-failed"
-                  >{{ row.failures }} failed</span
+              </div>
+
+              <!-- YOU — the human turn. -->
+              <section
+                v-else-if="row.type === 'user'"
+                :id="row.anchor"
+                :data-anchor="row.anchor"
+                class="acp-speaker"
+              >
+                <header class="acp-rule">
+                  <span class="acp-label text-accent">You</span>
+                  <span v-if="row.steered" class="acp-prompt-state" data-testid="acp-steered"
+                    >steered turn {{ row.turn + 1 }}</span
+                  >
+                  <span class="acp-time">{{ row.time }}</span>
+                </header>
+                <MarkdownView :id="id" path="" :source="row.text" />
+              </section>
+
+              <!-- AGENT — the model's prose. -->
+              <section v-else-if="row.type === 'agent'" class="acp-speaker">
+                <header class="acp-rule">
+                  <span class="acp-label">Agent</span>
+                  <span v-if="row.time" class="acp-time">{{ row.time }}</span>
+                </header>
+                <MarkdownView :id="id" path="" :source="row.text" />
+              </section>
+
+              <!-- Only a live thought remains a standalone row; settled thoughts
+                 are folded into the surrounding activity run below. -->
+              <div v-else-if="row.type === 'thought'" class="acp-thought" data-testid="acp-thought">
+                <div class="acp-thought-live-clip">
+                  <p class="acp-thought-body">{{ row.text }}</p>
+                </div>
+              </div>
+
+              <!-- Apparatus: one folded activity line per continuous run of
+                 settled thinking and tool calls. -->
+              <div
+                v-else-if="row.type === 'activity'"
+                class="acp-activity"
+                data-testid="acp-activity"
+              >
+                <button
+                  type="button"
+                  class="acp-fold-head"
+                  data-testid="acp-activity-head"
+                  @click="toggleFold(row.key, row.failures > 0)"
                 >
-              </button>
-              <ul v-if="foldOpen(row.key, row.failures > 0)" class="acp-activity-list">
-                <li
-                  v-for="entry in row.entries"
-                  :key="entry.type === 'thought' ? entry.thought.key : entry.item.tool.tool_call_id"
-                  :data-testid="entry.type === 'tool' ? 'acp-activity-item' : undefined"
-                >
-                  <template v-if="entry.type === 'thought'">
-                    <p class="acp-activity-thought" data-testid="acp-activity-thought">
-                      {{ entry.thought.text }}
-                    </p>
-                  </template>
-                  <template v-else>
-                    <button
-                      type="button"
-                      class="acp-activity-line"
-                      :disabled="!canExpandTool(entry.item.tool)"
-                      :aria-expanded="
-                        canExpandTool(entry.item.tool) ? activityItemOpen(entry.item) : undefined
-                      "
-                      @click="toggleActivityItem(entry.item)"
-                    >
-                      <span class="acp-tool-glyph">{{ toolGlyph(entry.item.tool.tool_kind) }}</span>
-                      <span
-                        class="acp-activity-title"
-                        :class="{
-                          truncate: !activityItemOpen(entry.item),
-                          open: activityItemOpen(entry.item),
-                        }"
-                        data-testid="acp-activity-title"
-                        >{{ entry.item.tool.title || entry.item.tool.tool_kind }}</span
+                  <span class="chev" :class="{ open: foldOpen(row.key, row.failures > 0) }">▸</span>
+                  <span
+                    v-if="row.entries.length === 1 && row.items.length === 1"
+                    class="acp-activity-solo"
+                  >
+                    <span class="acp-tool-glyph">{{ toolGlyph(row.items[0].tool.tool_kind) }}</span>
+                    <span class="truncate">{{
+                      row.items[0].tool.title || row.items[0].tool.tool_kind
+                    }}</span>
+                  </span>
+                  <span v-else>{{ activitySummary(row) }}</span>
+                  <span
+                    v-if="row.failures"
+                    class="acp-activity-failbadge"
+                    data-testid="acp-activity-failed"
+                    >{{ row.failures }} failed</span
+                  >
+                </button>
+                <ul v-if="foldOpen(row.key, row.failures > 0)" class="acp-activity-list">
+                  <li
+                    v-for="entry in row.entries"
+                    :key="
+                      entry.type === 'thought' ? entry.thought.key : entry.item.tool.tool_call_id
+                    "
+                    :data-testid="entry.type === 'tool' ? 'acp-activity-item' : undefined"
+                  >
+                    <template v-if="entry.type === 'thought'">
+                      <p class="acp-activity-thought" data-testid="acp-activity-thought">
+                        {{ entry.thought.text }}
+                      </p>
+                    </template>
+                    <template v-else>
+                      <button
+                        type="button"
+                        class="acp-activity-line"
+                        :disabled="!canExpandTool(entry.item.tool)"
+                        :aria-expanded="
+                          canExpandTool(entry.item.tool) ? activityItemOpen(entry.item) : undefined
+                        "
+                        @click="toggleActivityItem(entry.item)"
                       >
-                      <span v-if="entry.item.failed" class="acp-activity-status text-block"
-                        >failed</span
+                        <span class="acp-tool-glyph">{{
+                          toolGlyph(entry.item.tool.tool_kind)
+                        }}</span>
+                        <span
+                          class="acp-activity-title"
+                          :class="{
+                            truncate: !activityItemOpen(entry.item),
+                            open: activityItemOpen(entry.item),
+                          }"
+                          data-testid="acp-activity-title"
+                          >{{ entry.item.tool.title || entry.item.tool.tool_kind }}</span
+                        >
+                        <span v-if="entry.item.failed" class="acp-activity-status text-block"
+                          >failed</span
+                        >
+                        <span
+                          v-else-if="canExpandTool(entry.item.tool)"
+                          class="chev sm"
+                          :class="{
+                            open: activityItemOpen(entry.item),
+                          }"
+                          >▸</span
+                        >
+                      </button>
+                      <div
+                        v-if="hasDetail(entry.item.tool) && activityItemOpen(entry.item)"
+                        class="acp-detail"
+                        data-testid="acp-detail"
                       >
-                      <span
-                        v-else-if="canExpandTool(entry.item.tool)"
-                        class="chev sm"
-                        :class="{
-                          open: activityItemOpen(entry.item),
-                        }"
-                        >▸</span
-                      >
-                    </button>
-                    <div
-                      v-if="hasDetail(entry.item.tool) && activityItemOpen(entry.item)"
-                      class="acp-detail"
-                      data-testid="acp-detail"
-                    >
-                      <template v-for="(c, ci) in entry.item.tool.content" :key="ci">
-                        <!-- A diff renders as real ±diff lines. -->
-                        <pre v-if="c.type === 'diff'" class="acp-diff" data-testid="acp-diff"><code
+                        <template v-for="(c, ci) in entry.item.tool.content" :key="ci">
+                          <!-- A diff renders as real ±diff lines. -->
+                          <pre
+                            v-if="c.type === 'diff'"
+                            class="acp-diff"
+                            data-testid="acp-diff"
+                          ><code
                           v-for="(l, li) in diffLines(c)"
                           :key="li"
                           class="acp-diff-line"
                           :class="l.sign === '-' ? 'acp-diff-del' : 'acp-diff-add'"
                         >{{ l.sign }} {{ l.text }}
   </code></pre>
-                        <!-- Text / command output on the recessed panel tone. -->
-                        <pre v-else-if="c.type === 'text' && c.text" class="acp-payload">{{
-                          c.text
-                        }}</pre>
-                      </template>
-                    </div>
-                  </template>
-                </li>
-              </ul>
-            </div>
+                          <!-- Text / command output on the recessed panel tone. -->
+                          <pre v-else-if="c.type === 'text' && c.text" class="acp-payload">{{
+                            c.text
+                          }}</pre>
+                        </template>
+                      </div>
+                    </template>
+                  </li>
+                </ul>
+              </div>
 
-            <!-- Permission — the one interactive block. -->
-            <div
-              v-else-if="row.type === 'permission'"
-              class="acp-perm"
-              data-testid="acp-permission"
-            >
-              <div class="acp-perm-label">Permission</div>
-              <p class="acp-perm-title">{{ row.perm.title }}</p>
+              <!-- Permission — the one interactive block. -->
               <div
-                v-if="row.perm.outcome"
-                class="acp-perm-receipt"
-                data-testid="acp-permission-receipt"
+                v-else-if="row.type === 'permission'"
+                class="acp-perm"
+                data-testid="acp-permission"
               >
-                {{ row.perm.outcome.cancelled ? 'cancelled' : row.perm.outcome.option_id }} ·
-                {{ shortTime(row.perm.outcome.at) }}
-              </div>
-              <div v-else class="acp-perm-options">
-                <button
-                  v-for="opt in row.perm.options"
-                  :key="opt.option_id"
-                  type="button"
-                  :class="isAllow(opt.kind) ? 'btn-primary' : 'btn-secondary'"
-                  class="px-2.5 py-1 text-xs"
-                  :disabled="answering.has(row.perm.request_id)"
-                  data-testid="acp-permission-option"
-                  @click="answer(row.perm, opt.option_id)"
+                <div class="acp-perm-label">Permission</div>
+                <p class="acp-perm-title">{{ row.perm.title }}</p>
+                <div
+                  v-if="row.perm.outcome"
+                  class="acp-perm-receipt"
+                  data-testid="acp-permission-receipt"
                 >
-                  {{ opt.name }}
-                </button>
+                  {{ row.perm.outcome.cancelled ? 'cancelled' : row.perm.outcome.option_id }} ·
+                  {{ shortTime(row.perm.outcome.at) }}
+                </div>
+                <div v-else class="acp-perm-options">
+                  <button
+                    v-for="opt in row.perm.options"
+                    :key="opt.option_id"
+                    type="button"
+                    :class="isAllow(opt.kind) ? 'btn-primary' : 'btn-secondary'"
+                    class="px-2.5 py-1 text-xs"
+                    :disabled="answering.has(row.perm.request_id)"
+                    data-testid="acp-permission-option"
+                    @click="answer(row.perm, opt.option_id)"
+                  >
+                    {{ opt.name }}
+                  </button>
+                </div>
               </div>
-            </div>
 
-            <!-- Mode change — a quiet centred marker. -->
-            <div v-else-if="row.type === 'mode'" class="acp-mode-note">
-              mode → {{ modeLabel(row.mode) }}
-            </div>
+              <!-- Mode change — a quiet centred marker. -->
+              <div v-else-if="row.type === 'mode'" class="acp-mode-note">
+                mode → {{ modeLabel(row.mode) }}
+              </div>
 
-            <!-- Provider boundary — the injected bootstrap stays hidden; this
+              <!-- Provider boundary — the injected bootstrap stays hidden; this
                  compact receipt is the honest journal provenance. -->
-            <div v-else-if="row.type === 'handoff'" class="acp-mode-note" data-testid="acp-handoff">
-              handoff · {{ row.handoff.from }} → {{ row.handoff.to
-              }}<template v-if="row.handoff.model"> · {{ row.handoff.model }}</template>
-            </div>
-          </template>
-
-          <!-- The server-owned durable queue is one coalesced next-turn prompt. -->
-          <section v-if="pendingPrompt" class="acp-speaker" data-testid="acp-pending">
-            <header class="acp-rule">
-              <span class="acp-label text-accent">You</span>
-              <span class="acp-prompt-state" data-testid="acp-queued"
-                >queued · agent hasn’t seen this yet</span
+              <div
+                v-else-if="row.type === 'handoff'"
+                class="acp-mode-note"
+                data-testid="acp-handoff"
               >
-              <span class="acp-prompt-actions">
-                <button
-                  type="button"
-                  class="acp-prompt-action"
-                  data-testid="acp-edit-queued"
-                  :disabled="sending || editingQueued"
-                  title="Move this unseen feedback back into the editor (ArrowUp from an empty editor)"
-                  @click="editQueued"
-                >
-                  {{ editingQueued ? 'Moving…' : 'Edit' }}
-                </button>
-                <button
-                  type="button"
-                  class="acp-prompt-action"
-                  data-testid="acp-force-queued"
-                  :disabled="sending || editingQueued"
-                  :title="
-                    turnLive
-                      ? steeringSupported
-                        ? 'Inject all queued feedback into the running turn now'
-                        : 'Stop the running turn and send all queued feedback as the next turn'
-                      : 'Start a new turn with all queued feedback'
-                  "
-                  @click="forceQueued"
-                >
-                  {{ turnLive ? (steeringSupported ? 'Force now' : 'Stop & send') : 'Send now' }}
-                </button>
-              </span>
-            </header>
-            <MarkdownView :id="id" path="" :source="pendingPrompt" />
-          </section>
+                handoff · {{ row.handoff.from }} → {{ row.handoff.to
+                }}<template v-if="row.handoff.model"> · {{ row.handoff.model }}</template>
+              </div>
+            </template>
 
-          <!-- A local send remains unclassified only until the server answers. -->
-          <section
-            v-for="o in optimistic"
-            :key="`opt-${o.key}`"
-            class="acp-speaker"
-            data-testid="acp-optimistic"
-          >
-            <header class="acp-rule">
-              <span class="acp-label text-accent">You</span>
-            </header>
-            <MarkdownView :id="id" path="" :source="o.text" />
-          </section>
+            <!-- The server-owned durable queue is one coalesced next-turn prompt. -->
+            <section v-if="pendingPrompt" class="acp-speaker" data-testid="acp-pending">
+              <header class="acp-rule">
+                <span class="acp-label text-accent">You</span>
+                <span class="acp-prompt-state" data-testid="acp-queued"
+                  >queued · agent hasn’t seen this yet</span
+                >
+                <span class="acp-prompt-actions">
+                  <button
+                    type="button"
+                    class="acp-prompt-action"
+                    data-testid="acp-edit-queued"
+                    :disabled="sending || editingQueued"
+                    title="Move this unseen feedback back into the editor (ArrowUp from an empty editor)"
+                    @click="editQueued"
+                  >
+                    {{ editingQueued ? 'Moving…' : 'Edit' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="acp-prompt-action"
+                    data-testid="acp-force-queued"
+                    :disabled="sending || editingQueued"
+                    :title="
+                      turnLive
+                        ? steeringSupported
+                          ? 'Inject all queued feedback into the running turn now'
+                          : 'Stop the running turn and send all queued feedback as the next turn'
+                        : 'Start a new turn with all queued feedback'
+                    "
+                    @click="forceQueued"
+                  >
+                    {{ turnLive ? (steeringSupported ? 'Force now' : 'Stop & send') : 'Send now' }}
+                  </button>
+                </span>
+              </header>
+              <MarkdownView :id="id" path="" :source="pendingPrompt" />
+            </section>
 
-          <!-- Live status — what the agent is doing right now, at the tail. -->
-          <div
-            v-if="turnLive"
-            class="acp-status"
-            :data-quiet="visiblyQuiet"
-            data-testid="acp-working"
-            role="status"
-            aria-live="polite"
-            title="Update age measures visible agent output and tool activity; silence alone does not prove the agent is stuck."
-          >
-            <span class="acp-live-label">{{ statusLabel }}…</span>
-            <span class="acp-status-meta"
-              >turn {{ (liveTurnNo ?? 0) + 1 }} · {{ elapsedLabel }} elapsed ·
-              {{ progressLabel }}</span
+            <!-- A local send remains unclassified only until the server answers. -->
+            <section
+              v-for="o in optimistic"
+              :key="`opt-${o.key}`"
+              class="acp-speaker"
+              data-testid="acp-optimistic"
             >
+              <header class="acp-rule">
+                <span class="acp-label text-accent">You</span>
+              </header>
+              <MarkdownView :id="id" path="" :source="o.text" />
+            </section>
+
+            <!-- Live status — what the agent is doing right now, at the tail. -->
+            <div
+              v-if="turnLive"
+              class="acp-status"
+              :data-quiet="visiblyQuiet"
+              data-testid="acp-working"
+              role="status"
+              aria-live="polite"
+              title="Update age measures visible agent output and tool activity; silence alone does not prove the agent is stuck."
+            >
+              <span class="acp-live-label">{{ statusLabel }}…</span>
+              <span class="acp-status-meta"
+                >turn {{ (liveTurnNo ?? 0) + 1 }} · {{ elapsedLabel }} elapsed ·
+                {{ progressLabel }}</span
+              >
+            </div>
           </div>
         </div>
+
+        <!-- Right rail: user-turn jump list + the current plan. -->
+        <nav
+          v-if="contextOpen && hasContext"
+          id="acp-context-rail"
+          class="absolute inset-y-0 right-0 z-20 flex w-[min(18rem,85%)] shrink-0 flex-col overflow-auto border-l border-line bg-surface px-3 py-2 shadow-lg lg:static lg:w-56 lg:bg-transparent lg:py-0 lg:pr-0 lg:shadow-none"
+          data-testid="acp-rail"
+          aria-label="Conversation context"
+          @keydown.esc.stop.prevent="closeContext"
+        >
+          <template v-if="model.toc.length">
+            <p class="acp-rail-head">Turns</p>
+            <ul class="mb-4 space-y-0.5" data-testid="acp-turns">
+              <li v-for="t in model.toc" :key="t.anchor">
+                <button
+                  type="button"
+                  class="acp-toc-item"
+                  :data-active="activeAnchor === t.anchor"
+                  @click="goTo(t.anchor)"
+                >
+                  <span class="acp-toc-num">{{ t.n }}</span>
+                  <span class="truncate">{{ t.title }}</span>
+                </button>
+              </li>
+            </ul>
+          </template>
+
+          <template v-if="latestPlan.length">
+            <p class="acp-rail-head">Plan</p>
+            <ul class="space-y-1" data-testid="acp-plan">
+              <li v-for="(e, i) in latestPlan" :key="i" class="acp-plan-item">
+                <span class="acp-plan-glyph" :class="planTone(e.status)">{{
+                  planGlyph(e.status)
+                }}</span>
+                <span :class="e.status === 'pending' ? 'text-faint' : 'text-muted'">{{
+                  e.content
+                }}</span>
+              </li>
+            </ul>
+          </template>
+        </nav>
       </div>
-
-      <!-- Right rail: user-turn jump list + the current plan. -->
-      <nav
-        v-if="model.toc.length || latestPlan.length"
-        class="hidden w-56 shrink-0 flex-col overflow-auto border-l border-line pl-3 lg:flex"
-        data-testid="acp-rail"
-        aria-label="Turns and plan"
-      >
-        <template v-if="model.toc.length">
-          <p class="acp-rail-head">Turns</p>
-          <ul class="mb-4 space-y-0.5" data-testid="acp-turns">
-            <li v-for="t in model.toc" :key="t.anchor">
-              <button
-                type="button"
-                class="acp-toc-item"
-                :data-active="activeAnchor === t.anchor"
-                @click="goTo(t.anchor)"
-              >
-                <span class="acp-toc-num">{{ t.n }}</span>
-                <span class="truncate">{{ t.title }}</span>
-              </button>
-            </li>
-          </ul>
-        </template>
-
-        <template v-if="latestPlan.length">
-          <p class="acp-rail-head">Plan</p>
-          <ul class="space-y-1" data-testid="acp-plan">
-            <li v-for="(e, i) in latestPlan" :key="i" class="acp-plan-item">
-              <span class="acp-plan-glyph" :class="planTone(e.status)">{{
-                planGlyph(e.status)
-              }}</span>
-              <span :class="e.status === 'pending' ? 'text-faint' : 'text-muted'">{{
-                e.content
-              }}</span>
-            </li>
-          </ul>
-        </template>
-      </nav>
-    </div>
+    </template>
 
     <!-- Composer. -->
     <form

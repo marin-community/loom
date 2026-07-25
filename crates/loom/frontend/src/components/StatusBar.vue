@@ -18,6 +18,7 @@ const clock = ref('');
 const live = computed(() =>
   sessions.value.filter((s) => s.status !== 'archived' && s.class !== 'automation'),
 );
+const history = computed(() => sessions.value.filter((s) => s.status === 'archived'));
 const needsMe = computed(
   () => live.value.filter((s) => effectiveAttention(s).level !== 'ok').length,
 );
@@ -40,17 +41,25 @@ onUnmounted(() => clearInterval(clockTimer));
 <template>
   <footer
     data-testid="status-bar"
-    class="flex h-6 shrink-0 items-center gap-4 border-t border-line bg-rail px-3 font-mono text-2xs text-muted"
+    class="flex h-6 shrink-0 items-center gap-2 overflow-hidden border-t border-line bg-rail px-3 font-mono text-2xs text-muted sm:gap-4"
   >
     <!-- Counts dim while the server is unreachable — they're the last good
          snapshot, not live truth, and the offline dot on the right says why. -->
     <span
-      class="flex items-center gap-4"
+      class="flex min-w-0 items-center gap-2 sm:gap-4"
       :class="online ? '' : 'opacity-50'"
       :title="online ? '' : 'Last known counts — server unreachable'"
     >
       <router-link to="/" class="hover:text-fg" data-testid="status-bar-sessions">
-        {{ live.length }} session{{ live.length === 1 ? '' : 's' }}
+        {{ live.length }} active session{{ live.length === 1 ? '' : 's' }}
+      </router-link>
+      <router-link
+        v-if="history.length"
+        to="/?history=true"
+        class="whitespace-nowrap text-faint hover:text-fg"
+        data-testid="status-bar-history"
+      >
+        {{ history.length }} archived
       </router-link>
       <router-link
         v-if="needsMe"
@@ -78,6 +87,6 @@ onUnmounted(() => clearInterval(clockTimer));
       ></span>
       {{ online ? 'online' : 'offline' }}
     </span>
-    <span class="text-faint">{{ clock }}</span>
+    <span class="hidden text-faint sm:inline">{{ clock }}</span>
   </footer>
 </template>

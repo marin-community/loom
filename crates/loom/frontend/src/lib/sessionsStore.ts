@@ -34,9 +34,9 @@ async function listInventory(): Promise<Session[]> {
   }
 }
 
-// Pull the whole fleet, archived and automation-class sessions included — the
-// superset the Workspace/Automation panes and archive disclosures need (the
-// status bar and each pane project their own subset). Concurrent callers
+// Pull the whole inventory, archived and automation-class sessions included —
+// the superset the Workspace, Automation, and explicit History views need (the
+// status bar and each view project disjoint honest counts). Concurrent callers
 // coalesce onto the one in-flight request.
 async function refresh(): Promise<void> {
   if (inflight) return inflight;

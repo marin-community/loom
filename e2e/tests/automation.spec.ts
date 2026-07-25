@@ -122,7 +122,7 @@ test.describe("automation session surface", () => {
     await expect(page).toHaveTitle("Weaver - Automation");
 
     await page.goto(`${weaver.baseUrl}/?view=unknown&history=true`);
-    await expect(page.getByTestId("workspace-pane-link")).toHaveAttribute(
+    await expect(page.getByTestId("history-pane-link")).toHaveAttribute(
       "aria-current",
       "page",
     );

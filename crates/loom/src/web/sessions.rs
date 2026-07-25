@@ -85,8 +85,9 @@ pub(super) async fn list_agents(State(st): State<AppState>) -> ApiResult<Json<Va
 pub(super) struct ListSessionsQuery {
     /// Include archived (torn-down) sessions. Defaults to `false` — an archived
     /// session is out of the active fleet, so the agent's `loom session ls` and
-    /// any survey see only live work unless they ask. The dashboard, which has
-    /// its own "show archived" toggle, opts in with `?archived=true`.
+    /// any survey see only live work unless they ask. The SPA fetches the
+    /// opt-in inventory once, then projects active Workspace and archived
+    /// History as disjoint views.
     #[serde(default)]
     archived: bool,
     /// Include automation-class sessions (watch/ops machinery). Defaults to

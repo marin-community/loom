@@ -1,5 +1,5 @@
 // Shared plumbing for the two markdown document surfaces — MarkdownView (the
-// read-only preview used on Overview / Conversation) and ArtifactDocument (the
+// read-only preview used in Conversation) and ArtifactDocument (the
 // commentable artifact surface). Both parse the same source into the same token
 // stream and route in-document link clicks the same way; only what they do
 // *after* a build (emit vs. locate comment threads) and *besides* a link click

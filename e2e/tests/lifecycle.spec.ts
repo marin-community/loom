@@ -9,12 +9,15 @@ test.describe('session lifecycle actions', () => {
     page,
     weaver,
   }) => {
-    const s = await weaver.seedSession({ goal: 'Delete me', name: 'remove-task' });
+    const s = await weaver.seedSession({
+      goal: 'Delete me',
+      name: 'remove-task',
+    });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
     await expect(page.getByRole('heading', { name: 'remove-task' })).toBeVisible();
 
-    await page.getByRole('button', { name: 'manage' }).click();
+    await page.getByRole('button', { name: /Details/ }).click();
 
     // Remove uses a native confirm() dialog — accept it.
     page.once('dialog', (dialog) => {
@@ -26,7 +29,7 @@ test.describe('session lifecycle actions', () => {
     // Router pushes back to the list.
     await expect(page).toHaveURL(/\/$/);
     await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
-    await expect(page.getByText('No sessions yet.')).toBeVisible();
+    await expect(page.getByText('No active sessions.')).toBeVisible();
 
     // And it is gone server-side.
     const all = await weaver.listSessions();
@@ -37,7 +40,7 @@ test.describe('session lifecycle actions', () => {
     const s = await weaver.seedSession({ goal: 'Keep me', name: 'keep-task' });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
-    await page.getByRole('button', { name: 'manage' }).click();
+    await page.getByRole('button', { name: /Details/ }).click();
 
     page.once('dialog', (dialog) => dialog.dismiss());
     await page.getByRole('button', { name: 'Remove' }).click();
@@ -52,10 +55,13 @@ test.describe('session lifecycle actions', () => {
     page,
     weaver,
   }) => {
-    const s = await weaver.seedSession({ goal: 'Archive me', name: 'archive-task' });
+    const s = await weaver.seedSession({
+      goal: 'Archive me',
+      name: 'archive-task',
+    });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
-    await page.getByRole('button', { name: 'manage' }).click();
+    await page.getByRole('button', { name: /Details/ }).click();
 
     page.once('dialog', (dialog) => {
       expect(dialog.type()).toBe('confirm');
@@ -78,11 +84,14 @@ test.describe('session lifecycle actions', () => {
     // in a short window, clipping Archive/Remove out of reach. The popover now
     // caps its height to the viewport and scrolls the metadata instead, keeping
     // the actions pinned and clickable.
-    const s = await weaver.seedSession({ goal: 'Stay reachable', name: 'short-window-task' });
+    const s = await weaver.seedSession({
+      goal: 'Stay reachable',
+      name: 'short-window-task',
+    });
 
     await page.setViewportSize({ width: 1280, height: 300 });
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
-    await page.getByRole('button', { name: 'manage' }).click();
+    await page.getByRole('button', { name: /Details/ }).click();
 
     for (const [name, id] of [
       ['Archive', 'action-archive'],
@@ -101,11 +110,11 @@ test.describe('session lifecycle actions', () => {
     expect(await weaver.listSessions()).toHaveLength(0);
   });
 
-  test('a fleet-list row can archive its session without opening it', async ({
-    page,
-    weaver,
-  }) => {
-    const s = await weaver.seedSession({ goal: 'Archive from the list', name: 'row-archive' });
+  test('a fleet-list row can archive its session without opening it', async ({ page, weaver }) => {
+    const s = await weaver.seedSession({
+      goal: 'Archive from the list',
+      name: 'row-archive',
+    });
 
     await page.goto(`${weaver.baseUrl}/`);
     const row = page.locator(`[data-session-id="${s.id}"]`);
@@ -131,10 +140,13 @@ test.describe('session lifecycle actions', () => {
     page,
     weaver,
   }) => {
-    const s = await weaver.seedSession({ goal: 'Keep me live', name: 'no-auto-archive' });
+    const s = await weaver.seedSession({
+      goal: 'Keep me live',
+      name: 'no-auto-archive',
+    });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
-    await page.getByRole('button', { name: 'manage' }).click();
+    await page.getByRole('button', { name: /Details/ }).click();
     await page.getByTestId('action-auto-archive').click();
 
     await expect(page.getByTestId('tag-pill')).toContainText('auto-archive: disabled');
@@ -155,14 +167,17 @@ test.describe('session lifecycle actions', () => {
     page,
     weaver,
   }) => {
-    const s = await weaver.seedSession({ goal: 'Recover me', name: 'recover-task' });
+    const s = await weaver.seedSession({
+      goal: 'Recover me',
+      name: 'recover-task',
+    });
     await weaver.archiveSession(s.id);
 
-    // On the fleet list (archived rows are behind the reveal chip), the row
-    // carries its own remedy — no need to open the session to find it. It is the
-    // same component the detail header renders, hence the same test id.
+    // In explicit History, the row carries its own remedy — no need to open the
+    // session to find it. It is the same component the detail header renders,
+    // hence the same test id.
     await page.goto(`${weaver.baseUrl}/`);
-    await page.getByRole('button', { name: /archived/ }).click();
+    await page.getByTestId('history-pane-link').click();
     const row = page.locator(`[data-session-id="${s.id}"]`);
     await expect(row.getByTestId('remedy-recover')).toBeVisible();
 

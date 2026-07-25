@@ -7,18 +7,14 @@ import { computed } from 'vue';
 // indicator — no loud fills; only the active tab gets text-fg + an accent
 // underline.
 //
-// The set depends on the execution backend. A *terminal* session leads with
-// Terminal (the live agent's TUI): Terminal · Overview · Conversation ·
-// Artifacts. An *ACP* session has no agent TUI — its Conversation is the working
-// surface, so it leads: Conversation · Overview · Shells · Artifacts, where
-// Shells is the worktree escape hatch (the old Terminal tab's reason to be
-// first-class — the agent lived there — is gone).
-type Tab = 'terminal' | 'overview' | 'conversation' | 'artifacts' | 'shells';
+// The set depends on the execution backend. A terminal session leads with its
+// live Agent surface; an ACP session leads with Conversation. Artifacts remains
+// route-backed and deep-linkable. Overview was a duplicate of these operational
+// surfaces and is deliberately absent.
+type Tab = 'terminal' | 'conversation' | 'artifacts' | 'shells';
 
 const props = defineProps<{
   tab: Tab;
-  id: string;
-  issueCount: number;
   /** Artifacts is open in the rail (popped out) rather than the work area. */
   artifactsPopped?: boolean;
   /** Execution backend — selects the tab set + order. */
@@ -27,14 +23,12 @@ const props = defineProps<{
 defineEmits<{ select: [Tab] }>();
 
 const TERMINAL_TABS: { key: Tab; label: string }[] = [
-  { key: 'terminal', label: 'Terminal' },
-  { key: 'overview', label: 'Overview' },
+  { key: 'terminal', label: 'Agent' },
   { key: 'conversation', label: 'Conversation' },
   { key: 'artifacts', label: 'Artifacts' },
 ];
 const ACP_TABS: { key: Tab; label: string }[] = [
   { key: 'conversation', label: 'Conversation' },
-  { key: 'overview', label: 'Overview' },
   { key: 'shells', label: 'Shells' },
   { key: 'artifacts', label: 'Artifacts' },
 ];
@@ -59,7 +53,6 @@ const tabs = computed(() => (props.protocol === 'acp' ? ACP_TABS : TERMINAL_TABS
       @click="$emit('select', t.key)"
     >
       {{ t.label }}
-      <span v-if="t.key === 'overview' && issueCount" class="pill ml-1">{{ issueCount }}</span>
       <!-- When popped out, the Artifacts surface lives in the rail, not here —
            a small glyph marks it open without claiming the work area. -->
       <span

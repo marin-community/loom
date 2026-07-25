@@ -65,7 +65,7 @@ function remove() {
     ></span>
     <div class="min-w-0 flex-1">
       <div class="flex flex-wrap items-center gap-2">
-        <span class="font-serif text-[15px] font-semibold text-fg">
+        <span class="text-[15px] font-semibold text-fg">
           {{ title }}
         </span>
         <StatusBadge :status="run.status" />

@@ -16,6 +16,13 @@ import {
 } from '../discussion-anchor';
 import CommentThread from './CommentThread.vue';
 
+// Dock/pop swaps mounts of the same document. Keep a small in-memory scroll
+// ledger keyed by session + artifact + revision so the document remains where
+// the reader left it across that layout change.
+const scrollPositions = new Map<string, number>();
+const MAX_SCROLL_POSITIONS = 100;
+const LAST_SCROLL_POSITION = 'loom.artifactScrollPosition';
+
 // The collaborative markdown surface: one component that renders the artifact as
 // a real Vue tree (the same token→vnode renderer MarkdownView uses) AND owns the
 // inline comment layer, Google-Wave style — each thread's card renders *in the
@@ -53,11 +60,66 @@ const router = useRouter();
 
 const containerEl = ref<HTMLElement | null>(null);
 const scrollerEl = ref<HTMLElement | null>(null);
+let activeScrollKey = '';
+
+function scrollKey(): string {
+  return `${props.id}:${props.artifactName}:${props.rev}`;
+}
+
+function storeScroll(key = activeScrollKey): void {
+  if (!key || !scrollerEl.value) return;
+  const top = scrollerEl.value.scrollTop;
+  if (!scrollPositions.has(key) && scrollPositions.size >= MAX_SCROLL_POSITIONS) {
+    const oldest = scrollPositions.keys().next().value;
+    if (oldest) scrollPositions.delete(oldest);
+  }
+  scrollPositions.set(key, top);
+  // Dock/pop can load the same SFC through separate async bundle instances.
+  // One tab-local handoff record keeps that transition correct without making
+  // the reading position durable or sending document identity anywhere.
+  try {
+    sessionStorage.setItem(LAST_SCROLL_POSITION, JSON.stringify({ key, top }));
+  } catch {
+    // Storage may be disabled; the in-module ledger still covers ordinary swaps.
+  }
+}
+
+async function restoreScroll(key: string): Promise<void> {
+  await nextTick();
+  if (key !== activeScrollKey || !scrollerEl.value) return;
+  let top = scrollPositions.get(key);
+  if (top === undefined) {
+    try {
+      const last = JSON.parse(sessionStorage.getItem(LAST_SCROLL_POSITION) ?? 'null') as {
+        key?: string;
+        top?: number;
+      } | null;
+      if (last?.key === key && typeof last.top === 'number') top = last.top;
+    } catch {
+      // An invalid tab-local hint is equivalent to no saved reading position.
+    }
+  }
+  scrollerEl.value.scrollTop = top ?? 0;
+}
+
+watch(
+  () => [props.id, props.artifactName, props.rev] as const,
+  (_next, previous) => {
+    if (previous) storeScroll(`${previous[0]}:${previous[1]}:${previous[2]}`);
+    activeScrollKey = scrollKey();
+    void restoreScroll(activeScrollKey);
+  },
+);
 
 // The shared markdown build pipeline: parse → reactive `tokens`/`ctx`, with the
 // out-of-order guard and the source watch. After each build lands (the fresh
 // tree painted) we re-run the comment locate pass against the new DOM.
-const { body, error, tokens, ctx } = useMarkdownDoc(props, () => locateCycle());
+const { body, error, tokens, ctx } = useMarkdownDoc(props, () => {
+  locateCycle();
+  // Markdown rendering is asynchronous; restore again once the long body exists,
+  // otherwise an early assignment can clamp to zero before content overflows.
+  if (activeScrollKey) void restoreScroll(activeScrollKey);
+});
 
 // --- comment state ----------------------------------------------------------
 
@@ -361,11 +423,17 @@ async function onCommentEvent(
   }
 }
 
-defineExpose({ onCommentEvent });
+function snapshotScroll(): void {
+  storeScroll();
+}
+
+defineExpose({ onCommentEvent, snapshotScroll });
 
 // --- lifecycle --------------------------------------------------------------
 
 onMounted(() => {
+  activeScrollKey = scrollKey();
+  void restoreScroll(activeScrollKey);
   document.addEventListener('selectionchange', onSelectionChange);
   document.addEventListener('mousedown', onDocMouseDown, true);
   // `useMarkdownDoc` already runs the initial build on mount; we just load the
@@ -374,6 +442,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  storeScroll();
   document.removeEventListener('selectionchange', onSelectionChange);
   document.removeEventListener('mousedown', onDocMouseDown, true);
   clearHighlights();
@@ -532,8 +601,13 @@ const DocBody = () => {
 </script>
 
 <template>
-  <div ref="containerEl" class="relative h-full w-full">
-    <div ref="scrollerEl" class="h-full w-full overflow-auto bg-surface">
+  <div ref="containerEl" class="relative h-full min-h-0 w-full overflow-hidden">
+    <div
+      ref="scrollerEl"
+      class="h-full min-h-0 w-full overflow-auto bg-surface"
+      data-testid="artifact-scroll"
+      @scroll.passive="storeScroll()"
+    >
       <p
         v-if="error"
         class="m-4 rounded border border-block-line bg-block-soft p-3 text-sm text-block"

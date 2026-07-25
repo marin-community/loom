@@ -282,9 +282,13 @@ async function deleteAllSessions(baseUrl: string) {
  *  clear that audit table directly between tests to keep run-only failures
  *  from leaking into later count assertions. */
 function deleteAllAutomationRuns(dbPath: string) {
-  execFileSync("sqlite3", [dbPath, "DELETE FROM automation_runs;"], {
-    stdio: "pipe",
-  });
+  execFileSync(
+    "sqlite3",
+    [dbPath, "PRAGMA busy_timeout=5000; DELETE FROM automation_runs;"],
+    {
+      stdio: "pipe",
+    },
+  );
 }
 
 /** Delete every watch on a server, best-effort — watches aren't tied

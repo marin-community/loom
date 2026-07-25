@@ -11,16 +11,16 @@ import {
 } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { get, ideInfo } from '../api';
-import type { Session, WeaverEvent, Issue } from '../types';
+import type { Session, WeaverEvent } from '../types';
 import SessionTerminals from '../components/SessionTerminals.vue';
 import IdeFrame from '../components/IdeFrame.vue';
 import ScratchPanel from '../components/ScratchPanel.vue';
 import SessionPageHeader from '../components/SessionPageHeader.vue';
 import SessionTabs from '../components/SessionTabs.vue';
-import SessionOverview from '../components/SessionOverview.vue';
 import SessionConversation from '../components/SessionConversation.vue';
 import ArtifactsPanel from '../components/ArtifactsPanel.vue';
 import { useFleet } from '../lib/sessionsStore';
+import { completeSessionOpen } from '../lib/workbenchMetrics';
 
 // Named + keyed-by-id in App.vue's <keep-alive> so the page (and its live
 // terminal) stays warm: every `/s/:id…` path (the work tabs and the Artifacts
@@ -38,8 +38,6 @@ const router = useRouter();
 const { sessionById } = useFleet();
 const ws = ref<Session | null>(sessionById(props.id) ?? null);
 const events = ref<WeaverEvent[]>([]);
-const issues = ref<Issue[]>([]);
-const backlog = ref<Issue[]>([]);
 const error = ref('');
 
 // --- Work-area tabs --------------------------------------------------------
@@ -53,12 +51,12 @@ const error = ref('');
 // (the live agent's TUI); an ACP session is headless, so it leads with
 // Conversation and demotes the worktree shells to a slim Shells tab. `defaultTab`
 // resolves whichever leads when the user hasn't picked one.
-type LocalTab = 'terminal' | 'overview' | 'conversation' | 'shells';
+type LocalTab = 'terminal' | 'conversation' | 'shells';
 type WorkTab = LocalTab | 'artifacts';
 const isAcp = computed(() => ws.value?.protocol === 'acp');
 const defaultTab = computed<LocalTab>(() => (isAcp.value ? 'conversation' : 'terminal'));
 
-const VALID_LOCAL = ['terminal', 'overview', 'conversation', 'shells'];
+const VALID_LOCAL = ['terminal', 'conversation', 'shells'];
 const initialTab = route.query.tab;
 // `null` means "follow the backend's default tab"; a real value is an explicit
 // pick (from the URL or a click) that sticks.
@@ -67,6 +65,13 @@ const localTab = ref<LocalTab | null>(
     ? (initialTab as LocalTab)
     : null,
 );
+// Overview no longer exists. Clean up old bookmarks/row links without breaking
+// the session deep link; the protocol-appropriate work surface becomes active.
+if (initialTab === 'overview') {
+  const query = { ...route.query };
+  delete query.tab;
+  void router.replace({ query });
+}
 const effectiveLocalTab = computed<LocalTab>(() => localTab.value ?? defaultTab.value);
 
 // The artifacts surface is open whenever the path is under `…/artifacts`.
@@ -90,7 +95,6 @@ const workTab = computed<WorkTab>(() =>
 // an ACP artifact deep-link is docked over its default Conversation tab and must
 // not fetch/render a potentially huge chat behind the requested document.
 const mounted = reactive({
-  overview: false,
   conversation: false,
   shells: false,
   artifacts: artifactsActive.value,
@@ -98,7 +102,7 @@ const mounted = reactive({
 watch(
   workTab,
   (t) => {
-    if (t === 'overview' || t === 'conversation' || t === 'shells') mounted[t] = true;
+    if (t === 'conversation' || t === 'shells') mounted[t] = true;
   },
   { immediate: true },
 );
@@ -118,7 +122,7 @@ function selectTab(t: WorkTab) {
     if (!artifactsActive.value) router.push(`/s/${props.id}/artifacts`);
     return;
   }
-  if (t === 'overview' || t === 'conversation' || t === 'shells') mounted[t] = true;
+  if (t === 'conversation' || t === 'shells') mounted[t] = true;
   localTab.value = t;
   // Leaving a docked artifacts surface for a local tab closes it (back to the
   // plain session URL); when it's popped out the rail stays and we just swap the
@@ -136,11 +140,9 @@ function closeRail() {
   router.push(`/s/${props.id}`);
 }
 
-const issueCount = computed(() => issues.value.length + backlog.value.length);
-
 // --- Resizable side rails --------------------------------------------------
-// Two panels pull in from the right: the artifact (popped out) and the embedded
-// editor. Each persists its own width and drags from the right edge.
+// Two on-demand panels pull in from the right: the artifact (popped out) and the
+// embedded editor. Each persists its own width and drags from the right edge.
 const MIN_PANEL_WIDTH = 360;
 function loadWidth(key: string, fallback: number): number {
   const v = Number(localStorage.getItem(key));
@@ -148,6 +150,11 @@ function loadWidth(key: string, fallback: number): number {
 }
 const artifactWidth = ref(loadWidth('loom.artifactWidth', 620));
 const ideWidth = ref(loadWidth('loom.ideWidth', 760));
+function panelWidth(width: number): { width: string } {
+  // On narrow windows the app rail still needs room; saved desktop widths must
+  // not push the close control or document scroller off-screen.
+  return { width: `min(${width}px, calc(100vw - 3.5rem))` };
+}
 
 // Each rail drags from the right edge and persists its own width; a single
 // discriminator picks which one a divider drives (templates auto-unwrap refs, so
@@ -197,27 +204,10 @@ async function loadSession() {
   ws.value = (await get(`/sessions/${props.id}`)) as Session;
 }
 
-async function loadIssues() {
-  if (!ws.value) return;
-  // The session's own claimed work, plus the repo's unclaimed backlog.
-  try {
-    issues.value = (await get(`/branches/${ws.value.branch.id}/issues`)) as Issue[];
-  } catch {
-    // Issues are read-only here; failure is non-fatal for the view.
-  }
-  try {
-    const repo = encodeURIComponent(ws.value.branch.repo_root);
-    backlog.value = (await get(`/repos/issues?repo_root=${repo}&scope=backlog`)) as Issue[];
-  } catch {
-    // Backlog is best-effort context; ignore failures.
-  }
-}
-
 async function loadAll() {
   try {
     await loadSession();
     events.value = (await get(`/sessions/${props.id}/log`)) as WeaverEvent[];
-    await loadIssues();
     error.value = '';
   } catch (e) {
     error.value = (e as Error).message;
@@ -242,46 +232,16 @@ function openStream() {
       loadSession().catch(() => {});
     });
   }
+  // The Issues deep link carries the branch's live open count. Refresh the
+  // session projection when the ledger changes without restoring the deleted
+  // issue/overview pane or duplicating issue state in this view.
   for (const kind of ['issue_added', 'issue_closed', 'issue_reopened']) {
-    source.addEventListener(kind, () => {
-      loadIssues().catch(() => {});
-    });
+    source.addEventListener(kind, () => loadSession().catch(() => {}));
   }
-  // An artifact write joins the feed; pushing it to `events` also nudges the
-  // Overview's pinned-plan watcher to re-fetch the `plan` artifact. The
-  // Artifacts panel refreshes off its own SSE subscription.
-  source.addEventListener('artifact_written', (e) => {
-    events.value.push(JSON.parse((e as MessageEvent).data) as WeaverEvent);
-  });
-}
-
-function eventLine(ev: WeaverEvent): string {
-  const d = ev.data || {};
-  if (ev.kind === 'status') return `status → ${d.status ?? '?'}`;
-  if (ev.kind === 'tag') {
-    // `{ key, value, note, by }`; an empty value means the tag was cleared.
-    // The agent's own `attention` events carry the status message as `note` —
-    // rendered message-first, they make the feed the session's progress log
-    // (an empty attention value is the calm `ok`, not a bare "cleared").
-    const key = (d.key as string) ?? 'tag';
-    if (key === 'attention' && d.by === 'agent') {
-      const level = (d.value as string) || 'ok';
-      return d.note ? `${level} — ${d.note}` : `status → ${level}`;
-    }
-    const note = d.note ? ` (${d.note})` : '';
-    return d.value ? `${key} → ${d.value}${note}` : `${key} cleared`;
-  }
-  if (ev.kind === 'github')
-    return `PR #${d.pr ?? '?'} → ${d.state ?? '?'}${d.checks ? ` · checks ${d.checks}` : ''}`;
-  if (ev.kind === 'issue_added') return `issue added: ${d.title ?? ''}`;
-  if (ev.kind === 'issue_closed') return `issue closed: #${d.id ?? '?'}`;
-  if (ev.kind === 'issue_reopened') return `issue reopened: #${d.id ?? '?'}`;
-  if (ev.kind === 'artifact_written')
-    return `artifact written: ${d.name ?? '?'}${d.rev ? ` (v${d.rev})` : ''}`;
-  return ev.kind;
 }
 
 onMounted(() => {
+  requestAnimationFrame(() => completeSessionOpen(props.id));
   loadAll();
   openStream();
   // Gate the editor affordance on the server setting (cheap; the panel itself
@@ -300,6 +260,7 @@ onMounted(() => {
 // a *return* (guarded by `source` so the initial mount never double-opens).
 onActivated(() => {
   if (source) return; // initial mount already loaded + opened the stream
+  requestAnimationFrame(() => completeSessionOpen(props.id));
   loadAll();
   openStream();
 });
@@ -314,15 +275,19 @@ onUnmounted(() => {
   <!-- A horizontal split fills the workbench main area: the session page (header
        + tabs + work area) on the left, then any panels pulled in from the right
        — the popped-out artifact and the embedded editor, each resizable. -->
-  <div v-if="ws" class="flex min-h-[28rem] flex-1">
+  <div v-if="ws" class="flex min-h-0 flex-1 overflow-hidden">
     <!-- Left: the session page. min-w-0 lets it shrink as panels widen;
          AgentTerminal's ResizeObserver re-fits the terminal on the change. -->
-    <div class="flex min-w-0 flex-1 flex-col px-5 py-3">
-      <SessionPageHeader :ws="ws" @reload="loadAll" />
+    <div class="flex min-h-0 min-w-0 flex-1 flex-col px-3 py-2 sm:px-5 sm:py-3">
+      <SessionPageHeader
+        :ws="ws"
+        :events="events"
+        :ide-enabled="ideEnabled"
+        @reload="loadAll"
+        @open-editor="ideOpen = true"
+      />
       <SessionTabs
         :tab="workTab"
-        :id="props.id"
-        :issue-count="issueCount"
         :artifacts-popped="railOpen"
         :protocol="ws.protocol"
         @select="selectTab"
@@ -350,22 +315,6 @@ onUnmounted(() => {
              then kept (v-show) so re-selecting is instant. -->
         <div v-if="isAcp && mounted.shells" v-show="workTab === 'shells'" class="h-full">
           <SessionTerminals :id="props.id" shells-only />
-        </div>
-
-        <!-- Overview — read-only context (goal, issues, activity). Mounted on
-             first visit, then kept (v-show) so re-selecting it is instant. -->
-        <div
-          v-if="mounted.overview"
-          v-show="workTab === 'overview'"
-          class="h-full overflow-auto pb-1"
-        >
-          <SessionOverview
-            :ws="ws"
-            :events="events"
-            :format="eventLine"
-            :issues="issues"
-            :backlog="backlog"
-          />
         </div>
 
         <!-- Conversation — the agent's chat with the model. Lazily mounted, then
@@ -400,8 +349,8 @@ onUnmounted(() => {
         @mousedown="(e) => startDrag('artifact', e)"
       ></div>
       <section
-        class="flex shrink-0 flex-col border-l border-line"
-        :style="{ width: artifactWidth + 'px' }"
+        class="flex min-h-0 shrink-0 flex-col overflow-hidden border-l border-line"
+        :style="panelWidth(artifactWidth)"
       >
         <ArtifactsPanel
           :id="props.id"
@@ -426,8 +375,8 @@ onUnmounted(() => {
           @mousedown="(e) => startDrag('ide', e)"
         ></div>
         <section
-          class="relative flex shrink-0 flex-col border-l border-line"
-          :style="{ width: ideWidth + 'px' }"
+          class="relative flex min-h-0 shrink-0 flex-col overflow-hidden border-l border-line"
+          :style="panelWidth(ideWidth)"
         >
           <button
             class="absolute right-1 top-1 z-10 rounded px-1.5 py-0.5 text-xs text-muted hover:bg-subtle hover:text-fg"
@@ -440,19 +389,6 @@ onUnmounted(() => {
           <IdeFrame :id="props.id" :work-dir="ws.work_dir" class="min-h-0 flex-1" />
         </section>
       </template>
-
-      <!-- Closed: a thin edge handle to pull the editor in from the right. -->
-      <button
-        v-else
-        class="group flex shrink-0 items-center border-l border-line bg-surface px-1 text-muted hover:bg-subtle hover:text-fg"
-        title="Open the editor"
-        data-testid="ide-open"
-        @click="ideOpen = true"
-      >
-        <span class="[writing-mode:vertical-rl] rotate-180 py-2 text-xs font-medium tracking-wide"
-          >‹ Editor</span
-        >
-      </button>
     </template>
   </div>
   <p v-else class="px-5 py-3 text-sm text-muted">Loading…</p>
