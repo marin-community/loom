@@ -101,13 +101,20 @@ export const listSessions = (
   return get(`/sessions${qs ? `?${qs}` : ''}`) as Promise<Session[]>;
 };
 
-/** Server-visible fleet search. History widens the active result set. */
+/** Server-visible fleet search. `history` widens an active search;
+ * `archivedOnly` keeps the History route a disjoint archived projection. */
 export const searchSessions = (
   query: string,
-  opts: { history?: boolean; status?: string; attention?: string } = {},
+  opts: {
+    history?: boolean;
+    archivedOnly?: boolean;
+    status?: string;
+    attention?: string;
+  } = {},
 ) => {
   const params = new URLSearchParams({ q: query });
   if (opts.history) params.set('history', 'true');
+  if (opts.archivedOnly) params.set('archived_only', 'true');
   if (opts.status) params.set('status', opts.status);
   if (opts.attention) params.set('attention', opts.attention);
   return get(`/sessions/search?${params}`) as Promise<Session[]>;

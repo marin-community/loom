@@ -59,7 +59,7 @@ const emit = defineEmits<{
 function title() {
   const task = props.session.branch.title || props.session.branch.name;
   if (!props.qualified || !props.session.placement) return task;
-  return `${props.session.placement.space_name} / ${props.session.placement.group_name} / ${task}`;
+  return `${props.session.placement.group_name} / ${task}`;
 }
 
 const positionOptions = computed(() => {

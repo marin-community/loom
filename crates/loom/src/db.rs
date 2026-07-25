@@ -387,7 +387,15 @@ mod tests {
                 sqlx::query(&statement).execute(&db).await.unwrap();
             }
         }
-        for id in ["user", "github", "ops", "parent", "child", "parked-child"] {
+        for id in [
+            "user",
+            "github",
+            "ops",
+            "parent",
+            "child",
+            "parked-child",
+            "warm",
+        ] {
             insert_branch(&db, id).await;
         }
         sqlx::query(
@@ -407,11 +415,17 @@ mod tests {
               NULL, 'parent', '2026-01-01T00:00:04.000Z'),
              ('parked-child', 'parked-child', '/parked-child', 't-parked-child',
               'running', 'agent', 'interactive', 'parked', 'child',
-              '2026-01-01T00:00:05.000Z')",
+              '2026-01-01T00:00:05.000Z'),
+             ('warm', 'warm', '/warm', 't-warm', 'running', 'watch', 'automation',
+              'parked', NULL, '2026-01-01T00:00:06.000Z')",
         )
         .execute(&db)
         .await
         .unwrap();
+        sqlx::query("UPDATE sessions SET managed_by = 'watch-1' WHERE id = 'warm'")
+            .execute(&db)
+            .await
+            .unwrap();
 
         for statement in split_statements(LOOM_MIGRATIONS[9].2) {
             sqlx::query(&statement).execute(&db).await.unwrap();
@@ -438,6 +452,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(placed, 6);
+        assert!(
+            crate::session_layout::placement_group(&db, "warm")
+                .await
+                .unwrap()
+                .is_none(),
+            "layout migration excludes hidden warm infrastructure"
+        );
     }
 
     #[tokio::test]

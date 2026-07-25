@@ -138,8 +138,9 @@ test.describe("durable session workbench", () => {
     const currentRow = page.locator(`[data-session-id="${current.id}"]`);
     await expect(currentRow).toBeVisible();
     await expect(currentRow.getByRole("link")).toContainText(
-      "User / Deep Focus / socket-current",
+      "Deep Focus / socket-current",
     );
+    await expect(currentRow.getByRole("link")).not.toContainText("User /");
 
     await search.fill("migration result");
     await expect(
@@ -149,8 +150,44 @@ test.describe("durable session workbench", () => {
     const historyRow = page.locator(`[data-session-id="${archived.id}"]`);
     await expect(historyRow).toBeVisible();
     await expect(historyRow.getByRole("link")).toContainText(
-      "User / Inbox / migration-history",
+      "Inbox / migration-history",
     );
+  });
+
+  test("History search stays archived-only and distinguishes empty from no matches", async ({
+    page,
+    weaver,
+  }) => {
+    const live = await weaver.seedSession({
+      goal: "history scope phrase",
+      name: "history-live",
+    });
+    const archived = await weaver.seedSession({
+      goal: "history scope phrase",
+      name: "history-archived",
+    });
+    await weaver.archiveSession(archived.id);
+
+    await page.goto(weaver.baseUrl);
+    await page.getByTestId("fleet-search").fill("history scope phrase");
+    await expect(page.locator(`[data-session-id="${live.id}"]`)).toBeVisible();
+    await page.getByTestId("history-view").click();
+    await expect(page.getByTestId("search-history")).toHaveCount(0);
+    await expect(
+      page.locator(`[data-session-id="${archived.id}"]`),
+    ).toBeVisible();
+    await expect(page.locator(`[data-session-id="${live.id}"]`)).toHaveCount(0);
+
+    await page.getByTestId("fleet-search").fill("no archived result");
+    await expect(page.getByText("No archived sessions match")).toBeVisible();
+    const removed = await fetch(
+      `${weaver.baseUrl}/api/sessions/${archived.id}`,
+      {
+        method: "DELETE",
+      },
+    );
+    expect(removed.ok).toBe(true);
+    await expect(page.getByText("No archived sessions yet.")).toBeVisible();
   });
 
   test("status and attention filters are URL-backed and compose", async ({
@@ -311,7 +348,7 @@ test.describe("durable session workbench", () => {
     const row = page.locator(`[data-session-id="${session.id}"]`);
     await expect(row).toBeVisible();
     await expect(row.getByRole("link")).toContainText(
-      "User / Review / recover-location",
+      "Review / recover-location",
     );
     await row.getByTestId("remedy-recover").click();
 

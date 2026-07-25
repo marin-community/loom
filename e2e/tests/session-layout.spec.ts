@@ -136,6 +136,41 @@ test.describe("durable placement interactions", () => {
     ).toBeVisible();
   });
 
+  test("moving into a collapsed group focuses Undo instead of a hidden row", async ({
+    page,
+    weaver,
+  }) => {
+    const session = await weaver.seedSession({
+      goal: "Collapsed target focus",
+      name: "collapsed-target-move",
+    });
+    const collapsed = await addGroup(weaver.baseUrl, "Collapsed target");
+    await page.goto(weaver.baseUrl);
+    const target = page
+      .getByTestId("session-group")
+      .filter({ hasText: "Collapsed target" });
+    await target
+      .getByRole("button", { name: "Collapse Collapsed target" })
+      .click();
+
+    const row = page.locator(`[data-session-id="${session.id}"]`);
+    await row.getByTestId("move-session").click();
+    await row
+      .getByRole("combobox", { name: "Move to" })
+      .selectOption(collapsed.id);
+    await row
+      .getByTestId("move-session-panel")
+      .getByRole("button", { name: "Move" })
+      .click();
+
+    await expect(
+      target.locator(`[data-session-id="${session.id}"]`),
+    ).toBeHidden();
+    await expect(
+      page.getByTestId("move-undo").getByRole("button", { name: "Undo" }),
+    ).toBeFocused();
+  });
+
   test("an external REST move updates live without losing selection or expansion", async ({
     page,
     weaver,
@@ -167,6 +202,16 @@ test.describe("durable placement interactions", () => {
       "1 hidden by this view",
     );
     await page.getByTestId("status-filter").selectOption("");
+    await expect(row.getByTestId("session-preview")).toBeVisible();
+    const reviewGroup = page
+      .getByTestId("session-group")
+      .filter({ hasText: "Review" });
+    await reviewGroup.getByRole("button", { name: "Collapse Review" }).click();
+    await expect(page.getByTestId("selection-toolbar")).toContainText(
+      "1 hidden by this view",
+    );
+    await expect(row).toBeHidden();
+    await reviewGroup.getByRole("button", { name: "Expand Review" }).click();
     await expect(row.getByTestId("session-preview")).toBeVisible();
   });
 
@@ -239,6 +284,9 @@ test.describe("durable placement interactions", () => {
       .getByRole("button", { name: "Undo" })
       .click();
     await expect(page.getByTestId("move-undo")).toBeVisible();
+    await expect(page.getByRole("alert")).toContainText(
+      "workbench changed in another client",
+    );
     for (const session of [first, second]) {
       await expect(
         page.locator(
@@ -253,39 +301,83 @@ test.describe("durable placement interactions", () => {
       .getByRole("button", { name: "Undo" })
       .click();
     await expect(page.getByTestId("move-undo")).toHaveCount(0);
+    await expect(page.getByRole("alert")).toHaveCount(0);
   });
 
-  test("an open search reconciles a REST rename and move", async ({
+  test("an open search recomputes membership for moves, renames, and deletion", async ({
     page,
     weaver,
   }) => {
-    const session = await weaver.seedSession({
-      goal: "stable search phrase",
-      name: "old-search-name",
+    const placed = await weaver.seedSession({
+      goal: "placement membership",
+      name: "placed-search-result",
+    });
+    const entering = await weaver.seedSession({
+      goal: "placement membership candidate",
+      name: "entering-search-result",
+    });
+    const renamed = await weaver.seedSession({
+      goal: "rename membership candidate",
+      name: "rename-search-result",
     });
     const review = await addGroup(weaver.baseUrl, "Search review");
+    await move(weaver.baseUrl, placed.id, review.id);
     await page.goto(weaver.baseUrl);
-    await page.getByTestId("fleet-search").fill("stable search phrase");
-    const row = page.locator(`[data-session-id="${session.id}"]`);
-    await expect(row).toBeVisible();
+    const search = page.getByTestId("fleet-search");
+    await search.fill("Search review");
+    await expect(
+      page.locator(`[data-session-id="${placed.id}"]`),
+    ).toBeVisible();
+    await expect(
+      page.locator(`[data-session-id="${entering.id}"]`),
+    ).toHaveCount(0);
 
-    const renamed = await fetch(
-      `${weaver.baseUrl}/api/sessions/${session.id}`,
+    await move(weaver.baseUrl, placed.id, "group-user-inbox");
+    await expect(page.locator(`[data-session-id="${placed.id}"]`)).toHaveCount(
+      0,
+    );
+    await move(weaver.baseUrl, entering.id, review.id);
+    await expect(
+      page.locator(`[data-session-id="${entering.id}"]`),
+    ).toBeVisible();
+    const removed = await fetch(
+      `${weaver.baseUrl}/api/sessions/${entering.id}`,
+      { method: "DELETE" },
+    );
+    expect(removed.ok).toBe(true);
+    await expect(
+      page.locator(`[data-session-id="${entering.id}"]`),
+    ).toHaveCount(0);
+
+    await search.fill("renamed-into-query");
+    await expect(page.locator(`[data-session-id="${renamed.id}"]`)).toHaveCount(
+      0,
+    );
+    const renamedInto = await fetch(
+      `${weaver.baseUrl}/api/sessions/${renamed.id}`,
       {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ title: "renamed while searching" }),
+        body: JSON.stringify({ title: "renamed-into-query" }),
       },
     );
-    expect(renamed.ok).toBe(true);
-    await move(weaver.baseUrl, session.id, review.id);
-
-    await expect(row.getByRole("link")).toContainText(
-      "User / Search review / renamed while searching",
+    expect(renamedInto.ok).toBe(true);
+    await expect(
+      page.locator(`[data-session-id="${renamed.id}"]`),
+    ).toBeVisible();
+    const renamedOut = await fetch(
+      `${weaver.baseUrl}/api/sessions/${renamed.id}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "outside again" }),
+      },
     );
-    await expect(page.getByTestId("fleet-search")).toHaveValue(
-      "stable search phrase",
+    expect(renamedOut.ok).toBe(true);
+    await expect(page.locator(`[data-session-id="${renamed.id}"]`)).toHaveCount(
+      0,
     );
+    await expect(search).toHaveValue("renamed-into-query");
   });
 
   test("an invalidation during an older poll gets a trailing refresh", async ({

@@ -391,6 +391,13 @@ async fn layout_crud_moves_conflicts_search_events_and_cli_share_one_contract() 
         archived_needs.as_array().unwrap().is_empty(),
         "archived sessions are calm even when they retain old attention tags"
     );
+    let archived_only = ts
+        .client
+        .get("/api/sessions/search?q=&archived_only=true")
+        .await
+        .unwrap();
+    assert_eq!(archived_only.as_array().unwrap().len(), 1);
+    assert_eq!(archived_only[0]["id"], first_id);
 
     for id in [first_id, second_id] {
         ts.client
@@ -398,6 +405,139 @@ async fn layout_crud_moves_conflicts_search_events_and_cli_share_one_contract() 
             .await
             .unwrap();
     }
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exact_parent_session_identity_survives_archive_and_parent_removal() {
+    let ts = TestServer::start().await;
+    let parent_one = ts
+        .client
+        .post(
+            "/api/sessions",
+            json!({
+                "goal": "first parent generation",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+                "name": "lineage-parent"
+            }),
+        )
+        .await
+        .unwrap();
+    let child_one = ts
+        .client
+        .post(
+            "/api/sessions",
+            json!({
+                "goal": "child of archived generation",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+                "name": "lineage-child-one",
+                "parent_branch": parent_one["branch"]["id"]
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(child_one["parent_session_id"], parent_one["id"]);
+    ts.client
+        .post(
+            &format!(
+                "/api/sessions/{}/archive",
+                parent_one["id"].as_str().unwrap()
+            ),
+            json!({}),
+        )
+        .await
+        .unwrap();
+
+    let parent_two = ts
+        .client
+        .post(
+            "/api/sessions",
+            json!({
+                "goal": "second parent generation",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+                "existing_branch": parent_one["branch"]["branch"]
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(parent_two["branch"]["id"], parent_one["branch"]["id"]);
+    let child_two = ts
+        .client
+        .post(
+            "/api/sessions",
+            json!({
+                "goal": "child of exact second generation",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+                "name": "lineage-child-two",
+                "parent_branch": parent_two["branch"]["id"]
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(child_two["parent_id"], parent_one["branch"]["id"]);
+    assert_eq!(child_two["parent_session_id"], parent_two["id"]);
+    let cli = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(["session", "show", child_two["id"].as_str().unwrap()])
+        .env("WEAVER_API", ts.addr.to_string())
+        .output()
+        .expect("showing exact parent session through the CLI");
+    assert!(cli.status.success());
+    assert!(String::from_utf8_lossy(&cli.stdout).contains(&format!(
+        "parent:   session {}",
+        parent_two["id"].as_str().unwrap()
+    )));
+    let child_one_after_archive = ts
+        .client
+        .get(&format!(
+            "/api/sessions/{}",
+            child_one["id"].as_str().unwrap()
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        child_one_after_archive["parent_session_id"], parent_one["id"],
+        "archived exact parents remain addressable in History"
+    );
+
+    ts.client
+        .delete(&format!(
+            "/api/sessions/{}",
+            parent_two["id"].as_str().unwrap()
+        ))
+        .await
+        .unwrap();
+    let after_parent_delete = ts
+        .client
+        .get(&format!(
+            "/api/sessions/{}",
+            child_two["id"].as_str().unwrap()
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        after_parent_delete["parent_session_id"], parent_two["id"],
+        "exact provenance is immutable even after the parent row is removed"
+    );
+
+    sqlx::query("UPDATE sessions SET parent_session_id = NULL WHERE id = ?")
+        .bind(child_two["id"].as_str().unwrap())
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    let legacy = ts
+        .client
+        .get(&format!(
+            "/api/sessions/{}",
+            child_two["id"].as_str().unwrap()
+        ))
+        .await
+        .unwrap();
+    assert!(legacy["parent_session_id"].is_null());
+    assert_eq!(legacy["parent_id"], parent_one["branch"]["id"]);
 }
 
 #[serial]
@@ -691,6 +831,78 @@ async fn atomic_group_restore_rolls_back_an_injected_mid_write_failure() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hidden_managed_placements_cannot_block_an_apparently_empty_group() {
+    let ts = TestServer::start().await;
+    let initial = ts.client.get_session_layout().await.unwrap();
+    let with_group = ts
+        .client
+        .create_session_group(&CreateSessionGroupReq {
+            space_id: "space-user".to_string(),
+            name: "Warm repair".to_string(),
+            expected_revision: initial.revision,
+        })
+        .await
+        .unwrap();
+    let group_id = with_group
+        .spaces
+        .iter()
+        .flat_map(|space| &space.groups)
+        .find(|group| group.name == "Warm repair")
+        .unwrap()
+        .id
+        .clone();
+    let repo_root = ts.cwd();
+    let branch =
+        weaver_core::branch::upsert(&ts.state.db, &repo_root, "weaver/hidden-warm", "main")
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions
+         (id, branch_id, work_dir, term_session, status, managed_by, origin, class)
+         VALUES ('hidden-warm', ?, '/tmp/hidden-warm', 'hidden-warm', 'running',
+                 'watch-1', 'watch', 'automation')",
+    )
+    .bind(branch.id)
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+    // Simulate the pre-correction split model. Organizer deletion must repair
+    // this hidden membership instead of asking for an impossible visible move.
+    sqlx::query(
+        "INSERT INTO session_placements (session_id, group_id, rank, updated_at)
+         VALUES ('hidden-warm', ?, 0, '2026-01-01T00:00:00.000Z')",
+    )
+    .bind(&group_id)
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+
+    let deleted = ts
+        .client
+        .delete_session_group(
+            &group_id,
+            &DeleteSessionGroupReq {
+                destination_group_id: None,
+                expected_revision: with_group.revision,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(deleted
+        .spaces
+        .iter()
+        .flat_map(|space| &space.groups)
+        .all(|group| group.id != group_id));
+    assert!(
+        loom::session_layout::placement_group(&ts.state.db, "hidden-warm")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn authenticated_http_sse_invalidates_on_session_membership_changes() {
     let ts = TestServer::start().await;
     let (token, _) = loom::auth::create_token(&ts.state.db, "rjpower", "sse-test", None)
@@ -821,6 +1033,15 @@ async fn layout_cli_covers_read_crud_reorder_preferences_defaults_restore_and_st
     )
     .status
     .success());
+    assert!(
+        !layout_cli(
+            &ts,
+            &["default-set", "watch", "inert-watch", "--to", &review_id]
+        )
+        .status
+        .success(),
+        "the CLI must not advertise an inert warm-session selector"
+    );
     assert!(layout_cli(&ts, &["default-delete", "origin", "cli-source"])
         .status
         .success());

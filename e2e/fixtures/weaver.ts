@@ -74,6 +74,8 @@ export interface Session {
   updated_at: string;
   /** Branch id of the session that launched this one, or null at the top level. */
   parent_id: string | null;
+  /** Exact immutable session id of the launcher, when recorded. */
+  parent_session_id: string | null;
   tracking_issue: number | null;
   branch: Branch;
 }

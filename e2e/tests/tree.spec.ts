@@ -83,4 +83,70 @@ test.describe("session lineage in the flat workbench", () => {
       .getByRole("link", { name: "delegated from parent" });
     await expect(provenance).toHaveAttribute("href", `/s/${parent.id}`);
   });
+
+  test("exact parent session identity wins across branch generations", async ({
+    page,
+    weaver,
+  }) => {
+    const parentOne = await weaver.seedSession({
+      goal: "First parent generation",
+      name: "shared-parent",
+    });
+    const archivedChild = await weaver.seedSession({
+      goal: "Keeps the archived exact parent",
+      name: "archived-parent-child",
+      parent: parentOne.branch.id,
+    });
+    await weaver.archiveSession(parentOne.id);
+
+    const parentResponse = await fetch(`${weaver.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: "Second parent generation",
+        cwd: weaver.repoPath,
+        agent: "shell",
+        existing_branch: parentOne.branch.branch,
+      }),
+    });
+    expect(parentResponse.ok).toBe(true);
+    const parentTwo = (await parentResponse.json()) as typeof parentOne;
+    const currentChild = await weaver.seedSession({
+      goal: "Must link the second exact parent",
+      name: "current-parent-child",
+      parent: parentTwo.branch.id,
+    });
+
+    await page.goto(weaver.baseUrl);
+    const archivedParentRow = page.locator(
+      `[data-session-id="${archivedChild.id}"]`,
+    );
+    await archivedParentRow.getByTestId("session-details-toggle").click();
+    await expect(
+      archivedParentRow
+        .getByTestId("session-preview")
+        .getByRole("link", { name: /delegated from/ }),
+    ).toHaveAttribute("href", `/s/${parentOne.id}`);
+
+    const currentChildRow = page.locator(
+      `[data-session-id="${currentChild.id}"]`,
+    );
+    await currentChildRow.getByTestId("session-details-toggle").click();
+    await expect(
+      currentChildRow
+        .getByTestId("session-preview")
+        .getByRole("link", { name: /delegated from/ }),
+    ).toHaveAttribute("href", `/s/${parentTwo.id}`);
+
+    const removed = await fetch(
+      `${weaver.baseUrl}/api/sessions/${parentTwo.id}`,
+      { method: "DELETE" },
+    );
+    expect(removed.ok).toBe(true);
+    await expect(
+      currentChildRow
+        .getByTestId("session-preview")
+        .getByRole("link", { name: /delegated from/ }),
+    ).toHaveCount(0);
+  });
 });

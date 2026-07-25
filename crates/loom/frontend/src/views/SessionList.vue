@@ -105,27 +105,46 @@ const searchResults = ref<Session[] | null>(null);
 const searching = ref(false);
 let searchTimer: number | undefined;
 let searchGeneration = 0;
-watch([searchText, includeHistory], () => {
-  window.clearTimeout(searchTimer);
-  const generation = ++searchGeneration;
-  const query = searchText.value.trim();
-  if (!query) {
-    searchResults.value = null;
-    searching.value = false;
-    return;
-  }
-  searching.value = true;
-  searchTimer = window.setTimeout(async () => {
-    try {
-      const result = await searchSessions(query, { history: includeHistory.value });
-      if (generation === searchGeneration) searchResults.value = result;
-    } catch (cause) {
-      if (generation === searchGeneration) error.value = (cause as Error).message;
-    } finally {
-      if (generation === searchGeneration) searching.value = false;
+let lastSearchArchivedOnly = view.value === 'history';
+// Search membership is server-owned. Fleet/layout snapshots are replaced after
+// polling, SSE invalidations, and mutations; while a query is open each fresh
+// snapshot reruns the same guarded search so renamed, moved, created, and
+// deleted sessions enter or leave the result set correctly.
+watch(
+  [searchText, includeHistory, () => view.value, sessions, layout],
+  () => {
+    window.clearTimeout(searchTimer);
+    const generation = ++searchGeneration;
+    const query = searchText.value.trim();
+    const archivedOnly = view.value === 'history';
+    if (archivedOnly !== lastSearchArchivedOnly) {
+      // Never render results from the opposite route scope while the fresh
+      // server-visible search is in flight.
+      searchResults.value = null;
+      lastSearchArchivedOnly = archivedOnly;
     }
-  }, 160);
-});
+    if (!query) {
+      searchResults.value = null;
+      searching.value = false;
+      return;
+    }
+    searching.value = true;
+    searchTimer = window.setTimeout(async () => {
+      try {
+        const result = await searchSessions(query, {
+          history: archivedOnly || includeHistory.value,
+          archivedOnly,
+        });
+        if (generation === searchGeneration) searchResults.value = result;
+      } catch (cause) {
+        if (generation === searchGeneration) error.value = (cause as Error).message;
+      } finally {
+        if (generation === searchGeneration) searching.value = false;
+      }
+    }, 160);
+  },
+  { flush: 'sync' },
+);
 
 function matchesFilters(session: Session): boolean {
   if (statusFilter.value && session.status !== statusFilter.value) return false;
@@ -154,11 +173,24 @@ const visibleSessions = computed(() => baseSessions.value.filter(matchesFilters)
 const visibleById = computed(
   () => new Map(visibleSessions.value.map((session) => [session.id, session])),
 );
-const sessionsByBranch = computed(
-  () => new Map(sessions.value.map((session) => [session.branch.id, session])),
+const sessionsByBranch = computed(() =>
+  sessions.value.reduce((byBranch, session) => {
+    const candidates = byBranch.get(session.branch.id) ?? [];
+    candidates.push(session);
+    byBranch.set(session.branch.id, candidates);
+    return byBranch;
+  }, new Map<string, Session[]>()),
+);
+const sessionsById = computed(
+  () => new Map(sessions.value.map((session) => [session.id, session])),
 );
 function parentSessionOf(session: Session) {
-  return session.parent_id ? sessionsByBranch.value.get(session.parent_id) : undefined;
+  if (session.parent_session_id) {
+    return sessionsById.value.get(session.parent_session_id);
+  }
+  if (!session.parent_id) return undefined;
+  const legacyCandidates = sessionsByBranch.value.get(session.parent_id) ?? [];
+  return legacyCandidates.length === 1 ? legacyCandidates[0] : undefined;
 }
 const groupedSessions = computed(() =>
   (activeSpace.value?.groups ?? []).map((group) => ({
@@ -228,8 +260,17 @@ function setSelected(id: string, shouldSelect: boolean) {
 function clearSelection() {
   selected.value = new Set();
 }
+const renderedVisibleIds = computed(() => {
+  const ids = new Set(visibleById.value.keys());
+  if (view.value !== 'space' || searchResults.value !== null) return ids;
+  for (const { group } of allGroups.value) {
+    if (!group.collapsed) continue;
+    for (const id of group.session_ids) ids.delete(id);
+  }
+  return ids;
+});
 const visibleSelectedCount = computed(
-  () => [...selected.value].filter((id) => visibleById.value.has(id)).length,
+  () => [...selected.value].filter((id) => renderedVisibleIds.value.has(id)).length,
 );
 const hiddenSelectedCount = computed(() => selected.value.size - visibleSelectedCount.value);
 
@@ -301,6 +342,7 @@ async function performMove(
   reversible = true,
 ) {
   if (!ids.length || !layout.value) return;
+  error.value = '';
   const undo = snapshotUndo(ids, destinationGroupId);
   try {
     layout.value = await moveSessions({
@@ -320,7 +362,11 @@ async function performMove(
             `[data-session-id="${CSS.escape(ids[0])}"] [data-testid="move-session"]`,
           )
         : null;
-    (movedRow ?? undoButton.value)?.focus();
+    const focusableMovedRow =
+      movedRow && movedRow.offsetParent !== null && !movedRow.hasAttribute('disabled')
+        ? movedRow
+        : null;
+    (focusableMovedRow ?? undoButton.value)?.focus();
   } catch (cause) {
     if (!useConflictLayout(cause)) error.value = (cause as Error).message;
     await refresh();
@@ -330,6 +376,7 @@ async function performMove(
 async function restoreMove() {
   const undo = undoMove.value;
   if (!undo) return;
+  error.value = '';
   try {
     if (!layout.value) return;
     layout.value = await restoreSessionGroups({
@@ -604,7 +651,7 @@ function scrollSpaces(direction: number) {
         />
         <span v-if="searching" class="absolute right-2 top-2 text-2xs text-faint">searching…</span>
       </label>
-      <label class="flex items-center gap-1.5 text-xs text-muted">
+      <label v-if="view !== 'history'" class="flex items-center gap-1.5 text-xs text-muted">
         <input v-model="includeHistory" type="checkbox" data-testid="search-history" />
         include History
       </label>
@@ -1121,10 +1168,12 @@ function scrollSpaces(direction: number) {
     >
       <p class="text-sm text-muted">
         {{
-          searchText
-            ? 'No sessions match this search.'
-            : view === 'history'
-              ? 'No archived sessions.'
+          view === 'history'
+            ? historySessions.length
+              ? 'No archived sessions match this search or the current filters.'
+              : 'No archived sessions yet.'
+            : searchText
+              ? 'No sessions match this search.'
               : 'No actionable sessions here.'
         }}
       </p>

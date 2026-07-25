@@ -1720,10 +1720,28 @@ async fn ensure_warm_session_reuses_the_same_session() {
     )
     .await;
 
+    let layout_revision = loom::session_layout::get_layout(&state.db, "rjpower")
+        .await
+        .unwrap()
+        .revision;
     let first = watch::ensure_warm_session(&state, &o)
         .await
         .unwrap()
         .unwrap();
+    let after_start = loom::session_layout::get_layout(&state.db, "rjpower")
+        .await
+        .unwrap();
+    assert_eq!(
+        after_start.revision, layout_revision,
+        "starting warm infrastructure does not change visible layout"
+    );
+    assert!(
+        loom::session_layout::placement_group(&state.db, &first)
+            .await
+            .unwrap()
+            .is_none(),
+        "warm infrastructure has no visible placement"
+    );
     // Re-fetch so the second call sees the persisted `warm_session_id` linkage.
     let o = watch_store::get(&state.db, &o.id).await.unwrap().unwrap();
     let second = watch::ensure_warm_session(&state, &o)
@@ -1744,6 +1762,15 @@ async fn ensure_warm_session_reuses_the_same_session() {
     if let Some(s) = session_mod::get(&state.db, &first).await.unwrap() {
         backend::kill_session(&s.term_session).await.ok();
     }
+    session_mod::delete(&state.db, &first).await.unwrap();
+    assert_eq!(
+        loom::session_layout::get_layout(&state.db, "rjpower")
+            .await
+            .unwrap()
+            .revision,
+        layout_revision,
+        "stopping warm infrastructure does not change visible layout"
+    );
 }
 
 /// The end-to-end subscription path: a watch created over REST has its trigger

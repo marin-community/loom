@@ -78,14 +78,16 @@ WITH RECURSIVE effective_space(session_id, space_id) AS (
             ELSE 'space-user'
         END
     FROM sessions s
-    WHERE s.origin != 'agent'
+    WHERE s.managed_by IS NULL
+      AND (s.origin != 'agent'
        OR s.parent_session_id IS NULL
-       OR NOT EXISTS (SELECT 1 FROM sessions parent WHERE parent.id = s.parent_session_id)
+       OR NOT EXISTS (SELECT 1 FROM sessions parent WHERE parent.id = s.parent_session_id))
     UNION ALL
     SELECT child.id, parent.space_id
     FROM sessions child
     JOIN effective_space parent ON parent.session_id = child.parent_session_id
-    WHERE child.origin = 'agent' AND child.id != child.parent_session_id
+    WHERE child.managed_by IS NULL
+      AND child.origin = 'agent' AND child.id != child.parent_session_id
 )
 INSERT INTO session_groups (id, space_id, name, rank, system_key, created_at, updated_at)
 SELECT
@@ -133,9 +135,10 @@ WITH RECURSIVE planned(session_id, group_id, created_at, sort_order) AS (
         s.created_at,
         s.sort_order
     FROM sessions s
-    WHERE s.origin != 'agent'
+    WHERE s.managed_by IS NULL
+      AND (s.origin != 'agent'
        OR s.parent_session_id IS NULL
-       OR NOT EXISTS (SELECT 1 FROM sessions parent WHERE parent.id = s.parent_session_id)
+       OR NOT EXISTS (SELECT 1 FROM sessions parent WHERE parent.id = s.parent_session_id))
     UNION ALL
     SELECT
         child.id,
@@ -153,7 +156,8 @@ WITH RECURSIVE planned(session_id, group_id, created_at, sort_order) AS (
         child.sort_order
     FROM sessions child
     JOIN planned parent ON parent.session_id = child.parent_session_id
-    WHERE child.origin = 'agent' AND child.id != child.parent_session_id
+    WHERE child.managed_by IS NULL
+      AND child.origin = 'agent' AND child.id != child.parent_session_id
 ),
 ranked AS (
     SELECT
@@ -184,7 +188,8 @@ SELECT
 WHERE EXISTS (
     SELECT 1
     FROM sessions s
-    WHERE s.park = 'parked'
+    WHERE s.managed_by IS NULL
+      AND s.park = 'parked'
       AND NOT EXISTS (
           SELECT 1 FROM session_placements p WHERE p.session_id = s.id
       )
@@ -197,7 +202,8 @@ WITH missing AS (
             AS group_id,
         s.created_at
     FROM sessions s
-    WHERE NOT EXISTS (
+    WHERE s.managed_by IS NULL
+      AND NOT EXISTS (
         SELECT 1 FROM session_placements p WHERE p.session_id = s.id
     )
 ),

@@ -369,6 +369,7 @@ pub(crate) async fn session_view(
         created_at: session.created_at.clone(),
         updated_at: branch.updated_at.clone(),
         parent_id: session.parent_branch_id.clone(),
+        parent_session_id: session.parent_session_id.clone(),
         created_by: session.created_by.clone(),
         origin: session.origin.clone(),
         class: session.class.clone(),

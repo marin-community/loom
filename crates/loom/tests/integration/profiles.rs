@@ -1091,6 +1091,67 @@ async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries(
     assert_eq!(launched["placement"]["space_name"], "Ops");
     assert_eq!(launched["placement"]["group_name"], "Inbox");
 
+    // Watch programs call Client.run with source=ops by default. Exercise that
+    // accepted producer contract rather than inventing a public `watch` source.
+    ts.client
+        .post(
+            "/api/profiles",
+            json!({
+                "name": "watch-ops",
+                "description": "visible watch-produced work",
+                "agent_kind": "claude",
+                "protocol": "acp",
+                "mode": "default",
+                "class": "automation",
+                "strict": true,
+                "env_clear": true,
+                "max_concurrent": 1,
+                "turn_budget": 20,
+                "prelude": "none"
+            }),
+        )
+        .await
+        .unwrap();
+    let watch_run = ts
+        .client
+        .post(
+            "/api/runs",
+            json!({
+                "profile": "watch-ops",
+                "source": "ops",
+                "channel": "watch-visible",
+                "idempotency_key": "watch:visible",
+                "session": {
+                    "cwd": ts.cwd(),
+                    "title": "Visible watch result",
+                    "goal": "ordinary watch-produced fleet work"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    let watch_session = ts
+        .client
+        .get(&format!(
+            "/api/sessions/{}",
+            watch_run["session_id"].as_str().unwrap()
+        ))
+        .await
+        .unwrap();
+    assert_eq!(watch_session["origin"], "ops");
+    assert_eq!(watch_session["placement"]["space_name"], "Ops");
+    assert_eq!(watch_session["placement"]["group_name"], "Inbox");
+    let visible_automation = ts
+        .client
+        .get("/api/sessions?automation=true")
+        .await
+        .unwrap();
+    assert!(visible_automation
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|session| session["id"] == watch_run["session_id"]));
+
     let chat = ts
         .client
         .get(&format!(

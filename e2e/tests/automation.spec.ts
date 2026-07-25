@@ -133,9 +133,7 @@ test.describe("automation unification", () => {
     await weaver.archiveSession(automation.id);
     await page.getByTestId("history-view").click();
     await expect(row).toBeVisible();
-    await expect(row.getByRole("link")).toContainText(
-      "Ops / Inbox / needs-operator",
-    );
+    await expect(row.getByRole("link")).toContainText("Inbox / needs-operator");
   });
 
   test("a failed run archives into visible History while Remove deletes it", async ({

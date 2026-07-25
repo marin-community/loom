@@ -1008,11 +1008,17 @@ pub async fn consume_pending_prompt(db: &Db, id: &str, promoted: &str) -> Result
 
 pub async fn delete(db: &Db, id: &str) -> Result<()> {
     let mut tx = weaver_core::db::begin_immediate(db).await?;
-    let had_placement: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM session_placements WHERE session_id = ?)")
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let had_placement: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM session_placements placement
+             JOIN sessions session ON session.id = placement.session_id
+             WHERE placement.session_id = ? AND session.managed_by IS NULL
+         )",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
     sqlx::query("DELETE FROM sessions WHERE id = ?")
         .bind(id)
         .execute(&mut *tx)
@@ -1069,10 +1075,31 @@ mod tests {
         insert(&db, &new_session("ordinary", &ordinary_branch, None))
             .await
             .unwrap();
+        let visible_revision: i64 =
+            sqlx::query_scalar("SELECT revision FROM session_layout_state WHERE id = 1")
+                .fetch_one(&db)
+                .await
+                .unwrap();
         let warm = insert(&db, &new_session("warm", &warm_branch, Some("ov-1")))
             .await
             .unwrap();
         assert_eq!(warm.managed_by.as_deref(), Some("ov-1"), "marker persists");
+        assert!(
+            crate::session_layout::placement(&db, "warm")
+                .await
+                .unwrap()
+                .is_none(),
+            "warm infrastructure has no canonical placement"
+        );
+        let after_warm_insert: i64 =
+            sqlx::query_scalar("SELECT revision FROM session_layout_state WHERE id = 1")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            after_warm_insert, visible_revision,
+            "warm insertion does not invalidate visible layout"
+        );
 
         let all: Vec<String> = list(&db).await.unwrap().into_iter().map(|s| s.id).collect();
         assert!(all.contains(&"ordinary".to_string()) && all.contains(&"warm".to_string()));
@@ -1110,6 +1137,16 @@ mod tests {
         assert!(
             active_managed_by(&db, "ov-other").await.unwrap().is_none(),
             "no warm session for a watch that owns none"
+        );
+        delete(&db, "warm").await.unwrap();
+        let after_warm_delete: i64 =
+            sqlx::query_scalar("SELECT revision FROM session_layout_state WHERE id = 1")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            after_warm_delete, visible_revision,
+            "warm removal does not invalidate visible layout"
         );
     }
 

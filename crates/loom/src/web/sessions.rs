@@ -59,13 +59,28 @@ async fn insert_session_row(
     policy: &session_mod::SessionLaunchPolicy,
 ) -> Result<Session, AppError> {
     let session = session_mod::insert_with_policy(&st.db, session, policy).await?;
-    super::session_layout::publish_invalidation(st).await;
+    if session.managed_by.is_none() {
+        super::session_layout::publish_invalidation(st).await;
+    }
     Ok(session)
 }
 
 async fn delete_session_row(st: &AppState, session_id: &str) -> Result<(), AppError> {
+    let had_visible_placement: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM session_placements placement
+             JOIN sessions session ON session.id = placement.session_id
+             WHERE placement.session_id = ? AND session.managed_by IS NULL
+         )",
+    )
+    .bind(session_id)
+    .fetch_one(&st.db)
+    .await?;
     session_mod::delete(&st.db, session_id).await?;
-    super::session_layout::publish_invalidation(st).await;
+    if had_visible_placement {
+        super::session_layout::publish_invalidation(st).await;
+    }
     Ok(())
 }
 pub(super) async fn list_agents(State(st): State<AppState>) -> ApiResult<Json<Value>> {
@@ -125,26 +140,31 @@ pub(super) async fn list_sessions(
     }
     collect_sessions(
         &st,
-        q.archived,
-        q.automation.unwrap_or(true),
-        q.managed,
-        q.q.as_deref(),
-        None,
-        None,
+        SessionCollectionFilter {
+            archived: q.archived,
+            archived_only: false,
+            automation: q.automation.unwrap_or(true),
+            managed: q.managed,
+            search: q.q.as_deref(),
+            status: None,
+            attention: None,
+        },
     )
     .await
     .map(Json)
 }
 
 /// Search is an explicit fleet read so non-browser clients can find the same
-/// qualified sessions as the workbench. `history=true` widens rather than
-/// replacing the actionable result set.
+/// qualified sessions as the workbench. `history=true` widens the actionable
+/// result set; `archived_only=true` is the disjoint History projection.
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct SearchSessionsQuery {
     #[serde(default)]
     q: String,
     #[serde(default)]
     history: bool,
+    #[serde(default)]
+    archived_only: bool,
     #[serde(default)]
     status: Option<String>,
     #[serde(default)]
@@ -157,12 +177,15 @@ pub(super) async fn search_sessions(
 ) -> ApiResult<Json<Vec<SessionView>>> {
     collect_sessions(
         &st,
-        q.history,
-        true,
-        false,
-        Some(&q.q),
-        q.status.as_deref(),
-        q.attention.as_deref(),
+        SessionCollectionFilter {
+            archived: q.history || q.archived_only,
+            archived_only: q.archived_only,
+            automation: true,
+            managed: false,
+            search: Some(&q.q),
+            status: q.status.as_deref(),
+            attention: q.attention.as_deref(),
+        },
     )
     .await
     .map(Json)
@@ -218,14 +241,19 @@ fn search_haystack(view: &SessionView) -> String {
     haystack.to_lowercase()
 }
 
-async fn collect_sessions(
-    st: &AppState,
+struct SessionCollectionFilter<'a> {
     archived: bool,
+    archived_only: bool,
     automation: bool,
     managed: bool,
-    search: Option<&str>,
-    status: Option<&str>,
-    attention: Option<&str>,
+    search: Option<&'a str>,
+    status: Option<&'a str>,
+    attention: Option<&'a str>,
+}
+
+async fn collect_sessions(
+    st: &AppState,
+    filter: SessionCollectionFilter<'_>,
 ) -> ApiResult<Vec<SessionView>> {
     // The fleet listing shows work, not infrastructure: engine-managed (warm)
     // sessions are excluded here, so neither the dashboard nor a watch
@@ -240,34 +268,38 @@ async fn collect_sessions(
         .filter_map(|o| o.warm_session_id)
         .collect();
     // A blank `q` is no filter; otherwise match case-insensitively.
-    let needle = search
+    let needle = filter
+        .search
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_lowercase);
-    let sessions = if managed {
+    let sessions = if filter.managed {
         session_mod::list(&st.db).await?
     } else {
         session_mod::list_visible(&st.db).await?
     };
     let mut views: Vec<SessionView> = Vec::with_capacity(sessions.len());
     for s in sessions {
-        if !managed && warm.contains(&s.id) {
+        if !filter.managed && warm.contains(&s.id) {
             continue;
         }
         // Archived sessions are torn down — hidden unless the caller opts in.
-        if !archived && s.status == "archived" {
+        if !filter.archived && s.status == "archived" {
+            continue;
+        }
+        if filter.archived_only && s.status != "archived" {
             continue;
         }
         // Explicit compatibility reads can still hide automation-class rows.
-        if !automation && s.class == "automation" {
+        if !filter.automation && s.class == "automation" {
             continue;
         }
         if let Some(branch) = branch_mod::get(&st.db, &s.branch_id).await? {
             let view = session_view(&st.db, &s, &branch).await?;
-            if status.is_some_and(|status| view.status != status) {
+            if filter.status.is_some_and(|status| view.status != status) {
                 continue;
             }
-            if attention.is_some_and(|attention| match attention {
+            if filter.attention.is_some_and(|attention| match attention {
                 "needs" => view_attention(&view) == "ok",
                 "ok" => view_attention(&view) != "ok",
                 exact => view_attention(&view) != exact,

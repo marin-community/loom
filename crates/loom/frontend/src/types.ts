@@ -90,6 +90,9 @@ export interface Session {
    *  threads by it; a child whose parent is absent (archived, or never tracked)
    *  renders at the top level. Stamped on the session row at launch. */
   parent_id: string | null;
+  /** Exact session id of the launcher. Prefer this for navigation; parent_id is
+   *  only a legacy branch-ancestry fallback for older rows. */
+  parent_session_id: string | null;
   /** The principal (username) that launched this session — attribution for the
    *  shared team board. null for engine-created warm watch sessions and rows
    *  predating the column. A tracking/UX field, not
@@ -175,7 +178,7 @@ export interface SessionSpace {
 }
 
 export interface SessionPlacementDefault {
-  selector_kind: 'origin' | 'profile' | 'watch';
+  selector_kind: 'origin' | 'profile';
   selector_value: string;
   group_id: string;
 }

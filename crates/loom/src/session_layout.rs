@@ -216,6 +216,12 @@ pub(crate) async fn insert_default_placement_tx(
     session: &NewSession,
     policy: &SessionLaunchPolicy,
 ) -> Result<()> {
+    // Warm watch sessions are engine infrastructure, not fleet membership.
+    // Keeping them out of canonical placement also keeps their lifecycle from
+    // advancing an otherwise unchanged visible layout revision.
+    if session.managed_by.is_some() {
+        return Ok(());
+    }
     let inherited = if session.origin == "agent" {
         if let Some(parent_id) = policy.parent_session_id.as_deref() {
             sqlx::query_scalar::<_, String>(
@@ -233,7 +239,6 @@ pub(crate) async fn insert_default_placement_tx(
     let mut group_id = inherited;
     if group_id.is_none() {
         let selectors = [
-            session.managed_by.as_deref().map(|value| ("watch", value)),
             Some(("profile", policy.profile.as_str())),
             Some(("origin", session.origin.as_str())),
             Some(("origin", "*")),
@@ -365,8 +370,11 @@ pub async fn update_space(
 
 async fn ordered_sessions(tx: &mut SqliteConnection, group_id: &str) -> sqlx::Result<Vec<String>> {
     sqlx::query_scalar(
-        "SELECT session_id FROM session_placements
-         WHERE group_id = ? ORDER BY rank, session_id",
+        "SELECT placement.session_id
+         FROM session_placements placement
+         JOIN sessions session ON session.id = placement.session_id
+         WHERE placement.group_id = ? AND session.managed_by IS NULL
+         ORDER BY placement.rank, placement.session_id",
     )
     .bind(group_id)
     .fetch_all(tx)
@@ -401,6 +409,19 @@ async fn move_container_contents(
     destination_group_id: Option<&str>,
     container_name: &str,
 ) -> MutationResult<()> {
+    // Repair any pre-release layout that placed warm infrastructure. Hidden
+    // rows must never make an apparently empty container require a destination
+    // or get moved by an organizer mutation.
+    sqlx::query(
+        "DELETE FROM session_placements
+         WHERE group_id IN (SELECT value FROM json_each(?))
+           AND session_id IN (
+               SELECT id FROM sessions WHERE managed_by IS NOT NULL
+           )",
+    )
+    .bind(serde_json::to_string(source_group_ids).expect("string ids serialize"))
+    .execute(&mut *tx)
+    .await?;
     let placement_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM session_placements
          WHERE group_id IN (SELECT value FROM json_each(?))",
@@ -1021,9 +1042,9 @@ pub async fn set_default(
     username: &str,
     req: &SetSessionPlacementDefaultReq,
 ) -> MutationResult<SessionLayoutView> {
-    if !matches!(req.selector_kind.as_str(), "origin" | "profile" | "watch") {
+    if !matches!(req.selector_kind.as_str(), "origin" | "profile") {
         return Err(MutationError::Invalid(
-            "selector kind must be 'origin', 'profile', or 'watch'".to_string(),
+            "selector kind must be 'origin' or 'profile'".to_string(),
         ));
     }
     let value = req.selector_value.trim();

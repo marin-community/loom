@@ -526,9 +526,9 @@ enum SessionLayoutCmd {
     Collapse { group: String },
     /// Expand one group for the current operator.
     Expand { group: String },
-    /// Set a configurable origin/profile/watch placement default.
+    /// Set a configurable origin/profile placement default.
     DefaultSet {
-        #[arg(value_parser = ["origin", "profile", "watch"])]
+        #[arg(value_parser = ["origin", "profile"])]
         kind: String,
         value: String,
         #[arg(long)]
@@ -538,7 +538,7 @@ enum SessionLayoutCmd {
     },
     /// Remove a configurable placement default.
     DefaultDelete {
-        #[arg(value_parser = ["origin", "profile", "watch"])]
+        #[arg(value_parser = ["origin", "profile"])]
         kind: String,
         value: String,
         #[arg(long)]
@@ -3885,6 +3885,15 @@ fn print_session(ws: &Value) {
         branch_str(ws, "branch"),
         branch_str(ws, "base_branch")
     );
+    let exact_parent = str_field(ws, "parent_session_id");
+    if !exact_parent.is_empty() {
+        println!("  parent:   session {exact_parent}");
+    } else {
+        let legacy_parent = str_field(ws, "parent_id");
+        if !legacy_parent.is_empty() {
+            println!("  parent:   branch {legacy_parent} (legacy)");
+        }
+    }
     println!("  work_dir: {}", str_field(ws, "work_dir"));
     println!("  session:  {}", str_field(ws, "term_session"));
     if let Some(repo) = ws.get("github_repo").and_then(Value::as_str) {

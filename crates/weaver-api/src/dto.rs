@@ -137,6 +137,11 @@ pub struct SessionView {
     /// Branch id of the session that **launched** this one — the parent in the
     /// dashboard's session tree — or `null` for a top-level session.
     pub parent_id: Option<String>,
+    /// Exact immutable session id of the launcher. New rows always stamp this;
+    /// `parent_id` remains as a legacy branch-ancestry fallback for rows created
+    /// before exact session lineage was recorded.
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
     /// The principal (username) that launched this session — attribution for the
     /// shared team board. `null` for engine-created warm watch sessions and rows
     /// that predate the column. A tracking/UX field,
