@@ -1079,6 +1079,17 @@ async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries(
         .await
         .unwrap();
     assert_eq!(sessions.as_array().unwrap().len(), 1);
+    let launched = ts
+        .client
+        .get(&format!(
+            "/api/sessions/{}",
+            first["session_id"].as_str().unwrap()
+        ))
+        .await
+        .unwrap();
+    assert_eq!(launched["origin"], "grafana");
+    assert_eq!(launched["placement"]["space_name"], "Ops");
+    assert_eq!(launched["placement"]["group_name"], "Inbox");
 
     let chat = ts
         .client

@@ -10,8 +10,8 @@ use sqlx::{FromRow, Row, SqliteConnection};
 use std::collections::HashSet;
 use weaver_api::{
     CreateSessionGroupReq, CreateSessionSpaceReq, DeleteSessionGroupReq, DeleteSessionSpaceReq,
-    MoveSessionsReq, ReorderSessionLayoutReq, SessionGroupView, SessionLayoutView,
-    SessionPlacementDefaultView, SessionPlacementView, SessionSpaceView,
+    MoveSessionsReq, ReorderSessionLayoutReq, RestoreSessionGroupsReq, SessionGroupView,
+    SessionLayoutView, SessionPlacementDefaultView, SessionPlacementView, SessionSpaceView,
     SetSessionPlacementDefaultReq, UpdateSessionGroupReq, UpdateSessionSpaceReq,
 };
 
@@ -187,7 +187,8 @@ pub async fn get_layout(db: &Db, username: &str) -> Result<SessionLayoutView> {
 pub async fn placement(db: &Db, session_id: &str) -> Result<Option<SessionPlacementView>> {
     let row = sqlx::query(
         "SELECT p.session_id, p.group_id, p.rank,
-                g.name AS group_name, s.id AS space_id, s.name AS space_name
+                g.name AS group_name, g.system_key AS group_system_key,
+                s.id AS space_id, s.name AS space_name
          FROM session_placements p
          JOIN session_groups g ON g.id = p.group_id
          JOIN session_spaces s ON s.id = g.space_id
@@ -200,6 +201,7 @@ pub async fn placement(db: &Db, session_id: &str) -> Result<Option<SessionPlacem
         session_id: row.get("session_id"),
         group_id: row.get("group_id"),
         group_name: row.get("group_name"),
+        group_system_key: row.get("group_system_key"),
         space_id: row.get("space_id"),
         space_name: row.get("space_name"),
         rank: row.get("rank"),
@@ -707,14 +709,17 @@ pub async fn reorder(
             }
         }
         "group" => {
-            let source_space: Option<String> =
-                sqlx::query_scalar("SELECT space_id FROM session_groups WHERE id = ?")
+            let group =
+                sqlx::query("SELECT space_id, name, system_key FROM session_groups WHERE id = ?")
                     .bind(&req.id)
                     .fetch_optional(&mut *tx)
                     .await?;
-            let Some(source_space) = source_space else {
+            let Some(group) = group else {
                 return Err(MutationError::Invalid("group not found".to_string()));
             };
+            let source_space: String = group.get("space_id");
+            let group_name: String = group.get("name");
+            let system_key: Option<String> = group.get("system_key");
             let destination_space = req
                 .destination_space_id
                 .as_deref()
@@ -731,6 +736,40 @@ pub async fn reorder(
                 ));
             }
             if source_space != destination_space {
+                if let Some(system_key) = system_key.as_deref() {
+                    let collision: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM session_groups
+                            WHERE space_id = ? AND system_key = ? AND id != ?
+                         )",
+                    )
+                    .bind(&destination_space)
+                    .bind(system_key)
+                    .bind(&req.id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    if collision {
+                        return Err(MutationError::Invalid(format!(
+                            "destination space already has a group with system key '{system_key}'"
+                        )));
+                    }
+                }
+                let name_collision: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM session_groups
+                        WHERE space_id = ? AND name = ? AND id != ?
+                     )",
+                )
+                .bind(&destination_space)
+                .bind(&group_name)
+                .bind(&req.id)
+                .fetch_one(&mut *tx)
+                .await?;
+                if name_collision {
+                    return Err(MutationError::Invalid(format!(
+                        "destination space already has a group named '{group_name}'"
+                    )));
+                }
                 let source_count: i64 =
                     sqlx::query_scalar("SELECT COUNT(*) FROM session_groups WHERE space_id = ?")
                         .bind(&source_space)
@@ -861,6 +900,90 @@ pub async fn move_sessions(
         }
         let order = ordered_sessions(&mut tx, &source).await?;
         write_session_order(&mut tx, &source, &order).await?;
+    }
+    bump_revision_tx(&mut tx).await?;
+    finish(db, tx, username).await
+}
+
+pub async fn restore_groups(
+    db: &Db,
+    username: &str,
+    req: &RestoreSessionGroupsReq,
+) -> MutationResult<SessionLayoutView> {
+    if req.groups.is_empty() {
+        return Err(MutationError::Invalid(
+            "at least one group snapshot is required".to_string(),
+        ));
+    }
+    let group_ids: HashSet<&str> = req
+        .groups
+        .iter()
+        .map(|group| group.group_id.as_str())
+        .collect();
+    if group_ids.len() != req.groups.len() {
+        return Err(MutationError::Invalid(
+            "group snapshot ids must be unique".to_string(),
+        ));
+    }
+    let desired_ids: HashSet<&str> = req
+        .groups
+        .iter()
+        .flat_map(|group| group.session_ids.iter().map(String::as_str))
+        .collect();
+    let desired_count: usize = req.groups.iter().map(|group| group.session_ids.len()).sum();
+    if desired_ids.len() != desired_count {
+        return Err(MutationError::Invalid(
+            "session ids must be unique across the restore".to_string(),
+        ));
+    }
+
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
+    check_revision(&mut tx, req.expected_revision).await?;
+    for group_id in &group_ids {
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM session_groups WHERE id = ?)")
+                .bind(group_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if !exists {
+            return Err(MutationError::Invalid(format!(
+                "restore group '{group_id}' not found"
+            )));
+        }
+    }
+
+    let mut current_ids = HashSet::new();
+    for group_id in &group_ids {
+        let ids = sqlx::query_scalar::<_, String>(
+            "SELECT p.session_id
+             FROM session_placements p
+             JOIN sessions s ON s.id = p.session_id
+             WHERE p.group_id = ? AND s.managed_by IS NULL",
+        )
+        .bind(group_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        current_ids.extend(ids);
+    }
+    let desired_owned: HashSet<String> = desired_ids.into_iter().map(str::to_string).collect();
+    if current_ids != desired_owned {
+        return Err(MutationError::Conflict);
+    }
+
+    for group in &req.groups {
+        for (rank, session_id) in group.session_ids.iter().enumerate() {
+            sqlx::query(
+                "UPDATE session_placements
+                 SET group_id = ?, rank = ?, updated_at = ?
+                 WHERE session_id = ?",
+            )
+            .bind(&group.group_id)
+            .bind(rank as i64)
+            .bind(now_iso())
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
     bump_revision_tx(&mut tx).await?;
     finish(db, tx, username).await

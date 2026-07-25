@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onActivated, ref, watch } from 'vue';
+import { computed, nextTick, onActivated, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import type { Session, SessionGroup, SessionLayout, SessionSpace } from '../types';
 import AutomationRunRow from '../components/AutomationRunRow.vue';
@@ -13,13 +13,19 @@ import {
   deleteSessionGroup,
   deleteSessionSpace,
   moveSessions,
+  post,
   reorderSessionLayout,
+  restoreSessionGroups,
   searchSessions,
   setSessionGroupPreference,
   updateSessionGroup,
   updateSessionSpace,
 } from '../api';
-import { unmatchedAutomationRuns, runNeedsIntervention } from '../lib/automationSessions';
+import {
+  isAutomationRunHistory,
+  unmatchedAutomationRuns,
+  runNeedsIntervention,
+} from '../lib/automationSessions';
 import { effectiveAttention } from '../lib/sessionState';
 import { useFleet } from '../lib/sessionsStore';
 import { beginSessionOpen, recordSessionListReturn } from '../lib/workbenchMetrics';
@@ -132,7 +138,12 @@ function matchesFilters(session: Session): boolean {
 }
 
 const baseSessions = computed(() => {
-  if (searchResults.value) return searchResults.value;
+  if (searchResults.value) {
+    const current = new Map(sessions.value.map((session) => [session.id, session]));
+    return searchResults.value
+      .map((result) => current.get(result.id))
+      .filter((session): session is Session => !!session);
+  }
   if (view.value === 'history') return historySessions.value;
   if (view.value === 'attention') return attentionSessions.value;
   if (view.value === 'all') return liveSessions.value;
@@ -143,6 +154,12 @@ const visibleSessions = computed(() => baseSessions.value.filter(matchesFilters)
 const visibleById = computed(
   () => new Map(visibleSessions.value.map((session) => [session.id, session])),
 );
+const sessionsByBranch = computed(
+  () => new Map(sessions.value.map((session) => [session.branch.id, session])),
+);
+function parentSessionOf(session: Session) {
+  return session.parent_id ? sessionsByBranch.value.get(session.parent_id) : undefined;
+}
 const groupedSessions = computed(() =>
   (activeSpace.value?.groups ?? []).map((group) => ({
     group,
@@ -172,6 +189,11 @@ const failedRuns = computed(() =>
     .filter(runNeedsIntervention)
     .sort((left, right) => right.updated_at.localeCompare(left.updated_at)),
 );
+const historicalRuns = computed(() =>
+  unmatchedAutomationRuns(runs.value, sessions.value)
+    .filter(isAutomationRunHistory)
+    .sort((left, right) => right.updated_at.localeCompare(left.updated_at)),
+);
 const showInterventions = computed(
   () =>
     view.value === 'attention' ||
@@ -197,15 +219,19 @@ watch(sessions, (next) => {
 function isSelected(id: string) {
   return selected.value.has(id);
 }
-function toggleSelected(id: string) {
+function setSelected(id: string, shouldSelect: boolean) {
   const next = new Set(selected.value);
-  if (next.has(id)) next.delete(id);
-  else next.add(id);
+  if (shouldSelect) next.add(id);
+  else next.delete(id);
   selected.value = next;
 }
 function clearSelection() {
   selected.value = new Set();
 }
+const visibleSelectedCount = computed(
+  () => [...selected.value].filter((id) => visibleById.value.has(id)).length,
+);
+const hiddenSelectedCount = computed(() => selected.value.size - visibleSelectedCount.value);
 
 const allGroups = computed(() =>
   (layout.value?.spaces ?? []).flatMap((space) =>
@@ -228,9 +254,8 @@ watch(
 );
 
 interface UndoGroup {
-  groupId: string;
-  sessionIds: string[];
-  beforeSessionId: string | null;
+  group_id: string;
+  session_ids: string[];
 }
 interface UndoMove {
   groups: UndoGroup[];
@@ -242,19 +267,13 @@ const error = ref('');
 
 function snapshotUndo(ids: string[], destinationGroupId: string): UndoMove {
   const moving = new Set(ids);
-  const groups: UndoGroup[] = [];
+  const affected = new Set([destinationGroupId]);
   for (const { group } of allGroups.value) {
-    const selectedInOrder = group.session_ids.filter((id) => moving.has(id));
-    for (const id of selectedInOrder) {
-      const index = group.session_ids.indexOf(id);
-      groups.push({
-        groupId: group.id,
-        sessionIds: [id],
-        beforeSessionId:
-          group.session_ids.slice(index + 1).find((candidate) => !moving.has(candidate)) ?? null,
-      });
-    }
+    if (group.session_ids.some((id) => moving.has(id))) affected.add(group.id);
   }
+  const groups = allGroups.value
+    .filter(({ group }) => affected.has(group.id))
+    .map(({ group }) => ({ group_id: group.id, session_ids: [...group.session_ids] }));
   const destination = allGroups.value.find(
     (candidate) => candidate.group.id === destinationGroupId,
   );
@@ -294,6 +313,14 @@ async function performMove(
     announcement.value = undo.message;
     clearSelection();
     await refresh();
+    await nextTick();
+    const movedRow =
+      ids.length === 1
+        ? document.querySelector<HTMLElement>(
+            `[data-session-id="${CSS.escape(ids[0])}"] [data-testid="move-session"]`,
+          )
+        : null;
+    (movedRow ?? undoButton.value)?.focus();
   } catch (cause) {
     if (!useConflictLayout(cause)) error.value = (cause as Error).message;
     await refresh();
@@ -303,17 +330,13 @@ async function performMove(
 async function restoreMove() {
   const undo = undoMove.value;
   if (!undo) return;
-  undoMove.value = null;
   try {
-    for (const group of undo.groups) {
-      if (!layout.value) break;
-      layout.value = await moveSessions({
-        session_ids: group.sessionIds,
-        destination_group_id: group.groupId,
-        before_session_id: group.beforeSessionId,
-        expected_revision: layout.value.revision,
-      });
-    }
+    if (!layout.value) return;
+    layout.value = await restoreSessionGroups({
+      groups: undo.groups,
+      expected_revision: layout.value.revision,
+    });
+    undoMove.value = null;
     announcement.value = 'Move undone';
     await refresh();
   } catch (cause) {
@@ -324,10 +347,12 @@ async function restoreMove() {
 
 const moveOpenId = ref('');
 const rowDestination = ref<Record<string, string>>({});
+const rowBefore = ref<Record<string, string>>({});
 function openMove(session: Session) {
   moveOpenId.value = moveOpenId.value === session.id ? '' : session.id;
   rowDestination.value[session.id] =
     rowDestination.value[session.id] || session.placement?.group_id || allGroups.value[0]?.group.id;
+  rowBefore.value[session.id] = '';
 }
 
 const draggingId = ref('');
@@ -372,6 +397,7 @@ const newGroupName = ref('');
 const spaceNames = ref<Record<string, string>>({});
 const groupNames = ref<Record<string, string>>({});
 const deleteDestinations = ref<Record<string, string>>({});
+const groupDestinationSpaces = ref<Record<string, string>>({});
 const pendingDelete = ref<
   { kind: 'space'; item: SessionSpace } | { kind: 'group'; item: SessionGroup } | null
 >(null);
@@ -384,7 +410,10 @@ watch(
     }
     for (const space of next.spaces) {
       spaceNames.value[space.id] ??= space.name;
-      for (const group of space.groups) groupNames.value[group.id] ??= group.name;
+      for (const group of space.groups) {
+        groupNames.value[group.id] ??= group.name;
+        groupDestinationSpaces.value[group.id] ??= space.id;
+      }
     }
   },
   { immediate: true },
@@ -495,6 +524,40 @@ function reorderGroup(group: SessionGroup, direction: -1 | 1) {
     }),
   );
 }
+function moveGroupToSpace(group: SessionGroup) {
+  if (!layout.value) return;
+  const destination = groupDestinationSpaces.value[group.id];
+  if (!destination || destination === group.space_id) return;
+  void mutateLayout(() =>
+    reorderSessionLayout({
+      kind: 'group',
+      id: group.id,
+      before_id: null,
+      destination_space_id: destination,
+      expected_revision: layout.value!.revision,
+    }),
+  );
+}
+
+const pendingBulkArchive = ref(false);
+const archiveResult = ref('');
+async function confirmBulkArchive() {
+  pendingBulkArchive.value = false;
+  error.value = '';
+  const ids = [...selected.value];
+  const results = await Promise.allSettled(ids.map((id) => post(`/sessions/${id}/archive`)));
+  const failed = ids.filter((_, index) => results[index].status === 'rejected');
+  const archived = ids.length - failed.length;
+  selected.value = new Set(failed);
+  announcement.value = `Archived ${archived} session${archived === 1 ? '' : 's'}${
+    failed.length ? `; ${failed.length} failed and remain selected` : ''
+  }`;
+  archiveResult.value = announcement.value;
+  if (failed.length) error.value = announcement.value;
+  await refresh();
+}
+
+const undoButton = ref<HTMLButtonElement>();
 
 function openForm() {
   router.push('/sessions/new');
@@ -647,7 +710,10 @@ function scrollSpaces(direction: number) {
           :class="view === 'history' ? 'bg-accent text-accent-fg' : 'text-muted hover:bg-subtle'"
           class="flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium"
         >
-          History <span class="font-mono text-2xs">{{ historySessions.length }}</span>
+          History
+          <span class="font-mono text-2xs">{{
+            historySessions.length + historicalRuns.length
+          }}</span>
         </router-link>
       </nav>
       <button
@@ -789,6 +855,23 @@ function scrollSpaces(direction: number) {
               ↓
             </button>
             <select
+              v-model="groupDestinationSpaces[group.id]"
+              :aria-label="`Destination space for ${group.name}`"
+              class="rounded bg-input px-2 py-1 text-xs"
+            >
+              <option v-for="space in layout.spaces" :key="space.id" :value="space.id">
+                {{ space.name }}
+              </option>
+            </select>
+            <button
+              class="btn-secondary px-2 py-1 text-xs"
+              type="button"
+              :disabled="groupDestinationSpaces[group.id] === group.space_id"
+              @click="moveGroupToSpace(group)"
+            >
+              Move group
+            </button>
+            <select
               v-model="deleteDestinations[group.id]"
               :aria-label="`Destination when deleting ${group.name}`"
               class="ml-auto rounded bg-input px-2 py-1 text-xs"
@@ -821,13 +904,26 @@ function scrollSpaces(direction: number) {
     >
       {{ error }}
     </div>
+    <div
+      v-if="archiveResult"
+      data-testid="archive-result"
+      role="status"
+      class="mb-3 rounded border border-line bg-surface px-3 py-2 text-sm text-muted"
+    >
+      {{ archiveResult }}
+    </div>
 
     <div
       v-if="selected.size"
       data-testid="selection-toolbar"
       class="sticky top-2 z-20 mb-3 flex flex-wrap items-center gap-2 rounded border border-accent bg-surface px-3 py-2 shadow"
     >
-      <strong class="text-xs">{{ selected.size }} selected</strong>
+      <strong class="text-xs">
+        {{ selected.size }} selected
+        <span v-if="hiddenSelectedCount" class="font-normal text-muted">
+          · {{ hiddenSelectedCount }} hidden by this view
+        </span>
+      </strong>
       <select
         v-model="bulkDestination"
         aria-label="Move selected to group"
@@ -843,6 +939,13 @@ function scrollSpaces(direction: number) {
         @click="performMove([...selected], bulkDestination)"
       >
         Move
+      </button>
+      <button
+        class="btn-secondary px-2 py-1 text-xs"
+        type="button"
+        @click="pendingBulkArchive = true"
+      >
+        Archive
       </button>
       <button class="btn-secondary px-2 py-1 text-xs" type="button" @click="clearSelection">
         Clear
@@ -915,15 +1018,19 @@ function scrollSpaces(direction: number) {
             :expanded="rowExpanded(session.id)"
             :move-open="moveOpenId === session.id"
             :destination="rowDestination[session.id]"
+            :before="rowBefore[session.id]"
             :all-groups="allGroups"
+            :all-sessions="sessions"
+            :parent-session="parentSessionOf(session)"
             :dragging="draggingId === session.id"
             :drop-before="dropGroupId === group.id && dropBeforeId === session.id"
             :clearing-tag="clearingTag"
-            @toggle-select="toggleSelected(session.id)"
+            @toggle-select="setSelected(session.id, $event)"
             @toggle-details="toggleRow(session.id)"
             @open-move="openMove(session)"
             @update-destination="rowDestination[session.id] = $event"
-            @move="performMove([session.id], $event)"
+            @update-before="rowBefore[session.id] = $event"
+            @move="performMove([session.id], $event.groupId, $event.beforeId || null)"
             @drag-start="dragStart(session.id, $event)"
             @drag-end="clearDrag"
             @drag-over="dragOver(group.id, session.id)"
@@ -938,7 +1045,11 @@ function scrollSpaces(direction: number) {
             data-testid="empty-group"
             class="px-3 py-5 text-center text-sm text-faint"
           >
-            Empty group — drop sessions here or use Move.
+            {{
+              group.session_ids.length
+                ? 'No sessions match the current view or filters.'
+                : 'Empty group — drop sessions here or use Move.'
+            }}
           </li>
         </ul>
       </section>
@@ -958,15 +1069,19 @@ function scrollSpaces(direction: number) {
         :expanded="rowExpanded(session.id)"
         :move-open="moveOpenId === session.id"
         :destination="rowDestination[session.id]"
+        :before="rowBefore[session.id]"
         :all-groups="allGroups"
+        :all-sessions="sessions"
+        :parent-session="parentSessionOf(session)"
         :dragging="draggingId === session.id"
         :drop-before="dropGroupId === session.placement?.group_id && dropBeforeId === session.id"
         :clearing-tag="clearingTag"
-        @toggle-select="toggleSelected(session.id)"
+        @toggle-select="setSelected(session.id, $event)"
         @toggle-details="toggleRow(session.id)"
         @open-move="openMove(session)"
         @update-destination="rowDestination[session.id] = $event"
-        @move="performMove([session.id], $event)"
+        @update-before="rowBefore[session.id] = $event"
+        @move="performMove([session.id], $event.groupId, $event.beforeId || null)"
         @drag-start="dragStart(session.id, $event)"
         @drag-end="clearDrag"
         @drag-over="dragOver(session.placement?.group_id ?? '', session.id)"
@@ -978,10 +1093,28 @@ function scrollSpaces(direction: number) {
       />
     </ul>
 
+    <section v-if="view === 'history' && historicalRuns.length" class="mt-4">
+      <h2 class="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">
+        Automation run history
+      </h2>
+      <ul data-testid="automation-run-history" class="rounded border border-line bg-surface">
+        <AutomationRunRow
+          v-for="run in historicalRuns"
+          :key="run.id"
+          :run="run"
+          :intervention="false"
+          history
+          @changed="refresh"
+          @error="error = $event"
+        />
+      </ul>
+    </section>
+
     <div
       v-if="
         (view !== 'space' || searchResults !== null) &&
         !smartSessions.length &&
+        !(view === 'history' && historicalRuns.length) &&
         !(showInterventions && failedRuns.length)
       "
       class="rounded border border-dashed border-line p-6 text-center"
@@ -1004,7 +1137,12 @@ function scrollSpaces(direction: number) {
       class="fixed bottom-10 right-4 z-40 flex items-center gap-3 rounded border border-line bg-surface px-3 py-2 text-sm shadow-lg"
     >
       <span>{{ undoMove.message }}</span>
-      <button type="button" class="font-semibold text-accent hover:underline" @click="restoreMove">
+      <button
+        ref="undoButton"
+        type="button"
+        class="font-semibold text-accent hover:underline"
+        @click="restoreMove"
+      >
         Undo
       </button>
       <button
@@ -1029,6 +1167,14 @@ function scrollSpaces(direction: number) {
       danger
       @confirm="confirmLayoutDelete"
       @cancel="pendingDelete = null"
+    />
+    <ConfirmDialog
+      :open="pendingBulkArchive"
+      title="Archive selected sessions?"
+      :description="`${selected.size} selected session${selected.size === 1 ? '' : 's'} will be torn down and kept in History. Failures remain selected so they can be retried.`"
+      confirm-label="Archive selected"
+      @confirm="confirmBulkArchive"
+      @cancel="pendingBulkArchive = false"
     />
   </div>
 </template>

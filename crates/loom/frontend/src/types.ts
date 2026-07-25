@@ -149,6 +149,7 @@ export interface SessionPlacement {
   session_id: string;
   group_id: string;
   group_name: string;
+  group_system_key: string | null;
   space_id: string;
   space_name: string;
   rank: number;
@@ -183,6 +184,11 @@ export interface SessionLayout {
   revision: number;
   spaces: SessionSpace[];
   defaults: SessionPlacementDefault[];
+}
+
+export interface SessionGroupOrder {
+  group_id: string;
+  session_ids: string[];
 }
 
 /** Durable automation launch reservation (`GET /api/runs`). A run normally

@@ -136,10 +136,11 @@ def test_profile_scoped_run_is_capability_gated_and_preserves_idempotency():
         StubClient().run("ops", "alert-1842", session_request)
 
 
-def session(id, status="running", tags=None, repo_root="/repo"):
+def session(id, status="running", tags=None, repo_root="/repo", session_class="interactive"):
     return {
         "id": id,
         "status": status,
+        "class": session_class,
         "branch": {"tags": tags or [], "repo_root": repo_root},
     }
 
@@ -226,7 +227,7 @@ def make_round(scope=None, sessions=None, capabilities=None, **config):
     client = StubClient(
         capabilities=capabilities or [],
         profile=config.get("profile", ""),
-        replies={"/sessions": sessions or []},
+        replies={"/sessions?automation=false": sessions or []},
     )
     return Round(
         config={"name": "t", "scope": scope or {}, **config},
@@ -244,6 +245,17 @@ def test_sessions_skips_terminal_and_counts_surveyed():
     )
     assert [s["id"] for s in rnd.sessions()] == ["live"]
     assert rnd.surveyed == 1
+
+
+def test_sessions_excludes_automation_class_as_a_recursion_guard():
+    rnd = make_round(
+        sessions=[
+            session("human"),
+            session("watch-child", session_class="automation"),
+        ]
+    )
+    assert [s["id"] for s in rnd.sessions()] == ["human"]
+    assert rnd.client.requests == [("GET", "/sessions?automation=false", None)]
 
 
 def test_scope_attention_filter_matches_exact_and_negated():
@@ -277,7 +289,9 @@ def branch_session(id, branch_id, **kw):
 
 
 def trigger_round(trigger, sessions, scope=None):
-    client = StubClient(capabilities=[], replies={"/sessions": sessions})
+    client = StubClient(
+        capabilities=[], replies={"/sessions?automation=false": sessions}
+    )
     return Round(
         config={"name": "t", "scope": scope or {}, "trigger": trigger}, client=client
     )
@@ -294,6 +308,12 @@ def test_triggered_sessions_scopes_to_the_named_session():
     fleet = [branch_session("a", "b1"), branch_session("b", "b1")]
     rnd = trigger_round({"event": "session.idle", "session": "b"}, fleet)
     assert [s["id"] for s in rnd.triggered_sessions()] == ["b"]
+
+
+def test_triggered_sessions_rejects_an_automation_target():
+    fleet = [branch_session("watch-child", "b1", session_class="automation")]
+    rnd = trigger_round({"event": "session.idle", "session": "watch-child"}, fleet)
+    assert rnd.triggered_sessions() == []
 
 
 def test_triggered_sessions_falls_back_to_full_survey_without_a_target():
@@ -379,7 +399,7 @@ def test_observe_is_implicit_and_writes_are_gated():
         with pytest.raises(CapabilityDenied):
             call()
     # The gate fires before any request leaves the process.
-    assert c.requests == [("GET", "/sessions", None)]
+    assert c.requests == [("GET", "/sessions?automation=false", None)]
 
 
 def test_capabilities_constant_matches_the_ladder():

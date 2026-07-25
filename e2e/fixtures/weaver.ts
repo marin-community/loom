@@ -324,6 +324,7 @@ function resetSessionLayout(dbPath: string) {
            ('origin', 'watch', 'group-ops-inbox'),
            ('origin', 'actions', 'group-ops-inbox'),
            ('origin', 'ops', 'group-ops-inbox'),
+           ('origin', 'grafana', 'group-ops-inbox'),
            ('origin', 'automation', 'group-ops-inbox');
          UPDATE session_layout_state SET revision = revision + 1 WHERE id = 1;
          COMMIT;`,

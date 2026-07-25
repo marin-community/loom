@@ -138,7 +138,7 @@ test.describe("automation unification", () => {
     );
   });
 
-  test("unmatched failed runs are typed, non-draggable Interventions with remediation", async ({
+  test("a failed run archives into visible History while Remove deletes it", async ({
     page,
     weaver,
   }) => {
@@ -156,11 +156,27 @@ test.describe("automation unification", () => {
 
     await intervention.hover();
     await intervention.getByTestId("run-actions").click();
-    await intervention.getByTestId("run-action-remove").click();
+    await intervention.getByTestId("run-action-archive").click();
     const dialog = page.getByTestId("confirm-dialog");
-    await expect(dialog).toContainText("Remove launch attempt?");
+    await expect(dialog).toContainText("Archive launch attempt?");
     await dialog.getByTestId("confirm-dialog-confirm").click();
     await expect(intervention).toHaveCount(0);
+
+    await page.getByTestId("history-view").click();
+    const history = page.getByTestId("automation-run-history");
+    const archived = history.getByTestId("automation-run-only");
+    await expect(archived).toContainText("Run cancelled");
+    await archived.hover();
+    await archived.getByTestId("run-actions").click();
+    await archived.getByTestId("run-action-remove").click();
+    await expect(page.getByTestId("confirm-dialog")).toContainText(
+      "Remove launch attempt?",
+    );
+    await page
+      .getByTestId("confirm-dialog")
+      .getByTestId("confirm-dialog-confirm")
+      .click();
+    await expect(archived).toHaveCount(0);
   });
 
   test("watch authoring remains available after the Automation pane is retired", async ({

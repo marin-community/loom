@@ -126,15 +126,30 @@ export function effectiveAttention(s: Session): EffectiveAttention {
     note: '',
     stale: false,
   };
+  if (s.status === 'archived') return calm;
   const tags = loudTags(s);
-  if (tags.length === 0) return calm;
-
+  if (tags.length) {
+    const live = tags.filter((t) => !tagStale(t, s.last_activity_at));
+    const pool = live.length ? live : tags;
+    const stale = live.length === 0;
+    const top = [...pool].sort(louder)[0];
+    if (top.value === 'blocked') return { ...markOf(s, top), stale };
+  }
+  if (s.status === 'error' || s.status === 'orphaned') {
+    return {
+      level: 'attention',
+      raisedBy: 'watch',
+      by: 'loom',
+      key: 'lifecycle',
+      note: s.status === 'error' ? 'Session failed' : 'Session is detached',
+      stale: false,
+    };
+  }
+  if (!tags.length) return calm;
   const live = tags.filter((t) => !tagStale(t, s.last_activity_at));
   const pool = live.length ? live : tags;
   const stale = live.length === 0;
-  const top = [...pool].sort(louder)[0];
-
-  return { ...markOf(s, top), stale };
+  return { ...markOf(s, [...pool].sort(louder)[0]), stale };
 }
 
 // One loud tag surfaced as an individually-dismissable chip. Unlike
@@ -228,8 +243,8 @@ export interface ConvState {
 export function conversationState(s: Session): ConvState {
   // Lifecycle first for the unambiguous mechanical states.
   if (s.status === 'archived') return { glyph: '◦', label: 'Archived', tone: 'muted' };
-  if (s.status === 'orphaned') return { glyph: '◦', label: 'Orphaned — detached', tone: 'muted' };
-  if (s.status === 'error') return { glyph: '◦', label: 'Error', tone: 'muted' };
+  if (s.status === 'orphaned') return { glyph: '●', label: 'Orphaned — detached', tone: 'attn' };
+  if (s.status === 'error') return { glyph: '●', label: 'Error', tone: 'attn' };
 
   // Then the resolved attention signal (the loudest live loud tag — the agent's
   // own, or an outside mark).

@@ -73,6 +73,7 @@ WITH RECURSIVE effective_space(session_id, space_id) AS (
             WHEN 'watch' THEN 'space-ops'
             WHEN 'actions' THEN 'space-ops'
             WHEN 'ops' THEN 'space-ops'
+            WHEN 'grafana' THEN 'space-ops'
             WHEN 'automation' THEN 'space-ops'
             ELSE 'space-user'
         END
@@ -114,6 +115,7 @@ WITH RECURSIVE planned(session_id, group_id, created_at, sort_order) AS (
                     WHEN 'watch' THEN 'group-ops-later'
                     WHEN 'actions' THEN 'group-ops-later'
                     WHEN 'ops' THEN 'group-ops-later'
+                    WHEN 'grafana' THEN 'group-ops-later'
                     WHEN 'automation' THEN 'group-ops-later'
                     ELSE 'group-user-later'
                 END
@@ -123,6 +125,7 @@ WITH RECURSIVE planned(session_id, group_id, created_at, sort_order) AS (
                     WHEN 'watch' THEN 'group-ops-inbox'
                     WHEN 'actions' THEN 'group-ops-inbox'
                     WHEN 'ops' THEN 'group-ops-inbox'
+                    WHEN 'grafana' THEN 'group-ops-inbox'
                     WHEN 'automation' THEN 'group-ops-inbox'
                     ELSE 'group-user-inbox'
                 END
@@ -224,4 +227,5 @@ VALUES
     ('origin', 'watch', 'group-ops-inbox'),
     ('origin', 'actions', 'group-ops-inbox'),
     ('origin', 'ops', 'group-ops-inbox'),
+    ('origin', 'grafana', 'group-ops-inbox'),
     ('origin', 'automation', 'group-ops-inbox');

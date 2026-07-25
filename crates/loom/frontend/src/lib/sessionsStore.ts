@@ -21,30 +21,39 @@ const layout = ref<SessionLayout | null>(null);
 const online = ref(true);
 
 let inflight: Promise<void> | null = null;
+let refreshRequested = false;
 
 // Pull the whole inventory, archived and automation-class sessions included —
 // the superset the Spaces, Attention, and explicit History views need. Concurrent
-// callers coalesce onto the one in-flight request.
+// callers coalesce onto one in-flight loop. A request arriving while a
+// snapshot is loading marks the loop dirty and guarantees one trailing fetch.
 async function refresh(): Promise<void> {
+  refreshRequested = true;
   if (inflight) return inflight;
   inflight = (async () => {
-    try {
-      const [nextSessions, nextRuns, nextLayout] = await Promise.all([
-        listSessions({ archived: true }),
-        listRuns(),
-        getSessionLayout(),
-      ]);
-      sessions.value = nextSessions;
-      runs.value = nextRuns;
-      layout.value = nextLayout;
-      online.value = true;
-    } catch {
-      // Keep the last good snapshot; the status bar's offline dot says why.
-      online.value = false;
-    } finally {
-      inflight = null;
+    while (refreshRequested) {
+      refreshRequested = false;
+      try {
+        const [nextSessions, nextRuns, nextLayout] = await Promise.all([
+          listSessions({ archived: true }),
+          listRuns(),
+          getSessionLayout(),
+        ]);
+        sessions.value = nextSessions;
+        runs.value = nextRuns;
+        layout.value = nextLayout;
+        online.value = true;
+      } catch {
+        // Keep the last good snapshot; the status bar's offline dot says why.
+        online.value = false;
+      }
     }
-  })();
+  })().finally(() => {
+    inflight = null;
+    // Cover the promise-resolution microtask gap between the loop's final
+    // condition check and this cleanup.
+    if (refreshRequested) void refresh();
+  });
   return inflight;
 }
 

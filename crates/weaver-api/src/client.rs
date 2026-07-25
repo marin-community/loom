@@ -20,10 +20,10 @@ use crate::dto::{
     IssueActionsReq, IssueActionsResult, IssueView, McpRegistryView, MoveSessionsReq,
     NewCommentBody, NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq, ProfileProbeView,
     ProfileReq, ProfileView, PutProfileEnvReq, ReadinessView, ReorderSessionLayoutReq,
-    ResolveLaunchReq, ResolvedLaunchView, RunReq, RunView, RunWatchReq, ScratchLimitsView, SendReq,
-    SessionGroupPreferenceReq, SessionLayoutView, SessionView, SetSessionPlacementDefaultReq,
-    SetTagsReq, SettingsEnvelope, TagReq, ThreadDto, TokenView, UpdateSessionGroupReq,
-    UpdateSessionSpaceReq, WatchView,
+    ResolveLaunchReq, ResolvedLaunchView, RestoreSessionGroupsReq, RunReq, RunView, RunWatchReq,
+    ScratchLimitsView, SendReq, SessionGroupPreferenceReq, SessionLayoutView, SessionView,
+    SetSessionPlacementDefaultReq, SetTagsReq, SettingsEnvelope, TagReq, ThreadDto, TokenView,
+    UpdateSessionGroupReq, UpdateSessionSpaceReq, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -251,6 +251,14 @@ impl Client {
 
     pub async fn move_sessions(&self, req: &MoveSessionsReq) -> Result<SessionLayoutView> {
         self.send_typed(Method::POST, "/api/session-layout/moves", Some(req))
+            .await
+    }
+
+    pub async fn restore_session_groups(
+        &self,
+        req: &RestoreSessionGroupsReq,
+    ) -> Result<SessionLayoutView> {
+        self.send_typed(Method::POST, "/api/session-layout/restores", Some(req))
             .await
     }
 

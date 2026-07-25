@@ -348,6 +348,10 @@ pub(crate) async fn session_view(
         )
     };
     let placement = crate::session_layout::placement(db, &session.id).await?;
+    let legacy_park = placement.as_ref().and_then(|placement| {
+        (placement.group_system_key.as_deref() == Some("later")).then_some("parked".to_string())
+    });
+    let legacy_sort_order = placement.as_ref().map(|placement| placement.rank as f64);
     Ok(SessionView {
         id: session.id.clone(),
         status: session.status.clone(),
@@ -370,8 +374,8 @@ pub(crate) async fn session_view(
         class: session.class.clone(),
         turn_count: session.turn_count,
         tracking_issue: session.tracking_issue_id,
-        park: session.park.clone(),
-        sort_order: session.sort_order,
+        park: legacy_park,
+        sort_order: legacy_sort_order,
         protocol: session.protocol.clone(),
         acp_session_id: session.acp_session_id.clone(),
         current_mode: session.current_mode.clone(),
@@ -629,6 +633,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/session-layout/reorder", post(reorder_session_layout))
         .route("/session-layout/moves", post(move_session_layout))
+        .route("/session-layout/restores", post(restore_session_layout))
         .route(
             "/session-layout/defaults",
             axum::routing::put(set_session_placement_default),

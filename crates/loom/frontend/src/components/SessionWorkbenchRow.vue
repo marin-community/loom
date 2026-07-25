@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { PropType } from 'vue';
+import { computed, type PropType } from 'vue';
 import type { Session, SessionGroup, SessionSpace } from '../types';
 import AgentUsage from './AgentUsage.vue';
 import GithubStatus from './GithubStatus.vue';
@@ -30,18 +30,22 @@ const props = defineProps({
   expanded: { type: Boolean, default: false },
   moveOpen: { type: Boolean, default: false },
   destination: { type: String, default: '' },
+  before: { type: String, default: '' },
   allGroups: { type: Array as PropType<GroupOption[]>, default: () => [] },
+  allSessions: { type: Array as PropType<Session[]>, default: () => [] },
+  parentSession: { type: Object as PropType<Session | undefined>, default: undefined },
   dragging: { type: Boolean, default: false },
   dropBefore: { type: Boolean, default: false },
   clearingTag: { type: String, default: '' },
 });
 
 const emit = defineEmits<{
-  toggleSelect: [];
+  toggleSelect: [selected: boolean];
   toggleDetails: [];
   openMove: [];
   updateDestination: [groupId: string];
-  move: [groupId: string];
+  updateBefore: [sessionId: string];
+  move: [position: { groupId: string; beforeId: string }];
   dragStart: [event: DragEvent];
   dragEnd: [];
   dragOver: [];
@@ -57,6 +61,18 @@ function title() {
   if (!props.qualified || !props.session.placement) return task;
   return `${props.session.placement.space_name} / ${props.session.placement.group_name} / ${task}`;
 }
+
+const positionOptions = computed(() => {
+  const group = props.allGroups.find((entry) => entry.group.id === props.destination)?.group;
+  if (!group) return [];
+  const byId = new Map(props.allSessions.map((session) => [session.id, session]));
+  return group.session_ids
+    .filter((id) => id !== props.session.id && byId.get(id)?.status !== 'archived')
+    .map((id) => ({
+      id,
+      label: byId.get(id)?.branch.title || byId.get(id)?.branch.name || id,
+    }));
+});
 </script>
 
 <template>
@@ -90,8 +106,7 @@ function title() {
       :checked="selected"
       :aria-label="`Select ${session.branch.title || session.branch.name}`"
       class="relative z-10 mt-1"
-      @change="emit('toggleSelect')"
-      @click.stop
+      @click.stop="emit('toggleSelect', ($event.target as HTMLInputElement).checked)"
     />
 
     <span
@@ -123,6 +138,13 @@ function title() {
           :title="`profile: ${session.profile}`"
         >
           {{ session.profile }}
+        </span>
+        <span
+          v-if="['created', 'done', 'error', 'orphaned'].includes(session.status)"
+          class="meta-chip shrink-0"
+          :aria-label="`Lifecycle: ${session.status}`"
+        >
+          {{ session.status }}
         </span>
       </div>
     </div>
@@ -166,10 +188,26 @@ function title() {
         <select
           :value="destination"
           class="ml-1 rounded border border-line bg-surface px-2 py-1 text-xs"
-          @change="emit('updateDestination', ($event.target as HTMLSelectElement).value)"
+          @change="
+            emit('updateDestination', ($event.target as HTMLSelectElement).value);
+            emit('updateBefore', '');
+          "
         >
           <option v-for="entry in allGroups" :key="entry.group.id" :value="entry.group.id">
             {{ entry.label }}
+          </option>
+        </select>
+      </label>
+      <label class="text-xs text-muted">
+        Position
+        <select
+          :value="before"
+          class="ml-1 max-w-64 rounded border border-line bg-surface px-2 py-1 text-xs"
+          @change="emit('updateBefore', ($event.target as HTMLSelectElement).value)"
+        >
+          <option value="">At end</option>
+          <option v-for="option in positionOptions" :key="option.id" :value="option.id">
+            Before {{ option.label }}
           </option>
         </select>
       </label>
@@ -177,7 +215,7 @@ function title() {
         type="button"
         class="btn-primary px-2 py-1 text-xs"
         :disabled="!destination"
-        @click="emit('move', destination)"
+        @click="emit('move', { groupId: destination, beforeId: before })"
       >
         Move
       </button>
@@ -215,7 +253,13 @@ function title() {
         <span>{{ session.branch.repo_root }}</span>
         <span>{{ session.branch.branch }}</span>
         <span v-if="session.created_by">launched by {{ session.created_by }}</span>
-        <span v-if="session.parent_id">delegated from {{ session.parent_id }}</span>
+        <router-link
+          v-if="parentSession"
+          :to="`/s/${parentSession.id}`"
+          class="relative z-10 text-accent hover:underline"
+        >
+          delegated from {{ parentSession.branch.title || parentSession.branch.name }}
+        </router-link>
       </div>
       <GithubStatus v-if="session.branch.github" :gh="session.branch.github" compact class="mt-1" />
     </div>

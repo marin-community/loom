@@ -160,10 +160,11 @@ pub struct SessionView {
     /// launch tracked nothing. Stored on the session row, so every read path
     /// carries it.
     pub tracking_issue: Option<i64>,
-    /// Legacy compatibility field. Explicit parked rows migrate into a normal
-    /// `Later` placement.
+    /// Legacy compatibility read derived from canonical placement. `"parked"`
+    /// means the session currently belongs to a system `Later` group; all
+    /// other placements read as `null`.
     pub park: Option<String>,
-    /// Legacy compatibility field. New clients use placement rank.
+    /// Legacy compatibility read derived from canonical placement rank.
     pub sort_order: Option<f64>,
     /// Execution backend: `"terminal"` (a PTY + interactive TUI) or `"acp"` (a
     /// headless adapter driven over the Agent Client Protocol). Terminal-backend
@@ -220,6 +221,7 @@ pub struct SessionPlacementView {
     pub session_id: String,
     pub group_id: String,
     pub group_name: String,
+    pub group_system_key: Option<String>,
     pub space_id: String,
     pub space_name: String,
     pub rank: i64,
@@ -1562,8 +1564,9 @@ pub struct CreateReq {
     pub mode: Option<String>,
     /// Session class override: `"interactive"` or `"automation"` (anything else
     /// is rejected). Blank/absent derives from the launch origin
-    /// (watch/actions/ops → automation, else interactive). Automation-class
-    /// sessions are hidden from the default fleet listing.
+    /// (watch/actions/ops/grafana → automation, else interactive).
+    /// Automation-class sessions remain in the default human fleet; survey
+    /// callers can explicitly request `automation=false`.
     #[serde(default)]
     pub class: Option<String>,
     /// Named launch profile. Blank/absent selects `default`.
@@ -1622,11 +1625,12 @@ pub struct PatchSessionReq {
     /// The agent's current-state message — the prose shown beside the level.
     #[serde(default)]
     pub description: Option<String>,
-    /// Legacy compatibility write. Absent leaves it unchanged; `"auto"` maps to
-    /// stored `NULL`.
+    /// Retained only to return an explicit compatibility error. Layout clients
+    /// must use the revisioned session-layout move API.
     #[serde(default)]
     pub park: Option<String>,
-    /// Legacy compatibility write. Absent leaves it unchanged.
+    /// Retained only to return an explicit compatibility error. Layout clients
+    /// must use the revisioned session-layout move API.
     #[serde(default)]
     pub sort_order: Option<f64>,
 }
@@ -1694,6 +1698,24 @@ pub struct MoveSessionsReq {
     pub destination_group_id: String,
     #[serde(default)]
     pub before_session_id: Option<String>,
+    pub expected_revision: i64,
+}
+
+/// One complete group order in an atomic layout restore.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionGroupOrderReq {
+    pub group_id: String,
+    pub session_ids: Vec<String>,
+}
+
+/// Atomically restore the complete membership and order of a set of groups.
+///
+/// The supplied groups must cover exactly the sessions currently placed in
+/// those groups. This makes an undo fail as a stale whole instead of partially
+/// overwriting an intervening placement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestoreSessionGroupsReq {
+    pub groups: Vec<SessionGroupOrderReq>,
     pub expected_revision: i64,
 }
 

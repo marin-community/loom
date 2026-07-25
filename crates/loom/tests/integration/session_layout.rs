@@ -1,3 +1,4 @@
+use futures_util::StreamExt;
 use std::process::Command;
 use std::time::Duration;
 
@@ -5,11 +6,20 @@ use serde_json::json;
 use serial_test::serial;
 use weaver_api::{
     CreateSessionGroupReq, CreateSessionSpaceReq, DeleteSessionGroupReq, DeleteSessionSpaceReq,
-    ReorderSessionLayoutReq, SetSessionPlacementDefaultReq, UpdateSessionGroupReq,
-    UpdateSessionSpaceReq,
+    MoveSessionsReq, ReorderSessionLayoutReq, RestoreSessionGroupsReq, SessionGroupOrderReq,
+    SetSessionPlacementDefaultReq, UpdateSessionGroupReq, UpdateSessionSpaceReq,
 };
 
 use crate::fixtures::TestServer;
+
+fn layout_cli(ts: &TestServer, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(["session", "layout"])
+        .args(args)
+        .env("WEAVER_API", ts.addr.to_string())
+        .output()
+        .expect("running loom session layout command")
+}
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -388,4 +398,446 @@ async fn layout_crud_moves_conflicts_search_events_and_cli_share_one_contract() 
             .await
             .unwrap();
     }
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn canonical_defaults_legacy_reads_and_cross_space_collisions_are_consistent() {
+    let ts = TestServer::start().await;
+    let initial = ts.client.get_session_layout().await.unwrap();
+    let with_default = ts
+        .client
+        .set_session_placement_default(&SetSessionPlacementDefaultReq {
+            selector_kind: "profile".to_string(),
+            selector_value: "default".to_string(),
+            group_id: "group-github-inbox".to_string(),
+            expected_revision: initial.revision,
+        })
+        .await
+        .unwrap();
+    let created = ts
+        .client
+        .post(
+            "/api/sessions",
+            json!({
+                "goal": "profile placement wins while another space is visible",
+                "cwd": ts.cwd(),
+                "agent": "shell"
+            }),
+        )
+        .await
+        .unwrap();
+    let session_id = created["id"].as_str().unwrap();
+    assert_eq!(created["placement"]["group_id"], "group-github-inbox");
+
+    let later = ts
+        .client
+        .create_session_group(&CreateSessionGroupReq {
+            space_id: "space-github".to_string(),
+            name: "Later".to_string(),
+            expected_revision: with_default.revision + 1,
+        })
+        .await
+        .unwrap();
+    let later_id = later
+        .spaces
+        .iter()
+        .flat_map(|space| &space.groups)
+        .find(|group| group.name == "Later")
+        .unwrap()
+        .id
+        .clone();
+    sqlx::query("UPDATE session_groups SET system_key = 'later' WHERE id = ?")
+        .bind(&later_id)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    let moved = ts
+        .client
+        .move_sessions(&MoveSessionsReq {
+            session_ids: vec![session_id.to_string()],
+            destination_group_id: later_id.clone(),
+            before_session_id: None,
+            expected_revision: later.revision,
+        })
+        .await
+        .unwrap();
+    let legacy_read = ts
+        .client
+        .get(&format!("/api/sessions/{session_id}"))
+        .await
+        .unwrap();
+    assert_eq!(legacy_read["park"], "parked");
+    assert_eq!(legacy_read["sort_order"], 0.0);
+
+    let rejected = reqwest::Client::new()
+        .patch(format!("http://{}/api/sessions/{session_id}", ts.addr))
+        .json(&json!({
+            "title": "must not partially apply",
+            "park": "active",
+            "sort_order": 42
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), reqwest::StatusCode::BAD_REQUEST);
+    let after_rejected = ts
+        .client
+        .get(&format!("/api/sessions/{session_id}"))
+        .await
+        .unwrap();
+    assert_eq!(after_rejected["placement"]["group_id"], later_id);
+    assert_ne!(
+        after_rejected["branch"]["title"],
+        "must not partially apply"
+    );
+    ts.client
+        .patch(
+            &format!("/api/sessions/{session_id}"),
+            json!({ "status": "error" }),
+        )
+        .await
+        .unwrap();
+    let urgent = ts
+        .client
+        .get("/api/sessions/search?q=&attention=needs")
+        .await
+        .unwrap();
+    assert!(urgent
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|session| session["id"] == session_id));
+    ts.client
+        .patch(
+            &format!("/api/sessions/{session_id}"),
+            json!({ "status": "running" }),
+        )
+        .await
+        .unwrap();
+
+    let user_review = ts
+        .client
+        .create_session_group(&CreateSessionGroupReq {
+            space_id: "space-user".to_string(),
+            name: "Review".to_string(),
+            expected_revision: moved.revision,
+        })
+        .await
+        .unwrap();
+    let user_review_id = user_review
+        .spaces
+        .iter()
+        .flat_map(|space| &space.groups)
+        .find(|group| group.space_id == "space-user" && group.name == "Review")
+        .unwrap()
+        .id
+        .clone();
+    let github_review = ts
+        .client
+        .create_session_group(&CreateSessionGroupReq {
+            space_id: "space-github".to_string(),
+            name: "Review".to_string(),
+            expected_revision: user_review.revision,
+        })
+        .await
+        .unwrap();
+
+    let name_collision = reqwest::Client::new()
+        .post(format!("http://{}/api/session-layout/reorder", ts.addr))
+        .json(&json!({
+            "kind": "group",
+            "id": user_review_id,
+            "destination_space_id": "space-github",
+            "expected_revision": github_review.revision
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(name_collision.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(name_collision
+        .text()
+        .await
+        .unwrap()
+        .contains("already has a group named 'Review'"));
+
+    let system_collision = reqwest::Client::new()
+        .post(format!("http://{}/api/session-layout/reorder", ts.addr))
+        .json(&json!({
+            "kind": "group",
+            "id": "group-user-inbox",
+            "destination_space_id": "space-github",
+            "expected_revision": github_review.revision
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(system_collision.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(system_collision
+        .text()
+        .await
+        .unwrap()
+        .contains("system key 'inbox'"));
+
+    let renamed = ts
+        .client
+        .update_session_group(
+            &user_review_id,
+            &UpdateSessionGroupReq {
+                name: "Unique review".to_string(),
+                expected_revision: github_review.revision,
+            },
+        )
+        .await
+        .unwrap();
+    let crossed = ts
+        .client
+        .reorder_session_layout(&ReorderSessionLayoutReq {
+            kind: "group".to_string(),
+            id: user_review_id.clone(),
+            before_id: None,
+            destination_space_id: Some("space-github".to_string()),
+            expected_revision: renamed.revision,
+        })
+        .await
+        .unwrap();
+    assert!(crossed
+        .spaces
+        .iter()
+        .find(|space| space.id == "space-github")
+        .unwrap()
+        .groups
+        .iter()
+        .any(|group| group.id == user_review_id));
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn atomic_group_restore_rolls_back_an_injected_mid_write_failure() {
+    let ts = TestServer::start().await;
+    let mut ids = Vec::new();
+    for name in ["restore-a", "restore-b"] {
+        let created = ts
+            .client
+            .post(
+                "/api/sessions",
+                json!({ "goal": name, "cwd": ts.cwd(), "agent": "shell", "name": name }),
+            )
+            .await
+            .unwrap();
+        ids.push(created["id"].as_str().unwrap().to_string());
+    }
+    let layout = ts.client.get_session_layout().await.unwrap();
+    let moved = ts
+        .client
+        .move_sessions(&MoveSessionsReq {
+            session_ids: vec![ids[0].clone()],
+            destination_group_id: "group-user-inbox".to_string(),
+            before_session_id: None,
+            expected_revision: layout.revision,
+        })
+        .await
+        .unwrap();
+    let current_order = moved
+        .spaces
+        .iter()
+        .find(|space| space.id == "space-user")
+        .unwrap()
+        .groups
+        .iter()
+        .find(|group| group.id == "group-user-inbox")
+        .unwrap()
+        .session_ids
+        .clone();
+    assert_eq!(current_order, vec![ids[1].clone(), ids[0].clone()]);
+
+    sqlx::query(&format!(
+        "CREATE TRIGGER fail_restore_b
+         BEFORE UPDATE ON session_placements
+         WHEN NEW.session_id = '{}'
+         BEGIN SELECT RAISE(FAIL, 'injected restore failure'); END",
+        ids[1].replace('\'', "''")
+    ))
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+    let failed = reqwest::Client::new()
+        .post(format!("http://{}/api/session-layout/restores", ts.addr))
+        .json(&RestoreSessionGroupsReq {
+            groups: vec![SessionGroupOrderReq {
+                group_id: "group-user-inbox".to_string(),
+                session_ids: ids.clone(),
+            }],
+            expected_revision: moved.revision,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(failed.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    let after = ts.client.get_session_layout().await.unwrap();
+    let after_order = &after
+        .spaces
+        .iter()
+        .find(|space| space.id == "space-user")
+        .unwrap()
+        .groups
+        .iter()
+        .find(|group| group.id == "group-user-inbox")
+        .unwrap()
+        .session_ids;
+    assert_eq!(after_order, &current_order, "no partial restore committed");
+    assert_eq!(after.revision, moved.revision);
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authenticated_http_sse_invalidates_on_session_membership_changes() {
+    let ts = TestServer::start().await;
+    let (token, _) = loom::auth::create_token(&ts.state.db, "rjpower", "sse-test", None)
+        .await
+        .unwrap();
+    ts.client
+        .patch("/api/settings", json!({ "auth.trust_loopback": false }))
+        .await
+        .unwrap();
+    let http = reqwest::Client::new();
+    let response = http
+        .get(format!("http://{}/api/session-layout/events", ts.addr))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let mut stream = response.bytes_stream();
+
+    let created: serde_json::Value = http
+        .post(format!("http://{}/api/sessions", ts.addr))
+        .bearer_auth(&token)
+        .json(&json!({ "goal": "SSE membership", "cwd": ts.cwd(), "agent": "shell" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let created_event = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut body = String::new();
+        while !body.contains("session_layout") {
+            body.push_str(&String::from_utf8_lossy(
+                &stream.next().await.unwrap().unwrap(),
+            ));
+        }
+        body
+    })
+    .await
+    .expect("session insertion should invalidate the HTTP SSE stream");
+    assert!(created_event.contains("\"revision\""));
+
+    let deleted = http
+        .delete(format!(
+            "http://{}/api/sessions/{}",
+            ts.addr,
+            created["id"].as_str().unwrap()
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), reqwest::StatusCode::OK);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let mut body = String::new();
+        while !body.contains("session_layout") {
+            body.push_str(&String::from_utf8_lossy(
+                &stream.next().await.unwrap().unwrap(),
+            ));
+        }
+    })
+    .await
+    .expect("session removal should invalidate the HTTP SSE stream");
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn layout_cli_covers_read_crud_reorder_preferences_defaults_restore_and_stale_conflicts() {
+    let ts = TestServer::start().await;
+    let show = layout_cli(&ts, &["show"]);
+    assert!(show.status.success());
+    assert!(String::from_utf8_lossy(&show.stdout).contains("revision"));
+
+    assert!(layout_cli(&ts, &["space-add", "CLI space"])
+        .status
+        .success());
+    let layout = ts.client.get_session_layout().await.unwrap();
+    let space = layout
+        .spaces
+        .iter()
+        .find(|space| space.name == "CLI space")
+        .unwrap();
+    let space_id = space.id.clone();
+    let inbox_id = space.groups[0].id.clone();
+    assert!(
+        layout_cli(&ts, &["space-rename", &space_id, "CLI projects"])
+            .status
+            .success()
+    );
+    assert!(layout_cli(&ts, &["group-add", &space_id, "CLI review"])
+        .status
+        .success());
+    let layout = ts.client.get_session_layout().await.unwrap();
+    let review_id = layout
+        .spaces
+        .iter()
+        .flat_map(|space| &space.groups)
+        .find(|group| group.name == "CLI review")
+        .unwrap()
+        .id
+        .clone();
+    assert!(layout_cli(&ts, &["group-rename", &review_id, "CLI ready"])
+        .status
+        .success());
+    assert!(layout_cli(
+        &ts,
+        &["reorder", "group", &review_id, "--before", &inbox_id]
+    )
+    .status
+    .success());
+    assert!(layout_cli(&ts, &["collapse", &review_id]).status.success());
+    assert!(
+        ts.client
+            .get_session_layout()
+            .await
+            .unwrap()
+            .spaces
+            .iter()
+            .flat_map(|space| &space.groups)
+            .find(|group| group.id == review_id)
+            .unwrap()
+            .collapsed
+    );
+    assert!(layout_cli(&ts, &["expand", &review_id]).status.success());
+    assert!(layout_cli(
+        &ts,
+        &["default-set", "origin", "cli-source", "--to", &review_id,],
+    )
+    .status
+    .success());
+    assert!(layout_cli(&ts, &["default-delete", "origin", "cli-source"])
+        .status
+        .success());
+    let snapshot = format!(r#"[{{"group_id":"{review_id}","session_ids":[]}}]"#);
+    assert!(layout_cli(&ts, &["restore", &snapshot]).status.success());
+
+    let stale = layout_cli(
+        &ts,
+        &["group-rename", &review_id, "stale", "--revision", "0"],
+    );
+    assert!(!stale.status.success());
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("revision changed"));
+
+    assert!(layout_cli(&ts, &["group-delete", &review_id])
+        .status
+        .success());
+    assert!(layout_cli(&ts, &["space-delete", &space_id])
+        .status
+        .success());
 }

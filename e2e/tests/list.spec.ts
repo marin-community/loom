@@ -96,6 +96,14 @@ test.describe("durable session workbench", () => {
       .getByTestId("empty-group");
     await expect(empty).toContainText("drop sessions here or use Move");
 
+    await page.getByTestId("status-filter").selectOption("done");
+    const filteredInbox = page
+      .getByTestId("session-group")
+      .filter({ hasText: "Inbox" })
+      .getByTestId("empty-group");
+    await expect(filteredInbox).toContainText("No sessions match");
+    await expect(filteredInbox).not.toContainText("Empty group");
+
     await page.reload();
     await expect(
       page.getByTestId("session-group").filter({ hasText: "Waiting" }),
@@ -177,6 +185,109 @@ test.describe("durable session workbench", () => {
       page.locator(`[data-session-id="${blocked.id}"]`),
     ).toBeVisible();
     await expect(page.locator(`[data-session-id="${calm.id}"]`)).toHaveCount(0);
+  });
+
+  test("mechanical failures are urgent and carry a textual lifecycle at rest", async ({
+    page,
+    weaver,
+  }) => {
+    const rows: { id: string; status: string }[] = [];
+    for (const status of ["created", "done", "error", "orphaned"]) {
+      const session = await weaver.seedSession({
+        goal: `${status} without relying on color`,
+        name: `lifecycle-${status}`,
+      });
+      const response = await fetch(
+        `${weaver.baseUrl}/api/sessions/${session.id}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status }),
+        },
+      );
+      expect(response.ok).toBe(true);
+      rows.push({ id: session.id, status });
+    }
+
+    await page.goto(weaver.baseUrl);
+    for (const row of rows) {
+      await expect(
+        page
+          .locator(`[data-session-id="${row.id}"]`)
+          .getByLabel(`Lifecycle: ${row.status}`),
+      ).toBeVisible();
+    }
+    await expect(page.getByTestId("status-bar-attention")).toContainText(
+      "2 need attention",
+    );
+    await page.getByTestId("attention-view").click();
+    await expect(page.locator('[aria-label="Lifecycle: error"]')).toBeVisible();
+    await expect(
+      page.locator('[aria-label="Lifecycle: orphaned"]'),
+    ).toBeVisible();
+    await expect(page.locator('[aria-label="Lifecycle: created"]')).toHaveCount(
+      0,
+    );
+    await expect(page.locator('[aria-label="Lifecycle: done"]')).toHaveCount(0);
+  });
+
+  test("multi-selection Archive confirms scope and reports aggregate success", async ({
+    page,
+    weaver,
+  }) => {
+    const sessions = await Promise.all([
+      weaver.seedSession({ goal: "Archive one", name: "archive-one" }),
+      weaver.seedSession({ goal: "Archive two", name: "archive-two" }),
+    ]);
+    await page.goto(weaver.baseUrl);
+    for (const [index, session] of sessions.entries()) {
+      const checkbox = page
+        .locator(`[data-session-id="${session.id}"]`)
+        .getByRole("checkbox");
+      await checkbox.focus();
+      await checkbox.press("Space");
+      await expect(page.getByTestId("selection-toolbar")).toContainText(
+        `${index + 1} selected`,
+      );
+    }
+    await page.route(
+      `**/api/sessions/${sessions[1].id}/archive`,
+      async (route) => {
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "injected archive failure" }),
+        });
+      },
+    );
+    await page
+      .getByTestId("selection-toolbar")
+      .getByRole("button", { name: "Archive" })
+      .click();
+    const dialog = page.getByTestId("confirm-dialog");
+    await expect(dialog).toContainText("2 selected sessions");
+    await dialog.getByTestId("confirm-dialog-confirm").click();
+    await expect(page.getByTestId("archive-result")).toContainText(
+      "Archived 1 session; 1 failed and remain selected",
+    );
+    await expect(page.getByTestId("selection-toolbar")).toContainText(
+      "1 selected",
+    );
+    await page.unroute(`**/api/sessions/${sessions[1].id}/archive`);
+    await page
+      .getByTestId("selection-toolbar")
+      .getByRole("button", { name: "Archive" })
+      .click();
+    await page
+      .getByTestId("confirm-dialog")
+      .getByTestId("confirm-dialog-confirm")
+      .click();
+    await page.getByTestId("history-view").click();
+    for (const session of sessions) {
+      await expect(
+        page.locator(`[data-session-id="${session.id}"]`),
+      ).toBeVisible();
+    }
   });
 
   test("History preserves location and recovered sessions return to that group", async ({

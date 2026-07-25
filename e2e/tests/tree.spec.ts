@@ -78,8 +78,9 @@ test.describe("session lineage in the flat workbench", () => {
     await expect(childRow).toBeVisible();
     await expect(childRow).not.toHaveAttribute("data-depth");
     await childRow.getByTestId("session-details-toggle").click();
-    await expect(childRow.getByTestId("session-preview")).toContainText(
-      `delegated from ${parent.branch.id}`,
-    );
+    const provenance = childRow
+      .getByTestId("session-preview")
+      .getByRole("link", { name: "delegated from parent" });
+    await expect(provenance).toHaveAttribute("href", `/s/${parent.id}`);
   });
 });

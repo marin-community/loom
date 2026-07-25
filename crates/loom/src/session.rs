@@ -41,14 +41,12 @@ pub struct Session {
     /// the resolving [`crate::auth::Principal`]; a tracking/UX field, never a
     /// security boundary.
     pub created_by: Option<String>,
-    /// Legacy park state retained during the compatibility window. Canonical
-    /// organization lives in `session_placements`; migration maps explicit
-    /// `parked` rows into a normal `Later` group.
+    /// Historical input retained so the layout migration can map explicit
+    /// `parked` rows into a normal `Later` group. API reads are derived from
+    /// canonical placement and no runtime path writes this column.
     pub park: Option<String>,
-    /// Manual fleet-list sort key. `None` = follow the automatic
-    /// urgency-then-recency order; a number places the row exactly (assigned as
-    /// the midpoint of its neighbours on drag), on one numeric axis with the
-    /// derived auto-order so placed and untouched rows interleave.
+    /// Historical ordering input retained for migration only. API reads use
+    /// canonical integer placement rank and no runtime path writes this column.
     pub sort_order: Option<f64>,
     /// Execution backend: `"terminal"` (a PTY supervisor + interactive TUI) or
     /// `"acp"` (a headless adapter under a relay supervisor, driven by
@@ -562,28 +560,6 @@ pub async fn touch(db: &Db, id: &str) -> Result<()> {
         .execute(db)
         .await?;
     tracing::debug!(session = %id, "session activity touched");
-    Ok(())
-}
-
-/// Compatibility write for clients predating canonical placement.
-pub async fn set_park(db: &Db, id: &str, park: Option<&str>) -> Result<()> {
-    sqlx::query("UPDATE sessions SET park = ? WHERE id = ?")
-        .bind(park)
-        .bind(id)
-        .execute(db)
-        .await?;
-    tracing::info!(session = %id, park = park.unwrap_or("auto"), "session park changed");
-    Ok(())
-}
-
-/// Compatibility write for clients predating canonical placement rank.
-pub async fn set_sort_order(db: &Db, id: &str, order: f64) -> Result<()> {
-    sqlx::query("UPDATE sessions SET sort_order = ? WHERE id = ?")
-        .bind(order)
-        .bind(id)
-        .execute(db)
-        .await?;
-    tracing::debug!(session = %id, order, "session sort_order changed");
     Ok(())
 }
 

@@ -359,8 +359,12 @@ class Client:
     # -- Reads (observe) ----------------------------------------------------
 
     def sessions(self):
-        """Every active session (``GET /api/sessions``)."""
-        return self._request("GET", "/sessions")
+        """Every non-automation active session.
+
+        Watch surveys must not inspect the automation sessions they launch;
+        ``class`` is the durable recursion guard.
+        """
+        return self._request("GET", "/sessions?automation=false")
 
     def session(self, key):
         """One session by id, branch id, branch name, or ``repo:branch``."""
@@ -596,6 +600,8 @@ class Round:
         return admitted
 
     def _admits(self, session):
+        if session.get("class") == "automation":
+            return False
         branch = session.get("branch") or {}
         want = self.scope.get("attention")
         if want:

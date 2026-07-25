@@ -172,6 +172,10 @@ export const moveSessions = (body: {
   before_session_id?: string | null;
   expected_revision: number;
 }) => post('/session-layout/moves', body) as Promise<SessionLayout>;
+export const restoreSessionGroups = (body: {
+  groups: SessionGroupOrder[];
+  expected_revision: number;
+}) => post('/session-layout/restores', body) as Promise<SessionLayout>;
 export const setSessionGroupPreference = (groupId: string, collapsed: boolean) =>
   put(`/session-layout/groups/${encodeURIComponent(groupId)}/preference`, {
     collapsed,
@@ -186,6 +190,7 @@ import type {
   IssueTagInput,
   Session,
   AutomationRun,
+  SessionGroupOrder,
   SessionLayout,
   ArtifactMeta,
   ArtifactView,

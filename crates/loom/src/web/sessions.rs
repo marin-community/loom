@@ -53,6 +53,21 @@ const HANDOFF_SUMMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// legible without adding a per-session lock registry.
 static LIFECYCLE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+async fn insert_session_row(
+    st: &AppState,
+    session: &NewSession,
+    policy: &session_mod::SessionLaunchPolicy,
+) -> Result<Session, AppError> {
+    let session = session_mod::insert_with_policy(&st.db, session, policy).await?;
+    super::session_layout::publish_invalidation(st).await;
+    Ok(session)
+}
+
+async fn delete_session_row(st: &AppState, session_id: &str) -> Result<(), AppError> {
+    session_mod::delete(&st.db, session_id).await?;
+    super::session_layout::publish_invalidation(st).await;
+    Ok(())
+}
 pub(super) async fn list_agents(State(st): State<AppState>) -> ApiResult<Json<Value>> {
     let default_agent = crate::profile::get(&st.db, crate::profile::DEFAULT_PROFILE)
         .await?
@@ -158,7 +173,9 @@ fn view_attention(view: &SessionView) -> &str {
         "ok"
     } else if view.branch.tags.iter().any(|tag| tag.value == "blocked") {
         "blocked"
-    } else if view.branch.tags.iter().any(|tag| tag.value == "attention") {
+    } else if matches!(view.status.as_str(), "error" | "orphaned")
+        || view.branch.tags.iter().any(|tag| tag.value == "attention")
+    {
         "attention"
     } else {
         "ok"
@@ -1491,8 +1508,8 @@ pub(crate) async fn provision_session(
                 // launching the agent into a half-provisioned worktree. The
                 // worktree is left intact for inspection; full output is in the
                 // run dir's setup.log.
-                let session = session_mod::insert_with_policy(
-                    &st.db,
+                let session = insert_session_row(
+                    &st,
                     &NewSession {
                         id: session_id.clone(),
                         branch_id: branch.id.clone(),
@@ -1601,7 +1618,7 @@ pub(crate) async fn provision_session(
             session = %session_id, branch = %branch.id, runtime = %runtime,
             work_dir = %work_dir.display(), mode = %mode, "launching acp session"
         );
-        let session = session_mod::insert_with_policy(&st.db, &new_session, &launch_policy).await?;
+        let session = insert_session_row(&st, &new_session, &launch_policy).await?;
         // A custom ACP agent supplies the exact adapter command accepted by
         // canonical resolution; registry edits after preview cannot replace it.
         let launch = agent::build_acp_launch(
@@ -1690,7 +1707,7 @@ pub(crate) async fn provision_session(
         // terminal agent may call back into loom as soon as its shell execs;
         // inserting after `agent::launch` left a race where that first request
         // saw a correctly minted token as unauthorized.
-        let session = session_mod::insert_with_policy(&st.db, &new_session, &launch_policy).await?;
+        let session = insert_session_row(&st, &new_session, &launch_policy).await?;
         if let Err(e) = agent::launch(
             &st.db,
             &agent::LaunchSpec {
@@ -2071,6 +2088,11 @@ pub(super) async fn patch_session(
     Path(key): Path<String>,
     Json(req): Json<PatchSessionReq>,
 ) -> ApiResult<Json<SessionView>> {
+    if req.park.is_some() || req.sort_order.is_some() {
+        return Err(AppError::bad_request(
+            "park and sort_order are read-only compatibility fields; use the revisioned session-layout move API",
+        ));
+    }
     let (initial_session, _) = require_session(&st.db, &key).await?;
     let _source_permit = st.launch_gate.acquire_session(&initial_session.id).await;
     let _lifecycle = LIFECYCLE_LOCK.lock().await;
@@ -2107,19 +2129,6 @@ pub(super) async fn patch_session(
         )
         .await
         .ok();
-    }
-    // Compatibility window for clients predating canonical placement.
-    if let Some(park) = &req.park {
-        let stored = match park.as_str() {
-            "auto" => None,
-            "parked" => Some("parked"),
-            "active" => Some("active"),
-            other => return Err(AppError::bad_request(format!("invalid park '{other}'"))),
-        };
-        session_mod::set_park(&st.db, &session.id, stored).await?;
-    }
-    if let Some(order) = req.sort_order {
-        session_mod::set_sort_order(&st.db, &session.id, order).await?;
     }
     let (session, branch) = require_session(&st.db, &session.id).await?;
     Ok(Json(session_view(&st.db, &session, &branch).await?))
@@ -2212,7 +2221,7 @@ async fn remove_locked(
         .await
         .ok();
     crate::auth::revoke_session_tokens(&st.db, &session.id).await?;
-    session_mod::delete(&st.db, &session.id).await?;
+    delete_session_row(st, &session.id).await?;
     // Release this branch's claimed issues back to the repo backlog before the
     // branch row goes away — issues are repo-owned and must outlive teardown.
     weaver_core::issue::unclaim_branch(&st.db, &branch.repo_root, &branch.branch)
@@ -2699,8 +2708,8 @@ pub(crate) async fn create_warm_session(
     // deliberately requires a live bound session, so an eager agent cannot hit
     // a transient authentication failure during startup.
     let status = agent::initial_status(&st.db, &agent).await;
-    let session = session_mod::insert_with_policy(
-        &st.db,
+    let session = insert_session_row(
+        st,
         &NewSession {
             id: session_id.clone(),
             branch_id: branch.id.clone(),
@@ -2802,7 +2811,7 @@ pub(crate) async fn create_warm_session(
             .ok();
         st.acp.stop(&session_id);
         backend::kill_session(&term_session).await.ok();
-        session_mod::delete(&st.db, &session_id).await.ok();
+        delete_session_row(st, &session_id).await.ok();
         return Err(AppError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             error.to_string(),

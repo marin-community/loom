@@ -12,8 +12,8 @@ use serde_json::{json, Value};
 use weaver_api::{
     CreateSessionGroupReq, CreateSessionSpaceReq, DeleteSessionGroupReq, DeleteSessionSpaceReq,
     IssueAction, IssueActionsReq, MoveSessionsReq, ReorderSessionLayoutReq,
-    SessionGroupPreferenceReq, SessionLayoutView, SetSessionPlacementDefaultReq,
-    UpdateSessionGroupReq, UpdateSessionSpaceReq,
+    RestoreSessionGroupsReq, SessionGroupPreferenceReq, SessionLayoutView,
+    SetSessionPlacementDefaultReq, UpdateSessionGroupReq, UpdateSessionSpaceReq,
 };
 
 use loom::client::{self, Client};
@@ -514,6 +514,13 @@ enum SessionLayoutCmd {
         revision: Option<i64>,
         #[arg(required = true)]
         sessions: Vec<String>,
+    },
+    /// Atomically restore complete group orders from a JSON snapshot.
+    Restore {
+        /// JSON array of {"group_id":"…","session_ids":["…"]} objects.
+        snapshot: String,
+        #[arg(long)]
+        revision: Option<i64>,
     },
     /// Collapse one group for the current operator.
     Collapse { group: String },
@@ -1392,6 +1399,17 @@ async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
                     session_ids: sessions,
                     destination_group_id: to,
                     before_session_id: before,
+                    expected_revision,
+                })
+                .await?
+        }
+        SessionLayoutCmd::Restore { snapshot, revision } => {
+            let groups = serde_json::from_str(&snapshot)
+                .context("restore snapshot must be a JSON array of group orders")?;
+            let expected_revision = layout_revision(&client, revision).await?;
+            client
+                .restore_session_groups(&RestoreSessionGroupsReq {
+                    groups,
                     expected_revision,
                 })
                 .await?
