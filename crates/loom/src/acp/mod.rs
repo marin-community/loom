@@ -617,6 +617,20 @@ impl AcpHandle {
             .map_err(|_| anyhow!("acp task dropped the reply"))?
     }
 
+    /// Notice feedback another durable subsystem already appended to
+    /// `sessions.pending_prompt`. Start it when idle; while a turn is live,
+    /// leave it queued for the normal turn boundary. This never appends text,
+    /// so a stable-key producer can wake the task without duplicating payload.
+    pub async fn notify_pending(&self) -> Result<PromptAck> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::NotifyPending { reply: tx })
+            .await
+            .map_err(|_| anyhow!("acp task is gone"))?;
+        rx.await
+            .map_err(|_| anyhow!("acp task dropped the reply"))?
+    }
+
     /// Atomically retract the durable next-turn queue for editing. This runs on
     /// the ACP task so a turn boundary cannot dispatch the same text while the
     /// browser is moving it back into the composer.
@@ -950,6 +964,9 @@ enum Command {
     },
     ForcePending {
         by: Option<String>,
+        reply: oneshot::Sender<Result<PromptAck>>,
+    },
+    NotifyPending {
         reply: oneshot::Sender<Result<PromptAck>>,
     },
     RetractPending {
@@ -1698,7 +1715,9 @@ impl Task {
                 let answer = self.answer_permission(&request_id, &option_id, &by).await;
                 let _ = reply.send(answer);
             }
-            Command::Prompt { reply, .. } | Command::ForcePending { reply, .. } => {
+            Command::Prompt { reply, .. }
+            | Command::ForcePending { reply, .. }
+            | Command::NotifyPending { reply } => {
                 let _ = reply.send(Err(setup_error()));
             }
             Command::RetractPending { reply } => {
@@ -2882,6 +2901,28 @@ impl Task {
                             }
                         }
                     }
+                }
+            }
+            Command::NotifyPending { reply } => {
+                let queued = match session::read_pending_prompt(&self.db, &self.session_id).await {
+                    Ok(queued) => queued,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return;
+                    }
+                };
+                if queued.trim().is_empty() {
+                    let _ = reply.send(Err(anyhow!("there is no queued feedback to send")));
+                } else if self.turn_live {
+                    self.emit_queue(Some(&queued));
+                    let _ = reply.send(Ok(PromptAck {
+                        queued: true,
+                        steered: false,
+                        turn: Some(self.current_turn),
+                    }));
+                } else {
+                    let result = self.start_pending_prompt(None).await;
+                    let _ = reply.send(result);
                 }
             }
             Command::RetractPending { reply } => {

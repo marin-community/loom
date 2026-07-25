@@ -14,6 +14,7 @@ pub mod github;
 pub mod issue;
 pub mod migrations;
 pub mod repo_config;
+pub mod review;
 pub mod tags;
 pub mod transcript;
 pub mod watch;

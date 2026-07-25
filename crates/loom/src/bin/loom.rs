@@ -10,12 +10,13 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde_json::{json, Value};
 use weaver_api::{
-    CreateSessionGroupReq, CreateSessionSpaceReq, DeleteSessionGroupReq, DeleteSessionSpaceReq,
-    IssueAction, IssueActionsReq, MoveSessionsReq, ReorderSessionLayoutReq,
-    RestoreSessionGroupsReq, SearchSessionsOptions, SessionGroupPreferenceReq,
-    SessionLayoutItemKind, SessionLayoutView, SessionPlacementSelectorKind, SessionSearchAttention,
-    SessionSearchStatus, SetSessionPlacementDefaultReq, UpdateSessionGroupReq,
-    UpdateSessionSpaceReq,
+    AddReviewCommentReq, CreateReviewReq, CreateSessionGroupReq, CreateSessionSpaceReq,
+    DeleteSessionGroupReq, DeleteSessionSpaceReq, IssueAction, IssueActionsReq, MoveSessionsReq,
+    ReorderSessionLayoutReq, RestoreSessionGroupsReq, SearchSessionsOptions,
+    SessionGroupPreferenceReq, SessionLayoutItemKind, SessionLayoutView,
+    SessionPlacementSelectorKind, SessionSearchAttention, SessionSearchStatus,
+    SetSessionPlacementDefaultReq, SubmitReviewReq, UpdateReviewCommentReq,
+    UpdateSessionGroupReq, UpdateSessionSpaceReq,
 };
 
 use loom::client::{self, Client};
@@ -147,6 +148,11 @@ enum Cmd {
     Issue {
         #[command(subcommand)]
         cmd: IssueCmd,
+    },
+    /// Draft and submit one coherent artifact review into a session.
+    Review {
+        #[command(subcommand)]
+        cmd: ReviewCmd,
     },
 
     /// Guided one-time credential setup.
@@ -281,6 +287,71 @@ enum IssueCmd {
         #[arg(required = true)]
         ids: Vec<i64>,
     },
+}
+
+/// Subcommands under `loom review`.
+#[derive(Subcommand)]
+enum ReviewCmd {
+    /// List reviews for one artifact in a session.
+    Ls { session: String, artifact: String },
+    /// Add a pending comment, creating the caller's draft when needed.
+    Add {
+        session: String,
+        artifact: String,
+        #[arg(long)]
+        rev: i64,
+        #[arg(long)]
+        quote: String,
+        #[arg(long, default_value = "")]
+        prefix: String,
+        #[arg(long, default_value = "")]
+        suffix: String,
+        #[arg(long)]
+        block: Option<i64>,
+        #[arg(required = true)]
+        body: Vec<String>,
+    },
+    /// Edit a pending comment body.
+    Edit {
+        review_id: i64,
+        comment_id: i64,
+        #[arg(required = true)]
+        body: Vec<String>,
+    },
+    /// Move a pending comment to a new text/block anchor and revision.
+    Reanchor {
+        review_id: i64,
+        comment_id: i64,
+        #[arg(long)]
+        rev: i64,
+        #[arg(long)]
+        quote: String,
+        #[arg(long, default_value = "")]
+        prefix: String,
+        #[arg(long, default_value = "")]
+        suffix: String,
+        #[arg(long)]
+        block: Option<i64>,
+    },
+    /// Delete one pending comment.
+    DeleteComment { review_id: i64, comment_id: i64 },
+    /// Resolve one submitted review comment.
+    Resolve { review_id: i64, comment_id: i64 },
+    /// Reopen one resolved review comment.
+    Reopen { review_id: i64, comment_id: i64 },
+    /// Discard a draft and all of its pending comments.
+    Discard { review_id: i64 },
+    /// Submit the immutable review and enqueue one structured conversation message.
+    Submit {
+        review_id: i64,
+        #[arg(long, default_value = "")]
+        summary: String,
+        /// Intentionally submit anchors from an older artifact revision.
+        #[arg(long)]
+        acknowledge_outdated: bool,
+    },
+    /// Retry a failed review delivery.
+    Retry { review_id: i64 },
 }
 
 /// Subcommands under `loom session` — the uniform way to drive a child session.
@@ -1141,6 +1212,7 @@ async fn run() -> Result<()> {
         Cmd::Server { cmd } => run_server(cmd).await,
         Cmd::Session { cmd } => run_session(cmd).await,
         Cmd::Issue { cmd } => run_issue(cmd).await,
+        Cmd::Review { cmd } => run_review(cmd).await,
         Cmd::Watch { cmd } => run_watch(cmd).await,
         Cmd::Token { cmd } => run_token(cmd).await,
         Cmd::Login {
@@ -1210,6 +1282,197 @@ async fn run_issue(cmd: IssueCmd) -> Result<()> {
             cmd_issue_action(ids, IssueAction::Untag { key }, "untagged").await
         }
         IssueCmd::Delete { ids } => cmd_issue_action(ids, IssueAction::Delete, "deleted").await,
+    }
+}
+
+async fn run_review(cmd: ReviewCmd) -> Result<()> {
+    let client = client::default()?;
+    match cmd {
+        ReviewCmd::Ls { session, artifact } => {
+            let reviews = client
+                .list_session_reviews(&session, "artifact", &artifact)
+                .await?;
+            if reviews.is_empty() {
+                println!("(no reviews)");
+                return Ok(());
+            }
+            for review in reviews {
+                let stale = if review.outdated { " stale" } else { "" };
+                println!(
+                    "#{} {} · {} comments · {}{}",
+                    review.id,
+                    review.status,
+                    review.comments.len(),
+                    review.delivery_state,
+                    stale
+                );
+                for comment in review.comments {
+                    println!(
+                        "  {}  rev {}  {}",
+                        comment.id,
+                        comment.subject_version,
+                        comment.body.replace('\n', " ")
+                    );
+                }
+            }
+            Ok(())
+        }
+        ReviewCmd::Add {
+            session,
+            artifact,
+            rev,
+            quote,
+            prefix,
+            suffix,
+            block,
+            body,
+        } => {
+            let body = body.join(" ").trim().to_string();
+            if body.is_empty() {
+                bail!("a comment body is required");
+            }
+            let draft = client
+                .create_session_review(
+                    &session,
+                    &CreateReviewReq {
+                        session_id: None,
+                        subject_kind: "artifact".to_string(),
+                        subject_key: artifact,
+                        subject_version: rev.to_string(),
+                    },
+                )
+                .await?;
+            let comment = client
+                .add_review_comment(
+                    draft.id,
+                    &AddReviewCommentReq {
+                        subject_version: rev.to_string(),
+                        anchor_kind: "text".to_string(),
+                        anchor: json!({
+                            "quote": quote,
+                            "prefix": prefix,
+                            "suffix": suffix,
+                            "block_index": block,
+                        }),
+                        body,
+                    },
+                )
+                .await?;
+            println!("draft review #{} · comment {}", draft.id, comment.id);
+            Ok(())
+        }
+        ReviewCmd::Edit {
+            review_id,
+            comment_id,
+            body,
+        } => {
+            let body = body.join(" ").trim().to_string();
+            if body.is_empty() {
+                bail!("a comment body is required");
+            }
+            let comment = client
+                .update_review_comment(
+                    review_id,
+                    comment_id,
+                    &UpdateReviewCommentReq {
+                        body: Some(body),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            println!("updated comment {}", comment.id);
+            Ok(())
+        }
+        ReviewCmd::Reanchor {
+            review_id,
+            comment_id,
+            rev,
+            quote,
+            prefix,
+            suffix,
+            block,
+        } => {
+            let comment = client
+                .update_review_comment(
+                    review_id,
+                    comment_id,
+                    &UpdateReviewCommentReq {
+                        subject_version: Some(rev.to_string()),
+                        anchor_kind: Some("text".to_string()),
+                        anchor: Some(json!({
+                            "quote": quote,
+                            "prefix": prefix,
+                            "suffix": suffix,
+                            "block_index": block,
+                        })),
+                        body: None,
+                    },
+                )
+                .await?;
+            println!(
+                "re-anchored comment {} to revision {}",
+                comment.id, comment.subject_version
+            );
+            Ok(())
+        }
+        ReviewCmd::DeleteComment {
+            review_id,
+            comment_id,
+        } => {
+            client.delete_review_comment(review_id, comment_id).await?;
+            println!("deleted comment {comment_id}");
+            Ok(())
+        }
+        ReviewCmd::Resolve {
+            review_id,
+            comment_id,
+        } => {
+            let comment = client
+                .resolve_review_comment(review_id, comment_id, true)
+                .await?;
+            println!("resolved comment {}", comment.id);
+            Ok(())
+        }
+        ReviewCmd::Reopen {
+            review_id,
+            comment_id,
+        } => {
+            let comment = client
+                .resolve_review_comment(review_id, comment_id, false)
+                .await?;
+            println!("reopened comment {}", comment.id);
+            Ok(())
+        }
+        ReviewCmd::Discard { review_id } => {
+            client.discard_review(review_id).await?;
+            println!("discarded review {review_id}");
+            Ok(())
+        }
+        ReviewCmd::Submit {
+            review_id,
+            summary,
+            acknowledge_outdated,
+        } => {
+            let review = client
+                .submit_review(
+                    review_id,
+                    &SubmitReviewReq {
+                        summary,
+                        acknowledge_outdated,
+                    },
+                )
+                .await?;
+            println!(
+                "submitted review {} · delivery {}",
+                review.id, review.delivery_state
+            );
+            Ok(())
+        }
+        ReviewCmd::Retry { review_id } => {
+            let review = client.retry_review_delivery(review_id).await?;
+            println!("review {} · delivery {}", review.id, review.delivery_state);
+            Ok(())
+        }
     }
 }
 
@@ -4573,6 +4836,61 @@ mod tests {
                 assert_eq!(ids, vec![41, 42]);
             }
             _ => panic!("expected issue tag command"),
+        }
+    }
+
+    #[test]
+    fn review_commands_parse_the_shared_rest_contract() {
+        let Cli { cmd, .. } = Cli::try_parse_from([
+            "loom",
+            "review",
+            "add",
+            "session-1",
+            "design",
+            "--rev",
+            "3",
+            "--quote",
+            "selected text",
+            "--block",
+            "7",
+            "Tighten",
+            "this",
+            "claim.",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cmd,
+            Cmd::Review {
+                cmd: ReviewCmd::Add {
+                    session,
+                    artifact,
+                    rev: 3,
+                    block: Some(7),
+                    body,
+                    ..
+                }
+            } if session == "session-1"
+                && artifact == "design"
+                && body == ["Tighten", "this", "claim."]
+        ));
+
+        for args in [
+            vec!["loom", "review", "ls", "session-1", "design"],
+            vec!["loom", "review", "edit", "4", "9", "new body"],
+            vec![
+                "loom", "review", "reanchor", "4", "9", "--rev", "4", "--quote", "new text",
+            ],
+            vec!["loom", "review", "delete-comment", "4", "9"],
+            vec!["loom", "review", "resolve", "4", "9"],
+            vec!["loom", "review", "reopen", "4", "9"],
+            vec!["loom", "review", "discard", "4"],
+            vec!["loom", "review", "submit", "4", "--acknowledge-outdated"],
+            vec!["loom", "review", "retry", "4"],
+        ] {
+            assert!(matches!(
+                Cli::try_parse_from(args).unwrap().cmd,
+                Cmd::Review { .. }
+            ));
         }
     }
 

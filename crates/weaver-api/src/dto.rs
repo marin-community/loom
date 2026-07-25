@@ -1413,6 +1413,99 @@ pub struct NewCommentBody {
     pub body: String,
 }
 
+// ---------------------------------------------------------------------------
+// Reviews — creator-private draft feedback over versioned artifacts. The
+// generic subject/anchor shapes are shared with the future changes viewer.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewSubjectDto {
+    pub kind: String,
+    pub key: String,
+    pub label: String,
+    pub version: String,
+    pub current_version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewCommentDto {
+    pub id: i64,
+    pub subject_version: String,
+    pub anchor_kind: String,
+    pub anchor: Value,
+    pub body: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewDto {
+    pub id: i64,
+    pub session_id: String,
+    pub subject: ReviewSubjectDto,
+    pub status: String,
+    pub summary: String,
+    pub created_by: String,
+    pub outdated: bool,
+    pub acknowledged_outdated: bool,
+    pub delivery_state: String,
+    pub delivery_error: Option<String>,
+    pub delivery_key: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub submitted_at: Option<String>,
+    pub comments: Vec<ReviewCommentDto>,
+    #[serde(default)]
+    pub legacy: bool,
+}
+
+/// Create or recover the caller's one draft for a session/subject.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateReviewReq {
+    /// Required by the branch-scoped CLI route; ignored by a session-scoped
+    /// route, whose path already identifies the delivery target.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    pub subject_kind: String,
+    /// Artifact name for `subject_kind = "artifact"`.
+    pub subject_key: String,
+    pub subject_version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddReviewCommentReq {
+    pub subject_version: String,
+    pub anchor_kind: String,
+    pub anchor: Value,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateReviewCommentReq {
+    #[serde(default)]
+    pub subject_version: Option<String>,
+    #[serde(default)]
+    pub anchor_kind: Option<String>,
+    #[serde(default)]
+    pub anchor: Option<Value>,
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SubmitReviewReq {
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub acknowledge_outdated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolveReviewCommentReq {
+    pub resolved: bool,
+}
+
 /// One watch, as the API exposes it. The JSON-bearing columns
 /// (`trigger`, `scope`, `params`) are returned as **parsed** structured JSON so
 /// a UI never re-parses strings; `capabilities` is a real array; the rest is the

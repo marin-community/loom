@@ -1,224 +1,286 @@
-import { test, expect } from '../fixtures/weaver';
-import type { Page } from '@playwright/test';
-
-// The Wave-style collaborative layer on artifacts: the session goal is now a
-// first-class `goal` artifact (versioned, rendered, commentable), and any
-// markdown artifact carries an inline comment layer — select-to-comment, a
-// highlighted span, and a reply thread that renders in the document flow right
-// under the block it annotates (not a margin gutter), with resolve dropping the
-// thread out of the rendered view while keeping it in history. The comment
-// backend is exercised directly by the Rust suite; this drives the real browser
-// UI: text-quote anchoring, the CSS Custom Highlight paint, and the inline cards
-// teleported into the rendered body.
+import { test, expect } from "../fixtures/weaver";
+import type { Page } from "@playwright/test";
 
 const DOC = [
-  '# Design notes',
-  '',
-  'We keep the markdown representation as the default, and layer',
-  'collaborative editing on top of it.',
-  '',
-  '## Open questions',
-  '',
-  '- Should comments resolve out of the agent context?',
-  '- How do anchors survive an edit elsewhere in the document?',
-  '',
-].join('\n');
+  "# Design notes",
+  "",
+  "We keep the markdown representation as the default, and layer",
+  "collaborative editing on top of it.",
+  "",
+  "## Open questions",
+  "",
+  "- Should comments wait for one explicit review submission?",
+  "- How do anchors survive an edit elsewhere in the document?",
+  "",
+].join("\n");
 
-/** Select a phrase inside the rendered `.markdown-body` and fire the `mouseup`
- *  the comment controller listens for, so the floating "Comment" button shows. */
-async function selectPhrase(page: Page, phrase: string) {
-  await page.evaluate((needle) => {
-    const body = document.querySelector('.markdown-body') as HTMLElement;
-    const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
-    let node: Text | null = null;
-    let idx = -1;
-    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-      const at = (n as Text).data.indexOf(needle);
-      if (at !== -1) {
-        node = n as Text;
-        idx = at;
-        break;
+/** Select rendered text. Dispatching `selectionchange` models keyboard-created
+ * selection; the review affordance must not depend on a mouseup. */
+async function selectPhrase(page: Page, phrase: string, mouseup = true) {
+  await page.evaluate(
+    ({ needle, mouse }) => {
+      const body = document.querySelector(".markdown-body") as HTMLElement;
+      const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+      let node: Text | null = null;
+      let index = -1;
+      for (
+        let current = walker.nextNode();
+        current;
+        current = walker.nextNode()
+      ) {
+        const at = (current as Text).data.indexOf(needle);
+        if (at !== -1) {
+          node = current as Text;
+          index = at;
+          break;
+        }
       }
-    }
-    if (!node) throw new Error(`phrase not found in rendered body: ${needle}`);
-    const range = document.createRange();
-    range.setStart(node, idx);
-    range.setEnd(node, idx + needle.length);
-    const sel = window.getSelection()!;
-    sel.removeAllRanges();
-    sel.addRange(range);
-    body.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-  }, phrase);
+      if (!node)
+        throw new Error(`phrase not found in rendered body: ${needle}`);
+      const range = document.createRange();
+      range.setStart(node, index);
+      range.setEnd(node, index + needle.length);
+      const selection = window.getSelection()!;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.dispatchEvent(new Event("selectionchange"));
+      if (mouse)
+        body.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    },
+    { needle: phrase, mouse: mouseup },
+  );
 }
 
-test.describe('goal as an artifact', () => {
-  test('a seeded goal becomes a first-class `goal` artifact you can open', async ({
+async function addPendingComment(
+  page: Page,
+  phrase: string,
+  body: string,
+  mouseup = true,
+) {
+  await expect(page.locator(".markdown-body")).toContainText(phrase);
+  await selectPhrase(page, phrase, mouseup);
+  const affordance = page.getByTestId("review-selection-button");
+  await expect(affordance).toBeVisible();
+  await affordance.click();
+  const composer = page.getByTestId("review-comment-composer");
+  await composer.locator("textarea").fill(body);
+  await composer.getByRole("button", { name: "Add pending comment" }).click();
+  await expect(composer).toBeHidden();
+}
+
+test.describe("goal as an artifact", () => {
+  test("a seeded goal remains a first-class rendered artifact", async ({
     page,
     weaver,
   }) => {
     const session = await weaver.seedSession({
-      goal: '# Ship the search rewrite\n\nMake it **fast** and incremental.',
-      name: 'goal-artifact',
+      goal: "# Ship the search rewrite\n\nMake it **fast** and incremental.",
+      name: "goal-artifact",
     });
-
     await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/goal`);
-
-    // The goal shows in the artifact list as a branch-scoped artifact, and its
-    // latest revision renders as markdown — the single source of truth the
-    // session-create path wrote through `set_goal`.
-    const row = page.locator('[data-artifact="goal"]');
-    await expect(row).toBeVisible();
-    await expect(row).toContainText('branch');
-    const body = page.locator('.markdown-body');
-    await expect(body.locator('h1')).toContainText('Ship the search rewrite');
-    await expect(body.locator('strong')).toContainText('fast');
+    await expect(page.locator('[data-artifact="goal"]')).toContainText(
+      "branch",
+    );
+    await expect(page.locator(".markdown-body h1")).toContainText(
+      "Ship the search rewrite",
+    );
+    await expect(page.locator(".markdown-body strong")).toContainText("fast");
   });
 });
 
-test.describe('artifact inline comments', () => {
-  test('select → comment → reply → resolve, with a painted highlight', async ({ page, weaver }) => {
-    const session = await weaver.seedSession({ goal: 'commenting', name: 'comments' });
-    await weaver.writeArtifact(session, 'design', DOC, { title: 'Design notes' });
-
-    await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/design`);
-    await expect(page.locator('.markdown-body h1')).toContainText('Design notes');
-
-    // Select a phrase and open the composer from the floating button.
-    await selectPhrase(page, 'collaborative editing');
-    const commentBtn = page.getByTestId('comment-select-button');
-    await expect(commentBtn).toBeVisible();
-    await commentBtn.click();
-
-    const composer = page.getByTestId('comment-pending');
-    await expect(composer).toBeVisible();
-    await composer.locator('textarea').fill('Do we keep WYSIWYG too, or source-only?');
-    await composer.getByRole('button', { name: 'Comment' }).click();
-
-    // A card appears (active/expanded) carrying the anchor quote and the body.
-    const card = page.locator('[data-testid^="comment-card-"]').first();
-    await expect(card).toBeVisible();
-    await expect(card).toContainText('collaborative editing');
-    await expect(card).toContainText('Do we keep WYSIWYG too');
-
-    // The span is painted via the CSS Custom Highlight API.
-    const painted = await page.evaluate(
-      () => 'highlights' in CSS && (CSS.highlights as Map<string, unknown>).has('weaver-comment'),
-    );
-    expect(painted).toBe(true);
-
-    // A reply appends to the same thread.
-    await card.locator('textarea').fill('Source-only to start.');
-    await card.getByRole('button', { name: 'Reply' }).click();
-    await expect(card).toContainText('Source-only to start.');
-
-    // Resolve drops the thread out of the rendered view (still in history via
-    // the API) — no card, and the highlight is cleared.
-    await card.getByRole('button', { name: 'Resolve' }).click();
-    await expect(page.locator('[data-testid^="comment-card-"]')).toHaveCount(0);
-    const clearedAfterResolve = await page.evaluate(
-      () => 'highlights' in CSS && (CSS.highlights as Map<string, unknown>).has('weaver-comment'),
-    );
-    expect(clearedAfterResolve).toBe(false);
-  });
-
-  test('a comment on an older view carries that selected base revision', async ({
+test.describe("staged artifact reviews", () => {
+  test("drafts multiple comments, edits, deletes, and survives reload", async ({
     page,
     weaver,
   }) => {
     const session = await weaver.seedSession({
-      goal: 'revision comments',
-      name: 'comment-old-revision',
+      goal: "review drafting",
+      name: "review-draft",
     });
-    await weaver.writeArtifact(session, 'design', `${DOC}\nRevision one marker.\n`, {
-      title: 'Design notes',
+    await weaver.writeArtifact(session, "design", DOC, {
+      title: "Design notes",
     });
-    await weaver.writeArtifact(session, 'design', `${DOC}\nRevision two marker.\n`, {
-      title: 'Design notes',
-    });
-
     await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/design`);
-    await page.getByTestId('artifact-rev').selectOption('1');
-    await expect(page.locator('.markdown-body')).toContainText('Revision one marker');
-
-    await selectPhrase(page, 'collaborative editing');
-    await page.getByTestId('comment-select-button').click();
-    const composer = page.getByTestId('comment-pending');
-    await composer.locator('textarea').fill('This belongs to revision one.');
-    const request = page.waitForRequest(
-      (candidate) =>
-        candidate.method() === 'POST' &&
-        candidate.url().endsWith(`/api/sessions/${session.id}/artifacts/design/threads`),
+    await expect(page.locator(".markdown-body h1")).toContainText(
+      "Design notes",
     );
-    await composer.getByRole('button', { name: 'Comment' }).click();
 
-    expect((await request).postDataJSON()).toMatchObject({ base_rev: 1 });
-    await expect(composer).toBeHidden();
+    // The first selection is keyboard-shaped: no mouseup dependency.
+    await addPendingComment(
+      page,
+      "collaborative editing",
+      "Clarify whether editing is source-only.",
+      false,
+    );
+    await addPendingComment(
+      page,
+      "anchors survive",
+      "Call out the captured context used during drift.",
+    );
+
+    const tray = page.getByTestId("review-tray");
+    await expect(tray).toContainText("2 pending");
+    const cards = page.locator('[data-testid^="review-comment-"]');
+    await expect(cards).toHaveCount(2);
+
+    const second = cards.nth(1);
+    await expect(second).toContainText("captured context");
+    await second.getByRole("button", { name: "Edit" }).click();
+    await second
+      .getByTestId("review-comment-edit")
+      .fill("Explain prefix and suffix recovery.");
+    await second.getByRole("button", { name: "Save" }).click();
+    await expect(second).toContainText("Explain prefix and suffix recovery.");
+
+    // Durable server-side draft state comes back after a full document reload.
+    await page.reload();
+    await expect(page.getByTestId("review-tray")).toContainText("2 pending");
+    await expect(page.locator('[data-testid^="review-comment-"]')).toHaveCount(
+      2,
+    );
+    const edited = page
+      .locator('[data-testid^="review-comment-"]')
+      .filter({ hasText: "Explain prefix and suffix recovery." });
+    await edited.click();
+    await expect(edited).toContainText("Explain prefix and suffix recovery.");
+
+    await edited.getByRole("button", { name: "Delete" }).click();
+    await expect(page.getByTestId("review-tray")).toContainText("1 pending");
+    await expect(page.locator('[data-testid^="review-comment-"]')).toHaveCount(
+      1,
+    );
   });
 
-  test('captures the comment UI in both themes', async ({ page, weaver }) => {
-    const shotDir = process.env.WEAVER_SHOT_DIR;
+  test("preserves stale anchors, re-anchors, previews, and submits once", async ({
+    page,
+    weaver,
+  }) => {
+    const session = await weaver.seedSession({
+      goal: "stale review",
+      name: "review-stale",
+    });
+    await weaver.writeArtifact(session, "design", DOC, {
+      title: "Design notes",
+    });
+    await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/design`);
 
-    for (const t of ['light', 'dark'] as const) {
-      // A fresh session per theme so each shot is a clean single inline thread,
-      // not one carrying a leftover collapsed card from the previous iteration.
-      const session = await weaver.seedSession({ goal: 'shots', name: `comments-shot-${t}` });
-      await weaver.writeArtifact(session, 'design', DOC, { title: 'Design notes' });
+    await addPendingComment(
+      page,
+      "collaborative editing",
+      "This statement needs an explicit boundary.",
+    );
 
-      await page.addInitScript((theme) => localStorage.setItem('loom-theme', theme), t);
-      await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/design`);
-      await expect(page.locator('.markdown-body h1')).toContainText('Design notes');
+    const revised = DOC.replace(
+      "collaborative editing on top of it.",
+      "staged review feedback on top of it.",
+    );
+    await weaver.writeArtifact(session, "design", revised, {
+      title: "Design notes",
+    });
+    await expect(page.locator(".markdown-body")).toContainText(
+      "staged review feedback",
+    );
 
-      await selectPhrase(page, 'collaborative editing');
-      await page.getByTestId('comment-select-button').click();
-      const composer = page.getByTestId('comment-pending');
-      await composer.locator('textarea').fill('Anchor survives edits — recovery-based re-locate?');
-      await composer.getByRole('button', { name: 'Comment' }).click();
-      // Wait for the create to land: the composer closes and the thread's own
-      // inline card (expanded, carrying the body) takes its place.
-      await expect(composer).toBeHidden();
-      const card = page.locator('[data-testid^="comment-card-"]').first();
-      await expect(card).toContainText('Anchor survives edits');
+    const tray = page.getByTestId("review-tray");
+    await expect(tray).toContainText("stale");
+    await expect(page.getByTestId("review-stale-warning")).toBeVisible();
+    await expect(page.getByTestId("review-stale-anchors")).toBeVisible();
 
-      if (shotDir) {
-        await page.screenshot({ path: `${shotDir}/comments-${t}.png`, fullPage: false });
-      }
-    }
+    const staleCard = page.locator('[data-testid^="review-comment-"]').first();
+    await staleCard.getByRole("button", { name: "Re-anchor" }).click();
+    await selectPhrase(page, "staged review feedback");
+    await page.getByTestId("review-selection-button").click();
+    await expect(staleCard).toContainText("Revision 2");
+
+    await page
+      .getByTestId("review-overall-note")
+      .fill("Address this before landing.");
+    await expect(tray).toContainText("Conversation feedback preview");
+    await expect(tray).toContainText("Address this before landing.");
+    await expect(tray).toContainText(
+      "This statement needs an explicit boundary.",
+    );
+
+    // The review began on revision 1; even after re-anchoring its comment, the
+    // stale envelope requires explicit acknowledgement.
+    await page.getByTestId("review-stale-ack").check();
+    const submitRequest = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        /\/api\/reviews\/\d+\/submit$/.test(request.url()),
+    );
+    await page.getByTestId("submit-review").click();
+    await submitRequest;
+    await expect(tray).toContainText("Review submitted");
+    await expect(tray).toContainText(/queued|delivered/);
+    await expect(page.getByTestId("submit-review")).toHaveCount(0);
   });
 
-  // The real in-app path: users don't deep-link to an artifact, they land on a
-  // session and click into the Artifacts tab, which is kept alive across tab
-  // switches. This drives that path — land on the session, open Artifacts, switch
-  // to the terminal and back — and asserts select-to-comment still works end to
-  // end on the (warm, kept-alive) panel, not just on a freshly deep-linked one.
-  test('select-to-comment works through the in-app tab path', async ({ page, weaver }) => {
-    const session = await weaver.seedSession({ goal: 'roundtrip', name: 'comments-warm' });
-    await weaver.writeArtifact(session, 'design', DOC, { title: 'Design notes' });
+  test("keeps review and long-document position through pop and dock", async ({
+    page,
+    weaver,
+  }) => {
+    const session = await weaver.seedSession({
+      goal: "pop review",
+      name: "review-pop",
+    });
+    const sections = Array.from(
+      { length: 180 },
+      (_, index) =>
+        `## Section ${index}\n\nLong review body ${index}: context remains readable while scrolling.\n`,
+    );
+    const longDoc = `# Long design\n\n${sections.join("\n")}\nFinal review target at the end.\n`;
+    await weaver.writeArtifact(session, "design", longDoc, {
+      title: "Long design",
+    });
+    await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/design`);
 
-    // Land on the session (terminal), then click into Artifacts like a user —
-    // this mounts the kept-alive panel rather than deep-linking straight in.
-    await page.goto(`${weaver.baseUrl}/s/${session.id}`);
-    await page.locator('[data-tab="artifacts"]').click();
-    await expect(page.locator('.markdown-body h1')).toContainText('Design notes');
+    await addPendingComment(
+      page,
+      "Long review body 0",
+      "Opening context comment.",
+    );
+    const scroller = page.getByTestId("artifact-scroll");
+    await scroller.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    const before = await scroller.evaluate((element) => ({
+      top: element.scrollTop,
+      max: element.scrollHeight - element.clientHeight,
+    }));
+    expect(before.max).toBeGreaterThan(4_000);
+    expect(before.top).toBeGreaterThan(before.max * 0.9);
 
-    // First open: the seam works.
-    await selectPhrase(page, 'collaborative editing');
-    await expect(page.getByTestId('comment-select-button')).toBeVisible();
+    await page.getByTestId("artifact-pop").click();
+    const poppedScroller = page.getByTestId("artifact-scroll");
+    await expect(poppedScroller).toBeVisible();
+    await expect
+      .poll(() => poppedScroller.evaluate((element) => element.scrollTop))
+      .toBeGreaterThan(before.max * 0.75);
 
-    // Round-trip through the terminal tab and back — the panel stays mounted.
-    await page.locator('[data-tab="terminal"]').click();
-    await page.locator('[data-tab="artifacts"]').click();
-    await expect(page.locator('.markdown-body h1')).toContainText('Design notes');
+    await addPendingComment(
+      page,
+      "Final review target",
+      "Closing context comment.",
+    );
+    await expect(page.getByTestId("review-tray")).toContainText("2 pending");
 
-    // Warm panel: selecting text must still open the seam, and it must still
-    // drive all the way through to a created thread.
-    await selectPhrase(page, 'markdown representation');
-    await expect(page.getByTestId('comment-select-button')).toBeVisible();
-    await page.getByTestId('comment-select-button').click();
-    const composer = page.getByTestId('comment-pending');
-    await composer.locator('textarea').fill('Does the warm panel still comment?');
-    await composer.getByRole('button', { name: 'Comment' }).click();
-    await expect(composer).toBeHidden();
-    const card = page.locator('[data-testid^="comment-card-"]').first();
-    await expect(card).toContainText('Does the warm panel still comment?');
+    await page.getByTestId("artifact-pop").click();
+    await expect(page.getByTestId("artifact-scroll")).toBeVisible();
+    await expect
+      .poll(() =>
+        page
+          .getByTestId("artifact-scroll")
+          .evaluate((element) => element.scrollTop),
+      )
+      .toBeGreaterThan(before.max * 0.7);
+    await expect(page.getByTestId("review-tray")).toContainText("2 pending");
+
+    await page.setViewportSize({ width: 760, height: 680 });
+    const trayBox = await page.getByTestId("review-tray").boundingBox();
+    expect(trayBox).not.toBeNull();
+    expect(trayBox!.x).toBeGreaterThanOrEqual(0);
+    expect(trayBox!.x + trayBox!.width).toBeLessThanOrEqual(760);
   });
 });

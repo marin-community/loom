@@ -24,6 +24,7 @@ mod pane;
 mod profiles;
 mod recover;
 mod repos;
+mod reviews;
 mod scratch;
 mod session_layout;
 mod session_management;

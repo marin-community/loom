@@ -83,6 +83,7 @@ mod profiles;
 mod repo_env;
 mod repos;
 mod restricted_github;
+mod reviews;
 mod scratch;
 mod session_layout;
 pub(crate) mod sessions;
@@ -106,6 +107,7 @@ use profiles::*;
 use repo_env::*;
 use repos::*;
 use restricted_github::*;
+use reviews::*;
 use scratch::*;
 use session_layout::*;
 use sessions::*;
@@ -696,6 +698,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/sessions/{id}/artifacts", get(list_artifacts))
         .route(
+            "/sessions/{id}/reviews",
+            get(list_session_reviews).post(create_session_review),
+        )
+        .route(
             "/sessions/{id}/artifacts/{name}",
             get(get_artifact)
                 .put(write_artifact)
@@ -781,6 +787,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/branches/{id}/artifacts", get(list_branch_artifacts))
         .route(
+            "/branches/{id}/reviews",
+            get(list_branch_reviews).post(create_branch_review),
+        )
+        .route(
             "/branches/{id}/artifacts/{name}",
             get(get_branch_artifact)
                 .put(write_branch_artifact)
@@ -806,6 +816,18 @@ pub fn router(state: AppState) -> Router {
             "/branches/{id}/issues",
             get(list_branch_issues).post(create_branch_issue),
         )
+        .route("/reviews/{id}", delete(discard_review))
+        .route("/reviews/{id}/comments", post(add_review_comment))
+        .route(
+            "/reviews/{id}/comments/{comment_id}",
+            axum::routing::patch(update_review_comment).delete(delete_review_comment),
+        )
+        .route(
+            "/reviews/{id}/comments/{comment_id}/resolve",
+            post(resolve_review_comment),
+        )
+        .route("/reviews/{id}/submit", post(submit_review))
+        .route("/reviews/{id}/retry-delivery", post(retry_review_delivery))
         // The cross-repo issue board (the loom Issues pane consumes this).
         .route("/issues", get(list_all_issues))
         .route("/issues/actions", post(issue_actions))

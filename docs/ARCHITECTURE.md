@@ -41,7 +41,7 @@ other `weaver` subcommand.
 
 | Path | What's in it |
 |---|---|
-| `crates/weaver-core/` | lib: `branches`, `issues`, `events`, `db`, `migrations` (ordered SQL + `schema_migrations` indicator), `git`, `config`, `artifacts` (versioned documents), `repo_config` (`.weaver/config.toml`), `transcript` (agent conversation logs: raw → iris format → markdown), agent helpers. Pure logic; used by `loom` for DB access, and by `weaver` only for the DB-free pieces (`transcript`, `tags` constants/validators, the agent primer). |
+| `crates/weaver-core/` | lib: `branches`, `issues`, `events`, `db`, `migrations` (ordered SQL + `schema_migrations` indicator), `git`, `config`, `artifacts` (versioned documents), `review` (durable staged feedback + delivery outbox), `repo_config` (`.weaver/config.toml`), `transcript` (agent conversation logs: raw → iris format → markdown), agent helpers. Pure logic; used by `loom` for DB access, and by `weaver` only for the DB-free pieces (`transcript`, `tags` constants/validators, the agent primer). |
 | `crates/weaver-api/` | typed loom REST client + DTOs (`Client`, `*View`/`*Req` types, `endpoint::default_client()` for resolving `$WEAVER_API`/`$LOOM_TOKEN`). Zero server deps (no `axum`, no sqlite driver) — the one cross-process seam `weaver` links against instead of `weaver-core`'s DB layer. |
 | `crates/smartdoc/` | the markdown-convention layer: parse references (`#N`, `artifact:<name>`), project live status into the render. Dependency-free of weaver. See [artifacts.md](artifacts.md). |
 | `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`summary`, `readme`, `status` [read or set level + message], `tag` [`set`/`rm`/`ls` a branch tag], `issue …`, `where`, `log`, `chatlog` [render the agent's conversation transcript], `hook`, `config` [read-only: `get`/`ls`; writes go through `loom config set` or the settings pane]) — every command drives `weaver-api::Client` over HTTP; none touch sqlite |
@@ -294,6 +294,12 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `PUT /api/sessions/{id}/file?path=…` | write raw bytes to a worktree file (the editor save primitive) |
 | `GET /api/sessions/{id}/artifacts` | list the branch's [artifacts](artifacts.md) plus repo-shared ones |
 | `GET PUT /api/sessions/{id}/artifacts/{name}` | read content + projected refs (`rev=N` for a revision) / write a user edit as a new revision |
+| `GET POST /api/sessions/{id}/reviews` | list submitted reviews plus the caller's private draft / create or recover a draft for a versioned subject |
+| `GET POST /api/branches/{id}/reviews` | the same review operations for CLI callers that identify both branch and delivery session |
+| `POST /api/reviews/{id}/comments` / `PATCH DELETE /api/reviews/{id}/comments/{comment_id}` | add, edit/re-anchor, or delete pending review comments |
+| `POST /api/reviews/{id}/comments/{comment_id}/resolve` | resolve or reopen the one mutable lifecycle bit on an otherwise immutable submitted comment |
+| `DELETE /api/reviews/{id}` / `POST /api/reviews/{id}/submit` | discard a draft / atomically freeze and enqueue one structured feedback message |
+| `POST /api/reviews/{id}/retry-delivery` | retry a failed submitted-review delivery using its stable delivery key |
 | `GET /api/sessions/{id}/{diff,log,events}` | reads + SSE stream |
 | `GET /api/sessions/{id}/conversation` | the agent conversation as a normalized iris log (live transcript, else the archive capture); 404 when there is none — backs the Conversation tab |
 | `GET /api/sessions/{id}/history` | a bounded newest-tail page of provider-neutral records in chronological display order; `before`, `limit`, and `kinds` own backward pagination/filtering |

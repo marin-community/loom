@@ -202,6 +202,11 @@ import type {
   ArtifactMeta,
   ArtifactView,
   ArtifactWriteBody,
+  Review,
+  ReviewComment,
+  CreateReviewBody,
+  AddReviewCommentBody,
+  UpdateReviewCommentBody,
   IdeInfo,
   AgentMetadata,
   CustomAgent,
@@ -413,6 +418,47 @@ export const resolveThread = (id: string, name: string, tid: number) =>
     `/sessions/${id}/artifacts/${encodeURIComponent(name)}/threads/${tid}/resolve`,
     {},
   ) as Promise<Thread>;
+
+// --- Staged reviews --------------------------------------------------------
+
+export const listArtifactReviews = (id: string, name: string) =>
+  get(
+    `/sessions/${id}/reviews?subject_kind=artifact&subject_key=${encodeURIComponent(name)}`,
+  ) as Promise<Review[]>;
+
+export const createArtifactReview = (id: string, body: CreateReviewBody) =>
+  post(`/sessions/${id}/reviews`, body) as Promise<Review>;
+
+export const addReviewComment = (reviewId: number, body: AddReviewCommentBody) =>
+  post(`/reviews/${reviewId}/comments`, body) as Promise<ReviewComment>;
+
+export const updateReviewComment = (
+  reviewId: number,
+  commentId: number,
+  body: UpdateReviewCommentBody,
+) => patch(`/reviews/${reviewId}/comments/${commentId}`, body) as Promise<ReviewComment>;
+
+export const deleteReviewComment = (reviewId: number, commentId: number) =>
+  del(`/reviews/${reviewId}/comments/${commentId}`);
+
+export const discardReview = (reviewId: number) => del(`/reviews/${reviewId}`);
+
+export const submitReview = (
+  reviewId: number,
+  body: { summary: string; acknowledge_outdated: boolean },
+) => post(`/reviews/${reviewId}/submit`, body) as Promise<Review>;
+
+export const retryReviewDelivery = (reviewId: number) =>
+  post(`/reviews/${reviewId}/retry-delivery`, {}) as Promise<Review>;
+
+export const setReviewCommentResolution = (
+  reviewId: number,
+  commentId: number,
+  resolved: boolean,
+) =>
+  post(`/reviews/${reviewId}/comments/${commentId}/resolve`, {
+    resolved,
+  }) as Promise<ReviewComment>;
 
 /** Type a message into the session's agent pane and, by default, submit it with
  *  Enter to trigger a round (the same primitive the `loom` CLI's `send` wraps).

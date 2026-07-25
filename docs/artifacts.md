@@ -323,6 +323,30 @@ update the issues; when issues change shape, update the doc's references.*
   linking to the issue, `artifact:` links resolve, checked state for a
   referenced issue comes from the ledger, never the text.
 - `artifact_written` joins the activity feed and SSE-driven refresh.
+- **Review mode** stages feedback before it crosses into the conversation.
+  Selecting rendered text creates a pending comment in a creator-private,
+  session-and-artifact-scoped server draft. Pending comments can be edited,
+  deleted, navigated, or re-anchored after a new artifact revision; outdated
+  feedback remains visible and requires an explicit acknowledgement before
+  submission. The docked and popped viewers use the same draft and preserve
+  the reading position.
+
+  `Submit review` freezes the draft and its comments in one transaction,
+  records one `review_submitted` event, and inserts one delivery-outbox item.
+  A stable delivery key makes retries idempotent at the ACP prompt-queue
+  boundary; terminal delivery is at-least-once. Offline feedback stays queued,
+  failed delivery remains visible and retryable, and earlier discussion
+  threads are projected as submitted compatibility history.
+
+  The operator CLI exposes the same REST contract:
+
+  ```
+  loom review ls <session> <artifact>
+  loom review add <session> <artifact> --rev N --quote TEXT COMMENT
+  loom review edit|reanchor|delete-comment ...
+  loom review resolve|reopen <review-id> <comment-id>
+  loom review discard|submit|retry <review-id>
+  ```
 
 ## Lifecycle walkthrough
 
