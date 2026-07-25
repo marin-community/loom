@@ -192,6 +192,9 @@ pub(super) async fn create_session(
     Extension(principal): Extension<Principal>,
     Json(mut req): Json<CreateReq>,
 ) -> ApiResult<Json<SessionView>> {
+    // The authenticated managed-repository convenience below is itself a
+    // durable side effect. Reject the complete untrusted Scratch batch first.
+    let _ = prepare_initial_scratch(&req.scratch)?;
     // Naming a managed repo here registers it: a signed-in principal asking to
     // launch into `owner/name` is the grant, so a repo loom has never seen just
     // works (it is cloned on the way through runtime provisioning). The `repos`
@@ -765,6 +768,12 @@ pub(super) async fn resolve_session_handoff(
 ) -> ApiResult<Json<weaver_api::ResolvedLaunchView>> {
     let (session, _) = require_session(&st.db, &key).await?;
     require_handoff_source(&session)?;
+    let profile_name = match req.selection.profile.trim() {
+        "" => crate::profile::DEFAULT_PROFILE,
+        name => name,
+    };
+    let _profile_permit = st.launch_gate.acquire_profile(profile_name).await;
+    let _resolver_permit = st.launch_gate.acquire_resolver().await;
     Ok(Json(
         resolve_handoff_selection(&st, &session, &req.selection)
             .await?
@@ -805,12 +814,25 @@ pub(crate) async fn provision_session(
     // same permit; retaining it through session insertion closes the
     // resolve/provision/delete gap even for unlimited profiles.
     let _profile_permit = st.launch_gate.acquire_profile(&selected_profile_name).await;
+    // Custom-agent and custom-MCP mutations share this boundary. Keep the
+    // exact registry generation accepted below through command construction
+    // and runtime startup.
+    let _resolver_permit = st.launch_gate.acquire_resolver().await;
     let options = crate::launch::ResolveOptions {
         default_class: matches!(origin, "watch" | "actions" | "ops")
             .then(|| "automation".to_string()),
         ..Default::default()
     };
-    let resolved = super::launches::resolve_launch(&st, &selection, &options).await?;
+    let resolved = match super::launches::resolve_launch(&st, &selection, &options).await {
+        Ok(resolved) => resolved,
+        Err(error) if req.expected_resolver_revision.is_some() => {
+            return Err(AppError::conflict(format!(
+                "launch settings can no longer be resolved after preview: {}",
+                error.message()
+            )));
+        }
+        Err(error) => return Err(error),
+    };
     let stale_profile = req
         .expected_profile_revision
         .is_some_and(|expected| expected != resolved.view.profile_revision);
@@ -856,6 +878,7 @@ pub(crate) async fn provision_session(
         .with_fields(json!({ "preview": fresh.view })));
     }
     let profile_name = resolved.profile.name.clone();
+    let custom_agent = resolved.custom_agent.clone();
     let launch_profile = resolved.profile;
     let agent = resolved.view.agent.clone();
     let model = resolved.view.model.clone();
@@ -1184,6 +1207,13 @@ pub(crate) async fn provision_session(
         (branch_name, work_dir)
     };
 
+    // A replacement launch may reuse a worktree whose previous session left
+    // Scratch files behind. Validate and write the merged set while holding the
+    // same path-scoped permit as live upload/delete routes, before creating any
+    // branch row, tracking issue, claim, or session.
+    let _scratch_permit = st.launch_gate.acquire_scratch(&work_dir).await;
+    let scratch_names = write_prepared_initial_scratch(&work_dir, &prepared_scratch).await?;
+
     // Get-or-create the branch row, then stamp its title/goal/description.
     let branch = branch_mod::upsert(&st.db, &repo_root_str, &branch_name, &base).await?;
     tracing::debug!(branch = %branch.id, branch_name = %branch_name, "upserted branch row");
@@ -1281,7 +1311,6 @@ pub(crate) async fn provision_session(
     // clean text the user typed; the scratch and tracking notes ride on the
     // launch prompt (goal.txt) only, so they reach the agent without cluttering
     // the dashboard.
-    let scratch_names = write_prepared_initial_scratch(&work_dir, &prepared_scratch).await?;
     tracing::debug!(session = %session_id, scratch_files = scratch_names.len(), "wrote initial scratch files");
     // Goal, scratch, and tracking context ride in as the positional prompt that
     // seeds the session's first turn.
@@ -1467,13 +1496,8 @@ pub(crate) async fn provision_session(
             work_dir = %work_dir.display(), mode = %mode, "launching acp session"
         );
         let session = session_mod::insert_with_policy(&st.db, &new_session, &launch_policy).await?;
-        // A custom acp agent supplies its own adapter command; a builtin
-        // resolves its adapter (claude-agent-acp / codex-acp).
-        let custom = if agent::builtin_agent_type(&runtime).is_some() {
-            None
-        } else {
-            custom_agents::get(&st.db, &runtime).await?
-        };
+        // A custom ACP agent supplies the exact adapter command accepted by
+        // canonical resolution; registry edits after preview cannot replace it.
         let launch = agent::build_acp_launch(
             &st.db,
             &agent::AcpLaunchSpec {
@@ -1493,7 +1517,7 @@ pub(crate) async fn provision_session(
                 restricted: launch_profile.restricted,
                 allowed_tools: &stamped_allowed_tools,
                 mcp_access: &launch_policy.mcp_access,
-                custom: custom.as_ref(),
+                custom: custom_agent.as_ref(),
             },
             agent::AcpOpen::Fresh,
         )
@@ -1576,6 +1600,7 @@ pub(crate) async fn provision_session(
                 effort: &effort,
                 extra_env: &extra_env,
                 env_clear: launch_profile.env_clear,
+                custom: custom_agent.as_ref(),
             },
             agent::LaunchMode::Fresh,
         )
@@ -2593,6 +2618,7 @@ pub(crate) async fn create_warm_session(
             effort: &effort,
             extra_env: &extra_env,
             env_clear: launch_profile.env_clear,
+            custom: None,
         },
         agent::LaunchMode::Fresh,
     )
@@ -2964,6 +2990,7 @@ async fn resume_agent(
             effort: &session.effort,
             extra_env: &extra_env,
             env_clear: session.policy_env_clear,
+            custom: None,
         },
         agent::LaunchMode::Adopt,
     )
@@ -3575,6 +3602,7 @@ struct HandoffPlan {
     mcp_access: String,
     launch_snapshot: String,
     profile_environment: Vec<(String, String)>,
+    custom_agent: Option<custom_agents::CustomAgent>,
 }
 
 fn legacy_handoff_snapshot(
@@ -3626,9 +3654,21 @@ async fn legacy_handoff_plan(
     if target.is_empty() {
         return Err(AppError::bad_request("handoff agent is required"));
     }
-    let metadata = crate::agent::metadata_for(&st.db, target)
-        .await?
-        .ok_or_else(|| AppError::bad_request(format!("unknown agent '{target}'")))?;
+    let custom_agent = if crate::agent::builtin_agent_type(target).is_some() {
+        None
+    } else {
+        Some(
+            custom_agents::get(&st.db, target)
+                .await?
+                .ok_or_else(|| AppError::bad_request(format!("unknown agent '{target}'")))?,
+        )
+    };
+    let metadata = match custom_agent.as_ref() {
+        Some(custom) => crate::agent::custom_metadata(custom),
+        None => crate::agent::metadata_for(&st.db, target)
+            .await?
+            .ok_or_else(|| AppError::bad_request(format!("unknown agent '{target}'")))?,
+    };
     let model = req
         .model
         .as_deref()
@@ -3664,6 +3704,30 @@ async fn legacy_handoff_plan(
     let strict = snapshot
         .as_ref()
         .is_some_and(|snapshot| snapshot.policy.strict);
+    let lifetime = crate::profile::get_including_retired(&st.db, &session.profile)
+        .await?
+        .ok_or_else(|| {
+            AppError::conflict(
+                "the session's original profile lifetime is unavailable; review a canonical handoff preview",
+            )
+        })?;
+    let original_lifetime = lifetime.revision == session.profile_revision
+        || (lifetime.retired && lifetime.revision == session.profile_revision + 1);
+    if !original_lifetime {
+        return Err(AppError::conflict(
+            "the session's profile name now refers to a different template lifetime; review a canonical handoff preview",
+        ));
+    }
+    let keeps_same_slot = crate::profile::status_consumes_capacity(&session.status);
+    if lifetime.max_concurrent > 0
+        && !keeps_same_slot
+        && crate::profile::active_count(&st.db, &session.profile).await? >= lifetime.max_concurrent
+    {
+        return Err(AppError::conflict(format!(
+            "profile '{}' has reached its max_concurrent limit ({})",
+            session.profile, lifetime.max_concurrent
+        )));
+    }
     let profile_environment = crate::profile::env_pairs(&st.db, &session.profile)
         .await
         .map_err(|error| AppError::bad_request(error.to_string()))?;
@@ -3685,6 +3749,7 @@ async fn legacy_handoff_plan(
         mcp_access: session.policy_mcp_access.clone(),
         launch_snapshot: legacy_handoff_snapshot(session, target, &model, &effort, &mode)?,
         profile_environment,
+        custom_agent,
     })
 }
 
@@ -3695,14 +3760,36 @@ pub(super) async fn handoff_session(
     Path(key): Path<String>,
     Json(req): Json<HandoffReq>,
 ) -> ApiResult<Json<SessionView>> {
-    let (session, branch) = require_session(&st.db, &key).await?;
-    require_handoff_source(&session)?;
+    let (initial_session, _) = require_session(&st.db, &key).await?;
+    require_handoff_source(&initial_session)?;
     let canonical = req.selection.is_some();
     if canonical
         && (req.expected_profile_revision.is_none() || req.expected_resolver_revision.is_none())
     {
         return Err(AppError::bad_request(
             "canonical handoff selection requires expected_profile_revision and expected_resolver_revision from a handoff preview",
+        ));
+    }
+    let _source_permit = st.launch_gate.acquire_session(&initial_session.id).await;
+    let _lifecycle = LIFECYCLE_LOCK.lock().await;
+    let Some((session, branch)) = session_mod::with_branch(&st.db, &initial_session.id).await?
+    else {
+        return Err(AppError::conflict(
+            "session changed while the handoff request was waiting; review it again",
+        ));
+    };
+    require_handoff_source(&session)?;
+    let unchanged_source = session.status == initial_session.status
+        && session.agent_kind == initial_session.agent_kind
+        && session.model == initial_session.model
+        && session.effort == initial_session.effort
+        && session.profile == initial_session.profile
+        && session.profile_revision == initial_session.profile_revision
+        && session.launch_mode == initial_session.launch_mode
+        && session.launch_snapshot == initial_session.launch_snapshot;
+    if !unchanged_source {
+        return Err(AppError::conflict(
+            "session changed while the handoff request was waiting; review it again",
         ));
     }
     let selection = canonical
@@ -3717,8 +3804,18 @@ pub(super) async fn handoff_session(
         .unwrap_or(session.profile.as_str())
         .to_string();
     let _profile_permit = st.launch_gate.acquire_profile(&permit_profile).await;
+    let _resolver_permit = st.launch_gate.acquire_resolver().await;
     let plan = if let Some(selection) = selection {
-        let resolved = resolve_handoff_selection(&st, &session, &selection).await?;
+        let resolved = match resolve_handoff_selection(&st, &session, &selection).await {
+            Ok(resolved) => resolved,
+            Err(error) if req.expected_resolver_revision.is_some() => {
+                return Err(AppError::conflict(format!(
+                    "handoff settings can no longer be resolved after preview: {}",
+                    error.message()
+                )));
+            }
+            Err(error) => return Err(error),
+        };
         if req
             .expected_profile_revision
             .is_some_and(|expected| expected != resolved.view.profile_revision)
@@ -3763,6 +3860,7 @@ pub(super) async fn handoff_session(
                 .map_err(|error| AppError::bad_request(error.to_string()))?,
             launch_snapshot,
             profile_environment,
+            custom_agent: resolved.custom_agent,
         }
     } else {
         legacy_handoff_plan(&st, &req, &session).await?
@@ -3834,11 +3932,6 @@ pub(super) async fn handoff_session(
         None,
     )
     .await?;
-    let custom = if agent::builtin_agent_type(&target).is_some() {
-        None
-    } else {
-        custom_agents::get(&st.db, &target).await?
-    };
     // Build every policy/tool input before stopping the old task. The bootstrap
     // itself is injected in memory after the task returns its atomic snapshot.
     let mut launch = agent::build_acp_launch(
@@ -3860,7 +3953,7 @@ pub(super) async fn handoff_session(
             restricted: plan.restricted,
             allowed_tools: &handoff_policy.allowed_tools,
             mcp_access: &handoff_policy.mcp_access,
-            custom: custom.as_ref(),
+            custom: plan.custom_agent.as_ref(),
         },
         agent::AcpOpen::Fresh,
     )

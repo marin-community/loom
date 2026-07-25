@@ -2162,6 +2162,76 @@ async fn rest_create_drives_the_turn_lifecycle() {
     assert_eq!(nudges, 1, "the send recorded exactly one nudge audit event");
 }
 
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn canonical_acp_launch_finishes_its_accepted_agent_generation_before_delete() {
+    let ts = TestServer::start().await;
+    seed_acp_agent(&ts, "snapshot-acp").await;
+    let selection = json!({
+        "profile": "default",
+        "overrides": { "agent": "snapshot-acp" }
+    });
+    let preview = ts
+        .client
+        .post(
+            "/api/session-launches/resolve",
+            json!({ "selection": selection }),
+        )
+        .await
+        .unwrap();
+    let repo = ts.repo_path().canonicalize().unwrap();
+    let repo_permit = ts.state.launch_gate.acquire(&repo).await;
+    let create_url = format!("http://{}/api/sessions", ts.addr);
+    let cwd = ts.cwd();
+    let creating = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(create_url)
+            .json(&json!({
+                "cwd": cwd,
+                "goal": "say:accepted ACP snapshot",
+                "selection": selection,
+                "expected_profile_revision": preview["profile_revision"],
+                "expected_resolver_revision": preview["resolver_revision"]
+            }))
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!creating.is_finished());
+    let delete_url = format!("http://{}/api/agents/custom/snapshot-acp", ts.addr);
+    let deleting = tokio::spawn(async move {
+        reqwest::Client::new()
+            .delete(delete_url)
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !deleting.is_finished(),
+        "custom-agent delete waits for accepted ACP launch execution"
+    );
+    drop(repo_permit);
+    let created = tokio::time::timeout(Duration::from_secs(20), creating)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(created.status().is_success());
+    let created: Value = created.json().await.unwrap();
+    let id = created["id"].as_str().unwrap();
+    poll_chat(&ts, id, Duration::from_secs(15), |blocks| {
+        blocks.iter().any(|block| block["kind"] == "turn_end")
+    })
+    .await;
+    assert!(tokio::time::timeout(Duration::from_secs(10), deleting)
+        .await
+        .unwrap()
+        .unwrap()
+        .status()
+        .is_success());
+}
+
 /// REST keeps failure semantics for non-browser callers, while returning the
 /// durable failed session id so the UI can navigate to its recovery controls.
 #[serial]
@@ -2474,6 +2544,45 @@ async fn legacy_handoff_preserves_stamped_policy_after_template_retirement() {
     assert!(row.policy_env_clear);
     assert_eq!(row.policy_prelude, "none");
     assert_eq!(row.policy_ambient_allowlist, r#"["LANG"]"#);
+
+    ts.client
+        .patch(&format!("/api/sessions/{id}"), json!({ "status": "error" }))
+        .await
+        .unwrap();
+    ts.client
+        .post(
+            "/api/profiles",
+            json!({
+                "name": "legacy-strict",
+                "agent_kind": "legacy-a",
+                "protocol": "acp",
+                "mode": "default",
+                "class": "interactive",
+                "max_concurrent": 1,
+                "mcp_access": { "mode": "none", "groups": [] }
+            }),
+        )
+        .await
+        .unwrap();
+    ts.client
+        .put(
+            "/api/profiles/legacy-strict/env/REPLACEMENT_CREDENTIAL",
+            json!({ "value": "must-not-cross-lifetimes" }),
+        )
+        .await
+        .unwrap();
+    let recreated = reqwest::Client::new()
+        .post(format!("http://{}/api/sessions/{id}/handoff", ts.addr))
+        .json(&json!({ "agent": "legacy-a" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(recreated.status(), reqwest::StatusCode::CONFLICT);
+    let body: Value = recreated.json().await.unwrap();
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("different template lifetime"));
 }
 
 #[serial]
@@ -2545,10 +2654,118 @@ async fn error_session_gets_no_phantom_same_profile_capacity_credit() {
     assert_eq!(preview["capacity"]["active"], 1);
     assert_eq!(preview["capacity"]["allowed"], false);
     assert_eq!(preview["valid"], false);
+    let flattened = reqwest::Client::new()
+        .post(format!(
+            "http://{}/api/sessions/{errored_id}/handoff",
+            ts.addr
+        ))
+        .json(&json!({ "agent": "capacity-agent" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(flattened.status(), reqwest::StatusCode::CONFLICT);
+    let flattened_body: Value = flattened.json().await.unwrap();
+    assert!(flattened_body["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("max_concurrent"));
     ts.client
         .delete(&format!("/api/sessions/{}", active["id"].as_str().unwrap()))
         .await
         .unwrap();
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_flattened_handoffs_serialize_same_profile_admission() {
+    let ts = TestServer::start().await;
+    seed_acp_agent(&ts, "legacy-capacity-source").await;
+    seed_acp_agent(&ts, "legacy-capacity-target").await;
+    ts.client
+        .post(
+            "/api/profiles",
+            json!({
+                "name": "legacy-capacity",
+                "agent_kind": "legacy-capacity-source",
+                "protocol": "acp",
+                "mode": "default",
+                "class": "interactive",
+                "max_concurrent": 1,
+                "mcp_access": { "mode": "none", "groups": [] }
+            }),
+        )
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    for goal in ["say:first legacy source", "say:second legacy source"] {
+        let session = ts
+            .client
+            .post(
+                "/api/sessions",
+                json!({ "cwd": ts.cwd(), "goal": goal, "profile": "legacy-capacity" }),
+            )
+            .await
+            .unwrap();
+        let id = session["id"].as_str().unwrap().to_string();
+        poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
+            blocks.iter().any(|block| block["kind"] == "turn_end")
+        })
+        .await;
+        ts.client
+            .patch(&format!("/api/sessions/{id}"), json!({ "status": "error" }))
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+
+    let permit = ts
+        .state
+        .launch_gate
+        .acquire_profile("legacy-capacity")
+        .await;
+    let mut tasks = Vec::new();
+    for id in ids {
+        let url = format!("http://{}/api/sessions/{id}/handoff", ts.addr);
+        tasks.push(tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(url)
+                .json(&json!({ "agent": "legacy-capacity-target" }))
+                .send()
+                .await
+                .unwrap()
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(tasks.iter().all(|task| !task.is_finished()));
+    drop(permit);
+
+    let mut statuses = Vec::new();
+    for task in tasks {
+        statuses.push(
+            tokio::time::timeout(Duration::from_secs(30), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .status(),
+        );
+    }
+    assert_eq!(
+        statuses.iter().filter(|status| status.is_success()).count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == reqwest::StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    assert_eq!(
+        loom::profile::active_count(&ts.state.db, "legacy-capacity")
+            .await
+            .unwrap(),
+        1
+    );
 }
 
 #[serial]
@@ -2674,6 +2891,281 @@ async fn concurrent_handoffs_serialize_target_profile_admission() {
     assert_eq!(conflict["preview"]["capacity"]["active"], 1);
     assert_eq!(conflict["preview"]["capacity"]["allowed"], false);
     assert_eq!(conflict["preview"]["valid"], false);
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn same_source_handoffs_to_different_profiles_have_one_winner() {
+    let ts = TestServer::start().await;
+    seed_acp_agent(&ts, "fenced-source").await;
+    seed_acp_agent(&ts, "fenced-target-a").await;
+    seed_acp_agent(&ts, "fenced-target-b").await;
+    for (profile, agent) in [
+        ("fenced-profile-a", "fenced-target-a"),
+        ("fenced-profile-b", "fenced-target-b"),
+    ] {
+        ts.client
+            .post(
+                "/api/profiles",
+                json!({
+                    "name": profile,
+                    "agent_kind": agent,
+                    "protocol": "acp",
+                    "mode": "default",
+                    "class": "interactive",
+                    "mcp_access": { "mode": "none", "groups": [] }
+                }),
+            )
+            .await
+            .unwrap();
+    }
+    let source = rest_create(&ts, "fenced-source", "say:fence source").await;
+    let id = source["id"].as_str().unwrap().to_string();
+    poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
+        blocks.iter().any(|block| block["kind"] == "turn_end")
+    })
+    .await;
+    let mut previews = Vec::new();
+    for profile in ["fenced-profile-a", "fenced-profile-b"] {
+        previews.push(
+            ts.client
+                .post(
+                    &format!("/api/sessions/{id}/handoff/resolve"),
+                    json!({ "selection": { "profile": profile, "overrides": {} } }),
+                )
+                .await
+                .unwrap(),
+        );
+    }
+
+    let permit = ts.state.launch_gate.acquire_session(&id).await;
+    let mut tasks = Vec::new();
+    for (profile, preview) in ["fenced-profile-a", "fenced-profile-b"]
+        .into_iter()
+        .zip(previews)
+    {
+        let url = format!("http://{}/api/sessions/{id}/handoff", ts.addr);
+        tasks.push(tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(url)
+                .json(&json!({
+                    "selection": { "profile": profile, "overrides": {} },
+                    "expected_profile_revision": preview["profile_revision"],
+                    "expected_resolver_revision": preview["resolver_revision"]
+                }))
+                .send()
+                .await
+                .unwrap()
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(tasks.iter().all(|task| !task.is_finished()));
+    drop(permit);
+
+    let mut responses = Vec::new();
+    for task in tasks {
+        responses.push(
+            tokio::time::timeout(Duration::from_secs(30), task)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|response| response.status().is_success())
+            .count(),
+        1
+    );
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|response| response.status() == reqwest::StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    let row = loom::session::get(&ts.state.db, &id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        row.profile.as_str(),
+        "fenced-profile-a" | "fenced-profile-b"
+    ));
+    let chat = ts
+        .client
+        .get(&format!("/api/sessions/{id}/chat"))
+        .await
+        .unwrap();
+    assert_eq!(
+        chat["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|block| block["kind"] == "handoff")
+            .count(),
+        1
+    );
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn custom_agent_delete_across_canonical_handoff_is_exact_or_conflicts() {
+    let ts = TestServer::start().await;
+    seed_acp_agent(&ts, "handoff-snapshot-source").await;
+    seed_acp_agent(&ts, "handoff-snapshot-target").await;
+    ts.client
+        .post(
+            "/api/profiles",
+            json!({
+                "name": "handoff-snapshot-profile",
+                "agent_kind": "handoff-snapshot-target",
+                "protocol": "acp",
+                "mode": "default",
+                "class": "interactive",
+                "mcp_access": { "mode": "none", "groups": [] }
+            }),
+        )
+        .await
+        .unwrap();
+    let source = rest_create(
+        &ts,
+        "handoff-snapshot-source",
+        "say:handoff snapshot source",
+    )
+    .await;
+    let id = source["id"].as_str().unwrap().to_string();
+    poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
+        blocks.iter().any(|block| block["kind"] == "turn_end")
+    })
+    .await;
+    let selection = json!({
+        "profile": "handoff-snapshot-profile",
+        "overrides": {}
+    });
+    let preview = ts
+        .client
+        .post(
+            &format!("/api/sessions/{id}/handoff/resolve"),
+            json!({ "selection": selection }),
+        )
+        .await
+        .unwrap();
+
+    let resolver_permit = ts.state.launch_gate.acquire_resolver().await;
+    let handoff_url = format!("http://{}/api/sessions/{id}/handoff", ts.addr);
+    let handing_off = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(handoff_url)
+            .json(&json!({
+                "selection": selection,
+                "expected_profile_revision": preview["profile_revision"],
+                "expected_resolver_revision": preview["resolver_revision"]
+            }))
+            .send()
+            .await
+            .unwrap()
+    });
+    let delete_url = format!(
+        "http://{}/api/agents/custom/handoff-snapshot-target",
+        ts.addr
+    );
+    let deleting = tokio::spawn(async move {
+        reqwest::Client::new()
+            .delete(delete_url)
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!handing_off.is_finished());
+    assert!(!deleting.is_finished());
+    drop(resolver_permit);
+    let handoff = tokio::time::timeout(Duration::from_secs(30), handing_off)
+        .await
+        .unwrap()
+        .unwrap();
+    let deletion = tokio::time::timeout(Duration::from_secs(30), deleting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(deletion.status().is_success());
+    if handoff.status().is_success() {
+        let handed: Value = handoff.json().await.unwrap();
+        assert_eq!(handed["agent_kind"], "handoff-snapshot-target");
+    } else {
+        assert_eq!(handoff.status(), reqwest::StatusCode::CONFLICT);
+        let row = loom::session::get(&ts.state.db, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.agent_kind, "handoff-snapshot-source");
+    }
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn archive_and_delete_win_against_a_waiting_handoff_without_resurrection() {
+    let ts = TestServer::start().await;
+    seed_acp_agent(&ts, "lifecycle-source").await;
+    seed_acp_agent(&ts, "lifecycle-target").await;
+
+    for action in ["archive", "delete"] {
+        let source = rest_create(
+            &ts,
+            "lifecycle-source",
+            &format!("say:{action} lifecycle race"),
+        )
+        .await;
+        let id = source["id"].as_str().unwrap().to_string();
+        poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
+            blocks.iter().any(|block| block["kind"] == "turn_end")
+        })
+        .await;
+        let permit = ts.state.launch_gate.acquire_session(&id).await;
+        let url = format!("http://{}/api/sessions/{id}/handoff", ts.addr);
+        let handoff = tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(url)
+                .json(&json!({ "agent": "lifecycle-target" }))
+                .send()
+                .await
+                .unwrap()
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!handoff.is_finished());
+
+        if action == "archive" {
+            ts.client
+                .post(&format!("/api/sessions/{id}/archive"), json!({}))
+                .await
+                .unwrap();
+        } else {
+            ts.client
+                .delete(&format!("/api/sessions/{id}"))
+                .await
+                .unwrap();
+        }
+        drop(permit);
+        let response = tokio::time::timeout(Duration::from_secs(10), handoff)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+        if action == "archive" {
+            let row = loom::session::get(&ts.state.db, &id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.status, "archived");
+        } else {
+            assert!(loom::session::get(&ts.state.db, &id)
+                .await
+                .unwrap()
+                .is_none());
+        }
+    }
 }
 
 /// A missing task is a supported recovery state: close its abandoned turn,

@@ -403,6 +403,19 @@ pub async fn get_including_retired(db: &Db, name: &str) -> Result<Option<Profile
     )
 }
 
+pub(crate) struct PreparedProfile {
+    normalized: ProfileInput,
+    mcp_policy: weaver_api::McpPolicySnapshot,
+}
+
+pub(crate) async fn prepare_input(db: &Db, input: &ProfileInput) -> Result<PreparedProfile> {
+    let (normalized, mcp_policy) = normalized_input(db, input).await?;
+    Ok(PreparedProfile {
+        normalized,
+        mcp_policy,
+    })
+}
+
 async fn normalized_input(
     db: &Db,
     input: &ProfileInput,
@@ -734,14 +747,64 @@ pub enum CloneProfileOutcome {
 /// write-only environment in the same SQLite transaction. The source revision
 /// guard is checked inside that transaction, so an environment or template edit
 /// cannot race between preview and clone.
-pub async fn create_clone(
+#[cfg(test)]
+async fn create_clone(
     db: &Db,
     source_name: &str,
     expected_source_revision: i64,
     input: &ProfileInput,
     copy_environment: bool,
 ) -> Result<CloneProfileOutcome> {
-    let (normalized, current_mcp_policy) = normalized_input(db, input).await?;
+    let prepared = prepare_input(db, input).await?;
+    create_clone_prepared(
+        db,
+        source_name,
+        expected_source_revision,
+        prepared,
+        &weaver_api::CloneProfileEnvironmentReq {
+            inherit: copy_environment,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// Commit an already normalized clone proposal and its environment edits in
+/// one transaction. The caller owns the resolver-generation fence from
+/// [`prepare_input`] through this function.
+pub(crate) async fn create_clone_prepared(
+    db: &Db,
+    source_name: &str,
+    expected_source_revision: i64,
+    prepared: PreparedProfile,
+    environment: &weaver_api::CloneProfileEnvironmentReq,
+) -> Result<CloneProfileOutcome> {
+    let PreparedProfile {
+        normalized,
+        mcp_policy: current_mcp_policy,
+    } = prepared;
+    let mut seen_remove = std::collections::HashSet::new();
+    for name in &environment.remove {
+        crate::agent_env::validate_name(name).map_err(|error| anyhow!(error))?;
+        if !seen_remove.insert(name.as_str()) {
+            bail!("duplicate environment removal '{name}'");
+        }
+    }
+    let mut seen_set = std::collections::HashSet::new();
+    for entry in &environment.set {
+        crate::agent_env::validate_name(&entry.name).map_err(|error| anyhow!(error))?;
+        if !seen_set.insert(entry.name.as_str()) {
+            bail!("duplicate environment value '{}'", entry.name);
+        }
+        match (&entry.value, &entry.secret_ref) {
+            (Some(_), None) => {}
+            (None, Some(secret_ref)) => validate_gcp_secret_ref(secret_ref)?,
+            _ => bail!(
+                "environment '{}' requires exactly one of value and secret_ref",
+                entry.name
+            ),
+        }
+    }
     let target_name = normalized.name.as_str();
     let ambient = serde_json::to_string(&normalized.ambient_allowlist)?;
     let allowed_tools = serde_json::to_string(&normalized.allowed_tools)?;
@@ -842,7 +905,7 @@ pub async fn create_clone(
         .execute(&mut *tx)
         .await?;
     }
-    if copy_environment {
+    if environment.inherit {
         sqlx::query(
             "INSERT INTO profile_env
              (profile_name, name, value, source, secret_ref, updated_at)
@@ -853,6 +916,36 @@ pub async fn create_clone(
         .bind(target_name)
         .bind(&now)
         .bind(source_name)
+        .execute(&mut *tx)
+        .await?;
+    }
+    for name in &environment.remove {
+        sqlx::query("DELETE FROM profile_env WHERE profile_name = ? AND name = ?")
+            .bind(target_name)
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+    }
+    for entry in &environment.set {
+        let (value, source, secret_ref) = match (&entry.value, &entry.secret_ref) {
+            (Some(value), None) => (value.as_str(), "literal", None),
+            (None, Some(secret_ref)) => ("", "gcp_secret", Some(secret_ref.as_str())),
+            _ => unreachable!("environment proposal was validated"),
+        };
+        sqlx::query(
+            "INSERT INTO profile_env
+             (profile_name, name, value, source, secret_ref, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(profile_name, name) DO UPDATE SET
+              value=excluded.value, source=excluded.source,
+              secret_ref=excluded.secret_ref, updated_at=excluded.updated_at",
+        )
+        .bind(target_name)
+        .bind(&entry.name)
+        .bind(value)
+        .bind(source)
+        .bind(secret_ref)
+        .bind(&now)
         .execute(&mut *tx)
         .await?;
     }

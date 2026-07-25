@@ -18,6 +18,7 @@ async fn scratch_upload_list_and_delete() {
     assert_eq!(limits["max_files"], 20);
     assert_eq!(limits["max_file_bytes"], 25 * 1024 * 1024);
     assert_eq!(limits["max_total_bytes"], 50 * 1024 * 1024);
+    assert_eq!(limits["max_name_bytes"], 240);
 
     let ws = client
         .post(
@@ -83,6 +84,19 @@ async fn scratch_upload_list_and_delete() {
         .await
         .unwrap();
     assert_eq!(housekeeping.status().as_u16(), 400);
+    for invalid_name in [
+        "nul\0name.txt".to_string(),
+        format!("{}.txt", "x".repeat(241)),
+    ] {
+        let invalid = reqwest::Client::new()
+            .post(format!("{}/api/sessions/{id}/scratch", client.base()))
+            .query(&[("name", invalid_name)])
+            .body("nope")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), reqwest::StatusCode::BAD_REQUEST);
+    }
 
     let dotfile = reqwest::Client::new()
         .post(format!(
@@ -135,7 +149,11 @@ async fn scratch_upload_list_and_delete() {
     for index in 0..19 {
         std::fs::write(scratch_dir.join(format!("seed-{index:02}.txt")), "x").unwrap();
     }
-    let permit = ts.state.launch_gate.acquire_scratch(&id).await;
+    let permit = ts
+        .state
+        .launch_gate
+        .acquire_scratch(Path::new(&work_dir))
+        .await;
     let first_http = http.clone();
     let first_url = format!(
         "{}/api/sessions/{id}/scratch?name=concurrent-a.txt",
@@ -249,6 +267,59 @@ async fn invalid_initial_scratch_has_no_provisioning_side_effects() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_initial_names_precede_managed_repository_registration() {
+    let ts = TestServer::start().await;
+    for (index, invalid_name) in [
+        "nul\0name.txt".to_string(),
+        format!("{}.txt", "x".repeat(241)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let slug = format!("scratch-owner/invalid-{index}");
+        let response = reqwest::Client::new()
+            .post(format!("http://{}/api/sessions", ts.addr))
+            .json(&json!({
+                "repo": slug,
+                "goal": "reject before every side effect",
+                "name": format!("invalid-managed-{index}"),
+                "agent": "shell",
+                "scratch": [{
+                    "name": invalid_name,
+                    "content_base64": "eA=="
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    }
+
+    let repositories: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM repos")
+        .fetch_one(&ts.state.db)
+        .await
+        .unwrap();
+    let branches: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM branches")
+        .fetch_one(&ts.state.db)
+        .await
+        .unwrap();
+    let issues: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issues")
+        .fetch_one(&ts.state.db)
+        .await
+        .unwrap();
+    let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+        .fetch_one(&ts.state.db)
+        .await
+        .unwrap();
+    assert_eq!((repositories, branches, issues, sessions), (0, 0, 0, 0));
+    assert!(
+        !loom::repo::repos_dir().join("scratch-owner").exists(),
+        "validation must precede managed clone filesystem creation"
+    );
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exact_advertised_scratch_total_fits_the_create_transport_envelope() {
     let ts = TestServer::start().await;
     let bytes = vec![b'x'; 25 * 1024 * 1024];
@@ -281,4 +352,152 @@ async fn exact_advertised_scratch_total_fits_the_create_transport_envelope() {
         ))
         .await
         .unwrap();
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reused_worktree_scratch_limits_include_existing_files() {
+    let ts = TestServer::start().await;
+    let scratch = ts.repo_path().join("scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+    std::fs::write(scratch.join(".gitignore"), "*\n").unwrap();
+    for index in 0..20 {
+        std::fs::write(scratch.join(format!("existing-{index:02}.txt")), "x").unwrap();
+    }
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/api/sessions", ts.addr))
+        .json(&json!({
+            "cwd": ts.cwd(),
+            "goal": "reuse bounded scratch",
+            "agent": "shell",
+            "existing_branch": "main",
+            "scratch": [{
+                "name": "overflow.txt",
+                "content_base64": base64::engine::general_purpose::STANDARD.encode("x")
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(!scratch.join("overflow.txt").exists());
+    assert!(ts
+        .client
+        .get("/api/sessions")
+        .await
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let branch_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM branches")
+        .fetch_one(&ts.state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        branch_rows, 0,
+        "merged Scratch validation precedes branch tracking"
+    );
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reused_worktree_launch_and_live_upload_share_one_inventory_boundary() {
+    let ts = TestServer::start().await;
+    let original = ts
+        .client
+        .post(
+            "/api/sessions",
+            json!({
+                "cwd": ts.cwd(),
+                "goal": "own main before replacement",
+                "agent": "shell",
+                "existing_branch": "main"
+            }),
+        )
+        .await
+        .unwrap();
+    let original_id = original["id"].as_str().unwrap().to_string();
+    ts.client
+        .patch(
+            &format!("/api/sessions/{original_id}"),
+            json!({ "status": "error" }),
+        )
+        .await
+        .unwrap();
+    let work_dir = original["work_dir"].as_str().unwrap().to_string();
+    let scratch = Path::new(&work_dir).join("scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+    std::fs::write(scratch.join(".gitignore"), "*\n").unwrap();
+    for index in 0..19 {
+        std::fs::write(scratch.join(format!("race-{index:02}.txt")), "x").unwrap();
+    }
+
+    let permit = ts
+        .state
+        .launch_gate
+        .acquire_scratch(Path::new(&work_dir))
+        .await;
+    let launch_url = format!("http://{}/api/sessions", ts.addr);
+    let launch_cwd = ts.cwd();
+    let launch = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(launch_url)
+            .json(&json!({
+                "cwd": launch_cwd,
+                "goal": "replacement claims twentieth slot",
+                "agent": "shell",
+                "existing_branch": "main",
+                "scratch": [{
+                    "name": "from-launch.txt",
+                    "content_base64": "eA=="
+                }]
+            }))
+            .send()
+            .await
+            .unwrap()
+    });
+    let upload_url = format!(
+        "http://{}/api/sessions/{original_id}/scratch?name=from-upload.txt",
+        ts.addr
+    );
+    let upload = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(upload_url)
+            .body("x")
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!launch.is_finished());
+    assert!(!upload.is_finished());
+    drop(permit);
+
+    let launch = tokio::time::timeout(std::time::Duration::from_secs(15), launch)
+        .await
+        .unwrap()
+        .unwrap();
+    let upload = tokio::time::timeout(std::time::Duration::from_secs(15), upload)
+        .await
+        .unwrap()
+        .unwrap();
+    let statuses = [launch.status(), upload.status()];
+    assert_eq!(
+        statuses.iter().filter(|status| status.is_success()).count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == reqwest::StatusCode::BAD_REQUEST)
+            .count(),
+        1
+    );
+    let files = std::fs::read_dir(&scratch)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name() != ".gitignore")
+        .count();
+    assert_eq!(files, 20);
 }

@@ -19,6 +19,12 @@ pub(super) async fn resolve_session_launch(
     State(st): State<AppState>,
     Json(req): Json<ResolveLaunchReq>,
 ) -> ApiResult<Json<ResolvedLaunchView>> {
+    let profile_name = match req.selection.profile.trim() {
+        "" => crate::profile::DEFAULT_PROFILE,
+        name => name,
+    };
+    let _profile_permit = st.launch_gate.acquire_profile(profile_name).await;
+    let _resolver_permit = st.launch_gate.acquire_resolver().await;
     Ok(Json(
         resolve_launch(
             &st,

@@ -4,6 +4,7 @@ use reqwest::StatusCode;
 use serde_json::json;
 use serial_test::serial;
 use std::os::unix::fs::PermissionsExt;
+use std::process::Command;
 
 use crate::fixtures::TestServer;
 
@@ -348,11 +349,27 @@ async fn profile_clone_copies_environment_atomically_and_honors_source_revision(
         .post("/api/profiles", interactive_shell_profile("clone-source"))
         .await
         .unwrap();
-    let source = ts
-        .client
+    ts.client
         .put(
             "/api/profiles/clone-source/env/TOKEN",
             json!({ "value": "write-only-source" }),
+        )
+        .await
+        .unwrap();
+    ts.client
+        .put(
+            "/api/profiles/clone-source/env/REMOVE_ME",
+            json!({ "value": "discarded" }),
+        )
+        .await
+        .unwrap();
+    let source = ts
+        .client
+        .put(
+            "/api/profiles/clone-source/env/SECRET",
+            json!({
+                "secret_ref": "projects/acme/secrets/source/versions/latest"
+            }),
         )
         .await
         .unwrap();
@@ -380,18 +397,50 @@ async fn profile_clone_copies_environment_atomically_and_honors_source_revision(
                 "expected_profile_revision": source_revision,
                 "expected_resolver_revision": preview["resolver_revision"],
                 "overrides": { "effort": "" },
-                "copy_environment": true
+                "copy_environment": false,
+                "environment": {
+                    "inherit": true,
+                    "remove": ["REMOVE_ME"],
+                    "set": [
+                        { "name": "TOKEN", "value": "replaced" },
+                        { "name": "ADDED", "value": "new" },
+                        {
+                            "name": "NEW_SECRET",
+                            "secret_ref": "projects/acme/secrets/new/versions/7"
+                        }
+                    ]
+                }
             }),
         )
         .await
         .unwrap();
     assert_eq!(clone["name"], "clone-target");
-    assert_eq!(clone["env"][0]["name"], "TOKEN");
     assert_eq!(
-        loom::profile::env_pairs(&ts.state.db, "clone-target")
+        clone["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["ADDED", "NEW_SECRET", "SECRET", "TOKEN"]
+    );
+    assert_eq!(
+        loom::profile::env_get(&ts.state.db, "clone-target", "TOKEN")
             .await
             .unwrap(),
-        vec![("TOKEN".to_string(), "write-only-source".to_string())]
+        Some("replaced".to_string())
+    );
+    assert_eq!(
+        loom::profile::env_get(&ts.state.db, "clone-target", "ADDED")
+            .await
+            .unwrap(),
+        Some("new".to_string())
+    );
+    assert!(
+        loom::profile::env_get(&ts.state.db, "clone-target", "REMOVE_ME")
+            .await
+            .unwrap()
+            .is_none()
     );
 
     ts.client
@@ -431,6 +480,76 @@ async fn profile_clone_copies_environment_atomically_and_honors_source_revision(
         .await
         .unwrap()
         .is_empty());
+
+    let current = ts
+        .client
+        .post(
+            "/api/session-launches/resolve",
+            json!({ "selection": { "profile": "clone-source", "overrides": {} } }),
+        )
+        .await
+        .unwrap();
+    let invalid = reqwest::Client::new()
+        .post(format!(
+            "http://{}/api/profiles/clone-source/clone",
+            ts.addr
+        ))
+        .json(&json!({
+            "name": "environment-rollback",
+            "expected_profile_revision": current["profile_revision"],
+            "expected_resolver_revision": current["resolver_revision"],
+            "overrides": {},
+            "environment": {
+                "inherit": true,
+                "remove": [],
+                "set": [{
+                    "name": "BROKEN",
+                    "secret_ref": "not-a-secret-reference"
+                }]
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    assert!(loom::profile::get(&ts.state.db, "environment-rollback")
+        .await
+        .unwrap()
+        .is_none());
+
+    let cli = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args([
+            "profile",
+            "clone",
+            "clone-source",
+            "cli-environment-target",
+            "--copy-environment",
+            "--remove-environment",
+            "REMOVE_ME",
+            "--set-environment",
+            "TOKEN=from-cli",
+            "--secret-environment",
+            "CLI_SECRET=projects/acme/secrets/cli/versions/latest",
+        ])
+        .env("WEAVER_API", format!("http://{}", ts.addr))
+        .output()
+        .unwrap();
+    assert!(
+        cli.status.success(),
+        "CLI clone failed: {}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    assert_eq!(
+        loom::profile::env_get(&ts.state.db, "cli-environment-target", "TOKEN")
+            .await
+            .unwrap(),
+        Some("from-cli".to_string())
+    );
+    let cli_meta = loom::profile::env_meta(&ts.state.db, "cli-environment-target")
+        .await
+        .unwrap();
+    assert!(!cli_meta.iter().any(|entry| entry.name == "REMOVE_ME"));
+    assert!(cli_meta.iter().any(|entry| entry.name == "CLI_SECRET"));
 }
 
 #[serial]
@@ -525,6 +644,70 @@ async fn profile_clone_rejects_resolver_drift_and_accepts_an_editable_template()
     assert_eq!(created["description"], "edited before atomic clone");
     assert_eq!(created["max_concurrent"], 7);
     assert_eq!(created["env_clear"], true);
+
+    let race_preview = ts
+        .client
+        .post(
+            "/api/session-launches/resolve",
+            json!({ "selection": { "profile": "editable-source", "overrides": {} } }),
+        )
+        .await
+        .unwrap();
+    let resolver_permit = ts.state.launch_gate.acquire_resolver().await;
+    let clone_url = format!("http://{}/api/profiles/editable-source/clone", ts.addr);
+    let clone_task = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(clone_url)
+            .json(&json!({
+                "name": "registry-race-target",
+                "expected_profile_revision": race_preview["profile_revision"],
+                "expected_resolver_revision": race_preview["resolver_revision"],
+                "overrides": {},
+                "copy_environment": false
+            }))
+            .send()
+            .await
+            .unwrap()
+    });
+    let agent_url = format!("http://{}/api/agents/custom", ts.addr);
+    let mutation_task = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(agent_url)
+            .json(&json!({
+                "name": "clone-registry-race",
+                "label": "Clone registry race",
+                "protocol": "terminal",
+                "launch": "exit 0"
+            }))
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!clone_task.is_finished());
+    assert!(!mutation_task.is_finished());
+    drop(resolver_permit);
+    let clone_response = tokio::time::timeout(std::time::Duration::from_secs(10), clone_task)
+        .await
+        .unwrap()
+        .unwrap();
+    let mutation_response = tokio::time::timeout(std::time::Duration::from_secs(10), mutation_task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(mutation_response.status().is_success());
+    if clone_response.status().is_success() {
+        assert!(loom::profile::get(&ts.state.db, "registry-race-target")
+            .await
+            .unwrap()
+            .is_some());
+    } else {
+        assert_eq!(clone_response.status(), StatusCode::CONFLICT);
+        assert!(loom::profile::get(&ts.state.db, "registry-race-target")
+            .await
+            .unwrap()
+            .is_none());
+    }
 }
 
 #[serial]

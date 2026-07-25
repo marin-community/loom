@@ -38,6 +38,10 @@ pub struct ResolvedLaunch {
     pub profile: Profile,
     pub mcp_policy: weaver_api::McpPolicySnapshot,
     pub runtime_permissions: Vec<String>,
+    /// Exact custom runtime definition used to derive `view` and its resolver
+    /// revision. Kept internal because launch commands are operator data, not
+    /// part of the browser-safe preview.
+    pub custom_agent: Option<crate::custom_agents::CustomAgent>,
     pub view: ResolvedLaunchView,
 }
 
@@ -99,6 +103,7 @@ async fn policy_defaults(db: &Db, class: &str) -> (i64, i64) {
 async fn resolver_revision(
     db: &Db,
     metadata: &crate::agent::AgentMetadata,
+    custom_agents: &[crate::custom_agents::CustomAgent],
     policy_defaults: (i64, i64),
 ) -> Result<String> {
     // This is intentionally a global registry fingerprint. A custom runtime or
@@ -107,7 +112,6 @@ async fn resolver_revision(
     // MCP source; only the server computes it.
     let mut mcp_registry = crate::mcp::registry();
     mcp_registry.custom_servers = crate::custom_mcp::list(db).await?;
-    let custom_agents = crate::custom_agents::list(db).await?;
     let payload = serde_json::to_vec(&(
         RESOLVER_SCHEMA_VERSION,
         metadata,
@@ -145,9 +149,28 @@ pub async fn resolve(
     if overrides.agent.is_some() && agent.is_empty() {
         bail!("launch override agent must not be empty");
     }
-    let metadata = crate::agent::metadata_for(db, &agent)
-        .await?
-        .ok_or_else(|| anyhow!("unknown agent '{agent}'"))?;
+    // Read the custom registry once. For a custom selection, both metadata and
+    // the resolver fingerprint derive from this same row, and the row itself is
+    // retained through launch. An edit after this point therefore either
+    // conflicts with the caller's preview or cannot change the command we run.
+    let custom_agents = crate::custom_agents::list(db).await?;
+    let custom_agent = if crate::agent::builtin_agent_type(&agent).is_some() {
+        None
+    } else {
+        Some(
+            custom_agents
+                .iter()
+                .find(|candidate| candidate.name == agent)
+                .cloned()
+                .ok_or_else(|| anyhow!("unknown agent '{agent}'"))?,
+        )
+    };
+    let metadata = match custom_agent.as_ref() {
+        Some(custom) => crate::agent::custom_metadata(custom),
+        None => crate::agent::metadata_for(db, &agent)
+            .await?
+            .ok_or_else(|| anyhow!("unknown agent '{agent}'"))?,
+    };
 
     let (model, model_source) = match selected(&overrides.model) {
         Some(value) => (value.to_string(), "launch_override"),
@@ -241,7 +264,7 @@ pub async fn resolve(
     let defaults = policy_defaults(db, &class).await;
     let idle_archive_secs = profile.idle_archive_secs.unwrap_or(defaults.0);
     let turn_budget = profile.turn_budget.unwrap_or(defaults.1);
-    let resolver_revision = resolver_revision(db, &metadata, defaults).await?;
+    let resolver_revision = resolver_revision(db, &metadata, &custom_agents, defaults).await?;
     let locked_fields = if profile.strict {
         ["agent", "model", "effort", "protocol", "mode", "class"]
             .into_iter()
@@ -313,6 +336,7 @@ pub async fn resolve(
         profile,
         mcp_policy,
         runtime_permissions,
+        custom_agent,
         view,
     })
 }
@@ -477,5 +501,51 @@ mod tests {
             .unwrap();
         assert_eq!(after.view.policy.idle_archive_secs, Some(1234));
         assert_ne!(before.view.resolver_revision, after.view.resolver_revision);
+    }
+
+    #[tokio::test]
+    async fn custom_agent_snapshot_and_resolver_revision_stay_coupled() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let mut custom = crate::custom_agents::CustomAgent {
+            name: "reviewed-runtime".to_string(),
+            label: "Reviewed runtime".to_string(),
+            setup: String::new(),
+            launch: "printf old > reviewed-runtime.txt".to_string(),
+            resume: String::new(),
+            reports_status: false,
+            protocol: "terminal".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        crate::custom_agents::set(&db, &custom).await.unwrap();
+        let selection = LaunchSelection {
+            profile: "default".to_string(),
+            overrides: LaunchOverrides {
+                agent: Some(custom.name.clone()),
+                ..Default::default()
+            },
+        };
+
+        let reviewed = resolve(&db, &selection, &ResolveOptions::default())
+            .await
+            .unwrap();
+        custom.launch = "printf new > reviewed-runtime.txt".to_string();
+        crate::custom_agents::set(&db, &custom).await.unwrap();
+        let fresh = resolve(&db, &selection, &ResolveOptions::default())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            reviewed.custom_agent.as_ref().unwrap().launch,
+            "printf old > reviewed-runtime.txt"
+        );
+        assert_eq!(
+            fresh.custom_agent.as_ref().unwrap().launch,
+            "printf new > reviewed-runtime.txt"
+        );
+        assert_ne!(
+            reviewed.view.resolver_revision,
+            fresh.view.resolver_revision
+        );
     }
 }

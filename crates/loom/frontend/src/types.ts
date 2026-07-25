@@ -907,6 +907,18 @@ export interface ProfileEnv {
   updated_at: string;
 }
 
+export interface ProfileEnvMutation {
+  name: string;
+  value?: string;
+  secret_ref?: string;
+}
+
+export interface CloneProfileEnvironment {
+  inherit: boolean;
+  remove: string[];
+  set: ProfileEnvMutation[];
+}
+
 export interface LaunchOverrides {
   agent?: string;
   model?: string;
@@ -992,12 +1004,14 @@ export interface CloneProfileInput {
   overrides: LaunchOverrides;
   template?: ProfileInput;
   copy_environment: boolean;
+  environment?: CloneProfileEnvironment;
 }
 
 export interface ScratchLimits {
   max_files: number;
   max_file_bytes: number;
   max_total_bytes: number;
+  max_name_bytes: number;
 }
 
 /** Trusted MCP registry. Capability-set names are provider-neutral profile

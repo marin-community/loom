@@ -16,7 +16,9 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 enum LaunchGateKey {
     Repo(PathBuf),
     Profile(String),
-    Scratch(String),
+    Resolver,
+    Session(String),
+    Scratch(PathBuf),
 }
 
 #[derive(Clone, Default)]
@@ -80,10 +82,28 @@ impl RepoLaunchGate {
         permits
     }
 
-    /// Serialize limit validation and file mutation for one session's Scratch.
-    pub async fn acquire_scratch(&self, session_id: &str) -> RepoLaunchPermit {
-        self.acquire_key(LaunchGateKey::Scratch(session_id.to_string()))
+    /// Serialize registry mutations with profile proposals whose accepted
+    /// resolver revision must remain valid through commit.
+    pub async fn acquire_resolver(&self) -> RepoLaunchPermit {
+        self.acquire_key(LaunchGateKey::Resolver).await
+    }
+
+    /// Serialize destructive runtime replacement for one source session.
+    pub async fn acquire_session(&self, session_id: &str) -> RepoLaunchPermit {
+        self.acquire_key(LaunchGateKey::Session(session_id.to_string()))
             .await
+    }
+
+    /// Serialize limit validation and file mutation for one worktree's Scratch.
+    ///
+    /// Completed and replacement sessions can share a worktree, so the path is
+    /// the stable identity across launch-time batches and every session endpoint
+    /// that can still address those files.
+    pub async fn acquire_scratch(&self, work_dir: &Path) -> RepoLaunchPermit {
+        let work_dir = work_dir
+            .canonicalize()
+            .unwrap_or_else(|_| work_dir.to_path_buf());
+        self.acquire_key(LaunchGateKey::Scratch(work_dir)).await
     }
 }
 
@@ -126,14 +146,17 @@ mod tests {
     async fn profile_and_scratch_namespaces_serialize_only_matching_keys() {
         let gate = RepoLaunchGate::default();
         let profile = gate.acquire_profile("ops").await;
-        let scratch = gate.acquire_scratch("session-a").await;
+        let scratch = gate.acquire_scratch(Path::new("/worktrees/a")).await;
 
         tokio::time::timeout(Duration::from_secs(1), gate.acquire_profile("interactive"))
             .await
             .expect("a different profile must not wait");
-        tokio::time::timeout(Duration::from_secs(1), gate.acquire_scratch("session-b"))
-            .await
-            .expect("a different session must not wait");
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            gate.acquire_scratch(Path::new("/worktrees/b")),
+        )
+        .await
+        .expect("a different worktree must not wait");
 
         let waiting_profile = {
             let gate = gate.clone();
@@ -141,7 +164,7 @@ mod tests {
         };
         let waiting_scratch = {
             let gate = gate.clone();
-            tokio::spawn(async move { gate.acquire_scratch("session-a").await })
+            tokio::spawn(async move { gate.acquire_scratch(Path::new("/worktrees/a")).await })
         };
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(!waiting_profile.is_finished());

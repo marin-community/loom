@@ -90,6 +90,7 @@ type DetailsCloseReason = 'toggle' | 'escape' | 'outside' | 'navigation' | 'acti
 function closeDetails(reason: DetailsCloseReason) {
   if (!showDetails.value) return;
   showDetails.value = false;
+  resetHandoff();
   if (reason === 'escape') void nextTick(() => detailsButton.value?.focus());
 }
 
@@ -233,6 +234,18 @@ const unchangedHandoff = computed(() => {
 });
 
 let handoffResolveRequest = 0;
+function resetHandoff() {
+  ++handoffResolveRequest;
+  handoffOpen.value = false;
+  handoffAgents.value = [];
+  handoffProfiles.value = [];
+  handoffProfile.value = '';
+  handoffOverrides.value = {};
+  handoffResolved.value = null;
+  handoffResolving.value = false;
+  handoffError.value = '';
+}
+
 async function resolveHandoff() {
   const request = ++handoffResolveRequest;
   handoffResolved.value = null;
@@ -252,11 +265,14 @@ async function resolveHandoff() {
 watch(handoffSelection, () => void resolveHandoff(), { deep: true });
 
 async function toggleHandoff() {
-  handoffOpen.value = !handoffOpen.value;
+  if (handoffOpen.value) {
+    resetHandoff();
+    return;
+  }
+  handoffOpen.value = true;
   ++handoffResolveRequest;
   handoffResolved.value = null;
   handoffError.value = '';
-  if (!handoffOpen.value) return;
   try {
     const [metadata, profiles] = await Promise.all([listAgents(), listProfiles()]);
     handoffAgents.value = metadata.agents.filter((agent) => agent.supports_acp);

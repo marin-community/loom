@@ -912,6 +912,11 @@ test.describe('acp conversation', () => {
     const form = page.getByTestId('handoff-form');
     await form.scrollIntoViewIfNeeded();
     await expect(form).toBeVisible();
+    await page.getByRole('button', { name: /Details/ }).click();
+    await expect(form).toHaveCount(0);
+    await page.getByRole('button', { name: /Details/ }).click();
+    await page.getByTestId('action-handoff').click();
+    await expect(page.getByTestId('handoff-form')).toBeVisible();
 
     const bounds = await scroller.evaluate((element) => ({
       clientHeight: element.clientHeight,

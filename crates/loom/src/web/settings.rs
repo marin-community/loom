@@ -73,11 +73,17 @@ pub(super) async fn patch_settings(
         };
         return Err(AppError::bad_request(message).with_details(Value::Object(errors)));
     }
+    let _profile_permit = if legacy_agent_changes.is_empty() {
+        None
+    } else {
+        Some(
+            st.launch_gate
+                .acquire_profile(profile::DEFAULT_PROFILE)
+                .await,
+        )
+    };
+    let _resolver_permit = st.launch_gate.acquire_resolver().await;
     if !legacy_agent_changes.is_empty() {
-        let _permit = st
-            .launch_gate
-            .acquire_profile(profile::DEFAULT_PROFILE)
-            .await;
         apply_legacy_agent_patch(&st.db, &legacy_agent_changes)
             .await
             .map_err(|error| AppError::bad_request(error.to_string()))?;

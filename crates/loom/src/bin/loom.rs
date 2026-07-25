@@ -806,6 +806,15 @@ enum ProfileCmd {
         /// Copy the source's write-only environment in the clone transaction.
         #[arg(long)]
         copy_environment: bool,
+        /// Remove an inherited environment name (repeatable).
+        #[arg(long = "remove-environment")]
+        remove_environment: Vec<String>,
+        /// Add or replace a literal environment value as NAME=VALUE.
+        #[arg(long = "set-environment")]
+        set_environment: Vec<String>,
+        /// Add or replace a Secret Manager reference as NAME=REFERENCE.
+        #[arg(long = "secret-environment")]
+        secret_environment: Vec<String>,
     },
     /// Remove an unused profile (`default` is protected).
     Rm { name: String },
@@ -1589,6 +1598,9 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
             mode,
             class,
             copy_environment,
+            remove_environment,
+            set_environment,
+            secret_environment,
         } => {
             let overrides = weaver_api::LaunchOverrides {
                 agent,
@@ -1606,6 +1618,28 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
                     },
                 })
                 .await?;
+            let parse_environment = |raw: String, secret: bool| -> anyhow::Result<_> {
+                let (name, value) = raw
+                    .split_once('=')
+                    .ok_or_else(|| anyhow::anyhow!("environment edits must use NAME=VALUE"))?;
+                if name.trim().is_empty() {
+                    bail!("environment name must not be empty");
+                }
+                Ok(weaver_api::ProfileEnvMutationReq {
+                    name: name.to_string(),
+                    value: (!secret).then(|| value.to_string()),
+                    secret_ref: secret.then(|| value.to_string()),
+                })
+            };
+            let mut environment_set = Vec::new();
+            for raw in set_environment {
+                environment_set.push(parse_environment(raw, false)?);
+            }
+            for raw in secret_environment {
+                environment_set.push(parse_environment(raw, true)?);
+            }
+            let has_environment_proposal =
+                copy_environment || !remove_environment.is_empty() || !environment_set.is_empty();
             let saved = client
                 .clone_profile(
                     &source,
@@ -1616,6 +1650,13 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
                         overrides,
                         template: None,
                         copy_environment,
+                        environment: has_environment_proposal.then_some(
+                            weaver_api::CloneProfileEnvironmentReq {
+                                inherit: copy_environment,
+                                remove: remove_environment,
+                                set: environment_set,
+                            },
+                        ),
                     },
                 )
                 .await?;

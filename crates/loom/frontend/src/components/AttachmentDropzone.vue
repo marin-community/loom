@@ -28,6 +28,12 @@ const emit = defineEmits<{
 }>();
 
 const limits = ref<ScratchLimits | null>(null);
+const fallbackLimits: ScratchLimits = {
+  max_files: 20,
+  max_file_bytes: 25 * 1024 * 1024,
+  max_total_bytes: 50 * 1024 * 1024,
+  max_name_bytes: 240,
+};
 const dragging = ref(false);
 const error = ref('');
 const limitsError = ref('');
@@ -45,37 +51,41 @@ function fmtBytes(n: number): string {
 }
 
 function validate(files: File[]): string {
+  const activeLimits = limits.value ?? fallbackLimits;
   for (const file of files) {
-    const name = file.name.trim();
+    const name = file.name;
+    const nameBytes = new TextEncoder().encode(name).byteLength;
     if (
       !name ||
+      name !== name.trim() ||
       name === '.' ||
       name === '..' ||
       name === '.gitignore' ||
       name.includes('/') ||
-      name.includes('\\')
+      name.includes('\\') ||
+      /[\u0000-\u001f\u007f-\u009f]/u.test(name) ||
+      nameBytes > activeLimits.max_name_bytes
     ) {
       return name === '.gitignore'
         ? "'.gitignore' is reserved for Scratch housekeeping."
-        : `${file.name || 'Unnamed file'} must be a single file name.`;
+        : `${file.name || 'Unnamed file'} must be one control-free file name of at most ${activeLimits.max_name_bytes} UTF-8 bytes.`;
     }
   }
-  if (!limits.value) return '';
   const next = new Map(props.existing.map((item) => [item.name, item.bytes]));
   for (const file of files) {
     next.set(file.name, file.size);
   }
   for (const [name, bytes] of next) {
-    if (bytes > limits.value.max_file_bytes) {
-      return `${name} is ${fmtBytes(bytes)}; the per-file limit is ${fmtBytes(limits.value.max_file_bytes)}.`;
+    if (bytes > activeLimits.max_file_bytes) {
+      return `${name} is ${fmtBytes(bytes)}; the per-file limit is ${fmtBytes(activeLimits.max_file_bytes)}.`;
     }
   }
-  if (next.size > limits.value.max_files) {
-    return `Scratch accepts at most ${limits.value.max_files} files.`;
+  if (next.size > activeLimits.max_files) {
+    return `Scratch accepts at most ${activeLimits.max_files} files.`;
   }
   const total = [...next.values()].reduce((sum, bytes) => sum + bytes, 0);
-  if (total > limits.value.max_total_bytes) {
-    return `Scratch would total ${fmtBytes(total)}; the limit is ${fmtBytes(limits.value.max_total_bytes)}.`;
+  if (total > activeLimits.max_total_bytes) {
+    return `Scratch would total ${fmtBytes(total)}; the limit is ${fmtBytes(activeLimits.max_total_bytes)}.`;
   }
   return '';
 }

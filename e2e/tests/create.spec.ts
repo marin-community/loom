@@ -58,6 +58,53 @@ test.describe('creating a session via the UI form', () => {
     await expect(page.getByTestId('recent-repo')).toBeHidden();
   });
 
+  test('directly submitted remote repos are registered before session creation', async ({
+    page,
+    weaver,
+  }) => {
+    const destination = await weaver.seedSession({
+      goal: 'Mock destination',
+      name: 'remote-registration-destination',
+    });
+    const calls: string[] = [];
+    await page.route('**/api/repos', async (route) => {
+      if (route.request().method() !== 'POST') return route.continue();
+      calls.push('register');
+      expect(route.request().postDataJSON()).toEqual({
+        repo: 'octo/direct-submit',
+      });
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          slug: 'octo/direct-submit',
+          remote_url: 'https://github.com/octo/direct-submit.git',
+          path: '/managed/octo/direct-submit',
+          created_at: '2026-07-25T00:00:00Z',
+        }),
+      });
+    });
+    await page.route('**/api/sessions', async (route) => {
+      if (route.request().method() !== 'POST') return route.continue();
+      calls.push('create');
+      expect(route.request().postDataJSON().repo).toBe('octo/direct-submit');
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(destination),
+      });
+    });
+
+    await page.goto(`${weaver.baseUrl}/sessions/new`);
+    await page.getByPlaceholder(repoPlaceholder).fill('octo/direct-submit');
+    await page.getByPlaceholder('Add a /health endpoint').fill('Launch directly from typed slug');
+    // Submit without selecting the transient “Clone new repo” suggestion.
+    await page.getByRole('button', { name: 'Create session' }).click();
+
+    await expect(page).toHaveURL(new RegExp(`/s/${destination.id}$`));
+    expect(calls).toEqual(['register', 'create']);
+  });
+
   test('selects a profile, overrides it, launches, and drops an attachment', async ({
     page,
     weaver,
@@ -266,7 +313,100 @@ test.describe('creating a session via the UI form', () => {
     await expect(page.getByTestId('provenance-mode')).toHaveCount(0);
 
     await expect(page.getByTestId('provenance-mode')).toHaveText('launch override');
-    await expect(page.getByTestId('clone-profile')).toBeEnabled();
+    await expect(page.getByTestId('clone-profile')).toHaveCount(0);
+    await expect(page.getByTestId('clone-profile-open')).toBeEnabled();
+  });
+
+  test('composes write-only environment while saving a new profile', async ({ page, weaver }) => {
+    let cloneProposal: Record<string, unknown> | undefined;
+    page.on('request', (request) => {
+      if (
+        request.method() === 'POST' &&
+        request.url().includes('/profiles/ui-environment-source/clone')
+      ) {
+        cloneProposal = request.postDataJSON() as Record<string, unknown>;
+      }
+    });
+    const source = {
+      name: 'ui-environment-source',
+      description: 'Environment composition source',
+      agent_kind: 'shell',
+      model: '',
+      effort: '',
+      protocol: 'terminal',
+      mode: 'auto',
+      class: 'interactive',
+      strict: false,
+      env_clear: false,
+      ambient_allowlist: [],
+      max_concurrent: 0,
+      prelude: 'weaver',
+      restricted: false,
+      runtime_permissions: [],
+      mcp_access: { mode: 'none', groups: [] },
+    };
+    await fetch(`${weaver.baseUrl}/api/profiles`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(source),
+    });
+    for (const [name, value] of [
+      ['KEEP', 'kept'],
+      ['REMOVE_ME', 'removed'],
+    ]) {
+      await fetch(`${weaver.baseUrl}/api/profiles/${source.name}/env/${name}`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ value }),
+      });
+    }
+
+    await page.goto(`${weaver.baseUrl}/sessions/new`);
+    await page.getByTestId(`profile-option-${source.name}`).click();
+    await page.getByTestId('clone-profile-open').click();
+    const editor = page.getByTestId('profile-editor');
+    await editor.getByLabel('Name', { exact: true }).fill('ui-environment-target');
+    const environment = page.getByTestId('profile-environment-editor');
+    await environment.getByLabel(/REMOVE_ME/).uncheck();
+    await environment.getByLabel('Environment name').fill('ADDED');
+    await environment.getByLabel('Environment value', { exact: true }).fill('new write-only value');
+    await environment.getByRole('button', { name: 'Set' }).click();
+    await page.getByTestId('clone-profile').click();
+    await expect(page.getByTestId('profile-option-ui-environment-target')).toBeVisible();
+    expect(cloneProposal?.environment).toEqual({
+      inherit: true,
+      remove: ['REMOVE_ME'],
+      set: [{ name: 'ADDED', value: 'new write-only value' }],
+    });
+
+    const saved = (await (
+      await fetch(`${weaver.baseUrl}/api/profiles/ui-environment-target`)
+    ).json()) as { env: { name: string; source: string }[] };
+    expect(saved.env.map((entry) => entry.name)).toEqual(['ADDED', 'KEEP']);
+    expect(JSON.stringify(saved)).not.toContain('new write-only value');
+  });
+
+  test('ignores a branch response after the repository is cleared', async ({ page, weaver }) => {
+    let release!: () => void;
+    const delayed = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route('**/api/repos/branches?cwd=*', async (route) => {
+      await delayed;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([{ name: 'stale-branch', current: false, worktree: null }]),
+      });
+    });
+    await page.goto(`${weaver.baseUrl}/sessions/new`);
+    await page.getByPlaceholder(repoPlaceholder).fill(weaver.repoPath);
+    await page.getByText('Advanced branch controls', { exact: true }).click();
+    await page.getByRole('button', { name: 'Existing branch' }).click();
+    await page.getByPlaceholder(repoPlaceholder).fill('');
+    release();
+    await page.getByLabel(/Existing branch - weaver reuses/).focus();
+    await expect(page.getByTestId('branch-option')).toHaveCount(0);
   });
 
   test('refreshes added, edited, and deleted profiles without losing the cached draft', async ({
@@ -312,6 +452,13 @@ test.describe('creating a session via the UI form', () => {
     await page.getByTestId('profile-option-cached-template').click();
     const profileDelete = page.getByTestId('profile-delete');
     await profileDelete.getByRole('button', { name: 'Delete' }).click();
+    await expect(profileDelete.getByRole('button', { name: 'Confirm' })).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(profileDelete.getByRole('button', { name: 'Delete' })).toBeFocused();
+    await profileDelete.getByRole('button', { name: 'Delete' }).click();
+    await profileDelete.getByRole('button', { name: 'Cancel' }).click();
+    await expect(profileDelete.getByRole('button', { name: 'Delete' })).toBeFocused();
+    await profileDelete.getByRole('button', { name: 'Delete' }).click();
     await profileDelete.getByRole('button', { name: 'Confirm' }).click();
     await expect(page.getByTestId('profile-option-cached-template')).toHaveCount(0);
     await page.goBack();
@@ -331,6 +478,12 @@ test.describe('creating a session via the UI form', () => {
     await page.setViewportSize({ width: 320, height: 720 });
     await page.goto(`${weaver.baseUrl}/sessions/new`);
     await expect(page.getByTestId('new-session-drawer')).toBeVisible();
+    await page.getByTestId('clone-profile-open').click();
+    const cells = page.getByTestId('profile-editor').locator(':scope > div.grid');
+    await expect(cells.nth(0).getByLabel('Name', { exact: true })).toBeVisible();
+    await expect(cells.nth(1).getByLabel('Agent', { exact: true })).toBeVisible();
+    const access = page.getByRole('group', { name: 'MCP access' });
+    await expect(access.getByRole('radio', { name: 'none' })).toBeChecked();
     await expect
       .poll(() =>
         page.evaluate(() => ({

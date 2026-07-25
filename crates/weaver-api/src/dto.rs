@@ -640,6 +640,31 @@ pub struct CloneProfileReq {
     pub template: Option<ProfileReq>,
     #[serde(default)]
     pub copy_environment: bool,
+    /// Editable write-only environment composition. Omission preserves the
+    /// legacy `copy_environment` behavior.
+    #[serde(default)]
+    pub environment: Option<CloneProfileEnvironmentReq>,
+}
+
+/// Atomic environment composition for a cloned profile. Inherited values are
+/// copied server-side; literal values and secret references are write-only.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CloneProfileEnvironmentReq {
+    #[serde(default)]
+    pub inherit: bool,
+    #[serde(default)]
+    pub remove: Vec<String>,
+    #[serde(default)]
+    pub set: Vec<ProfileEnvMutationReq>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProfileEnvMutationReq {
+    pub name: String,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub secret_ref: Option<String>,
 }
 
 /// Shared upload limits for launch-time and live-session Scratch attachments:
@@ -649,6 +674,7 @@ pub struct ScratchLimitsView {
     pub max_files: usize,
     pub max_file_bytes: usize,
     pub max_total_bytes: usize,
+    pub max_name_bytes: usize,
 }
 
 /// Body for creating or replacing a profile.

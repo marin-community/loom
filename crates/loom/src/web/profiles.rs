@@ -161,6 +161,7 @@ pub(super) async fn create_profile(
 ) -> ApiResult<(StatusCode, Json<ProfileView>)> {
     let name = req.name.trim().to_string();
     let _permit = st.launch_gate.acquire_profile(&name).await;
+    let _resolver_permit = st.launch_gate.acquire_resolver().await;
     match profile::create(&st.db, &input(req, name.clone()))
         .await
         .map_err(|e| AppError::bad_request(e.to_string()))?
@@ -181,6 +182,7 @@ pub(super) async fn put_profile(
     Json(req): Json<ProfileReq>,
 ) -> ApiResult<Json<ProfileView>> {
     let _permit = st.launch_gate.acquire_profile(&name).await;
+    let _resolver_permit = st.launch_gate.acquire_resolver().await;
     if let Some(expected) = req.expected_revision {
         return match profile::update_expected(&st.db, &input(req, name.clone()), expected)
             .await
@@ -214,6 +216,9 @@ pub(super) async fn clone_profile(
         .launch_gate
         .acquire_profiles([source_name.as_str(), target_name.as_str()])
         .await;
+    // The accepted resolver fingerprint, editable normalization, and atomic
+    // insert must observe one custom-agent/custom-MCP registry generation.
+    let _resolver_permit = st.launch_gate.acquire_resolver().await;
     let source = profile::get(&st.db, &source_name)
         .await?
         .ok_or_else(|| AppError::not_found("profile"))?;
@@ -251,7 +256,7 @@ pub(super) async fn clone_profile(
     // the new profile from the server-owned source input. The browser never
     // round-trips environment values, custom MCP source, or another redacted
     // policy representation.
-    let resolved = super::launches::resolve_launch(
+    let resolved = match super::launches::resolve_launch(
         &st,
         &LaunchSelection {
             profile: source_name.clone(),
@@ -262,7 +267,16 @@ pub(super) async fn clone_profile(
             ..Default::default()
         },
     )
-    .await?;
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            return Err(AppError::conflict(format!(
+                "profile resolver can no longer reproduce the accepted preview: {}",
+                error.message()
+            )));
+        }
+    };
     if resolved.view.resolver_revision != req.expected_resolver_revision {
         return Err(AppError::conflict(
             "profile resolver changed after preview; review the fresh resolution",
@@ -296,12 +310,21 @@ pub(super) async fn clone_profile(
         cloned.mode = resolved.view.mode;
         cloned.class = resolved.view.class;
     }
-    match profile::create_clone(
+    let prepared = profile::prepare_input(&st.db, &cloned)
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let environment = req
+        .environment
+        .unwrap_or_else(|| weaver_api::CloneProfileEnvironmentReq {
+            inherit: req.copy_environment,
+            ..Default::default()
+        });
+    match profile::create_clone_prepared(
         &st.db,
         &source_name,
         req.expected_profile_revision,
-        &cloned,
-        req.copy_environment,
+        prepared,
+        &environment,
     )
     .await
     .map_err(|error| AppError::bad_request(error.to_string()))?

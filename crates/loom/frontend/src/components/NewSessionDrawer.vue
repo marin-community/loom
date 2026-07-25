@@ -15,6 +15,7 @@ import {
 } from '../api';
 import type {
   AgentMetadata,
+  CloneProfileEnvironment,
   LaunchOverrides as LaunchOverrideValues,
   LaunchSelection,
   ManagedRepo,
@@ -64,7 +65,8 @@ const resolving = ref(false);
 const resolveError = ref('');
 const advanced = ref(false);
 const cloneDraft = ref<ProfileInput | null>(null);
-const copyEnvironment = ref(false);
+const cloneEnvironment = ref<CloneProfileEnvironment | null>(null);
+const clonePreviewKey = ref('');
 const cloneBusy = ref(false);
 const cloneNotice = ref('');
 const cloningRepo = ref(false);
@@ -210,11 +212,11 @@ watch([title, goal], ([t, g]) => {
 });
 
 async function loadBranches() {
+  const reqId = ++branchesReqId;
   const path = repo.value.trim();
   branches.value = [];
   branchesError.value = '';
   if (!path) return;
-  const reqId = ++branchesReqId;
   try {
     const res = (await get(`/repos/branches?cwd=${encodeURIComponent(path)}`)) as RepoBranch[];
     if (reqId === branchesReqId) branches.value = res;
@@ -269,7 +271,8 @@ function resetForm() {
   branchMode.value = 'new';
   advanced.value = false;
   cloneDraft.value = null;
-  copyEnvironment.value = false;
+  cloneEnvironment.value = null;
+  clonePreviewKey.value = '';
   cloneNotice.value = '';
   error.value = '';
   resolveError.value = '';
@@ -295,6 +298,9 @@ function scheduleResolution() {
   if (resolveTimer) clearTimeout(resolveTimer);
   const request = ++resolveRequest;
   resolved.value = null;
+  cloneDraft.value = null;
+  cloneEnvironment.value = null;
+  clonePreviewKey.value = '';
   resolving.value = true;
   resolveError.value = '';
   resolveTimer = setTimeout(() => {
@@ -346,6 +352,14 @@ const cloneStaticValid = computed(
     (resolved.value?.errors ?? []).every((message) => message.includes('max_concurrent')),
 );
 
+function previewKey(preview: ResolvedLaunch): string {
+  return JSON.stringify({
+    selection: preview.selection,
+    profile_revision: preview.profile_revision,
+    resolver_revision: preview.resolver_revision,
+  });
+}
+
 function beginSaveAsNew() {
   const preview = resolved.value;
   if (!preview || !cloneStaticValid.value) return;
@@ -373,13 +387,30 @@ function beginSaveAsNew() {
     runtime_permissions: [...source.runtime_permissions],
     mcp_access: { ...source.mcp_access, groups: [...source.mcp_access.groups] },
   };
+  cloneEnvironment.value = {
+    inherit: true,
+    remove: [],
+    set: [],
+  };
+  clonePreviewKey.value = previewKey(preview);
   cloneNotice.value = '';
 }
 
 async function saveAsNewProfile() {
   const preview = resolved.value;
   const target = cloneDraft.value?.name.trim() ?? '';
-  if (!preview || !target) return;
+  if (
+    !preview ||
+    !target ||
+    !cloneEnvironment.value ||
+    clonePreviewKey.value !== previewKey(preview)
+  ) {
+    cloneDraft.value = null;
+    cloneEnvironment.value = null;
+    clonePreviewKey.value = '';
+    error.value = 'Launch settings changed. Review the fresh resolution before saving a profile.';
+    return;
+  }
   cloneBusy.value = true;
   cloneNotice.value = '';
   error.value = '';
@@ -390,19 +421,22 @@ async function saveAsNewProfile() {
       expected_resolver_revision: preview.resolver_revision,
       overrides: { ...overrides.value },
       template: cloneDraft.value!,
-      copy_environment: copyEnvironment.value,
+      copy_environment: false,
+      environment: cloneEnvironment.value,
     });
     profiles.value = await listProfiles();
     chooseProfile(saved.name);
     cloneDraft.value = null;
-    copyEnvironment.value = false;
+    cloneEnvironment.value = null;
+    clonePreviewKey.value = '';
     cloneNotice.value = `Saved ${saved.name} without changing ${preview.selection.profile}.`;
   } catch (cause) {
     const preview = cause instanceof ApiError ? cause.body.preview : undefined;
     if (preview && typeof preview === 'object') {
       resolved.value = preview as ResolvedLaunch;
       cloneDraft.value = null;
-      copyEnvironment.value = false;
+      cloneEnvironment.value = null;
+      clonePreviewKey.value = '';
       error.value = `${(cause as Error).message} Review the fresh resolution and reopen the new-profile editor.`;
     } else {
       error.value = (cause as Error).message;
@@ -439,11 +473,15 @@ async function create() {
       expected_profile_revision: resolved.value?.profile_revision,
       expected_resolver_revision: resolved.value?.resolver_revision,
     };
-    // A remote reference travels as `repo`: the server registers it if it is new
-    // and clones it on the way, so an unknown `owner/name` needs no separate
-    // "add the repo" step here. A path travels as `cwd`.
+    // A remote reference must be in the server's managed allowlist before
+    // session creation. Direct submission follows the same registration path
+    // as choosing “Clone new repo”; a server path travels as `cwd`.
     if (looksLikeRemoteRepo(repoInput)) {
-      body.repo = repoInput;
+      const known = managedRepos.value.find(
+        (candidate) => candidate.slug === repoInput || candidate.remote_url === repoInput,
+      );
+      const registered = known ?? (await registerRepo(repoInput));
+      body.repo = registered.slug;
     } else {
       body.cwd = repoInput;
     }
@@ -868,14 +906,14 @@ onActivated(() => void refreshLaunchData());
           <template v-else>
             <ProfileEditor
               v-model="cloneDraft"
+              v-model:environment="cloneEnvironment"
               :agents="agents"
               :mcp-registry="mcpRegistry"
+              :source-environment="
+                profiles.find((item) => item.name === resolved?.selection.profile)?.env ?? []
+              "
               :disabled="cloneBusy"
             />
-            <label class="flex items-center gap-2 text-xs text-muted">
-              <input v-model="copyEnvironment" type="checkbox" :disabled="cloneBusy" />
-              Copy write-only environment values
-            </label>
             <div class="flex flex-wrap gap-2">
               <button
                 type="button"
@@ -890,7 +928,11 @@ onActivated(() => void refreshLaunchData());
                 type="button"
                 class="px-2.5 py-1.5 text-xs text-muted"
                 :disabled="cloneBusy"
-                @click="cloneDraft = null"
+                @click="
+                  cloneDraft = null;
+                  cloneEnvironment = null;
+                  clonePreviewKey = '';
+                "
               >
                 Cancel
               </button>
