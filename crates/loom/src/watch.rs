@@ -129,6 +129,7 @@ pub async fn seed_builtins(db: &crate::Db) -> anyhow::Result<()> {
                 .iter()
                 .map(|c| c.to_string())
                 .collect(),
+            profile: "watch".to_string(),
             enabled: b.default_enabled,
             ..Default::default()
         };
@@ -828,7 +829,7 @@ async fn uv_available() -> bool {
 /// precedent) that reaches the fleet only
 /// through the loom REST API. `$WEAVER_API` carries the daemon's own address
 /// and `$WEAVER_WATCH` the round config (`{id, name, program, params,
-/// scope, capabilities, model, effort, dry_run}`); the vendored `weaver_loom`
+/// scope, capabilities, profile, model, effort, dry_run}`); the vendored `weaver_loom`
 /// module rides
 /// `PYTHONPATH` so every program can import the API layer with no install
 /// step. The contract is to print one JSON object — `{outcome, summary,
@@ -853,6 +854,7 @@ async fn run_script(
         "params": o.params(),
         "scope": serde_json::to_value(o.scope()).unwrap_or(Value::Null),
         "capabilities": o.capabilities(),
+        "profile": o.profile,
         "model": o.model,
         "effort": o.effort,
         "dry_run": dry_run,

@@ -355,7 +355,7 @@ async fn stale_session_emits_one_event_and_wakes_a_reactive_watch() {
 /// with a fixed response. Base64 keeps arbitrary judgement JSON out of the
 /// shell command's quoting surface.
 fn fake_judge_agent(_name: &str, out: &str) -> EnvVarGuard {
-    fake_judge_runtime("WEAVER_CLAUDE_ACP_CMD", out)
+    fake_judge_runtime("WEAVER_CODEX_ACP_CMD", out)
 }
 
 fn fake_judge_runtime(variable: &'static str, out: &str) -> EnvVarGuard {
@@ -364,7 +364,7 @@ fn fake_judge_runtime(variable: &'static str, out: &str) -> EnvVarGuard {
     EnvVarGuard::set(
         variable,
         &format!(
-            "FAKE_ACP_FIXED_OUTPUT_B64={encoded} {}",
+            "FAKE_ACP_MODELS=gpt-5.6-sol,fake-fast FAKE_ACP_FIXED_OUTPUT_B64={encoded} {}",
             crate::fixtures::fake_acp_agent_cmd()
         ),
     )
@@ -1304,7 +1304,7 @@ async fn status_judgement_uses_the_oneshot_agent() {
     let ts = TestServer::start().await;
 
     // The endpoint itself returns the adapter's fixed text; an empty prompt 400s.
-    let _endpoint_agent = fake_judge_agent("weaver-fake-judge-endpoint", "ping");
+    let _endpoint_agent = fake_judge_runtime("WEAVER_CLAUDE_ACP_CMD", "ping");
     let reply = ts
         .client
         .post("/api/agent/oneshot", json!({ "prompt": "ping" }))
@@ -1324,6 +1324,19 @@ async fn status_judgement_uses_the_oneshot_agent() {
         reply["output"], "codex selected",
         "the request selects a registered ACP runtime"
     );
+    let reply = ts
+        .client
+        .post(
+            "/api/agent/oneshot",
+            json!({ "prompt": "ping", "profile": "watch" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reply["output"], "codex selected",
+        "the stock watch profile selects Codex"
+    );
+    drop(_codex_agent);
     assert!(
         ts.client
             .post("/api/agent/oneshot", json!({ "prompt": "" }))
@@ -1336,8 +1349,8 @@ async fn status_judgement_uses_the_oneshot_agent() {
     // drove the mark — there is no fallback that would have invented one.
     let state = engine_state(&ts).await;
     let (session_id, _branch_id, _repo_root) = make_session(&ts, "judge me").await;
-    let _agent = fake_judge_agent(
-        "weaver-fake-judge-oneshot",
+    let _agent = fake_judge_runtime(
+        "WEAVER_CODEX_ACP_CMD",
         r#"[{"key":"agent-stuck","value":"blocked","note":"the judge says so"}]"#,
     );
     let o = enabled_watch(
@@ -1394,8 +1407,8 @@ async fn set_config(state: &AppState, key: &str, value: &str) {
         .unwrap();
 }
 
-async fn set_default_profile_agent(state: &AppState, agent: &str) {
-    let mut profile = loom::profile::get(&state.db, loom::profile::DEFAULT_PROFILE)
+async fn set_watch_profile_agent(state: &AppState, agent: &str) {
+    let mut profile = loom::profile::get(&state.db, "watch")
         .await
         .unwrap()
         .unwrap()
@@ -1566,9 +1579,9 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
     // The restart policy under test: fleet auto-adopt off, warm-adopt on.
     set_config(&state, "server.auto_adopt", "false").await;
     set_config(&state, "watch.adopt_warm", "true").await;
-    // Warm sessions launch the default agent; pin it to `shell` so creation is
+    // Warm sessions launch the watch's profile agent; pin it to `shell` so creation is
     // deterministic without a real `claude` on PATH.
-    set_default_profile_agent(&state, "shell").await;
+    set_watch_profile_agent(&state, "shell").await;
 
     let repo_root = ts.repo_path().canonicalize().unwrap().display().to_string();
 
@@ -1595,6 +1608,8 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(warm.profile, "watch");
+    assert_eq!(warm.agent_kind, "shell");
     assert!(
         backend::has_session(&warm.term_session).await,
         "the warm session has a live terminal"
@@ -1682,7 +1697,7 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
 async fn ensure_warm_session_reuses_the_same_session() {
     let ts = TestServer::start().await;
     let state = engine_state(&ts).await;
-    set_default_profile_agent(&state, "shell").await;
+    set_watch_profile_agent(&state, "shell").await;
 
     let repo_root = ts.repo_path().canonicalize().unwrap().display().to_string();
     let o = enabled_watch(

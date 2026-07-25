@@ -33,6 +33,9 @@ pub struct Watch {
     pub program: String,
     pub params: String,
     pub capabilities: String,
+    /// Automation-safe launch profile used by agent-backed rounds and warm
+    /// watch sessions.
+    pub profile: String,
     pub model: String,
     pub effort: String,
     pub cooldown_secs: i64,
@@ -279,6 +282,7 @@ pub struct NewWatch {
     pub program: String,
     pub params: String,
     pub capabilities: Vec<String>,
+    pub profile: String,
     pub model: String,
     pub effort: String,
     pub cooldown_secs: i64,
@@ -301,6 +305,7 @@ impl Default for NewWatch {
                 "mark".to_string(),
                 "escalate".to_string(),
             ],
+            profile: "watch".to_string(),
             model: String::new(),
             effort: String::new(),
             cooldown_secs: 0,
@@ -316,8 +321,8 @@ pub async fn create(db: &Db, new: &NewWatch) -> Result<Watch> {
     sqlx::query(
         "INSERT INTO watches
            (id, name, enabled, trigger_spec, scope, program, params, capabilities,
-            model, effort, cooldown_secs, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            profile, model, effort, cooldown_secs, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&new.name)
@@ -327,6 +332,7 @@ pub async fn create(db: &Db, new: &NewWatch) -> Result<Watch> {
     .bind(&new.program)
     .bind(&new.params)
     .bind(&caps)
+    .bind(&new.profile)
     .bind(&new.model)
     .bind(&new.effort)
     .bind(new.cooldown_secs)
@@ -403,6 +409,7 @@ pub struct WatchUpdate {
     pub program: Option<String>,
     pub params: Option<String>,
     pub capabilities: Option<Vec<String>>,
+    pub profile: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub cooldown_secs: Option<i64>,
@@ -416,6 +423,7 @@ impl WatchUpdate {
             && self.program.is_none()
             && self.params.is_none()
             && self.capabilities.is_none()
+            && self.profile.is_none()
             && self.model.is_none()
             && self.effort.is_none()
             && self.cooldown_secs.is_none()
@@ -437,6 +445,7 @@ pub async fn update(db: &Db, id: &str, patch: &WatchUpdate) -> Result<()> {
            program       = COALESCE(?, program),
            params        = COALESCE(?, params),
            capabilities  = COALESCE(?, capabilities),
+           profile       = COALESCE(?, profile),
            model         = COALESCE(?, model),
            effort        = COALESCE(?, effort),
            cooldown_secs = COALESCE(?, cooldown_secs),
@@ -448,6 +457,7 @@ pub async fn update(db: &Db, id: &str, patch: &WatchUpdate) -> Result<()> {
     .bind(&patch.program)
     .bind(&patch.params)
     .bind(&caps)
+    .bind(&patch.profile)
     .bind(&patch.model)
     .bind(&patch.effort)
     .bind(patch.cooldown_secs)
@@ -822,6 +832,7 @@ mod tests {
             program: "builtin:status".into(),
             params: "{}".into(),
             capabilities: r#"["mark"]"#.into(),
+            profile: "watch".into(),
             model: String::new(),
             effort: String::new(),
             cooldown_secs: 0,

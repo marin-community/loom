@@ -1,0 +1,23 @@
+{
+  "name": "watch",
+  "description": "Low-frequency agent judgement for fleet watches",
+  "agent_kind": "codex",
+  "model": "gpt-5.6-sol",
+  "effort": "medium",
+  "protocol": "acp",
+  "mode": "plan",
+  "class": "automation",
+  "strict": true,
+  "env_clear": true,
+  "ambient_allowlist": [],
+  "idle_archive_secs": 900,
+  "max_concurrent": 2,
+  "turn_budget": 1,
+  "prelude": "none",
+  "restricted": false,
+  "runtime_permissions": [],
+  "mcp_access": {
+    "mode": "none",
+    "groups": []
+  }
+}

@@ -93,6 +93,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "calibrate_watches",
         include_str!("../migrations/0014_calibrate_watches.sql"),
     ),
+    (
+        15,
+        "watch_profiles",
+        include_str!("../migrations/0015_watch_profiles.sql"),
+    ),
 ];
 
 /// Latest core schema version compiled into this binary.
@@ -551,6 +556,16 @@ mod tests {
                 .unwrap();
             assert!(!enabled, "{name} stock row becomes opt-in");
         }
+        let profiles: Vec<String> =
+            sqlx::query_scalar("SELECT DISTINCT profile FROM watches ORDER BY profile")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            profiles,
+            vec!["watch"],
+            "the additive profile migration selects the stock watch profile"
+        );
     }
 
     #[tokio::test]
