@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { unmatchedAutomationRuns, runNeedsIntervention } from '../lib/automationSessions';
 import { effectiveAttention } from '../lib/sessionState';
 import { useFleet } from '../lib/sessionsStore';
 
@@ -9,18 +10,17 @@ import { useFleet } from '../lib/sessionsStore';
 // session + attention counts (the attention segment goes amber and links to the
 // filtered list; "all calm" reads a reassuring green). Right: connection dot +
 // a ticking clock — the "is this thing live?" glance.
-const { sessions, online } = useFleet();
+const { sessions, runs, online } = useFleet();
 const clock = ref('');
 
-// Automation-class sessions (agent/github/slack/watch/actions/ops launched)
-// stay out of the fleet vitals by default, same as archived — a background
-// session shouldn't move the "N sessions" count a person reads at a glance.
-const live = computed(() =>
-  sessions.value.filter((s) => s.status !== 'archived' && s.class !== 'automation'),
-);
+// Automation sessions are ordinary fleet sessions now. Only failed launch
+// attempts without a session are counted separately as typed interventions.
+const live = computed(() => sessions.value.filter((s) => s.status !== 'archived'));
 const history = computed(() => sessions.value.filter((s) => s.status === 'archived'));
 const needsMe = computed(
-  () => live.value.filter((s) => effectiveAttention(s).level !== 'ok').length,
+  () =>
+    live.value.filter((s) => effectiveAttention(s).level !== 'ok').length +
+    unmatchedAutomationRuns(runs.value, sessions.value).filter(runNeedsIntervention).length,
 );
 
 let clockTimer: number | undefined;
@@ -63,7 +63,7 @@ onUnmounted(() => clearInterval(clockTimer));
       </router-link>
       <router-link
         v-if="needsMe"
-        to="/?filter=attention"
+        to="/?view=attention"
         class="flex items-center gap-1.5 text-attn-line hover:text-fg"
         data-testid="status-bar-attention"
       >

@@ -9,7 +9,12 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde_json::{json, Value};
-use weaver_api::{IssueAction, IssueActionsReq};
+use weaver_api::{
+    CreateSessionGroupReq, CreateSessionSpaceReq, DeleteSessionGroupReq, DeleteSessionSpaceReq,
+    IssueAction, IssueActionsReq, MoveSessionsReq, ReorderSessionLayoutReq,
+    SessionGroupPreferenceReq, SessionLayoutView, SetSessionPlacementDefaultReq,
+    UpdateSessionGroupReq, UpdateSessionSpaceReq,
+};
 
 use loom::client::{self, Client};
 use weaver_core::db::Db;
@@ -364,16 +369,17 @@ enum SessionCmd {
     /// List active sessions (also `loom ps`).
     ///
     /// Archived (torn-down) sessions are hidden by default — pass `--archived`
-    /// to include them. `--search <text>` narrows to sessions whose title,
-    /// branch name, or goal contains the text. The list is an index: it shows
-    /// each session's id, lifecycle, attention, and title — pull the full detail
-    /// (goal, PR, dirs, activity) for one with `loom session show <id>`.
+    /// to include them. Successful automation sessions are normal rows.
+    /// `--search <text>` spans placement, title/prompt, repo/branch, issue/PR,
+    /// tags, status, profile, and provenance. The list is an index: it shows
+    /// each session's id, lifecycle, attention, location, and title — pull the
+    /// full detail for one with `loom session show <id>`.
     Ls {
         /// Include archived (torn-down) sessions.
         #[arg(long)]
         archived: bool,
-        /// Include automation-class sessions.
-        #[arg(long)]
+        /// Deprecated compatibility flag; automation sessions are included.
+        #[arg(long, hide = true)]
         automation: bool,
         /// Include engine-managed watch sessions (admin only; implies automation).
         #[arg(long)]
@@ -381,6 +387,11 @@ enum SessionCmd {
         /// Case-insensitive substring filter over title / branch / goal.
         #[arg(long)]
         search: Option<String>,
+    },
+    /// Read or edit the durable Spaces → Groups → Sessions workbench layout.
+    Layout {
+        #[command(subcommand)]
+        cmd: SessionLayoutCmd,
     },
     /// Rename a session: set the one-line title shown on the dashboard.
     Rename {
@@ -396,7 +407,7 @@ enum SessionCmd {
     /// Archive a session or failed launch: tear down runtime, keep history.
     ///
     /// An unmatched automation launch is addressed by its reserved session id,
-    /// the same id shown in the Automation pane/API.
+    /// the same id shown in the Interventions section/API.
     Archive { branch: String },
     /// Recreate the terminal session for an orphaned session.
     Adopt { branch: String },
@@ -431,6 +442,100 @@ enum SessionCmd {
         branch: String,
         #[arg(long)]
         keep_branch: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionLayoutCmd {
+    /// Print spaces, groups, ordered sessions, defaults, and the revision.
+    Show,
+    /// Add a space with an empty Inbox group.
+    SpaceAdd {
+        name: String,
+        #[arg(long)]
+        revision: Option<i64>,
+    },
+    /// Rename a space.
+    SpaceRename {
+        id: String,
+        name: String,
+        #[arg(long)]
+        revision: Option<i64>,
+    },
+    /// Delete a space, moving any contents/defaults to `--to`.
+    SpaceDelete {
+        id: String,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        revision: Option<i64>,
+    },
+    /// Add an empty group to a space.
+    GroupAdd {
+        space: String,
+        name: String,
+        #[arg(long)]
+        revision: Option<i64>,
+    },
+    /// Rename a group.
+    GroupRename {
+        id: String,
+        name: String,
+        #[arg(long)]
+        revision: Option<i64>,
+    },
+    /// Delete a group, moving any contents/defaults to `--to`.
+    GroupDelete {
+        id: String,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        revision: Option<i64>,
+    },
+    /// Move one space or group before an anchor (omit `--before` for the end).
+    Reorder {
+        #[arg(value_parser = ["space", "group"])]
+        kind: String,
+        id: String,
+        #[arg(long)]
+        before: Option<String>,
+        #[arg(long)]
+        space: Option<String>,
+        #[arg(long)]
+        revision: Option<i64>,
+    },
+    /// Atomically move sessions into a group.
+    Move {
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        before: Option<String>,
+        #[arg(long)]
+        revision: Option<i64>,
+        #[arg(required = true)]
+        sessions: Vec<String>,
+    },
+    /// Collapse one group for the current operator.
+    Collapse { group: String },
+    /// Expand one group for the current operator.
+    Expand { group: String },
+    /// Set a configurable origin/profile/watch placement default.
+    DefaultSet {
+        #[arg(value_parser = ["origin", "profile", "watch"])]
+        kind: String,
+        value: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        revision: Option<i64>,
+    },
+    /// Remove a configurable placement default.
+    DefaultDelete {
+        #[arg(value_parser = ["origin", "profile", "watch"])]
+        kind: String,
+        value: String,
+        #[arg(long)]
+        revision: Option<i64>,
     },
 }
 
@@ -1121,6 +1226,7 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
             managed,
             search,
         } => cmd_ps(archived, automation, managed, search).await,
+        SessionCmd::Layout { cmd } => run_session_layout(cmd).await,
         SessionCmd::Rename { session, title } => cmd_session_rename(session, title.join(" ")).await,
         SessionCmd::Show { branch } => cmd_show(branch).await,
         SessionCmd::Attach { branch } => cmd_attach(branch).await,
@@ -1140,6 +1246,201 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
             keep_branch,
         } => cmd_rm(branch, keep_branch).await,
     }
+}
+
+async fn layout_revision(client: &Client, requested: Option<i64>) -> Result<i64> {
+    match requested {
+        Some(revision) => Ok(revision),
+        None => Ok(client.get_session_layout().await?.revision),
+    }
+}
+
+fn print_session_layout(layout: &SessionLayoutView) {
+    println!("session layout revision {}", layout.revision);
+    for space in &layout.spaces {
+        println!("{}  {}  (rank {})", space.id, space.name, space.rank);
+        for group in &space.groups {
+            println!(
+                "  {}  {}  (rank {}, {})",
+                group.id,
+                group.name,
+                group.rank,
+                if group.collapsed {
+                    "collapsed"
+                } else {
+                    "expanded"
+                }
+            );
+            for session_id in &group.session_ids {
+                println!("    {session_id}");
+            }
+        }
+    }
+    if !layout.defaults.is_empty() {
+        println!("defaults:");
+        for default in &layout.defaults {
+            println!(
+                "  {}:{} -> {}",
+                default.selector_kind, default.selector_value, default.group_id
+            );
+        }
+    }
+}
+
+async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
+    let client = client::default()?;
+    let layout = match cmd {
+        SessionLayoutCmd::Show => client.get_session_layout().await?,
+        SessionLayoutCmd::SpaceAdd { name, revision } => {
+            let expected_revision = layout_revision(&client, revision).await?;
+            client
+                .create_session_space(&CreateSessionSpaceReq {
+                    name,
+                    expected_revision,
+                })
+                .await?
+        }
+        SessionLayoutCmd::SpaceRename { id, name, revision } => {
+            let expected_revision = layout_revision(&client, revision).await?;
+            client
+                .update_session_space(
+                    &id,
+                    &UpdateSessionSpaceReq {
+                        name,
+                        expected_revision,
+                    },
+                )
+                .await?
+        }
+        SessionLayoutCmd::SpaceDelete { id, to, revision } => {
+            let expected_revision = layout_revision(&client, revision).await?;
+            client
+                .delete_session_space(
+                    &id,
+                    &DeleteSessionSpaceReq {
+                        destination_group_id: to,
+                        expected_revision,
+                    },
+                )
+                .await?
+        }
+        SessionLayoutCmd::GroupAdd {
+            space,
+            name,
+            revision,
+        } => {
+            let expected_revision = layout_revision(&client, revision).await?;
+            client
+                .create_session_group(&CreateSessionGroupReq {
+                    space_id: space,
+                    name,
+                    expected_revision,
+                })
+                .await?
+        }
+        SessionLayoutCmd::GroupRename { id, name, revision } => {
+            let expected_revision = layout_revision(&client, revision).await?;
+            client
+                .update_session_group(
+                    &id,
+                    &UpdateSessionGroupReq {
+                        name,
+                        expected_revision,
+                    },
+                )
+                .await?
+        }
+        SessionLayoutCmd::GroupDelete { id, to, revision } => {
+            let expected_revision = layout_revision(&client, revision).await?;
+            client
+                .delete_session_group(
+                    &id,
+                    &DeleteSessionGroupReq {
+                        destination_group_id: to,
+                        expected_revision,
+                    },
+                )
+                .await?
+        }
+        SessionLayoutCmd::Reorder {
+            kind,
+            id,
+            before,
+            space,
+            revision,
+        } => {
+            let expected_revision = layout_revision(&client, revision).await?;
+            client
+                .reorder_session_layout(&ReorderSessionLayoutReq {
+                    kind,
+                    id,
+                    before_id: before,
+                    destination_space_id: space,
+                    expected_revision,
+                })
+                .await?
+        }
+        SessionLayoutCmd::Move {
+            to,
+            before,
+            revision,
+            sessions,
+        } => {
+            let expected_revision = layout_revision(&client, revision).await?;
+            client
+                .move_sessions(&MoveSessionsReq {
+                    session_ids: sessions,
+                    destination_group_id: to,
+                    before_session_id: before,
+                    expected_revision,
+                })
+                .await?
+        }
+        SessionLayoutCmd::Collapse { group } => {
+            client
+                .set_session_group_preference(
+                    &group,
+                    &SessionGroupPreferenceReq { collapsed: true },
+                )
+                .await?
+        }
+        SessionLayoutCmd::Expand { group } => {
+            client
+                .set_session_group_preference(
+                    &group,
+                    &SessionGroupPreferenceReq { collapsed: false },
+                )
+                .await?
+        }
+        SessionLayoutCmd::DefaultSet {
+            kind,
+            value,
+            to,
+            revision,
+        } => {
+            let expected_revision = layout_revision(&client, revision).await?;
+            client
+                .set_session_placement_default(&SetSessionPlacementDefaultReq {
+                    selector_kind: kind,
+                    selector_value: value,
+                    group_id: to,
+                    expected_revision,
+                })
+                .await?
+        }
+        SessionLayoutCmd::DefaultDelete {
+            kind,
+            value,
+            revision,
+        } => {
+            let expected_revision = layout_revision(&client, revision).await?;
+            client
+                .delete_session_placement_default(&kind, &value, expected_revision)
+                .await?
+        }
+    };
+    print_session_layout(&layout);
+    Ok(())
 }
 
 async fn run_mcp(cmd: McpCmd) -> Result<()> {
@@ -3364,10 +3665,18 @@ async fn cmd_ps(
     if managed {
         query.push("managed=true".to_string());
     }
-    if let Some(s) = search.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        query.push(format!("q={}", encode_query(s)));
+    let search = search.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if managed {
+        if let Some(search) = search {
+            query.push(format!("q={}", encode_query(search)));
+        }
     }
-    let path = if query.is_empty() {
+    let path = if let Some(search) = search.filter(|_| !managed) {
+        format!(
+            "/api/sessions/search?q={}&history={archived}",
+            encode_query(search)
+        )
+    } else if query.is_empty() {
         "/api/sessions".to_string()
     } else {
         format!("/api/sessions?{}", query.join("&"))
@@ -3376,23 +3685,31 @@ async fn cmd_ps(
     let rows = list.as_array().cloned().unwrap_or_default();
     if rows.is_empty() {
         let hint = match search {
-            Some(s) if !s.trim().is_empty() => format!("no sessions match '{}'", s.trim()),
+            Some(s) => format!("no sessions match '{s}'"),
             _ => "no sessions — start one with `loom session launch \"<task>\"`".to_string(),
         };
         println!("{hint}");
         return Ok(());
     }
     println!(
-        "{:<10}  {:<9}  {:<10}  {:<22}  TITLE",
-        "ID", "STATUS", "ATTENTION", "NAME"
+        "{:<10}  {:<9}  {:<10}  {:<22}  {:<24}  TITLE",
+        "ID", "STATUS", "ATTENTION", "NAME", "LOCATION"
     );
     for ws in rows {
+        let location = ws.get("placement").map_or_else(String::new, |placement| {
+            format!(
+                "{}/{}",
+                str_field(placement, "space_name"),
+                str_field(placement, "group_name")
+            )
+        });
         println!(
-            "{:<10}  {:<9}  {:<10}  {:<22}  {}",
+            "{:<10}  {:<9}  {:<10}  {:<22}  {:<24}  {}",
             str_field(&ws, "id"),
             str_field(&ws, "status"),
             branch_attention(&ws),
             truncate(branch_str(&ws, "name"), 22),
+            truncate(&location, 24),
             truncate(branch_str(&ws, "title"), 46),
         );
     }
@@ -3513,6 +3830,13 @@ fn print_session(ws: &Value) {
     );
     println!("  title:    {}", branch_str(ws, "title"));
     println!("  status:   {}", str_field(ws, "status"));
+    if let Some(placement) = ws.get("placement").filter(|value| !value.is_null()) {
+        println!(
+            "  location: {} / {}",
+            str_field(placement, "space_name"),
+            str_field(placement, "group_name")
+        );
+    }
     // Agent-declared attention level (the resolved `attention` tag) plus its
     // current-state message (the branch `description`), shown together — one
     // signal.

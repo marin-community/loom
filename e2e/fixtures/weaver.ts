@@ -289,6 +289,73 @@ async function deleteAllSessions(baseUrl: string) {
   }
 }
 
+interface SessionLayoutFixture {
+  revision: number;
+  spaces: {
+    id: string;
+    system_key: string | null;
+    groups: { id: string; system_key: string | null }[];
+  }[];
+}
+
+/** Restore the seeded User/GitHub/Ops layout between tests. Layout is durable
+ *  by design, so session cleanup alone would otherwise leak custom/collapsed
+ *  groups between tests that share a worker. */
+async function resetSessionLayout(baseUrl: string) {
+  try {
+    let current = (await fetchJson(
+      `${baseUrl}/api/session-layout`,
+    )) as SessionLayoutFixture;
+    const userInbox = current.spaces
+      .find((space) => space.system_key === "user")
+      ?.groups.find((group) => group.system_key === "inbox")?.id;
+    if (!userInbox) return;
+
+    for (const space of current.spaces.filter((space) => !space.system_key)) {
+      current = (await fetchJson(
+        `${baseUrl}/api/session-layout/spaces/${space.id}`,
+        {
+          method: "DELETE",
+          body: JSON.stringify({
+            destination_group_id: userInbox,
+            expected_revision: current.revision,
+          }),
+        },
+      )) as SessionLayoutFixture;
+    }
+    for (const group of current.spaces
+      .filter((space) => space.system_key)
+      .flatMap((space) => space.groups)
+      .filter((group) => !group.system_key)) {
+      current = (await fetchJson(
+        `${baseUrl}/api/session-layout/groups/${group.id}`,
+        {
+          method: "DELETE",
+          body: JSON.stringify({
+            destination_group_id: userInbox,
+            expected_revision: current.revision,
+          }),
+        },
+      )) as SessionLayoutFixture;
+    }
+    await Promise.all(
+      current.spaces.flatMap((space) =>
+        space.groups.map((group) =>
+          fetchJson(
+            `${baseUrl}/api/session-layout/groups/${group.id}/preference`,
+            {
+              method: "PUT",
+              body: JSON.stringify({ collapsed: false }),
+            },
+          ),
+        ),
+      ),
+    );
+  } catch {
+    // Best effort: a test failure should remain the primary diagnostic.
+  }
+}
+
 /** Automation launch reservations are durable and intentionally have no
  *  product delete endpoint. Test workers own a private sqlite database, so
  *  clear that audit table directly between tests to keep run-only failures
@@ -375,7 +442,7 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       // worker's terminals never collide with another worker's or the user's real
       // sessions. WEAVER_TAPESTRY_BIN points loom at the sibling supervisor binary
       // built alongside it.
-      const childEnv = {
+      const childEnv: NodeJS.ProcessEnv = {
         ...process.env,
         WEAVER_HOME: weaverHome,
         WEAVER_DB: dbPath,
@@ -702,6 +769,7 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
 
     // Reset for the next test in this worker.
     await deleteAllSessions(baseUrl);
+    await resetSessionLayout(baseUrl);
     deleteAllAutomationRuns(childEnv.WEAVER_DB!);
     await deleteAllWatches(baseUrl);
     await deleteAllIssues(baseUrl);

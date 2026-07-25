@@ -41,13 +41,9 @@ pub struct Session {
     /// the resolving [`crate::auth::Principal`]; a tracking/UX field, never a
     /// security boundary.
     pub created_by: Option<String>,
-    /// Park state — the fleet list's resting shelf (a tier above archived: the
-    /// terminal + worktree stay, the session stays resumable, it's just
-    /// collapsed out of the live list). Tri-state: `None` = auto (parked-in-view
-    /// once idle past the threshold, live otherwise), `Some("parked")` = pinned
-    /// to the shelf by hand, `Some("active")` = kept live by hand even when idle.
-    /// The idle threshold itself is a client view concern; the server only
-    /// stores the explicit override.
+    /// Legacy park state retained during the compatibility window. Canonical
+    /// organization lives in `session_placements`; migration maps explicit
+    /// `parked` rows into a normal `Later` group.
     pub park: Option<String>,
     /// Manual fleet-list sort key. `None` = follow the automatic
     /// urgency-then-recency order; a number places the row exactly (assigned as
@@ -87,9 +83,9 @@ pub struct Session {
     /// re-derived.
     #[serde(default = "default_origin")]
     pub origin: String,
-    /// Presentation tier: `"interactive"` fleet work or `"automation"`
-    /// machinery, which the default fleet listing hides. Derived from `origin`
-    /// at create (watch/actions/ops → automation), overridable per request.
+    /// Presentation tier: `"interactive"` or `"automation"`. Both are normal
+    /// fleet sessions; the machine fact still drives authorization and issue
+    /// policies. Derived from `origin` at create, overridable per request.
     #[serde(default = "default_class")]
     pub class: String,
     /// Completed agent turns on this session, advanced at each turn boundary
@@ -281,6 +277,7 @@ pub async fn insert_with_policy(
     s: &NewSession,
     policy: &SessionLaunchPolicy,
 ) -> Result<Session> {
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
     let now = now_iso();
     let protocol = if s.protocol.trim().is_empty() {
         "terminal"
@@ -336,8 +333,10 @@ pub async fn insert_with_policy(
     .bind(&policy.creator_subject)
     .bind(&policy.parent_session_id)
     .bind(&policy.automation_run_id)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    crate::session_layout::insert_default_placement_tx(&mut tx, s, policy).await?;
+    tx.commit().await?;
     tracing::info!(
         session = %s.id,
         branch = %s.branch_id,
@@ -566,9 +565,7 @@ pub async fn touch(db: &Db, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Set the manual park override — `Some("parked")` / `Some("active")` / `None`
-/// (auto). See [`Session::park`]. The fleet list writes this when a row is
-/// dragged into or out of the Parked shelf.
+/// Compatibility write for clients predating canonical placement.
 pub async fn set_park(db: &Db, id: &str, park: Option<&str>) -> Result<()> {
     sqlx::query("UPDATE sessions SET park = ? WHERE id = ?")
         .bind(park)
@@ -579,8 +576,7 @@ pub async fn set_park(db: &Db, id: &str, park: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Set the manual fleet-list sort key. See [`Session::sort_order`]. The list
-/// writes the dragged row's new midpoint key here.
+/// Compatibility write for clients predating canonical placement rank.
 pub async fn set_sort_order(db: &Db, id: &str, order: f64) -> Result<()> {
     sqlx::query("UPDATE sessions SET sort_order = ? WHERE id = ?")
         .bind(order)
@@ -1035,10 +1031,20 @@ pub async fn consume_pending_prompt(db: &Db, id: &str, promoted: &str) -> Result
 }
 
 pub async fn delete(db: &Db, id: &str) -> Result<()> {
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
+    let had_placement: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM session_placements WHERE session_id = ?)")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
     sqlx::query("DELETE FROM sessions WHERE id = ?")
         .bind(id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+    if had_placement {
+        crate::session_layout::bump_revision_tx(&mut tx).await?;
+    }
+    tx.commit().await?;
     tracing::info!(session = %id, "session row deleted");
     Ok(())
 }
@@ -1110,12 +1116,95 @@ mod tests {
             .map(|s| s.id)
             .collect();
         assert_eq!(managed, vec!["warm".to_string()], "only managed listed");
+        let layout = crate::session_layout::get_layout(&db, "test")
+            .await
+            .unwrap();
+        assert!(
+            layout
+                .spaces
+                .iter()
+                .flat_map(|space| &space.groups)
+                .flat_map(|group| &group.session_ids)
+                .all(|id| id != "warm"),
+            "workbench layout hides managed infrastructure"
+        );
 
         let owned = active_managed_by(&db, "ov-1").await.unwrap().unwrap();
         assert_eq!(owned.id, "warm", "the watch's warm session resolves");
         assert!(
             active_managed_by(&db, "ov-other").await.unwrap().is_none(),
             "no warm session for a watch that owns none"
+        );
+    }
+
+    #[tokio::test]
+    async fn placement_defaults_route_ops_and_delegated_sessions_inherit() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+
+        let watch_branch = branch_id(&db, "weaver/watch-result").await;
+        let mut watch = new_session("watch-result", &watch_branch, None);
+        watch.origin = "watch".to_string();
+        watch.class = "automation".to_string();
+        insert(&db, &watch).await.unwrap();
+        let watch_placement = crate::session_layout::placement(&db, "watch-result")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(watch_placement.space_name, "Ops");
+        assert_eq!(watch_placement.group_name, "Inbox");
+
+        let parent_branch = branch_id(&db, "weaver/parent").await;
+        insert(&db, &new_session("parent", &parent_branch, None))
+            .await
+            .unwrap();
+        let initial = crate::session_layout::get_layout(&db, "test")
+            .await
+            .unwrap();
+        let focused = crate::session_layout::create_group(
+            &db,
+            "test",
+            &weaver_api::CreateSessionGroupReq {
+                space_id: "space-user".to_string(),
+                name: "Focused".to_string(),
+                expected_revision: initial.revision,
+            },
+        )
+        .await
+        .unwrap();
+        let focused_group = focused
+            .spaces
+            .iter()
+            .flat_map(|space| &space.groups)
+            .find(|group| group.name == "Focused")
+            .unwrap();
+        let focused_id = focused_group.id.clone();
+        crate::session_layout::move_sessions(
+            &db,
+            "test",
+            &weaver_api::MoveSessionsReq {
+                session_ids: vec!["parent".to_string()],
+                destination_group_id: focused_id.clone(),
+                before_session_id: None,
+                expected_revision: focused.revision,
+            },
+        )
+        .await
+        .unwrap();
+
+        let child_branch = branch_id(&db, "weaver/child").await;
+        let mut child = new_session("child", &child_branch, None);
+        child.origin = "agent".to_string();
+        child.parent_branch_id = Some(parent_branch);
+        let mut policy = SessionLaunchPolicy::compatible(&child);
+        policy.parent_session_id = Some("parent".to_string());
+        insert_with_policy(&db, &child, &policy).await.unwrap();
+        assert_eq!(
+            crate::session_layout::placement(&db, "child")
+                .await
+                .unwrap()
+                .unwrap()
+                .group_id,
+            focused_id
         );
     }
 

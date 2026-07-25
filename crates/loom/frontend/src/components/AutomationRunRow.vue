@@ -3,12 +3,14 @@ import { computed, ref } from 'vue';
 import { del, post } from '../api';
 import type { AutomationRun } from '../types';
 import { exactTime, timeAgo } from '../lib/time';
+import ConfirmDialog from './ConfirmDialog.vue';
 import StatusBadge from './StatusBadge.vue';
 
 const props = defineProps<{ run: AutomationRun; intervention: boolean; history?: boolean }>();
 const emit = defineEmits<{ changed: []; error: [message: string] }>();
 const open = ref(false);
 const busy = ref('');
+const pendingAction = ref<'archive' | 'remove' | ''>('');
 const canArchive = computed(
   () => props.run.status !== 'cancelled' && props.run.status !== 'completed',
 );
@@ -32,23 +34,23 @@ async function act(name: string, fn: () => Promise<void>) {
   }
 }
 
-function archive() {
-  if (
-    !confirm(
-      'Archive this launch attempt? Any reserved runtime is torn down and the attempt is kept in history.',
-    )
-  )
-    return;
-  void act('archive', async () => {
-    await post(`/sessions/${props.run.session_id}/archive`);
-  });
+function requestConfirmation(action: 'archive' | 'remove') {
+  open.value = false;
+  pendingAction.value = action;
 }
 
-function remove() {
-  if (!confirm('Remove this launch attempt and any reserved runtime?')) return;
-  void act('remove', async () => {
-    await del(`/sessions/${props.run.session_id}`);
-  });
+function confirmAction() {
+  const action = pendingAction.value;
+  pendingAction.value = '';
+  if (action === 'archive') {
+    void act('archive', async () => {
+      await post(`/sessions/${props.run.session_id}/archive`);
+    });
+  } else if (action === 'remove') {
+    void act('remove', async () => {
+      await del(`/sessions/${props.run.session_id}`);
+    });
+  }
 }
 </script>
 
@@ -112,7 +114,7 @@ function remove() {
           type="button"
           data-testid="run-action-archive"
           class="block w-full px-3 py-1.5 text-left text-fg transition-colors hover:bg-subtle"
-          @click="archive"
+          @click="requestConfirmation('archive')"
         >
           <span class="block text-xs font-medium">Archive</span>
           <span class="block text-2xs text-faint">Tear down runtime, keep launch history</span>
@@ -121,12 +123,26 @@ function remove() {
           type="button"
           data-testid="run-action-remove"
           class="block w-full px-3 py-1.5 text-left text-block transition-colors hover:bg-block-soft"
-          @click="remove"
+          @click="requestConfirmation('remove')"
         >
           <span class="block text-xs font-medium">Remove</span>
           <span class="block text-2xs text-faint">Delete this attempt and reserved runtime</span>
         </button>
       </div>
     </div>
+    <ConfirmDialog
+      :open="pendingAction !== ''"
+      :title="pendingAction === 'archive' ? 'Archive launch attempt?' : 'Remove launch attempt?'"
+      :description="
+        pendingAction === 'archive'
+          ? 'Any reserved runtime is torn down and the attempt is kept in History.'
+          : 'This permanently deletes the attempt and any reserved runtime.'
+      "
+      :confirm-label="pendingAction === 'archive' ? 'Archive' : 'Remove'"
+      :danger="pendingAction === 'remove'"
+      :busy="!!busy"
+      @confirm="confirmAction"
+      @cancel="pendingAction = ''"
+    />
   </li>
 </template>

@@ -81,11 +81,11 @@ pub(super) struct ListSessionsQuery {
     /// History as disjoint views.
     #[serde(default)]
     archived: bool,
-    /// Include automation-class sessions (watch/ops machinery). Defaults to
-    /// `false` — the fleet listing shows interactive work; a machinery view
-    /// opts in with `?automation=true`, symmetric with `archived`.
+    /// Compatibility filter for automation-class sessions. Successful
+    /// automation sessions are normal fleet work now, so omission includes
+    /// them; an explicit `automation=false` retains the old filtered read.
     #[serde(default)]
-    automation: bool,
+    automation: Option<bool>,
     /// Include engine-managed warm sessions. This is an operator inventory
     /// escape hatch: normal fleet/survey callers must not see a watcher's own
     /// infrastructure and recurse into it.
@@ -108,6 +108,70 @@ pub(super) async fn list_sessions(
             "admin grant required to list managed sessions",
         ));
     }
+    collect_sessions(
+        &st,
+        q.archived,
+        q.automation.unwrap_or(true),
+        q.managed,
+        q.q.as_deref(),
+        None,
+        None,
+    )
+    .await
+    .map(Json)
+}
+
+/// Search is an explicit fleet read so non-browser clients can find the same
+/// qualified sessions as the workbench. `history=true` widens rather than
+/// replacing the actionable result set.
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct SearchSessionsQuery {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    history: bool,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    attention: Option<String>,
+}
+
+pub(super) async fn search_sessions(
+    State(st): State<AppState>,
+    Query(q): Query<SearchSessionsQuery>,
+) -> ApiResult<Json<Vec<SessionView>>> {
+    collect_sessions(
+        &st,
+        q.history,
+        true,
+        false,
+        Some(&q.q),
+        q.status.as_deref(),
+        q.attention.as_deref(),
+    )
+    .await
+    .map(Json)
+}
+
+fn view_attention(view: &SessionView) -> &str {
+    if view.branch.tags.iter().any(|tag| tag.value == "blocked") {
+        "blocked"
+    } else if view.branch.tags.iter().any(|tag| tag.value == "attention") {
+        "attention"
+    } else {
+        "ok"
+    }
+}
+
+async fn collect_sessions(
+    st: &AppState,
+    archived: bool,
+    automation: bool,
+    managed: bool,
+    search: Option<&str>,
+    status: Option<&str>,
+    attention: Option<&str>,
+) -> ApiResult<Vec<SessionView>> {
     // The fleet listing shows work, not infrastructure: engine-managed (warm)
     // sessions are excluded here, so neither the dashboard nor a watch
     // round's survey (scripts read this route) ever sees a watcher's own
@@ -121,43 +185,56 @@ pub(super) async fn list_sessions(
         .filter_map(|o| o.warm_session_id)
         .collect();
     // A blank `q` is no filter; otherwise match case-insensitively.
-    let needle =
-        q.q.as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_lowercase);
-    let sessions = if q.managed {
+    let needle = search
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_lowercase);
+    let sessions = if managed {
         session_mod::list(&st.db).await?
     } else {
         session_mod::list_visible(&st.db).await?
     };
     let mut views: Vec<SessionView> = Vec::with_capacity(sessions.len());
     for s in sessions {
-        if !q.managed && warm.contains(&s.id) {
+        if !managed && warm.contains(&s.id) {
             continue;
         }
         // Archived sessions are torn down — hidden unless the caller opts in.
-        if !q.archived && s.status == "archived" {
+        if !archived && s.status == "archived" {
             continue;
         }
-        // Automation-class sessions are machinery — hidden unless asked.
-        if !q.automation && s.class == "automation" {
+        // Explicit compatibility reads can still hide automation-class rows.
+        if !automation && s.class == "automation" {
             continue;
         }
         if let Some(branch) = branch_mod::get(&st.db, &s.branch_id).await? {
+            let view = session_view(&st.db, &s, &branch).await?;
+            if status.is_some_and(|status| view.status != status) {
+                continue;
+            }
+            if attention.is_some_and(|attention| match attention {
+                "needs" => view_attention(&view) == "ok",
+                "ok" => view_attention(&view) != "ok",
+                exact => view_attention(&view) != exact,
+            }) {
+                continue;
+            }
             if let Some(needle) = &needle {
-                // Match the identifiers a human searches by: the title, the branch
-                // name, and the goal.
-                let hay =
-                    format!("{} {} {}", branch.title, branch.branch, branch.goal).to_lowercase();
+                // The wire view already carries every promised search facet:
+                // qualified placement, title/goal, repo/branch, issue/PR, tags,
+                // status, profile, and provenance. Searching its text keeps the
+                // REST and CLI vocabulary synchronized as fields evolve.
+                let hay = serde_json::to_string(&view)
+                    .unwrap_or_default()
+                    .to_lowercase();
                 if !hay.contains(needle) {
                     continue;
                 }
             }
-            views.push(session_view(&st.db, &s, &branch).await?);
+            views.push(view);
         }
     }
-    Ok(Json(views))
+    Ok(views)
 }
 
 pub(super) async fn get_session(
@@ -1995,8 +2072,7 @@ pub(super) async fn patch_session(
         .await
         .ok();
     }
-    // Park override — the fleet list's resting shelf. `"auto"` clears the manual
-    // override back to idle-driven (stored NULL); `"parked"` / `"active"` pin it.
+    // Compatibility window for clients predating canonical placement.
     if let Some(park) = &req.park {
         let stored = match park.as_str() {
             "auto" => None,

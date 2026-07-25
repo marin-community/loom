@@ -147,9 +147,9 @@ pub struct SessionView {
     /// `"watch"` (engine infrastructure). Stamped once at create.
     #[serde(default = "default_origin")]
     pub origin: String,
-    /// Presentation tier: `"interactive"` fleet work or `"automation"`
-    /// machinery. The default `GET /api/sessions` listing hides
-    /// automation-class rows; `?automation=true` includes them.
+    /// Machine tier: `"interactive"` or `"automation"`. Both appear in the
+    /// normal fleet; the class remains useful for policy and compatibility
+    /// filters.
     #[serde(default = "default_class")]
     pub class: String,
     /// Completed agent turns on this session.
@@ -160,14 +160,10 @@ pub struct SessionView {
     /// launch tracked nothing. Stored on the session row, so every read path
     /// carries it.
     pub tracking_issue: Option<i64>,
-    /// Manual park override for the fleet list's resting shelf: `"parked"` (pinned
-    /// to the shelf), `"active"` (kept live even when idle), or `null` (auto — the
-    /// client parks it once idle past the threshold). See the `sessions.park`
-    /// column.
+    /// Legacy compatibility field. Explicit parked rows migrate into a normal
+    /// `Later` placement.
     pub park: Option<String>,
-    /// Manual fleet-list sort key, or `null` to follow the automatic
-    /// urgency-then-recency order. Placed rows and untouched rows share one
-    /// numeric axis so they interleave.
+    /// Legacy compatibility field. New clients use placement rank.
     pub sort_order: Option<f64>,
     /// Execution backend: `"terminal"` (a PTY + interactive TUI) or `"acp"` (a
     /// headless adapter driven over the Agent Client Protocol). Terminal-backend
@@ -212,7 +208,62 @@ pub struct SessionView {
     /// the launch-composition contract expose `null`.
     #[serde(default)]
     pub resolved_launch: Option<ResolvedLaunchView>,
+    /// The session's one canonical, operator-controlled fleet location.
+    #[serde(default)]
+    pub placement: Option<SessionPlacementView>,
     pub branch: BranchView,
+}
+
+/// One session's canonical position in the shared Spaces → Groups layout.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionPlacementView {
+    pub session_id: String,
+    pub group_id: String,
+    pub group_name: String,
+    pub space_id: String,
+    pub space_name: String,
+    pub rank: i64,
+}
+
+/// An ordered, flat group inside one session space.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionGroupView {
+    pub id: String,
+    pub space_id: String,
+    pub name: String,
+    pub rank: i64,
+    pub system_key: Option<String>,
+    /// Viewer-specific disclosure preference; membership/order remain shared.
+    pub collapsed: bool,
+    /// Canonically ordered session ids, including archived rows. Fleet views
+    /// decide whether to project active work or History.
+    pub session_ids: Vec<String>,
+}
+
+/// A top-level shared fleet space.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionSpaceView {
+    pub id: String,
+    pub name: String,
+    pub rank: i64,
+    pub system_key: Option<String>,
+    pub groups: Vec<SessionGroupView>,
+}
+
+/// One configurable default-placement selector.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionPlacementDefaultView {
+    pub selector_kind: String,
+    pub selector_value: String,
+    pub group_id: String,
+}
+
+/// Complete shared session layout at one optimistic-concurrency revision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionLayoutView {
+    pub revision: i64,
+    pub spaces: Vec<SessionSpaceView>,
+    pub defaults: Vec<SessionPlacementDefaultView>,
 }
 
 /// One provider-neutral conversation record returned by the session history
@@ -1571,17 +1622,92 @@ pub struct PatchSessionReq {
     /// The agent's current-state message — the prose shown beside the level.
     #[serde(default)]
     pub description: Option<String>,
-    /// Park override: `"parked"` pins the row to the resting shelf, `"active"`
-    /// keeps it live even when idle, `"auto"` clears the override back to
-    /// idle-driven. Absent leaves it unchanged. (JSON can't distinguish `null`
-    /// from absent for `Option<String>`, so the reset value is the string
-    /// `"auto"`, mapped to a stored `NULL`.)
+    /// Legacy compatibility write. Absent leaves it unchanged; `"auto"` maps to
+    /// stored `NULL`.
     #[serde(default)]
     pub park: Option<String>,
-    /// New manual sort key for this row (the drag midpoint). Absent leaves the
-    /// order unchanged.
+    /// Legacy compatibility write. Absent leaves it unchanged.
     #[serde(default)]
     pub sort_order: Option<f64>,
+}
+
+/// Create a space and its useful empty Inbox group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSessionSpaceReq {
+    pub name: String,
+    pub expected_revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateSessionSpaceReq {
+    pub name: String,
+    pub expected_revision: i64,
+}
+
+/// Deleting a non-empty space atomically moves its sessions/defaults here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteSessionSpaceReq {
+    #[serde(default)]
+    pub destination_group_id: Option<String>,
+    pub expected_revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSessionGroupReq {
+    pub space_id: String,
+    pub name: String,
+    pub expected_revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateSessionGroupReq {
+    pub name: String,
+    pub expected_revision: i64,
+}
+
+/// Deleting a group never deletes sessions. A destination is required whenever
+/// the group owns placements or default-placement selectors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteSessionGroupReq {
+    #[serde(default)]
+    pub destination_group_id: Option<String>,
+    pub expected_revision: i64,
+}
+
+/// Reorder one space, or one group (optionally into another space).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReorderSessionLayoutReq {
+    /// `"space"` or `"group"`.
+    pub kind: String,
+    pub id: String,
+    #[serde(default)]
+    pub before_id: Option<String>,
+    #[serde(default)]
+    pub destination_space_id: Option<String>,
+    pub expected_revision: i64,
+}
+
+/// Atomically move one or more sessions to an exact group insertion point.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoveSessionsReq {
+    pub session_ids: Vec<String>,
+    pub destination_group_id: String,
+    #[serde(default)]
+    pub before_session_id: Option<String>,
+    pub expected_revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionGroupPreferenceReq {
+    pub collapsed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetSessionPlacementDefaultReq {
+    pub selector_kind: String,
+    pub selector_value: String,
+    pub group_id: String,
+    pub expected_revision: i64,
 }
 
 /// Body for `PUT /api/sessions/{id}/tags/{key}`: set (upsert) a tag. The `key`

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import type { Session } from '../types';
-import { autoArchiveDisabled, lifecycleActions, shelved } from '../lib/sessionState';
+import { autoArchiveDisabled, lifecycleActions } from '../lib/sessionState';
 import { useSessionActions } from '../lib/sessionActions';
 
 // A fleet-list row's ⋯ menu: every lifecycle verb that applies to the session
@@ -17,20 +17,11 @@ import { useSessionActions } from '../lib/sessionActions';
 // the two surfaces can't drift; the writes are `useSessionActions`. This
 // component is only the chrome.
 const props = defineProps<{ ws: Session }>();
-const emit = defineEmits<{ changed: []; error: [string]; park: ['parked' | 'active'] }>();
+const emit = defineEmits<{ changed: []; error: [string] }>();
 
 const open = ref(false);
 const actions = computed(() => lifecycleActions(props.ws));
-// Park is the keyboard/no-drag path for the shelf gesture: a live session parks,
-// a resting one returns. Archived rows read through their own reveal, not here.
-const isShelved = computed(() => shelved(props.ws));
-const canPark = computed(() => props.ws.status !== 'archived');
 const keepsSession = computed(() => autoArchiveDisabled(props.ws));
-
-function togglePark() {
-  open.value = false;
-  emit('park', isShelved.value ? 'active' : 'parked');
-}
 
 const { busy, error, setAutoArchiveDisabled, run } = useSessionActions(
   () => props.ws.id,
@@ -77,18 +68,6 @@ async function toggleAutoArchive() {
       data-testid="row-actions-menu"
       class="absolute right-0 top-full z-30 mt-1 w-64 overflow-hidden rounded border border-line bg-surface py-1 shadow-lg"
     >
-      <button
-        v-if="canPark"
-        type="button"
-        data-testid="row-action-park"
-        class="block w-full border-b border-line px-3 py-1.5 text-left text-fg transition-colors hover:bg-subtle"
-        @click="togglePark"
-      >
-        <span class="block text-xs font-medium">{{ isShelved ? 'Keep live' : 'Park' }}</span>
-        <span class="block text-2xs text-faint">{{
-          isShelved ? 'Return it to the live list' : 'Rest it on the shelf — kept, not archived'
-        }}</span>
-      </button>
       <button
         v-if="ws.status !== 'archived'"
         type="button"

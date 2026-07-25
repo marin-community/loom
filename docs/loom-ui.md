@@ -181,29 +181,9 @@ revisions and stamp a new snapshot. The CLI/API’s flattened compatibility inpu
 continues to change runtime selectors only and preserves the session’s existing
 stamped policy.
 
-## Workspace: order & the resting shelf
-
-The fleet list is where a long day's fatigue accumulates, so two controls keep it
-from becoming a wall of stale rows:
-
-- **The resting shelf ("Parked").** Below the live list sits a collapsed shelf
-  for threads that need nothing from you right now — hand-parked, or simply long
-  idle (the agent has rested past `IDLE_PARK_HOURS` — hours, not minutes, so a
-  finished turn never parks a conversation, only an abandoned one). Shelf rows
-  are dimmed, labelled with *why* they rest (`idle 12h` / `idle 6d` / `parked`),
-  and one click (or a drag) away from live. A loud signal always keeps a thread
-  live — a session that needs a human never hides. A session merely *awaiting an
-  external reviewer* is **not** shelved: its `awaiting: review` mark sinks it
-  below the calm rows in the live list (it's still yours to glance at) but never
-  hides it away. The idle threshold is a pure client view over
-  `last_activity_at`; only the manual override (`park`: `'parked'` / `'active'`)
-  is persisted.
-- **Manual order.** A hover-revealed grip (`⠿`) drags a top-level thread to
-  reorder it, or onto the shelf to rest it (drag back out, or "Keep live", to
-  return it). A drag persists one midpoint `sort_order`; placed and untouched
-  rows share one numeric axis (`orderKey`), so a dragged row lands exactly where
-  dropped while every other row keeps its automatic urgency-then-recency spot.
-  The grip is the only draggable handle, so the row's link still click/⌘-clicks.
+The SPA's shared inventory includes archived and automation-class rows but not
+`managed=true`: engine-managed warm watch sessions are infrastructure and stay
+out of Spaces, Attention, History, counts, and destructive row actions.
 
 ## Recurring pieces
 

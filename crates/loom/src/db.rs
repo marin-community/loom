@@ -65,6 +65,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "profile-lifetimes",
         include_str!("../migrations/0011_profile_lifetimes.sql"),
     ),
+    (
+        12,
+        "session-layout",
+        include_str!("../migrations/0010_session_layout.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -290,16 +295,40 @@ mod tests {
     #[tokio::test]
     async fn fresh_schema_records_baseline_and_has_final_shape() {
         let db = connect_in_memory().await.unwrap();
+        migrate_loom(&db).await.unwrap();
         let versions: Vec<i64> =
             sqlx::query_scalar("SELECT version FROM loom_schema_migrations ORDER BY version")
                 .fetch_all(&db)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
 
         let profile_columns = table_columns(&db, "profiles").await.unwrap();
         assert!(profile_columns.iter().any(|column| column == "retired"));
         assert!(profile_columns.iter().any(|column| column == "lifetime"));
+        assert!(!table_columns(&db, "session_spaces")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(!table_columns(&db, "session_groups")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(!table_columns(&db, "session_placements")
+            .await
+            .unwrap()
+            .is_empty());
+        let spaces: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_spaces")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let revision: i64 =
+            sqlx::query_scalar("SELECT revision FROM session_layout_state WHERE id = 1")
+                .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(spaces, 3);
+        assert_eq!(revision, 1);
 
         let columns = table_columns(&db, "sessions").await.unwrap();
         for expected in [
@@ -348,6 +377,67 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn layout_migration_maps_parked_and_delegated_sessions_deterministically() {
+        let db = core_connect_in_memory().await.unwrap();
+        for (_, _, migration) in LOOM_MIGRATIONS.iter().take(9) {
+            for statement in split_statements(migration) {
+                sqlx::query(&statement).execute(&db).await.unwrap();
+            }
+        }
+        for id in ["user", "github", "ops", "parent", "child", "parked-child"] {
+            insert_branch(&db, id).await;
+        }
+        sqlx::query(
+            "INSERT INTO sessions
+             (id, branch_id, work_dir, term_session, status, origin, class, park,
+              parent_session_id, created_at)
+             VALUES
+             ('user', 'user', '/user', 't-user', 'running', 'user', 'interactive',
+              'parked', NULL, '2026-01-01T00:00:00.000Z'),
+             ('github', 'github', '/github', 't-github', 'running', 'github', 'interactive',
+              'parked', NULL, '2026-01-01T00:00:01.000Z'),
+             ('ops', 'ops', '/ops', 't-ops', 'running', 'actions', 'automation',
+              'parked', NULL, '2026-01-01T00:00:02.000Z'),
+             ('parent', 'parent', '/parent', 't-parent', 'running', 'github', 'interactive',
+              NULL, NULL, '2026-01-01T00:00:03.000Z'),
+             ('child', 'child', '/child', 't-child', 'running', 'agent', 'interactive',
+              NULL, 'parent', '2026-01-01T00:00:04.000Z'),
+             ('parked-child', 'parked-child', '/parked-child', 't-parked-child',
+              'running', 'agent', 'interactive', 'parked', 'child',
+              '2026-01-01T00:00:05.000Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        for statement in split_statements(LOOM_MIGRATIONS[9].2) {
+            sqlx::query(&statement).execute(&db).await.unwrap();
+        }
+
+        for (session, expected) in [
+            ("user", "group-user-later"),
+            ("github", "group-github-later"),
+            ("ops", "group-ops-later"),
+            ("parent", "group-github-inbox"),
+            ("child", "group-github-inbox"),
+            ("parked-child", "group-github-later"),
+        ] {
+            let group: String =
+                sqlx::query_scalar("SELECT group_id FROM session_placements WHERE session_id = ?")
+                    .bind(session)
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(group, expected, "{session}");
+        }
+        let placed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_placements")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(placed, 6);
     }
 
     #[tokio::test]
@@ -496,7 +586,7 @@ mod tests {
                 .fetch_all(&db)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
         let index_sql: String = sqlx::query_scalar(
             "SELECT sql FROM sqlite_master
              WHERE type = 'index' AND name = 'idx_sessions_active_branch'",
@@ -570,7 +660,7 @@ mod tests {
             .fetch_one(&db)
             .await
             .unwrap();
-        assert_eq!(count, 11);
+        assert_eq!(count, 12);
 
         // Adoption replaced the historical index predicate: archived history
         // no longer prevents a new active session from claiming the branch.

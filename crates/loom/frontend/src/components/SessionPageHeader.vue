@@ -53,21 +53,11 @@ const emit = defineEmits<{ reload: []; openEditor: [] }>();
 
 const router = useRouter();
 const fleetHref = computed(() => {
-  if (props.ws.class === 'automation') {
-    return {
-      path: '/',
-      query:
-        props.ws.status === 'archived'
-          ? { view: 'automation', history: 'true' }
-          : { view: 'automation' },
-    };
-  }
-  return props.ws.status === 'archived' ? { path: '/', query: { history: 'true' } } : '/';
+  if (props.ws.status === 'archived') return { path: '/', query: { history: 'true' } };
+  const space = props.ws.placement?.space_id;
+  return space ? { path: '/', query: { space } } : '/';
 });
 const fleetLabel = computed(() => {
-  if (props.ws.class === 'automation') {
-    return props.ws.status === 'archived' ? '← automation history' : '← automation';
-  }
   return props.ws.status === 'archived' ? '← history' : '← sessions';
 });
 // The detail page's subject is the session itself, so a successful Remove has to

@@ -112,6 +112,10 @@ loom session preview <session>        # print the recent terminal screen
 loom session url [<session>]          # its dashboard URL (yours by default) — the link to share
 loom ps                               # list active sessions
 loom session show <branch>                    # session detail
+loom session layout show                      # spaces, groups, placements, defaults, revision
+loom session layout group-add space-user Focused
+loom session layout move --to <group-id> <session>...
+loom session layout reorder group <group-id> --before <group-id>
 loom attach <branch>                  # attach your terminal to the session (or use the browser terminal)
 loom session archive <branch>                 # tear down terminal + worktree, keep branch + history
 loom session adopt <branch>                   # recreate the terminal for an orphaned session
@@ -329,8 +333,11 @@ Loom serves a JSON API under `/api`; the Vue SPA is the primary consumer.
   `GET /api/ready` (database + migration readiness)
 - `GET /metrics` (bounded-label OpenMetrics) and `GET /api/diagnostics`
   (admin-only operational inventory used by Settings → Diagnostics)
-- `GET POST /api/sessions`, `GET PATCH DELETE /api/sessions/{id}`,
+- `GET POST /api/sessions`, `GET /api/sessions/search`,
+  `GET PATCH DELETE /api/sessions/{id}`,
   `POST /api/session-launches/resolve`,
+  `GET /api/session-layout`, `POST /api/session-layout/{moves,reorder}`,
+  and space/group/default CRUD under `/api/session-layout`,
   `POST /api/sessions/{id}/handoff/resolve`,
   `POST /api/sessions/{id}/{note,archive,adopt,handoff,github}`,
   `PUT /api/sessions/{id}/tags` (atomic author-scoped replacement),

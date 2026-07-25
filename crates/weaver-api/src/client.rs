@@ -13,14 +13,17 @@ use serde_json::Value;
 use crate::dto::{
     AnchorDto, ArtifactMeta, ArtifactUpsertReq, ArtifactView, AutomationTokenReq,
     AutomationTokenView, BranchStatusReq, BranchView, CloneProfileReq, CommentDto, CreateEventReq,
-    CreateIssueReq, CreateRepoIssueReq, CreateReq, CreateTokenReq, CreateWatchReq,
-    CreatedTokenView, CustomMcpReq, CustomMcpView, DeploymentReq, DeploymentView, DiagnosticsView,
+    CreateIssueReq, CreateRepoIssueReq, CreateReq, CreateSessionGroupReq, CreateSessionSpaceReq,
+    CreateTokenReq, CreateWatchReq, CreatedTokenView, CustomMcpReq, CustomMcpView,
+    DeleteSessionGroupReq, DeleteSessionSpaceReq, DeploymentReq, DeploymentView, DiagnosticsView,
     EffectiveProfileView, FederationReq, FederationView, HandoffReq, HistoryPageView,
-    IssueActionsReq, IssueActionsResult, IssueView, McpRegistryView, NewCommentBody, NewThreadBody,
-    PatchIssueReq, PatchSessionReq, PatchWatchReq, ProfileProbeView, ProfileReq, ProfileView,
-    PutProfileEnvReq, ReadinessView, ResolveLaunchReq, ResolvedLaunchView, RunReq, RunView,
-    RunWatchReq, ScratchLimitsView, SendReq, SessionView, SetTagsReq, SettingsEnvelope, TagReq,
-    ThreadDto, TokenView, WatchView,
+    IssueActionsReq, IssueActionsResult, IssueView, McpRegistryView, MoveSessionsReq,
+    NewCommentBody, NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq, ProfileProbeView,
+    ProfileReq, ProfileView, PutProfileEnvReq, ReadinessView, ReorderSessionLayoutReq,
+    ResolveLaunchReq, ResolvedLaunchView, RunReq, RunView, RunWatchReq, ScratchLimitsView, SendReq,
+    SessionGroupPreferenceReq, SessionLayoutView, SessionView, SetSessionPlacementDefaultReq,
+    SetTagsReq, SettingsEnvelope, TagReq, ThreadDto, TokenView, UpdateSessionGroupReq,
+    UpdateSessionSpaceReq, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -152,6 +155,142 @@ impl Client {
     /// List every active session (`GET /api/sessions`).
     pub async fn list_sessions(&self) -> Result<Vec<SessionView>> {
         self.get_typed("/api/sessions").await
+    }
+
+    /// Search active sessions across title/goal, qualified placement, repo,
+    /// branch, issue/PR, tags, status, and provenance. `history` widens the
+    /// result set to archived sessions.
+    pub async fn search_sessions(&self, query: &str, history: bool) -> Result<Vec<SessionView>> {
+        let query =
+            percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC);
+        self.get_typed(&format!("/api/sessions/search?q={query}&history={history}"))
+            .await
+    }
+
+    // -- Session layout ---------------------------------------------------
+
+    pub async fn get_session_layout(&self) -> Result<SessionLayoutView> {
+        self.get_typed("/api/session-layout").await
+    }
+
+    pub async fn create_session_space(
+        &self,
+        req: &CreateSessionSpaceReq,
+    ) -> Result<SessionLayoutView> {
+        self.send_typed(Method::POST, "/api/session-layout/spaces", Some(req))
+            .await
+    }
+
+    pub async fn update_session_space(
+        &self,
+        id: &str,
+        req: &UpdateSessionSpaceReq,
+    ) -> Result<SessionLayoutView> {
+        self.send_typed(
+            Method::PATCH,
+            &format!("/api/session-layout/spaces/{}", Self::seg(id)),
+            Some(req),
+        )
+        .await
+    }
+
+    pub async fn delete_session_space(
+        &self,
+        id: &str,
+        req: &DeleteSessionSpaceReq,
+    ) -> Result<SessionLayoutView> {
+        self.send_typed(
+            Method::DELETE,
+            &format!("/api/session-layout/spaces/{}", Self::seg(id)),
+            Some(req),
+        )
+        .await
+    }
+
+    pub async fn create_session_group(
+        &self,
+        req: &CreateSessionGroupReq,
+    ) -> Result<SessionLayoutView> {
+        self.send_typed(Method::POST, "/api/session-layout/groups", Some(req))
+            .await
+    }
+
+    pub async fn update_session_group(
+        &self,
+        id: &str,
+        req: &UpdateSessionGroupReq,
+    ) -> Result<SessionLayoutView> {
+        self.send_typed(
+            Method::PATCH,
+            &format!("/api/session-layout/groups/{}", Self::seg(id)),
+            Some(req),
+        )
+        .await
+    }
+
+    pub async fn delete_session_group(
+        &self,
+        id: &str,
+        req: &DeleteSessionGroupReq,
+    ) -> Result<SessionLayoutView> {
+        self.send_typed(
+            Method::DELETE,
+            &format!("/api/session-layout/groups/{}", Self::seg(id)),
+            Some(req),
+        )
+        .await
+    }
+
+    pub async fn reorder_session_layout(
+        &self,
+        req: &ReorderSessionLayoutReq,
+    ) -> Result<SessionLayoutView> {
+        self.send_typed(Method::POST, "/api/session-layout/reorder", Some(req))
+            .await
+    }
+
+    pub async fn move_sessions(&self, req: &MoveSessionsReq) -> Result<SessionLayoutView> {
+        self.send_typed(Method::POST, "/api/session-layout/moves", Some(req))
+            .await
+    }
+
+    pub async fn set_session_group_preference(
+        &self,
+        id: &str,
+        req: &SessionGroupPreferenceReq,
+    ) -> Result<SessionLayoutView> {
+        self.send_typed(
+            Method::PUT,
+            &format!("/api/session-layout/groups/{}/preference", Self::seg(id)),
+            Some(req),
+        )
+        .await
+    }
+
+    pub async fn set_session_placement_default(
+        &self,
+        req: &SetSessionPlacementDefaultReq,
+    ) -> Result<SessionLayoutView> {
+        self.send_typed(Method::PUT, "/api/session-layout/defaults", Some(req))
+            .await
+    }
+
+    pub async fn delete_session_placement_default(
+        &self,
+        kind: &str,
+        value: &str,
+        expected_revision: i64,
+    ) -> Result<SessionLayoutView> {
+        self.send_typed::<(), SessionLayoutView>(
+            Method::DELETE,
+            &format!(
+                "/api/session-layout/defaults/{}/{}?expected_revision={expected_revision}",
+                Self::seg(kind),
+                Self::seg(value)
+            ),
+            None,
+        )
+        .await
     }
 
     /// Get one session by key — id, branch id, branch name, or `repo:branch`

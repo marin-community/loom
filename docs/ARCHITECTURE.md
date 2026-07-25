@@ -159,7 +159,8 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
   - Loom tables (`crates/loom/src/db.rs`): `sessions` (`origin` — the channel
     it was created through: `user`/`agent`/`github`/`slack`/`watch`/`actions`/
     `ops`, stamped server-side at create; `class` — `interactive`/`automation`,
-    gating default-list visibility, see [Status & tags](#status--tags). A
+    retained as machine provenance and for policy rather than as a separate
+    fleet surface. A
     request may set `class` explicitly; otherwise `watch`/`actions`/`ops`
     origins default to `automation` while `github`/`slack` stay `interactive` —
     a person asked for those sessions and expects to find them on the board;
@@ -168,7 +169,11 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
     session per branch is enforced by a partial unique index on `branch_id`
     where `status NOT IN ('done', 'error', 'archived')` — an archived session
     releases its branch slot, so relaunching a done/archived branch is never
-    blocked by its predecessor), `recent_repos`,
+    blocked by its predecessor), `session_layout_state`, `session_spaces`,
+    `session_groups`, `session_placements` (one canonical ordered placement per
+    session), `session_placement_defaults` (origin/profile/watch routing), and
+    `user_session_group_state` (operator-local collapse preferences),
+    `recent_repos`,
     `branch_github` (per-branch PR snapshot), `chat_blocks` (the ACP
     [chat journal](#rest-api): one row per `(session_id, turn, seq)` block),
     `session_acp_metadata` (the latest provider-advertised composer controls,
@@ -258,7 +263,13 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `GET /metrics` | public OpenMetrics scrape derived from durable session/profile/run/migration state; labels are bounded operational dimensions and never contain session/branch/path/user/token/error values (deployments normally restrict this at the public edge) |
 | `GET /api/diagnostics` | admin-only redacted counts, profile capacity, automation failures/staleness, orphan/error inventory, migration state, and non-secret federation metadata; backs Settings → Diagnostics |
 | `POST /api/session-launches/resolve` | resolve a canonical profile selection plus one-launch overrides into concrete selectors, provenance, policy, capacity, validation, and profile/resolver revisions without provisioning |
-| `GET /api/sessions` / `POST /api/sessions` | list / create sessions (list takes `archived` — default `false` — `automation` — default `false` — and admin-only `managed` — default `false`; canonical create requires both revisions from resolve and returns 409 plus a fresh preview on drift/admission change; flattened selectors remain compatible; valid Scratch input is decoded before provisioning; create stamps `resolved_launch`, opens a tracking issue, and returns its id as `tracking_issue`) |
+| `GET /api/sessions` / `POST /api/sessions` | list / create sessions (list takes `archived` — default `false` — `automation` — default `false` — and admin-only `managed` — default `false`; canonical create requires both revisions from resolve and returns 409 plus a fresh preview on drift/admission change; flattened selectors remain compatible; valid Scratch input is decoded before provisioning; create atomically assigns canonical placement, stamps `resolved_launch`, opens a tracking issue, and returns its id as `tracking_issue`) |
+| `GET /api/sessions/search` | case-insensitive fleet search across qualified placement, title/prompt, repo/branch, issue/PR, tags, status, profile, and provenance; optional `history`, `status`, and `attention` filters |
+| `GET /api/session-layout`; `GET /api/session-layout/events` | read the ordered Spaces → Groups → Sessions model plus defaults/revision; SSE is invalidation-only so clients reload canonical state |
+| `POST PATCH DELETE /api/session-layout/{spaces,groups}[/{id}]` | create/rename/delete spaces and groups; non-empty deletion requires a destination and moves sessions/defaults atomically |
+| `POST /api/session-layout/{moves,reorder}` | atomic session moves and space/group reorder with an exact `expected_revision`; stale mutations return 409 plus the current layout |
+| `PUT /api/session-layout/groups/{id}/preference` | set the authenticated operator's collapse preference without changing shared layout revision |
+| `PUT DELETE /api/session-layout/defaults[/{kind}/{value}]` | configure or remove origin/profile/watch placement defaults |
 | `GET POST /api/profiles`; `GET PUT DELETE /api/profiles/{name}` | named launch-template CRUD, including provider-neutral `mcp_access`, prelude, and the runtime-permission compatibility escape hatch; POST is atomic insert-only; edits and environment mutations share an optimistic revision; deletion leaves a monotonic tombstone while watches and non-terminal sessions block it |
 | `POST /api/profiles/{name}/clone` | atomically create (never overwrite) an optionally edited template from a resolved source; checks source-profile and resolver revisions, can copy write-only environment in the same transaction, and returns 409 plus a fresh preview on resolver drift |
 | `GET /api/profiles/{name}/effective`; `POST /api/profiles/{name}/probe` | inspect the exact profile-revision capability sets, custom revisions, runtime permission translation, and MCP processes without launching; probe also reports retired builtins and removed/disabled pinned custom definitions |
@@ -325,8 +336,9 @@ linked on the session's tracking issue), `last_activity_at`,
 the journal's latest `usage` block), `origin` (the channel that created it:
 `user`/`agent`/`github`/`slack`/`watch`/`actions`/`ops`), `class`
 (`interactive`/`automation`), `turn_count` (incremented on each `working`
-lifecycle edge), and `tracking_issue` (the weaver issue opened at create;
-populated on every read, not just the create response)) plus a nested
+lifecycle edge), `placement` (qualified space/group plus integer rank), and
+`tracking_issue` (the weaver issue opened at create; populated on every read,
+not just the create response)) plus a nested
 `branch: BranchView`
 (`id`, `name`, `title`, `goal`, `description`, `tags`,
 `repo_root`, `branch`, `base_branch`, `created_at`, `updated_at`,

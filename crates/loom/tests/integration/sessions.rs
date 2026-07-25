@@ -703,11 +703,11 @@ async fn session_records_origin_class_and_tracking_issue() {
     client.delete(&format!("/api/sessions/{id}")).await.unwrap();
 }
 
-/// An automation-class session is machinery: absent from the default fleet
-/// listing, present with `?automation=true` — symmetric with `archived`.
+/// Successful automation work is a normal session in the default fleet. The
+/// explicit false query remains as a compatibility read for old consumers.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn automation_class_hidden_from_the_default_listing() {
+async fn automation_class_surfaces_in_the_default_listing() {
     let ts = TestServer::start().await;
     let client = &ts.client;
 
@@ -734,18 +734,18 @@ async fn automation_class_hidden_from_the_default_listing() {
         list.as_array()
             .unwrap()
             .iter()
-            .all(|s| s["id"] != auto_id.as_str()),
-        "automation-class sessions are hidden by default: {list}"
+            .any(|s| s["id"] == auto_id.as_str()),
+        "successful automation sessions are normal fleet rows: {list}"
     );
 
-    let shown = client.get("/api/sessions?automation=true").await.unwrap();
+    let shown = client.get("/api/sessions?automation=false").await.unwrap();
     assert!(
         shown
             .as_array()
             .unwrap()
             .iter()
-            .any(|s| s["id"] == auto_id.as_str()),
-        "?automation=true includes the automation session: {shown}"
+            .all(|s| s["id"] != auto_id.as_str()),
+        "explicit automation=false preserves the compatibility filter: {shown}"
     );
 
     client

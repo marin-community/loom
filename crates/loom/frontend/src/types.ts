@@ -103,20 +103,15 @@ export interface Session {
    *  `ops`. Drives the origin pill on an automation-class row. */
   origin: string;
   /** `interactive` (a person's own session) or `automation` (agent/system
-   *  launched). Automation-class sessions are excluded from the default fleet
-   *  list and issue board; the Sessions view gives them a separate Automation
-   *  pane. */
+   *  launched). Both are normal workbench sessions; class remains a machine
+   *  fact used by recursion/issue policies. */
   class: string;
   /** Total agent turns run so far. */
   turn_count: number;
-  /** Manual park override for the fleet list's resting shelf: `'parked'` pins the
-   *  row to the shelf, `'active'` keeps it live even when idle, `null` = auto (the
-   *  client shelves it once idle past the threshold). Set by dragging a row
-   *  into/out of the Parked region. */
+  /** Legacy compatibility field. New clients use durable group placement;
+   *  explicit parked rows are migrated to a Later group. */
   park: 'parked' | 'active' | null;
-  /** Manual fleet-list sort key, or `null` to follow the automatic
-   *  urgency-then-recency order. Placed and untouched rows share one numeric axis
-   *  so they interleave. Set by drag-reordering. */
+  /** Legacy compatibility field. New clients use placement rank. */
   sort_order: number | null;
   /** Execution backend: `'terminal'` (a PTY + interactive TUI) or `'acp'` (a
    *  headless adapter driven over the Agent Client Protocol). Older/terminal rows
@@ -141,6 +136,8 @@ export interface Session {
   resolved_launch: ResolvedLaunch | null;
   /** Exact capability snapshot stamped at launch. Custom source is redacted. */
   mcp_policy: SessionMcpPolicy;
+  /** One canonical, shared workbench placement. */
+  placement: SessionPlacement | null;
   /** The ACP modes the adapter offers, when the server exposes them. Absent today
    *  (SessionView carries only `current_mode`), so the mode chip falls back to the
    *  well-known claude/codex mode set — see `AcpConversation`. */
@@ -148,9 +145,49 @@ export interface Session {
   branch: Branch;
 }
 
+export interface SessionPlacement {
+  session_id: string;
+  group_id: string;
+  group_name: string;
+  space_id: string;
+  space_name: string;
+  rank: number;
+}
+
+export interface SessionGroup {
+  id: string;
+  space_id: string;
+  name: string;
+  rank: number;
+  system_key: string | null;
+  collapsed: boolean;
+  /** Includes archived session ids; each view projects its own live/history scope. */
+  session_ids: string[];
+}
+
+export interface SessionSpace {
+  id: string;
+  name: string;
+  rank: number;
+  system_key: string | null;
+  groups: SessionGroup[];
+}
+
+export interface SessionPlacementDefault {
+  selector_kind: 'origin' | 'profile' | 'watch';
+  selector_value: string;
+  group_id: string;
+}
+
+export interface SessionLayout {
+  revision: number;
+  spaces: SessionSpace[];
+  defaults: SessionPlacementDefault[];
+}
+
 /** Durable automation launch reservation (`GET /api/runs`). A run normally
  *  points at an automation-class Session, but a launch can fail before that
- *  session becomes usable; the Automation pane keeps those failures visible. */
+ *  session becomes usable; unmatched failures become typed interventions. */
 export interface AutomationRun {
   id: string;
   actor_subject: string;
