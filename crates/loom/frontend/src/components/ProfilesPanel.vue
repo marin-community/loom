@@ -1,7 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import * as api from '../api';
 import type { AgentMetadata, McpRegistry, Profile, ProfileInput } from '../types';
+import InlineConfirm from './InlineConfirm.vue';
+import ProfileEditor from './ProfileEditor.vue';
+import ProfileSelector from './ProfileSelector.vue';
 
 const profiles = ref<Profile[]>([]);
 const agents = ref<AgentMetadata[]>([]);
@@ -16,51 +19,6 @@ const envName = ref('');
 const envValue = ref('');
 
 const current = computed(() => profiles.value.find((profile) => profile.name === selected.value));
-const selectedAgent = computed(() =>
-  agents.value.find((agent) => agent.kind === draft.value?.agent_kind),
-);
-const mcpGroups = computed(() => {
-  const groups = new Map<string, boolean>();
-  for (const set of mcpRegistry.value?.capability_sets ?? []) groups.set(set.group, true);
-  for (const server of mcpRegistry.value?.custom_servers ?? [])
-    if (!groups.has(server.group)) groups.set(server.group, false);
-  return [...groups]
-    .map(([name, builtin]) => ({ name, builtin }))
-    .sort((left, right) => left.name.localeCompare(right.name));
-});
-
-function normalizeAgentChoices(metadata = selectedAgent.value) {
-  const profile = draft.value;
-  if (!profile || !metadata) return;
-  if (
-    profile.model &&
-    !metadata.accepts_raw_model &&
-    !metadata.models.some((choice) => choice.id === profile.model)
-  ) {
-    profile.model = '';
-  }
-  if (profile.effort && !metadata.efforts.some((choice) => choice.id === profile.effort)) {
-    profile.effort = '';
-  }
-}
-
-watch(selectedAgent, normalizeAgentChoices);
-watch(
-  () => draft.value?.restricted,
-  (restricted) => {
-    if (!restricted || !draft.value) return;
-    if (draft.value.mcp_access.mode === 'all') {
-      draft.value.mcp_access = { mode: 'none', groups: [] };
-    } else if (draft.value.mcp_access.mode === 'groups') {
-      const builtins = new Set(
-        mcpGroups.value.filter((group) => group.builtin).map((group) => group.name),
-      );
-      draft.value.mcp_access.groups = draft.value.mcp_access.groups.filter((group) =>
-        builtins.has(group),
-      );
-    }
-  },
-);
 
 function editable(profile: Profile): ProfileInput {
   const {
@@ -70,11 +28,9 @@ function editable(profile: Profile): ProfileInput {
     env: _env,
     ...input
   } = profile;
-  // `profile` is a Vue reactive proxy; structuredClone rejects proxies with a
-  // DataCloneError. Copy the one nested collection explicitly and keep the
-  // editable draft detached from the server snapshot.
   return {
     ...input,
+    expected_revision: profile.revision,
     ambient_allowlist: [...input.ambient_allowlist],
     runtime_permissions: [...input.runtime_permissions],
     mcp_access: { ...input.mcp_access, groups: [...input.mcp_access.groups] },
@@ -85,7 +41,6 @@ function choose(name: string) {
   selected.value = name;
   const profile = profiles.value.find((item) => item.name === name);
   draft.value = profile ? editable(profile) : null;
-  normalizeAgentChoices();
   creating.value = false;
   error.value = '';
   notice.value = '';
@@ -106,19 +61,18 @@ async function load() {
         ? selected.value
         : (items[0]?.name ?? 'default'),
     );
-  } catch (e) {
-    error.value = (e as Error).message;
+  } catch (cause) {
+    error.value = (cause as Error).message;
   }
 }
 
 function add() {
-  const agent = agents.value[0]?.kind ?? 'claude';
   selected.value = '';
   creating.value = true;
   draft.value = {
     name: '',
     description: '',
-    agent_kind: agent,
+    agent_kind: agents.value[0]?.kind ?? 'claude',
     model: '',
     effort: '',
     protocol: '',
@@ -143,8 +97,8 @@ async function act(fn: () => Promise<void>) {
   notice.value = '';
   try {
     await fn();
-  } catch (e) {
-    error.value = (e as Error).message;
+  } catch (cause) {
+    error.value = (cause as Error).message;
   } finally {
     busy.value = false;
   }
@@ -164,7 +118,6 @@ function save() {
 
 function remove() {
   if (!current.value || current.value.name === 'default') return;
-  if (!confirm(`Delete profile ${current.value.name}?`)) return;
   void act(async () => {
     await api.deleteProfile(current.value!.name);
     selected.value = 'default';
@@ -196,297 +149,65 @@ onMounted(load);
 </script>
 
 <template>
-  <div class="grid gap-4 md:grid-cols-[12rem_minmax(0,1fr)]">
-    <aside class="overflow-hidden rounded-md border border-line bg-surface self-start">
-      <button
-        v-for="profile in profiles"
-        :key="profile.name"
-        class="block w-full border-b border-line px-3 py-2 text-left text-sm last:border-0"
-        :class="selected === profile.name ? 'bg-input text-fg' : 'text-muted hover:bg-subtle'"
-        @click="choose(profile.name)"
-      >
-        <span class="block font-medium">{{ profile.name }}</span>
-        <span class="text-2xs text-faint">{{ profile.class }} · r{{ profile.revision }}</span>
-      </button>
+  <div class="grid min-w-0 gap-4 md:grid-cols-[12rem_minmax(0,1fr)]">
+    <aside class="self-start overflow-hidden rounded-md border border-line bg-surface">
+      <ProfileSelector
+        :profiles="profiles"
+        :model-value="selected"
+        layout="list"
+        @update:model-value="choose"
+      />
       <button class="block w-full px-3 py-2 text-left text-xs text-accent" @click="add">
         + Add profile
       </button>
     </aside>
 
-    <div class="space-y-4">
-      <p v-if="error" class="text-sm text-block">{{ error }}</p>
+    <div class="min-w-0 space-y-4">
+      <p v-if="error" class="text-sm text-block" role="alert">{{ error }}</p>
       <p v-if="notice" class="text-sm text-accent">{{ notice }}</p>
       <template v-if="draft">
-        <section class="grid gap-3 rounded-md border border-line bg-surface p-3 sm:grid-cols-2">
-          <label class="text-xs"
-            >Name
-            <input
-              v-model="draft.name"
-              :disabled="!creating"
-              class="mt-1 w-full rounded bg-input px-2 py-1.5"
-            />
-          </label>
-          <label class="text-xs"
-            >Agent
-            <select
-              data-testid="profile-agent"
-              v-model="draft.agent_kind"
-              class="mt-1 w-full rounded bg-input px-2 py-1.5"
-            >
-              <option v-for="agent in agents" :key="agent.kind" :value="agent.kind">
-                {{ agent.label }}
-              </option>
-            </select>
-          </label>
-          <label class="text-xs sm:col-span-2"
-            >Description
-            <input v-model="draft.description" class="mt-1 w-full rounded bg-input px-2 py-1.5" />
-          </label>
-          <label class="text-xs"
-            >Model
-            <input
-              v-if="selectedAgent?.accepts_raw_model"
-              data-testid="profile-model"
-              v-model="draft.model"
-              list="profile-model-options"
-              placeholder="Agent default"
-              class="mt-1 w-full rounded bg-input px-2 py-1.5"
-            />
-            <datalist v-if="selectedAgent?.accepts_raw_model" id="profile-model-options">
-              <option
-                v-for="model in selectedAgent.models"
-                :key="model.id"
-                :value="model.id"
-                :label="model.label"
-              />
-            </datalist>
-            <select
-              v-else
-              data-testid="profile-model"
-              v-model="draft.model"
-              class="mt-1 w-full rounded bg-input px-2 py-1.5"
-            >
-              <option value="">Agent default</option>
-              <option
-                v-for="model in selectedAgent?.models ?? []"
-                :key="model.id"
-                :value="model.id"
-              >
-                {{ model.label }}
-              </option>
-            </select>
-          </label>
-          <label class="text-xs"
-            >Effort
-            <select
-              data-testid="profile-effort"
-              v-model="draft.effort"
-              class="mt-1 w-full rounded bg-input px-2 py-1.5"
-            >
-              <option value="">Agent default</option>
-              <option
-                v-for="effort in selectedAgent?.efforts ?? []"
-                :key="effort.id"
-                :value="effort.id"
-              >
-                {{ effort.label }}
-              </option>
-            </select>
-          </label>
-          <label class="text-xs"
-            >Protocol
-            <select v-model="draft.protocol" class="mt-1 w-full rounded bg-input px-2 py-1.5">
-              <option value="">Agent default</option>
-              <option value="acp">ACP</option>
-              <option value="terminal">Terminal</option>
-            </select>
-          </label>
-          <label class="text-xs"
-            >Mode
-            <select
-              data-testid="profile-mode"
-              v-model="draft.mode"
-              class="mt-1 w-full rounded bg-input px-2 py-1.5"
-            >
-              <option
-                v-for="mode in ['auto', 'default', 'acceptEdits', 'plan', 'bypassPermissions']"
-                :key="mode"
-              >
-                {{ mode }}
-              </option>
-            </select>
-          </label>
-          <label class="text-xs"
-            >Class
-            <select v-model="draft.class" class="mt-1 w-full rounded bg-input px-2 py-1.5">
-              <option value="interactive">Interactive</option>
-              <option value="automation">Automation</option>
-            </select>
-          </label>
-          <label class="text-xs"
-            >Prelude
-            <select v-model="draft.prelude" class="mt-1 w-full rounded bg-input px-2 py-1.5">
-              <option value="weaver">Weaver</option>
-              <option value="none">None (caller prompt only)</option>
-            </select>
-          </label>
-          <label class="text-xs"
-            >Max concurrent (0 = unlimited)
-            <input
-              v-model.number="draft.max_concurrent"
-              type="number"
-              min="0"
-              class="mt-1 w-full rounded bg-input px-2 py-1.5"
-            />
-          </label>
-          <label class="flex items-center gap-2 text-xs"
-            ><input v-model="draft.strict" type="checkbox" /> Strict (no launch overrides)</label
+        <ProfileEditor
+          v-model="draft"
+          :agents="agents"
+          :mcp-registry="mcpRegistry"
+          :name-locked="!creating"
+          :disabled="busy"
+        />
+        <div class="flex flex-wrap items-center gap-2">
+          <button
+            data-testid="profile-save"
+            class="btn-primary px-3 py-1.5 text-xs"
+            :disabled="busy || !draft.name.trim()"
+            @click="save"
           >
-          <label class="flex items-center gap-2 text-xs"
-            ><input v-model="draft.env_clear" type="checkbox" /> Clear ambient environment</label
-          >
-          <label class="flex items-center gap-2 text-xs"
-            ><input v-model="draft.restricted" type="checkbox" /> Restricted automation
-            posture</label
-          >
-          <label class="text-xs"
-            >Turn budget (blank = inherit)
-            <input
-              v-model.number="draft.turn_budget"
-              type="number"
-              min="0"
-              class="mt-1 w-full rounded bg-input px-2 py-1.5"
-            />
-          </label>
-          <label class="text-xs"
-            >Idle archive seconds (blank = inherit)
-            <input
-              v-model.number="draft.idle_archive_secs"
-              type="number"
-              min="0"
-              class="mt-1 w-full rounded bg-input px-2 py-1.5"
-            />
-          </label>
-          <label class="text-xs sm:col-span-2"
-            >Ambient allowlist (comma-separated)
-            <input
-              :value="draft.ambient_allowlist.join(',')"
-              class="mt-1 w-full rounded bg-input px-2 py-1.5 font-mono"
-              @input="
-                draft!.ambient_allowlist = ($event.target as HTMLInputElement).value
-                  .split(',')
-                  .map((v) => v.trim())
-                  .filter(Boolean)
-              "
-            />
-          </label>
-          <fieldset class="space-y-2 rounded border border-line p-2 sm:col-span-2">
-            <legend class="px-1 text-xs font-medium">MCP access</legend>
-            <div class="flex flex-wrap gap-1.5">
-              <button
-                v-for="mode in ['none', 'all', 'groups'] as const"
-                :key="mode"
-                type="button"
-                class="rounded border px-2.5 py-1 text-xs capitalize"
-                :disabled="draft.restricted && mode === 'all'"
-                :class="
-                  draft.mcp_access.mode === mode
-                    ? 'border-accent bg-accent text-accent-fg'
-                    : 'border-line bg-input text-muted'
-                "
-                @click="
-                  draft!.mcp_access = {
-                    mode,
-                    groups: mode === 'groups' ? draft!.mcp_access.groups : [],
-                  }
-                "
-              >
-                {{ mode }}
-              </button>
-            </div>
-            <div v-if="draft.mcp_access.mode === 'groups'" class="flex flex-wrap gap-2">
-              <label
-                v-for="group in mcpGroups"
-                :key="group.name"
-                class="flex items-center gap-1 text-xs"
-                :class="{ 'opacity-50': draft.restricted && !group.builtin }"
-              >
-                <input
-                  type="checkbox"
-                  :checked="draft.mcp_access.groups.includes(group.name)"
-                  :disabled="draft.restricted && !group.builtin"
-                  @change="
-                    draft!.mcp_access.groups = ($event.target as HTMLInputElement).checked
-                      ? [...draft!.mcp_access.groups, group.name]
-                      : draft!.mcp_access.groups.filter((value) => value !== group.name)
-                  "
-                />
-                <code>{{ group.name }}</code>
-              </label>
-            </div>
-            <p class="text-xs text-muted">
-              None starts no MCP processes. All includes every enabled builtin and custom MCP.
-              Restricted profiles may select trusted builtins only.
-            </p>
-          </fieldset>
-          <label class="text-xs sm:col-span-2"
-            >Runtime permissions (one provider-specific rule per line)
-            <textarea
-              :value="draft.runtime_permissions.join('\n')"
-              rows="3"
-              class="mt-1 w-full rounded bg-input px-2 py-1.5 font-mono"
-              @input="
-                draft!.runtime_permissions = ($event.target as HTMLTextAreaElement).value
-                  .split('\n')
-                  .map((v) => v.trim())
-                  .filter(Boolean)
-              "
-            />
-            <span class="mt-1 block text-muted">
-              Legacy escape hatch for restricted filesystem rules such as <code>Read(./**)</code>.
-              Integrations belong in MCP access above.
-            </span>
-          </label>
-          <div v-if="mcpRegistry?.capability_sets.length" class="text-xs sm:col-span-2">
-            <div class="mb-1 font-medium">Available trusted MCP capability sets</div>
-            <ul class="space-y-1 text-muted">
-              <li v-for="set in mcpRegistry.capability_sets" :key="set.name">
-                <code>{{ set.name }}</code> — {{ set.description }}
-              </li>
-            </ul>
-          </div>
-          <div class="flex gap-2 sm:col-span-2">
-            <button
-              data-testid="profile-save"
-              class="btn-primary px-3 py-1.5 text-xs"
-              :disabled="busy"
-              @click="save"
-            >
-              Save
-            </button>
-            <button
-              v-if="!creating && selected !== 'default'"
-              class="btn-secondary px-3 py-1.5 text-xs"
-              :disabled="busy"
-              @click="remove"
-            >
-              Delete
-            </button>
-          </div>
-        </section>
+            Save
+          </button>
+          <InlineConfirm
+            v-if="!creating && selected !== 'default'"
+            data-testid="profile-delete"
+            label="Delete"
+            :message="`Delete ${selected}?`"
+            :disabled="busy"
+            @confirm="remove"
+          />
+        </div>
 
         <section v-if="current && !creating" class="rounded-md border border-line bg-surface p-3">
           <h3 class="mb-1 text-sm font-medium">Profile environment</h3>
           <p class="mb-3 text-xs text-muted">
             Values are write-only and apply on the next launch or real respawn.
           </p>
-          <div class="mb-3 flex gap-2">
+          <div class="mb-3 flex min-w-0 flex-wrap gap-2">
+            <label class="sr-only" for="profile-env-name">Environment name</label>
             <input
+              id="profile-env-name"
               v-model="envName"
               placeholder="NAME"
               class="min-w-0 flex-1 rounded bg-input px-2 py-1.5 font-mono text-xs"
             />
+            <label class="sr-only" for="profile-env-value">Environment value</label>
             <input
+              id="profile-env-value"
               v-model="envValue"
               placeholder="value"
               type="password"
@@ -501,8 +222,8 @@ onMounted(load);
             :key="entry.name"
             class="flex items-center justify-between border-t border-line py-2 text-xs"
           >
-            <code>{{ entry.name }}</code
-            ><button class="text-block" @click="removeEnv(entry.name)">Remove</button>
+            <code>{{ entry.name }}</code>
+            <button class="text-block" @click="removeEnv(entry.name)">Remove</button>
           </div>
           <p v-if="!current.env.length" class="text-xs text-faint">No profile variables.</p>
         </section>

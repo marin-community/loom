@@ -95,6 +95,14 @@ impl CustomAgentType {
     }
 }
 
+/// Derive picker/resolver metadata from an already-read custom-agent row.
+///
+/// Launch resolution keeps this metadata coupled to the exact command snapshot
+/// it later executes instead of re-reading the mutable registry in between.
+pub fn custom_metadata(agent: &CustomAgent) -> AgentMetadata {
+    CustomAgentType::new(agent.clone()).metadata()
+}
+
 const MODEL_CHOICES: &[(&str, &str)] = &[
     ("haiku", "Haiku"),
     ("sonnet", "Sonnet"),
@@ -658,6 +666,10 @@ pub struct LaunchSpec<'a> {
     /// caller reads these from the database; an empty slice adds nothing.
     pub extra_env: &'a [(String, String)],
     pub env_clear: bool,
+    /// Exact custom-agent definition accepted by canonical resolution. `None`
+    /// resolves a builtin or retains the legacy/adopt behavior of consulting
+    /// the current registry.
+    pub custom: Option<&'a CustomAgent>,
 }
 
 /// Bring up the session's terminal running the agent. `spec.runtime` is resolved
@@ -679,9 +691,20 @@ pub async fn launch(db: &Db, spec: &LaunchSpec<'_>, mode: LaunchMode) -> Result<
         env_clear: spec.env_clear,
         memory_max_gb: backend::memory_max_gb(db).await,
     };
-    let resolved = resolve(db, spec.runtime)
-        .await?
-        .ok_or_else(|| anyhow!("unknown agent '{}'", spec.runtime))?;
+    let resolved = if let Some(custom) = spec.custom {
+        if custom.name != spec.runtime {
+            return Err(anyhow!(
+                "resolved custom agent '{}' does not match runtime '{}'",
+                custom.name,
+                spec.runtime
+            ));
+        }
+        ResolvedAgent::Custom(CustomAgentType::new(custom.clone()))
+    } else {
+        resolve(db, spec.runtime)
+            .await?
+            .ok_or_else(|| anyhow!("unknown agent '{}'", spec.runtime))?
+    };
     let agent_type = resolved.as_type();
     let _instance = match mode {
         LaunchMode::Fresh => agent_type.create(ctx).await,

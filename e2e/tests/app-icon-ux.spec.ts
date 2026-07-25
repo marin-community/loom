@@ -34,10 +34,10 @@ test.describe('consistent page titles', () => {
     await page.goto(weaver.baseUrl);
     await expect(page).toHaveTitle('Weaver - Sessions');
 
-    // Opening the New Session drawer is URL-reflected, so the title follows.
+    // The focused New Session route carries its own URL and title.
     await page.getByRole('button', { name: 'New session' }).click();
     await expect(page).toHaveTitle('Weaver - New Session');
-    await expect(page).toHaveURL(/\?new$/);
+    await expect(page).toHaveURL(/\/sessions\/new$/);
 
     await page.goto(`${weaver.baseUrl}/settings`);
     await expect(page).toHaveTitle('Weaver - Settings');
@@ -83,8 +83,11 @@ test.describe('keyboard submit', () => {
     await goal.fill('Built with the keyboard');
 
     // Submit from inside the goal textarea (a plain Enter there is a newline).
-    await goal.press('ControlOrMeta+Enter');
+    await expect(page.getByTestId('create-session')).toBeEnabled();
+    await goal.press('Control+Enter');
 
+    await expect(page).toHaveURL(/\/s\/[^/]+$/);
+    await page.locator('[data-rail="sessions"]').click();
     const card = page.getByTestId('session-card');
     await expect(card).toHaveCount(1);
     await expect(card.first()).toContainText('Built with the keyboard');

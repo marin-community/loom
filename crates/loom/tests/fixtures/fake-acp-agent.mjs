@@ -111,7 +111,13 @@ function configOptions() {
       category: "model",
       type: "select",
       currentValue: currentModel,
-      options: modelValues.map((value) => ({ value, name: value })),
+      options: modelValues.map((value) => {
+        const label = value.replaceAll("-", " ");
+        return {
+          value,
+          name: label.charAt(0).toUpperCase() + label.slice(1),
+        };
+      }),
     },
     {
       id: "thought_level",

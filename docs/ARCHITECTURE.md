@@ -257,8 +257,10 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `GET /api/ready` | public structured readiness: database access plus core and loom migration versions; optional future remote runner degradation will be reported without failing the whole API |
 | `GET /metrics` | public OpenMetrics scrape derived from durable session/profile/run/migration state; labels are bounded operational dimensions and never contain session/branch/path/user/token/error values (deployments normally restrict this at the public edge) |
 | `GET /api/diagnostics` | admin-only redacted counts, profile capacity, automation failures/staleness, orphan/error inventory, migration state, and non-secret federation metadata; backs Settings → Diagnostics |
-| `GET /api/sessions` / `POST /api/sessions` | list / create sessions (list takes `archived` — default `false` — `automation` — default `false` — and admin-only `managed` — default `false`; create resolves `profile` or `default`, permits launch selectors only when the profile is non-strict, stamps the resolved profile revision/policy, opens a tracking issue, and returns its id as `tracking_issue`; views include the exact source-redacted MCP audit snapshot) |
-| `GET POST /api/profiles`; `GET PUT DELETE /api/profiles/{name}` | named launch-policy CRUD, including provider-neutral `mcp_access`, prelude, and the runtime-permission compatibility escape hatch; profile secret values are never returned; deletion retires a profile needed by terminal session history so archived sessions remain recoverable, while watches and non-terminal sessions block deletion |
+| `POST /api/session-launches/resolve` | resolve a canonical profile selection plus one-launch overrides into concrete selectors, provenance, policy, capacity, validation, and profile/resolver revisions without provisioning |
+| `GET /api/sessions` / `POST /api/sessions` | list / create sessions (list takes `archived` — default `false` — `automation` — default `false` — and admin-only `managed` — default `false`; canonical create requires both revisions from resolve and returns 409 plus a fresh preview on drift/admission change; flattened selectors remain compatible; valid Scratch input is decoded before provisioning; create stamps `resolved_launch`, opens a tracking issue, and returns its id as `tracking_issue`) |
+| `GET POST /api/profiles`; `GET PUT DELETE /api/profiles/{name}` | named launch-template CRUD, including provider-neutral `mcp_access`, prelude, and the runtime-permission compatibility escape hatch; POST is atomic insert-only; edits and environment mutations share an optimistic revision; deletion leaves a monotonic tombstone while watches and non-terminal sessions block it |
+| `POST /api/profiles/{name}/clone` | atomically create (never overwrite) an optionally edited template from a resolved source; checks source-profile and resolver revisions, can copy write-only environment in the same transaction, and returns 409 plus a fresh preview on resolver drift |
 | `GET /api/profiles/{name}/effective`; `POST /api/profiles/{name}/probe` | inspect the exact profile-revision capability sets, custom revisions, runtime permission translation, and MCP processes without launching; probe also reports retired builtins and removed/disabled pinned custom definitions |
 | `GET /api/mcps` | merged trusted-builtin and operator-authored MCP registry |
 | `GET POST /api/mcps/custom`; `GET PUT DELETE /api/mcps/custom/{path}` | admin-only custom MCP CRUD; every write creates an immutable revision and validates real MCP discovery plus optional tests through `uv` |
@@ -272,9 +274,10 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `PUT /api/sessions/{id}/tags` | atomically replace one author's complete tag set, with optional exact `(key, value)` clears for lifecycle marks; the watch-safe write path |
 | `GET /api/sessions/{id}/url` | the session's dashboard URL as `{url}`, built from the externally-visible origin (`auth.base_url`, else the request's own Host) — what `loom session url` prints, so an agent can link a PR back to its session without inventing a loopback link |
 | `POST /api/sessions/{id}/{archive,adopt}` | actions; archive also accepts an unmatched automation run's reserved session id, cancelling its runtime while preserving run history |
-| `POST /api/sessions/{id}/handoff` | replace an idle ACP session's agent runtime/profile while preserving its loom session, worktree, branch, and canonical chat journal; after an atomic idle snapshot, `AgentManager` opens the incoming runtime's configured ACP adapter in a transient relay, selects an advertised Haiku/Luna-class model through ACP `configOptions`, and requests a best-effort digest; the clean replacement receives it plus the last eight authored messages and instructions for the self-history MCP or normalized `/history` fallback, and the journal boundary records summary provenance/cutoff (missing cheap tiers and ACP failures fall back without blocking handoff) |
+| `POST /api/sessions/{id}/handoff/resolve` | session-derived canonical handoff preview: resolves the target profile's true class, capacity (crediting only a slot-consuming source), policy, provenance, and optimistic revisions |
+| `POST /api/sessions/{id}/handoff` | replace an idle ACP runtime while preserving the loom session, worktree, branch, and journal; canonical `selection` requires preview revisions, holds target-profile admission through the final write, and stamps a new snapshot; legacy flattened agent/model/effort/mode input remains runtime-only and preserves the session's stamped profile/policy even after template edits or retirement; the incoming runtime also receives a best-effort digest and recent authored messages |
 | `POST /api/sessions/{id}/github` | re-poll the branch's GitHub PR now and return the updated session |
-| `GET POST DELETE /api/sessions/{id}/scratch` | list / drop / remove worktree `scratch/` reference files |
+| `GET /api/scratch/limits`; `GET POST DELETE /api/sessions/{id}/scratch` | shared Scratch contract and live list/drop/remove: 20 files, 25 MiB each, 50 MiB decoded total; accepted dotfiles count, while `.gitignore` is reserved |
 | `PUT /api/sessions/{id}/file?path=…` | write raw bytes to a worktree file (the editor save primitive) |
 | `GET /api/sessions/{id}/artifacts` | list the branch's [artifacts](artifacts.md) plus repo-shared ones |
 | `GET PUT /api/sessions/{id}/artifacts/{name}` | read content + projected refs (`rev=N` for a revision) / write a user edit as a new revision |
@@ -372,7 +375,20 @@ to a live session via `POST /api/sessions/{id}/scratch`, or attached up-front in
 the New Session form: those ride in the create request as `scratch` and are
 written *before* the agent launches, with a note appended to the launch prompt
 so a fresh agent knows the files are there. The stored branch goal stays the
-clean text the user typed.
+clean text the user typed. Launch-time and live uploads share a 20-file,
+25-MiB-per-file, 50-MiB-total decoded limit and the same filename validation.
+The create route has a base64-aware transport envelope, validates the whole
+batch before repo/worktree/branch/issue/session side effects, counts ordinary
+dotfiles, and reserves `.gitignore` for Loom's `scratch/*` exclusion guard.
+
+**Resolved launch snapshots.** A profile is a reusable template. A canonical
+`LaunchSelection` layers optional one-launch selectors over it; omissions
+inherit through the template, agent metadata, and policy defaults. Resolve
+returns field provenance plus `profile_revision` and a stable
+`resolver_revision`. Canonical create, clone, and handoff carry those guards and
+receive 409 with a fresh preview on drift. Once accepted, `resolved_launch` is
+the concrete immutable non-secret snapshot stamped for that runtime launch;
+subsequent template/default/registry edits do not mutate it.
 
 **Launch base.** A new session's worktree forks from `base`. When the create
 request omits it, `git::default_base` resolves the repo's default branch on

@@ -407,9 +407,15 @@ enum SessionCmd {
     Handoff {
         /// Session key: id, branch id, branch name, or `repo:branch`.
         session: String,
-        /// Target ACP agent runtime (for example `claude` or `codex`).
+        /// Target launch profile. When present, Loom previews a canonical
+        /// profile selection and sends both optimistic revisions.
         #[arg(long)]
-        agent: String,
+        profile: Option<String>,
+        /// Target ACP agent runtime (for example `claude` or `codex`). With
+        /// `--profile` this is a one-handoff override; without it this selects
+        /// the legacy runtime-only compatibility path.
+        #[arg(long)]
+        agent: Option<String>,
         /// Target model selector; omit for the runtime default.
         #[arg(long)]
         model: Option<String>,
@@ -762,6 +768,54 @@ enum ProfileCmd {
     },
     /// Validate and resolve a profile without launching a session.
     Probe { name: String },
+    /// Resolve the exact launch snapshot, including provenance and capacity.
+    Resolve {
+        name: String,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        effort: Option<String>,
+        #[arg(long)]
+        protocol: Option<String>,
+        #[arg(long)]
+        mode: Option<String>,
+        #[arg(long)]
+        class: Option<String>,
+    },
+    /// Save a resolved profile selection as a new insert-only template.
+    ///
+    /// Loom previews first and guards both the source profile and resolver
+    /// revisions; `--copy-environment` participates in the same transaction.
+    Clone {
+        source: String,
+        name: String,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        effort: Option<String>,
+        #[arg(long)]
+        protocol: Option<String>,
+        #[arg(long)]
+        mode: Option<String>,
+        #[arg(long)]
+        class: Option<String>,
+        /// Copy the source's write-only environment in the clone transaction.
+        #[arg(long)]
+        copy_environment: bool,
+        /// Remove an inherited environment name (repeatable).
+        #[arg(long = "remove-environment")]
+        remove_environment: Vec<String>,
+        /// Add or replace a literal environment value as NAME=VALUE.
+        #[arg(long = "set-environment")]
+        set_environment: Vec<String>,
+        /// Add or replace a Secret Manager reference as NAME=REFERENCE.
+        #[arg(long = "secret-environment")]
+        secret_environment: Vec<String>,
+    },
     /// Remove an unused profile (`default` is protected).
     Rm { name: String },
     /// Manage a profile's write-only environment.
@@ -1075,11 +1129,12 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
         SessionCmd::Recover { branch } => cmd_recover(branch).await,
         SessionCmd::Handoff {
             session,
+            profile,
             agent,
             model,
             effort,
             mode,
-        } => cmd_handoff(session, agent, model, effort, mode).await,
+        } => cmd_handoff(session, profile, agent, model, effort, mode).await,
         SessionCmd::Rm {
             branch,
             keep_branch,
@@ -1467,6 +1522,7 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
                     restricted: opts.restricted,
                     runtime_permissions: opts.runtime_permission,
                     mcp_access: parse_mcp_access(&opts.mcp)?,
+                    expected_revision: None,
                 })
                 .await?;
             println!(
@@ -1502,6 +1558,112 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
             if !probe.ok {
                 bail!("profile probe failed");
             }
+        }
+        ProfileCmd::Resolve {
+            name,
+            agent,
+            model,
+            effort,
+            protocol,
+            mode,
+            class,
+        } => {
+            let resolved = client
+                .resolve_session_launch(&weaver_api::ResolveLaunchReq {
+                    selection: weaver_api::LaunchSelection {
+                        profile: name,
+                        overrides: weaver_api::LaunchOverrides {
+                            agent,
+                            model,
+                            effort,
+                            protocol,
+                            mode,
+                            class,
+                        },
+                    },
+                })
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&resolved)?);
+            if !resolved.valid {
+                bail!("resolved launch is not currently valid");
+            }
+        }
+        ProfileCmd::Clone {
+            source,
+            name,
+            agent,
+            model,
+            effort,
+            protocol,
+            mode,
+            class,
+            copy_environment,
+            remove_environment,
+            set_environment,
+            secret_environment,
+        } => {
+            let overrides = weaver_api::LaunchOverrides {
+                agent,
+                model,
+                effort,
+                protocol,
+                mode,
+                class,
+            };
+            let resolved = client
+                .resolve_session_launch(&weaver_api::ResolveLaunchReq {
+                    selection: weaver_api::LaunchSelection {
+                        profile: source.clone(),
+                        overrides: overrides.clone(),
+                    },
+                })
+                .await?;
+            let parse_environment = |raw: String, secret: bool| -> anyhow::Result<_> {
+                let (name, value) = raw
+                    .split_once('=')
+                    .ok_or_else(|| anyhow::anyhow!("environment edits must use NAME=VALUE"))?;
+                if name.trim().is_empty() {
+                    bail!("environment name must not be empty");
+                }
+                Ok(weaver_api::ProfileEnvMutationReq {
+                    name: name.to_string(),
+                    value: (!secret).then(|| value.to_string()),
+                    secret_ref: secret.then(|| value.to_string()),
+                })
+            };
+            let mut environment_set = Vec::new();
+            for raw in set_environment {
+                environment_set.push(parse_environment(raw, false)?);
+            }
+            for raw in secret_environment {
+                environment_set.push(parse_environment(raw, true)?);
+            }
+            let has_environment_proposal =
+                copy_environment || !remove_environment.is_empty() || !environment_set.is_empty();
+            let saved = client
+                .clone_profile(
+                    &source,
+                    &weaver_api::CloneProfileReq {
+                        name,
+                        expected_profile_revision: resolved.profile_revision,
+                        expected_resolver_revision: resolved.resolver_revision,
+                        overrides,
+                        template: None,
+                        copy_environment,
+                        environment: has_environment_proposal.then_some(
+                            weaver_api::CloneProfileEnvironmentReq {
+                                inherit: copy_environment,
+                                remove: remove_environment,
+                                set: environment_set,
+                            },
+                        ),
+                    },
+                )
+                .await?;
+            println!(
+                "cloned {source} as {} (revision {})",
+                saved.name, saved.revision
+            );
         }
         ProfileCmd::Rm { name } => {
             client.delete_profile(&name).await?;
@@ -2886,11 +3048,11 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
     // A managed repo travels as `repo` (the server registers it and clones it if
     // this is its first use); a local checkout travels as `cwd`. Exactly one is
     // set — the server ignores `cwd` whenever `repo` is present.
-    let (cwd, managed_repo) = match &target {
+    let (cwd, managed_repo) = match target {
         RepoTarget::Local(path) => (path.display().to_string(), None),
-        RepoTarget::Managed(r) => (String::new(), Some(r.as_str())),
+        RepoTarget::Managed(repo) => (String::new(), Some(repo)),
     };
-    if let Some(r) = managed_repo {
+    if let Some(r) = managed_repo.as_deref() {
         println!("repo {r} — cloning it if loom doesn't have it yet...");
     }
     // When an agent in a weaver session runs `loom session launch`,
@@ -2900,33 +3062,50 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
     let parent_branch = std::env::var("WEAVER_BRANCH")
         .ok()
         .filter(|s| !s.is_empty());
-    let ws = client
-        .post(
-            "/api/sessions",
-            json!({
-                "goal": goal,
-                "profile": profile,
-                "title": title,
-                "cwd": cwd,
-                "repo": managed_repo,
-                "base": base,
-                "agent": agent,
-                "name": name,
-                "existing_branch": branch,
-                "issue": issue,
-                "claim_issue": claim,
-                "parent_branch": parent_branch,
-                "model": model,
-                "effort": effort,
-                "protocol": protocol,
-                "mode": mode,
-            }),
-        )
+    let selection = weaver_api::LaunchSelection {
+        profile: profile.unwrap_or_else(|| "default".to_string()),
+        overrides: weaver_api::LaunchOverrides {
+            agent,
+            model,
+            effort,
+            protocol,
+            mode,
+            ..Default::default()
+        },
+    };
+    let preview = client
+        .resolve_session_launch(&weaver_api::ResolveLaunchReq {
+            selection: selection.clone(),
+        })
         .await?;
-    let id = str_field(&ws, "id");
-    println!("launched session {id}  ({})", branch_str(&ws, "name"));
-    println!("  title:  {}", branch_str(&ws, "title"));
-    let g = branch_str(&ws, "goal");
+    if !preview.valid {
+        bail!(
+            "launch settings are not currently valid:\n{}",
+            preview.errors.join("\n")
+        );
+    }
+    let ws = client
+        .create_session(&weaver_api::CreateReq {
+            goal: Some(goal),
+            selection: Some(selection),
+            expected_profile_revision: Some(preview.profile_revision),
+            expected_resolver_revision: Some(preview.resolver_revision),
+            title,
+            cwd,
+            repo: managed_repo,
+            base,
+            name,
+            existing_branch: branch,
+            issue,
+            claim_issue: claim,
+            parent_branch,
+            ..Default::default()
+        })
+        .await?;
+    let id = &ws.id;
+    println!("launched session {id}  ({})", ws.branch.name);
+    println!("  title:  {}", ws.branch.title);
+    let g = &ws.branch.goal;
     println!(
         "  goal:   {}",
         if g.is_empty() {
@@ -2935,17 +3114,15 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
             g
         }
     );
-    println!("  branch: {}", branch_str(&ws, "branch"));
-    let model = str_field(&ws, "model");
-    if !model.is_empty() {
-        println!("  model:  {model}");
+    println!("  branch: {}", ws.branch.branch);
+    if !ws.model.is_empty() {
+        println!("  model:  {}", ws.model);
     }
-    let effort = str_field(&ws, "effort");
-    if !effort.is_empty() {
-        println!("  effort: {effort}");
+    if !ws.effort.is_empty() {
+        println!("  effort: {}", ws.effort);
     }
-    println!("  dir:    {}", str_field(&ws, "work_dir"));
-    if let Some(n) = ws.get("tracking_issue").and_then(Value::as_i64) {
+    println!("  dir:    {}", ws.work_dir);
+    if let Some(n) = ws.tracking_issue {
         // The handle the caller uses to follow this sub-tree: poll it with
         // `weaver issue show <n>`, or block on it with `weaver issue wait <n>`.
         println!("  track:  weaver issue #{n}  (weaver issue show {n} | wait {n})");
@@ -3485,23 +3662,57 @@ async fn cmd_recover(key: String) -> Result<()> {
 
 async fn cmd_handoff(
     key: String,
-    agent: String,
+    profile: Option<String>,
+    agent: Option<String>,
     model: Option<String>,
     effort: Option<String>,
     mode: Option<String>,
 ) -> Result<()> {
     let client = client::default()?;
-    let ws = client
-        .handoff_session(
-            &key,
-            &weaver_api::HandoffReq {
+    let request = if let Some(profile) = profile {
+        let selection = weaver_api::LaunchSelection {
+            profile,
+            overrides: weaver_api::LaunchOverrides {
                 agent,
                 model,
                 effort,
                 mode,
+                ..Default::default()
             },
-        )
-        .await?;
+        };
+        let preview = client
+            .resolve_session_handoff(
+                &key,
+                &weaver_api::ResolveLaunchReq {
+                    selection: selection.clone(),
+                },
+            )
+            .await?;
+        if !preview.valid {
+            bail!(
+                "handoff settings are not currently valid:\n{}",
+                preview.errors.join("\n")
+            );
+        }
+        weaver_api::HandoffReq {
+            selection: Some(selection),
+            expected_profile_revision: Some(preview.profile_revision),
+            expected_resolver_revision: Some(preview.resolver_revision),
+            ..Default::default()
+        }
+    } else {
+        let agent = agent.ok_or_else(|| {
+            anyhow::anyhow!("handoff requires either --profile or the legacy --agent selector")
+        })?;
+        weaver_api::HandoffReq {
+            agent,
+            model,
+            effort,
+            mode,
+            ..Default::default()
+        }
+    };
+    let ws = client.handoff_session(&key, &request).await?;
     println!("handed off session {} to {}", ws.id, ws.agent_kind);
     if !ws.model.is_empty() {
         println!("  model:   {}", ws.model);

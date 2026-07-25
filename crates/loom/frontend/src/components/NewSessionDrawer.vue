@@ -1,9 +1,36 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, nextTick, onActivated, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
-import { ApiError, get, listAgents, listRepos, post, registerRepo } from '../api';
-import type { AgentMetadata, ManagedRepo, RecentRepo, RepoBranch } from '../types';
-import AgentRuntimePicker from './AgentRuntimePicker.vue';
+import {
+  ApiError,
+  cloneProfile,
+  get,
+  getMcpRegistry,
+  listAgents,
+  listProfiles,
+  listRepos,
+  post,
+  registerRepo,
+  resolveSessionLaunch,
+} from '../api';
+import type {
+  AgentMetadata,
+  CloneProfileEnvironment,
+  LaunchOverrides as LaunchOverrideValues,
+  LaunchSelection,
+  ManagedRepo,
+  McpRegistry,
+  Profile,
+  ProfileInput,
+  RecentRepo,
+  RepoBranch,
+  ResolvedLaunch,
+  Session,
+} from '../types';
+import LaunchOverrides from './LaunchOverrides.vue';
+import ProfileEditor from './ProfileEditor.vue';
+import ProfileSelector from './ProfileSelector.vue';
+import ResolvedLaunchSummary from './ResolvedLaunchSummary.vue';
 import ScratchPicker from './ScratchPicker.vue';
 
 const emit = defineEmits<{
@@ -17,32 +44,54 @@ const managedRepos = ref<ManagedRepo[]>([]);
 const error = ref('');
 const repo = ref('');
 const repoFocused = ref(false);
+const repoActiveOption = ref(-1);
 const title = ref('');
 const goal = ref('');
-const agent = ref('');
-const model = ref('');
-const effort = ref('');
 const name = ref('');
 const nameEdited = ref(false);
 const base = ref('');
 const creating = ref(false);
 const scratchFiles = ref<File[]>([]);
+const scratchError = ref('');
+const scratchPicker = ref<InstanceType<typeof ScratchPicker> | null>(null);
+const errorElement = ref<HTMLElement | null>(null);
 const agents = ref<AgentMetadata[]>([]);
-const cloningRepo = ref(false);
+const profiles = ref<Profile[]>([]);
+const mcpRegistry = ref<McpRegistry | null>(null);
+const profile = ref('default');
+const overrides = ref<LaunchOverrideValues>({});
+const resolved = ref<ResolvedLaunch | null>(null);
+const lastResolved = ref<ResolvedLaunch | null>(null);
+const resolving = ref(false);
+const resolveError = ref('');
+const advanced = ref(false);
+const cloneDraft = ref<ProfileInput | null>(null);
+const cloneEnvironment = ref<CloneProfileEnvironment | null>(null);
+const cloneSourceEnvironment = ref<Profile['env']>([]);
+const clonePreviewKey = ref('');
+const cloneBusy = ref(false);
+const cloneNotice = ref('');
+const repoRegistrations = ref(0);
+const cloningRepo = computed(() => repoRegistrations.value > 0);
+const repoError = ref('');
+let repoRegistrationReq = 0;
+let repoRegistrationTail: Promise<void> = Promise.resolve();
+const registeredRepo = ref<ManagedRepo | null>(null);
 
 // Show the platform's submit modifier (⌘ on macOS, Ctrl elsewhere). Both are
 // wired up on the form; this is only the label.
 const metaKeyLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
 
-const selectedAgent = computed<AgentMetadata | undefined>(() => {
-  const selected = agent.value || agents.value[0]?.kind || '';
-  return agents.value.find((a) => a.kind === selected);
-});
+const selection = computed<LaunchSelection>(() => ({
+  profile: profile.value || 'default',
+  overrides: { ...overrides.value },
+}));
 
 type BranchMode = 'new' | 'existing';
 const branchMode = ref<BranchMode>('new');
 const existingBranch = ref('');
 const branchFocused = ref(false);
+const branchActiveOption = ref(-1);
 const branches = ref<RepoBranch[]>([]);
 const branchesError = ref('');
 let branchesReqId = 0;
@@ -89,53 +138,124 @@ function pickRepo(path: string) {
   repoFocused.value = false;
 }
 
-async function loadManagedRepos() {
+function onRepoKeydown(event: KeyboardEvent) {
+  const count = repoMatches.value.length + (cloneCandidate.value ? 1 : 0);
+  if (event.key === 'Escape') {
+    repoFocused.value = false;
+    repoActiveOption.value = -1;
+    return;
+  }
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    if (!count) return;
+    event.preventDefault();
+    repoFocused.value = true;
+    const delta = event.key === 'ArrowDown' ? 1 : -1;
+    repoActiveOption.value = (repoActiveOption.value + delta + count) % count;
+    return;
+  }
+  if (event.key !== 'Enter' || repoActiveOption.value < 0) return;
+  event.preventDefault();
+  if (cloneCandidate.value && repoActiveOption.value === 0) void addAndCloneRepo();
+  else {
+    const index = repoActiveOption.value - (cloneCandidate.value ? 1 : 0);
+    const match = repoMatches.value[index];
+    if (match) pickRepo(match.repo_root);
+  }
+}
+
+function rememberManagedRepo(added: ManagedRepo) {
+  const next = managedRepos.value.filter(
+    (candidate) => candidate.slug !== added.slug && candidate.remote_url !== added.remote_url,
+  );
+  managedRepos.value = [...next, added];
+  registeredRepo.value = added;
+}
+
+async function registerDraftRepo(candidate: string): Promise<ManagedRepo> {
+  repoRegistrations.value += 1;
+  let release!: () => void;
+  const predecessor = repoRegistrationTail;
+  repoRegistrationTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
   try {
-    managedRepos.value = await listRepos();
-  } catch {
-    // Managed-repo suggestions are a convenience; ignore failures here.
+    await predecessor;
+    const added = await registerRepo(candidate);
+    rememberManagedRepo(added);
+    return added;
+  } finally {
+    release();
+    repoRegistrations.value -= 1;
   }
 }
 
 async function addAndCloneRepo() {
   const q = cloneCandidate.value;
   if (!q) return;
-  cloningRepo.value = true;
+  const request = ++repoRegistrationReq;
+  repoError.value = '';
   try {
-    const added = await registerRepo(q);
-    await loadManagedRepos();
+    const added = await registerDraftRepo(q);
+    if (request !== repoRegistrationReq || repo.value.trim() !== q) return;
     repo.value = added.slug;
     repoFocused.value = false;
   } catch (e) {
-    error.value = (e as Error).message;
-  } finally {
-    cloningRepo.value = false;
+    if (request === repoRegistrationReq && repo.value.trim() === q) {
+      repoError.value = (e as Error).message;
+    }
   }
 }
+
+watch(repo, () => {
+  ++repoRegistrationReq;
+  const current = repo.value.trim();
+  if (
+    registeredRepo.value &&
+    current !== registeredRepo.value.slug &&
+    current !== registeredRepo.value.remote_url
+  ) {
+    registeredRepo.value = null;
+  }
+  repoError.value = '';
+});
 
 function pickBranch(b: RepoBranch) {
   existingBranch.value = b.name;
   branchFocused.value = false;
 }
 
+function onBranchKeydown(event: KeyboardEvent) {
+  const count = branchMatches.value.length;
+  if (event.key === 'Escape') {
+    branchFocused.value = false;
+    branchActiveOption.value = -1;
+    return;
+  }
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    if (!count) return;
+    event.preventDefault();
+    branchFocused.value = true;
+    const delta = event.key === 'ArrowDown' ? 1 : -1;
+    branchActiveOption.value = (branchActiveOption.value + delta + count) % count;
+    return;
+  }
+  if (event.key === 'Enter' && branchActiveOption.value >= 0) {
+    event.preventDefault();
+    const match = branchMatches.value[branchActiveOption.value];
+    if (match) pickBranch(match);
+  }
+}
+
 watch([title, goal], ([t, g]) => {
   if (!nameEdited.value) name.value = slugify(t || g);
 });
 
-watch(selectedAgent, (meta) => {
-  if (!meta) return;
-  if (model.value && !meta.accepts_raw_model && !meta.models.some((m) => m.id === model.value)) {
-    model.value = '';
-  }
-  if (effort.value && !meta.efforts.some((e) => e.id === effort.value)) effort.value = '';
-});
-
 async function loadBranches() {
+  const reqId = ++branchesReqId;
   const path = repo.value.trim();
   branches.value = [];
   branchesError.value = '';
   if (!path) return;
-  const reqId = ++branchesReqId;
   try {
     const res = (await get(`/repos/branches?cwd=${encodeURIComponent(path)}`)) as RepoBranch[];
     if (reqId === branchesReqId) branches.value = res;
@@ -148,45 +268,294 @@ watch([repo, branchMode], ([, mode]) => {
   if (mode === 'existing') loadBranches();
 });
 
-async function loadRecentRepos() {
-  try {
-    recentRepos.value = (await get('/repos/recent')) as RecentRepo[];
-  } catch {
-    // The recent-repos dropdown is a convenience; ignore failures here.
-  }
-}
-
-async function loadAgents() {
-  try {
-    const res = await listAgents();
-    agents.value = res.agents;
-    if (!agent.value) {
-      agent.value = agents.value.some((a) => a.kind === res.default_agent)
-        ? res.default_agent
-        : agents.value[0]?.kind || '';
-    }
-  } catch (e) {
-    error.value = (e as Error).message;
-  }
-}
-
 function resetForm() {
+  repo.value = '';
   title.value = '';
   goal.value = '';
-  agent.value = agents.value[0]?.kind || '';
-  model.value = '';
-  effort.value = '';
+  profile.value = profiles.value.some((item) => item.name === 'default')
+    ? 'default'
+    : (profiles.value[0]?.name ?? 'default');
+  overrides.value = {};
   name.value = '';
   base.value = '';
   existingBranch.value = '';
   scratchFiles.value = [];
   nameEdited.value = false;
   branchMode.value = 'new';
+  advanced.value = false;
+  cloneDraft.value = null;
+  cloneEnvironment.value = null;
+  cloneSourceEnvironment.value = [];
+  clonePreviewKey.value = '';
+  cloneNotice.value = '';
+  error.value = '';
+  resolveError.value = '';
+  branchesError.value = '';
+  repoError.value = '';
+  scratchError.value = '';
+  ++resolveRequest;
+  resolved.value = null;
+  lastResolved.value = null;
+  resolving.value = false;
+  scratchPicker.value?.resetTransient();
 }
 
 function cancel() {
+  if (creating.value) return;
   resetForm();
   emit('close');
+  void router.replace('/');
+}
+
+let resolveRequest = 0;
+let resolveTimer: ReturnType<typeof setTimeout> | undefined;
+
+function scheduleResolution() {
+  if (resolveTimer) clearTimeout(resolveTimer);
+  const request = ++resolveRequest;
+  resolved.value = null;
+  cloneDraft.value = null;
+  cloneEnvironment.value = null;
+  cloneSourceEnvironment.value = [];
+  clonePreviewKey.value = '';
+  resolving.value = true;
+  resolveError.value = '';
+  resolveTimer = setTimeout(() => {
+    resolveTimer = undefined;
+    void resolveSelection(request);
+  }, 120);
+}
+
+watch(selection, scheduleResolution, { deep: true, flush: 'sync' });
+
+async function resolveSelection(request: number) {
+  if (!profiles.value.length) {
+    if (request === resolveRequest) resolving.value = false;
+    return;
+  }
+  try {
+    const preview = await resolveSessionLaunch(selection.value);
+    if (request === resolveRequest) {
+      resolved.value = preview;
+      lastResolved.value = preview;
+    }
+  } catch (cause) {
+    if (request !== resolveRequest) return;
+    resolved.value = null;
+    resolveError.value = (cause as Error).message;
+  } finally {
+    if (request === resolveRequest) resolving.value = false;
+  }
+}
+
+let activationRequest = 0;
+async function refreshLaunchData() {
+  const activation = ++activationRequest;
+  if (resolveTimer) {
+    clearTimeout(resolveTimer);
+    resolveTimer = undefined;
+  }
+  ++resolveRequest;
+  resolved.value = null;
+  resolving.value = false;
+  try {
+    const [recent, managed, metadata, templates, registry] = await Promise.all([
+      get('/repos/recent').catch(() => recentRepos.value) as Promise<RecentRepo[]>,
+      listRepos().catch(() => managedRepos.value),
+      listAgents(),
+      listProfiles(),
+      getMcpRegistry(),
+    ]);
+    if (activation !== activationRequest) return;
+    recentRepos.value = recent;
+    managedRepos.value = managed;
+    agents.value = metadata.agents;
+    profiles.value = templates;
+    mcpRegistry.value = registry;
+    if (!templates.some((item) => item.name === profile.value)) {
+      profile.value = templates.some((item) => item.name === 'default')
+        ? 'default'
+        : (templates[0]?.name ?? 'default');
+      lastResolved.value = null;
+    }
+  } catch (cause) {
+    if (activation !== activationRequest) return;
+    error.value = (cause as Error).message;
+  }
+  if (activation !== activationRequest) return;
+  scheduleResolution();
+}
+
+function chooseProfile(value: string) {
+  profile.value = value;
+  overrides.value = {};
+  cloneNotice.value = '';
+}
+
+const cloneStaticValid = computed(
+  () =>
+    Boolean(resolved.value) &&
+    (resolved.value?.errors ?? []).every((message) => message.includes('max_concurrent')),
+);
+
+function previewKey(preview: ResolvedLaunch): string {
+  return JSON.stringify({
+    selection: preview.selection,
+    profile_lifetime: preview.profile_lifetime,
+    profile_revision: preview.profile_revision,
+    resolver_revision: preview.resolver_revision,
+  });
+}
+
+async function beginSaveAsNew() {
+  const preview = resolved.value;
+  if (!preview || !cloneStaticValid.value) return;
+  cloneBusy.value = true;
+  error.value = '';
+  let source: Profile | undefined;
+  try {
+    const refreshed = await listProfiles();
+    if (
+      !resolved.value ||
+      preview !== resolved.value ||
+      previewKey(preview) !== previewKey(resolved.value)
+    )
+      return;
+    profiles.value = refreshed;
+    source = refreshed.find((item) => item.name === preview.selection.profile);
+    if (
+      !source ||
+      source.revision !== preview.profile_revision ||
+      source.lifetime !== preview.profile_lifetime
+    ) {
+      error.value =
+        'The source profile changed after this preview. Review the fresh resolution before saving.';
+      scheduleResolution();
+      return;
+    }
+  } catch (cause) {
+    error.value = (cause as Error).message;
+    return;
+  } finally {
+    cloneBusy.value = false;
+  }
+  if (!source) return;
+  cloneDraft.value = {
+    name: `${source.name}-copy`,
+    description: source.description
+      ? `Copy of ${source.name}: ${source.description}`
+      : `Copy of ${source.name}`,
+    agent_kind: preview.agent,
+    model: preview.model,
+    effort: preview.effort,
+    protocol: preview.protocol,
+    mode: preview.mode,
+    class: preview.class,
+    strict: source.strict,
+    env_clear: source.env_clear,
+    ambient_allowlist: [...source.ambient_allowlist],
+    idle_archive_secs: source.idle_archive_secs,
+    max_concurrent: source.max_concurrent,
+    turn_budget: source.turn_budget,
+    prelude: source.prelude,
+    restricted: source.restricted,
+    runtime_permissions: [...source.runtime_permissions],
+    mcp_access: { ...source.mcp_access, groups: [...source.mcp_access.groups] },
+  };
+  cloneEnvironment.value = {
+    inherit: false,
+    remove: [],
+    set: [],
+  };
+  cloneSourceEnvironment.value = source.env.map((entry) => ({ ...entry }));
+  clonePreviewKey.value = previewKey(preview);
+  cloneNotice.value = '';
+}
+
+async function saveAsNewProfile() {
+  const preview = resolved.value;
+  const target = cloneDraft.value?.name.trim() ?? '';
+  if (
+    !preview ||
+    !target ||
+    !cloneEnvironment.value ||
+    clonePreviewKey.value !== previewKey(preview)
+  ) {
+    cloneDraft.value = null;
+    cloneEnvironment.value = null;
+    cloneSourceEnvironment.value = [];
+    clonePreviewKey.value = '';
+    error.value = 'Launch settings changed. Review the fresh resolution before saving a profile.';
+    return;
+  }
+  cloneBusy.value = true;
+  cloneNotice.value = '';
+  error.value = '';
+  const submittedKey = previewKey(preview);
+  const submittedGeneration = resolveRequest;
+  let saved: Profile;
+  try {
+    saved = await cloneProfile(preview.selection.profile, {
+      name: target,
+      expected_profile_revision: preview.profile_revision,
+      expected_resolver_revision: preview.resolver_revision,
+      overrides: { ...overrides.value },
+      template: cloneDraft.value!,
+      copy_environment: false,
+      environment: cloneEnvironment.value,
+    });
+  } catch (cause) {
+    const preview = cause instanceof ApiError ? cause.body.preview : undefined;
+    const stillCurrent =
+      submittedGeneration === resolveRequest &&
+      resolved.value !== null &&
+      submittedKey === previewKey(resolved.value);
+    if (preview && typeof preview === 'object' && stillCurrent) {
+      resolved.value = preview as ResolvedLaunch;
+      cloneDraft.value = null;
+      cloneEnvironment.value = null;
+      cloneSourceEnvironment.value = [];
+      clonePreviewKey.value = '';
+      error.value = `${(cause as Error).message} Review the fresh resolution and reopen the new-profile editor.`;
+    } else if (stillCurrent) {
+      error.value = (cause as Error).message;
+    } else {
+      cloneNotice.value = `The save from the previous launch selection failed: ${(cause as Error).message}`;
+    }
+    return;
+  } finally {
+    cloneBusy.value = false;
+  }
+
+  // The clone mutation already committed. Adopt its returned row immediately;
+  // a best-effort list refresh below may warn, but can never turn success into
+  // a retry that collides with the newly created name.
+  rememberProfile(saved);
+  const stillCurrent =
+    submittedGeneration === resolveRequest &&
+    resolved.value !== null &&
+    submittedKey === previewKey(resolved.value);
+  cloneDraft.value = null;
+  cloneEnvironment.value = null;
+  cloneSourceEnvironment.value = [];
+  clonePreviewKey.value = '';
+  if (stillCurrent) {
+    chooseProfile(saved.name);
+    cloneNotice.value = `Saved ${saved.name} without changing ${preview.selection.profile}.`;
+  } else {
+    cloneNotice.value = `Saved ${saved.name}; launch settings have since changed.`;
+  }
+  try {
+    profiles.value = await listProfiles();
+  } catch (cause) {
+    cloneNotice.value += ` Profile refresh is temporarily unavailable: ${(cause as Error).message}`;
+  }
+}
+
+function rememberProfile(saved: Profile) {
+  profiles.value = [...profiles.value.filter((item) => item.name !== saved.name), saved].sort(
+    (left, right) => left.name.localeCompare(right.name),
+  );
 }
 
 async function fileToBase64(file: File): Promise<string> {
@@ -200,23 +569,36 @@ async function fileToBase64(file: File): Promise<string> {
 }
 
 async function create() {
-  if (!repo.value.trim() || !(title.value.trim() || goal.value.trim())) return;
-  if (branchMode.value === 'existing' && !existingBranch.value.trim()) return;
+  if (!canCreate.value) {
+    error.value = createBlockReason.value;
+    await nextTick();
+    errorElement.value?.focus();
+    return;
+  }
   creating.value = true;
   try {
     const repoInput = repo.value.trim();
     const body: Record<string, unknown> = {
       title: title.value || undefined,
       goal: goal.value,
-      agent: agent.value || undefined,
-      model: model.value || undefined,
-      effort: effort.value || undefined,
+      selection: selection.value,
+      expected_profile_revision: resolved.value?.profile_revision,
+      expected_resolver_revision: resolved.value?.resolver_revision,
     };
-    // A remote reference travels as `repo`: the server registers it if it is new
-    // and clones it on the way, so an unknown `owner/name` needs no separate
-    // "add the repo" step here. A path travels as `cwd`.
+    // A remote reference must be in the server's managed allowlist before
+    // session creation. Direct submission follows the same registration path
+    // as choosing “Clone new repo”; a server path travels as `cwd`.
     if (looksLikeRemoteRepo(repoInput)) {
-      body.repo = repoInput;
+      const known = managedRepos.value.find(
+        (candidate) => candidate.slug === repoInput || candidate.remote_url === repoInput,
+      );
+      const staged =
+        registeredRepo.value &&
+        (registeredRepo.value.slug === repoInput || registeredRepo.value.remote_url === repoInput)
+          ? registeredRepo.value
+          : null;
+      const registered = known ?? staged ?? (await registerDraftRepo(repoInput));
+      body.repo = registered.slug;
     } else {
       body.cwd = repoInput;
     }
@@ -234,11 +616,20 @@ async function create() {
         })),
       );
     }
-    await post('/sessions', body);
+    const session = (await post('/sessions', body)) as Session;
     resetForm();
     emit('created');
     emit('close');
+    await router.push(`/s/${session.id}`);
   } catch (e) {
+    const preview = e instanceof ApiError ? e.body.preview : undefined;
+    if (preview && typeof preview === 'object') {
+      resolved.value = preview as ResolvedLaunch;
+      lastResolved.value = resolved.value;
+    } else if (e instanceof ApiError && e.status === 409) {
+      resolved.value = null;
+      scheduleResolution();
+    }
     const failedSession = e instanceof ApiError ? e.body.session_id : undefined;
     if (typeof failedSession === 'string' && failedSession) {
       // Provisioning succeeded far enough to leave a recoverable session, but
@@ -251,14 +642,40 @@ async function create() {
       return;
     }
     error.value = (e as Error).message;
+    await nextTick();
+    errorElement.value?.focus();
   } finally {
     creating.value = false;
   }
 }
 
-loadRecentRepos();
-loadManagedRepos();
-loadAgents();
+function onFormKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
+  event.preventDefault();
+  void create();
+}
+
+const createBlockReason = computed(() => {
+  if (!repo.value.trim()) return 'Choose a repository before creating the session.';
+  if (!(title.value.trim() || goal.value.trim()))
+    return 'Add a task title or goal before creating the session.';
+  if (branchMode.value === 'existing' && !existingBranch.value.trim())
+    return 'Choose the existing branch to reuse.';
+  if (scratchError.value) return scratchError.value;
+  if (repoRegistrations.value > 0) return 'Wait for repository registration to finish.';
+  if (cloneBusy.value) return 'Wait for the new profile to finish saving.';
+  if (resolving.value) return 'Wait for launch settings to finish resolving.';
+  if (!resolved.value) return resolveError.value || 'Launch settings have not resolved yet.';
+  if (!resolved.value.capacity.allowed)
+    return `Profile ${resolved.value.selection.profile} is at launch capacity.`;
+  if (!resolved.value.valid)
+    return resolved.value.errors[0] || 'Resolve the launch settings before creating.';
+  if (creating.value) return 'The session is being created.';
+  return '';
+});
+const canCreate = computed(() => !createBlockReason.value);
+
+onActivated(() => void refreshLaunchData());
 </script>
 
 <template>
@@ -269,46 +686,65 @@ loadAgents();
     behavior.
   -->
   <form
-    class="mb-4 flex max-h-[calc(100vh-7rem)] max-w-4xl flex-col rounded-md border border-line bg-surface"
+    class="mx-auto flex min-h-full w-full max-w-7xl flex-1 flex-col bg-canvas"
     autocomplete="off"
     data-testid="new-session-drawer"
     @submit.prevent="create"
-    @keydown.enter.meta.prevent="create"
-    @keydown.enter.ctrl.prevent="create"
+    @keydown="onFormKeydown"
   >
-    <div class="border-b border-line px-4 py-3">
-      <h2 class="text-sm font-semibold text-fg">New session</h2>
-      <p class="mt-0.5 text-xs text-faint">Choose the repo, task, runtime, and branch shape.</p>
+    <div class="border-b border-line bg-surface px-5 py-4 sm:px-8">
+      <p class="text-2xs font-semibold uppercase tracking-wider text-muted">Sessions / New</p>
+      <h1 class="mt-1 font-serif text-2xl font-semibold text-fg">Launch a session</h1>
+      <p class="mt-1 text-sm text-muted">
+        Pick a reusable profile, make one-launch changes, and review the server’s exact snapshot.
+      </p>
     </div>
 
-    <div class="grid min-h-0 gap-5 overflow-auto p-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
-      <div class="space-y-5">
+    <fieldset
+      :disabled="creating"
+      class="grid min-h-0 min-w-0 flex-1 gap-6 overflow-auto p-5 disabled:opacity-80 sm:p-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,25rem)]"
+    >
+      <div class="min-w-0 space-y-5">
         <section class="space-y-3">
           <h3 class="text-2xs font-semibold uppercase tracking-wider text-muted">Repository</h3>
           <div class="relative">
-            <label class="block text-xs text-muted mb-1">
+            <label for="launch-repository" class="mb-1 block text-xs text-muted">
               Repository - a server path, or a GitHub <span class="font-mono">owner/name</span> to
               clone
               <span v-if="recentRepos.length" class="text-faint">- or pick a recent one</span>
             </label>
             <input
+              id="launch-repository"
               v-model="repo"
               @focus="repoFocused = true"
               @input="repoFocused = true"
               @blur="repoFocused = false"
+              @keydown="onRepoKeydown"
+              role="combobox"
+              aria-autocomplete="list"
+              :aria-expanded="repoFocused && Boolean(repoMatches.length || cloneCandidate)"
+              aria-controls="launch-repository-options"
+              :aria-activedescendant="
+                repoActiveOption >= 0 ? `launch-repository-option-${repoActiveOption}` : undefined
+              "
               placeholder="owner/name or /home/you/code/project"
               autocomplete="loom-repo"
               spellcheck="false"
               class="w-full rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent"
             />
             <ul
+              id="launch-repository-options"
               v-if="repoFocused && (repoMatches.length || cloneCandidate)"
+              role="listbox"
               data-testid="recent-repos"
               class="absolute left-0 right-0 z-20 mt-1 max-h-56 overflow-auto rounded border border-line bg-input shadow-lg"
             >
               <li v-if="cloneCandidate">
                 <button
+                  id="launch-repository-option-0"
                   type="button"
+                  role="option"
+                  :aria-selected="repoActiveOption === 0"
                   data-testid="clone-repo"
                   :disabled="cloningRepo"
                   class="flex w-full items-center gap-2 px-2 py-1.5 text-left text-accent hover:bg-subtle disabled:opacity-60"
@@ -323,9 +759,12 @@ loadAgents();
                   >
                 </button>
               </li>
-              <li v-for="r in repoMatches" :key="r.repo_root">
+              <li v-for="(r, index) in repoMatches" :key="r.repo_root">
                 <button
+                  :id="`launch-repository-option-${index + (cloneCandidate ? 1 : 0)}`"
                   type="button"
+                  role="option"
+                  :aria-selected="repoActiveOption === index + (cloneCandidate ? 1 : 0)"
                   data-testid="recent-repo"
                   @mousedown.prevent="pickRepo(r.repo_root)"
                   class="flex w-full items-center justify-between gap-3 px-2 py-1.5 text-left hover:bg-subtle"
@@ -347,13 +786,15 @@ loadAgents();
               </li>
             </ul>
           </div>
+          <p v-if="repoError" class="text-xs text-block" role="alert">{{ repoError }}</p>
         </section>
 
         <section class="space-y-3 border-t border-line pt-3">
           <h3 class="text-2xs font-semibold uppercase tracking-wider text-muted">What to build</h3>
           <div>
-            <label class="block text-xs text-muted mb-1">Title</label>
+            <label for="launch-title" class="mb-1 block text-xs text-muted">Title</label>
             <input
+              id="launch-title"
               v-model="title"
               placeholder="Health endpoint"
               autocomplete="loom-title"
@@ -361,10 +802,11 @@ loadAgents();
             />
           </div>
           <div>
-            <label class="block text-xs text-muted mb-1">
+            <label for="launch-goal" class="mb-1 block text-xs text-muted">
               Goal - optional; leave blank to start the agent with no prompt
             </label>
             <textarea
+              id="launch-goal"
               v-model="goal"
               rows="4"
               placeholder="Add a /health endpoint that returns 200"
@@ -374,9 +816,13 @@ loadAgents();
           </div>
         </section>
 
-        <section class="space-y-3 border-t border-line pt-3">
-          <h3 class="text-2xs font-semibold uppercase tracking-wider text-muted">Branch</h3>
-          <div>
+        <details class="space-y-3 border-t border-line pt-3">
+          <summary
+            class="cursor-pointer text-2xs font-semibold uppercase tracking-wider text-muted"
+          >
+            Advanced branch controls
+          </summary>
+          <div class="pt-3">
             <div class="inline-flex rounded border border-line text-xs overflow-hidden mb-2">
               <button
                 type="button"
@@ -405,11 +851,12 @@ loadAgents();
             </div>
             <div v-if="branchMode === 'new'" class="space-y-2">
               <div>
-                <label class="block text-xs text-muted mb-1">
+                <label for="launch-branch-name" class="mb-1 block text-xs text-muted">
                   Name - the worktree (<code>.worktrees/&lt;name&gt;</code>) and branch
                   (<code>weaver/&lt;name&gt;</code>)
                 </label>
                 <input
+                  id="launch-branch-name"
                   v-model="name"
                   @input="nameEdited = true"
                   placeholder="health-endpoint"
@@ -419,10 +866,11 @@ loadAgents();
                 />
               </div>
               <div>
-                <label class="block text-xs text-muted mb-1">
+                <label for="launch-base-branch" class="mb-1 block text-xs text-muted">
                   Base branch - fork point (optional)
                 </label>
                 <input
+                  id="launch-base-branch"
                   v-model="base"
                   placeholder="origin/main (freshly fetched)"
                   autocomplete="loom-base-branch"
@@ -436,14 +884,23 @@ loadAgents();
               </div>
             </div>
             <div v-else class="relative">
-              <label class="block text-xs text-muted mb-1">
+              <label for="launch-existing-branch" class="mb-1 block text-xs text-muted">
                 Existing branch - weaver reuses its worktree if one is checked out
               </label>
               <input
+                id="launch-existing-branch"
                 v-model="existingBranch"
                 @focus="branchFocused = true"
                 @input="branchFocused = true"
                 @blur="branchFocused = false"
+                @keydown="onBranchKeydown"
+                role="combobox"
+                aria-autocomplete="list"
+                :aria-expanded="branchFocused && Boolean(branchMatches.length)"
+                aria-controls="launch-branch-options"
+                :aria-activedescendant="
+                  branchActiveOption >= 0 ? `launch-branch-option-${branchActiveOption}` : undefined
+                "
                 placeholder="feature/foo"
                 autocomplete="loom-existing-branch"
                 spellcheck="false"
@@ -451,13 +908,18 @@ loadAgents();
               />
               <p v-if="branchesError" class="mt-1 text-xs text-block">{{ branchesError }}</p>
               <ul
+                id="launch-branch-options"
                 v-if="branchFocused && branchMatches.length"
+                role="listbox"
                 data-testid="branch-options"
                 class="absolute left-0 right-0 z-20 mt-1 max-h-56 overflow-auto rounded border border-line bg-input shadow-lg"
               >
-                <li v-for="b in branchMatches" :key="b.name">
+                <li v-for="(b, index) in branchMatches" :key="b.name">
                   <button
+                    :id="`launch-branch-option-${index}`"
                     type="button"
+                    role="option"
+                    :aria-selected="branchActiveOption === index"
                     data-testid="branch-option"
                     @mousedown.prevent="pickBranch(b)"
                     class="flex w-full items-center justify-between gap-3 px-2 py-1.5 text-left hover:bg-subtle"
@@ -476,63 +938,177 @@ loadAgents();
               </ul>
             </div>
           </div>
-        </section>
+        </details>
 
         <section class="space-y-3 border-t border-line pt-3">
           <h3 class="text-2xs font-semibold uppercase tracking-wider text-muted">Scratch files</h3>
-          <ScratchPicker v-model="scratchFiles" />
+          <ScratchPicker
+            ref="scratchPicker"
+            v-model="scratchFiles"
+            :disabled="creating"
+            @validation="scratchError = $event"
+          />
         </section>
       </div>
 
-      <aside class="space-y-4 border-t border-line pt-4 lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0">
+      <aside
+        class="min-w-0 space-y-4 border-t border-line pt-4 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0"
+      >
         <section class="space-y-3">
           <div>
             <h3 class="text-2xs font-semibold uppercase tracking-wider text-muted">
-              Runtime profile
+              Launch profile
             </h3>
             <p class="mt-1 text-xs text-faint">
-              Agent runtime, model selector, and reasoning effort.
+              Templates stay unchanged unless you explicitly save a new one.
             </p>
           </div>
 
-          <AgentRuntimePicker
+          <ProfileSelector
+            :profiles="profiles"
+            :model-value="profile"
+            layout="list"
+            :disabled="creating"
+            @update:model-value="chooseProfile"
+          />
+          <RouterLink
+            to="/settings"
+            class="inline-flex text-xs text-accent hover:underline"
+            @click="creating && $event.preventDefault()"
+          >
+            Edit profile templates in Settings
+          </RouterLink>
+        </section>
+
+        <section class="space-y-2 rounded-md border border-line bg-surface p-3">
+          <button
+            type="button"
+            class="flex w-full items-center justify-between text-left text-xs font-medium text-fg"
+            :aria-expanded="advanced"
+            @click="advanced = !advanced"
+          >
+            One-launch overrides
+            <span class="text-faint">{{ advanced ? 'Hide' : 'Edit' }}</span>
+          </button>
+          <p v-if="resolved?.policy.strict" class="text-xs text-faint">
+            This strict profile locks every launch selector.
+          </p>
+          <LaunchOverrides
+            v-if="advanced"
+            v-model="overrides"
             :agents="agents"
-            :agent-kind="agent"
-            :model="model"
-            :effort="effort"
-            agent-grid-class="grid gap-2"
-            choice-grid-class="grid gap-4"
-            :show-agent-badges="false"
-            show-agent-counts
-            raw-model-id="session-model"
-            raw-model-autocomplete="loom-model"
-            @update:agent="agent = $event"
-            @update:model="model = $event"
-            @update:effort="effort = $event"
+            :resolved="resolved"
+            :fallback="lastResolved"
+            :disabled="resolving || Boolean(resolved?.policy.strict)"
           />
         </section>
+
+        <p v-if="resolveError" class="rounded bg-block-soft p-2 text-xs text-block" role="alert">
+          {{ resolveError }}
+        </p>
+        <ResolvedLaunchSummary :resolved="resolved" :loading="resolving" />
+
+        <section
+          v-if="resolved"
+          class="min-w-0 space-y-2 rounded-md border border-line bg-surface p-3"
+        >
+          <h3 class="text-xs font-medium text-fg">Save these settings as a new profile</h3>
+          <p class="text-xs text-faint">
+            Review and edit the proposed template before the server creates it atomically.
+            <code>{{ resolved.selection.profile }}</code> is never overwritten.
+          </p>
+          <button
+            v-if="!cloneDraft"
+            type="button"
+            data-testid="clone-profile-open"
+            class="btn-secondary px-2.5 py-1.5 text-xs"
+            :disabled="cloneBusy || resolving || !cloneStaticValid"
+            @click="beginSaveAsNew"
+          >
+            Review new profile…
+          </button>
+          <template v-else>
+            <ProfileEditor
+              v-model="cloneDraft"
+              v-model:environment="cloneEnvironment"
+              :agents="agents"
+              :mcp-registry="mcpRegistry"
+              :source-environment="cloneSourceEnvironment"
+              :disabled="cloneBusy"
+            />
+            <div class="flex flex-wrap gap-2">
+              <button
+                type="button"
+                data-testid="clone-profile"
+                class="btn-secondary px-2.5 py-1.5 text-xs"
+                :disabled="cloneBusy || resolving || !cloneDraft.name.trim()"
+                @click="saveAsNewProfile"
+              >
+                {{ cloneBusy ? 'Saving…' : 'Create new profile' }}
+              </button>
+              <button
+                type="button"
+                class="px-2.5 py-1.5 text-xs text-muted"
+                :disabled="cloneBusy"
+                @click="
+                  cloneDraft = null;
+                  cloneEnvironment = null;
+                  cloneSourceEnvironment = [];
+                  clonePreviewKey = '';
+                "
+              >
+                Cancel
+              </button>
+            </div>
+          </template>
+          <p v-if="cloneNotice" class="text-xs text-ok">{{ cloneNotice }}</p>
+        </section>
       </aside>
-    </div>
+    </fieldset>
 
-    <p v-if="error" class="border-t border-line px-4 py-2 text-sm text-block">{{ error }}</p>
+    <p
+      v-if="error"
+      ref="errorElement"
+      tabindex="-1"
+      role="alert"
+      class="border-t border-line bg-surface px-5 py-2 text-sm text-block outline-none sm:px-8"
+    >
+      {{ error }}
+    </p>
 
-    <div class="flex items-center gap-2 border-t border-line px-4 py-3">
+    <div
+      class="sticky bottom-0 flex flex-wrap items-center gap-2 border-t border-line bg-surface px-5 py-3 sm:px-8"
+    >
       <button
         type="submit"
-        :disabled="creating"
+        data-testid="create-session"
+        :disabled="!canCreate"
         class="btn-primary px-3 py-1.5 text-sm font-medium"
       >
-        {{ creating ? 'Creating...' : 'Create' }}
+        {{ creating ? 'Creating...' : 'Create session' }}
       </button>
-      <button type="button" class="btn-secondary px-3 py-1.5 text-sm font-medium" @click="cancel">
+      <button
+        type="button"
+        class="btn-secondary px-3 py-1.5 text-sm font-medium"
+        :disabled="creating"
+        @click="cancel"
+      >
         Cancel
       </button>
       <!-- Keyboard affordance: submit from anywhere in the form (the goal
            textarea swallows a plain Enter) without reaching for the mouse. -->
-      <span class="ml-auto text-2xs text-faint">
+      <span class="w-full min-w-0 text-2xs text-faint sm:ml-auto sm:w-auto">
         <kbd class="font-mono">{{ metaKeyLabel }}</kbd> + <kbd class="font-mono">Enter</kbd> to
         create
       </span>
+      <p
+        v-if="!canCreate && !creating"
+        class="w-full text-xs text-muted"
+        data-testid="create-block-reason"
+        aria-live="polite"
+      >
+        {{ createBlockReason }}
+      </p>
     </div>
   </form>
 </template>

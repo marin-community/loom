@@ -426,7 +426,10 @@ pub async fn remove(db: &Db, identity: &str) -> Result<bool> {
     let Some(target) = get(db, identity).await? else {
         return Ok(false);
     };
-    for profile in crate::profile::list_including_retired(db).await? {
+    // Retired rows are generation tombstones, not selectable templates. Live
+    // sessions carry the full executable custom-MCP source in their immutable
+    // policy snapshot, so a tombstone must not pin registry administration.
+    for profile in crate::profile::list(db).await? {
         if profile
             .mcp_policy_snapshot()?
             .custom_servers
@@ -445,7 +448,7 @@ pub async fn remove(db: &Db, identity: &str) -> Result<bool> {
         .iter()
         .any(|server| server.identity != identity && server.group == target.group);
     if !group_has_other_server {
-        for profile in crate::profile::list_including_retired(db).await? {
+        for profile in crate::profile::list(db).await? {
             let access = profile.mcp_access()?;
             if access.mode == "groups" && access.groups.contains(&target.group) {
                 bail!(

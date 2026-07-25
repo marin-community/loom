@@ -25,6 +25,7 @@ pub(super) async fn create_custom_mcp(
     State(st): State<AppState>,
     Json(req): Json<CustomMcpReq>,
 ) -> ApiResult<(StatusCode, Json<CustomMcpView>)> {
+    let _resolver = st.launch_gate.acquire_resolver().await;
     if crate::custom_mcp::get(&st.db, req.identity.trim())
         .await?
         .is_some()
@@ -59,6 +60,7 @@ pub(super) async fn put_custom_mcp(
     Path(identity): Path<String>,
     Json(mut req): Json<CustomMcpReq>,
 ) -> ApiResult<Json<CustomMcpView>> {
+    let _resolver = st.launch_gate.acquire_resolver().await;
     req.identity = identity_from_path(&identity);
     Ok(Json(
         crate::custom_mcp::upsert(&st.db, &req)
@@ -71,6 +73,7 @@ pub(super) async fn delete_custom_mcp(
     State(st): State<AppState>,
     Path(identity): Path<String>,
 ) -> ApiResult<StatusCode> {
+    let _resolver = st.launch_gate.acquire_resolver().await;
     let removed = crate::custom_mcp::remove(&st.db, &identity_from_path(&identity))
         .await
         .map_err(|error| AppError::bad_request(error.to_string()))?;

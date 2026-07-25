@@ -4,8 +4,8 @@ use axum::{
 };
 use serde_json::{json, Value};
 
-use crate::agent_env;
 use crate::db::Db;
+use crate::{agent_env, profile};
 
 use super::{ApiResult, AppError, AppState};
 
@@ -37,7 +37,11 @@ pub(super) async fn put_env(
     if let Err(why) = agent_env::validate_name(&name) {
         return Err(AppError::bad_request(why));
     }
-    agent_env::set(&st.db, &name, &body.value).await?;
+    let _profile_permit = st
+        .launch_gate
+        .acquire_profile(profile::DEFAULT_PROFILE)
+        .await;
+    profile::env_set(&st.db, profile::DEFAULT_PROFILE, &name, &body.value).await?;
     env_envelope(&st.db).await
 }
 
@@ -47,6 +51,10 @@ pub(super) async fn delete_env(
     State(st): State<AppState>,
     Path(name): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    agent_env::remove(&st.db, &name).await?;
+    let _profile_permit = st
+        .launch_gate
+        .acquire_profile(profile::DEFAULT_PROFILE)
+        .await;
+    profile::env_remove(&st.db, profile::DEFAULT_PROFILE, &name).await?;
     env_envelope(&st.db).await
 }

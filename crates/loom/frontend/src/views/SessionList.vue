@@ -7,7 +7,6 @@ import SignalChip from '../components/SignalChip.vue';
 import IdleChip from '../components/IdleChip.vue';
 import TagPill from '../components/TagPill.vue';
 import GithubStatus from '../components/GithubStatus.vue';
-import NewSessionDrawer from '../components/NewSessionDrawer.vue';
 import SessionRowActions from '../components/SessionRowActions.vue';
 import SessionRemedyButton from '../components/SessionRemedyButton.vue';
 import AgentUsage from '../components/AgentUsage.vue';
@@ -408,17 +407,8 @@ const error = ref('');
 const MISSING_GITHUB_TOKEN_ERROR = 'No GitHub token configured.';
 const tokenConfigWarning = computed(() => error.value.startsWith(MISSING_GITHUB_TOKEN_ERROR));
 
-// The New Session drawer is reflected in the URL (`/?new`), like the attention
-// filter above — so it's deep-linkable, the back button closes it, and the tab
-// title (composed in App.vue) can read "Weaver - New Session" while it's open.
-const showForm = computed(() => workspaceOpen.value && route.query.new !== undefined);
 function openForm() {
-  router.replace({ query: { ...route.query, new: null } });
-}
-function closeForm() {
-  const query = { ...route.query };
-  delete query.new;
-  router.replace({ query });
+  router.push('/sessions/new');
 }
 
 // A quiet pill's × clears that tag, then refreshes the row. The tag write
@@ -435,15 +425,6 @@ async function clearTag(sessionId: string, key: string) {
     clearingTag.value = '';
   }
 }
-
-async function handleCreated() {
-  try {
-    await refresh();
-  } catch (e) {
-    error.value = (e as Error).message;
-  }
-}
-
 function recordSessionLinkOpen(event: MouseEvent, sessionId: string) {
   // Vue Router leaves modified clicks to the browser so they can open another
   // tab/window. Start the in-tab timer only for the activation this page owns;
@@ -568,22 +549,14 @@ function recordSessionLinkOpen(event: MouseEvent, sessionId: string) {
         </button>
       </div>
 
-      <!-- Toggles the create form. Closed → primary (accent) call-to-action;
-           open → a neutral "Cancel" so it never reads as a second primary
-           action competing with the form's own Create button. -->
       <button
         v-if="workspaceOpen"
-        :class="[
-          'ml-auto px-2.5 py-1 text-xs font-medium',
-          showForm ? 'btn-secondary' : 'btn-primary',
-        ]"
-        @click="showForm ? closeForm() : openForm()"
+        class="btn-primary ml-auto px-2.5 py-1 text-xs font-medium"
+        @click="openForm"
       >
-        {{ showForm ? 'Cancel' : 'New session' }}
+        New session
       </button>
     </div>
-
-    <NewSessionDrawer v-if="showForm" @close="closeForm" @created="handleCreated" />
 
     <div v-if="error" class="mb-4 text-sm text-block">
       <template v-if="tokenConfigWarning">

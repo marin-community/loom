@@ -57,6 +57,11 @@ export interface Session {
   work_dir: string;
   term_session: string;
   agent_kind: string;
+  profile: string;
+  launch_mode: string;
+  resolved_launch: {
+    provenance: { mode: string };
+  } | null;
   pending_prompt: string;
   github_repo: string | null;
   github_issue: { repo: string; number: number } | null;

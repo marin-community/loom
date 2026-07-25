@@ -78,6 +78,9 @@ export const uploadSessionScratch = (id: string, file: File) =>
     ScratchFile & { path: string }
   >;
 
+/** Server-owned attachment limits shared by launch staging and live Scratch. */
+export const getScratchLimits = () => get('/scratch/limits') as Promise<ScratchLimits>;
+
 // --- Sessions ----------------------------------------------------------------
 
 /** The fleet: every session, optionally widened past the default-hidden
@@ -122,6 +125,7 @@ import type {
   NewCommentBody,
   RepoEnvVar,
   ScratchFile,
+  ScratchLimits,
 } from './types';
 
 // --- Managed repos ---------------------------------------------------------
@@ -330,10 +334,12 @@ export const sendMessage = (id: string, text: string, submit = true) =>
 
 /** Replace the provider behind an idle ACP session while preserving its stable
  * loom session, worktree, branch, and canonical conversation journal. */
-export const handoffSession = (
-  id: string,
-  body: { agent: string; model?: string; effort?: string; mode?: string },
-) => post(`/sessions/${id}/handoff`, body) as Promise<Session>;
+export const handoffSession = (id: string, body: import('./types').HandoffInput) =>
+  post(`/sessions/${id}/handoff`, body) as Promise<Session>;
+/** Resolve a profile-first handoff against an existing session's class and
+ * capacity slot before sending its optimistic revisions. */
+export const resolveSessionHandoff = (id: string, selection: LaunchSelection) =>
+  post(`/sessions/${id}/handoff/resolve`, { selection }) as Promise<ResolvedLaunch>;
 
 // --- ACP conversation (protocol='acp' sessions) ----------------------------
 
@@ -443,9 +449,19 @@ export const deleteEnv = (name: string) =>
 
 // --- Launch profiles -------------------------------------------------------
 
-import type { CustomMcp, CustomMcpInput, Profile, ProfileInput } from './types';
+import type {
+  CloneProfileInput,
+  CustomMcp,
+  CustomMcpInput,
+  LaunchSelection,
+  Profile,
+  ProfileInput,
+  ResolvedLaunch,
+} from './types';
 
 export const listProfiles = () => get('/profiles') as Promise<Profile[]>;
+export const resolveSessionLaunch = (selection: LaunchSelection) =>
+  post('/session-launches/resolve', { selection }) as Promise<ResolvedLaunch>;
 export const getMcpRegistry = () => get('/mcps') as Promise<import('./types').McpRegistry>;
 export const createCustomMcp = (input: CustomMcpInput) =>
   post('/mcps/custom', input) as Promise<CustomMcp>;
@@ -457,6 +473,8 @@ export const createProfile = (profile: ProfileInput) =>
   post('/profiles', profile) as Promise<Profile>;
 export const updateProfile = (name: string, profile: ProfileInput) =>
   put(`/profiles/${encodeURIComponent(name)}`, profile) as Promise<Profile>;
+export const cloneProfile = (source: string, input: CloneProfileInput) =>
+  post(`/profiles/${encodeURIComponent(source)}/clone`, input) as Promise<Profile>;
 export const deleteProfile = (name: string) => del(`/profiles/${encodeURIComponent(name)}`);
 export const setProfileEnv = (profile: string, name: string, value: string) =>
   put(`/profiles/${encodeURIComponent(profile)}/env/${encodeURIComponent(name)}`, {

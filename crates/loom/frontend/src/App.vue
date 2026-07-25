@@ -29,8 +29,7 @@ watch(authed, (ok) => (ok ? startFleetPoll() : stopFleetPoll()), { immediate: tr
 // place so every route reads "Weaver - <Section>" consistently and several open
 // loom tabs are tellable apart at a glance. The section comes from (in priority
 // order): the live session name on a `/s/:id` page (falling back to its branch
-// name), the New Session drawer when it's open on the fleet list, else the
-// route's declared `meta.title`. The session name is read from the shared fleet
+// name), else the route's declared `meta.title`. The session name is read from the shared fleet
 // snapshot — the same source the page header uses — so a rename reflects on the
 // next poll and a deep link shows the base title only until that row arrives (no
 // wrong-name flash, just a late refine).
@@ -45,7 +44,6 @@ const docTitle = computed(() => {
     return withSection(sessionById(id)?.branch.title || sessionById(id)?.branch.name);
   }
   if (route.path === '/' && route.query.view === 'automation') return withSection('Automation');
-  if (route.path === '/' && route.query.new !== undefined) return withSection('New Session');
   return withSection(route.meta.title as string | undefined);
 });
 watch(docTitle, (t) => (document.title = t), { immediate: true });
@@ -54,7 +52,7 @@ watch(docTitle, (t) => (document.title = t), { immediate: true });
 // refetch flash, no entrance-animation replay. The list views return exactly as
 // left (scroll, filter, the open create form); the session detail page returns
 // to its warm terminal (scrollback intact, no reconnect).
-const CACHED_VIEWS = ['SessionList', 'Issues', 'Watches', 'SessionDetail'];
+const CACHED_VIEWS = ['SessionList', 'Issues', 'Watches', 'SessionDetail', 'SessionLaunch'];
 
 // Cache key per cached instance. List views are singletons (keyed by their
 // stable path); the session detail is keyed per session id so each session gets
@@ -64,13 +62,14 @@ const CACHED_VIEWS = ['SessionList', 'Issues', 'Watches', 'SessionDetail'];
 // snappiness win, and WebSockets ride a separate connection pool from HTTP); its
 // status SSEs are paused on deactivate (see SessionDetail/SessionConversation),
 // so idle EventSources don't accumulate against the browser's ~6 per-origin
-// HTTP/1.1 cap. max=3 therefore bounds warm terminals — memory, the xterm WebGL
+// HTTP/1.1 cap. max=4 therefore bounds warm terminals — memory, the xterm WebGL
 // contexts (browsers cap those too), and server-side PTYs — keeping the common
 // set warm (the fleet plus the current session, with headroom) while older
-// details evict and tear down their socket. An evicted list remounts instantly
-// from the store cache, so list eviction is invisible — the cap is really there
-// to bound the detail terminals.
-const KEEP_ALIVE_MAX = 3;
+// details evict and tear down their socket. The fourth slot keeps an in-progress
+// launch draft alive while its profile is edited in Settings. An evicted list
+// remounts instantly from the store cache, so list eviction is invisible — the
+// cap is really there to bound the detail terminals.
+const KEEP_ALIVE_MAX = 4;
 function cacheKey(route: { path: string; params: Record<string, string | string[]> }): string {
   // Every `/s/:id…` path (the work tabs and the Artifacts deep-links) is the
   // same SessionDetail instance, so they share one cache key — switching to

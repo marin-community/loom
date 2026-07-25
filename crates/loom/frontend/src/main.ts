@@ -20,6 +20,7 @@ import { createRouter, createWebHistory } from 'vue-router';
 import App from './App.vue';
 import SessionList from './views/SessionList.vue';
 import SessionDetail from './views/SessionDetail.vue';
+import SessionLaunch from './views/SessionLaunch.vue';
 import Settings from './views/Settings.vue';
 import Issues from './views/Issues.vue';
 import Watches from './views/Watches.vue';
@@ -37,6 +38,7 @@ const router = createRouter({
   routes: [
     { path: '/login', component: Login, meta: { public: true, title: 'Login' } },
     { path: '/', component: SessionList, meta: { title: 'Sessions' } },
+    { path: '/sessions/new', component: SessionLaunch, meta: { title: 'New Session' } },
     { path: '/s/:id', component: SessionDetail, props: true },
     // The old Files browser is gone — the embedded editor (a side panel on the
     // detail page) is the file surface now. Redirect stale links there.
@@ -57,6 +59,9 @@ const router = createRouter({
 // Gate every non-public route on an authenticated identity. A loopback-trusted
 // user resolves immediately; anyone else is bounced to the login screen.
 router.beforeEach(async (to) => {
+  if (to.path === '/' && to.query.new !== undefined && to.query.view !== 'automation') {
+    return { path: '/sessions/new' };
+  }
   if (to.meta.public) return true;
   if (me.authenticated) return true;
   if (await loadMe()) return true;

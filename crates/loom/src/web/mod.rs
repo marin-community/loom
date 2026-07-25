@@ -76,6 +76,7 @@ mod diagnostics;
 mod discussion;
 mod env;
 mod issues;
+mod launches;
 mod logview;
 mod mcps;
 mod profiles;
@@ -97,6 +98,7 @@ use diagnostics::*;
 use discussion::*;
 use env::*;
 use issues::*;
+use launches::*;
 use logview::*;
 use mcps::*;
 use profiles::*;
@@ -157,8 +159,8 @@ pub struct AppState {
     /// `/chat`, `/prompt`, `/permissions`, `/mode`, and `/interrupt` routes drive
     /// an `acp` session through, and subscribe to its SSE stream on.
     pub acp: crate::acp::AcpRegistry,
-    /// Serializes new-session provisioning within one repository while allowing
-    /// unrelated repositories to launch independently.
+    /// Namespaced repository provisioning, capped-profile admission, and
+    /// per-session Scratch mutation locks.
     pub launch_gate: crate::launch_gate::RepoLaunchGate,
 }
 
@@ -329,6 +331,18 @@ pub(crate) async fn session_view(
                 format!("invalid session MCP policy snapshot: {error}"),
             )
         })?;
+    let resolved_launch = if session.launch_snapshot.trim().is_empty() {
+        None
+    } else {
+        Some(
+            serde_json::from_str(&session.launch_snapshot).map_err(|error| {
+                AppError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("invalid session launch snapshot: {error}"),
+                )
+            })?,
+        )
+    };
     Ok(SessionView {
         id: session.id.clone(),
         status: session.status.clone(),
@@ -359,8 +373,12 @@ pub(crate) async fn session_view(
         usage,
         profile: session.profile.clone(),
         profile_revision: session.profile_revision,
+        profile_lifetime: session.profile_lifetime,
+        policy_strict: session.policy_strict,
+        mutation_revision: session.mutation_revision,
         launch_mode: session.launch_mode.clone(),
         mcp_policy,
+        resolved_launch,
         branch: bv,
     })
 }
@@ -587,7 +605,16 @@ pub fn router(state: AppState) -> Router {
     // session cookie, or a trusted-loopback request — gated by `require_auth`.
     let protected = Router::new()
         // Sessions
-        .route("/sessions", get(list_sessions).post(create_session))
+        .route(
+            "/sessions",
+            get(list_sessions)
+                .post(create_session)
+                .layer(DefaultBodyLimit::max(
+                    scratch::MAX_SESSION_CREATE_BODY_BYTES,
+                )),
+        )
+        .route("/session-launches/resolve", post(resolve_session_launch))
+        .route("/scratch/limits", get(scratch_limits))
         .route(
             "/sessions/{id}",
             get(get_session).patch(patch_session).delete(delete_session),
@@ -600,6 +627,10 @@ pub fn router(state: AppState) -> Router {
             post(restricted_github_tool),
         )
         .route("/sessions/{id}/adopt", post(adopt_session))
+        .route(
+            "/sessions/{id}/handoff/resolve",
+            post(resolve_session_handoff),
+        )
         .route("/sessions/{id}/handoff", post(handoff_session))
         .route("/sessions/{id}/recover", post(recover_session))
         .route(
@@ -786,6 +817,7 @@ pub fn router(state: AppState) -> Router {
         .route("/profiles", get(list_profiles).post(create_profile))
         .route("/profiles/{name}/effective", get(effective_profile))
         .route("/profiles/{name}/probe", post(probe_profile))
+        .route("/profiles/{name}/clone", post(clone_profile))
         .route(
             "/profiles/{name}",
             get(get_profile).put(put_profile).delete(delete_profile),

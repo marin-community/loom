@@ -5,10 +5,9 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use weaver_api::{BranchStatusReq, BranchView, CreateEventReq, TagReq};
-use weaver_core::branch as branch_mod;
-use weaver_core::tags;
+use weaver_core::{branch as branch_mod, tags};
 
-use crate::events;
+use crate::{events, session as session_mod};
 
 use super::sessions::ByQuery;
 use super::{author_or_manual, branch_view, require_branch};
@@ -48,12 +47,42 @@ pub(super) async fn patch_branch(
     Path(key): Path<String>,
     Json(req): Json<PatchBranchReq>,
 ) -> ApiResult<Json<BranchView>> {
-    let branch = require_branch(&st.db, &key).await?;
+    let initial_branch = require_branch(&st.db, &key).await?;
+    let goal_sessions = if req.goal.is_some() {
+        session_mod::handoff_capable_for_branch(&st.db, &initial_branch.id).await?
+    } else {
+        Vec::new()
+    };
+    let initial_goal_ids: std::collections::BTreeSet<_> = goal_sessions
+        .iter()
+        .map(|session| session.id.clone())
+        .collect();
+    let _goal_permits = st
+        .launch_gate
+        .acquire_sessions(goal_sessions.iter().map(|session| session.id.as_str()))
+        .await;
+    let branch = require_branch(&st.db, &initial_branch.id).await?;
+    let current_goal_sessions = if req.goal.is_some() {
+        session_mod::handoff_capable_for_branch(&st.db, &branch.id).await?
+    } else {
+        Vec::new()
+    };
+    if current_goal_sessions
+        .iter()
+        .any(|session| !initial_goal_ids.contains(&session.id))
+    {
+        return Err(AppError::conflict(
+            "the branch's handoff-capable session changed while the goal edit was waiting; retry",
+        ));
+    }
     if let Some(title) = &req.title {
         branch_mod::set_title(&st.db, &branch.id, title).await?;
     }
     if let Some(goal) = &req.goal {
         branch_mod::set_goal(&st.db, &branch.id, goal, "user").await?;
+        for session in &current_goal_sessions {
+            session_mod::bump_mutation_revision(&st.db, &session.id).await?;
+        }
     }
     if let Some(description) = &req.description {
         branch_mod::set_description(&st.db, &branch.id, description).await?;

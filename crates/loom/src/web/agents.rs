@@ -69,6 +69,7 @@ pub(super) async fn create_custom_agent(
     State(st): State<AppState>,
     Json(body): Json<CustomAgentBody>,
 ) -> ApiResult<Json<Value>> {
+    let _resolver = st.launch_gate.acquire_resolver().await;
     let name = body.name.trim().to_string();
     custom_agents::validate_name(&name).map_err(AppError::bad_request)?;
     if custom_agents::exists(&st.db, &name).await? {
@@ -90,6 +91,7 @@ pub(super) async fn update_custom_agent(
     Path(name): Path<String>,
     Json(body): Json<CustomAgentBody>,
 ) -> ApiResult<Json<Value>> {
+    let _resolver = st.launch_gate.acquire_resolver().await;
     if !custom_agents::exists(&st.db, &name).await? {
         return Err(AppError::not_found("custom agent"));
     }
@@ -107,6 +109,7 @@ pub(super) async fn delete_custom_agent(
     State(st): State<AppState>,
     Path(name): Path<String>,
 ) -> ApiResult<Json<Value>> {
+    let _resolver = st.launch_gate.acquire_resolver().await;
     custom_agents::remove(&st.db, &name).await?;
     custom_envelope(&st.db).await
 }

@@ -265,6 +265,8 @@ async fn seed_classed_session(
             profile: loom::profile::DEFAULT_PROFILE.to_string(),
             launch_mode: "auto".to_string(),
             profile_revision: 1,
+            profile_lifetime: 1,
+            strict: false,
             env_clear: false,
             ambient_allowlist: "[]".to_string(),
             idle_archive_secs: None,
@@ -274,6 +276,7 @@ async fn seed_classed_session(
             allowed_tools: "[]".to_string(),
             mcp_access: r#"{"selection":{"mode":"none","groups":[]},"capability_sets":[]}"#
                 .to_string(),
+            launch_snapshot: String::new(),
             creator_kind: "system".to_string(),
             creator_subject: "test".to_string(),
             parent_session_id: None,

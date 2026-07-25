@@ -1258,6 +1258,11 @@ pub async fn ensure_warm_session(state: &AppState, o: &Watch) -> anyhow::Result<
         return Ok(None);
     }
 
+    // The watch id is the stable managed identity. Recheck reuse only after
+    // owning it, then retain the claim through provisioning and linkage so two
+    // concurrent rounds cannot create hidden duplicate capacity consumers.
+    let _managed_permit = state.launch_gate.acquire_managed(&o.id).await;
+
     // Reuse-first: an existing live managed session is the warm session. Keep its
     // id and (cheaply) repair the watch linkage if it drifted.
     if let Some(existing) = session_mod::active_managed_by(&state.db, &o.id).await? {

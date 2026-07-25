@@ -140,6 +140,13 @@ async fn grant_allows(
             if *method == axum::http::Method::POST && path == "/sessions" {
                 return true;
             }
+            // `loom session launch` performs this read-only canonical preflight
+            // before POSTing `/sessions`. Session principals already have the
+            // right to delegate a child launch; letting them resolve the exact
+            // template snapshot does not grant another read or write surface.
+            if *method == axum::http::Method::POST && path == "/session-launches/resolve" {
+                return true;
+            }
             if segments.first() == Some(&"sessions") && segments.len() >= 2 {
                 return is_session_descendant(st, session_id, segments[1]).await;
             }

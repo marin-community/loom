@@ -1,8 +1,16 @@
 <script setup lang="ts">
-import { ref, computed, nextTick } from 'vue';
+import { ref, computed, nextTick, watch } from 'vue';
 import { useRouter } from 'vue-router';
-import type { AgentMetadata, Session, WeaverEvent } from '../types';
-import { handoffSession, listAgents } from '../api';
+import type {
+  AgentMetadata,
+  LaunchOverrides as LaunchOverrideValues,
+  LaunchSelection,
+  Profile,
+  ResolvedLaunch,
+  Session,
+  WeaverEvent,
+} from '../types';
+import { ApiError, handoffSession, listAgents, listProfiles, resolveSessionHandoff } from '../api';
 import {
   messageOf,
   conversationState,
@@ -20,6 +28,9 @@ import TagPill from './TagPill.vue';
 import SessionDetailsPopover from './SessionDetailsPopover.vue';
 import SessionRemedyButton from './SessionRemedyButton.vue';
 import GithubAssociations from './GithubAssociations.vue';
+import LaunchOverrides from './LaunchOverrides.vue';
+import ProfileSelector from './ProfileSelector.vue';
+import ResolvedLaunchSummary from './ResolvedLaunchSummary.vue';
 
 // The session page header — one compact chrome block shared by both the detail
 // view and the file browser, so the "where am I / what is this" context never
@@ -79,6 +90,7 @@ type DetailsCloseReason = 'toggle' | 'escape' | 'outside' | 'navigation' | 'acti
 function closeDetails(reason: DetailsCloseReason) {
   if (!showDetails.value) return;
   showDetails.value = false;
+  resetHandoff();
   if (reason === 'escape') void nextTick(() => detailsButton.value?.focus());
 }
 
@@ -195,68 +207,125 @@ const statusTrail = computed(() =>
 // still authoritative when a turn starts between paint and submit.
 const handoffOpen = ref(false);
 const handoffAgents = ref<AgentMetadata[]>([]);
-const handoffAgent = ref('');
-const handoffModel = ref('');
-const handoffEffort = ref('');
+const handoffProfiles = ref<Profile[]>([]);
+const handoffProfile = ref('');
+const handoffOverrides = ref<LaunchOverrideValues>({});
+const handoffResolved = ref<ResolvedLaunch | null>(null);
+const lastHandoffResolved = ref<ResolvedLaunch | null>(null);
+const handoffResolving = ref(false);
 const handoffBusy = ref(false);
 const handoffError = ref('');
 const canHandoff = computed(
   () => props.ws.protocol === 'acp' && ['running', 'orphaned', 'error'].includes(props.ws.status),
 );
-const unchangedHandoff = computed(
-  () =>
-    handoffAgent.value === props.ws.agent_kind &&
-    handoffModel.value === props.ws.model &&
-    handoffEffort.value === props.ws.effort,
-);
-const handoffMetadata = computed(() =>
-  handoffAgents.value.find((a) => a.kind === handoffAgent.value),
-);
+const handoffSelection = computed<LaunchSelection>(() => ({
+  profile: handoffProfile.value || 'default',
+  overrides: { ...handoffOverrides.value },
+}));
+const unchangedHandoff = computed(() => {
+  const resolved = handoffResolved.value;
+  return (
+    resolved?.agent === props.ws.agent_kind &&
+    resolved.model === props.ws.model &&
+    resolved.effort === props.ws.effort &&
+    resolved.mode === props.ws.launch_mode &&
+    resolved.selection.profile === props.ws.profile &&
+    resolved.profile_revision === props.ws.profile_revision
+  );
+});
 
-async function toggleHandoff() {
-  handoffOpen.value = !handoffOpen.value;
+let handoffResolveRequest = 0;
+function resetHandoff() {
+  ++handoffResolveRequest;
+  handoffOpen.value = false;
+  handoffAgents.value = [];
+  handoffProfiles.value = [];
+  handoffProfile.value = '';
+  handoffOverrides.value = {};
+  handoffResolved.value = null;
+  lastHandoffResolved.value = null;
+  handoffResolving.value = false;
   handoffError.value = '';
-  if (!handoffOpen.value) return;
-  handoffAgent.value = props.ws.agent_kind;
-  handoffModel.value = props.ws.model;
-  handoffEffort.value = props.ws.effort;
-  if (!handoffAgents.value.length) {
-    try {
-      handoffAgents.value = (await listAgents()).agents.filter((a) => a.supports_acp);
-    } catch (e) {
-      handoffError.value = (e as Error).message;
+}
+
+async function resolveHandoff() {
+  const request = ++handoffResolveRequest;
+  handoffResolved.value = null;
+  if (!handoffOpen.value || !handoffProfiles.value.length) return;
+  handoffResolving.value = true;
+  handoffError.value = '';
+  try {
+    const preview = await resolveSessionHandoff(props.ws.id, handoffSelection.value);
+    if (request === handoffResolveRequest) {
+      handoffResolved.value = preview;
+      lastHandoffResolved.value = preview;
     }
+  } catch (cause) {
+    if (request === handoffResolveRequest) handoffError.value = (cause as Error).message;
+  } finally {
+    if (request === handoffResolveRequest) handoffResolving.value = false;
   }
 }
 
-function chooseHandoffAgent(kind: string) {
-  if (kind === handoffAgent.value) return;
-  handoffAgent.value = kind;
-  handoffModel.value = '';
-  handoffEffort.value = '';
+watch(handoffSelection, () => void resolveHandoff(), { deep: true });
+
+async function toggleHandoff() {
+  if (handoffOpen.value) {
+    resetHandoff();
+    return;
+  }
+  handoffOpen.value = true;
+  ++handoffResolveRequest;
+  handoffResolved.value = null;
+  handoffError.value = '';
+  try {
+    const [metadata, profiles] = await Promise.all([listAgents(), listProfiles()]);
+    handoffAgents.value = metadata.agents.filter((agent) => agent.supports_acp);
+    handoffProfiles.value = profiles.filter((profile) => profile.class === props.ws.class);
+    handoffProfile.value = handoffProfiles.value.some(
+      (profile) => profile.name === props.ws.profile,
+    )
+      ? props.ws.profile
+      : (handoffProfiles.value[0]?.name ?? '');
+    handoffOverrides.value = {};
+    await resolveHandoff();
+  } catch (cause) {
+    handoffError.value = (cause as Error).message;
+  }
 }
 
-function chooseHandoffAgentFromEvent(event: Event) {
-  chooseHandoffAgent((event.target as HTMLSelectElement).value);
+function chooseHandoffProfile(profile: string) {
+  handoffProfile.value = profile;
+  handoffOverrides.value = {};
 }
 
 async function submitHandoff() {
-  if (handoffBusy.value || unchangedHandoff.value) return;
+  const preview = handoffResolved.value;
+  if (handoffBusy.value || unchangedHandoff.value || !preview?.valid) return;
   handoffBusy.value = true;
   handoffError.value = '';
   try {
     await handoffSession(props.ws.id, {
-      agent: handoffAgent.value,
-      model: handoffModel.value,
-      effort: handoffEffort.value,
+      selection: handoffSelection.value,
+      expected_profile_revision: preview.profile_revision,
+      expected_resolver_revision: preview.resolver_revision,
     });
     handoffOpen.value = false;
     closeDetails('action');
-    notice.value = `Handed off to ${handoffAgent.value}.`;
+    notice.value = `Handed off to ${preview.agent}.`;
     window.dispatchEvent(new CustomEvent('loom:acp-handoff', { detail: { id: props.ws.id } }));
     await emit('reload');
-  } catch (e) {
-    handoffError.value = (e as Error).message;
+  } catch (cause) {
+    const preview = cause instanceof ApiError ? cause.body.preview : undefined;
+    const message = (cause as Error).message;
+    if (preview && typeof preview === 'object') {
+      handoffResolved.value = preview as ResolvedLaunch;
+      lastHandoffResolved.value = handoffResolved.value;
+    } else {
+      handoffResolved.value = null;
+      await resolveHandoff();
+    }
+    handoffError.value = message;
   } finally {
     handoffBusy.value = false;
   }
@@ -374,54 +443,42 @@ async function submitHandoff() {
                 </button>
                 <form
                   v-if="handoffOpen"
-                  class="space-y-3 rounded border border-line bg-input p-2"
+                  class="min-w-0 space-y-3 rounded border border-line bg-input p-2"
                   data-testid="handoff-form"
                   @submit.prevent="submitHandoff"
                 >
-                  <label class="block text-2xs font-semibold uppercase tracking-wider text-muted">
-                    Provider
-                    <select
-                      :value="handoffAgent"
-                      class="mt-1 block w-full rounded bg-surface px-2 py-1.5 text-xs font-normal normal-case tracking-normal text-fg"
-                      @change="chooseHandoffAgentFromEvent"
-                    >
-                      <option v-for="a in handoffAgents" :key="a.kind" :value="a.kind">
-                        {{ a.label }}
-                      </option>
-                    </select>
-                  </label>
-                  <label class="block text-2xs font-semibold uppercase tracking-wider text-muted">
-                    Model
-                    <select
-                      v-model="handoffModel"
-                      class="mt-1 block w-full rounded bg-surface px-2 py-1.5 text-xs font-normal normal-case tracking-normal text-fg"
-                    >
-                      <option value="">Default</option>
-                      <option v-for="m in handoffMetadata?.models ?? []" :key="m.id" :value="m.id">
-                        {{ m.label }}
-                      </option>
-                    </select>
-                  </label>
-                  <label class="block text-2xs font-semibold uppercase tracking-wider text-muted">
-                    Effort
-                    <select
-                      v-model="handoffEffort"
-                      class="mt-1 block w-full rounded bg-surface px-2 py-1.5 text-xs font-normal normal-case tracking-normal text-fg"
-                    >
-                      <option value="">Default</option>
-                      <option v-for="e in handoffMetadata?.efforts ?? []" :key="e.id" :value="e.id">
-                        {{ e.label }}
-                      </option>
-                    </select>
-                  </label>
+                  <p class="text-2xs font-semibold uppercase tracking-wider text-muted">
+                    Target profile
+                  </p>
+                  <ProfileSelector
+                    :profiles="handoffProfiles"
+                    :model-value="handoffProfile"
+                    layout="list"
+                    :disabled="handoffBusy"
+                    @update:model-value="chooseHandoffProfile"
+                  />
+                  <LaunchOverrides
+                    v-model="handoffOverrides"
+                    :agents="handoffAgents"
+                    :resolved="handoffResolved"
+                    :fallback="lastHandoffResolved"
+                    :disabled="
+                      handoffBusy || handoffResolving || Boolean(handoffResolved?.policy.strict)
+                    "
+                  />
+                  <ResolvedLaunchSummary :resolved="handoffResolved" :loading="handoffResolving" />
                   <p class="text-2xs text-faint">
                     Starts the replacement with this session's goal and conversation history.
                   </p>
-                  <p v-if="handoffError" class="text-xs text-block">{{ handoffError }}</p>
+                  <p v-if="handoffError" class="text-xs text-block" role="alert">
+                    {{ handoffError }}
+                  </p>
                   <button
                     type="submit"
                     class="btn-primary px-2.5 py-1 text-xs"
-                    :disabled="handoffBusy || unchangedHandoff || !handoffAgent"
+                    :disabled="
+                      handoffBusy || handoffResolving || unchangedHandoff || !handoffResolved?.valid
+                    "
                   >
                     {{ handoffBusy ? 'Handing off…' : 'Hand off now' }}
                   </button>

@@ -48,6 +48,9 @@ pub struct Profile {
     pub mcp_policy: String,
     /// Retired profiles remain only to support recovery of historical sessions.
     pub retired: bool,
+    /// Stable identity for one selectable profile lifetime. Ordinary edits,
+    /// environment rotation, and retirement preserve it; recreate advances it.
+    pub lifetime: i64,
     pub revision: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -361,6 +364,10 @@ pub async fn active_count(db: &Db, name: &str) -> Result<i64> {
     .await?)
 }
 
+pub fn status_consumes_capacity(status: &str) -> bool {
+    !matches!(status, "done" | "error" | "archived")
+}
+
 pub async fn list(db: &Db) -> Result<Vec<Profile>> {
     Ok(
         sqlx::query_as::<_, Profile>("SELECT * FROM profiles WHERE retired = 0 ORDER BY name")
@@ -387,7 +394,35 @@ pub async fn get(db: &Db, name: &str) -> Result<Option<Profile>> {
     )
 }
 
-pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
+/// Resolve a profile lifetime even after it has been retired. Session recovery
+/// and flattened handoff use the stamped lifetime rather than requiring the
+/// template to remain selectable for new launches.
+pub async fn get_including_retired(db: &Db, name: &str) -> Result<Option<Profile>> {
+    Ok(
+        sqlx::query_as::<_, Profile>("SELECT * FROM profiles WHERE name = ?")
+            .bind(name)
+            .fetch_optional(db)
+            .await?,
+    )
+}
+
+pub(crate) struct PreparedProfile {
+    normalized: ProfileInput,
+    mcp_policy: weaver_api::McpPolicySnapshot,
+}
+
+pub(crate) async fn prepare_input(db: &Db, input: &ProfileInput) -> Result<PreparedProfile> {
+    let (normalized, mcp_policy) = normalized_input(db, input).await?;
+    Ok(PreparedProfile {
+        normalized,
+        mcp_policy,
+    })
+}
+
+async fn normalized_input(
+    db: &Db,
+    input: &ProfileInput,
+) -> Result<(ProfileInput, weaver_api::McpPolicySnapshot)> {
     let name = input.name.trim();
     let (protocol, mode, mcp_policy) = validate_input(db, input).await?;
     let normalized = ProfileInput {
@@ -410,6 +445,119 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
         allowed_tools: input.allowed_tools.clone(),
         mcp_access: input.mcp_access.clone(),
     };
+    Ok((normalized, mcp_policy))
+}
+
+pub enum CreateProfileOutcome {
+    Created(Profile),
+    Exists(Profile),
+}
+
+/// Insert one new selectable profile lifetime atomically. A retired tombstone
+/// may be recreated under the same name, but its monotonic revision advances so
+/// a preview from an earlier lifetime can never pass an optimistic guard.
+pub async fn create(db: &Db, input: &ProfileInput) -> Result<CreateProfileOutcome> {
+    let (normalized, mcp_policy) = normalized_input(db, input).await?;
+    let name = normalized.name.as_str();
+    let ambient = serde_json::to_string(&normalized.ambient_allowlist)?;
+    let allowed_tools = serde_json::to_string(&normalized.allowed_tools)?;
+    let mcp_access = serde_json::to_string(&normalized.mcp_access)?;
+    let mcp_policy_json = serde_json::to_string(&mcp_policy)?;
+    let now = now_iso();
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
+    let existing = sqlx::query_as::<_, Profile>("SELECT * FROM profiles WHERE name = ?")
+        .bind(name)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if let Some(existing) = existing.as_ref().filter(|profile| !profile.retired) {
+        tx.rollback().await?;
+        return Ok(CreateProfileOutcome::Exists(existing.clone()));
+    }
+
+    if existing.is_some() {
+        sqlx::query(
+            "UPDATE profiles SET
+             description = ?, agent_kind = ?, model = ?, effort = ?, protocol = ?,
+             mode = ?, class = ?, strict = ?, env_clear = ?, ambient_allowlist = ?,
+             idle_archive_secs = ?, max_concurrent = ?, turn_budget = ?, prelude = ?,
+             restricted = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
+             retired = 0, lifetime = lifetime + 1,
+             revision = revision + 1, updated_at = ?
+             WHERE name = ? AND retired = 1",
+        )
+        .bind(&normalized.description)
+        .bind(&normalized.agent_kind)
+        .bind(&normalized.model)
+        .bind(&normalized.effort)
+        .bind(&normalized.protocol)
+        .bind(&normalized.mode)
+        .bind(&normalized.class)
+        .bind(normalized.strict)
+        .bind(normalized.env_clear)
+        .bind(&ambient)
+        .bind(normalized.idle_archive_secs)
+        .bind(normalized.max_concurrent)
+        .bind(normalized.turn_budget)
+        .bind(&normalized.prelude)
+        .bind(normalized.restricted)
+        .bind(&allowed_tools)
+        .bind(&mcp_access)
+        .bind(&mcp_policy_json)
+        .bind(&now)
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+        // A recreated template starts with no write-only environment from the
+        // unrelated retired lifetime.
+        sqlx::query("DELETE FROM profile_env WHERE profile_name = ?")
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+    } else {
+        sqlx::query(
+            "INSERT INTO profiles
+             (name, description, agent_kind, model, effort, protocol, mode, class,
+              strict, env_clear, ambient_allowlist, idle_archive_secs, max_concurrent,
+              turn_budget, revision, created_at, updated_at, prelude, restricted,
+              allowed_tools, mcp_access, mcp_policy)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(name)
+        .bind(&normalized.description)
+        .bind(&normalized.agent_kind)
+        .bind(&normalized.model)
+        .bind(&normalized.effort)
+        .bind(&normalized.protocol)
+        .bind(&normalized.mode)
+        .bind(&normalized.class)
+        .bind(normalized.strict)
+        .bind(normalized.env_clear)
+        .bind(&ambient)
+        .bind(normalized.idle_archive_secs)
+        .bind(normalized.max_concurrent)
+        .bind(normalized.turn_budget)
+        .bind(&now)
+        .bind(&now)
+        .bind(&normalized.prelude)
+        .bind(normalized.restricted)
+        .bind(&allowed_tools)
+        .bind(&mcp_access)
+        .bind(&mcp_policy_json)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let created =
+        sqlx::query_as::<_, Profile>("SELECT * FROM profiles WHERE name = ? AND retired = 0")
+            .bind(name)
+            .fetch_one(&mut *tx)
+            .await?;
+    tx.commit().await?;
+    Ok(CreateProfileOutcome::Created(created))
+}
+
+pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
+    let (normalized, mcp_policy) = normalized_input(db, input).await?;
+    let name = normalized.name.as_str();
     let ambient = serde_json::to_string(&normalized.ambient_allowlist)?;
     let allowed_tools = serde_json::to_string(&normalized.allowed_tools)?;
     let mcp_access = serde_json::to_string(&normalized.mcp_access)?;
@@ -440,6 +588,12 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
         }
     }
     let now = now_iso();
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
+    let reviving_retired: bool = sqlx::query_scalar("SELECT retired FROM profiles WHERE name = ?")
+        .bind(name)
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or(false);
     sqlx::query(
         "INSERT INTO profiles
          (name, description, agent_kind, model, effort, protocol, mode, class,
@@ -457,6 +611,10 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
           prelude=excluded.prelude, restricted=excluded.restricted,
           allowed_tools=excluded.allowed_tools, mcp_access=excluded.mcp_access,
           mcp_policy=excluded.mcp_policy, retired=0,
+          lifetime=CASE
+            WHEN profiles.retired = 1 THEN profiles.lifetime + 1
+            ELSE profiles.lifetime
+          END,
           revision=profiles.revision + 1, updated_at=excluded.updated_at",
     )
     .bind(name)
@@ -480,11 +638,350 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
     .bind(allowed_tools)
     .bind(mcp_access)
     .bind(mcp_policy_json)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
-    get(db, name)
+    if reviving_retired {
+        // Every revival is a new lifetime. Tombstoned credentials belong to
+        // the previous lifetime and may only return through an explicit new
+        // environment proposal.
+        sqlx::query("DELETE FROM profile_env WHERE profile_name = ?")
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+    }
+    let updated =
+        sqlx::query_as::<_, Profile>("SELECT * FROM profiles WHERE name = ? AND retired = 0")
+            .bind(name)
+            .fetch_one(&mut *tx)
+            .await?;
+    tx.commit().await?;
+    Ok(updated)
+}
+
+pub enum UpdateProfileOutcome {
+    Updated(Profile),
+    Stale(Profile),
+    Missing,
+}
+
+/// Replace an existing profile under an atomic revision guard. Environment
+/// edits use the same profile revision, so a settings form can never overwrite
+/// a template whose write-only inputs changed after it loaded.
+pub async fn update_expected(
+    db: &Db,
+    input: &ProfileInput,
+    expected_revision: i64,
+) -> Result<UpdateProfileOutcome> {
+    let (normalized, mcp_policy) = normalized_input(db, input).await?;
+    let name = normalized.name.as_str();
+    let ambient = serde_json::to_string(&normalized.ambient_allowlist)?;
+    let allowed_tools = serde_json::to_string(&normalized.allowed_tools)?;
+    let mcp_access = serde_json::to_string(&normalized.mcp_access)?;
+    let mcp_policy_json = serde_json::to_string(&mcp_policy)?;
+    let now = now_iso();
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
+    let Some(existing) =
+        sqlx::query_as::<_, Profile>("SELECT * FROM profiles WHERE name = ? AND retired = 0")
+            .bind(name)
+            .fetch_optional(&mut *tx)
+            .await?
+    else {
+        tx.rollback().await?;
+        return Ok(UpdateProfileOutcome::Missing);
+    };
+    if existing.revision != expected_revision {
+        tx.rollback().await?;
+        return Ok(UpdateProfileOutcome::Stale(existing));
+    }
+    if existing.as_input()? == normalized && existing.mcp_policy_snapshot()? == mcp_policy {
+        tx.commit().await?;
+        return Ok(UpdateProfileOutcome::Updated(existing));
+    }
+    let widens_restricted_tools = existing.restricted
+        && widens_allowlist(
+            &existing.effective_allowed_tool_rules_for(&existing.mcp_policy_snapshot()?)?,
+            &{
+                let mut rules = crate::mcp::expand_tool_sets(&normalized.allowed_tools)?;
+                rules.extend(crate::mcp::rules_for_snapshot(&mcp_policy)?);
+                rules
+            },
+        );
+    let has_automation: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sessions WHERE profile = ? AND class = 'automation')",
+    )
+    .bind(name)
+    .fetch_one(&mut *tx)
+    .await?;
+    if existing.is_automation_safe()
+        && has_automation
+        && (!normalized.strict
+            || !normalized.env_clear
+            || normalized.class != "automation"
+            || (existing.restricted && !normalized.restricted)
+            || widens_restricted_tools
+            || widens_allowlist(&existing.ambient_names()?, &normalized.ambient_allowlist))
+    {
+        bail!("cannot weaken a profile referenced by automation sessions");
+    }
+    sqlx::query(
+        "UPDATE profiles SET
+         description = ?, agent_kind = ?, model = ?, effort = ?, protocol = ?,
+         mode = ?, class = ?, strict = ?, env_clear = ?, ambient_allowlist = ?,
+         idle_archive_secs = ?, max_concurrent = ?, turn_budget = ?, prelude = ?,
+         restricted = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
+         retired = 0, revision = revision + 1, updated_at = ?
+         WHERE name = ? AND revision = ?",
+    )
+    .bind(&normalized.description)
+    .bind(&normalized.agent_kind)
+    .bind(&normalized.model)
+    .bind(&normalized.effort)
+    .bind(&normalized.protocol)
+    .bind(&normalized.mode)
+    .bind(&normalized.class)
+    .bind(normalized.strict)
+    .bind(normalized.env_clear)
+    .bind(ambient)
+    .bind(normalized.idle_archive_secs)
+    .bind(normalized.max_concurrent)
+    .bind(normalized.turn_budget)
+    .bind(&normalized.prelude)
+    .bind(normalized.restricted)
+    .bind(allowed_tools)
+    .bind(mcp_access)
+    .bind(mcp_policy_json)
+    .bind(&now)
+    .bind(name)
+    .bind(expected_revision)
+    .execute(&mut *tx)
+    .await?;
+    let updated =
+        sqlx::query_as::<_, Profile>("SELECT * FROM profiles WHERE name = ? AND retired = 0")
+            .bind(name)
+            .fetch_one(&mut *tx)
+            .await?;
+    tx.commit().await?;
+    Ok(UpdateProfileOutcome::Updated(updated))
+}
+
+pub enum CloneProfileOutcome {
+    Created(Profile),
+    Stale(Profile),
+    TargetExists,
+}
+
+/// Create a profile from a server-owned source snapshot and optionally copy its
+/// write-only environment in the same SQLite transaction. The source revision
+/// guard is checked inside that transaction, so an environment or template edit
+/// cannot race between preview and clone.
+#[cfg(test)]
+async fn create_clone(
+    db: &Db,
+    source_name: &str,
+    expected_source_revision: i64,
+    input: &ProfileInput,
+    copy_environment: bool,
+) -> Result<CloneProfileOutcome> {
+    let prepared = prepare_input(db, input).await?;
+    create_clone_prepared(
+        db,
+        source_name,
+        expected_source_revision,
+        prepared,
+        &weaver_api::CloneProfileEnvironmentReq {
+            inherit: copy_environment,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// Commit an already normalized clone proposal and its environment edits in
+/// one transaction. The caller owns the resolver-generation fence from
+/// [`prepare_input`] through this function.
+pub(crate) async fn create_clone_prepared(
+    db: &Db,
+    source_name: &str,
+    expected_source_revision: i64,
+    prepared: PreparedProfile,
+    environment: &weaver_api::CloneProfileEnvironmentReq,
+) -> Result<CloneProfileOutcome> {
+    let PreparedProfile {
+        normalized,
+        mcp_policy: current_mcp_policy,
+    } = prepared;
+    let mut seen_remove = std::collections::HashSet::new();
+    for name in &environment.remove {
+        crate::agent_env::validate_name(name).map_err(|error| anyhow!(error))?;
+        if !seen_remove.insert(name.as_str()) {
+            bail!("duplicate environment removal '{name}'");
+        }
+    }
+    let mut seen_set = std::collections::HashSet::new();
+    for entry in &environment.set {
+        crate::agent_env::validate_name(&entry.name).map_err(|error| anyhow!(error))?;
+        if !seen_set.insert(entry.name.as_str()) {
+            bail!("duplicate environment value '{}'", entry.name);
+        }
+        match (&entry.value, &entry.secret_ref) {
+            (Some(_), None) => {}
+            (None, Some(secret_ref)) => validate_gcp_secret_ref(secret_ref)?,
+            _ => bail!(
+                "environment '{}' requires exactly one of value and secret_ref",
+                entry.name
+            ),
+        }
+    }
+    let target_name = normalized.name.as_str();
+    let ambient = serde_json::to_string(&normalized.ambient_allowlist)?;
+    let allowed_tools = serde_json::to_string(&normalized.allowed_tools)?;
+    let mcp_access = serde_json::to_string(&normalized.mcp_access)?;
+    let now = now_iso();
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
+    let Some(source) =
+        sqlx::query_as::<_, Profile>("SELECT * FROM profiles WHERE name = ? AND retired = 0")
+            .bind(source_name)
+            .fetch_optional(&mut *tx)
+            .await?
+    else {
+        bail!("unknown profile '{source_name}'");
+    };
+    if source.revision != expected_source_revision {
+        tx.rollback().await?;
+        return Ok(CloneProfileOutcome::Stale(source));
+    }
+    let target = sqlx::query_as::<_, Profile>("SELECT * FROM profiles WHERE name = ?")
+        .bind(target_name)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if target.as_ref().is_some_and(|profile| !profile.retired) {
+        tx.rollback().await?;
+        return Ok(CloneProfileOutcome::TargetExists);
+    }
+
+    // `normalized_input` resolved the submitted template against the current
+    // registry before this transaction. The clone route guards that resolver
+    // fingerprint, so the snapshot written here is exactly the composition the
+    // caller reviewed (including edits made in the reusable editor).
+    if target.is_some() {
+        sqlx::query(
+            "UPDATE profiles SET
+             description = ?, agent_kind = ?, model = ?, effort = ?, protocol = ?,
+             mode = ?, class = ?, strict = ?, env_clear = ?, ambient_allowlist = ?,
+             idle_archive_secs = ?, max_concurrent = ?, turn_budget = ?, prelude = ?,
+             restricted = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
+             retired = 0, lifetime = lifetime + 1,
+             revision = revision + 1, updated_at = ?
+             WHERE name = ? AND retired = 1",
+        )
+        .bind(&normalized.description)
+        .bind(&normalized.agent_kind)
+        .bind(&normalized.model)
+        .bind(&normalized.effort)
+        .bind(&normalized.protocol)
+        .bind(&normalized.mode)
+        .bind(&normalized.class)
+        .bind(normalized.strict)
+        .bind(normalized.env_clear)
+        .bind(&ambient)
+        .bind(normalized.idle_archive_secs)
+        .bind(normalized.max_concurrent)
+        .bind(normalized.turn_budget)
+        .bind(&normalized.prelude)
+        .bind(normalized.restricted)
+        .bind(&allowed_tools)
+        .bind(&mcp_access)
+        .bind(serde_json::to_string(&current_mcp_policy)?)
+        .bind(&now)
+        .bind(target_name)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM profile_env WHERE profile_name = ?")
+            .bind(target_name)
+            .execute(&mut *tx)
+            .await?;
+    } else {
+        sqlx::query(
+            "INSERT INTO profiles
+             (name, description, agent_kind, model, effort, protocol, mode, class,
+              strict, env_clear, ambient_allowlist, idle_archive_secs, max_concurrent,
+              turn_budget, revision, created_at, updated_at, prelude, restricted,
+              allowed_tools, mcp_access, mcp_policy)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(target_name)
+        .bind(&normalized.description)
+        .bind(&normalized.agent_kind)
+        .bind(&normalized.model)
+        .bind(&normalized.effort)
+        .bind(&normalized.protocol)
+        .bind(&normalized.mode)
+        .bind(&normalized.class)
+        .bind(normalized.strict)
+        .bind(normalized.env_clear)
+        .bind(&ambient)
+        .bind(normalized.idle_archive_secs)
+        .bind(normalized.max_concurrent)
+        .bind(normalized.turn_budget)
+        .bind(&now)
+        .bind(&now)
+        .bind(&normalized.prelude)
+        .bind(normalized.restricted)
+        .bind(allowed_tools)
+        .bind(mcp_access)
+        .bind(serde_json::to_string(&current_mcp_policy)?)
+        .execute(&mut *tx)
+        .await?;
+    }
+    if environment.inherit {
+        sqlx::query(
+            "INSERT INTO profile_env
+             (profile_name, name, value, source, secret_ref, updated_at)
+             SELECT ?, name, value, source, secret_ref, ?
+             FROM profile_env
+             WHERE profile_name = ?",
+        )
+        .bind(target_name)
+        .bind(&now)
+        .bind(source_name)
+        .execute(&mut *tx)
+        .await?;
+    }
+    for name in &environment.remove {
+        sqlx::query("DELETE FROM profile_env WHERE profile_name = ? AND name = ?")
+            .bind(target_name)
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+    }
+    for entry in &environment.set {
+        let (value, source, secret_ref) = match (&entry.value, &entry.secret_ref) {
+            (Some(value), None) => (value.as_str(), "literal", None),
+            (None, Some(secret_ref)) => ("", "gcp_secret", Some(secret_ref.as_str())),
+            _ => unreachable!("environment proposal was validated"),
+        };
+        sqlx::query(
+            "INSERT INTO profile_env
+             (profile_name, name, value, source, secret_ref, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(profile_name, name) DO UPDATE SET
+              value=excluded.value, source=excluded.source,
+              secret_ref=excluded.secret_ref, updated_at=excluded.updated_at",
+        )
+        .bind(target_name)
+        .bind(&entry.name)
+        .bind(value)
+        .bind(source)
+        .bind(secret_ref)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    let created = get(db, target_name)
         .await?
-        .ok_or_else(|| anyhow!("profile vanished after upsert"))
+        .ok_or_else(|| anyhow!("cloned profile vanished after create"))?;
+    Ok(CloneProfileOutcome::Created(created))
 }
 
 fn widens_allowlist(old: &[String], new: &[String]) -> bool {
@@ -504,10 +1001,11 @@ pub async fn remove(db: &Db, name: &str) -> Result<bool> {
     if name == DEFAULT_PROFILE {
         bail!("the default profile cannot be removed");
     }
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
     let watch_referenced: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM watches WHERE profile = ?)")
             .bind(name)
-            .fetch_one(db)
+            .fetch_one(&mut *tx)
             .await?;
     if watch_referenced {
         bail!("profile '{name}' is selected by watches");
@@ -519,32 +1017,24 @@ pub async fn remove(db: &Db, name: &str) -> Result<bool> {
         )",
     )
     .bind(name)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
     if active_session_referenced {
         bail!("profile '{name}' is referenced by non-terminal sessions");
     }
-    let session_referenced: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE profile = ?)")
-            .bind(name)
-            .fetch_one(db)
-            .await?;
-    if session_referenced {
-        return Ok(
-            sqlx::query("UPDATE profiles SET retired = 1 WHERE name = ?")
-                .bind(name)
-                .execute(db)
-                .await?
-                .rows_affected()
-                > 0,
-        );
-    }
-    Ok(sqlx::query("DELETE FROM profiles WHERE name = ?")
-        .bind(name)
-        .execute(db)
-        .await?
-        .rows_affected()
-        > 0)
+    let changed = sqlx::query(
+        "UPDATE profiles
+         SET retired = 1, revision = revision + 1, updated_at = ?
+         WHERE name = ? AND retired = 0",
+    )
+    .bind(now_iso())
+    .bind(name)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    tx.commit().await?;
+    Ok(changed)
 }
 
 pub async fn env_meta(db: &Db, profile: &str) -> Result<Vec<ProfileEnvMeta>> {
@@ -625,20 +1115,35 @@ pub async fn env_set(db: &Db, profile: &str, name: &str, value: &str) -> Result<
     if get(db, profile).await?.is_none() {
         bail!("unknown profile '{profile}'");
     }
-    sqlx::query(
+    let now = now_iso();
+    let mut tx = db.begin().await?;
+    let changed = sqlx::query(
         "INSERT INTO profile_env
          (profile_name, name, value, source, secret_ref, updated_at)
          VALUES (?, ?, ?, 'literal', NULL, ?)
          ON CONFLICT(profile_name, name) DO UPDATE SET
           value=excluded.value, source='literal', secret_ref=NULL,
-          updated_at=excluded.updated_at",
+          updated_at=excluded.updated_at
+         WHERE profile_env.value != excluded.value
+            OR profile_env.source != 'literal'
+            OR profile_env.secret_ref IS NOT NULL",
     )
     .bind(profile)
     .bind(name)
     .bind(value)
-    .bind(now_iso())
-    .execute(db)
-    .await?;
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    if changed {
+        sqlx::query("UPDATE profiles SET revision = revision + 1, updated_at = ? WHERE name = ?")
+            .bind(&now)
+            .bind(profile)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -648,20 +1153,35 @@ pub async fn env_set_secret(db: &Db, profile: &str, name: &str, secret_ref: &str
         bail!("unknown profile '{profile}'");
     }
     validate_gcp_secret_ref(secret_ref)?;
-    sqlx::query(
+    let now = now_iso();
+    let mut tx = db.begin().await?;
+    let changed = sqlx::query(
         "INSERT INTO profile_env
          (profile_name, name, value, source, secret_ref, updated_at)
          VALUES (?, ?, '', 'gcp_secret', ?, ?)
          ON CONFLICT(profile_name, name) DO UPDATE SET
           value='', source='gcp_secret', secret_ref=excluded.secret_ref,
-          updated_at=excluded.updated_at",
+          updated_at=excluded.updated_at
+         WHERE profile_env.value != ''
+            OR profile_env.source != 'gcp_secret'
+            OR NOT (profile_env.secret_ref IS excluded.secret_ref)",
     )
     .bind(profile)
     .bind(name)
     .bind(secret_ref)
-    .bind(now_iso())
-    .execute(db)
-    .await?;
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    if changed {
+        sqlx::query("UPDATE profiles SET revision = revision + 1, updated_at = ? WHERE name = ?")
+            .bind(&now)
+            .bind(profile)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -732,15 +1252,23 @@ async fn resolve_gcp_secret(secret_ref: &str) -> Result<String> {
 }
 
 pub async fn env_remove(db: &Db, profile: &str, name: &str) -> Result<bool> {
-    Ok(
-        sqlx::query("DELETE FROM profile_env WHERE profile_name = ? AND name = ?")
+    let mut tx = db.begin().await?;
+    let removed = sqlx::query("DELETE FROM profile_env WHERE profile_name = ? AND name = ?")
+        .bind(profile)
+        .bind(name)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+        > 0;
+    if removed {
+        sqlx::query("UPDATE profiles SET revision = revision + 1, updated_at = ? WHERE name = ?")
+            .bind(now_iso())
             .bind(profile)
-            .bind(name)
-            .execute(db)
-            .await?
-            .rows_affected()
-            > 0,
-    )
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(removed)
 }
 
 pub async fn mark_deployment_managed(db: &Db, name: &str) -> Result<()> {
@@ -759,14 +1287,14 @@ pub async fn deployment_managed_names(db: &Db) -> Result<Vec<String>> {
     .await?)
 }
 
-/// Seed reviewed stock profile manifests when they are absent. Existing rows
-/// remain operator-editable: startup never overwrites a profile after its first
-/// seed, and deployment reconciliation can still take explicit ownership.
+/// Seed reviewed stock profile manifests only when no lifetime has ever existed
+/// under that name. Existing rows remain operator-editable, and an explicit
+/// tombstone is a durable opt-out rather than first-run absence.
 pub async fn seed_stock_profiles(db: &Db) -> Result<()> {
     for (source, contents) in STOCK_PROFILES {
         let input: ProfileInput = serde_json::from_str(contents)
             .with_context(|| format!("parsing stock profile {source}"))?;
-        if get(db, &input.name).await?.is_none() {
+        if get_including_retired(db, &input.name).await?.is_none() {
             upsert(db, &input)
                 .await
                 .with_context(|| format!("seeding stock profile {source}"))?;
@@ -933,14 +1461,50 @@ mod tests {
                 .description,
             "operator-edited description"
         );
+
+        env_set(&db, "github_comment", "STOCK_SECRET", "write-only")
+            .await
+            .unwrap();
+        let before_delete = get(&db, "github_comment").await.unwrap().unwrap();
+        remove(&db, "github_comment").await.unwrap();
+        seed_stock_profiles(&db).await.unwrap();
+        assert!(
+            get(&db, "github_comment").await.unwrap().is_none(),
+            "an explicitly deleted stock profile stays unselectable after restart seeding"
+        );
+        let tombstone = get_including_retired(&db, "github_comment")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(tombstone.retired);
+        assert_eq!(tombstone.lifetime, before_delete.lifetime);
+        assert_eq!(
+            env_get(&db, "github_comment", "STOCK_SECRET")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("write-only"),
+            "startup does not revive or clear a tombstoned lifetime"
+        );
     }
 
     #[tokio::test]
     async fn env_values_are_separate_from_metadata() {
         let db = crate::db::connect_in_memory().await.unwrap();
+        let before = get(&db, DEFAULT_PROFILE).await.unwrap().unwrap().revision;
         env_set(&db, DEFAULT_PROFILE, "API_TOKEN", "secret")
             .await
             .unwrap();
+        let after_set = get(&db, DEFAULT_PROFILE).await.unwrap().unwrap().revision;
+        assert_eq!(after_set, before + 1);
+        env_set(&db, DEFAULT_PROFILE, "API_TOKEN", "secret")
+            .await
+            .unwrap();
+        assert_eq!(
+            get(&db, DEFAULT_PROFILE).await.unwrap().unwrap().revision,
+            after_set,
+            "replaying the same literal value is not a template edit"
+        );
         assert_eq!(
             env_meta(&db, DEFAULT_PROFILE).await.unwrap()[0].name,
             "API_TOKEN"
@@ -952,6 +1516,188 @@ mod tests {
                 .as_deref(),
             Some("secret")
         );
+        env_set_secret(
+            &db,
+            DEFAULT_PROFILE,
+            "API_TOKEN",
+            "projects/test/secrets/token/versions/1",
+        )
+        .await
+        .unwrap();
+        let after_secret = get(&db, DEFAULT_PROFILE).await.unwrap().unwrap().revision;
+        assert_eq!(after_secret, after_set + 1);
+        env_set_secret(
+            &db,
+            DEFAULT_PROFILE,
+            "API_TOKEN",
+            "projects/test/secrets/token/versions/1",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            get(&db, DEFAULT_PROFILE).await.unwrap().unwrap().revision,
+            after_secret,
+            "replaying the same secret reference is not a template edit"
+        );
+        assert!(env_remove(&db, DEFAULT_PROFILE, "API_TOKEN").await.unwrap());
+        assert_eq!(
+            get(&db, DEFAULT_PROFILE).await.unwrap().unwrap().revision,
+            after_secret + 1
+        );
+        assert!(!env_remove(&db, DEFAULT_PROFILE, "API_TOKEN").await.unwrap());
+        assert_eq!(
+            get(&db, DEFAULT_PROFILE).await.unwrap().unwrap().revision,
+            after_secret + 1,
+            "a no-op removal is not a template edit"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_clone_after_environment_edit_creates_nothing() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let source = get(&db, DEFAULT_PROFILE).await.unwrap().unwrap();
+        let mut clone = source.as_input().unwrap();
+        clone.name = "default-copy".to_string();
+        env_set(&db, DEFAULT_PROFILE, "TOKEN", "changed")
+            .await
+            .unwrap();
+
+        let outcome = create_clone(&db, DEFAULT_PROFILE, source.revision, &clone, true)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, CloneProfileOutcome::Stale(_)));
+        assert!(get(&db, "default-copy").await.unwrap().is_none());
+        assert!(env_meta(&db, "default-copy").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn optimistic_profile_update_observes_environment_revisions() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let source = get(&db, DEFAULT_PROFILE).await.unwrap().unwrap();
+        let mut edited = source.as_input().unwrap();
+        edited.description = "stale editor".to_string();
+        env_set(&db, DEFAULT_PROFILE, "TOKEN", "new input")
+            .await
+            .unwrap();
+        let literal_revision = get(&db, DEFAULT_PROFILE).await.unwrap().unwrap().revision;
+        assert_eq!(literal_revision, source.revision + 1);
+        env_set(&db, DEFAULT_PROFILE, "TOKEN", "new input")
+            .await
+            .unwrap();
+        assert_eq!(
+            get(&db, DEFAULT_PROFILE).await.unwrap().unwrap().revision,
+            literal_revision,
+            "an identical literal write is not a new template input"
+        );
+        env_set_secret(
+            &db,
+            DEFAULT_PROFILE,
+            "TOKEN",
+            "projects/p/secrets/token/versions/latest",
+        )
+        .await
+        .unwrap();
+        let secret_revision = get(&db, DEFAULT_PROFILE).await.unwrap().unwrap().revision;
+        assert_eq!(secret_revision, literal_revision + 1);
+        env_set_secret(
+            &db,
+            DEFAULT_PROFILE,
+            "TOKEN",
+            "projects/p/secrets/token/versions/latest",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            get(&db, DEFAULT_PROFILE).await.unwrap().unwrap().revision,
+            secret_revision,
+            "an identical secret reference is not a new template input"
+        );
+        assert!(env_remove(&db, DEFAULT_PROFILE, "TOKEN").await.unwrap());
+        let removed_revision = get(&db, DEFAULT_PROFILE).await.unwrap().unwrap().revision;
+        assert_eq!(removed_revision, secret_revision + 1);
+        assert!(!env_remove(&db, DEFAULT_PROFILE, "TOKEN").await.unwrap());
+        assert_eq!(
+            get(&db, DEFAULT_PROFILE).await.unwrap().unwrap().revision,
+            removed_revision,
+            "removing a missing environment name is a no-op"
+        );
+
+        match update_expected(&db, &edited, source.revision)
+            .await
+            .unwrap()
+        {
+            UpdateProfileOutcome::Stale(current) => {
+                assert_eq!(current.revision, source.revision + 3)
+            }
+            _ => panic!("environment edit must make the profile editor stale"),
+        }
+        assert_ne!(
+            get(&db, DEFAULT_PROFILE)
+                .await
+                .unwrap()
+                .unwrap()
+                .description,
+            "stale editor"
+        );
+    }
+
+    #[tokio::test]
+    async fn clone_copies_environment_inside_created_profile() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        env_set(&db, DEFAULT_PROFILE, "TOKEN", "secret")
+            .await
+            .unwrap();
+        let source = get(&db, DEFAULT_PROFILE).await.unwrap().unwrap();
+        let mut clone = source.as_input().unwrap();
+        clone.name = "default-copy".to_string();
+
+        let outcome = create_clone(&db, DEFAULT_PROFILE, source.revision, &clone, true)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, CloneProfileOutcome::Created(_)));
+        assert_eq!(
+            env_get(&db, "default-copy", "TOKEN")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn clone_environment_failure_rolls_back_the_profile() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        env_set(&db, DEFAULT_PROFILE, "TOKEN", "secret")
+            .await
+            .unwrap();
+        let source = get(&db, DEFAULT_PROFILE).await.unwrap().unwrap();
+        let mut clone = source.as_input().unwrap();
+        clone.name = "copy-must-rollback".to_string();
+        sqlx::query(
+            "CREATE TRIGGER reject_clone_environment
+             BEFORE INSERT ON profile_env
+             WHEN NEW.profile_name = 'copy-must-rollback'
+             BEGIN
+               SELECT RAISE(ABORT, 'injected environment copy failure');
+             END",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        assert!(
+            create_clone(&db, DEFAULT_PROFILE, source.revision, &clone, true)
+                .await
+                .is_err()
+        );
+        assert!(get_including_retired(&db, "copy-must-rollback")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(env_meta(&db, "copy-must-rollback")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -981,6 +1727,126 @@ mod tests {
         .unwrap();
 
         assert!(remove(&db, "github_comment").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn atomic_create_allows_exactly_one_writer() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let mut input = get(&db, DEFAULT_PROFILE)
+            .await
+            .unwrap()
+            .unwrap()
+            .as_input()
+            .unwrap();
+        input.name = "atomic-create".to_string();
+        let left_db = db.clone();
+        let left_input = input.clone();
+        let right_db = db.clone();
+        let (left, right) = tokio::join!(
+            async move { create(&left_db, &left_input).await.unwrap() },
+            async move { create(&right_db, &input).await.unwrap() },
+        );
+        let created = [&left, &right]
+            .into_iter()
+            .filter(|outcome| matches!(outcome, CreateProfileOutcome::Created(_)))
+            .count();
+        let exists = [&left, &right]
+            .into_iter()
+            .filter(|outcome| matches!(outcome, CreateProfileOutcome::Exists(_)))
+            .count();
+        assert_eq!((created, exists), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn retired_name_recreation_advances_lifetime_revision() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let mut input = get(&db, DEFAULT_PROFILE)
+            .await
+            .unwrap()
+            .unwrap()
+            .as_input()
+            .unwrap();
+        input.name = "recreated".to_string();
+        match create(&db, &input).await.unwrap() {
+            CreateProfileOutcome::Created(_) => {}
+            CreateProfileOutcome::Exists(_) => panic!("new name unexpectedly existed"),
+        }
+        env_set(&db, &input.name, "OLD_SECRET", "previous-lifetime")
+            .await
+            .unwrap();
+        let first = get(&db, &input.name).await.unwrap().unwrap();
+        assert!(remove(&db, &input.name).await.unwrap());
+        let tombstone = get_including_retired(&db, &input.name)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(tombstone.retired);
+        assert_eq!(tombstone.revision, first.revision + 1);
+        assert_eq!(tombstone.lifetime, first.lifetime);
+        assert_eq!(
+            env_get(&db, &input.name, "OLD_SECRET")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("previous-lifetime"),
+            "retirement preserves credentials for same-lifetime recovery"
+        );
+
+        input.description = "unrelated replacement".to_string();
+        let replacement = match create(&db, &input).await.unwrap() {
+            CreateProfileOutcome::Created(profile) => profile,
+            CreateProfileOutcome::Exists(_) => panic!("retired name was not recreated"),
+        };
+        assert_eq!(replacement.revision, tombstone.revision + 1);
+        assert_ne!(replacement.revision, first.revision);
+        assert_eq!(replacement.lifetime, first.lifetime + 1);
+        assert!(
+            env_meta(&db, &input.name).await.unwrap().is_empty(),
+            "recreate must not revive tombstoned credentials"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_retired_revival_advances_lifetime_and_clears_environment() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let source = get(&db, DEFAULT_PROFILE).await.unwrap().unwrap();
+        let mut input = source.as_input().unwrap();
+        input.name = "revive-upsert".to_string();
+        let created = match create(&db, &input).await.unwrap() {
+            CreateProfileOutcome::Created(profile) => profile,
+            CreateProfileOutcome::Exists(_) => panic!("new profile unexpectedly existed"),
+        };
+        env_set(&db, &input.name, "TOKEN", "old").await.unwrap();
+        remove(&db, &input.name).await.unwrap();
+        let revived = upsert(&db, &input).await.unwrap();
+        assert_eq!(revived.lifetime, created.lifetime + 1);
+        assert!(env_meta(&db, &input.name).await.unwrap().is_empty());
+
+        let mut target_input = source.as_input().unwrap();
+        target_input.name = "revive-clone".to_string();
+        let target = match create(&db, &target_input).await.unwrap() {
+            CreateProfileOutcome::Created(profile) => profile,
+            CreateProfileOutcome::Exists(_) => panic!("new clone target unexpectedly existed"),
+        };
+        env_set(&db, &target_input.name, "TOKEN", "old")
+            .await
+            .unwrap();
+        remove(&db, &target_input.name).await.unwrap();
+        let current_source = get(&db, DEFAULT_PROFILE).await.unwrap().unwrap();
+        let cloned = create_clone(
+            &db,
+            DEFAULT_PROFILE,
+            current_source.revision,
+            &target_input,
+            false,
+        )
+        .await
+        .unwrap();
+        let CloneProfileOutcome::Created(cloned) = cloned else {
+            panic!("retired clone target was not revived")
+        };
+        assert_eq!(cloned.lifetime, target.lifetime + 1);
+        assert!(env_meta(&db, &target_input.name).await.unwrap().is_empty());
     }
 
     #[tokio::test]

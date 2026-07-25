@@ -154,7 +154,7 @@ for line in sys.stdin:
     await page.getByTestId("profile-agent").selectOption("codex");
     await page.getByLabel("Protocol").selectOption("acp");
     const access = page.getByRole("group", { name: "MCP access" });
-    await access.getByRole("button", { name: "groups" }).click();
+    await access.getByRole("radio", { name: "groups" }).check();
     await access.getByLabel("docs").check();
     await page.getByTestId("profile-save").click();
     await expect(page.getByText("Saved default.")).toBeVisible();
@@ -165,6 +165,20 @@ for line in sys.stdin:
       mcp_access: { mode: string; groups: string[] };
     };
     expect(profile.mcp_access).toEqual({ mode: "groups", groups: ["docs"] });
+
+    // This worker reuses one isolated server. Restore the shared default
+    // template so a later terminal seed is not intentionally rejected by the
+    // terminal + MCP cross-field invariant.
+    await access.getByRole("radio", { name: "none" }).check();
+    await page.getByTestId("profile-save").click();
+    await expect(page.getByText("Saved default.")).toBeVisible();
+    const removed = await fetch(
+      `${weaver.baseUrl}/api/mcps/custom/docs/search`,
+      {
+        method: "DELETE",
+      },
+    );
+    expect(removed.ok).toBe(true);
   });
 
   test("overlapping settings are consolidated into workspace and access", async ({

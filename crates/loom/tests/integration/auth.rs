@@ -7,6 +7,7 @@
 //! credential paths gate access as designed.
 
 use std::path::Path;
+use std::process::Command;
 
 use reqwest::StatusCode;
 use serde_json::{json, Value};
@@ -319,4 +320,61 @@ async fn session_token_is_limited_to_its_tree_and_work_items() {
         .await
         .unwrap();
     assert_eq!(admin.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn session_token_can_delegate_through_the_cli_resolve_then_create_path() {
+    let ts = TestServer::start().await;
+    let parent = ts
+        .client
+        .post(
+            "/api/sessions",
+            json!({ "cwd": ts.cwd(), "goal": "scoped parent", "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let parent_id = parent["id"].as_str().unwrap();
+    let parent_branch_id = parent["branch"]["id"].as_str().unwrap();
+    let token = loom::auth::create_session_token(
+        &ts.state.db,
+        Some("rjpower"),
+        parent_id,
+        parent_branch_id,
+    )
+    .await
+    .unwrap();
+    ts.client
+        .patch("/api/settings", json!({ "auth.trust_loopback": false }))
+        .await
+        .unwrap();
+
+    let cwd = ts.cwd();
+    let output = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args([
+            "session",
+            "launch",
+            "--repo",
+            &cwd,
+            "--agent",
+            "shell",
+            "delegated through scoped CLI",
+        ])
+        .env("WEAVER_API", format!("http://{}", ts.addr))
+        .env("WEAVER_BRANCH", parent_branch_id)
+        .env("LOOM_TOKEN", token)
+        .output()
+        .expect("running scoped loom session launch");
+    assert!(
+        output.status.success(),
+        "scoped launch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let children = loom::session::list(&ts.state.db).await.unwrap();
+    let child = children
+        .iter()
+        .find(|session| session.parent_session_id.as_deref() == Some(parent_id))
+        .expect("CLI launch created a child of the scoped session");
+    assert_eq!(child.creator_kind, "session");
 }

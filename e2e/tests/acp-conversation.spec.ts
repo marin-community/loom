@@ -191,11 +191,34 @@ test.describe('acp conversation', () => {
     await expect(conv.getByText('before handoff', { exact: true })).toBeVisible();
     await expect(page.getByTestId('acp-turn-rule')).toBeVisible();
     await defineFakeAcpAgent(weaver, 'acp-fake-next', 'ACP fake next');
+    await fetch(`${weaver.baseUrl}/api/profiles`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'handoff-target',
+        description: 'Target provider for handoff',
+        agent_kind: 'acp-fake-next',
+        model: '',
+        effort: '',
+        protocol: 'acp',
+        mode: 'default',
+        class: 'interactive',
+        strict: false,
+        env_clear: false,
+        ambient_allowlist: [],
+        max_concurrent: 1,
+        prelude: 'weaver',
+        restricted: false,
+        runtime_permissions: [],
+        mcp_access: { mode: 'none', groups: [] },
+      }),
+    });
 
     await page.getByRole('button', { name: /Details/ }).click();
     await page.getByTestId('action-handoff').click();
     const form = page.getByTestId('handoff-form');
-    await form.getByLabel('Provider').selectOption('acp-fake-next');
+    await form.getByTestId('profile-option-handoff-target').click();
+    await expect(form.getByTestId('resolved-launch-summary')).toContainText('acp-fake-next');
     await form.getByRole('button', { name: 'Hand off now' }).click();
 
     // The stable session URL and earlier prose survive; only the provider and
@@ -769,10 +792,10 @@ test.describe('acp conversation', () => {
     await expect(permissions).toContainText('Accept edits');
 
     const model = page.getByTestId('acp-config-model');
-    await expect(model).toContainText('fake-fast');
+    await expect(model).toContainText('Fake fast');
     await model.getByRole('button').first().click();
-    await page.getByTestId('acp-config-menu').getByText('fake-deep', { exact: true }).click();
-    await expect(model).toContainText('fake-deep');
+    await page.getByTestId('acp-config-menu').getByText('Fake deep', { exact: true }).click();
+    await expect(model).toContainText('Fake deep');
 
     const effort = page.getByTestId('acp-config-thought_level');
     await expect(effort).toContainText('Medium');
@@ -889,6 +912,11 @@ test.describe('acp conversation', () => {
     const form = page.getByTestId('handoff-form');
     await form.scrollIntoViewIfNeeded();
     await expect(form).toBeVisible();
+    await page.getByRole('button', { name: /Details/ }).click();
+    await expect(form).toHaveCount(0);
+    await page.getByRole('button', { name: /Details/ }).click();
+    await page.getByTestId('action-handoff').click();
+    await expect(page.getByTestId('handoff-form')).toBeVisible();
 
     const bounds = await scroller.evaluate((element) => ({
       clientHeight: element.clientHeight,

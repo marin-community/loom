@@ -617,12 +617,21 @@ pub async fn lookup_token(db: &Db, token: &str) -> Result<Option<Principal>> {
 /// Mint an opaque credential bound to exactly one session and branch. The
 /// primary/admin user owns the row for lifecycle cleanup, while authorization
 /// comes exclusively from the serialized session grant.
-pub async fn create_session_token(
+#[derive(Debug)]
+pub struct StagedSessionToken {
+    pub id: String,
+    pub value: String,
+}
+
+/// Mint a session credential without revoking any predecessor. Provider
+/// handoff uses this staged form so a rejected preflight or teardown rollback
+/// leaves the live source token fully usable.
+pub async fn stage_session_token(
     db: &Db,
     owner: Option<&str>,
     session_id: &str,
     branch_id: &str,
-) -> Result<String> {
+) -> Result<StagedSessionToken> {
     let username = match owner {
         Some(username) if get_user(db, username).await?.is_some() => username.to_string(),
         _ => primary_user(db)
@@ -640,7 +649,7 @@ pub async fn create_session_token(
          (id, username, name, token_hash, prefix, kind, grant_json, subject, bound_session_id)
          VALUES (?, ?, ?, ?, ?, 'session', ?, ?, ?)",
     )
-    .bind(id)
+    .bind(&id)
     .bind(username)
     .bind(format!("session {session_id}"))
     .bind(hash)
@@ -650,7 +659,45 @@ pub async fn create_session_token(
     .bind(session_id)
     .execute(db)
     .await?;
-    Ok(plain)
+    Ok(StagedSessionToken { id, value: plain })
+}
+
+pub async fn create_session_token(
+    db: &Db,
+    owner: Option<&str>,
+    session_id: &str,
+    branch_id: &str,
+) -> Result<String> {
+    Ok(stage_session_token(db, owner, session_id, branch_id)
+        .await?
+        .value)
+}
+
+/// Roll back one uncommitted replacement credential without touching the live
+/// source session's other tokens.
+pub async fn revoke_staged_session_token(db: &Db, token_id: &str) -> Result<bool> {
+    Ok(
+        sqlx::query("DELETE FROM api_tokens WHERE id = ? AND kind = 'session'")
+            .bind(token_id)
+            .execute(db)
+            .await?
+            .rows_affected()
+            == 1,
+    )
+}
+
+/// Commit a replacement credential by retaining exactly `token_id` for the
+/// session and revoking only superseded session tokens.
+pub async fn commit_staged_session_token(db: &Db, session_id: &str, token_id: &str) -> Result<u64> {
+    Ok(sqlx::query(
+        "DELETE FROM api_tokens
+         WHERE kind = 'session' AND bound_session_id = ? AND id <> ?",
+    )
+    .bind(session_id)
+    .bind(token_id)
+    .execute(db)
+    .await?
+    .rows_affected())
 }
 
 pub async fn revoke_session_tokens(db: &Db, session_id: &str) -> Result<u64> {

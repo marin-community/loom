@@ -26,7 +26,7 @@ const MAIN: RailItem[] = [
   {
     to: '/',
     label: 'Sessions',
-    match: (p) => p === '/' || p.startsWith('/s/'),
+    match: (p) => p === '/' || p.startsWith('/s/') || p === '/sessions/new',
     // square-terminal — a session is a live agent terminal.
     paths: [
       'm7 11 2-2-2-2',

@@ -133,7 +133,12 @@ export interface Session {
   usage: AcpUsage | null;
   profile: string;
   profile_revision: number;
+  profile_lifetime: number;
+  policy_strict: boolean;
+  mutation_revision: number;
   launch_mode: string;
+  /** Immutable, source-redacted launch resolution stamped by the server. */
+  resolved_launch: ResolvedLaunch | null;
   /** Exact capability snapshot stamped at launch. Custom source is redacted. */
   mcp_policy: SessionMcpPolicy;
   /** The ACP modes the adapter offers, when the server exposes them. Absent today
@@ -892,6 +897,7 @@ export interface Profile {
   restricted: boolean;
   runtime_permissions: string[];
   mcp_access: McpAccess;
+  lifetime: number;
   revision: number;
   created_at: string;
   updated_at: string;
@@ -903,6 +909,125 @@ export interface ProfileEnv {
   source: 'literal' | 'gcp_secret';
   secret_ref: string | null;
   updated_at: string;
+}
+
+export interface ProfileEnvMutation {
+  name: string;
+  value?: string;
+  secret_ref?: string;
+}
+
+export interface CloneProfileEnvironment {
+  inherit: boolean;
+  remove: string[];
+  set: ProfileEnvMutation[];
+}
+
+export interface LaunchOverrides {
+  agent?: string;
+  model?: string;
+  effort?: string;
+  protocol?: string;
+  mode?: string;
+  class?: string;
+}
+
+export interface LaunchSelection {
+  profile: string;
+  overrides: LaunchOverrides;
+}
+
+export type LaunchSource =
+  'profile' | 'agent_default' | 'origin_default' | 'policy_default' | 'launch_override';
+
+export interface LaunchProvenance {
+  agent: LaunchSource;
+  model: LaunchSource;
+  effort: LaunchSource;
+  protocol: LaunchSource;
+  mode: LaunchSource;
+  class: LaunchSource;
+  idle_archive_secs: LaunchSource;
+  turn_budget: LaunchSource;
+}
+
+export interface LaunchCapacity {
+  active: number;
+  maximum: number | null;
+  available: number | null;
+  allowed: boolean;
+}
+
+export interface ResolvedLaunchPolicy {
+  strict: boolean;
+  restricted: boolean;
+  env_clear: boolean;
+  environment: ProfileEnv[];
+  ambient_allowlist: string[];
+  idle_archive_secs: number | null;
+  turn_budget: number | null;
+  prelude: string;
+  runtime_permissions: string[];
+  mcp_policy: SessionMcpPolicy;
+}
+
+export interface ResolvedCustomAgent {
+  name: string;
+  label: string;
+  setup: string;
+  launch: string;
+  resume: string;
+  reports_status: boolean;
+  protocol: string;
+}
+
+export interface ResolvedLaunch {
+  selection: LaunchSelection;
+  profile_lifetime: number;
+  profile_revision: number;
+  resolver_revision: string;
+  agent: string;
+  model: string;
+  effort: string;
+  protocol: string;
+  mode: string;
+  class: 'interactive' | 'automation';
+  custom_agent: ResolvedCustomAgent | null;
+  locked_fields: string[];
+  provenance: LaunchProvenance;
+  capacity: LaunchCapacity;
+  policy: ResolvedLaunchPolicy;
+  valid: boolean;
+  errors: string[];
+}
+
+export interface HandoffInput {
+  /** Canonical clients send selection plus both preview revisions. */
+  selection?: LaunchSelection;
+  expected_profile_revision?: number;
+  expected_resolver_revision?: string;
+  /** Flattened compatibility selectors preserve the stamped session policy. */
+  agent?: string;
+  model?: string;
+  effort?: string;
+  mode?: string;
+}
+
+export interface CloneProfileInput {
+  name: string;
+  expected_profile_revision: number;
+  expected_resolver_revision: string;
+  overrides: LaunchOverrides;
+  template?: ProfileInput;
+  copy_environment: boolean;
+  environment?: CloneProfileEnvironment;
+}
+
+export interface ScratchLimits {
+  max_files: number;
+  max_file_bytes: number;
+  max_total_bytes: number;
+  max_name_bytes: number;
 }
 
 /** Trusted MCP registry. Capability-set names are provider-neutral profile
@@ -971,7 +1096,12 @@ export type CustomMcpInput = Pick<
   'identity' | 'label' | 'description' | 'enabled' | 'source' | 'test_source'
 >;
 
-export type ProfileInput = Omit<Profile, 'revision' | 'created_at' | 'updated_at' | 'env'>;
+export type ProfileInput = Omit<
+  Profile,
+  'lifetime' | 'revision' | 'created_at' | 'updated_at' | 'env'
+> & {
+  expected_revision?: number;
+};
 
 /**
  * The GitHub App / sign-in config (secret withheld). Mirrors `GithubConfigView`.

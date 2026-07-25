@@ -192,12 +192,26 @@ pub struct SessionView {
     /// Revision of the profile whose non-secret policy was stamped at launch.
     #[serde(default)]
     pub profile_revision: i64,
+    /// Stable identity of the profile lifetime accepted at launch. Zero means
+    /// an upgraded row whose same-name relationship could not be proven.
+    #[serde(default)]
+    pub profile_lifetime: i64,
+    /// Immutable environment precedence accepted at launch.
+    #[serde(default)]
+    pub policy_strict: bool,
+    /// Monotonic lifecycle/goal mutation generation used to fence handoff.
+    #[serde(default)]
+    pub mutation_revision: i64,
     /// Resolved launch permission posture, immutable for this session.
     #[serde(default)]
     pub launch_mode: String,
     /// Exact, source-redacted MCP capability snapshot stamped at launch.
     #[serde(default)]
     pub mcp_policy: SessionMcpPolicyView,
+    /// Canonical server-resolved launch snapshot. Older sessions created before
+    /// the launch-composition contract expose `null`.
+    #[serde(default)]
+    pub resolved_launch: Option<ResolvedLaunchView>,
     pub branch: BranchView,
 }
 
@@ -288,12 +302,17 @@ fn default_profile() -> String {
     "default".to_string()
 }
 
+fn default_profile_lifetime() -> i64 {
+    1
+}
+
 fn default_prelude() -> String {
     "weaver".to_string()
 }
 
-/// A reusable, named session launch posture. Secret environment values are
-/// deliberately excluded; `env` contains names and update timestamps only.
+/// A reusable, named session launch template. It is concretized into an
+/// immutable `ResolvedLaunchView` for each accepted launch/handoff. Secret
+/// environment values are excluded; `env` contains metadata only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileView {
     pub name: String,
@@ -318,6 +337,10 @@ pub struct ProfileView {
     pub runtime_permissions: Vec<String>,
     #[serde(default)]
     pub mcp_access: McpAccess,
+    /// Servers predating profile lifetimes expose only the original selectable
+    /// lifetime, so a newer typed client can safely interpret omission as 1.
+    #[serde(default = "default_profile_lifetime")]
+    pub lifetime: i64,
     pub revision: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -509,6 +532,187 @@ pub struct ProfileProbeView {
     pub errors: Vec<String>,
 }
 
+/// Fields a caller may layer over a named profile for one launch. Presence is
+/// significant: an omitted (or blank agent) field inherits while an explicit
+/// empty model or effort selects the agent's own default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchOverrides {
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub class: Option<String>,
+}
+
+/// Canonical profile-template selection accepted by launch preview, session
+/// create, handoff, and profile clone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchSelection {
+    #[serde(default = "default_profile")]
+    pub profile: String,
+    #[serde(default)]
+    pub overrides: LaunchOverrides,
+}
+
+impl Default for LaunchSelection {
+    fn default() -> Self {
+        Self {
+            profile: default_profile(),
+            overrides: LaunchOverrides::default(),
+        }
+    }
+}
+
+/// Provenance for every concrete runtime selector in a resolved launch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaunchProvenanceView {
+    pub agent: String,
+    pub model: String,
+    pub effort: String,
+    pub protocol: String,
+    pub mode: String,
+    pub class: String,
+    #[serde(default)]
+    pub idle_archive_secs: String,
+    #[serde(default)]
+    pub turn_budget: String,
+}
+
+/// Capacity observed while resolving a launch. The repository launch gate
+/// rechecks it immediately before provisioning, so this is an honest preview,
+/// not an admission reservation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaunchCapacityView {
+    pub active: i64,
+    pub maximum: Option<i64>,
+    pub available: Option<i64>,
+    pub allowed: bool,
+}
+
+/// Source-redacted security and lifecycle policy that will be stamped on the
+/// session. Environment values and custom MCP source are deliberately absent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvedLaunchPolicyView {
+    pub strict: bool,
+    pub restricted: bool,
+    pub env_clear: bool,
+    pub environment: Vec<ProfileEnvView>,
+    pub ambient_allowlist: Vec<String>,
+    pub idle_archive_secs: Option<i64>,
+    pub turn_budget: Option<i64>,
+    pub prelude: String,
+    pub runtime_permissions: Vec<String>,
+    pub mcp_policy: SessionMcpPolicyView,
+}
+
+/// Exact non-secret command/runtime definition accepted for a custom agent.
+/// Builtin agents omit this field. Persisting it makes adopt/recover use the
+/// reviewed runtime even if the mutable registry is later edited or deleted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvedCustomAgentView {
+    pub name: String,
+    pub label: String,
+    pub setup: String,
+    pub launch: String,
+    pub resume: String,
+    pub reports_status: bool,
+    pub protocol: String,
+}
+
+/// Concrete non-secret immutable launch snapshot returned by preview and
+/// stored with the created session (or replacement handoff runtime).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvedLaunchView {
+    pub selection: LaunchSelection,
+    #[serde(default)]
+    pub profile_lifetime: i64,
+    pub profile_revision: i64,
+    pub resolver_revision: String,
+    pub agent: String,
+    pub model: String,
+    pub effort: String,
+    pub protocol: String,
+    pub mode: String,
+    pub class: String,
+    #[serde(default)]
+    pub custom_agent: Option<ResolvedCustomAgentView>,
+    pub locked_fields: Vec<String>,
+    pub provenance: LaunchProvenanceView,
+    pub capacity: LaunchCapacityView,
+    pub policy: ResolvedLaunchPolicyView,
+    pub valid: bool,
+    pub errors: Vec<String>,
+}
+
+/// Body for `POST /api/session-launches/resolve`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResolveLaunchReq {
+    #[serde(default)]
+    pub selection: LaunchSelection,
+}
+
+/// Body for `POST /api/profiles/{name}/clone`. Creation is insert-only and
+/// atomic; the caller may submit the fully edited proposed template.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CloneProfileReq {
+    pub name: String,
+    pub expected_profile_revision: i64,
+    /// Resolver fingerprint from the composition the caller reviewed. A custom
+    /// agent/MCP/policy-default drift returns 409 with a fresh preview.
+    pub expected_resolver_revision: String,
+    #[serde(default)]
+    pub overrides: LaunchOverrides,
+    /// Optional editable template proposal. When present, policy/lifecycle/MCP
+    /// fields are validated as submitted while source revision and environment
+    /// copy remain server-owned and atomic.
+    #[serde(default)]
+    pub template: Option<ProfileReq>,
+    #[serde(default)]
+    pub copy_environment: bool,
+    /// Editable write-only environment composition. Omission preserves the
+    /// legacy `copy_environment` behavior.
+    #[serde(default)]
+    pub environment: Option<CloneProfileEnvironmentReq>,
+}
+
+/// Atomic environment composition for a cloned profile. Inherited values are
+/// copied server-side; literal values and secret references are write-only.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CloneProfileEnvironmentReq {
+    #[serde(default)]
+    pub inherit: bool,
+    #[serde(default)]
+    pub remove: Vec<String>,
+    #[serde(default)]
+    pub set: Vec<ProfileEnvMutationReq>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProfileEnvMutationReq {
+    pub name: String,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub secret_ref: Option<String>,
+}
+
+/// Shared upload limits for launch-time and live-session Scratch attachments:
+/// 20 files, 25 MiB each, 50 MiB decoded total. `.gitignore` is reserved.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScratchLimitsView {
+    pub max_files: usize,
+    pub max_file_bytes: usize,
+    pub max_total_bytes: usize,
+    pub max_name_bytes: usize,
+}
+
 /// Body for creating or replacing a profile.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProfileReq {
@@ -548,6 +752,10 @@ pub struct ProfileReq {
     pub runtime_permissions: Vec<String>,
     #[serde(default)]
     pub mcp_access: McpAccess,
+    /// Optimistic update guard. Omitted remains compatible with older clients;
+    /// interactive editors always send the revision they loaded.
+    #[serde(default)]
+    pub expected_revision: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1326,12 +1534,26 @@ pub struct CreateReq {
     /// Named launch profile. Blank/absent selects `default`.
     #[serde(default)]
     pub profile: Option<String>,
+    /// Canonical launch selection. Requires both expected revisions returned by
+    /// `/api/session-launches/resolve`. Flattened fields remain compatible.
+    #[serde(default)]
+    pub selection: Option<LaunchSelection>,
+    /// Revisions returned by the last resolve preview. Canonical input requires
+    /// both; drift returns 409 with a fresh preview.
+    #[serde(default)]
+    pub expected_profile_revision: Option<i64>,
+    #[serde(default)]
+    pub expected_resolver_revision: Option<String>,
 }
 
-/// Body for `POST /api/sessions/{id}/handoff`: replace the live ACP runtime
-/// while keeping the loom session, worktree, and canonical chat journal.
+/// Body for `POST /api/sessions/{id}/handoff`: canonical `selection` requires
+/// both revisions from `/handoff/resolve` and stamps the target template.
+/// Flattened input is legacy runtime-only compatibility and preserves the
+/// session's stamped profile/policy.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HandoffReq {
+    /// Legacy flattened runtime selector. Canonical clients use `selection`.
+    #[serde(default)]
     pub agent: String,
     /// Blank/absent uses the target runtime's default.
     #[serde(default)]
@@ -1342,6 +1564,12 @@ pub struct HandoffReq {
     /// ACP permission posture. Blank/absent uses the configured `agent.mode`.
     #[serde(default)]
     pub mode: Option<String>,
+    #[serde(default)]
+    pub selection: Option<LaunchSelection>,
+    #[serde(default)]
+    pub expected_profile_revision: Option<i64>,
+    #[serde(default)]
+    pub expected_resolver_revision: Option<String>,
 }
 
 /// Body for `PATCH /api/sessions/{id}`. Branch-level fields (goal/title/
