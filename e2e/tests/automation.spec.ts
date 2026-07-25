@@ -122,11 +122,58 @@ test.describe("automation session surface", () => {
     await expect(page).toHaveTitle("Weaver - Automation");
 
     await page.goto(`${weaver.baseUrl}/?view=unknown&history=true`);
-    await expect(page.getByTestId("workspace-pane-link")).toHaveAttribute(
+    await expect(page.getByTestId("history-pane-link")).toHaveAttribute(
       "aria-current",
       "page",
     );
     await expect(page.getByTestId("automation-pane")).toHaveCount(0);
+  });
+
+  test("the shared workbench inventory excludes engine-managed warm sessions", async ({
+    page,
+    weaver,
+  }) => {
+    const managed = await seedAutomationSession(
+      weaver.baseUrl,
+      weaver.repoPath,
+      {
+        name: "watch-warm-infrastructure",
+        goal: "Stay outside user inventory",
+      },
+    );
+    await weaver.archiveSession(managed.id);
+    await weaver.setManaged(managed.id);
+
+    const inventoryRequests: string[] = [];
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname === "/api/sessions") {
+        inventoryRequests.push(request.url());
+      }
+    });
+
+    await page.goto(weaver.baseUrl);
+    await expect.poll(() => inventoryRequests.length).toBeGreaterThan(0);
+    const inventory = new URL(inventoryRequests[0]);
+    expect(inventory.searchParams.get("archived")).toBe("true");
+    expect(inventory.searchParams.get("automation")).toBe("true");
+    expect(inventory.searchParams.has("managed")).toBe(false);
+    await expect(
+      page.locator(`[data-session-id="${managed.id}"]`),
+    ).toHaveCount(0);
+    await expect(page.getByTestId("status-bar-history")).toHaveCount(0);
+    await expect(
+      page.getByTestId("history-pane-link").locator('[aria-label="0 archived sessions"]'),
+    ).toBeVisible();
+
+    await page.getByTestId("automation-pane-link").click();
+    await expect(
+      page.locator(`[data-session-id="${managed.id}"]`),
+    ).toHaveCount(0);
+    await page.getByTestId("history-pane-link").click();
+    await expect(
+      page.locator(`[data-session-id="${managed.id}"]`),
+    ).toHaveCount(0);
+    await expect(page.getByTestId("row-actions")).toHaveCount(0);
   });
 
   test("exceptions are ordered blocked, lifecycle failures, then attention", async ({
@@ -246,6 +293,26 @@ test.describe("automation session surface", () => {
 
     await page.reload();
     await expect(page.getByTestId("automation-history")).toBeVisible();
+
+    const archivedRow = page
+      .getByTestId("automation-history")
+      .locator(`[data-session-id="${archived.id}"]`);
+    await archivedRow.getByRole("link", { name: "archived-run" }).click();
+    const historyBack = page.getByRole("link", {
+      name: "← automation history",
+    });
+    const historyHref = new URL(
+      (await historyBack.getAttribute("href"))!,
+      weaver.baseUrl,
+    );
+    expect(historyHref.pathname).toBe("/");
+    expect(historyHref.searchParams.get("view")).toBe("automation");
+    expect(historyHref.searchParams.get("history")).toBe("true");
+
+    await page.getByTestId("remedy-recover").click();
+    await expect(
+      page.getByRole("link", { name: "← automation" }),
+    ).toHaveAttribute("href", "/?view=automation");
   });
 
   test("automation sessions expose the same lifecycle controls as workspace sessions", async ({

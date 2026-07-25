@@ -316,10 +316,9 @@ update the issues; when issues change shape, update the doc's references.*
   instant flip on the warm page, not a route swap. The panel can **pop out** into
   a resizable rail beside the live terminal (mirroring the embedded-editor
   panel), so the user reads an artifact and watches the agent at once.
-- **Overview** pins the well-known `plan` artifact where `SessionPlan`
-  renders today; the goal renders as projected markdown above it.
-  `SessionPlan.vue`'s reconcile modal goes; its render path becomes the
-  artifact viewer.
+- **Session detail** keeps the branch goal/prompt as a collapsed, bounded
+  disclosure in Details. Documents, including the well-known `plan`, remain on
+  the canonical Artifacts surface instead of being duplicated into an overview.
 - **Projection pass** in the markdown renderer: `#123` → live status chip
   linking to the issue, `artifact:` links resolve, checked state for a
   referenced issue comes from the ledger, never the text.
@@ -353,7 +352,7 @@ Each step shippable alone:
 1. **Tables + CLI + events** — `artifacts`/`artifact_versions`, `weaver
    artifact write|ls|show`, `artifact_written`. Useful immediately as a
    durable, out-of-repo doc store.
-2. **Loom surface** — routes, viewer, Overview pin, activity/SSE.
+2. **Loom surface** — routes, viewer, session Details context, activity/SSE.
 3. **smartdoc + projection** — the crate, ref resolution in `GET`, status
    chips in `MarkdownView`, the `goal` artifact.
 4. **The deletion** — retire `weaver plan`, the sync engine, `/plan` routes,

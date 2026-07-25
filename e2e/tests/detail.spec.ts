@@ -2,7 +2,12 @@ import { test, expect } from '../fixtures/weaver';
 
 test.describe('session detail view', () => {
   test('renders goal, status and identity metadata', async ({ page, weaver }) => {
-    const s = await weaver.seedSession({ goal: 'Render my details', name: 'detail-task' });
+    const goal = Array.from(
+      { length: 40 },
+      (_, index) => `Private operator context line ${index + 1}`,
+    ).join('\n');
+    const s = await weaver.seedSession({ goal, name: 'detail-task' });
+    await weaver.seedIssue(s, 'Scoped from Details');
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
 
@@ -11,25 +16,145 @@ test.describe('session detail view', () => {
     // badge for it (only off-nominal states get one, as on the fleet list).
     await expect(page.getByTestId('status-badge')).toHaveCount(0);
 
-    // The goal is the agent's launch prompt — read-only prose on the Overview
-    // tab, not an editable field.
-    await page.getByRole('button', { name: 'Overview' }).click();
-    // Scope to the goal element — the goal text also appears in the tracking
-    // issue's body in the issues panel, so a bare getByText is ambiguous.
-    await expect(page.getByTestId('session-goal')).toHaveText('Render my details');
+    await expect(page.getByRole('button', { name: 'Overview' })).toHaveCount(0);
 
-    // Identity metadata (id, branch, base) lives behind the ⋯ manage menu, under
-    // the lifecycle actions, not cluttering the header. Scope to the popover and
-    // match exactly so the id doesn't also match the `weaver-<id>` terminal line.
-    await page.getByRole('button', { name: 'manage' }).click();
+    // Identity and goal context live behind a keyboard-operable Details popover,
+    // not in permanent header chrome.
+    const trigger = page.getByRole('button', { name: /Details/ });
+    await trigger.focus();
+    await trigger.press('Enter');
     const details = page.getByTestId('details-popover');
+    await expect(details.locator(':focus')).toHaveCount(1);
+    await expect(details).toHaveAttribute('role', 'region');
+    await expect(details).not.toHaveAttribute('aria-modal', 'true');
     await expect(details.getByText(s.id, { exact: true })).toBeVisible();
     await expect(details.getByText(s.branch.branch, { exact: true })).toBeVisible();
     await expect(details.getByText(`base ${s.branch.base_branch}`)).toBeVisible();
+    await expect(details.getByTestId('session-goal-context')).toBeHidden();
+    await details.getByText('Goal / prompt', { exact: true }).click();
+    const goalContext = details.getByTestId('session-goal-context');
+    await expect(goalContext).toHaveText(goal);
+    await expect(goalContext).toHaveCSS('overflow-y', 'auto');
+    const goalBounds = await goalContext.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+    }));
+    expect(goalBounds.scrollHeight).toBeGreaterThan(goalBounds.clientHeight);
+    await expect(details.locator('a[href$="/artifacts/goal"]')).toHaveCount(0);
+
+    // Details preserves a contextual Issues path, scoped by the literal branch
+    // name (not the branch row id) for #630's claimed/source branch matching.
+    const issuesLink = details.getByRole('link', { name: /\d+ open issues?/ });
+    const issuesHref = await issuesLink.getAttribute('href');
+    const issuesTarget = new URL(issuesHref!, weaver.baseUrl);
+    expect(issuesTarget.pathname).toBe('/issues');
+    expect(issuesTarget.searchParams.get('repo_root')).toBe(s.branch.repo_root);
+    expect(issuesTarget.searchParams.get('branch')).toBe(s.branch.branch);
+
+    // Escape dismisses the nonmodal popover and returns focus to its trigger.
+    await page.keyboard.press('Escape');
+    await expect(details).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+  });
+
+  test('an old Overview deep link falls back to the operational surface', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({
+      goal: 'Legacy bookmark',
+      name: 'legacy-overview',
+    });
+
+    await page.goto(`${weaver.baseUrl}/s/${s.id}?tab=overview`);
+    await expect(page).toHaveURL(`${weaver.baseUrl}/s/${s.id}`);
+    await expect(page.getByRole('button', { name: 'Overview' })).toHaveCount(0);
+    await expect(page.locator('[data-tab="terminal"]')).toHaveText('Agent');
+    await expect(page.locator('[data-term-tab="agent"]')).toBeVisible();
+  });
+
+  test('outside dismissal preserves the focus target that was clicked', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({
+      goal: 'Dismiss lightly',
+      name: 'outside-focus',
+    });
+
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await page.getByRole('button', { name: /Details/ }).click();
+    await expect(page.getByTestId('details-popover')).toBeVisible();
+
+    const agentTab = page.locator('[data-tab="terminal"]');
+    await agentTab.click();
+    await expect(page.getByTestId('details-popover')).toHaveCount(0);
+    await expect(agentTab).toBeFocused();
+  });
+
+  test('resource navigation closes Details across cached session routes', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({
+      goal: 'Navigate cleanly',
+      name: 'details-navigation',
+    });
+    await weaver.seedIssue(s, 'Scoped navigation');
+
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await page.getByRole('button', { name: /Details/ }).click();
+    await page.getByTestId('details-popover').getByRole('link', { name: 'Artifacts' }).click();
+    await expect(page).toHaveURL(new RegExp(`/s/${s.id}/artifacts`));
+    await expect(page.getByTestId('details-popover')).toHaveCount(0);
+
+    await page.locator('[data-tab="terminal"]').click();
+    await page.getByRole('button', { name: /Details/ }).click();
+    await page
+      .getByTestId('details-popover')
+      .getByRole('link', { name: /\d+ open issues?/ })
+      .click();
+    await expect(page).toHaveURL(/\/issues\?/);
+    await expect(page.getByTestId('details-popover')).toHaveCount(0);
+
+    await page.goBack();
+    await expect(page).toHaveURL(`${weaver.baseUrl}/s/${s.id}`);
+    await expect(page.getByTestId('details-popover')).toHaveCount(0);
+  });
+
+  test('Details preserves bounded, deduplicated surfaced links', async ({ page, weaver }) => {
+    const s = await weaver.seedSession({
+      goal: 'Keep operational links',
+      name: 'surfaced-links',
+    });
+    for (let index = 0; index < 13; index += 1) {
+      await weaver.setStatus(
+        s,
+        'attention',
+        `Review https://example.test/doc/${index} before continuing`,
+      );
+    }
+    await weaver.setStatus(s, 'attention', 'Latest: https://example.test/doc/12.');
+
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await page.getByRole('button', { name: /Details/ }).click();
+    await page.getByText('Surfaced links (12)', { exact: true }).click();
+
+    const links = page.getByTestId('session-links');
+    await expect(links.getByRole('link')).toHaveCount(12);
+    await expect(links.getByRole('link', { name: 'example.test/doc/12' })).toHaveCount(1);
+    await expect(links.getByRole('link', { name: 'example.test/doc/12' })).toHaveAttribute(
+      'href',
+      'https://example.test/doc/12',
+    );
+    await expect(links.getByText('example.test/doc/0', { exact: true })).toHaveCount(0);
   });
 
   test('sets the browser tab title to the open session', async ({ page, weaver }) => {
-    const s = await weaver.seedSession({ goal: 'Name my tab', name: 'tab-task' });
+    const s = await weaver.seedSession({
+      goal: 'Name my tab',
+      name: 'tab-task',
+    });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
 
@@ -57,6 +182,7 @@ test.describe('session detail view', () => {
     });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await page.getByRole('button', { name: /Details/ }).click();
     const prPill = page.getByTestId('pr-association-pill');
     const issuePill = page.getByTestId('issue-association-pill');
     await expect(prPill).toHaveText('PR —');
@@ -76,10 +202,12 @@ test.describe('session detail view', () => {
     await issueForm.getByRole('button', { name: 'Save' }).click();
 
     await expect(issuePill).toHaveText('Issue #73');
-    await expect.poll(async () => (await weaver.getSession(s.id)).github_issue).toEqual({
-      repo: 'acme/widgets',
-      number: 73,
-    });
+    await expect
+      .poll(async () => (await weaver.getSession(s.id)).github_issue)
+      .toEqual({
+        repo: 'acme/widgets',
+        number: 73,
+      });
 
     await issuePill.click();
     await page.getByTestId('issue-mapping-form').getByRole('button', { name: 'Clear' }).click();
@@ -87,7 +215,10 @@ test.describe('session detail view', () => {
   });
 
   test('clearing the attention chip marks the agent’s attention calm', async ({ page, weaver }) => {
-    const s = await weaver.seedSession({ goal: 'Acknowledge me', name: 'ack-task' });
+    const s = await weaver.seedSession({
+      goal: 'Acknowledge me',
+      name: 'ack-task',
+    });
     // The agent raises its attention; the human's only write here is to clear it.
     await weaver.setStatus(s, 'attention', 'waiting on review');
 
@@ -112,7 +243,10 @@ test.describe('session detail view', () => {
     page,
     weaver,
   }) => {
-    const s = await weaver.seedSession({ goal: 'Hold my files', name: 'scratch-task' });
+    const s = await weaver.seedSession({
+      goal: 'Hold my files',
+      name: 'scratch-task',
+    });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
     const panel = page.getByTestId('scratch-panel');
@@ -152,11 +286,11 @@ test.describe('session detail view', () => {
     await expect(panel.getByText('notes.txt')).toHaveCount(0);
   });
 
-  test('renders an interactive terminal that connects to the agent', async ({
-    page,
-    weaver,
-  }) => {
-    const s = await weaver.seedSession({ goal: 'Receive a command', name: 'term-task' });
+  test('renders an interactive terminal that connects to the agent', async ({ page, weaver }) => {
+    const s = await weaver.seedSession({
+      goal: 'Receive a command',
+      name: 'term-task',
+    });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
 
@@ -169,6 +303,8 @@ test.describe('session detail view', () => {
     // renderer-independent; the keystroke→PTY→output byte round-trip itself is
     // covered deterministically by the Rust integration test (WebGL draws to a
     // canvas, so asserting rendered text here would be renderer-dependent).
-    await expect(page.getByTestId('term-status')).toHaveCount(0, { timeout: 20_000 });
+    await expect(page.getByTestId('term-status')).toHaveCount(0, {
+      timeout: 20_000,
+    });
   });
 });

@@ -5,7 +5,7 @@ import { test, expect } from '../fixtures/weaver';
 // real `plan` artifact through the running UI — the list, the markdown viewer
 // with the smartdoc projection (an `#N` issue ref becomes a live status chip),
 // the version picker, an SSE-driven refresh, a user edit that appends a
-// revision, and the Overview pin + goal render.
+// revision, and the docked/popped document layouts.
 
 /** A `plan` artifact referencing issue #id, with a mermaid diagram and an
  *  issue-like token inside a code span that must NOT be projected. */
@@ -28,17 +28,37 @@ function planDoc(id: number, marker: string): string {
   ].join('\n');
 }
 
+function longDoc(): string {
+  return [
+    '# Long operational notes',
+    '',
+    ...Array.from(
+      { length: 180 },
+      (_, i) =>
+        `## Checkpoint ${i + 1}\n\nThis is enough prose to make the document overflow its workbench rail.`,
+    ),
+    '',
+  ].join('\n');
+}
+
 test.describe('artifacts surface', () => {
   test('renders the viewer with projection, mermaid, and version history', async ({
     page,
     weaver,
   }) => {
-    const session = await weaver.seedSession({ goal: 'rewrite search', name: 'artifacts-view' });
+    const session = await weaver.seedSession({
+      goal: 'rewrite search',
+      name: 'artifacts-view',
+    });
     const issue = await weaver.seedIssue(session, 'Index layer');
 
     // Two revisions so the picker has history; the second retitles via the env.
-    await weaver.writeArtifact(session, 'plan', planDoc(issue.id, 'v1'), { title: 'Search rewrite' });
-    await weaver.writeArtifact(session, 'plan', planDoc(issue.id, 'v2'), { title: 'Search rewrite' });
+    await weaver.writeArtifact(session, 'plan', planDoc(issue.id, 'v1'), {
+      title: 'Search rewrite',
+    });
+    await weaver.writeArtifact(session, 'plan', planDoc(issue.id, 'v2'), {
+      title: 'Search rewrite',
+    });
 
     await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/plan`);
 
@@ -81,13 +101,22 @@ test.describe('artifacts surface', () => {
     // An out-of-band CLI write (rev 3) is re-broadcast over SSE; the viewer,
     // back on latest, refreshes itself. Return to latest first.
     await rev.selectOption('');
-    await weaver.writeArtifact(session, 'plan', planDoc(issue.id, 'v3'), { title: 'Search rewrite' });
-    await expect(rev.locator('option').first()).toHaveText(/latest \(v3\)/, { timeout: 15_000 });
+    await weaver.writeArtifact(session, 'plan', planDoc(issue.id, 'v3'), {
+      title: 'Search rewrite',
+    });
+    await expect(rev.locator('option').first()).toHaveText(/latest \(v3\)/, {
+      timeout: 15_000,
+    });
   });
 
   test('a user edit in the viewer appends a revision', async ({ page, weaver }) => {
-    const session = await weaver.seedSession({ goal: 'edit me', name: 'artifacts-edit' });
-    await weaver.writeArtifact(session, 'notes', '# Notes\n\nFirst draft.\n', { title: 'Notes' });
+    const session = await weaver.seedSession({
+      goal: 'edit me',
+      name: 'artifacts-edit',
+    });
+    await weaver.writeArtifact(session, 'notes', '# Notes\n\nFirst draft.\n', {
+      title: 'Notes',
+    });
 
     await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/notes`);
     await expect(page.locator('.markdown-body h1')).toContainText('Notes');
@@ -108,13 +137,68 @@ test.describe('artifacts surface', () => {
     await expect(page.locator('.markdown-body')).toContainText('A user revision.');
   });
 
+  test('each viewed revision keeps an independent reading position', async ({ page, weaver }) => {
+    const session = await weaver.seedSession({
+      goal: 'compare revisions',
+      name: 'artifact-revision-scroll',
+    });
+    await weaver.writeArtifact(
+      session,
+      'notes',
+      longDoc().replace('# Long operational notes', '# Revision one'),
+      { title: 'Notes' },
+    );
+    await weaver.writeArtifact(
+      session,
+      'notes',
+      longDoc().replace('# Long operational notes', '# Revision two'),
+      { title: 'Notes' },
+    );
+
+    await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/notes`);
+    const scroll = page.getByTestId('artifact-scroll');
+    const rev = page.getByTestId('artifact-rev');
+    await expect(page.locator('.markdown-body h1')).toContainText('Revision two');
+
+    await scroll.evaluate((element) => {
+      element.scrollTop = 640;
+    });
+    const latestTop = await scroll.evaluate((element) => element.scrollTop);
+
+    await rev.selectOption('1');
+    await expect(page.locator('.markdown-body h1')).toContainText('Revision one');
+    await scroll.evaluate((element) => {
+      element.scrollTop = 1_420;
+    });
+    const oldTop = await scroll.evaluate((element) => element.scrollTop);
+    expect(oldTop).toBeGreaterThan(latestTop + 500);
+
+    await rev.selectOption('');
+    await expect(page.locator('.markdown-body h1')).toContainText('Revision two');
+    await expect
+      .poll(async () =>
+        Math.abs((await scroll.evaluate((element) => element.scrollTop)) - latestTop),
+      )
+      .toBeLessThanOrEqual(5);
+
+    await rev.selectOption('1');
+    await expect(page.locator('.markdown-body h1')).toContainText('Revision one');
+    await expect
+      .poll(async () => Math.abs((await scroll.evaluate((element) => element.scrollTop)) - oldTop))
+      .toBeLessThanOrEqual(5);
+  });
+
   test('deleting an artifact removes it and falls back to the next', async ({ page, weaver }) => {
     const session = await weaver.seedSession({
       goal: '# Session goal\n\nClean up the docs.',
       name: 'artifacts-delete',
     });
-    await weaver.writeArtifact(session, 'keep', '# Keep me\n', { title: 'Keep' });
-    await weaver.writeArtifact(session, 'scratch', '# Throwaway\n', { title: 'Scratch' });
+    await weaver.writeArtifact(session, 'keep', '# Keep me\n', {
+      title: 'Keep',
+    });
+    await weaver.writeArtifact(session, 'scratch', '# Throwaway\n', {
+      title: 'Scratch',
+    });
 
     await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/scratch`);
     await expect(page.locator('.markdown-body h1')).toContainText('Throwaway');
@@ -133,8 +217,13 @@ test.describe('artifacts surface', () => {
   });
 
   test('a CLI `artifact rm` removes it and the list updates over SSE', async ({ page, weaver }) => {
-    const session = await weaver.seedSession({ goal: 'cli rm', name: 'artifacts-cli-rm' });
-    await weaver.writeArtifact(session, 'doomed', '# Doomed\n', { title: 'Doomed' });
+    const session = await weaver.seedSession({
+      goal: 'cli rm',
+      name: 'artifacts-cli-rm',
+    });
+    await weaver.writeArtifact(session, 'doomed', '# Doomed\n', {
+      title: 'Doomed',
+    });
 
     await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/doomed`);
     await expect(page.locator('[data-artifact="doomed"]')).toBeVisible();
@@ -143,18 +232,26 @@ test.describe('artifacts surface', () => {
     // Remove it out-of-band via the CLI; the `artifact_deleted` event is
     // re-broadcast over SSE and the list updates without a reload.
     await weaver.removeArtifact(session, 'doomed');
-    await expect(page.locator('[data-artifact="doomed"]')).toHaveCount(0, { timeout: 15_000 });
+    await expect(page.locator('[data-artifact="doomed"]')).toHaveCount(0, {
+      timeout: 15_000,
+    });
   });
 
   test('an html artifact renders in a sandboxed iframe, with a source view', async ({
     page,
     weaver,
   }) => {
-    const session = await weaver.seedSession({ goal: 'html report', name: 'artifacts-html' });
+    const session = await weaver.seedSession({
+      goal: 'html report',
+      name: 'artifacts-html',
+    });
     const html =
       '<!doctype html><html><body><h1 id="hi">Live report</h1>' +
       '<script>document.documentElement.dataset.ran = "1";</script></body></html>';
-    await weaver.writeArtifact(session, 'report', html, { title: 'Report', kind: 'html' });
+    await weaver.writeArtifact(session, 'report', html, {
+      title: 'Report',
+      kind: 'html',
+    });
 
     await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/report`);
 
@@ -176,34 +273,86 @@ test.describe('artifacts surface', () => {
     await expect(page.getByTestId('artifact-html')).toHaveCount(0);
   });
 
-  test('pops the artifact out beside the terminal, then docks it', async ({ page, weaver }) => {
-    const session = await weaver.seedSession({ goal: 'side by side', name: 'artifacts-pop' });
-    await weaver.writeArtifact(session, 'notes', '# Notes\n\nbody\n', { title: 'Notes' });
+  test('a long popped artifact has a bounded scroller and keeps its place when docked', async ({
+    page,
+    weaver,
+  }) => {
+    const session = await weaver.seedSession({
+      goal: 'side by side',
+      name: 'artifacts-pop',
+    });
+    await weaver.writeArtifact(session, 'notes', longDoc(), { title: 'Notes' });
 
     await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/notes`);
-    await expect(page.locator('.markdown-body h1')).toContainText('Notes');
+    await expect(page.locator('.markdown-body h1')).toContainText('Long operational notes');
     // Docked: the artifact fills the work area, so the terminal is hidden.
     await expect(page.locator('[data-term-tab="agent"]')).toBeHidden();
+
+    const dockedScroll = page.getByTestId('artifact-scroll');
+    await dockedScroll.evaluate((element) => {
+      element.scrollTop = 800;
+    });
+    const dockedTop = await dockedScroll.evaluate((element) => element.scrollTop);
+    expect(dockedTop).toBeGreaterThan(700);
 
     // Pop out → a rail appears beside the terminal: both visible at once.
     await page.getByTestId('artifact-pop').click();
     await expect(page.getByTestId('artifact-rail-close')).toBeVisible();
     await expect(page.locator('[data-term-tab="agent"]')).toBeVisible(); // terminal back
-    await expect(page.locator('.markdown-body h1')).toContainText('Notes'); // artifact in the rail
+    await expect(page.locator('.markdown-body h1')).toContainText('Long operational notes');
 
-    // Dock back → the rail closes and the artifact returns to the work-area tab.
+    // The regression: every flex ancestor is bounded, leaving the document as
+    // the scrolling element instead of growing the whole page beyond the
+    // viewport. A long document can reach its end inside the popped rail.
+    const poppedScroll = page.getByTestId('artifact-scroll');
+    const bounds = await poppedScroll.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      overflowY: getComputedStyle(element).overflowY,
+    }));
+    expect(bounds.clientHeight).toBeGreaterThan(100);
+    expect(bounds.clientHeight).toBeLessThan(await page.evaluate(() => window.innerHeight));
+    expect(bounds.scrollHeight).toBeGreaterThan(bounds.clientHeight + 1_000);
+    expect(bounds.overflowY).toMatch(/auto|scroll/);
+    await expect
+      .poll(async () =>
+        Math.abs((await poppedScroll.evaluate((element) => element.scrollTop)) - dockedTop),
+      )
+      .toBeLessThanOrEqual(5);
+
+    await poppedScroll.evaluate((element) => {
+      element.scrollTop = 1_600;
+    });
+    const poppedTop = await poppedScroll.evaluate((element) => element.scrollTop);
+    expect(poppedTop).toBeGreaterThan(dockedTop + 500);
+
+    // Dock back → the rail closes and the artifact returns to the work-area tab
+    // at the same reading position, rather than jumping to the top.
     await page.getByTestId('artifact-pop').click();
     await expect(page.getByTestId('artifact-rail-close')).toHaveCount(0);
     await expect(page.locator('[data-term-tab="agent"]')).toBeHidden();
-    await expect(page.locator('.markdown-body h1')).toContainText('Notes');
+    await expect(page.locator('.markdown-body h1')).toContainText('Long operational notes');
+    await expect
+      .poll(async () =>
+        Math.abs(
+          (await page.getByTestId('artifact-scroll').evaluate((element) => element.scrollTop)) -
+            poppedTop,
+        ),
+      )
+      .toBeLessThanOrEqual(5);
   });
 
   test('Artifacts is an in-page tab — terminal ⇄ artifacts stays on the session page', async ({
     page,
     weaver,
   }) => {
-    const session = await weaver.seedSession({ goal: 'tabbing', name: 'artifacts-tab' });
-    await weaver.writeArtifact(session, 'plan', '# Plan\n\nthe plan\n', { title: 'Plan' });
+    const session = await weaver.seedSession({
+      goal: 'tabbing',
+      name: 'artifacts-tab',
+    });
+    await weaver.writeArtifact(session, 'plan', '# Plan\n\nthe plan\n', {
+      title: 'Plan',
+    });
 
     await page.goto(`${weaver.baseUrl}/s/${session.id}`);
     await expect(page.locator('[data-term-tab="agent"]')).toBeVisible();
@@ -225,7 +374,10 @@ test.describe('artifacts surface', () => {
     page,
     weaver,
   }) => {
-    const session = await weaver.seedSession({ goal: 'shots', name: 'artifacts-image' });
+    const session = await weaver.seedSession({
+      goal: 'shots',
+      name: 'artifacts-image',
+    });
     // A 1×1 transparent PNG, piped as raw bytes (no extension): the CLI sniffs
     // it from its magic bytes and wraps it as a base64 data-URI markdown doc.
     const png = Buffer.from(
@@ -240,31 +392,5 @@ test.describe('artifacts surface', () => {
     const img = page.locator('.markdown-body img');
     await expect(img).toHaveAttribute('src', /^data:image\/png;base64,/);
     await expect(img).toHaveAttribute('alt', 'Screenshot');
-  });
-});
-
-test.describe('overview', () => {
-  test('pins the plan artifact and renders the goal as markdown', async ({ page, weaver }) => {
-    const session = await weaver.seedSession({
-      goal: '# Rewrite search\n\nMake it **fast** and incremental.',
-      name: 'artifacts-overview',
-    });
-    const issue = await weaver.seedIssue(session, 'Index layer');
-    await weaver.writeArtifact(session, 'plan', planDoc(issue.id, ''), { title: 'Search rewrite' });
-
-    await page.goto(`${weaver.baseUrl}/s/${session.id}`);
-    await page.getByRole('button', { name: 'Overview' }).click();
-
-    // The goal renders through the markdown pipeline (not raw text).
-    const goal = page.getByTestId('session-goal');
-    await expect(goal.locator('h1')).toContainText('Rewrite search');
-    await expect(goal.locator('strong')).toContainText('fast');
-
-    // The well-known `plan` artifact is pinned where the plan used to live, with
-    // its title, the projected issue chip, and the architecture diagram.
-    const plan = page.getByTestId('session-plan');
-    await expect(plan).toContainText('Search rewrite');
-    await expect(plan.locator(`a.smartdoc-chip[data-issue="${issue.id}"]`)).toBeVisible();
-    await expect(plan.locator('.mermaid-diagram svg').first()).toBeVisible({ timeout: 30_000 });
   });
 });

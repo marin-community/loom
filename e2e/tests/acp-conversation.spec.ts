@@ -29,9 +29,19 @@ import { join } from 'path';
 // assumptions (how a custom agent declares `protocol`/`launch`, and the create
 // body's `protocol`/`mode` fields) live in `launchAcpSession`.
 
-const FAKE_AGENT = join(__dirname, '..', '..', 'crates', 'loom', 'tests', 'fixtures', 'fake-acp-agent.mjs');
+const FAKE_AGENT = join(
+  __dirname,
+  '..',
+  '..',
+  'crates',
+  'loom',
+  'tests',
+  'fixtures',
+  'fake-acp-agent.mjs',
+);
 const HEADERS = { 'content-type': 'application/json' };
-const SKIP_MSG = 'ACP lifecycle backend (weaver #508) not merged: the server does not launch acp sessions over REST yet';
+const SKIP_MSG =
+  'ACP lifecycle backend (weaver #508) not merged: the server does not launch acp sessions over REST yet';
 
 async function defineFakeAcpAgent(
   weaver: WeaverFixture,
@@ -53,7 +63,8 @@ async function defineFakeAcpAgent(
     }),
   });
   // Tests sharing a worker can race to define the common source adapter.
-  if (!res.ok && res.status !== 409) throw new Error(`defining ${name} failed: ${await res.text()}`);
+  if (!res.ok && res.status !== 409)
+    throw new Error(`defining ${name} failed: ${await res.text()}`);
 }
 
 /** Define (idempotently) a custom agent that runs the fake ACP adapter over
@@ -115,12 +126,16 @@ test.describe('acp conversation', () => {
     await openAcp(page, weaver, { goal, name: 'acp-foot' });
     const conv = page.getByTestId('acp-conversation');
     // The turn has settled — its closing rule renders after the prose.
-    await expect(page.getByTestId('acp-turn-rule')).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByTestId('acp-turn-rule')).toBeVisible({
+      timeout: 20_000,
+    });
 
     // The transcript genuinely overflows… (generous timeouts: markdown paints
     // asynchronously and can lag well behind the stream on a loaded machine)
     await expect
-      .poll(() => conv.evaluate((el) => el.scrollHeight - el.clientHeight), { timeout: 30_000 })
+      .poll(() => conv.evaluate((el) => el.scrollHeight - el.clientHeight), {
+        timeout: 30_000,
+      })
       .toBeGreaterThan(300);
     // …and the view rests pinned at its foot, where the newest prose reads.
     await expect
@@ -138,7 +153,9 @@ test.describe('acp conversation', () => {
 
     // The agent's consolidated prose (two streamed chunks → one message).
     await expect(
-      conv.getByText('The route resolves against auth.base_url now.', { exact: true }),
+      conv.getByText('The route resolves against auth.base_url now.', {
+        exact: true,
+      }),
     ).toBeVisible();
     // The edit folds into an activity line, closed by default — no output visible.
     const head = page.getByTestId('acp-activity-head').filter({ hasText: 'Edit web.rs' });
@@ -175,7 +192,7 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('acp-turn-rule')).toBeVisible();
     await defineFakeAcpAgent(weaver, 'acp-fake-next', 'ACP fake next');
 
-    await page.getByRole('button', { name: 'manage' }).click();
+    await page.getByRole('button', { name: /Details/ }).click();
     await page.getByTestId('action-handoff').click();
     const form = page.getByTestId('handoff-form');
     await form.getByLabel('Provider').selectOption('acp-fake-next');
@@ -185,17 +202,25 @@ test.describe('acp conversation', () => {
     // its private ACP connection change. The journal makes that boundary clear.
     await expect(page).toHaveURL(new RegExp(`/s/${s.id}$`));
     await expect.poll(async () => (await weaver.getSession(s.id)).agent_kind).toBe('acp-fake-next');
-    await expect(page.getByText('acp-fake-next', { exact: true })).toBeVisible();
+    await expect(page.getByText('Handed off to acp-fake-next.')).toBeVisible();
     await expect(conv.getByText('before handoff', { exact: true })).toBeVisible();
     await expect
       .poll(async () => {
         const res = await fetch(`${weaver.baseUrl}/api/sessions/${s.id}/chat`);
         const chat = (await res.json()) as {
-          blocks: Array<{ kind: string; payload: { from?: string; to?: string } }>;
+          blocks: Array<{
+            kind: string;
+            payload: { from?: string; to?: string };
+          }>;
         };
         return chat.blocks.find((block) => block.kind === 'handoff')?.payload;
       })
-      .toEqual({ from: 'acp-fake', to: 'acp-fake-next', model: '', effort: '' });
+      .toMatchObject({
+        from: 'acp-fake',
+        to: 'acp-fake-next',
+        model: '',
+        effort: '',
+      });
     await expect(page.getByTestId('acp-handoff')).toContainText('acp-fake → acp-fake-next');
 
     const input = page.getByTestId('acp-composer-input');
@@ -237,7 +262,10 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('acp-activity-item')).toHaveCount(2);
   });
 
-  test('gloms interleaved thinking and commands into one activity run', async ({ page, weaver }) => {
+  test('gloms interleaved thinking and commands into one activity run', async ({
+    page,
+    weaver,
+  }) => {
     await openAcp(page, weaver, {
       goal: 'think:inspect provider versions|tool:read:Read lockfile|think:compare constraints|tool:search:Find callers|say:done',
     });
@@ -274,20 +302,24 @@ test.describe('acp conversation', () => {
     await expect(title).not.toHaveClass(/truncate/);
     await expect(title).toHaveText(command);
     await expect(item.getByRole('button')).toHaveAttribute('aria-expanded', 'true');
-    await expect.poll(() => title.evaluate((el) => el.clientHeight)).toBeGreaterThan(collapsedHeight);
+    await expect
+      .poll(() => title.evaluate((el) => el.clientHeight))
+      .toBeGreaterThan(collapsedHeight);
   });
 
   test('a failed call opens its group and shows the failure', async ({ page, weaver }) => {
-    await openAcp(page, weaver, { goal: 'tool:read:Read config|toolfail:cargo test|say:after' });
+    await openAcp(page, weaver, {
+      goal: 'tool:read:Read config|toolfail:cargo test|say:after',
+    });
     const conv = page.getByTestId('acp-conversation');
     await expect(conv.getByText('after', { exact: true })).toBeVisible();
 
     // The failure re-opens the fold by default: the badge, the failed line, and
     // its output are all visible without a click.
     await expect(page.getByTestId('acp-activity-failed')).toContainText('1 failed');
-    await expect(page.getByTestId('acp-activity-item').filter({ hasText: 'cargo test' })).toContainText(
-      'failed',
-    );
+    await expect(
+      page.getByTestId('acp-activity-item').filter({ hasText: 'cargo test' }),
+    ).toContainText('failed');
     await expect(page.getByTestId('acp-detail')).toContainText('exit 1: boom');
   });
 
@@ -295,24 +327,39 @@ test.describe('acp conversation', () => {
     page,
     weaver,
   }) => {
-    const s = await launchAcpSession(weaver, { goal: 'say:ready', name: 'acp-empty' });
+    const s = await launchAcpSession(weaver, {
+      goal: 'say:ready',
+      name: 'acp-empty',
+    });
     test.skip(s === null, SKIP_MSG);
     // Serve an empty journal so the surface renders its fresh-session state.
     await page.route(`**/api/sessions/${s!.id}/chat`, (route) =>
       route.fulfill({ json: { blocks: [], live_turn: null } }),
     );
     await page.route(`**/api/sessions/${s!.id}/chat/stream`, (route) =>
-      route.fulfill({ status: 200, headers: { 'content-type': 'text/event-stream' }, body: '' }),
+      route.fulfill({
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+        body: '',
+      }),
     );
     await page.goto(`${weaver.baseUrl}/s/${s!.id}`);
     const empty = page.getByTestId('acp-empty');
     await expect(empty).toBeVisible();
     await expect(empty).toContainText('No conversation yet');
-    await page.screenshot({ path: test.info().outputPath('acp-empty-state.png') });
+    await page.screenshot({
+      path: test.info().outputPath('acp-empty-state.png'),
+    });
   });
 
-  test('loads the journal tail once and pages older history on demand', async ({ page, weaver }) => {
-    const s = await launchAcpSession(weaver, { goal: 'say:ready', name: 'acp-paged' });
+  test('loads the journal tail once and pages older history on demand', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await launchAcpSession(weaver, {
+      goal: 'say:ready',
+      name: 'acp-paged',
+    });
     test.skip(s === null, SKIP_MSG);
     let snapshots = 0;
     await page.route(`**/api/sessions/${s!.id}/chat*`, (route) => {
@@ -328,7 +375,9 @@ test.describe('acp conversation', () => {
               turn: older ? 0 : 8,
               seq: 0,
               kind: older ? 'user_message' : 'agent_message',
-              payload: { text: older ? 'oldest retained prompt' : 'newest retained answer' },
+              payload: {
+                text: older ? 'oldest retained prompt' : 'newest retained answer',
+              },
               created_at: '2026-07-23T00:00:00Z',
             },
           ],
@@ -336,7 +385,12 @@ test.describe('acp conversation', () => {
           live_turn: null,
           effective_mode: null,
           pending_prompt: null,
-          metadata: { commands: [], config_options: [], modes: [], steering_supported: false },
+          metadata: {
+            commands: [],
+            config_options: [],
+            modes: [],
+            steering_supported: false,
+          },
         },
       });
     });
@@ -357,7 +411,10 @@ test.describe('acp conversation', () => {
     page,
     weaver,
   }) => {
-    const s = await launchAcpSession(weaver, { goal: 'say:ready', name: 'acp-artifact' });
+    const s = await launchAcpSession(weaver, {
+      goal: 'say:ready',
+      name: 'acp-artifact',
+    });
     test.skip(s === null, SKIP_MSG);
     await weaver.writeArtifact(s!, 'proxy-results', '# Proxy results\n\nReady.\n', {
       title: 'Proxy results',
@@ -402,12 +459,17 @@ test.describe('acp conversation', () => {
     await page.clock.fastForward(16_000);
     await expect(status).toHaveAttribute('data-quiet', 'true');
     await expect(status).toContainText('no updates for 0:16');
-    await page.screenshot({ path: test.info().outputPath('acp-live-status.png') });
+    await page.screenshot({
+      path: test.info().outputPath('acp-live-status.png'),
+    });
     await expect(status).toBeHidden({ timeout: 15_000 });
   });
 
   test('Enter returns focus to the composer after sending', async ({ page, weaver }) => {
-    await openAcp(page, weaver, { goal: 'say:ready', name: 'acp-composer-focus' });
+    await openAcp(page, weaver, {
+      goal: 'say:ready',
+      name: 'acp-composer-focus',
+    });
     const input = page.getByTestId('acp-composer-input');
 
     await input.fill('say:first message');
@@ -422,7 +484,9 @@ test.describe('acp conversation', () => {
   test('streaming deltas appear, then consolidate into one message', async ({ page, weaver }) => {
     // A `wait` keeps the turn live long enough for the streamed text to arrive
     // as a delta before its block journals.
-    await openAcp(page, weaver, { goal: 'wait:600|say:streamed reply lands here' });
+    await openAcp(page, weaver, {
+      goal: 'wait:600|say:streamed reply lands here',
+    });
     const conv = page.getByTestId('acp-conversation');
 
     // The text shows (whether caught mid-stream as a shadow or after the block
@@ -430,11 +494,16 @@ test.describe('acp conversation', () => {
     await expect(conv.getByText('streamed reply lands here', { exact: true })).toBeVisible({
       timeout: 15_000,
     });
-    await expect(page.getByTestId('acp-working')).toBeHidden({ timeout: 15_000 });
+    await expect(page.getByTestId('acp-working')).toBeHidden({
+      timeout: 15_000,
+    });
     await expect(conv.getByText('streamed reply lands here', { exact: true })).toHaveCount(1);
   });
 
-  test('usage updates do not fragment one agent reply into many speaker rows', async ({ page, weaver }) => {
+  test('usage updates do not fragment one agent reply into many speaker rows', async ({
+    page,
+    weaver,
+  }) => {
     await openAcp(page, weaver, {
       goal: 'say:The PR override is modeled independently from |usage:41000:200000|say:the cached snapshot.',
       name: 'acp-coalesce',
@@ -452,7 +521,10 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('agent-usage')).toContainText('41k / 200k context · 21%');
   });
 
-  test('stop settles working and leaves unseen feedback idle until sent', async ({ page, weaver }) => {
+  test('stop settles working and leaves unseen feedback idle until sent', async ({
+    page,
+    weaver,
+  }) => {
     await openAcp(page, weaver, {
       goal: 'say:ready',
       name: 'acp-stop-settles',
@@ -461,13 +533,13 @@ test.describe('acp conversation', () => {
     const input = page.getByTestId('acp-composer-input');
     await input.fill('wait:5000|say:unreached');
     await page.getByTestId('acp-composer-send').click();
-    await expect(page.getByTestId('acp-working')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('acp-working')).toBeVisible({
+      timeout: 15_000,
+    });
 
     await input.fill('say:after stop');
     await page.getByTestId('acp-composer-send').click();
-    await expect(page.getByTestId('acp-queued')).toHaveText(
-      'queued · agent hasn’t seen this yet',
-    );
+    await expect(page.getByTestId('acp-queued')).toHaveText('queued · agent hasn’t seen this yet');
 
     await page.getByTestId('acp-composer-stop').click();
     await expect(page.getByTestId('acp-working')).toBeHidden({
@@ -481,7 +553,9 @@ test.describe('acp conversation', () => {
     await expect(sendNow).toHaveText('Send now');
     await sendNow.click();
     await expect(page.getByTestId('acp-queued')).toBeHidden();
-    await expect(page.getByText('after stop', { exact: true })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('after stop', { exact: true })).toBeVisible({
+      timeout: 15_000,
+    });
   });
 
   test('force steer is offered only when the agent advertises it', async ({ page, weaver }) => {
@@ -501,7 +575,10 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('acp-composer-force-steer')).toBeHidden();
   });
 
-  test('ordinary feedback says when the running agent has not seen it yet', async ({ page, weaver }) => {
+  test('ordinary feedback says when the running agent has not seen it yet', async ({
+    page,
+    weaver,
+  }) => {
     await openAcp(page, weaver, {
       goal: 'say:ready',
       name: 'acp-queue-ui',
@@ -510,33 +587,31 @@ test.describe('acp conversation', () => {
     const input = page.getByTestId('acp-composer-input');
     await input.fill('wait:5000|say:first turn done');
     await page.getByTestId('acp-composer-send').click();
-    await expect(page.getByTestId('acp-working')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('acp-working')).toBeVisible({
+      timeout: 15_000,
+    });
 
     await input.fill('say:queued feedback');
     await page.getByTestId('acp-composer-send').click();
-    await expect(page.getByTestId('acp-queued')).toHaveText(
-      'queued · agent hasn’t seen this yet',
-    );
+    await expect(page.getByTestId('acp-queued')).toHaveText('queued · agent hasn’t seen this yet');
     await input.fill('say:and another thought');
     await page.getByTestId('acp-composer-send').click();
     await expect(page.getByTestId('acp-pending')).toHaveCount(1);
     await expect(page.getByTestId('acp-pending')).toContainText('queued feedback');
     await expect(page.getByTestId('acp-pending')).toContainText('and another thought');
     await page.reload();
-    await expect(page.getByTestId('acp-queued')).toHaveText(
-      'queued · agent hasn’t seen this yet',
-    );
+    await expect(page.getByTestId('acp-queued')).toHaveText('queued · agent hasn’t seen this yet');
     const forceNow = page.getByTestId('acp-force-queued').last();
     await expect(forceNow).toBeEnabled();
     await expect(forceNow).toHaveText('Stop & send');
-    await page.screenshot({ path: test.info().outputPath('acp-queued-feedback.png') });
+    await page.screenshot({
+      path: test.info().outputPath('acp-queued-feedback.png'),
+    });
     await forceNow.click();
 
     await expect(page.getByTestId('acp-queued')).toBeHidden();
     await expect(
-      page
-        .getByTestId('acp-conversation')
-        .getByText('queued feedback', { exact: true }),
+      page.getByTestId('acp-conversation').getByText('queued feedback', { exact: true }),
     ).toBeVisible({ timeout: 20_000 });
     await expect(
       page.getByTestId('acp-conversation').getByText('say:and another thought', { exact: true }),
@@ -555,7 +630,9 @@ test.describe('acp conversation', () => {
     const input = page.getByTestId('acp-composer-input');
     await input.fill('wait:5000|say:first turn done');
     await page.getByTestId('acp-composer-send').click();
-    await expect(page.getByTestId('acp-working')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('acp-working')).toBeVisible({
+      timeout: 15_000,
+    });
 
     await input.fill('say:before edit');
     await page.getByTestId('acp-composer-send').click();
@@ -581,7 +658,10 @@ test.describe('acp conversation', () => {
     await expect(input).toBeFocused();
   });
 
-  test('@file completion resolves server files and sends an ACP resource', async ({ page, weaver }) => {
+  test('@file completion resolves server files and sends an ACP resource', async ({
+    page,
+    weaver,
+  }) => {
     await openAcp(page, weaver, {
       goal: 'say:ready',
       name: 'acp-file-resource',
@@ -595,13 +675,18 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('acp-attachment-pill')).toContainText('README.md');
 
     await page.getByTestId('acp-composer-send').click();
-    await expect(page.getByTestId('acp-conversation').getByText('README.md', { exact: true })).toBeVisible({
+    await expect(
+      page.getByTestId('acp-conversation').getByText('README.md', { exact: true }),
+    ).toBeVisible({
       timeout: 15_000,
     });
   });
 
   test('composer uploads become removable ACP resource pills', async ({ page, weaver }) => {
-    await openAcp(page, weaver, { goal: 'say:ready', name: 'acp-upload-resource' });
+    await openAcp(page, weaver, {
+      goal: 'say:ready',
+      name: 'acp-upload-resource',
+    });
     await page.getByTestId('acp-composer-file-input').setInputFiles({
       name: 'long-notes.txt',
       mimeType: 'text/plain',
@@ -644,7 +729,9 @@ test.describe('acp conversation', () => {
     ).toBeVisible({ timeout: 20_000 });
     // One rule for the launch goal and one for this interaction: the steer did
     // not create a third turn.
-    await expect(page.getByTestId('acp-turn-rule')).toHaveCount(2, { timeout: 20_000 });
+    await expect(page.getByTestId('acp-turn-rule')).toHaveCount(2, {
+      timeout: 20_000,
+    });
   });
 
   test('discovers slash commands from the agent and forwards them', async ({ page, weaver }) => {
@@ -663,10 +750,15 @@ test.describe('acp conversation', () => {
     // and appears once in the durable transcript.
     await input.fill('/resume');
     await page.getByTestId('acp-composer-send').click();
-    await expect(page.getByTestId('acp-conversation').getByText('/resume', { exact: true })).toBeVisible();
+    await expect(
+      page.getByTestId('acp-conversation').getByText('/resume', { exact: true }),
+    ).toBeVisible();
   });
 
-  test('permission, model, and effort pills change the live agent config', async ({ page, weaver }) => {
+  test('permission, model, and effort pills change the live agent config', async ({
+    page,
+    weaver,
+  }) => {
     await openAcp(page, weaver, { goal: 'say:ready' });
 
     const permissions = page.getByTestId('acp-config-mode');
@@ -677,10 +769,10 @@ test.describe('acp conversation', () => {
     await expect(permissions).toContainText('Accept edits');
 
     const model = page.getByTestId('acp-config-model');
-    await expect(model).toContainText('Fake fast');
+    await expect(model).toContainText('fake-fast');
     await model.getByRole('button').first().click();
-    await page.getByTestId('acp-config-menu').getByText('Fake deep', { exact: true }).click();
-    await expect(model).toContainText('Fake deep');
+    await page.getByTestId('acp-config-menu').getByText('fake-deep', { exact: true }).click();
+    await expect(model).toContainText('fake-deep');
 
     const effort = page.getByTestId('acp-config-thought_level');
     await expect(effort).toContainText('Medium');
@@ -699,7 +791,9 @@ test.describe('acp conversation', () => {
     const input = page.getByTestId('acp-composer-input');
     await input.fill('wait:5000|say:done');
     await page.getByTestId('acp-composer-send').click();
-    await expect(page.getByTestId('acp-working')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('acp-working')).toBeVisible({
+      timeout: 15_000,
+    });
 
     const permissions = page.getByTestId('acp-config-mode');
     await permissions.getByRole('button').first().click();
@@ -711,31 +805,107 @@ test.describe('acp conversation', () => {
     await expect(permissions).toContainText('next turn');
 
     await page.getByTestId('acp-composer-stop').click();
-    await expect(page.getByTestId('acp-working')).toBeHidden({ timeout: 5_000 });
+    await expect(page.getByTestId('acp-working')).toBeHidden({
+      timeout: 5_000,
+    });
     await expect(permissions).not.toContainText('next turn');
   });
 
   test('a permission card answers and collapses to a receipt', async ({ page, weaver }) => {
     // A supervised mode surfaces the request as an interactive card (bypass mode
     // would auto-answer it).
-    await openAcp(page, weaver, { goal: 'permission:deploy/loom-entrypoint.sh', mode: 'default' });
+    await openAcp(page, weaver, {
+      goal: 'permission:deploy/loom-entrypoint.sh',
+      mode: 'default',
+    });
     const card = page.getByTestId('acp-permission');
     await expect(card).toBeVisible({ timeout: 15_000 });
     await expect(card).toContainText('deploy/loom-entrypoint.sh');
 
     // Answering posts the option and collapses the card to a one-line receipt.
     await card.getByTestId('acp-permission-option').filter({ hasText: 'Allow once' }).click();
-    await expect(page.getByTestId('acp-permission-receipt')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('acp-permission-receipt')).toBeVisible({
+      timeout: 15_000,
+    });
     await expect(page.getByTestId('acp-permission-option')).toHaveCount(0);
   });
 
-  test('the plan rail renders the latest checklist', async ({ page, weaver }) => {
+  test('the context rail is hidden by default and restores focus when dismissed', async ({
+    page,
+    weaver,
+  }) => {
     await openAcp(page, weaver, { goal: 'plan|say:planned' });
+    const toggle = page.getByTestId('acp-context-toggle');
+    const rail = page.getByTestId('acp-rail');
     const plan = page.getByTestId('acp-plan');
+
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(rail).toHaveCount(0);
+    await expect(plan).toHaveCount(0);
+
+    await toggle.focus();
+    await toggle.press('Enter');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await expect(rail).toBeVisible();
     await expect(plan).toBeVisible();
     // The fake plan has a completed + an in_progress entry.
     await expect(plan.getByText('first step')).toBeVisible();
     await expect(plan.getByText('second step')).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const active = document.activeElement;
+          return !!active && document.querySelector('[data-testid="acp-rail"]')?.contains(active);
+        }),
+      )
+      .toBe(true);
+
+    await page.keyboard.press('Escape');
+    await expect(rail).toHaveCount(0);
+    await expect(toggle).toBeFocused();
+  });
+
+  test('expanded ACP details stay reachable in a short viewport', async ({ page, weaver }) => {
+    await openAcp(page, weaver, {
+      goal: `plan|say:${Array.from(
+        { length: 36 },
+        (_, index) => `Operator context line ${index + 1}`,
+      ).join(' ')}`,
+      name: 'short-acp-details',
+    });
+    await page.setViewportSize({ width: 900, height: 320 });
+
+    await page.getByRole('button', { name: /Details/ }).click();
+    const scroller = page.getByTestId('details-scroll');
+    const goalSummary = page.getByText('Goal / prompt', { exact: true });
+    await goalSummary.scrollIntoViewIfNeeded();
+    await goalSummary.click();
+    await page.getByTestId('session-goal-context').scrollIntoViewIfNeeded();
+    await expect(page.getByTestId('session-goal-context')).toBeVisible();
+
+    const handoff = page.getByTestId('action-handoff');
+    await handoff.scrollIntoViewIfNeeded();
+    await handoff.click();
+    const form = page.getByTestId('handoff-form');
+    await form.scrollIntoViewIfNeeded();
+    await expect(form).toBeVisible();
+
+    const bounds = await scroller.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      overflowY: getComputedStyle(element).overflowY,
+    }));
+    expect(bounds.scrollHeight).toBeGreaterThan(bounds.clientHeight);
+    expect(bounds.overflowY).toMatch(/auto|scroll/);
+
+    for (const id of ['action-archive', 'action-remove']) {
+      const action = page.getByTestId(id);
+      await action.scrollIntoViewIfNeeded();
+      const box = await action.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.y).toBeGreaterThanOrEqual(0);
+      expect(box!.y + box!.height).toBeLessThanOrEqual(320);
+    }
   });
 
   test('renders in both themes', async ({ page, weaver }) => {
@@ -759,7 +929,9 @@ test.describe('acp conversation', () => {
         document.documentElement.classList.toggle('dark', t === 'dark');
       }, theme);
       await page.waitForTimeout(200);
-      await page.screenshot({ path: test.info().outputPath(`acp-conversation-${theme}.png`) });
+      await page.screenshot({
+        path: test.info().outputPath(`acp-conversation-${theme}.png`),
+      });
     }
   });
 });

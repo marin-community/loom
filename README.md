@@ -238,8 +238,8 @@ pull request. A background loop polls `gh pr view` for the branch every 30s and
 surfaces the result on the dashboard: a link straight to the PR, its state
 (open / draft / merged / closed), the review decision (approved / changes
 requested / review required), and a rolled-up CI verdict (checks passing /
-failing / pending). The session's Overview tab has a **Refresh** button to
-re-poll on demand.
+failing / pending). Session **Details** keeps the associations and a **Refresh**
+button available without occupying the workbench header.
 
 Every session detail has a **Conversation** tab that renders the agent's chat
 with the model — user turns, replies, thinking, and tool calls — live and
@@ -270,7 +270,7 @@ record, cursor, source, and authorization contract.
 Once a branch's PR merges, loom archives the session automatically — tearing
 down its terminal and worktree while keeping the branch and its weaver history,
 the same as the Archive button. To keep one session until you archive it
-yourself, choose **Disable auto-archive** from that session's **Manage** menu, or
+yourself, choose **Disable auto-archive** from that session's **Details** popover, or
 set its quiet opt-out label:
 
 ```sh

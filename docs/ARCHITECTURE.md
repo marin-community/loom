@@ -602,7 +602,7 @@ closes, or after `automation.idle_archive_secs` (default `28800`, `0`
 disables) of inactivity — both guarded by a no-live-turn check and a grace
 period, so a session mid-turn or only just gone quiet is never torn down out
 from under it. Every automatic retention path skips a branch carrying the exact
-quiet tag `auto-archive: disabled`; the session Manage menu toggles it, while a
+quiet tag `auto-archive: disabled`; the session Details popover toggles it, while a
 manual Archive deliberately ignores it. The `automation.*` settings live in
 `weaver-core::config::registry()` under the **Automation** group.
 
@@ -619,7 +619,7 @@ number, URL, state (`OPEN`/`CLOSED`/`MERGED`), draft
 flag, `reviewDecision`, a rolled-up `checks` verdict (`passing`/`failing`/
 `pending`), and mergeability — is written to the loom-owned `branch_github`
 table (one row per branch, keyed `branch_id`) and served as `BranchView.github`.
-The dashboard renders it on the session list and overview; `POST
+The dashboard renders it on the session list and compact session Details; `POST
 /api/sessions/{id}/github` forces an immediate re-poll.
 
 The loop self-gates and degrades quietly: it is always spawned but does nothing

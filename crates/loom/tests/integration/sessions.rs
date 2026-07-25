@@ -253,13 +253,14 @@ async fn settings_validate_agent_model_effort_against_registry() {
     );
 }
 
-/// The fleet listing hides archived sessions by default (so the agent's `loom
-/// session ls` sees only live work), includes them on `?archived=true`, and
-/// narrows by substring on `?q=` — over the title, branch, and goal. A rename
-/// (PATCH title) is reflected in that search.
+/// The active fleet and archived history remain disjoint at the REST boundary:
+/// the default (and therefore `loom session ls`) contains only actionable work,
+/// while inventory callers can opt into both with `?archived=true`. Search
+/// narrows the selected set over title, branch, and goal; a title PATCH is
+/// reflected in that search.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn list_hides_archived_by_default_and_searches() {
+async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
     let ts = TestServer::start().await;
     let client = &ts.client;
 
@@ -301,6 +302,16 @@ async fn list_hides_archived_by_default_and_searches() {
     let all = client.get("/api/sessions?archived=true").await.unwrap();
     let all = all.as_array().unwrap();
     assert_eq!(all.len(), 2, "?archived=true includes the archived session");
+    assert_eq!(
+        all.iter().filter(|s| s["status"] == "archived").count(),
+        1,
+        "the inventory has one archived history row"
+    );
+    assert_eq!(
+        all.iter().filter(|s| s["status"] != "archived").count(),
+        list.as_array().unwrap().len(),
+        "the active count is exactly the default fleet projection"
+    );
     let beta_row = all.iter().find(|s| s["id"] == beta_id.as_str()).unwrap();
     assert_eq!(beta_row["status"], "archived");
 

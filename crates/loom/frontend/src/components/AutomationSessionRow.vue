@@ -35,7 +35,7 @@ const dotClass = computed(() => {
       <div class="flex flex-wrap items-center gap-2">
         <router-link
           :to="`/s/${session.id}`"
-          class="stretched-link truncate font-serif text-[15px] text-fg hover:text-accent"
+          class="stretched-link truncate text-[15px] font-medium text-fg hover:text-accent"
           :class="tone === 'history' ? 'font-medium' : 'font-semibold'"
         >
           {{ session.branch.title || session.branch.name }}
@@ -52,7 +52,7 @@ const dotClass = computed(() => {
       </div>
       <p
         v-if="tone !== 'history' && messageOf(session)"
-        class="mt-0.5 truncate font-serif text-[13px] text-muted"
+        class="mt-0.5 truncate text-[13px] text-muted"
       >
         {{ messageOf(session) }}
       </p>

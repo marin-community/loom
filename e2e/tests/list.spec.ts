@@ -4,13 +4,19 @@ test.describe('session list view', () => {
   test('shows an empty state when there are no sessions', async ({ page, weaver }) => {
     await page.goto(weaver.baseUrl);
     await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
-    await expect(page.getByText('No sessions yet.')).toBeVisible();
+    await expect(page.getByText('No active sessions.')).toBeVisible();
     await expect(page.getByTestId('session-card')).toHaveCount(0);
   });
 
   test('renders seeded sessions with name, status and goal', async ({ page, weaver }) => {
-    const a = await weaver.seedSession({ goal: 'Add a health endpoint', name: 'alpha-task' });
-    const b = await weaver.seedSession({ goal: 'Fix the login bug', name: 'beta-task' });
+    const a = await weaver.seedSession({
+      goal: 'Add a health endpoint',
+      name: 'alpha-task',
+    });
+    const b = await weaver.seedSession({
+      goal: 'Fix the login bug',
+      name: 'beta-task',
+    });
 
     await page.goto(weaver.baseUrl);
 
@@ -46,32 +52,63 @@ test.describe('session list view', () => {
     await expect(card).toContainText('ready for review');
   });
 
-  test('an archived session stops asking for attention', async ({ page, weaver }) => {
-    const s = await weaver.seedSession({ goal: 'Old pass', name: 'old-pass' });
+  test('archived history is separate from active fleet counts', async ({ page, weaver }) => {
+    const live = await weaver.seedSession({
+      goal: 'Current work',
+      name: 'current-work',
+    });
+    const archived = await weaver.seedSession({
+      goal: 'Old pass',
+      name: 'old-pass',
+    });
     // The agent had flagged it; then the user archives the workstream.
-    await weaver.setStatus(s, 'attention', 'Waiting for input');
-    await fetch(`${weaver.baseUrl}/api/sessions/${s.id}/archive`, { method: 'POST' });
+    await weaver.setStatus(archived, 'attention', 'Waiting for input');
+    await weaver.archiveSession(archived.id);
 
     await page.goto(weaver.baseUrl);
-    const card = page.locator(`[data-session-id="${s.id}"]`);
+    // Workspace, All, OK, and the status bar describe only active work.
+    await expect(page.getByTestId('workspace-pane-link')).toContainText('1');
+    await expect(page.getByTestId('filter-all')).toContainText('1');
+    await expect(page.getByTestId('filter-attention')).toContainText('0');
+    await expect(page.getByTestId('filter-ok')).toContainText('1');
+    await expect(page.getByTestId('status-bar-sessions')).toHaveText('1 active session');
+    await expect(page.getByTestId('status-bar-history')).toHaveText('1 archived');
+    await expect(page.locator(`[data-session-id="${live.id}"]`)).toBeVisible();
+    await expect(page.locator(`[data-session-id="${archived.id}"]`)).toHaveCount(0);
+
+    // History is an explicit, URL-backed view and is the only count/archive list.
+    const historyLink = page.getByTestId('history-pane-link');
+    await expect(historyLink).toContainText('1');
+    await historyLink.focus();
+    await historyLink.press('Enter');
+    await expect(page).toHaveURL(/\?history=true$/);
+    await expect(historyLink).toHaveAttribute('aria-current', 'page');
+    const card = page.locator(`[data-session-id="${archived.id}"]`);
     await expect(card).toBeVisible();
+    await expect(page.locator(`[data-session-id="${live.id}"]`)).toHaveCount(0);
     // No signal chip (an archived agent is gone); the lifecycle badge shows it.
     await expect(card.getByTestId('signal-chip')).toHaveCount(0);
     await expect(card.getByTestId('status-badge')).toHaveText(/archived/i);
     // The stale "Waiting for input" reason is suppressed…
     await expect(card).not.toContainText('Waiting for input');
-    // …and it isn't counted among the sessions that need a human.
-    await expect(page.getByTestId('filter-attention')).toContainText('0');
+    // …and active filters are absent from History rather than counting the row as OK.
+    await expect(page.getByTestId('filter-attention')).toHaveCount(0);
   });
 
   test('a watch triage mark is its own chip, attributed and clearable', async ({
     page,
     weaver,
   }) => {
-    const s = await weaver.seedSession({ goal: 'Looks stuck', name: 'watched' });
+    const s = await weaver.seedSession({
+      goal: 'Looks stuck',
+      name: 'watched',
+    });
     // The agent itself is calm; a watch stamps a triage mark. It renders as
     // its own chip, attributed to the watch (⊙).
-    await weaver.mark(s, 'blocked', { note: 'no progress in an hour', by: 'status-check' });
+    await weaver.mark(s, 'blocked', {
+      note: 'no progress in an hour',
+      by: 'status-check',
+    });
 
     await page.goto(weaver.baseUrl);
     const card = page.locator(`[data-session-id="${s.id}"]`);
@@ -144,9 +181,18 @@ test.describe('session list view', () => {
     // reviewer, a plainly-calm one, and one the agent raised. The review-wait
     // mark sinks the first below the calm rows but must NOT hide it on the shelf —
     // an open PR awaiting review is still yours to glance at.
-    const review = await weaver.seedSession({ goal: 'Awaiting review', name: 'review-low' });
-    const calm = await weaver.seedSession({ goal: 'Quietly working', name: 'calm-mid' });
-    const attn = await weaver.seedSession({ goal: 'Needs a decision', name: 'top-attn' });
+    const review = await weaver.seedSession({
+      goal: 'Awaiting review',
+      name: 'review-low',
+    });
+    const calm = await weaver.seedSession({
+      goal: 'Quietly working',
+      name: 'calm-mid',
+    });
+    const attn = await weaver.seedSession({
+      goal: 'Needs a decision',
+      name: 'top-attn',
+    });
     await weaver.setTag(review, 'awaiting', 'review', {
       note: 'PR #7 review required — waiting on an external reviewer',
       by: 'review-wait',
@@ -165,24 +211,212 @@ test.describe('session list view', () => {
 
     // The review-waiting row carries no loud signal (its mark is quiet) and does
     // not count toward "needs attention" — the user has no action there.
-    const reviewCard = page
-      .getByTestId('session-list')
-      .locator(`[data-session-id="${review.id}"]`);
+    const reviewCard = page.getByTestId('session-list').locator(`[data-session-id="${review.id}"]`);
     await expect(reviewCard.getByTestId('signal-chip')).toHaveCount(0);
     await expect(page.getByTestId('filter-attention')).toContainText('1');
   });
 
   test('clicking a card navigates to the detail view', async ({ page, weaver }) => {
-    const s = await weaver.seedSession({ goal: 'Navigate to me', name: 'nav-task' });
+    const s = await weaver.seedSession({
+      goal: 'Navigate to me',
+      name: 'nav-task',
+    });
 
     await page.goto(weaver.baseUrl);
     await page.locator(`[data-session-id="${s.id}"]`).click();
 
     await expect(page).toHaveURL(new RegExp(`/s/${s.id}$`));
     await expect(page.getByRole('heading', { name: 'nav-task' })).toBeVisible();
-    // The goal is read-only prose on the Overview tab (agent-authored). Scope to
-    // the goal element — the text also appears in the tracking issue's body.
-    await page.getByRole('button', { name: 'Overview' }).click();
-    await expect(page.getByTestId('session-goal')).toHaveText('Navigate to me');
+    await expect(page.getByRole('button', { name: 'Overview' })).toHaveCount(0);
+    // The actual branch goal remains available as bounded context under Details.
+    await page.getByRole('button', { name: /Details/ }).click();
+    await page.getByText('Goal / prompt', { exact: true }).click();
+    await expect(page.getByTestId('session-goal-context')).toHaveText('Navigate to me');
+  });
+
+  test('an issue count keeps repo and branch scope in its URL', async ({ page, weaver }) => {
+    const s = await weaver.seedSession({
+      goal: 'Scoped work',
+      name: 'scoped-issues',
+    });
+    await weaver.seedIssue(s, 'Only this session');
+
+    await page.goto(weaver.baseUrl);
+    const row = page.locator(`[data-session-id="${s.id}"]`);
+    const link = row.getByRole('link', { name: /\d+ open issues?/ });
+    await expect(link).toBeVisible();
+    const href = await link.getAttribute('href');
+    const target = new URL(href!, weaver.baseUrl);
+    expect(target.pathname).toBe('/issues');
+    expect(target.searchParams.get('repo_root')).toBe(s.branch.repo_root);
+    expect(target.searchParams.get('branch')).toBe(s.branch.branch);
+  });
+
+  test('records privacy-safe open and backtrack timing for keyboard navigation', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({
+      goal: 'Sensitive prompt text',
+      name: 'timed-open',
+    });
+    await page.goto(weaver.baseUrl);
+    await page.evaluate(() => {
+      const target = window as Window & { __workbenchMetrics?: unknown[] };
+      target.__workbenchMetrics = [];
+      window.addEventListener('loom:ui-metric', (event) => {
+        target.__workbenchMetrics!.push((event as CustomEvent).detail);
+      });
+    });
+
+    const link = page.locator(`[data-session-id="${s.id}"]`).locator(`a[href="/s/${s.id}"]`);
+    await link.dispatchEvent('click', { ctrlKey: true });
+    await expect
+      .poll(() =>
+        page.evaluate(() => performance.getEntriesByName('weaver:list-open-start', 'mark').length),
+      )
+      .toBe(0);
+
+    await link.focus();
+    await link.press('Enter');
+    await expect(page).toHaveURL(new RegExp(`/s/${s.id}$`));
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const target = window as Window & {
+            __workbenchMetrics?: Record<string, unknown>[];
+          };
+          return target.__workbenchMetrics?.find((metric) => metric.name === 'session_open');
+        }),
+      )
+      .toMatchObject({
+        name: 'session_open',
+        session_id: s.id,
+        source: 'list',
+      });
+    expect(
+      await page.evaluate(() => performance.getEntriesByName('weaver:list-to-session').length),
+    ).toBe(1);
+
+    await page.goBack();
+    await expect(page).toHaveURL(weaver.baseUrl + '/');
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const target = window as Window & {
+            __workbenchMetrics?: Record<string, unknown>[];
+          };
+          return target.__workbenchMetrics?.find((metric) => metric.name === 'session_backtrack');
+        }),
+      )
+      .toMatchObject({
+        name: 'session_backtrack',
+        session_id: s.id,
+        source: 'list',
+      });
+    const serialized = await page.evaluate(() =>
+      JSON.stringify((window as Window & { __workbenchMetrics?: unknown[] }).__workbenchMetrics),
+    );
+    expect(serialized).not.toContain('Sensitive prompt text');
+  });
+
+  test('leaving detail for another surface cancels the backtrack candidate', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({
+      goal: 'Do not miscount navigation',
+      name: 'cancel-backtrack',
+    });
+    await weaver.seedIssue(s, 'Leave for this issue');
+    await page.addInitScript(() => {
+      const target = window as Window & { __workbenchMetrics?: unknown[] };
+      target.__workbenchMetrics = [];
+      window.addEventListener('loom:ui-metric', (event) => {
+        target.__workbenchMetrics!.push((event as CustomEvent).detail);
+      });
+    });
+
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const metrics = (
+            window as Window & {
+              __workbenchMetrics?: Record<string, unknown>[];
+            }
+          ).__workbenchMetrics;
+          return metrics?.find((metric) => metric.name === 'session_open');
+        }),
+      )
+      .toMatchObject({ name: 'session_open', source: 'direct' });
+
+    await page.getByRole('button', { name: /Details/ }).click();
+    await page.getByRole('link', { name: /\d+ open issues?/ }).click();
+    await expect(page).toHaveURL(/\/issues\?/);
+    await page.locator('[data-rail="sessions"]').click();
+    await expect(page).toHaveURL(`${weaver.baseUrl}/`);
+    await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    expect(
+      await page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __workbenchMetrics?: Record<string, unknown>[];
+            }
+          ).__workbenchMetrics?.filter((metric) => metric.name === 'session_backtrack') ?? [],
+      ),
+    ).toHaveLength(0);
+  });
+
+  test('a direct detail-to-list return still records a backtrack', async ({ page, weaver }) => {
+    const s = await weaver.seedSession({
+      goal: 'Count my direct return',
+      name: 'direct-backtrack',
+    });
+    await page.addInitScript(() => {
+      const target = window as Window & { __workbenchMetrics?: unknown[] };
+      target.__workbenchMetrics = [];
+      window.addEventListener('loom:ui-metric', (event) => {
+        target.__workbenchMetrics!.push((event as CustomEvent).detail);
+      });
+    });
+
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          (
+            window as Window & {
+              __workbenchMetrics?: Record<string, unknown>[];
+            }
+          ).__workbenchMetrics?.some((metric) => metric.name === 'session_open'),
+        ),
+      )
+      .toBe(true);
+    await page.getByRole('link', { name: '← sessions' }).click();
+    await expect(page).toHaveURL(`${weaver.baseUrl}/`);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const metrics = (
+            window as Window & {
+              __workbenchMetrics?: Record<string, unknown>[];
+            }
+          ).__workbenchMetrics;
+          return metrics?.find((metric) => metric.name === 'session_backtrack');
+        }),
+      )
+      .toMatchObject({
+        name: 'session_backtrack',
+        session_id: s.id,
+        source: 'direct',
+      });
   });
 });

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, onActivated } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import type { Session } from '../types';
 import StatusBadge from '../components/StatusBadge.vue';
@@ -33,6 +33,7 @@ import {
   signalChips,
 } from '../lib/sessionState';
 import { useFleet } from '../lib/sessionsStore';
+import { beginSessionOpen, recordSessionListReturn } from '../lib/workbenchMetrics';
 import { del, setSessionOrder, setSessionPark } from '../api';
 
 // Named so App.vue's <keep-alive :include> matches it — the fleet list stays
@@ -44,6 +45,7 @@ defineOptions({ name: 'SessionList' });
 // across navigation — no refetch flash, no re-animate). `refresh()` forces an
 // immediate re-pull after a write (create / clear tag).
 const { sessions, runs, refresh } = useFleet();
+onActivated(recordSessionListReturn);
 
 // Attention filter — the dashboard's "which sessions need me?" control. The
 // URL query is the source of truth (`/?filter=attention`, the status bar's
@@ -69,16 +71,24 @@ function setFilter(f: AttentionFilter) {
   router.replace({ query: { ...route.query, filter: f === 'all' ? undefined : f } });
 }
 
-// The Sessions route has two URL-backed surfaces. Workspace is the default and
-// remains the human workbench; Automation is a purpose-built operational view.
-// Kept-alive route changes (including back/forward) flow through this computed
-// value without remounting the list.
+// The Sessions route has two operational surfaces. Workspace is the default
+// human workbench; Automation is the machinery view. Archived sessions are a
+// third, explicit History projection within the workspace route so historical
+// rows never inflate the actionable counts or appear in "All".
 type SessionPane = 'workspace' | 'automation';
 const pane = computed<SessionPane>(() =>
   route.query.view === 'automation' ? 'automation' : 'workspace',
 );
-const workspaceSessions = computed(() =>
+const interactiveSessions = computed(() =>
   sessions.value.filter((session) => session.class !== 'automation'),
+);
+const workspaceSessions = computed(() =>
+  interactiveSessions.value.filter((session) => session.status !== 'archived'),
+);
+// History is intentionally cross-class: an archived automation session is still
+// archived work, and History is the one place where archived rows count.
+const historySessions = computed(() =>
+  sessions.value.filter((session) => session.status === 'archived'),
 );
 const automationSessions = computed(() =>
   sessions.value.filter((session) => session.class === 'automation'),
@@ -94,7 +104,13 @@ const automationInterventionCount = computed(
     automationSessions.value.filter(needsAutomationIntervention).length +
     unmatchedRuns.value.filter(runNeedsIntervention).length,
 );
-const historyOpen = computed(() => pane.value === 'automation' && route.query.history === 'true');
+const workspaceHistoryOpen = computed(
+  () => pane.value === 'workspace' && route.query.history === 'true',
+);
+const workspaceOpen = computed(() => pane.value === 'workspace' && !workspaceHistoryOpen.value);
+const automationHistoryOpen = computed(
+  () => pane.value === 'automation' && route.query.history === 'true',
+);
 
 function paneQuery(next: SessionPane): Record<string, string | null | undefined> {
   const query = { ...route.query };
@@ -111,49 +127,34 @@ function paneQuery(next: SessionPane): Record<string, string | null | undefined>
 
 function toggleAutomationHistory() {
   const query = paneQuery('automation');
-  if (historyOpen.value) delete query.history;
+  if (automationHistoryOpen.value) delete query.history;
   else query.history = 'true';
   router.replace({ query });
 }
 
-// Archived sessions are torn-down workstreams: kept for reference but clutter
-// the live fleet view. Hide them by default; a reveal chip brings them back.
-// They still show when there's nothing else to look at (an all-archived fleet),
-// so the list never reads as empty while archived rows exist.
-const showArchived = ref(false);
-
-// Every existing Workspace calculation reads this interactive-only base.
-// Automation has its own component and cannot leak into workspace counts,
-// threading, manual ordering, or the Parked shelf.
-const filteredBase = computed<Session[]>(() => workspaceSessions.value);
-
-const archivedCount = computed(
-  () => filteredBase.value.filter((s) => s.status === 'archived').length,
+// The generic list renders either the active interactive fleet or archived
+// History, never a mixture. Automation has its own component and cannot leak
+// into Workspace threading, manual ordering, or the Parked shelf.
+const filteredBase = computed<Session[]>(() =>
+  workspaceHistoryOpen.value ? historySessions.value : workspaceSessions.value,
 );
 
-// The archived-aware, filtered set to display (membership only — the tree below
-// imposes the order). Archived rows are hidden by default; a reveal chip brings
-// them back, and they always show when there's nothing else, so the list never
-// reads empty while archived rows exist. Individual attention rows aren't pinned
-// to the top — threading keeps related work grouped — but a whole thread that
-// contains attention floats up (see treeRows), and attention rows carry their
-// loud signal chip, so they stay easy to spot.
+// Individual attention rows aren't pinned to the top — threading keeps related
+// work grouped — but a whole thread that contains attention floats up (see
+// treeRows), and attention rows carry their loud signal chip.
 const visibleSessions = computed<Session[]>(() => {
-  const all = filteredBase.value;
-  const live = all.filter((s) => s.status !== 'archived');
-  const base = showArchived.value || live.length === 0 ? all : live;
+  const base = filteredBase.value;
+  if (workspaceHistoryOpen.value) return base;
   if (filter.value === 'attention') return base.filter((s) => effectiveAttention(s).level !== 'ok');
   if (filter.value === 'ok') return base.filter((s) => effectiveAttention(s).level === 'ok');
   return base;
 });
 
-// Counts reflect the full fleet (NOT the archived-hidden view, but automation-
-// aware) so the filter chips read the true picture; effectiveAttention()
-// already forces archived → ok and ignores stale watch marks, keeping "needs
-// attention" honest.
+// Workspace and its filters count actionable interactive sessions only.
+// Archived rows contribute exclusively to History.
 const counts = computed(() => {
-  const c = { all: filteredBase.value.length, attention: 0, ok: 0 };
-  for (const s of filteredBase.value) {
+  const c = { all: workspaceSessions.value.length, attention: 0, ok: 0 };
+  for (const s of workspaceSessions.value) {
     if (effectiveAttention(s).level === 'ok') c.ok += 1;
     else c.attention += 1; // 'attention' and 'blocked' both need a human
   }
@@ -410,7 +411,7 @@ const tokenConfigWarning = computed(() => error.value.startsWith(MISSING_GITHUB_
 // The New Session drawer is reflected in the URL (`/?new`), like the attention
 // filter above — so it's deep-linkable, the back button closes it, and the tab
 // title (composed in App.vue) can read "Weaver - New Session" while it's open.
-const showForm = computed(() => pane.value === 'workspace' && route.query.new !== undefined);
+const showForm = computed(() => workspaceOpen.value && route.query.new !== undefined);
 function openForm() {
   router.replace({ query: { ...route.query, new: null } });
 }
@@ -442,12 +443,21 @@ async function handleCreated() {
     error.value = (e as Error).message;
   }
 }
+
+function recordSessionLinkOpen(event: MouseEvent, sessionId: string) {
+  // Vue Router leaves modified clicks to the browser so they can open another
+  // tab/window. Start the in-tab timer only for the activation this page owns;
+  // keyboard Enter produces an unmodified primary click and remains covered.
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+    return;
+  beginSessionOpen(sessionId);
+}
 </script>
 
 <template>
   <div class="px-5 py-3">
-    <!-- One toolbar line: the view label, the attention filter, the archived
-         reveal, and the primary action — no page-hero heading (the rail
+    <!-- One toolbar line: the view label, live/history surfaces, the attention
+         filter, and the primary action — no page-hero heading (the rail
          already says where you are; the h1 stays for a11y + tests). -->
     <div class="mb-3 flex min-h-7 flex-wrap items-center gap-2.5">
       <h1 class="text-2xs font-semibold uppercase tracking-wider text-muted">Sessions</h1>
@@ -460,10 +470,10 @@ async function handleCreated() {
         <router-link
           :to="{ path: '/', query: paneQuery('workspace') }"
           data-testid="workspace-pane-link"
-          :aria-current="pane === 'workspace' ? 'page' : undefined"
+          :aria-current="workspaceOpen ? 'page' : undefined"
           :class="[
             'flex items-center gap-1.5 px-2.5 py-1 font-medium transition-colors',
-            pane === 'workspace'
+            workspaceOpen
               ? 'bg-accent text-accent-fg'
               : 'bg-input text-muted hover:bg-subtle hover:text-fg',
           ]"
@@ -471,10 +481,30 @@ async function handleCreated() {
           Workspace
           <span
             class="rounded-full px-1.5 text-2xs leading-4"
-            :class="pane === 'workspace' ? 'bg-accent-fg/20' : 'bg-subtle text-faint'"
-            :aria-label="`${workspaceSessions.length} workspace sessions`"
+            :class="workspaceOpen ? 'bg-accent-fg/20' : 'bg-subtle text-faint'"
+            :aria-label="`${workspaceSessions.length} active workspace sessions`"
           >
             {{ workspaceSessions.length }}
+          </span>
+        </router-link>
+        <router-link
+          :to="{ path: '/', query: { history: 'true' } }"
+          data-testid="history-pane-link"
+          :aria-current="workspaceHistoryOpen ? 'page' : undefined"
+          :class="[
+            'flex items-center gap-1.5 border-l border-line px-2.5 py-1 font-medium transition-colors',
+            workspaceHistoryOpen
+              ? 'bg-accent text-accent-fg'
+              : 'bg-input text-muted hover:bg-subtle hover:text-fg',
+          ]"
+        >
+          History
+          <span
+            class="rounded-full px-1.5 text-2xs leading-4"
+            :class="workspaceHistoryOpen ? 'bg-accent-fg/20' : 'bg-subtle text-faint'"
+            :aria-label="`${historySessions.length} archived sessions`"
+          >
+            {{ historySessions.length }}
           </span>
         </router-link>
         <router-link
@@ -511,7 +541,7 @@ async function handleCreated() {
            Each segment pairs a label with its count in a small pill so the
            number reads as a count, not a suffix glued to the word. -->
       <div
-        v-if="pane === 'workspace' && filteredBase.length"
+        v-if="workspaceOpen && workspaceSessions.length"
         class="inline-flex overflow-hidden rounded border border-line text-xs"
       >
         <button
@@ -538,25 +568,11 @@ async function handleCreated() {
         </button>
       </div>
 
-      <!-- Archived live below the fold: a quiet chip reveals/hides them. -->
-      <button
-        v-if="pane === 'workspace' && archivedCount"
-        type="button"
-        :aria-pressed="showArchived"
-        :class="[
-          'rounded border border-line px-2.5 py-1 text-xs text-muted transition-colors',
-          showArchived ? 'bg-subtle text-fg' : 'bg-input hover:bg-subtle',
-        ]"
-        @click="showArchived = !showArchived"
-      >
-        {{ showArchived ? 'Hide' : 'Show' }} {{ archivedCount }} archived
-      </button>
-
       <!-- Toggles the create form. Closed → primary (accent) call-to-action;
            open → a neutral "Cancel" so it never reads as a second primary
            action competing with the form's own Create button. -->
       <button
-        v-if="pane === 'workspace'"
+        v-if="workspaceOpen"
         :class="[
           'ml-auto px-2.5 py-1 text-xs font-medium',
           showForm ? 'btn-secondary' : 'btn-primary',
@@ -589,14 +605,22 @@ async function handleCreated() {
     </div>
 
     <div
-      v-if="pane === 'workspace' && !filteredBase.length"
+      v-if="workspaceOpen && !workspaceSessions.length"
       class="rounded-md border border-dashed border-line p-6 text-center"
     >
-      <p class="text-sm text-muted">No sessions yet.</p>
+      <p class="text-sm text-muted">No active sessions.</p>
       <p class="mt-1 text-xs text-faint">
         Launch one with <strong>New session</strong>, or
         <code>loom session launch "&lt;goal&gt;"</code>.
       </p>
+    </div>
+
+    <div
+      v-if="workspaceHistoryOpen && !historySessions.length"
+      class="rounded-md border border-dashed border-line p-6 text-center"
+    >
+      <p class="text-sm text-muted">No archived sessions.</p>
+      <p class="mt-1 text-xs text-faint">Archived work remains available here for reference.</p>
     </div>
 
     <!--
@@ -616,8 +640,8 @@ async function handleCreated() {
     <!-- Every session is resting — the live list is empty but the fleet isn't.
          Point at the shelf below rather than reading as "no sessions". -->
     <p
-      v-if="pane === 'workspace' && filteredBase.length && !liveRows.length"
-      class="rounded-md border border-dashed border-line px-4 py-3 text-center font-serif text-[13px] italic text-muted"
+      v-if="workspaceOpen && workspaceSessions.length && !liveRows.length"
+      class="rounded-md border border-dashed border-line px-4 py-3 text-center text-[13px] text-muted"
     >
       All sessions are resting on the shelf below.
     </p>
@@ -649,7 +673,7 @@ async function handleCreated() {
              row's link still click/⌘-clicks. Drag within the list to reorder, or
              onto the Parked shelf below to rest the thread. Hover/focus-revealed. -->
         <button
-          v-if="depth === 0"
+          v-if="workspaceOpen && depth === 0"
           type="button"
           draggable="true"
           data-testid="session-drag"
@@ -693,7 +717,8 @@ async function handleCreated() {
                  clickable above the overlay. -->
             <router-link
               :to="`/s/${s.id}`"
-              class="stretched-link truncate font-serif text-[15px] font-semibold text-fg hover:text-accent"
+              class="stretched-link truncate text-[15px] font-semibold text-fg hover:text-accent"
+              @click="recordSessionLinkOpen($event, s.id)"
             >
               {{ s.branch.title || s.branch.name }}
             </router-link>
@@ -742,17 +767,15 @@ async function handleCreated() {
             />
           </div>
 
-          <!-- Current-state headline (agent's status message), else the goal —
-               both in the serif prose voice. The status note is italic, a live
-               margin annotation; the goal is roman and quieter beneath it. On an
-               attention row the goal steps up from faint to muted so the metadata
-               doesn't recede next to the loud chip. -->
-          <p v-if="messageOf(s)" class="mt-0.5 truncate font-serif text-[13px] italic text-muted">
+          <!-- Current state and launch goal stay secondary to the task title.
+               Operational list chrome uses the shared sans voice without
+               ornamental italics. -->
+          <p v-if="messageOf(s)" class="mt-0.5 truncate text-[13px] text-muted">
             {{ messageOf(s) }}
           </p>
           <p
             v-if="s.branch.goal"
-            class="mt-0.5 truncate font-serif text-[13px]"
+            class="mt-0.5 truncate text-[13px]"
             :class="effectiveAttention(s).level === 'ok' ? 'text-faint' : 'text-muted'"
           >
             {{ s.branch.goal }}
@@ -780,7 +803,10 @@ async function handleCreated() {
           />
           <router-link
             v-if="s.branch.open_issue_count"
-            :to="`/s/${s.id}?tab=overview`"
+            :to="{
+              path: '/issues',
+              query: { repo_root: s.branch.repo_root, branch: s.branch.branch },
+            }"
             class="relative z-10 block font-mono text-2xs text-muted hover:text-accent"
             @click.stop
           >
@@ -791,16 +817,6 @@ async function handleCreated() {
           <span v-if="s.last_activity_at" class="mt-0.5 block font-mono text-2xs text-faint">
             {{ timeAgo(s.last_activity_at) }}
           </span>
-          <!-- The session brief: catch up without opening the terminal. The
-               row's stretched link stays the shell — this is the side door. -->
-          <router-link
-            :to="`/s/${s.id}?tab=overview`"
-            data-testid="row-overview"
-            class="relative z-10 mt-0.5 block font-mono text-2xs text-faint hover:text-accent"
-            @click.stop
-          >
-            overview →
-          </router-link>
         </div>
 
         <!-- The row's ⋯ menu: park, then every lifecycle verb (Adopt/Recover,
@@ -822,7 +838,7 @@ async function handleCreated() {
          verb (and dragging a row back out) returns it. Shown while empty only
          mid-drag, so there's always somewhere to drop. -->
     <section
-      v-if="pane === 'workspace' && (shelfCount || draggingId)"
+      v-if="workspaceOpen && (shelfCount || draggingId)"
       data-testid="parked-shelf"
       class="mt-3 rounded-md transition-shadow"
       :class="overShelf && draggingId ? 'shadow-[inset_0_0_0_1px_var(--accent)]' : ''"
@@ -842,7 +858,7 @@ async function handleCreated() {
           >▸</span
         >
         Parked
-        <span class="font-serif text-[11px] normal-case italic tracking-normal text-faint"
+        <span class="text-[11px] font-normal normal-case tracking-normal text-faint"
           >resting — nothing for you</span
         >
         <span class="h-px flex-1 bg-line"></span>
@@ -886,7 +902,8 @@ async function handleCreated() {
             <div class="flex flex-wrap items-center gap-2">
               <router-link
                 :to="`/s/${s.id}`"
-                class="stretched-link truncate font-serif text-[15px] font-medium text-fg hover:text-accent"
+                class="stretched-link truncate text-[15px] font-medium text-fg hover:text-accent"
+                @click="recordSessionLinkOpen($event, s.id)"
               >
                 {{ s.branch.title || s.branch.name }}
               </router-link>
@@ -901,7 +918,7 @@ async function handleCreated() {
                 parkLabel(s)
               }}</span>
             </div>
-            <p v-if="s.branch.goal" class="mt-0.5 truncate font-serif text-[13px] text-faint">
+            <p v-if="s.branch.goal" class="mt-0.5 truncate text-[13px] text-faint">
               {{ s.branch.goal }}
             </p>
           </div>
@@ -911,16 +928,6 @@ async function handleCreated() {
             <span v-if="s.last_activity_at" class="mt-0.5 block font-mono text-2xs text-faint">
               {{ timeAgo(s.last_activity_at) }}
             </span>
-            <!-- A resting session is exactly the one you catch up on via the
-                 brief rather than by waking its terminal. -->
-            <router-link
-              :to="`/s/${s.id}?tab=overview`"
-              data-testid="row-overview"
-              class="relative z-10 mt-0.5 block font-mono text-2xs text-faint hover:text-accent"
-              @click.stop
-            >
-              overview →
-            </router-link>
           </div>
 
           <button
@@ -935,10 +942,7 @@ async function handleCreated() {
           </button>
         </li>
 
-        <li
-          v-if="!shelfRows.length"
-          class="px-3 py-4 text-center font-serif text-[13px] italic text-faint"
-        >
+        <li v-if="!shelfRows.length" class="px-3 py-4 text-center text-[13px] text-faint">
           Drop a session here to rest it.
         </li>
       </ul>
@@ -949,7 +953,7 @@ async function handleCreated() {
       :sessions="automationSessions"
       :fleet="sessions"
       :runs="runs"
-      :history-open="historyOpen"
+      :history-open="automationHistoryOpen"
       :clearing-tag="clearingTag"
       @toggle-history="toggleAutomationHistory"
       @clear-tag="clearTag"

@@ -106,6 +106,14 @@ const showComments = computed(
   () => !!view.value && isMarkdown.value && viewMode.value === 'preview' && !editing.value,
 );
 
+function togglePop() {
+  // Snapshot before the parent changes layouts. Waiting for child unmount made
+  // restoration sensitive to Vue's patch order when docked and rail instances
+  // swap in the same render.
+  commentsRef.value?.snapshotScroll();
+  emit('togglePop');
+}
+
 // Load an artifact (optionally a specific revision) into the viewer. `keepMode`
 // refreshes content without resetting the preview/source choice — for a live
 // re-fetch (an SSE write to the open artifact), where snapping back to Preview
@@ -393,7 +401,7 @@ onUnmounted(() => {
       </div>
 
       <!-- Viewer -->
-      <div class="flex min-w-0 flex-1 flex-col">
+      <div class="flex min-h-0 min-w-0 flex-1 flex-col">
         <!-- Toolbar -->
         <div class="flex flex-wrap items-center gap-3 border-b border-line px-3 py-1.5 text-xs">
           <span class="truncate font-medium text-fg">
@@ -473,7 +481,7 @@ onUnmounted(() => {
               class="rounded border border-line px-1.5 py-1 text-muted hover:bg-subtle hover:text-fg"
               data-testid="artifact-pop"
               :title="popped ? 'Dock back into the tab' : 'Pop out beside the terminal'"
-              @click="emit('togglePop')"
+              @click="togglePop"
             >
               {{ popped ? '⤡ Dock' : '⤢ Pop out' }}
             </button>
@@ -525,7 +533,7 @@ onUnmounted(() => {
             :source="view.content"
             :refs="view.refs.issues"
             :artifact-name="selected"
-            :rev="view.meta.rev"
+            :rev="viewRev ?? view.meta.rev"
             class="h-full w-full"
           />
 

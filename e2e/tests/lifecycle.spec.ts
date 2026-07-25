@@ -1,7 +1,7 @@
 import { test, expect } from '../fixtures/weaver';
 
 // The lifecycle actions (Adopt / Recover / Archive / Remove) are reachable from
-// two places: the detail header's ⋯ manage menu, and each fleet-list row's ⋯
+// two places: the detail header's Details popover, and each fleet-list row's ⋯
 // menu. A stuck session (orphaned/archived) also carries its remedy as a plain
 // button next to the status badge, on both surfaces.
 test.describe('session lifecycle actions', () => {
@@ -9,12 +9,15 @@ test.describe('session lifecycle actions', () => {
     page,
     weaver,
   }) => {
-    const s = await weaver.seedSession({ goal: 'Delete me', name: 'remove-task' });
+    const s = await weaver.seedSession({
+      goal: 'Delete me',
+      name: 'remove-task',
+    });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
     await expect(page.getByRole('heading', { name: 'remove-task' })).toBeVisible();
 
-    await page.getByRole('button', { name: 'manage' }).click();
+    await page.getByRole('button', { name: /Details/ }).click();
 
     // Remove uses a native confirm() dialog — accept it.
     page.once('dialog', (dialog) => {
@@ -26,7 +29,7 @@ test.describe('session lifecycle actions', () => {
     // Router pushes back to the list.
     await expect(page).toHaveURL(/\/$/);
     await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible();
-    await expect(page.getByText('No sessions yet.')).toBeVisible();
+    await expect(page.getByText('No active sessions.')).toBeVisible();
 
     // And it is gone server-side.
     const all = await weaver.listSessions();
@@ -37,7 +40,7 @@ test.describe('session lifecycle actions', () => {
     const s = await weaver.seedSession({ goal: 'Keep me', name: 'keep-task' });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
-    await page.getByRole('button', { name: 'manage' }).click();
+    await page.getByRole('button', { name: /Details/ }).click();
 
     page.once('dialog', (dialog) => dialog.dismiss());
     await page.getByRole('button', { name: 'Remove' }).click();
@@ -52,10 +55,13 @@ test.describe('session lifecycle actions', () => {
     page,
     weaver,
   }) => {
-    const s = await weaver.seedSession({ goal: 'Archive me', name: 'archive-task' });
+    const s = await weaver.seedSession({
+      goal: 'Archive me',
+      name: 'archive-task',
+    });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
-    await page.getByRole('button', { name: 'manage' }).click();
+    await page.getByRole('button', { name: /Details/ }).click();
 
     page.once('dialog', (dialog) => {
       expect(dialog.type()).toBe('confirm');
@@ -75,20 +81,35 @@ test.describe('session lifecycle actions', () => {
 
   test('lifecycle actions stay on-screen in a short window', async ({ page, weaver }) => {
     // Regression: the details popover used to grow past the bottom of the page
-    // in a short window, clipping Archive/Remove out of reach. The popover now
-    // caps its height to the viewport and scrolls the metadata instead, keeping
-    // the actions pinned and clickable.
-    const s = await weaver.seedSession({ goal: 'Stay reachable', name: 'short-window-task' });
+    // in a short window, clipping expanded context and Archive/Remove out of
+    // reach. The whole variable-height body now shares a bounded scroller.
+    const s = await weaver.seedSession({
+      goal: Array.from({ length: 40 }, (_, index) => `Goal context line ${index + 1}`).join('\n'),
+      name: 'short-window-task',
+    });
 
     await page.setViewportSize({ width: 1280, height: 300 });
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
-    await page.getByRole('button', { name: 'manage' }).click();
+    await page.getByRole('button', { name: /Details/ }).click();
+    await page.getByText('Goal / prompt', { exact: true }).click();
 
+    const scroller = page.getByTestId('details-scroll');
+    await expect(scroller).toHaveCSS('overflow-y', 'auto');
+    const bounds = await scroller.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+    }));
+    expect(bounds.scrollHeight).toBeGreaterThan(bounds.clientHeight);
+
+    await page.getByTestId('session-goal-context').scrollIntoViewIfNeeded();
+    await expect(page.getByTestId('session-goal-context')).toBeVisible();
     for (const [name, id] of [
       ['Archive', 'action-archive'],
       ['Remove', 'action-remove'],
     ]) {
-      const box = await page.getByTestId(id).boundingBox();
+      const action = page.getByTestId(id);
+      await action.scrollIntoViewIfNeeded();
+      const box = await action.boundingBox();
       expect(box, `${name} button should render`).not.toBeNull();
       expect(box!.y).toBeGreaterThanOrEqual(0);
       expect(box!.y + box!.height).toBeLessThanOrEqual(300);
@@ -101,11 +122,11 @@ test.describe('session lifecycle actions', () => {
     expect(await weaver.listSessions()).toHaveLength(0);
   });
 
-  test('a fleet-list row can archive its session without opening it', async ({
-    page,
-    weaver,
-  }) => {
-    const s = await weaver.seedSession({ goal: 'Archive from the list', name: 'row-archive' });
+  test('a fleet-list row can archive its session without opening it', async ({ page, weaver }) => {
+    const s = await weaver.seedSession({
+      goal: 'Archive from the list',
+      name: 'row-archive',
+    });
 
     await page.goto(`${weaver.baseUrl}/`);
     const row = page.locator(`[data-session-id="${s.id}"]`);
@@ -127,14 +148,17 @@ test.describe('session lifecycle actions', () => {
     await expect(page).toHaveURL(/\/$/);
   });
 
-  test('a session can opt out of automatic archive from its manage menu', async ({
+  test('a session can opt out of automatic archive from Details', async ({
     page,
     weaver,
   }) => {
-    const s = await weaver.seedSession({ goal: 'Keep me live', name: 'no-auto-archive' });
+    const s = await weaver.seedSession({
+      goal: 'Keep me live',
+      name: 'no-auto-archive',
+    });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
-    await page.getByRole('button', { name: 'manage' }).click();
+    await page.getByRole('button', { name: /Details/ }).click();
     await page.getByTestId('action-auto-archive').click();
 
     await expect(page.getByTestId('tag-pill')).toContainText('auto-archive: disabled');
@@ -155,20 +179,34 @@ test.describe('session lifecycle actions', () => {
     page,
     weaver,
   }) => {
-    const s = await weaver.seedSession({ goal: 'Recover me', name: 'recover-task' });
+    const s = await weaver.seedSession({
+      goal: 'Recover me',
+      name: 'recover-task',
+    });
     await weaver.archiveSession(s.id);
 
-    // On the fleet list (archived rows are behind the reveal chip), the row
-    // carries its own remedy — no need to open the session to find it. It is the
-    // same component the detail header renders, hence the same test id.
+    // In explicit History, the row carries its own remedy — no need to open the
+    // session to find it. It is the same component the detail header renders,
+    // hence the same test id.
     await page.goto(`${weaver.baseUrl}/`);
-    await page.getByRole('button', { name: /archived/ }).click();
+    await page.getByTestId('history-pane-link').click();
     const row = page.locator(`[data-session-id="${s.id}"]`);
     await expect(row.getByTestId('remedy-recover')).toBeVisible();
 
-    // And on the detail page, sitting against the ARCHIVED badge.
-    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    // Following a History row keeps History as the logical return surface.
+    await row.getByRole('link', { name: 'recover-task' }).click();
     await expect(page.getByTestId('status-badge')).toHaveText(/archived/i);
     await expect(page.getByTestId('remedy-recover')).toBeVisible();
+    const historyBack = page.getByRole('link', { name: '← history' });
+    await expect(historyBack).toHaveAttribute('href', '/?history=true');
+    await historyBack.click();
+    await expect(page).toHaveURL(`${weaver.baseUrl}/?history=true`);
+    await expect(row).toBeVisible();
+
+    // Recovering returns it to the live surface, and the header destination
+    // naturally follows the updated lifecycle.
+    await row.getByRole('link', { name: 'recover-task' }).click();
+    await page.getByTestId('remedy-recover').click();
+    await expect(page.getByRole('link', { name: '← sessions' })).toHaveAttribute('href', '/');
   });
 });

@@ -121,6 +121,40 @@ test.describe('artifact inline comments', () => {
     expect(clearedAfterResolve).toBe(false);
   });
 
+  test('a comment on an older view carries that selected base revision', async ({
+    page,
+    weaver,
+  }) => {
+    const session = await weaver.seedSession({
+      goal: 'revision comments',
+      name: 'comment-old-revision',
+    });
+    await weaver.writeArtifact(session, 'design', `${DOC}\nRevision one marker.\n`, {
+      title: 'Design notes',
+    });
+    await weaver.writeArtifact(session, 'design', `${DOC}\nRevision two marker.\n`, {
+      title: 'Design notes',
+    });
+
+    await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/design`);
+    await page.getByTestId('artifact-rev').selectOption('1');
+    await expect(page.locator('.markdown-body')).toContainText('Revision one marker');
+
+    await selectPhrase(page, 'collaborative editing');
+    await page.getByTestId('comment-select-button').click();
+    const composer = page.getByTestId('comment-pending');
+    await composer.locator('textarea').fill('This belongs to revision one.');
+    const request = page.waitForRequest(
+      (candidate) =>
+        candidate.method() === 'POST' &&
+        candidate.url().endsWith(`/api/sessions/${session.id}/artifacts/design/threads`),
+    );
+    await composer.getByRole('button', { name: 'Comment' }).click();
+
+    expect((await request).postDataJSON()).toMatchObject({ base_rev: 1 });
+    await expect(composer).toBeHidden();
+  });
+
   test('captures the comment UI in both themes', async ({ page, weaver }) => {
     const shotDir = process.env.WEAVER_SHOT_DIR;
 

@@ -127,8 +127,15 @@ Sessions has two URL-backed surfaces because a person's work and an automation
 execution have different operating rhythms:
 
 - **Workspace** is the default human workbench. It contains interactive-class
-  sessions only and keeps the attention filters, parent/child threads, manual
-  order, Parked shelf, and New session action.
+  sessions only, excludes archived records, and keeps the attention filters,
+  parent/child threads, manual order, Parked shelf, and New session action. Its
+  All / attention / calm counts therefore describe actionable interactive work,
+  never retained history.
+- **History** (`?history=true`) is the explicit retained-work projection.
+  Archived rows across interactive and automation classes stay navigable there
+  but never inflate Workspace filters or the `active sessions` status-bar
+  vital. The archived count is the size of this historical projection, not a
+  claim that those sessions are still running.
 - **Automation** is an exceptions-first operational view. It contains
   automation-class sessions only, puts blocked/error/orphaned/attention work
   ahead of calm active work, and collapses done/archived history. Durable
@@ -140,8 +147,16 @@ execution have different operating rhythms:
 The Workspace / Automation links preserve the surface in the URL
 (`?view=automation`; `history=true` expands automation history). The Automation
 link carries a distinct intervention count even while Workspace is selected;
-archived history never inflates that live signal. The status bar remains the
-human fleet vital and excludes automation.
+archived history never inflates that live signal. The status bar's active vital
+is the human fleet and excludes automation; its separate archived link counts
+retained rows across classes and routes to History.
+
+The SPA's one shared inventory request opts into archived and automation rows so
+each surface can project the same server truth. It does not opt into
+`managed=true`: engine-managed warm sessions are watch infrastructure and stay
+out of Workspace, Automation, History, counts, and destructive row actions.
+That admin-only query flag remains an explicit operator/CLI inventory escape
+hatch.
 
 ## Workspace: order & the resting shelf
 
