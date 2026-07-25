@@ -105,6 +105,36 @@ test.describe('creating a session via the UI form', () => {
     expect(calls).toEqual(['register', 'create']);
   });
 
+  test('falls back to shared Scratch limits when limits observability is unavailable', async ({
+    page,
+    weaver,
+  }) => {
+    await page.route('**/api/scratch/limits', (route) =>
+      route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'temporary limits lookup failure' }),
+      }),
+    );
+    await page.goto(`${weaver.baseUrl}/sessions/new`);
+    await page.getByPlaceholder(repoPlaceholder).fill(weaver.repoPath);
+    await page.getByPlaceholder('Add a /health endpoint').fill('Launch with fallback limits');
+    await page
+      .getByTestId('scratch-picker-dropzone')
+      .locator('input[type=file]')
+      .setInputFiles({
+        name: 'fallback.txt',
+        mimeType: 'text/plain',
+        buffer: Buffer.from('fallback attachment'),
+      });
+    await expect(page.getByTestId('attachment-error')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Create session' }).click();
+    await expect(page).toHaveURL(/\/s\//);
+    const launched = (await weaver.listSessions())[0];
+    const scratch = await fetch(`${weaver.baseUrl}/api/sessions/${launched.id}/scratch`);
+    expect(await scratch.json()).toEqual([{ name: 'fallback.txt', bytes: 19 }]);
+  });
+
   test('selects a profile, overrides it, launches, and drops an attachment', async ({
     page,
     weaver,
@@ -371,18 +401,23 @@ test.describe('creating a session via the UI form', () => {
     await environment.getByLabel('Environment name').fill('ADDED');
     await environment.getByLabel('Environment value', { exact: true }).fill('new write-only value');
     await environment.getByRole('button', { name: 'Set' }).click();
+    await environment.getByLabel('Environment name').fill('EMPTY');
+    await environment.getByRole('button', { name: 'Set' }).click();
     await page.getByTestId('clone-profile').click();
     await expect(page.getByTestId('profile-option-ui-environment-target')).toBeVisible();
     expect(cloneProposal?.environment).toEqual({
       inherit: true,
       remove: ['REMOVE_ME'],
-      set: [{ name: 'ADDED', value: 'new write-only value' }],
+      set: [
+        { name: 'ADDED', value: 'new write-only value' },
+        { name: 'EMPTY', value: '' },
+      ],
     });
 
     const saved = (await (
       await fetch(`${weaver.baseUrl}/api/profiles/ui-environment-target`)
     ).json()) as { env: { name: string; source: string }[] };
-    expect(saved.env.map((entry) => entry.name)).toEqual(['ADDED', 'KEEP']);
+    expect(saved.env.map((entry) => entry.name)).toEqual(['ADDED', 'EMPTY', 'KEEP']);
     expect(JSON.stringify(saved)).not.toContain('new write-only value');
   });
 

@@ -70,7 +70,7 @@ function toggleInherited(name: string, include: boolean) {
 
 function setEnvironment() {
   const name = envName.value.trim();
-  if (!environment.value || !name || !envValue.value) return;
+  if (!environment.value || !name || (envKind.value === 'gcp_secret' && !envValue.value)) return;
   const proposal = {
     name,
     ...(envKind.value === 'literal' ? { value: envValue.value } : { secret_ref: envValue.value }),
@@ -464,7 +464,7 @@ watch(
         <button
           type="button"
           class="btn-secondary px-2.5 py-1.5 text-xs"
-          :disabled="disabled || !envName.trim() || !envValue"
+          :disabled="disabled || !envName.trim() || (envKind === 'gcp_secret' && !envValue)"
           @click="setEnvironment"
         >
           Set

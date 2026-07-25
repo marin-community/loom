@@ -36,7 +36,6 @@ const fallbackLimits: ScratchLimits = {
 };
 const dragging = ref(false);
 const error = ref('');
-const limitsError = ref('');
 const fileInput = ref<HTMLInputElement | null>(null);
 
 const limitHint = computed(() => {
@@ -91,7 +90,7 @@ function validate(files: File[]): string {
 }
 
 function publishValidation(message: string) {
-  error.value = limitsError.value || message;
+  error.value = message;
   emit('validation', error.value);
 }
 
@@ -132,9 +131,12 @@ onMounted(async () => {
   try {
     limits.value = await getScratchLimits();
     validateCurrent();
-  } catch (cause) {
-    limitsError.value = (cause as Error).message;
-    publishValidation('');
+  } catch {
+    // Keep the attachment surface usable during a transient observability
+    // failure. These values mirror the server constants and still fail closed
+    // if the later upload reaches a server with stricter limits.
+    limits.value = fallbackLimits;
+    validateCurrent();
   }
 });
 
