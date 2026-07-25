@@ -4,7 +4,7 @@
 # ---- build: loom + tapestry + weaver, plus the embedded Vue bundle ----
 FROM rust:1-bookworm AS build
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
- && apt-get install -y --no-install-recommends nodejs \
+ && apt-get install -y --no-install-recommends nodejs sccache \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
@@ -97,7 +97,7 @@ RUN set -eux; \
       unzip zip less wget vim tree \
       bubblewrap socat \
       sqlite3 openssh-client patch diffutils procps rsync file \
-      gettext-base shellcheck; \
+      gettext-base shellcheck sccache; \
     rm -rf /var/lib/apt/lists/*; \
     # Debian ships fd as `fdfind` to avoid a name clash; expose the conventional
     # `fd` name agents (and fd-aware tools) expect.
