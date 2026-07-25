@@ -186,6 +186,36 @@ test.describe('creating a session via the UI form', () => {
     await expect(page.getByTestId('provenance-model')).toHaveText(/profile|agent default/);
   });
 
+  test('invalidates the approved preview before resolving an edited selection', async ({
+    page,
+    weaver,
+  }) => {
+    await page.route('**/api/session-launches/resolve', async (route) => {
+      const body = route.request().postDataJSON() as {
+        selection?: { overrides?: { mode?: string } };
+      };
+      if (body.selection?.overrides?.mode) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      await route.continue();
+    });
+    await page.goto(`${weaver.baseUrl}/sessions/new`);
+    await expect(page.getByTestId('provenance-mode')).toBeVisible();
+    await page.getByTestId('clone-profile-name').fill('stale-preview-clone');
+    await expect(page.getByTestId('clone-profile')).toBeEnabled();
+
+    await page.getByRole('button', { name: /One-launch overrides/ }).click();
+    await page.getByTestId('override-mode-toggle').check();
+
+    await expect(page.getByTestId('create-session')).toBeDisabled();
+    await expect(page.getByTestId('clone-profile')).toHaveCount(0);
+    await expect(page.getByTestId('resolved-launch-summary')).toContainText('Resolving…');
+    await expect(page.getByTestId('provenance-mode')).toHaveCount(0);
+
+    await expect(page.getByTestId('provenance-mode')).toHaveText('launch override');
+    await expect(page.getByTestId('clone-profile')).toBeEnabled();
+  });
+
   test('keeps the launch draft while profile templates are edited', async ({ page, weaver }) => {
     await page.goto(`${weaver.baseUrl}/sessions/new`);
     await page.getByPlaceholder(repoPlaceholder).fill(weaver.repoPath);
@@ -200,11 +230,24 @@ test.describe('creating a session via the UI form', () => {
     await expect(page.getByPlaceholder('Add a /health endpoint')).toHaveValue('Keep this draft');
   });
 
-  test('Cancel hides the form again', async ({ page, weaver }) => {
+  test('Cancel discards the cached launch draft', async ({ page, weaver }) => {
     await page.goto(weaver.baseUrl);
     await page.getByRole('button', { name: 'New session' }).click();
-    await expect(page.getByPlaceholder('Add a /health endpoint')).toBeVisible();
+    await page.getByPlaceholder(repoPlaceholder).fill(weaver.repoPath);
+    await page.getByPlaceholder('Add a /health endpoint').fill('Discard this task');
+    const dataTransfer = await page.evaluateHandle(() => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(['discard'], 'discard.txt', { type: 'text/plain' }));
+      return transfer;
+    });
+    await page.getByTestId('scratch-picker-dropzone').dispatchEvent('drop', { dataTransfer });
+    await expect(page.getByTestId('scratch-picker-file')).toContainText('discard.txt');
+
     await page.locator('form').getByRole('button', { name: 'Cancel' }).click();
     await expect(page).toHaveURL(`${weaver.baseUrl}/`);
+    await page.getByRole('button', { name: 'New session' }).click();
+    await expect(page.getByPlaceholder(repoPlaceholder)).toHaveValue('');
+    await expect(page.getByPlaceholder('Add a /health endpoint')).toHaveValue('');
+    await expect(page.getByTestId('scratch-picker-file')).toHaveCount(0);
   });
 });

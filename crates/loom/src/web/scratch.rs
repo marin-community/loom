@@ -182,6 +182,7 @@ pub(super) async fn upload_scratch(
     let (session, _) = require_session(&st.db, &key).await?;
     let name = scratch_name(&q.name)?;
     validate_scratch_size(&name, body.len())?;
+    let _permit = st.launch_gate.acquire_scratch(&session.id).await;
     let dir = PathBuf::from(&session.work_dir).join("scratch");
     tokio::fs::create_dir_all(&dir).await?;
     let mut count = 0usize;
@@ -237,6 +238,7 @@ pub(super) async fn delete_scratch(
 ) -> ApiResult<StatusCode> {
     let (session, _) = require_session(&st.db, &key).await?;
     let name = scratch_name(&q.name)?;
+    let _permit = st.launch_gate.acquire_scratch(&session.id).await;
     let path = PathBuf::from(&session.work_dir).join("scratch").join(&name);
     match tokio::fs::remove_file(&path).await {
         Ok(()) => {

@@ -1,9 +1,10 @@
-//! Per-repository serialization for new session provisioning.
+//! Namespaced serialization for launch and attachment invariants.
 //!
 //! Git stores refs and worktree metadata in one repository-wide namespace.
 //! Provisioning two sessions concurrently against the same checkout therefore
-//! races clone/fetch, branch selection, and `git worktree add`. Different
-//! repositories remain independent.
+//! races clone/fetch, branch selection, and `git worktree add`. Profile
+//! admission and per-session Scratch mutation have similar check-then-write
+//! boundaries. One namespaced registry keeps those domains independent.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,9 +12,16 @@ use std::sync::{Arc, Weak};
 
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+enum LaunchGateKey {
+    Repo(PathBuf),
+    Profile(String),
+    Scratch(String),
+}
+
 #[derive(Clone, Default)]
 pub struct RepoLaunchGate {
-    locks: Arc<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>>,
+    locks: Arc<Mutex<HashMap<LaunchGateKey, Weak<Mutex<()>>>>>,
 }
 
 pub struct RepoLaunchPermit {
@@ -21,20 +29,15 @@ pub struct RepoLaunchPermit {
 }
 
 impl RepoLaunchGate {
-    /// Wait until no other new session is being provisioned for `repo`.
-    ///
-    /// The caller keeps the returned permit until the agent has started (or
-    /// provisioning fails). Weak entries make the registry self-pruning once a
-    /// repository has no active or waiting launches.
-    pub async fn acquire(&self, repo: &Path) -> RepoLaunchPermit {
+    async fn acquire_key(&self, key: LaunchGateKey) -> RepoLaunchPermit {
         let lock = {
             let mut locks = self.locks.lock().await;
             locks.retain(|_, lock| lock.strong_count() > 0);
-            match locks.get(repo).and_then(Weak::upgrade) {
+            match locks.get(&key).and_then(Weak::upgrade) {
                 Some(lock) => lock,
                 None => {
                     let lock = Arc::new(Mutex::new(()));
-                    locks.insert(repo.to_path_buf(), Arc::downgrade(&lock));
+                    locks.insert(key, Arc::downgrade(&lock));
                     lock
                 }
             }
@@ -42,6 +45,28 @@ impl RepoLaunchGate {
         RepoLaunchPermit {
             _guard: lock.lock_owned().await,
         }
+    }
+
+    /// Wait until no other new session is being provisioned for `repo`.
+    ///
+    /// The caller keeps the returned permit until the agent has started (or
+    /// provisioning fails). Weak entries make the registry self-pruning once a
+    /// repository has no active or waiting launches.
+    pub async fn acquire(&self, repo: &Path) -> RepoLaunchPermit {
+        self.acquire_key(LaunchGateKey::Repo(repo.to_path_buf()))
+            .await
+    }
+
+    /// Serialize the capacity check and session insertion for one profile.
+    pub async fn acquire_profile(&self, profile: &str) -> RepoLaunchPermit {
+        self.acquire_key(LaunchGateKey::Profile(profile.to_string()))
+            .await
+    }
+
+    /// Serialize limit validation and file mutation for one session's Scratch.
+    pub async fn acquire_scratch(&self, session_id: &str) -> RepoLaunchPermit {
+        self.acquire_key(LaunchGateKey::Scratch(session_id.to_string()))
+            .await
     }
 }
 
@@ -78,5 +103,42 @@ mod tests {
         )
         .await
         .expect("a different repository must not wait");
+    }
+
+    #[tokio::test]
+    async fn profile_and_scratch_namespaces_serialize_only_matching_keys() {
+        let gate = RepoLaunchGate::default();
+        let profile = gate.acquire_profile("ops").await;
+        let scratch = gate.acquire_scratch("session-a").await;
+
+        tokio::time::timeout(Duration::from_secs(1), gate.acquire_profile("interactive"))
+            .await
+            .expect("a different profile must not wait");
+        tokio::time::timeout(Duration::from_secs(1), gate.acquire_scratch("session-b"))
+            .await
+            .expect("a different session must not wait");
+
+        let waiting_profile = {
+            let gate = gate.clone();
+            tokio::spawn(async move { gate.acquire_profile("ops").await })
+        };
+        let waiting_scratch = {
+            let gate = gate.clone();
+            tokio::spawn(async move { gate.acquire_scratch("session-a").await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!waiting_profile.is_finished());
+        assert!(!waiting_scratch.is_finished());
+
+        drop(profile);
+        drop(scratch);
+        tokio::time::timeout(Duration::from_secs(1), waiting_profile)
+            .await
+            .expect("matching profile waiter should be released")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), waiting_scratch)
+            .await
+            .expect("matching scratch waiter should be released")
+            .unwrap();
     }
 }

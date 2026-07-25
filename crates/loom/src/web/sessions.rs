@@ -605,22 +605,25 @@ fn tail_chars(s: &str, max: usize) -> String {
 }
 
 fn legacy_launch_selection(req: &CreateReq) -> LaunchSelection {
-    let present = |value: &Option<String>| {
+    let nonempty = |value: &Option<String>| {
         value
             .as_ref()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
     };
+    let selected = |value: &Option<String>| value.as_ref().map(|value| value.trim().to_string());
     LaunchSelection {
-        profile: present(&req.profile)
+        profile: nonempty(&req.profile)
             .unwrap_or_else(|| crate::profile::DEFAULT_PROFILE.to_string()),
         overrides: LaunchOverrides {
-            agent: present(&req.agent),
-            model: present(&req.model),
-            effort: present(&req.effort),
-            protocol: present(&req.protocol),
-            mode: present(&req.mode),
-            class: present(&req.class),
+            agent: nonempty(&req.agent),
+            // Empty is an explicit "agent default" selector for these legacy
+            // fields, distinct from omission (which inherits the profile).
+            model: selected(&req.model),
+            effort: selected(&req.effort),
+            protocol: selected(&req.protocol),
+            mode: nonempty(&req.mode),
+            class: nonempty(&req.class),
         },
     }
 }
@@ -648,6 +651,15 @@ fn create_selection(req: &CreateReq) -> ApiResult<LaunchSelection> {
     Ok(selection.clone())
 }
 
+fn legacy_handoff_mode(requested: &Option<String>, current: &str) -> String {
+    requested
+        .as_deref()
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
+        .unwrap_or(current)
+        .to_string()
+}
+
 fn handoff_selection(req: &HandoffReq, session: &Session) -> ApiResult<LaunchSelection> {
     if let Some(selection) = &req.selection {
         if !req.agent.trim().is_empty()
@@ -671,7 +683,9 @@ fn handoff_selection(req: &HandoffReq, session: &Session) -> ApiResult<LaunchSel
             agent: Some(target.to_string()),
             model: req.model.clone(),
             effort: req.effort.clone(),
-            mode: req.mode.clone(),
+            // A flattened handoff historically retained the live session's
+            // permission posture when mode was absent or blank.
+            mode: Some(legacy_handoff_mode(&req.mode, &session.launch_mode)),
             ..Default::default()
         },
     })
@@ -788,13 +802,21 @@ pub(crate) async fn provision_session(
         }
     };
     let repo_key = repo_key.canonicalize().unwrap_or(repo_key);
+    let _profile_permit = if launch_profile.max_concurrent > 0 {
+        tracing::debug!(profile = %profile_name, "waiting for profile admission gate");
+        let permit = st.launch_gate.acquire_profile(&profile_name).await;
+        tracing::debug!(profile = %profile_name, "acquired profile admission gate");
+        Some(permit)
+    } else {
+        None
+    };
     tracing::debug!(repo = %repo_key.display(), "waiting for repository launch gate");
     let launch_permit = st.launch_gate.acquire(&repo_key).await;
     tracing::debug!(repo = %repo_key.display(), "acquired repository launch gate");
 
-    // Recheck capacity only after reaching the front of the repository queue.
-    // Earlier launches have inserted their live session rows by this point, so
-    // a burst cannot all observe the same stale count and over-admit itself.
+    // Recheck capacity while holding the profile-wide admission gate. The
+    // permit remains live through session insertion, so launches against
+    // different repositories cannot over-admit the same profile.
     if launch_profile.max_concurrent > 0
         && crate::profile::active_count(&st.db, &profile_name).await?
             >= launch_profile.max_concurrent
@@ -4157,6 +4179,41 @@ pub(super) async fn set_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_create_preserves_explicit_agent_default_selectors() {
+        let req = CreateReq {
+            profile: Some(" template ".to_string()),
+            agent: Some(" ".to_string()),
+            model: Some(" ".to_string()),
+            effort: Some(String::new()),
+            protocol: Some(" ".to_string()),
+            mode: Some(" ".to_string()),
+            class: Some(" ".to_string()),
+            ..Default::default()
+        };
+        let selection = legacy_launch_selection(&req);
+        assert_eq!(selection.profile, "template");
+        assert_eq!(selection.overrides.agent, None);
+        assert_eq!(selection.overrides.model.as_deref(), Some(""));
+        assert_eq!(selection.overrides.effort.as_deref(), Some(""));
+        assert_eq!(selection.overrides.protocol.as_deref(), Some(""));
+        assert_eq!(selection.overrides.mode, None);
+        assert_eq!(selection.overrides.class, None);
+    }
+
+    #[test]
+    fn legacy_handoff_inherits_current_mode_when_omitted_or_blank() {
+        assert_eq!(legacy_handoff_mode(&None, "acceptEdits"), "acceptEdits");
+        assert_eq!(
+            legacy_handoff_mode(&Some(" ".to_string()), "acceptEdits"),
+            "acceptEdits"
+        );
+        assert_eq!(
+            legacy_handoff_mode(&Some(" plan ".to_string()), "acceptEdits"),
+            "plan"
+        );
+    }
 
     async fn seed_user(db: &Db, username: &str) {
         sqlx::query("INSERT INTO users (username) VALUES (?)")

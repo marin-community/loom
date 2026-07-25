@@ -192,6 +192,7 @@ async function loadAgents() {
 }
 
 function resetForm() {
+  repo.value = '';
   title.value = '';
   goal.value = '';
   profile.value = profiles.value.some((item) => item.name === 'default')
@@ -204,29 +205,40 @@ function resetForm() {
   scratchFiles.value = [];
   nameEdited.value = false;
   branchMode.value = 'new';
+  advanced.value = false;
+  cloneName.value = '';
+  copyEnvironment.value = false;
+  cloneNotice.value = '';
 }
 
 function cancel() {
+  resetForm();
   emit('close');
   void router.push('/');
 }
 
 let resolveRequest = 0;
 let resolveTimer: ReturnType<typeof setTimeout> | undefined;
-watch(
-  selection,
-  () => {
-    if (resolveTimer) clearTimeout(resolveTimer);
-    resolveTimer = setTimeout(() => void resolveSelection(), 120);
-  },
-  { deep: true },
-);
 
-async function resolveSelection() {
-  if (!profiles.value.length) return;
+function scheduleResolution() {
+  if (resolveTimer) clearTimeout(resolveTimer);
   const request = ++resolveRequest;
+  resolved.value = null;
   resolving.value = true;
   resolveError.value = '';
+  resolveTimer = setTimeout(() => {
+    resolveTimer = undefined;
+    void resolveSelection(request);
+  }, 120);
+}
+
+watch(selection, scheduleResolution, { deep: true, flush: 'sync' });
+
+async function resolveSelection(request: number) {
+  if (!profiles.value.length) {
+    if (request === resolveRequest) resolving.value = false;
+    return;
+  }
   try {
     const preview = await resolveSessionLaunch(selection.value);
     if (request === resolveRequest) resolved.value = preview;
@@ -353,7 +365,7 @@ function onFormKeydown(event: KeyboardEvent) {
 
 loadRecentRepos();
 loadManagedRepos();
-void loadAgents().then(resolveSelection);
+void loadAgents().then(scheduleResolution);
 </script>
 
 <template>
@@ -650,7 +662,7 @@ void loadAgents().then(resolveSelection);
               type="button"
               data-testid="clone-profile"
               class="btn-secondary px-2.5 py-1.5 text-xs"
-              :disabled="cloneBusy || !cloneName.trim()"
+              :disabled="cloneBusy || resolving || !resolved?.valid || !cloneName.trim()"
               @click="saveAsNewProfile"
             >
               {{ cloneBusy ? 'Saving…' : 'Save new' }}
