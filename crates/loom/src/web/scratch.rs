@@ -22,6 +22,10 @@ use super::{ApiResult, AppError, AppState};
 pub(crate) const MAX_SCRATCH_FILES: usize = 20;
 pub(crate) const MAX_SCRATCH_FILE_BYTES: usize = 25 * 1024 * 1024;
 pub(crate) const MAX_SCRATCH_TOTAL_BYTES: usize = 50 * 1024 * 1024;
+/// JSON base64 expands a valid 50 MiB batch by roughly one third. Keep this
+/// route envelope explicit and comfortably above that encoded payload while
+/// retaining the smaller protected-router default for unrelated endpoints.
+pub(crate) const MAX_SESSION_CREATE_BODY_BYTES: usize = 72 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ScratchQuery {
@@ -42,6 +46,11 @@ fn scratch_name(raw: &str) -> ApiResult<String> {
     if name != trimmed || name == "." || name == ".." {
         return Err(AppError::bad_request(
             "file name must be a single path component",
+        ));
+    }
+    if name == ".gitignore" {
+        return Err(AppError::bad_request(
+            "'.gitignore' is reserved for Scratch housekeeping",
         ));
     }
     Ok(name.to_string())
@@ -65,17 +74,18 @@ fn validate_scratch_size(name: &str, bytes: usize) -> ApiResult<()> {
     Ok(())
 }
 
-/// Write launch-time scratch files into `<work_dir>/scratch/`, returning the
-/// bare names written (sorted, de-duplicated). The directory is git-ignored
-/// exactly as [`upload_scratch`] does it, so reference material never enters
-/// the agent's diff. The whole batch is rejected if any name or body is
-/// malformed — a launch shouldn't half-succeed.
-pub(crate) async fn write_initial_scratch(
-    work_dir: &std::path::Path,
-    files: &[ScratchUpload],
-) -> ApiResult<Vec<String>> {
+/// A fully decoded and validated launch-time batch. Construct this before any
+/// repository, branch, issue, or session side effect; writing it later cannot
+/// discover malformed client input.
+pub(crate) struct PreparedScratch {
+    files: std::collections::BTreeMap<String, Vec<u8>>,
+}
+
+pub(crate) fn prepare_initial_scratch(files: &[ScratchUpload]) -> ApiResult<PreparedScratch> {
     if files.is_empty() {
-        return Ok(Vec::new());
+        return Ok(PreparedScratch {
+            files: std::collections::BTreeMap::new(),
+        });
     }
     let mut decoded = std::collections::BTreeMap::<String, Vec<u8>>::new();
     for file in files {
@@ -101,21 +111,40 @@ pub(crate) async fn write_initial_scratch(
         )));
     }
 
-    // Validate and decode the entire batch before touching disk. A malformed
-    // later item therefore cannot leave a half-written attachment set.
+    Ok(PreparedScratch { files: decoded })
+}
+
+/// Write a batch that has already passed [`prepare_initial_scratch`] into
+/// `<work_dir>/scratch/`, returning sorted, de-duplicated bare names.
+pub(crate) async fn write_prepared_initial_scratch(
+    work_dir: &std::path::Path,
+    prepared: &PreparedScratch,
+) -> ApiResult<Vec<String>> {
+    if prepared.files.is_empty() {
+        return Ok(Vec::new());
+    }
     let dir = work_dir.join("scratch");
     tokio::fs::create_dir_all(&dir).await?;
     let gitignore = dir.join(".gitignore");
     if !gitignore.exists() {
         tokio::fs::write(&gitignore, "*\n").await?;
     }
-    let mut names: Vec<String> = Vec::with_capacity(decoded.len());
-    for (name, bytes) in decoded {
-        tokio::fs::write(dir.join(&name), &bytes).await?;
-        names.push(name);
+    let mut names: Vec<String> = Vec::with_capacity(prepared.files.len());
+    for (name, bytes) in &prepared.files {
+        tokio::fs::write(dir.join(name), bytes).await?;
+        names.push(name.clone());
     }
     tracing::info!(files = ?names, "scratch files written");
     Ok(names)
+}
+
+#[cfg(test)]
+async fn write_initial_scratch(
+    work_dir: &std::path::Path,
+    files: &[ScratchUpload],
+) -> ApiResult<Vec<String>> {
+    let prepared = prepare_initial_scratch(files)?;
+    write_prepared_initial_scratch(work_dir, &prepared).await
 }
 
 /// A sentence telling the agent about its launch-time scratch files, or `None`
@@ -152,8 +181,9 @@ pub(super) async fn list_scratch(
                     continue;
                 }
                 if let Some(name) = entry.file_name().to_str() {
-                    // Hide housekeeping dotfiles (e.g. the .gitignore we write).
-                    if name.starts_with('.') {
+                    // The server-owned exclusion guard is housekeeping. Other
+                    // dotfiles are user attachments and remain visible/countable.
+                    if name == ".gitignore" {
                         continue;
                     }
                     out.push(json!({ "name": name, "bytes": meta.len() }));
@@ -195,7 +225,7 @@ pub(super) async fn upload_scratch(
         let Some(entry_name) = entry_name.to_str() else {
             continue;
         };
-        if !metadata.is_file() || entry_name.starts_with('.') {
+        if !metadata.is_file() || entry_name == ".gitignore" {
             continue;
         }
         count += 1;
@@ -311,6 +341,13 @@ mod tests {
             content_base64: b64("x"),
         }];
         assert!(write_initial_scratch(dir.path(), &bad_name).await.is_err());
+        let housekeeping = vec![ScratchUpload {
+            name: ".gitignore".into(),
+            content_base64: b64("not an exclusion guard"),
+        }];
+        assert!(write_initial_scratch(dir.path(), &housekeeping)
+            .await
+            .is_err());
         // Malformed base64 is refused — a launch shouldn't half-write garbage.
         let bad_b64 = vec![
             ScratchUpload {

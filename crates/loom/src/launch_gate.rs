@@ -63,6 +63,23 @@ impl RepoLaunchGate {
             .await
     }
 
+    /// Acquire several profile lifetime/admission permits in stable name order.
+    /// Clone touches both source and target; global ordering prevents crossed
+    /// clones from deadlocking while keeping each lifetime serialized.
+    pub async fn acquire_profiles<'a>(
+        &self,
+        profiles: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<RepoLaunchPermit> {
+        let mut names: Vec<&str> = profiles.into_iter().collect();
+        names.sort_unstable();
+        names.dedup();
+        let mut permits = Vec::with_capacity(names.len());
+        for name in names {
+            permits.push(self.acquire_profile(name).await);
+        }
+        permits
+    }
+
     /// Serialize limit validation and file mutation for one session's Scratch.
     pub async fn acquire_scratch(&self, session_id: &str) -> RepoLaunchPermit {
         self.acquire_key(LaunchGateKey::Scratch(session_id.to_string()))

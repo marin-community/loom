@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use base64::Engine as _;
 use serde_json::json;
 use serial_test::serial;
 
@@ -72,6 +73,36 @@ async fn scratch_upload_list_and_delete() {
         .await
         .unwrap();
     assert_eq!(bad.status().as_u16(), 400, "path traversal rejected");
+    let housekeeping = reqwest::Client::new()
+        .post(format!(
+            "{}/api/sessions/{id}/scratch?name=.gitignore",
+            client.base()
+        ))
+        .body("overwrite")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(housekeeping.status().as_u16(), 400);
+
+    let dotfile = reqwest::Client::new()
+        .post(format!(
+            "{}/api/sessions/{id}/scratch?name=.env.example",
+            client.base()
+        ))
+        .body("SAFE=value")
+        .send()
+        .await
+        .unwrap();
+    assert!(dotfile.status().is_success());
+    let listed = client
+        .get(&format!("/api/sessions/{id}/scratch"))
+        .await
+        .unwrap();
+    assert!(listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["name"] == ".env.example"));
 
     // Delete removes it.
     client
@@ -82,9 +113,18 @@ async fn scratch_upload_list_and_delete() {
         .get(&format!("/api/sessions/{id}/scratch"))
         .await
         .unwrap();
-    assert_eq!(
-        after.as_array().unwrap().len(),
-        0,
+    assert_eq!(after.as_array().unwrap().len(), 1);
+    assert_eq!(after[0]["name"], ".env.example");
+    client
+        .delete(&format!("/api/sessions/{id}/scratch?name=.env.example"))
+        .await
+        .unwrap();
+    let after = client
+        .get(&format!("/api/sessions/{id}/scratch"))
+        .await
+        .unwrap();
+    assert!(
+        after.as_array().unwrap().is_empty(),
         "scratch empty after delete"
     );
 
@@ -146,4 +186,99 @@ async fn scratch_upload_list_and_delete() {
     assert_eq!(listed.as_array().unwrap().len(), 20);
 
     client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_initial_scratch_has_no_provisioning_side_effects() {
+    let ts = TestServer::start().await;
+    let backlog = ts
+        .client
+        .post(
+            "/api/repos/issues",
+            json!({
+                "repo_root": ts.cwd(),
+                "title": "must remain unclaimed",
+                "body": ""
+            }),
+        )
+        .await
+        .unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/api/sessions", ts.addr))
+        .json(&json!({
+            "cwd": ts.cwd(),
+            "goal": "must remain side-effect free",
+            "name": "invalid-scratch",
+            "agent": "shell",
+            "claim_issue": backlog["id"],
+            "scratch": [{
+                "name": ".gitignore",
+                "content_base64": "bm90IHRoZSBndWFyZA=="
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 400);
+    assert!(!loom::git::branch_exists(ts.repo_path(), "weaver/invalid-scratch").await);
+    assert!(!ts.repo_path().join(".worktrees/invalid-scratch").exists());
+    let branches: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM branches")
+        .fetch_one(&ts.state.db)
+        .await
+        .unwrap();
+    let issues: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issues")
+        .fetch_one(&ts.state.db)
+        .await
+        .unwrap();
+    let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+        .fetch_one(&ts.state.db)
+        .await
+        .unwrap();
+    assert_eq!((branches, issues, sessions), (0, 1, 0));
+    let backlog = ts
+        .client
+        .get(&format!("/api/issues/{}", backlog["id"].as_i64().unwrap()))
+        .await
+        .unwrap();
+    assert!(
+        backlog["claimed_branch"].is_null(),
+        "attachment validation runs before claiming existing work"
+    );
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exact_advertised_scratch_total_fits_the_create_transport_envelope() {
+    let ts = TestServer::start().await;
+    let bytes = vec![b'x'; 25 * 1024 * 1024];
+    let content = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/api/sessions", ts.addr))
+        .json(&json!({
+            "cwd": ts.cwd(),
+            "goal": "exact scratch boundary",
+            "agent": "shell",
+            "scratch": [
+                { "name": "first.bin", "content_base64": content },
+                { "name": "second.bin", "content_base64": content }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    assert!(
+        status.is_success(),
+        "50 MiB decoded request was rejected at transport: {body}"
+    );
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    ts.client
+        .delete(&format!(
+            "/api/sessions/{}",
+            created["id"].as_str().unwrap()
+        ))
+        .await
+        .unwrap();
 }

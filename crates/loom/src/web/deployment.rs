@@ -47,6 +47,20 @@ pub(super) async fn reconcile_deployment(
         }
     }
 
+    // Deployment reconciliation is another profile editor. Serialize every
+    // declared lifetime plus any deployment-owned lifetime it may prune with
+    // the same permit used by launch/create/handoff.
+    let mut serialized_profile_names = profile_names.clone();
+    if req.prune {
+        for name in crate::profile::deployment_managed_names(&st.db).await? {
+            serialized_profile_names.insert(name);
+        }
+    }
+    let _profile_permits = st
+        .launch_gate
+        .acquire_profiles(serialized_profile_names.iter().map(String::as_str))
+        .await;
+
     for declared in &req.profiles {
         let input = super::profiles::input(
             declared.profile.clone(),

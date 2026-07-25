@@ -973,10 +973,24 @@ export interface ResolvedLaunch {
   errors: string[];
 }
 
+export interface HandoffInput {
+  /** Canonical clients send selection plus both preview revisions. */
+  selection?: LaunchSelection;
+  expected_profile_revision?: number;
+  expected_resolver_revision?: string;
+  /** Flattened compatibility selectors preserve the stamped session policy. */
+  agent?: string;
+  model?: string;
+  effort?: string;
+  mode?: string;
+}
+
 export interface CloneProfileInput {
   name: string;
   expected_profile_revision: number;
+  expected_resolver_revision: string;
   overrides: LaunchOverrides;
+  template?: ProfileInput;
   copy_environment: boolean;
 }
 

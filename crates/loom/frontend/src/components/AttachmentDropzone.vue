@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { getScratchLimits } from '../api';
 import type { ScratchLimits } from '../types';
 
@@ -24,11 +24,13 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   files: [File[]];
+  validation: [string];
 }>();
 
 const limits = ref<ScratchLimits | null>(null);
 const dragging = ref(false);
 const error = ref('');
+const limitsError = ref('');
 const fileInput = ref<HTMLInputElement | null>(null);
 
 const limitHint = computed(() => {
@@ -43,13 +45,30 @@ function fmtBytes(n: number): string {
 }
 
 function validate(files: File[]): string {
+  for (const file of files) {
+    const name = file.name.trim();
+    if (
+      !name ||
+      name === '.' ||
+      name === '..' ||
+      name === '.gitignore' ||
+      name.includes('/') ||
+      name.includes('\\')
+    ) {
+      return name === '.gitignore'
+        ? "'.gitignore' is reserved for Scratch housekeeping."
+        : `${file.name || 'Unnamed file'} must be a single file name.`;
+    }
+  }
   if (!limits.value) return '';
   const next = new Map(props.existing.map((item) => [item.name, item.bytes]));
   for (const file of files) {
-    if (file.size > limits.value.max_file_bytes) {
-      return `${file.name} is ${fmtBytes(file.size)}; the per-file limit is ${fmtBytes(limits.value.max_file_bytes)}.`;
-    }
     next.set(file.name, file.size);
+  }
+  for (const [name, bytes] of next) {
+    if (bytes > limits.value.max_file_bytes) {
+      return `${name} is ${fmtBytes(bytes)}; the per-file limit is ${fmtBytes(limits.value.max_file_bytes)}.`;
+    }
   }
   if (next.size > limits.value.max_files) {
     return `Scratch accepts at most ${limits.value.max_files} files.`;
@@ -61,11 +80,20 @@ function validate(files: File[]): string {
   return '';
 }
 
+function publishValidation(message: string) {
+  error.value = limitsError.value || message;
+  emit('validation', error.value);
+}
+
+function validateCurrent() {
+  publishValidation(validate([]));
+}
+
 function accept(list: FileList | File[]) {
   if (props.disabled) return;
   const files = Array.from(list);
   if (!files.length) return;
-  error.value = validate(files);
+  publishValidation(validate(files));
   if (!error.value) emit('files', files);
 }
 
@@ -93,10 +121,22 @@ function onPick(event: Event) {
 onMounted(async () => {
   try {
     limits.value = await getScratchLimits();
+    validateCurrent();
   } catch (cause) {
-    error.value = (cause as Error).message;
+    limitsError.value = (cause as Error).message;
+    publishValidation('');
   }
 });
+
+watch(() => props.existing.map((item) => `${item.name}\0${item.bytes}`), validateCurrent);
+
+function resetTransient() {
+  dragging.value = false;
+  publishValidation('');
+  if (fileInput.value) fileInput.value.value = '';
+}
+
+defineExpose({ resetTransient });
 </script>
 
 <template>
@@ -126,9 +166,16 @@ onMounted(async () => {
         <span class="text-sm">Drop reference files here, or click to browse</span>
         <span v-if="!compact" class="mt-1 block text-xs text-faint">{{ limitHint }}</span>
       </slot>
-      <input ref="fileInput" type="file" multiple class="hidden" @change="onPick" />
+      <input
+        ref="fileInput"
+        type="file"
+        multiple
+        class="hidden"
+        :disabled="disabled"
+        @change="onPick"
+      />
     </div>
-    <p v-if="error" class="mt-1 text-xs text-block" data-testid="attachment-error">
+    <p v-if="error" class="mt-1 text-xs text-block" data-testid="attachment-error" role="alert">
       {{ error }}
     </p>
   </div>

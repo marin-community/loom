@@ -407,9 +407,15 @@ enum SessionCmd {
     Handoff {
         /// Session key: id, branch id, branch name, or `repo:branch`.
         session: String,
-        /// Target ACP agent runtime (for example `claude` or `codex`).
+        /// Target launch profile. When present, Loom previews a canonical
+        /// profile selection and sends both optimistic revisions.
         #[arg(long)]
-        agent: String,
+        profile: Option<String>,
+        /// Target ACP agent runtime (for example `claude` or `codex`). With
+        /// `--profile` this is a one-handoff override; without it this selects
+        /// the legacy runtime-only compatibility path.
+        #[arg(long)]
+        agent: Option<String>,
         /// Target model selector; omit for the runtime default.
         #[arg(long)]
         model: Option<String>,
@@ -778,7 +784,10 @@ enum ProfileCmd {
         #[arg(long)]
         class: Option<String>,
     },
-    /// Save a resolved profile selection as a new template.
+    /// Save a resolved profile selection as a new insert-only template.
+    ///
+    /// Loom previews first and guards both the source profile and resolver
+    /// revisions; `--copy-environment` participates in the same transaction.
     Clone {
         source: String,
         name: String,
@@ -1111,11 +1120,12 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
         SessionCmd::Recover { branch } => cmd_recover(branch).await,
         SessionCmd::Handoff {
             session,
+            profile,
             agent,
             model,
             effort,
             mode,
-        } => cmd_handoff(session, agent, model, effort, mode).await,
+        } => cmd_handoff(session, profile, agent, model, effort, mode).await,
         SessionCmd::Rm {
             branch,
             keep_branch,
@@ -1602,7 +1612,9 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
                     &weaver_api::CloneProfileReq {
                         name,
                         expected_profile_revision: resolved.profile_revision,
+                        expected_resolver_revision: resolved.resolver_revision,
                         overrides,
+                        template: None,
                         copy_environment,
                     },
                 )
@@ -3609,24 +3621,57 @@ async fn cmd_recover(key: String) -> Result<()> {
 
 async fn cmd_handoff(
     key: String,
-    agent: String,
+    profile: Option<String>,
+    agent: Option<String>,
     model: Option<String>,
     effort: Option<String>,
     mode: Option<String>,
 ) -> Result<()> {
     let client = client::default()?;
-    let ws = client
-        .handoff_session(
-            &key,
-            &weaver_api::HandoffReq {
+    let request = if let Some(profile) = profile {
+        let selection = weaver_api::LaunchSelection {
+            profile,
+            overrides: weaver_api::LaunchOverrides {
                 agent,
                 model,
                 effort,
                 mode,
                 ..Default::default()
             },
-        )
-        .await?;
+        };
+        let preview = client
+            .resolve_session_handoff(
+                &key,
+                &weaver_api::ResolveLaunchReq {
+                    selection: selection.clone(),
+                },
+            )
+            .await?;
+        if !preview.valid {
+            bail!(
+                "handoff settings are not currently valid:\n{}",
+                preview.errors.join("\n")
+            );
+        }
+        weaver_api::HandoffReq {
+            selection: Some(selection),
+            expected_profile_revision: Some(preview.profile_revision),
+            expected_resolver_revision: Some(preview.resolver_revision),
+            ..Default::default()
+        }
+    } else {
+        let agent = agent.ok_or_else(|| {
+            anyhow::anyhow!("handoff requires either --profile or the legacy --agent selector")
+        })?;
+        weaver_api::HandoffReq {
+            agent,
+            model,
+            effort,
+            mode,
+            ..Default::default()
+        }
+    };
+    let ws = client.handoff_session(&key, &request).await?;
     println!("handed off session {} to {}", ws.id, ws.agent_kind);
     if !ws.model.is_empty() {
         println!("  model:   {}", ws.model);

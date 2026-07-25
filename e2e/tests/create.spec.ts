@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { test, expect } from '../fixtures/weaver';
 
 test.describe('creating a session via the UI form', () => {
@@ -56,7 +58,10 @@ test.describe('creating a session via the UI form', () => {
     await expect(page.getByTestId('recent-repo')).toBeHidden();
   });
 
-  test('selects a profile, overrides it, launches, and drops an attachment', async ({ page, weaver }) => {
+  test('selects a profile, overrides it, launches, and drops an attachment', async ({
+    page,
+    weaver,
+  }) => {
     await fetch(`${weaver.baseUrl}/api/profiles`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -112,7 +117,10 @@ test.describe('creating a session via the UI form', () => {
     expect(files).toEqual([{ name: 'trace.log', bytes: Buffer.byteLength('panic at line 42\n') }]);
   });
 
-  test('a cached session does not consume new-session file drops', async ({ page, weaver }) => {
+  test('a cached session routes drop and browse files only into the next launch', async ({
+    page,
+    weaver,
+  }) => {
     await page.addInitScript(() => {
       const original = window.addEventListener.bind(window);
       (window as Window & { __dropListeners?: number }).__dropListeners = 0;
@@ -137,18 +145,59 @@ test.describe('creating a session via the UI form', () => {
     // SessionDetail remains cached, but both attachment surfaces are bounded.
     await page.locator('[data-rail="sessions"]').click();
     await page.getByRole('button', { name: 'New session' }).click();
+    await page.getByPlaceholder(repoPlaceholder).fill(weaver.repoPath);
+    await page
+      .getByPlaceholder('Add a /health endpoint')
+      .fill('Verify cached route attachment bytes');
     const dropzone = page.getByTestId('scratch-picker-dropzone');
     const dataTransfer = await page.evaluateHandle(() => {
       const dt = new DataTransfer();
-      dt.items.add(new File(['image'], 'new-session.png', { type: 'image/png' }));
+      dt.items.add(new File([new Uint8Array([0, 255, 1, 2])], 'empty-type.bin'));
+      dt.items.add(
+        new File(['plain text with a misleading MIME'], 'misleading.txt', {
+          type: 'image/png',
+        }),
+      );
+      Object.defineProperty(dt, 'types', { value: [] });
       return dt;
     });
     await dropzone.dispatchEvent('drop', { dataTransfer });
-    await expect(page.getByTestId('scratch-picker-file')).toContainText('new-session.png');
-    expect(await page.evaluate(() => (window as Window & { __dropListeners?: number }).__dropListeners)).toBe(0);
+    await expect(page.getByTestId('scratch-picker-file')).toHaveCount(2);
+    await dropzone.locator('input[type="file"]').setInputFiles({
+      name: 'browsed.dat',
+      mimeType: 'application/x-weaver-misleading',
+      buffer: Buffer.from([9, 8, 7, 6]),
+    });
+    await expect(page.getByTestId('scratch-picker-file')).toHaveCount(3);
+    expect(
+      await page.evaluate(() => (window as Window & { __dropListeners?: number }).__dropListeners),
+    ).toBe(0);
 
     const oldScratch = await fetch(`${weaver.baseUrl}/api/sessions/${existing.id}/scratch`);
     expect((await oldScratch.json()) as { name: string }[]).toEqual([]);
+
+    await page.getByRole('button', { name: 'Create session' }).click();
+    await expect(page).toHaveURL(/\/s\/[^/]+$/);
+    const launched = (await weaver.listSessions()).find(
+      (session) => session.branch.goal === 'Verify cached route attachment bytes',
+    )!;
+    const listed = (await (
+      await fetch(`${weaver.baseUrl}/api/sessions/${launched.id}/scratch`)
+    ).json()) as { name: string; bytes: number }[];
+    expect(listed.map((file) => file.name).sort()).toEqual([
+      'browsed.dat',
+      'empty-type.bin',
+      'misleading.txt',
+    ]);
+    expect(await readFile(join(launched.work_dir, 'scratch/empty-type.bin'))).toEqual(
+      Buffer.from([0, 255, 1, 2]),
+    );
+    expect(await readFile(join(launched.work_dir, 'scratch/misleading.txt'), 'utf8')).toBe(
+      'plain text with a misleading MIME',
+    );
+    expect(await readFile(join(launched.work_dir, 'scratch/browsed.dat'))).toEqual(
+      Buffer.from([9, 8, 7, 6]),
+    );
   });
 
   test('an agent startup failure opens its recoverable session', async ({ page, weaver }) => {
@@ -201,7 +250,11 @@ test.describe('creating a session via the UI form', () => {
     });
     await page.goto(`${weaver.baseUrl}/sessions/new`);
     await expect(page.getByTestId('provenance-mode')).toBeVisible();
-    await page.getByTestId('clone-profile-name').fill('stale-preview-clone');
+    await page.getByTestId('clone-profile-open').click();
+    await page
+      .getByTestId('profile-editor')
+      .getByLabel('Name', { exact: true })
+      .fill('stale-preview-clone');
     await expect(page.getByTestId('clone-profile')).toBeEnabled();
 
     await page.getByRole('button', { name: /One-launch overrides/ }).click();
@@ -216,7 +269,10 @@ test.describe('creating a session via the UI form', () => {
     await expect(page.getByTestId('clone-profile')).toBeEnabled();
   });
 
-  test('keeps the launch draft while profile templates are edited', async ({ page, weaver }) => {
+  test('refreshes added, edited, and deleted profiles without losing the cached draft', async ({
+    page,
+    weaver,
+  }) => {
     await page.goto(`${weaver.baseUrl}/sessions/new`);
     await page.getByPlaceholder(repoPlaceholder).fill(weaver.repoPath);
     await page.getByPlaceholder('Add a /health endpoint').fill('Keep this draft');
@@ -224,10 +280,65 @@ test.describe('creating a session via the UI form', () => {
     await page.getByRole('link', { name: 'Edit profile templates in Settings' }).click();
     await expect(page).toHaveURL(`${weaver.baseUrl}/settings`);
     await expect(page.getByTestId('profile-selector')).toBeVisible();
+    await page.getByRole('button', { name: '+ Add profile' }).click();
+    await page.getByLabel('Name', { exact: true }).fill('cached-template');
+    await page.getByLabel('Description', { exact: true }).fill('first revision');
+    await page.getByTestId('profile-agent').selectOption('shell');
+    await page.getByLabel('Protocol', { exact: true }).selectOption('terminal');
+    await page.getByTestId('profile-save').click();
+    await expect(page.getByText('Saved cached-template.')).toBeVisible();
+    await page.getByLabel('Description', { exact: true }).fill('second revision');
+    await page.getByTestId('profile-save').click();
+    await expect(page.getByTestId('profile-option-cached-template')).toContainText('r2');
     await page.goBack();
 
     await expect(page.getByPlaceholder(repoPlaceholder)).toHaveValue(weaver.repoPath);
     await expect(page.getByPlaceholder('Add a /health endpoint')).toHaveValue('Keep this draft');
+    await expect(page.getByTestId('profile-option-cached-template')).toContainText('r2');
+    await page.getByTestId('profile-option-cached-template').click();
+    await page.getByRole('button', { name: /One-launch overrides/ }).click();
+    await page.getByTestId('override-mode-toggle').check();
+    await page.getByTestId('override-mode').selectOption('plan');
+    const staged = await page.evaluateHandle(() => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(['preserved'], 'preserved.txt'));
+      return transfer;
+    });
+    await page.getByTestId('scratch-picker-dropzone').dispatchEvent('drop', {
+      dataTransfer: staged,
+    });
+
+    await page.getByRole('link', { name: 'Edit profile templates in Settings' }).click();
+    await page.getByTestId('profile-option-cached-template').click();
+    const profileDelete = page.getByTestId('profile-delete');
+    await profileDelete.getByRole('button', { name: 'Delete' }).click();
+    await profileDelete.getByRole('button', { name: 'Confirm' }).click();
+    await expect(page.getByTestId('profile-option-cached-template')).toHaveCount(0);
+    await page.goBack();
+
+    await expect(page.getByTestId('profile-option-cached-template')).toHaveCount(0);
+    await expect(page.getByPlaceholder(repoPlaceholder)).toHaveValue(weaver.repoPath);
+    await expect(page.getByPlaceholder('Add a /health endpoint')).toHaveValue('Keep this draft');
+    await expect(page.getByTestId('override-mode-toggle')).toBeChecked();
+    await expect(page.getByTestId('override-mode')).toHaveValue('plan');
+    await expect(page.getByTestId('scratch-picker-file')).toContainText('preserved.txt');
+  });
+
+  test('the focused launch surface does not overflow a 320px viewport', async ({
+    page,
+    weaver,
+  }) => {
+    await page.setViewportSize({ width: 320, height: 720 });
+    await page.goto(`${weaver.baseUrl}/sessions/new`);
+    await expect(page.getByTestId('new-session-drawer')).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(() => ({
+          client: document.documentElement.clientWidth,
+          scroll: document.documentElement.scrollWidth,
+        })),
+      )
+      .toEqual({ client: 320, scroll: 320 });
   });
 
   test('Cancel discards the cached launch draft', async ({ page, weaver }) => {

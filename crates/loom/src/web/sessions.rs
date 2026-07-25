@@ -34,7 +34,7 @@ use weaver_core::branch::Branch;
 use weaver_core::tags;
 use weaver_core::watch::{self as watch_store, Watch};
 
-use super::scratch::{scratch_note, write_initial_scratch};
+use super::scratch::{prepare_initial_scratch, scratch_note, write_prepared_initial_scratch};
 use super::{author_or_manual, require_branch, require_session, session_view};
 use super::{ApiResult, AppError, AppState};
 
@@ -648,6 +648,11 @@ fn create_selection(req: &CreateReq) -> ApiResult<LaunchSelection> {
             "canonical `selection` cannot be combined with flattened launch selectors",
         ));
     }
+    if req.expected_profile_revision.is_none() || req.expected_resolver_revision.is_none() {
+        return Err(AppError::bad_request(
+            "canonical `selection` requires expected_profile_revision and expected_resolver_revision from a resolve preview",
+        ));
+    }
     Ok(selection.clone())
 }
 
@@ -691,6 +696,82 @@ fn handoff_selection(req: &HandoffReq, session: &Session) -> ApiResult<LaunchSel
     })
 }
 
+fn handoff_resolve_options(session: &Session) -> crate::launch::ResolveOptions {
+    crate::launch::ResolveOptions {
+        // Resolve the selected template's real class. The handoff boundary
+        // compares it with the existing session instead of coercing it first.
+        default_class: None,
+        capacity_credit_profile: crate::profile::status_consumes_capacity(&session.status)
+            .then(|| session.profile.clone()),
+        ..Default::default()
+    }
+}
+
+async fn resolve_handoff_selection(
+    st: &AppState,
+    session: &Session,
+    selection: &LaunchSelection,
+) -> ApiResult<crate::launch::ResolvedLaunch> {
+    let mut resolved =
+        super::launches::resolve_launch(st, selection, &handoff_resolve_options(session)).await?;
+    if resolved.view.class != session.class {
+        resolved.view.errors.push(format!(
+            "profile '{}' is {}-class; this {} session cannot change class during handoff",
+            resolved.profile.name, resolved.view.class, session.class
+        ));
+    }
+    if resolved.view.protocol != "acp" {
+        resolved.view.errors.push(format!(
+            "agent '{}' does not resolve to the ACP protocol required for handoff",
+            resolved.view.agent
+        ));
+    }
+    if resolved.profile.restricted {
+        resolved
+            .view
+            .errors
+            .push("restricted profiles cannot be applied by handoff".to_string());
+    }
+    resolved.view.valid = resolved.view.errors.is_empty();
+    Ok(resolved)
+}
+
+fn require_handoff_source(session: &Session) -> ApiResult<()> {
+    require_acp(session)?;
+    if session.policy_restricted {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "restricted sessions cannot change agent runtime",
+        ));
+    }
+    if !matches!(session.status.as_str(), "running" | "orphaned" | "error") {
+        return Err(AppError::conflict(format!(
+            "session '{}' is {}, not handoff-capable",
+            session.id, session.status
+        )));
+    }
+    if session.managed_by.is_some() {
+        return Err(AppError::conflict(
+            "engine-managed sessions cannot be handed off manually",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) async fn resolve_session_handoff(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Json(req): Json<weaver_api::ResolveLaunchReq>,
+) -> ApiResult<Json<weaver_api::ResolvedLaunchView>> {
+    let (session, _) = require_session(&st.db, &key).await?;
+    require_handoff_source(&session)?;
+    Ok(Json(
+        resolve_handoff_selection(&st, &session, &req.selection)
+            .await?
+            .view,
+    ))
+}
+
 /// The session-creation core shared by every producer. The actor supplies trusted
 /// attribution, origin, ancestry, and profile bounds; request fields cannot
 /// impersonate those properties. Returns the view directly so each caller can
@@ -709,7 +790,21 @@ pub(crate) async fn provision_session(
         origin,
         "provision_session: starting session creation"
     );
+    // Attachment input is untrusted launch input, not a provisioning step.
+    // Decode and validate the entire batch before touching a repository,
+    // worktree, branch, tracking issue, claim, or session row.
+    let prepared_scratch = prepare_initial_scratch(&req.scratch)?;
     let selection = create_selection(&req)?;
+    let selected_profile_name = match selection.profile.trim() {
+        "" => crate::profile::DEFAULT_PROFILE,
+        name => name,
+    }
+    .to_string();
+    // This is both the capacity gate and the template-lifetime gate. Profile
+    // edits, retirement, recreation, clone, and environment mutation use the
+    // same permit; retaining it through session insertion closes the
+    // resolve/provision/delete gap even for unlimited profiles.
+    let _profile_permit = st.launch_gate.acquire_profile(&selected_profile_name).await;
     let options = crate::launch::ResolveOptions {
         default_class: matches!(origin, "watch" | "actions" | "ops")
             .then(|| "automation".to_string()),
@@ -802,14 +897,6 @@ pub(crate) async fn provision_session(
         }
     };
     let repo_key = repo_key.canonicalize().unwrap_or(repo_key);
-    let _profile_permit = if launch_profile.max_concurrent > 0 {
-        tracing::debug!(profile = %profile_name, "waiting for profile admission gate");
-        let permit = st.launch_gate.acquire_profile(&profile_name).await;
-        tracing::debug!(profile = %profile_name, "acquired profile admission gate");
-        Some(permit)
-    } else {
-        None
-    };
     tracing::debug!(repo = %repo_key.display(), "waiting for repository launch gate");
     let launch_permit = st.launch_gate.acquire(&repo_key).await;
     tracing::debug!(repo = %repo_key.display(), "acquired repository launch gate");
@@ -821,10 +908,12 @@ pub(crate) async fn provision_session(
         && crate::profile::active_count(&st.db, &profile_name).await?
             >= launch_profile.max_concurrent
     {
+        let fresh = super::launches::resolve_launch(&st, &selection, &options).await?;
         return Err(AppError::conflict(format!(
             "profile '{profile_name}' has reached its max_concurrent limit ({})",
             launch_profile.max_concurrent
-        )));
+        ))
+        .with_fields(json!({ "preview": fresh.view })));
     }
 
     // Now acquire the managed clone (inside the gate), or reuse the local root
@@ -1192,7 +1281,7 @@ pub(crate) async fn provision_session(
     // clean text the user typed; the scratch and tracking notes ride on the
     // launch prompt (goal.txt) only, so they reach the agent without cluttering
     // the dashboard.
-    let scratch_names = write_initial_scratch(&work_dir, &req.scratch).await?;
+    let scratch_names = write_prepared_initial_scratch(&work_dir, &prepared_scratch).await?;
     tracing::debug!(session = %session_id, scratch_files = scratch_names.len(), "wrote initial scratch files");
     // Goal, scratch, and tracking context ride in as the positional prompt that
     // seeds the session's first turn.
@@ -3468,6 +3557,137 @@ fn require_acp_task(st: &AppState, session: &Session) -> ApiResult<crate::acp::A
     })
 }
 
+struct HandoffPlan {
+    target: String,
+    model: String,
+    effort: String,
+    mode: String,
+    profile: String,
+    profile_revision: i64,
+    env_clear: bool,
+    ambient_allowlist: String,
+    idle_archive_secs: Option<i64>,
+    turn_budget: i64,
+    prelude: String,
+    restricted: bool,
+    strict: bool,
+    allowed_tools: String,
+    mcp_access: String,
+    launch_snapshot: String,
+    profile_environment: Vec<(String, String)>,
+}
+
+fn legacy_handoff_snapshot(
+    session: &Session,
+    target: &str,
+    model: &str,
+    effort: &str,
+    mode: &str,
+) -> ApiResult<String> {
+    if session.launch_snapshot.trim().is_empty() {
+        return Ok(String::new());
+    }
+    let mut snapshot: weaver_api::ResolvedLaunchView =
+        serde_json::from_str(&session.launch_snapshot)
+            .map_err(|error| AppError::bad_request(error.to_string()))?;
+    snapshot.agent = target.to_string();
+    snapshot.model = model.to_string();
+    snapshot.effort = effort.to_string();
+    snapshot.protocol = "acp".to_string();
+    snapshot.mode = mode.to_string();
+    snapshot.selection.overrides.agent = Some(target.to_string());
+    snapshot.selection.overrides.model = Some(model.to_string());
+    snapshot.selection.overrides.effort = Some(effort.to_string());
+    snapshot.selection.overrides.mode = Some(mode.to_string());
+    snapshot.provenance.agent = "launch_override".to_string();
+    snapshot.provenance.model = if model.is_empty() {
+        "agent_default"
+    } else {
+        "launch_override"
+    }
+    .to_string();
+    snapshot.provenance.effort = if effort.is_empty() {
+        "agent_default"
+    } else {
+        "launch_override"
+    }
+    .to_string();
+    snapshot.provenance.protocol = "agent_default".to_string();
+    snapshot.provenance.mode = "launch_override".to_string();
+    serde_json::to_string(&snapshot).map_err(|error| AppError::bad_request(error.to_string()))
+}
+
+async fn legacy_handoff_plan(
+    st: &AppState,
+    req: &HandoffReq,
+    session: &Session,
+) -> ApiResult<HandoffPlan> {
+    let target = req.agent.trim();
+    if target.is_empty() {
+        return Err(AppError::bad_request("handoff agent is required"));
+    }
+    let metadata = crate::agent::metadata_for(&st.db, target)
+        .await?
+        .ok_or_else(|| AppError::bad_request(format!("unknown agent '{target}'")))?;
+    let model = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    let effort = req
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    crate::agent::validate_model(&metadata, &model).map_err(AppError::bad_request)?;
+    crate::agent::validate_effort(&metadata, &effort).map_err(AppError::bad_request)?;
+    let protocol =
+        crate::agent::resolve_protocol(&metadata, None).map_err(AppError::bad_request)?;
+    if protocol != "acp" {
+        return Err(AppError::bad_request(format!(
+            "agent '{target}' does not resolve to the ACP protocol required for handoff"
+        )));
+    }
+    let mode = legacy_handoff_mode(&req.mode, &session.launch_mode);
+    if !matches!(
+        mode.as_str(),
+        "auto" | "default" | "acceptEdits" | "plan" | "bypassPermissions"
+    ) {
+        return Err(AppError::bad_request(format!(
+            "invalid handoff mode '{mode}'"
+        )));
+    }
+    let snapshot =
+        serde_json::from_str::<weaver_api::ResolvedLaunchView>(&session.launch_snapshot).ok();
+    let strict = snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.policy.strict);
+    let profile_environment = crate::profile::env_pairs(&st.db, &session.profile)
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    Ok(HandoffPlan {
+        target: target.to_string(),
+        model: model.clone(),
+        effort: effort.clone(),
+        mode: mode.clone(),
+        profile: session.profile.clone(),
+        profile_revision: session.profile_revision,
+        env_clear: session.policy_env_clear,
+        ambient_allowlist: session.policy_ambient_allowlist.clone(),
+        idle_archive_secs: session.policy_idle_archive_secs,
+        turn_budget: session.policy_turn_budget,
+        prelude: session.policy_prelude.clone(),
+        restricted: session.policy_restricted,
+        strict,
+        allowed_tools: session.policy_allowed_tools.clone(),
+        mcp_access: session.policy_mcp_access.clone(),
+        launch_snapshot: legacy_handoff_snapshot(session, target, &model, &effort, &mode)?,
+        profile_environment,
+    })
+}
+
 /// Replace the provider behind an idle ACP work session while preserving loom's
 /// stable session/branch/worktree identity and canonical journal.
 pub(super) async fn handoff_session(
@@ -3476,114 +3696,105 @@ pub(super) async fn handoff_session(
     Json(req): Json<HandoffReq>,
 ) -> ApiResult<Json<SessionView>> {
     let (session, branch) = require_session(&st.db, &key).await?;
-    require_acp(&session)?;
-    if session.policy_restricted {
-        return Err(AppError::new(
-            StatusCode::FORBIDDEN,
-            "restricted sessions cannot change agent runtime",
-        ));
-    }
-    if !matches!(session.status.as_str(), "running" | "orphaned" | "error") {
-        return Err(AppError::conflict(format!(
-            "session '{}' is {}, not handoff-capable",
-            session.id, session.status
-        )));
-    }
-    if session.managed_by.is_some() {
-        return Err(AppError::conflict(
-            "engine-managed sessions cannot be handed off manually",
-        ));
-    }
-
-    let selection = handoff_selection(&req, &session)?;
-    let options = crate::launch::ResolveOptions {
-        default_class: Some(session.class.clone()),
-        capacity_credit_profile: Some(session.profile.clone()),
-    };
-    let resolved = super::launches::resolve_launch(&st, &selection, &options).await?;
-    if req
-        .expected_profile_revision
-        .is_some_and(|expected| expected != resolved.view.profile_revision)
-        || req
-            .expected_resolver_revision
-            .as_deref()
-            .is_some_and(|expected| expected != resolved.view.resolver_revision)
+    require_handoff_source(&session)?;
+    let canonical = req.selection.is_some();
+    if canonical
+        && (req.expected_profile_revision.is_none() || req.expected_resolver_revision.is_none())
     {
-        return Err(AppError::conflict(
-            "handoff settings changed after preview; review the fresh resolution",
-        )
-        .with_fields(json!({ "preview": resolved.view })));
-    }
-    if !resolved.view.valid {
-        return Err(
-            AppError::conflict("resolved handoff settings are not currently launchable")
-                .with_fields(json!({ "preview": resolved.view })),
-        );
-    }
-    if resolved.view.protocol != "acp" {
-        return Err(AppError::bad_request(format!(
-            "agent '{}' does not resolve to the ACP protocol required for handoff",
-            resolved.view.agent
-        )));
-    }
-    if resolved.view.class != session.class {
         return Err(AppError::bad_request(
-            "handoff cannot change an existing session's class",
+            "canonical handoff selection requires expected_profile_revision and expected_resolver_revision from a handoff preview",
         ));
     }
-    if resolved.profile.restricted {
-        return Err(AppError::new(
-            StatusCode::FORBIDDEN,
-            "restricted profiles cannot be applied by handoff",
-        ));
-    }
-    let profile_environment = crate::profile::env_pairs(&st.db, &resolved.profile.name)
-        .await
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
-    let current_profile = crate::profile::get(&st.db, &resolved.profile.name)
-        .await?
-        .ok_or_else(|| AppError::bad_request("selected profile was removed after preview"))?;
-    if current_profile.revision != resolved.view.profile_revision {
-        let fresh = super::launches::resolve_launch(&st, &selection, &options).await?;
-        return Err(AppError::conflict(
-            "handoff profile changed while resolving its environment; review the fresh resolution",
-        )
-        .with_fields(json!({ "preview": fresh.view })));
-    }
-    let target = resolved.view.agent.clone();
-    let model = resolved.view.model.clone();
-    let effort = resolved.view.effort.clone();
-    let mode = resolved.view.mode.clone();
+    let selection = canonical
+        .then(|| handoff_selection(&req, &session))
+        .transpose()?;
+    let permit_profile = selection
+        .as_ref()
+        .map(|selection| match selection.profile.trim() {
+            "" => crate::profile::DEFAULT_PROFILE,
+            name => name,
+        })
+        .unwrap_or(session.profile.as_str())
+        .to_string();
+    let _profile_permit = st.launch_gate.acquire_profile(&permit_profile).await;
+    let plan = if let Some(selection) = selection {
+        let resolved = resolve_handoff_selection(&st, &session, &selection).await?;
+        if req
+            .expected_profile_revision
+            .is_some_and(|expected| expected != resolved.view.profile_revision)
+            || req
+                .expected_resolver_revision
+                .as_deref()
+                .is_some_and(|expected| expected != resolved.view.resolver_revision)
+        {
+            return Err(AppError::conflict(
+                "handoff settings changed after preview; review the fresh resolution",
+            )
+            .with_fields(json!({ "preview": resolved.view })));
+        }
+        if !resolved.view.valid {
+            return Err(AppError::conflict(
+                "resolved handoff settings are not currently launchable",
+            )
+            .with_fields(json!({ "preview": resolved.view })));
+        }
+        let profile_environment = crate::profile::env_pairs(&st.db, &resolved.profile.name)
+            .await
+            .map_err(|error| AppError::bad_request(error.to_string()))?;
+        let launch_snapshot = serde_json::to_string(&resolved.view)
+            .map_err(|error| AppError::bad_request(error.to_string()))?;
+        HandoffPlan {
+            target: resolved.view.agent.clone(),
+            model: resolved.view.model.clone(),
+            effort: resolved.view.effort.clone(),
+            mode: resolved.view.mode.clone(),
+            profile: resolved.profile.name.clone(),
+            profile_revision: resolved.profile.revision,
+            env_clear: resolved.profile.env_clear,
+            ambient_allowlist: resolved.profile.ambient_allowlist.clone(),
+            idle_archive_secs: resolved.view.policy.idle_archive_secs,
+            turn_budget: resolved.view.policy.turn_budget.unwrap_or(0),
+            prelude: resolved.profile.prelude.clone(),
+            restricted: resolved.profile.restricted,
+            strict: resolved.profile.strict,
+            allowed_tools: serde_json::to_string(&resolved.runtime_permissions)
+                .map_err(|error| AppError::bad_request(error.to_string()))?,
+            mcp_access: serde_json::to_string(&resolved.mcp_policy)
+                .map_err(|error| AppError::bad_request(error.to_string()))?,
+            launch_snapshot,
+            profile_environment,
+        }
+    } else {
+        legacy_handoff_plan(&st, &req, &session).await?
+    };
+    let target = plan.target.clone();
+    let model = plan.model.clone();
+    let effort = plan.effort.clone();
+    let mode = plan.mode.clone();
     if target == session.agent_kind
         && model == session.model
         && effort == session.effort
-        && resolved.profile.name == session.profile
-        && resolved.profile.revision == session.profile_revision
+        && plan.profile == session.profile
+        && plan.profile_revision == session.profile_revision
         && mode == session.launch_mode
     {
         return Err(AppError::bad_request(
             "handoff target matches the current runtime profile",
         ));
     }
-    let launch_snapshot = serde_json::to_string(&resolved.view)
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
-    let stamped_allowed_tools = serde_json::to_string(&resolved.runtime_permissions)
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
-    let stamped_mcp_access = serde_json::to_string(&resolved.mcp_policy)
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
     let handoff_policy = session_mod::SessionHandoffPolicy {
-        profile: resolved.profile.name.clone(),
+        profile: plan.profile.clone(),
         launch_mode: mode.clone(),
-        profile_revision: resolved.profile.revision,
-        env_clear: resolved.profile.env_clear,
-        ambient_allowlist: resolved.profile.ambient_allowlist.clone(),
-        idle_archive_secs: resolved.view.policy.idle_archive_secs,
-        turn_budget: resolved.view.policy.turn_budget.unwrap_or(0),
-        prelude: resolved.profile.prelude.clone(),
-        restricted: resolved.profile.restricted,
-        allowed_tools: stamped_allowed_tools,
-        mcp_access: stamped_mcp_access,
-        launch_snapshot,
+        profile_revision: plan.profile_revision,
+        env_clear: plan.env_clear,
+        ambient_allowlist: plan.ambient_allowlist.clone(),
+        idle_archive_secs: plan.idle_archive_secs,
+        turn_budget: plan.turn_budget,
+        prelude: plan.prelude.clone(),
+        restricted: plan.restricted,
+        allowed_tools: plan.allowed_tools.clone(),
+        mcp_access: plan.mcp_access.clone(),
+        launch_snapshot: plan.launch_snapshot.clone(),
     };
 
     // Resolve every fallible launch input before quiescing the current task.
@@ -3600,16 +3811,14 @@ pub(super) async fn handoff_session(
         &st.db,
         &repo_root,
         &repo_cfg,
-        &resolved.profile.name,
-        profile_environment,
-        resolved.profile.strict,
-        resolved.profile.restricted,
+        &plan.profile,
+        plan.profile_environment.clone(),
+        plan.strict,
+        plan.restricted,
     )
     .await;
-    if resolved.profile.env_clear {
-        let allowlist = resolved
-            .profile
-            .ambient_names()
+    if plan.env_clear {
+        let allowlist: Vec<String> = serde_json::from_str(&plan.ambient_allowlist)
             .map_err(|error| AppError::bad_request(error.to_string()))?;
         extra_env = crate::profile::cleared_environment(extra_env, &allowlist);
     }
@@ -3645,10 +3854,10 @@ pub(super) async fn handoff_session(
             goal_file: None,
             primer_file: None,
             extra_env: &extra_env,
-            env_clear: resolved.profile.env_clear,
+            env_clear: plan.env_clear,
             mode: &mode,
-            prelude: &resolved.profile.prelude,
-            restricted: resolved.profile.restricted,
+            prelude: &plan.prelude,
+            restricted: plan.restricted,
             allowed_tools: &handoff_policy.allowed_tools,
             mcp_access: &handoff_policy.mcp_access,
             custom: custom.as_ref(),

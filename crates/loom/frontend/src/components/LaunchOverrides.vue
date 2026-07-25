@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, useId } from 'vue';
 import type { AgentMetadata, LaunchOverrides, ResolvedLaunch } from '../types';
 
 const props = defineProps<{
@@ -12,6 +12,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:modelValue': [LaunchOverrides];
 }>();
+const uid = useId();
 
 const effectiveAgent = computed(
   () => props.modelValue.agent ?? props.resolved?.agent ?? props.agents[0]?.kind ?? '',
@@ -51,15 +52,17 @@ function locked(field: keyof LaunchOverrides): boolean {
 
 <template>
   <div class="grid gap-3 sm:grid-cols-2" data-testid="launch-overrides">
-    <label
+    <fieldset
       v-for="field in ['agent', 'model', 'effort', 'protocol', 'mode', 'class'] as const"
       :key="field"
       class="rounded border border-line bg-input p-2 text-xs"
     >
+      <legend class="sr-only capitalize">{{ field }} override</legend>
       <span class="mb-1 flex items-center justify-between gap-2">
-        <span class="font-medium capitalize">{{ field }}</span>
-        <span class="flex items-center gap-1 text-faint">
+        <span class="font-medium capitalize" aria-hidden="true">{{ field }}</span>
+        <label :for="`${uid}-${field}-enabled`" class="flex items-center gap-1 text-faint">
           <input
+            :id="`${uid}-${field}-enabled`"
             type="checkbox"
             :data-testid="`override-${field}-toggle`"
             :checked="enabled(field)"
@@ -67,11 +70,13 @@ function locked(field: keyof LaunchOverrides): boolean {
             @change="toggle(field, ($event.target as HTMLInputElement).checked)"
           />
           override
-        </span>
+        </label>
       </span>
 
       <select
         v-if="field === 'agent'"
+        :id="`${uid}-${field}-value`"
+        :aria-label="`${field} override value`"
         :value="modelValue.agent ?? resolved?.agent ?? ''"
         :disabled="!enabled(field) || locked(field)"
         :data-testid="`override-${field}`"
@@ -85,6 +90,8 @@ function locked(field: keyof LaunchOverrides): boolean {
 
       <input
         v-else-if="field === 'model' && metadata?.accepts_raw_model"
+        :id="`${uid}-${field}-value`"
+        :aria-label="`${field} override value`"
         :value="modelValue.model ?? resolved?.model ?? ''"
         :disabled="!enabled(field) || locked(field)"
         :data-testid="`override-${field}`"
@@ -99,6 +106,8 @@ function locked(field: keyof LaunchOverrides): boolean {
 
       <select
         v-else-if="field === 'model'"
+        :id="`${uid}-${field}-value`"
+        :aria-label="`${field} override value`"
         :value="modelValue.model ?? resolved?.model ?? ''"
         :disabled="!enabled(field) || locked(field)"
         :data-testid="`override-${field}`"
@@ -113,6 +122,8 @@ function locked(field: keyof LaunchOverrides): boolean {
 
       <select
         v-else-if="field === 'effort'"
+        :id="`${uid}-${field}-value`"
+        :aria-label="`${field} override value`"
         :value="modelValue.effort ?? resolved?.effort ?? ''"
         :disabled="!enabled(field) || locked(field)"
         :data-testid="`override-${field}`"
@@ -127,6 +138,8 @@ function locked(field: keyof LaunchOverrides): boolean {
 
       <select
         v-else-if="field === 'protocol'"
+        :id="`${uid}-${field}-value`"
+        :aria-label="`${field} override value`"
         :value="modelValue.protocol ?? resolved?.protocol ?? ''"
         :disabled="!enabled(field) || locked(field)"
         :data-testid="`override-${field}`"
@@ -139,6 +152,8 @@ function locked(field: keyof LaunchOverrides): boolean {
 
       <select
         v-else-if="field === 'mode'"
+        :id="`${uid}-${field}-value`"
+        :aria-label="`${field} override value`"
         :value="modelValue.mode ?? resolved?.mode ?? ''"
         :disabled="!enabled(field) || locked(field)"
         :data-testid="`override-${field}`"
@@ -156,6 +171,8 @@ function locked(field: keyof LaunchOverrides): boolean {
 
       <select
         v-else
+        :id="`${uid}-${field}-value`"
+        :aria-label="`${field} override value`"
         :value="modelValue.class ?? resolved?.class ?? ''"
         :disabled="!enabled(field) || locked(field)"
         :data-testid="`override-${field}`"
@@ -170,6 +187,6 @@ function locked(field: keyof LaunchOverrides): boolean {
       <span v-else-if="!enabled(field)" class="mt-1 block truncate text-faint">
         Inherits {{ resolved?.[field] || 'agent default' }}
       </span>
-    </label>
+    </fieldset>
   </div>
 </template>

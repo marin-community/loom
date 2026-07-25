@@ -107,6 +107,18 @@ async fn launch_resolution_reports_agent_defaults_and_rejects_environment_revisi
     assert_eq!(preview["provenance"]["protocol"], "profile");
     assert_eq!(preview["protocol"], "terminal");
 
+    let unstamped = reqwest::Client::new()
+        .post(format!("http://{}/api/sessions", ts.addr))
+        .json(&json!({
+            "cwd": ts.cwd(),
+            "goal": "canonical launch needs its reviewed revisions",
+            "selection": { "profile": "launch-test", "overrides": {} }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unstamped.status(), StatusCode::BAD_REQUEST);
+
     let edited = ts
         .client
         .put(
@@ -232,11 +244,15 @@ async fn profile_capacity_admission_is_serialized_across_repositories() {
         1
     );
 
-    let successful = if first.status().is_success() {
-        first
+    let (successful, conflict) = if first.status().is_success() {
+        (first, second)
     } else {
-        second
+        (second, first)
     };
+    let conflict_body: serde_json::Value = conflict.json().await.unwrap();
+    assert_eq!(conflict_body["preview"]["capacity"]["active"], 1);
+    assert_eq!(conflict_body["preview"]["capacity"]["allowed"], false);
+    assert_eq!(conflict_body["preview"]["valid"], false);
     let session: serde_json::Value = successful.json().await.unwrap();
     assert_eq!(
         loom::profile::active_count(&ts.state.db, "one-at-a-time")
@@ -248,6 +264,77 @@ async fn profile_capacity_admission_is_serialized_across_repositories() {
         .delete(&format!(
             "/api/sessions/{}",
             session["id"].as_str().unwrap()
+        ))
+        .await
+        .unwrap();
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn profile_lifetime_permit_extends_through_session_insertion() {
+    let ts = TestServer::start().await;
+    ts.client
+        .post(
+            "/api/profiles",
+            interactive_shell_profile("lifetime-serialized"),
+        )
+        .await
+        .unwrap();
+    let permit = ts
+        .state
+        .launch_gate
+        .acquire_profile("lifetime-serialized")
+        .await;
+    let create_url = format!("http://{}/api/sessions", ts.addr);
+    let cwd = ts.cwd();
+    let creating = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(create_url)
+            .json(&json!({
+                "cwd": cwd,
+                "goal": "serialize profile lifetime",
+                "profile": "lifetime-serialized"
+            }))
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let delete_url = format!("http://{}/api/profiles/lifetime-serialized", ts.addr);
+    let deleting = tokio::spawn(async move {
+        reqwest::Client::new()
+            .delete(delete_url)
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(!creating.is_finished());
+    assert!(!deleting.is_finished());
+    drop(permit);
+
+    let created = tokio::time::timeout(std::time::Duration::from_secs(15), creating)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(created.status().is_success());
+    let created: serde_json::Value = created.json().await.unwrap();
+    let deleted = tokio::time::timeout(std::time::Duration::from_secs(15), deleting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        loom::profile::get(&ts.state.db, "lifetime-serialized")
+            .await
+            .unwrap()
+            .is_some(),
+        "the launch inserted its session before deletion checked references"
+    );
+    ts.client
+        .delete(&format!(
+            "/api/sessions/{}",
+            created["id"].as_str().unwrap()
         ))
         .await
         .unwrap();
@@ -270,6 +357,19 @@ async fn profile_clone_copies_environment_atomically_and_honors_source_revision(
         .await
         .unwrap();
     let source_revision = source["revision"].as_i64().unwrap();
+    let preview = ts
+        .client
+        .post(
+            "/api/session-launches/resolve",
+            json!({
+                "selection": {
+                    "profile": "clone-source",
+                    "overrides": { "effort": "" }
+                }
+            }),
+        )
+        .await
+        .unwrap();
 
     let clone = ts
         .client
@@ -278,6 +378,7 @@ async fn profile_clone_copies_environment_atomically_and_honors_source_revision(
             json!({
                 "name": "clone-target",
                 "expected_profile_revision": source_revision,
+                "expected_resolver_revision": preview["resolver_revision"],
                 "overrides": { "effort": "" },
                 "copy_environment": true
             }),
@@ -308,6 +409,7 @@ async fn profile_clone_copies_environment_atomically_and_honors_source_revision(
         .json(&json!({
             "name": "stale-clone",
             "expected_profile_revision": source_revision,
+            "expected_resolver_revision": preview["resolver_revision"],
             "overrides": {},
             "copy_environment": true
         }))
@@ -315,6 +417,12 @@ async fn profile_clone_copies_environment_atomically_and_honors_source_revision(
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(
+        body["preview"]["profile_revision"],
+        source_revision + 1,
+        "profile drift returns a freshly resolved clone proposal"
+    );
     assert!(loom::profile::get(&ts.state.db, "stale-clone")
         .await
         .unwrap()
@@ -323,6 +431,154 @@ async fn profile_clone_copies_environment_atomically_and_honors_source_revision(
         .await
         .unwrap()
         .is_empty());
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn profile_clone_rejects_resolver_drift_and_accepts_an_editable_template() {
+    let ts = TestServer::start().await;
+    ts.client
+        .post(
+            "/api/profiles",
+            interactive_shell_profile("editable-source"),
+        )
+        .await
+        .unwrap();
+    let preview = ts
+        .client
+        .post(
+            "/api/session-launches/resolve",
+            json!({ "selection": { "profile": "editable-source", "overrides": {} } }),
+        )
+        .await
+        .unwrap();
+    loom::custom_agents::set(
+        &ts.state.db,
+        &loom::custom_agents::CustomAgent {
+            name: "resolver-drift".to_string(),
+            label: "Resolver drift".to_string(),
+            setup: String::new(),
+            launch: String::new(),
+            resume: String::new(),
+            reports_status: false,
+            protocol: "terminal".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let stale = reqwest::Client::new()
+        .post(format!(
+            "http://{}/api/profiles/editable-source/clone",
+            ts.addr
+        ))
+        .json(&json!({
+            "name": "resolver-stale-target",
+            "expected_profile_revision": preview["profile_revision"],
+            "expected_resolver_revision": preview["resolver_revision"],
+            "overrides": {},
+            "copy_environment": false
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let stale_body: serde_json::Value = stale.json().await.unwrap();
+    assert!(stale_body["preview"]["resolver_revision"].is_string());
+    assert_ne!(
+        stale_body["preview"]["resolver_revision"],
+        preview["resolver_revision"]
+    );
+    assert!(loom::profile::get(&ts.state.db, "resolver-stale-target")
+        .await
+        .unwrap()
+        .is_none());
+
+    let fresh = ts
+        .client
+        .post(
+            "/api/session-launches/resolve",
+            json!({ "selection": { "profile": "editable-source", "overrides": {} } }),
+        )
+        .await
+        .unwrap();
+    let mut template = interactive_shell_profile("ignored-by-path");
+    template["description"] = json!("edited before atomic clone");
+    template["max_concurrent"] = json!(7);
+    template["env_clear"] = json!(true);
+    let created = ts
+        .client
+        .post(
+            "/api/profiles/editable-source/clone",
+            json!({
+                "name": "editable-target",
+                "expected_profile_revision": fresh["profile_revision"],
+                "expected_resolver_revision": fresh["resolver_revision"],
+                "overrides": {},
+                "template": template,
+                "copy_environment": false
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created["description"], "edited before atomic clone");
+    assert_eq!(created["max_concurrent"], 7);
+    assert_eq!(created["env_clear"], true);
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn profile_at_capacity_remains_cloneable() {
+    let ts = TestServer::start().await;
+    let mut profile = interactive_shell_profile("full-template");
+    profile["max_concurrent"] = json!(1);
+    ts.client.post("/api/profiles", profile).await.unwrap();
+    let session = ts
+        .client
+        .post(
+            "/api/sessions",
+            json!({
+                "cwd": ts.cwd(),
+                "goal": "occupy source capacity",
+                "profile": "full-template"
+            }),
+        )
+        .await
+        .unwrap();
+    let preview = ts
+        .client
+        .post(
+            "/api/session-launches/resolve",
+            json!({ "selection": { "profile": "full-template", "overrides": {} } }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview["capacity"]["allowed"], false);
+    assert_eq!(preview["valid"], false);
+
+    let cloned = ts
+        .client
+        .post(
+            "/api/profiles/full-template/clone",
+            json!({
+                "name": "full-template-copy",
+                "expected_profile_revision": preview["profile_revision"],
+                "expected_resolver_revision": preview["resolver_revision"],
+                "overrides": {},
+                "copy_environment": false
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cloned["name"], "full-template-copy");
+    ts.client
+        .delete(&format!(
+            "/api/sessions/{}",
+            session["id"].as_str().unwrap()
+        ))
+        .await
+        .unwrap();
 }
 
 #[serial]

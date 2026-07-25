@@ -239,6 +239,21 @@ impl Client {
             .await
     }
 
+    /// Resolve a canonical profile selection in the context of an existing
+    /// session handoff, including honest class and capacity credit.
+    pub async fn resolve_session_handoff(
+        &self,
+        key: &str,
+        req: &ResolveLaunchReq,
+    ) -> Result<ResolvedLaunchView> {
+        self.send_typed(
+            Method::POST,
+            &format!("/api/sessions/{}/handoff/resolve", Self::seg(key)),
+            Some(req),
+        )
+        .await
+    }
+
     /// Patch a session's lifecycle / branch fields (`PATCH /api/sessions/{key}`).
     pub async fn patch_session(&self, key: &str, req: &PatchSessionReq) -> Result<SessionView> {
         self.send_typed(

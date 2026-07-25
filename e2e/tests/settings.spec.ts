@@ -165,6 +165,20 @@ for line in sys.stdin:
       mcp_access: { mode: string; groups: string[] };
     };
     expect(profile.mcp_access).toEqual({ mode: "groups", groups: ["docs"] });
+
+    // This worker reuses one isolated server. Restore the shared default
+    // template so a later terminal seed is not intentionally rejected by the
+    // terminal + MCP cross-field invariant.
+    await access.getByRole("button", { name: "none" }).click();
+    await page.getByTestId("profile-save").click();
+    await expect(page.getByText("Saved default.")).toBeVisible();
+    const removed = await fetch(
+      `${weaver.baseUrl}/api/mcps/custom/docs/search`,
+      {
+        method: "DELETE",
+      },
+    );
+    expect(removed.ok).toBe(true);
   });
 
   test("overlapping settings are consolidated into workspace and access", async ({

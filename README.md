@@ -115,7 +115,8 @@ loom session show <branch>                    # session detail
 loom attach <branch>                  # attach your terminal to the session (or use the browser terminal)
 loom session archive <branch>                 # tear down terminal + worktree, keep branch + history
 loom session adopt <branch>                   # recreate the terminal for an orphaned session
-loom session handoff <branch> --agent codex   # replace an idle ACP provider; summarize through incoming ACP Luna/Haiku
+loom session handoff <branch> --profile codex-review  # profile-first handoff, previewed with optimistic revisions
+loom session handoff <branch> --agent codex           # legacy runtime-only handoff compatibility
 loom session rm <branch>                      # remove worktree + terminal + db row
 loom open                             # open the web UI
 
@@ -148,6 +149,16 @@ just `loom session launch "<what to do>"`. A launch with no task and nothing to 
 usage hint and exits without launching. New branches fork from a
 freshly-fetched `origin/<default branch>` — the latest mainline — unless you
 pin a parent with `--base` (also a field in the web create form).
+
+Profiles are reusable templates, not live session configuration. Omitted
+selectors inherit from the template and then the selected agent/default policy;
+the resolve preflight reports that provenance, capacity, and validation. Create
+sends the returned profile and resolver revisions, and the resulting
+`resolved_launch` is the concrete immutable snapshot for that runtime launch.
+Later profile, environment, registry, or default edits cannot silently change
+it. The New Session route exposes the same profile picker, one-launch overrides,
+resolved summary, editable “save as new” composition, and bounded Scratch
+drop/browse target as the REST/CLI workflow.
 
 Once a session is up, the other verbs interact with it: `loom session poll`
 reads its status, `loom session wait` blocks until it finishes or raises
@@ -319,7 +330,9 @@ Loom serves a JSON API under `/api`; the Vue SPA is the primary consumer.
 - `GET /metrics` (bounded-label OpenMetrics) and `GET /api/diagnostics`
   (admin-only operational inventory used by Settings → Diagnostics)
 - `GET POST /api/sessions`, `GET PATCH DELETE /api/sessions/{id}`,
-  `POST /api/sessions/{id}/{note,archive,adopt,github}`,
+  `POST /api/session-launches/resolve`,
+  `POST /api/sessions/{id}/handoff/resolve`,
+  `POST /api/sessions/{id}/{note,archive,adopt,handoff,github}`,
   `PUT /api/sessions/{id}/tags` (atomic author-scoped replacement),
   `GET /api/sessions/{id}/{diff,log,events}`,
   `GET /api/sessions/{id}/terminal` (WebSocket: xterm.js ⇄ the tapestry PTY)
@@ -328,7 +341,9 @@ Loom serves a JSON API under `/api`; the Vue SPA is the primary consumer.
   revisioned custom MCP administration)
 - `GET POST /api/profiles`, `GET PUT DELETE /api/profiles/{name}`,
   `GET /api/profiles/{name}/effective`, and
-  `POST /api/profiles/{name}/probe`
+  `POST /api/profiles/{name}/{probe,clone}`
+- `GET /api/scratch/limits`,
+  `GET POST DELETE /api/sessions/{id}/scratch`
 - `GET /api/branches`, `GET PATCH /api/branches/{id}`,
   `GET POST /api/branches/{id}/issues` (issues claimed by the branch),
   `GET PATCH DELETE /api/issues/{id}`
@@ -471,6 +486,10 @@ Notable settings:
   profiles reject launch-time overrides; `env_clear` profiles start from a
   minimal baseline plus their explicit ambient allowlist and layered
   profile/repo env.
+- Profile and environment edits advance one optimistic revision. Creation and
+  clone are insert-only, clone optionally copies environment in the same
+  transaction, and retired names retain a tombstone generation so an old
+  preview can never match a recreated template.
 - Restricted profiles are Claude ACP automation envelopes for caller-supplied
   prompts. They suppress the Weaver prelude and repository setup/config, clear
   Claude setting sources, expose repository-scoped read tools plus fixed

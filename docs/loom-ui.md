@@ -158,6 +158,29 @@ out of Workspace, Automation, History, counts, and destructive row actions.
 That admin-only query flag remains an explicit operator/CLI inventory escape
 hatch.
 
+## Profile-first launch
+
+New Session is a focused `/sessions/new` route, kept alive while the operator
+visits Settings. Its primary path is repository/task, reusable profile,
+optional one-launch overrides, the server-resolved snapshot, and one bounded
+Scratch drop/browse component. The summary names selector provenance and keeps
+strict-policy or cross-field failures visible; Create remains disabled until
+repository/task/branch/files and the current resolution are all valid.
+
+Profiles are templates. Settings and launch “Save as new” compose the same
+ProfileEditor, while launch and handoff share ProfileSelector,
+LaunchOverrides, and ResolvedLaunchSummary. Saving a composition creates a new
+name under profile and resolver revision guards—it never mutates or silently
+overwrites the selected template. Reactivating the cached launch route refreshes
+profiles/agents and re-resolves while preserving draft text, overrides, branch
+inputs, and staged files; creation freezes every launch-affecting control.
+
+ACP handoff uses a session-derived preview of the selected target profile,
+including true class and capacity. Canonical submissions send both optimistic
+revisions and stamp a new snapshot. The CLI/API’s flattened compatibility input
+continues to change runtime selectors only and preserves the session’s existing
+stamped policy.
+
 ## Workspace: order & the resting shelf
 
 The fleet list is where a long day's fatigue accumulates, so two controls keep it

@@ -602,7 +602,14 @@ pub fn router(state: AppState) -> Router {
     // session cookie, or a trusted-loopback request — gated by `require_auth`.
     let protected = Router::new()
         // Sessions
-        .route("/sessions", get(list_sessions).post(create_session))
+        .route(
+            "/sessions",
+            get(list_sessions)
+                .post(create_session)
+                .layer(DefaultBodyLimit::max(
+                    scratch::MAX_SESSION_CREATE_BODY_BYTES,
+                )),
+        )
         .route("/session-launches/resolve", post(resolve_session_launch))
         .route("/scratch/limits", get(scratch_limits))
         .route(
@@ -617,6 +624,10 @@ pub fn router(state: AppState) -> Router {
             post(restricted_github_tool),
         )
         .route("/sessions/{id}/adopt", post(adopt_session))
+        .route(
+            "/sessions/{id}/handoff/resolve",
+            post(resolve_session_handoff),
+        )
         .route("/sessions/{id}/handoff", post(handoff_session))
         .route("/sessions/{id}/recover", post(recover_session))
         .route(

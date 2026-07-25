@@ -26,6 +26,10 @@ pub struct ResolveOptions {
     /// A handoff keeps one live session rather than consuming another slot.
     /// Credit that session when it already belongs to the selected profile.
     pub capacity_credit_profile: Option<String>,
+    /// Template composition (for example profile cloning) validates immutable
+    /// selectors and policy without treating current launch occupancy as an
+    /// error. Ordinary previews and admissions leave this false.
+    pub ignore_capacity: bool,
 }
 
 /// Exact server-side result. `view` is safe to return and persist;
@@ -60,10 +64,14 @@ fn has_override(overrides: &LaunchOverrides) -> bool {
 
 fn normalized_selection(selection: &LaunchSelection) -> LaunchSelection {
     let trim = |value: &Option<String>| value.as_ref().map(|value| value.trim().to_string());
+    let nonempty = |value: &Option<String>| trim(value).filter(|value| !value.is_empty());
     LaunchSelection {
         profile: selection.profile.trim().to_string(),
         overrides: LaunchOverrides {
-            agent: trim(&selection.overrides.agent),
+            // An empty agent has no useful explicit meaning (unlike model and
+            // effort, where empty selects the runtime default). Normalize it to
+            // omission so resolution and provenance agree for raw API callers.
+            agent: nonempty(&selection.overrides.agent),
             model: trim(&selection.overrides.model),
             effort: trim(&selection.overrides.effort),
             protocol: trim(&selection.overrides.protocol),
@@ -195,6 +203,16 @@ pub async fn resolve(
     let mcp_policy = profile.mcp_policy_snapshot()?;
     let mut errors = crate::mcp::snapshot_errors(db, &mcp_policy).await?;
     let runtime_permissions = profile.effective_allowed_tool_rules_for(&mcp_policy)?;
+    if protocol != "acp"
+        && (mcp_policy.selection.mode != "none"
+            || !mcp_policy.capability_sets.is_empty()
+            || !mcp_policy.custom_servers.is_empty())
+    {
+        errors.push(
+            "MCP policy requires the ACP protocol; terminal launches cannot apply the displayed MCP permissions"
+                .to_string(),
+        );
+    }
     let active = crate::profile::active_count(db, profile_name).await?;
     let maximum = (profile.max_concurrent > 0).then_some(profile.max_concurrent);
     let available = maximum.map(|maximum| (maximum - active).max(0));
@@ -203,7 +221,7 @@ pub async fn resolve(
         .as_deref()
         .is_some_and(|current| current == profile_name);
     let allowed = keeps_existing_slot || available.is_none_or(|available| available > 0);
-    if !allowed {
+    if !allowed && !options.ignore_capacity {
         errors.push(format!(
             "profile '{profile_name}' has reached its max_concurrent limit ({})",
             profile.max_concurrent
@@ -375,6 +393,62 @@ mod tests {
         assert_eq!(resolved.view.provenance.model, "agent_default");
         assert_eq!(resolved.view.provenance.effort, "agent_default");
         assert_eq!(resolved.view.provenance.protocol, "agent_default");
+    }
+
+    #[tokio::test]
+    async fn blank_agent_override_is_normalized_to_inheritance() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let resolved = resolve(
+            &db,
+            &LaunchSelection {
+                profile: "default".to_string(),
+                overrides: LaunchOverrides {
+                    agent: Some("   ".to_string()),
+                    ..Default::default()
+                },
+            },
+            &ResolveOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved.view.selection.overrides.agent, None);
+        assert_eq!(resolved.view.provenance.agent, "profile");
+        assert_eq!(resolved.view.provenance.model, "agent_default");
+    }
+
+    #[tokio::test]
+    async fn protocol_override_cannot_strand_mcp_policy_on_terminal() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        sqlx::query(
+            "UPDATE profiles
+             SET mcp_access = (SELECT mcp_access FROM profiles WHERE name = 'github_comment'),
+                 mcp_policy = (SELECT mcp_policy FROM profiles WHERE name = 'github_comment')
+             WHERE name = 'default'",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let resolved = resolve(
+            &db,
+            &LaunchSelection {
+                profile: "default".to_string(),
+                overrides: LaunchOverrides {
+                    protocol: Some("terminal".to_string()),
+                    ..Default::default()
+                },
+            },
+            &ResolveOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(!resolved.view.valid);
+        assert!(resolved
+            .view
+            .errors
+            .iter()
+            .any(|error| error.contains("MCP policy requires the ACP protocol")));
     }
 
     #[tokio::test]

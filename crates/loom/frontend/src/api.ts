@@ -334,10 +334,12 @@ export const sendMessage = (id: string, text: string, submit = true) =>
 
 /** Replace the provider behind an idle ACP session while preserving its stable
  * loom session, worktree, branch, and canonical conversation journal. */
-export const handoffSession = (
-  id: string,
-  body: { agent: string; model?: string; effort?: string; mode?: string },
-) => post(`/sessions/${id}/handoff`, body) as Promise<Session>;
+export const handoffSession = (id: string, body: import('./types').HandoffInput) =>
+  post(`/sessions/${id}/handoff`, body) as Promise<Session>;
+/** Resolve a profile-first handoff against an existing session's class and
+ * capacity slot before sending its optimistic revisions. */
+export const resolveSessionHandoff = (id: string, selection: LaunchSelection) =>
+  post(`/sessions/${id}/handoff/resolve`, { selection }) as Promise<ResolvedLaunch>;
 
 // --- ACP conversation (protocol='acp' sessions) ----------------------------
 

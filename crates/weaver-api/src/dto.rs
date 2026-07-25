@@ -296,8 +296,9 @@ fn default_prelude() -> String {
     "weaver".to_string()
 }
 
-/// A reusable, named session launch posture. Secret environment values are
-/// deliberately excluded; `env` contains names and update timestamps only.
+/// A reusable, named session launch template. It is concretized into an
+/// immutable `ResolvedLaunchView` for each accepted launch/handoff. Secret
+/// environment values are excluded; `env` contains metadata only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileView {
     pub name: String,
@@ -514,8 +515,8 @@ pub struct ProfileProbeView {
 }
 
 /// Fields a caller may layer over a named profile for one launch. Presence is
-/// significant: an omitted field inherits while an explicit empty model or
-/// effort selects the agent's own default.
+/// significant: an omitted (or blank agent) field inherits while an explicit
+/// empty model or effort selects the agent's own default.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchOverrides {
     #[serde(default)]
@@ -593,8 +594,8 @@ pub struct ResolvedLaunchPolicyView {
     pub mcp_policy: SessionMcpPolicyView,
 }
 
-/// Concrete non-secret launch settings returned by preview and stored with a
-/// created session.
+/// Concrete non-secret immutable launch snapshot returned by preview and
+/// stored with the created session (or replacement handoff runtime).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedLaunchView {
     pub selection: LaunchSelection,
@@ -621,20 +622,28 @@ pub struct ResolveLaunchReq {
     pub selection: LaunchSelection,
 }
 
-/// Body for `POST /api/profiles/{name}/clone`. Policy is copied from the named
-/// source on the server; the browser supplies only a new name and permitted
-/// launch overrides.
+/// Body for `POST /api/profiles/{name}/clone`. Creation is insert-only and
+/// atomic; the caller may submit the fully edited proposed template.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CloneProfileReq {
     pub name: String,
     pub expected_profile_revision: i64,
+    /// Resolver fingerprint from the composition the caller reviewed. A custom
+    /// agent/MCP/policy-default drift returns 409 with a fresh preview.
+    pub expected_resolver_revision: String,
     #[serde(default)]
     pub overrides: LaunchOverrides,
+    /// Optional editable template proposal. When present, policy/lifecycle/MCP
+    /// fields are validated as submitted while source revision and environment
+    /// copy remain server-owned and atomic.
+    #[serde(default)]
+    pub template: Option<ProfileReq>,
     #[serde(default)]
     pub copy_environment: bool,
 }
 
-/// Shared upload limits for launch-time and live-session Scratch attachments.
+/// Shared upload limits for launch-time and live-session Scratch attachments:
+/// 20 files, 25 MiB each, 50 MiB decoded total. `.gitignore` is reserved.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScratchLimitsView {
     pub max_files: usize,
@@ -1463,21 +1472,22 @@ pub struct CreateReq {
     /// Named launch profile. Blank/absent selects `default`.
     #[serde(default)]
     pub profile: Option<String>,
-    /// Canonical launch selection. The flattened profile/agent/model/effort/
-    /// protocol/mode/class fields above remain accepted for compatibility.
+    /// Canonical launch selection. Requires both expected revisions returned by
+    /// `/api/session-launches/resolve`. Flattened fields remain compatible.
     #[serde(default)]
     pub selection: Option<LaunchSelection>,
-    /// Revisions returned by the last resolve preview. When either changed, the
-    /// server returns 409 with a fresh preview instead of launching drifted
-    /// settings.
+    /// Revisions returned by the last resolve preview. Canonical input requires
+    /// both; drift returns 409 with a fresh preview.
     #[serde(default)]
     pub expected_profile_revision: Option<i64>,
     #[serde(default)]
     pub expected_resolver_revision: Option<String>,
 }
 
-/// Body for `POST /api/sessions/{id}/handoff`: replace the live ACP runtime
-/// while keeping the loom session, worktree, and canonical chat journal.
+/// Body for `POST /api/sessions/{id}/handoff`: canonical `selection` requires
+/// both revisions from `/handoff/resolve` and stamps the target template.
+/// Flattened input is legacy runtime-only compatibility and preserves the
+/// session's stamped profile/policy.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HandoffReq {
     /// Legacy flattened runtime selector. Canonical clients use `selection`.
