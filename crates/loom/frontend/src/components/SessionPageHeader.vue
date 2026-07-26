@@ -36,12 +36,13 @@ import ResolvedLaunchSummary from './ResolvedLaunchSummary.vue';
 // view and the file browser, so the "where am I / what is this" context never
 // vanishes when you cross into Files.
 //
-//   row 1  ← sessions · title · current state / freshness · signals · Details
+//   row 1  ← sessions · title · GitHub destinations · current state / freshness
+//          · signals · Details
 //   row 2  the agent's current-state message, when present
 //
-// Identity, launch metadata, associations, tags, status history, lifecycle
-// actions, and the optional editor live in Details instead of permanently
-// occupying the work surface.
+// Frequent destinations stay in the always-visible row. Identity, launch
+// metadata, tags, status history, lifecycle actions, and the optional editor
+// live in Details instead of permanently occupying the work surface.
 const props = withDefaults(
   defineProps<{ ws: Session; events?: WeaverEvent[]; ideEnabled?: boolean }>(),
   {
@@ -368,6 +369,11 @@ async function submitHandoff() {
       </div>
 
       <div class="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1.5">
+        <!-- An issue/PR is a frequent work destination, not merely metadata.
+             Existing associations open directly; their adjacent edit affordance
+             and the empty states own configuration. -->
+        <GithubAssociations :ws="ws" @reload="emit('reload')" />
+
         <span
           data-testid="conversation-state"
           :class="toneClass"
@@ -623,8 +629,6 @@ async function submitHandoff() {
                     </li>
                   </ul>
                 </details>
-
-                <GithubAssociations :ws="ws" @reload="emit('reload')" />
 
                 <div v-if="quiet.length" class="flex flex-wrap items-center gap-1.5">
                   <TagPill

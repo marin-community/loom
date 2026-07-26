@@ -25,15 +25,17 @@ use crate::{agent, backend, config, custom_agents, db, events, git, github, repo
 use weaver_api::{
     CreateReq, EnsureResumptionCueReq, HandoffReq, HistoryPageView, LaunchOverrides,
     LaunchSelection, PatchSessionReq, ResumptionCueView, SearchSessionsOptions, SendReq,
-    SessionSearchAttention, SessionSearchStatus, SessionView, SetTagsReq, SetTitleGenerationReq,
-    TagReq,
+    SessionSearchAttention, SessionSearchStatus, SessionSummaryView, SessionView, SetTagsReq,
+    SetTitleGenerationReq, TagReq,
 };
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::{Branch, TitleProvenance, TitleUpdate};
 use weaver_core::tags;
 use weaver_core::watch::{self as watch_store, Watch};
 
-use super::{author_or_manual, require_branch, require_session, session_view};
+use super::{
+    author_or_manual, require_branch, require_session, session_summary_view, session_view,
+};
 use super::{ApiResult, AppError, AppState};
 use crate::runtime::{layer_launch_environment, repo_cfg_or_default, set_env};
 
@@ -99,14 +101,56 @@ pub(super) async fn list_sessions(
     }
     collect_sessions(
         &st,
+        q.managed,
         SessionCollectionFilter {
             archived: q.archived,
             archived_only: false,
             automation: q.automation.unwrap_or(false),
-            managed: q.managed,
             search: q.q.as_deref(),
             status: None,
             attention: None,
+        },
+    )
+    .await
+    .map(Json)
+}
+
+/// Compact fleet/search query for `GET /api/sessions/summary`.
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct ListSessionSummariesQuery {
+    /// Include archived rows alongside active work.
+    #[serde(default)]
+    archived: bool,
+    /// Return only archived rows. Implies `archived=true`.
+    #[serde(default)]
+    archived_only: bool,
+    /// Include automation-class sessions.
+    #[serde(default)]
+    automation: bool,
+    /// Case-insensitive search over the same documented facets as fleet search.
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    status: Option<SessionSearchStatus>,
+    #[serde(default)]
+    attention: Option<SessionSearchAttention>,
+}
+
+/// Compact polling/search contract for indexes. Full session context remains on
+/// `GET /api/sessions/{id}` and is fetched only when a row or page discloses it.
+pub(super) async fn list_session_summaries(
+    State(st): State<AppState>,
+    Query(q): Query<ListSessionSummariesQuery>,
+) -> ApiResult<Json<Vec<SessionSummaryView>>> {
+    collect_session_summaries(
+        &st,
+        SessionCollectionFilter {
+            archived: q.archived || q.archived_only,
+            archived_only: q.archived_only,
+            automation: q.automation,
+            search: q.q.as_deref(),
+            status: q.status,
+            attention: q.attention,
         },
     )
     .await
@@ -122,11 +166,11 @@ pub(super) async fn search_sessions(
 ) -> ApiResult<Json<Vec<SessionView>>> {
     collect_sessions(
         &st,
+        false,
         SessionCollectionFilter {
             archived: q.history || q.archived_only,
             archived_only: q.archived_only,
             automation: true,
-            managed: false,
             search: Some(&q.query),
             status: q.status,
             attention: q.attention,
@@ -136,17 +180,31 @@ pub(super) async fn search_sessions(
     .map(Json)
 }
 
-fn view_attention(view: &SessionView) -> &str {
-    if view.status == "archived" {
+fn attention_level<'a>(status: &'a str, tags: &[weaver_api::TagView]) -> &'a str {
+    if status == "archived" {
         "ok"
-    } else if view.branch.tags.iter().any(|tag| tag.value == "blocked") {
+    } else if tags.iter().any(|tag| tag.value == "blocked") {
         "blocked"
-    } else if matches!(view.status.as_str(), "error" | "orphaned")
-        || view.branch.tags.iter().any(|tag| tag.value == "attention")
+    } else if matches!(status, "error" | "orphaned")
+        || tags.iter().any(|tag| tag.value == "attention")
     {
         "attention"
     } else {
         "ok"
+    }
+}
+
+fn matches_attention(
+    status: &str,
+    tags: &[weaver_api::TagView],
+    filter: SessionSearchAttention,
+) -> bool {
+    let level = attention_level(status, tags);
+    match filter {
+        SessionSearchAttention::Needs => level != "ok",
+        SessionSearchAttention::Ok => level == "ok",
+        SessionSearchAttention::Attention => level == "attention",
+        SessionSearchAttention::Blocked => level == "blocked",
     }
 }
 
@@ -155,41 +213,66 @@ fn append_search_field(haystack: &mut String, value: &str) {
     haystack.push_str(value);
 }
 
-fn search_haystack(view: &SessionView) -> String {
+struct SessionSearchFacets<'a> {
+    placement: Option<&'a weaver_api::SessionPlacementView>,
+    title: &'a str,
+    goal: &'a str,
+    description: &'a str,
+    repo_root: &'a str,
+    branch: &'a str,
+    name: &'a str,
+    base_branch: &'a str,
+    github_repo: Option<&'a str>,
+    status: &'a str,
+    profile: &'a str,
+    origin: &'a str,
+    class: &'a str,
+    created_by: Option<&'a str>,
+    parent_session_id: Option<&'a str>,
+    parent_id: Option<&'a str>,
+    github_issue: Option<&'a weaver_api::GithubIssueRef>,
+    tracking_issue: Option<i64>,
+    github: Option<&'a weaver_core::github::GithubStatus>,
+    github_pr: Option<i64>,
+    tags: &'a [weaver_api::TagView],
+}
+
+fn search_haystack(facets: SessionSearchFacets<'_>) -> String {
     let mut haystack = String::new();
-    if let Some(placement) = &view.placement {
+    if let Some(placement) = facets.placement {
         append_search_field(
             &mut haystack,
-            &format!("{} / {}", placement.group_name, view.branch.title.trim()),
+            &format!("{} / {}", placement.group_name, facets.title.trim()),
         );
         append_search_field(&mut haystack, &placement.group_name);
     }
     for field in [
-        view.branch.title.as_str(),
-        view.branch.goal.as_str(),
-        view.branch.description.as_str(),
-        view.github_repo.as_deref().unwrap_or_default(),
-        view.branch.repo_root.as_str(),
-        view.branch.branch.as_str(),
-        view.branch.name.as_str(),
-        view.status.as_str(),
-        view.profile.as_str(),
-        view.origin.as_str(),
-        view.class.as_str(),
-        view.created_by.as_deref().unwrap_or_default(),
-        view.parent_session_id.as_deref().unwrap_or_default(),
-        view.parent_id.as_deref().unwrap_or_default(),
+        facets.title,
+        facets.goal,
+        facets.description,
+        facets.repo_root,
+        facets.branch,
+        facets.name,
+        facets.base_branch,
+        facets.github_repo.unwrap_or_default(),
+        facets.status,
+        facets.profile,
+        facets.origin,
+        facets.class,
+        facets.created_by.unwrap_or_default(),
+        facets.parent_session_id.unwrap_or_default(),
+        facets.parent_id.unwrap_or_default(),
     ] {
         append_search_field(&mut haystack, field);
     }
-    if let Some(issue) = &view.github_issue {
+    if let Some(issue) = facets.github_issue {
         append_search_field(&mut haystack, &format!("{}#{}", issue.repo, issue.number));
         append_search_field(&mut haystack, &format!("#{}", issue.number));
     }
-    if let Some(issue) = view.tracking_issue {
+    if let Some(issue) = facets.tracking_issue {
         append_search_field(&mut haystack, &format!("#{issue}"));
     }
-    if let Some(pr) = &view.branch.github {
+    if let Some(pr) = facets.github {
         append_search_field(&mut haystack, &format!("#{}", pr.pr_number));
         for field in [
             pr.pr_url.as_str(),
@@ -200,10 +283,10 @@ fn search_haystack(view: &SessionView) -> String {
         ] {
             append_search_field(&mut haystack, field);
         }
-    } else if let Some(pr) = view.branch.github_pr {
+    } else if let Some(pr) = facets.github_pr {
         append_search_field(&mut haystack, &format!("#{pr}"));
     }
-    for tag in &view.branch.tags {
+    for tag in facets.tags {
         for field in [
             tag.key.as_str(),
             tag.value.as_str(),
@@ -216,18 +299,101 @@ fn search_haystack(view: &SessionView) -> String {
     haystack.to_lowercase()
 }
 
+fn view_search_haystack(view: &SessionView) -> String {
+    search_haystack(SessionSearchFacets {
+        placement: view.placement.as_ref(),
+        title: &view.branch.title,
+        goal: &view.branch.goal,
+        description: &view.branch.description,
+        repo_root: &view.branch.repo_root,
+        branch: &view.branch.branch,
+        name: &view.branch.name,
+        base_branch: &view.branch.base_branch,
+        github_repo: view.github_repo.as_deref(),
+        status: &view.status,
+        profile: &view.profile,
+        origin: &view.origin,
+        class: &view.class,
+        created_by: view.created_by.as_deref(),
+        parent_session_id: view.parent_session_id.as_deref(),
+        parent_id: view.parent_id.as_deref(),
+        github_issue: view.github_issue.as_ref(),
+        tracking_issue: view.tracking_issue,
+        github: view.branch.github.as_ref(),
+        github_pr: view.branch.github_pr,
+        tags: &view.branch.tags,
+    })
+}
+
+fn summary_search_haystack(view: &SessionSummaryView, branch: &Branch) -> String {
+    search_haystack(SessionSearchFacets {
+        placement: view.placement.as_ref(),
+        title: &view.branch.title,
+        goal: &branch.goal,
+        description: &view.branch.description,
+        repo_root: &view.branch.repo_root,
+        branch: &view.branch.branch,
+        name: &view.branch.name,
+        base_branch: &branch.base_branch,
+        github_repo: view.github_repo.as_deref(),
+        status: &view.status,
+        profile: &view.profile,
+        origin: &view.origin,
+        class: &view.class,
+        created_by: view.created_by.as_deref(),
+        parent_session_id: view.parent_session_id.as_deref(),
+        parent_id: view.parent_id.as_deref(),
+        github_issue: view.github_issue.as_ref(),
+        tracking_issue: view.tracking_issue,
+        github: view.branch.github.as_ref(),
+        github_pr: view.branch.github_pr,
+        tags: &view.branch.tags,
+    })
+}
+
 struct SessionCollectionFilter<'a> {
     archived: bool,
     archived_only: bool,
     automation: bool,
-    managed: bool,
     search: Option<&'a str>,
     status: Option<SessionSearchStatus>,
     attention: Option<SessionSearchAttention>,
 }
 
+fn search_needle(filter: &SessionCollectionFilter<'_>) -> Option<String> {
+    filter
+        .search
+        .map(str::trim)
+        .filter(|search| !search.is_empty())
+        .map(str::to_lowercase)
+}
+
+fn session_in_collection(
+    session: &Session,
+    warm: &HashSet<String>,
+    filter: &SessionCollectionFilter<'_>,
+    managed: bool,
+) -> bool {
+    (managed || !warm.contains(&session.id))
+        && (filter.archived || session.status != "archived")
+        && (!filter.archived_only || session.status == "archived")
+        && (filter.automation || session.class != "automation")
+}
+
+fn view_matches_filters(
+    status: &str,
+    tags: &[weaver_api::TagView],
+    filter: &SessionCollectionFilter<'_>,
+) -> bool {
+    filter.status.is_none_or(|wanted| status == wanted.as_str())
+        && filter
+            .attention
+            .is_none_or(|wanted| matches_attention(status, tags, wanted))
+}
+
 async fn collect_sessions(
     st: &AppState,
+    managed: bool,
     filter: SessionCollectionFilter<'_>,
 ) -> ApiResult<Vec<SessionView>> {
     // The fleet listing shows work, not infrastructure: engine-managed (warm)
@@ -243,46 +409,20 @@ async fn collect_sessions(
         .filter_map(|o| o.warm_session_id)
         .collect();
     // A blank `q` is no filter; otherwise match case-insensitively.
-    let needle = filter
-        .search
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_lowercase);
-    let sessions = if filter.managed {
+    let needle = search_needle(&filter);
+    let sessions = if managed {
         session_mod::list(&st.db).await?
     } else {
         session_mod::list_visible(&st.db).await?
     };
     let mut views: Vec<SessionView> = Vec::with_capacity(sessions.len());
     for s in sessions {
-        if !filter.managed && warm.contains(&s.id) {
-            continue;
-        }
-        // Archived sessions are torn down — hidden unless the caller opts in.
-        if !filter.archived && s.status == "archived" {
-            continue;
-        }
-        if filter.archived_only && s.status != "archived" {
-            continue;
-        }
-        // Explicit compatibility reads can still hide automation-class rows.
-        if !filter.automation && s.class == "automation" {
+        if !session_in_collection(&s, &warm, &filter, managed) {
             continue;
         }
         if let Some(branch) = branch_mod::get(&st.db, &s.branch_id).await? {
             let view = session_view(&st.db, &s, &branch).await?;
-            if filter
-                .status
-                .is_some_and(|status| view.status != status.as_str())
-            {
-                continue;
-            }
-            if filter.attention.is_some_and(|attention| match attention {
-                SessionSearchAttention::Needs => view_attention(&view) == "ok",
-                SessionSearchAttention::Ok => view_attention(&view) != "ok",
-                SessionSearchAttention::Attention => view_attention(&view) != "attention",
-                SessionSearchAttention::Blocked => view_attention(&view) != "blocked",
-            }) {
+            if !view_matches_filters(&view.status, &view.branch.tags, &filter) {
                 continue;
             }
             if let Some(needle) = &needle {
@@ -290,13 +430,47 @@ async fn collect_sessions(
                 // qualified placement, title/goal, repo/branch, issue/PR, tags,
                 // status, profile, and provenance. Searching only its values
                 // keeps that vocabulary synchronized without matching JSON keys.
-                let hay = search_haystack(&view);
+                let hay = view_search_haystack(&view);
                 if !hay.contains(needle) {
                     continue;
                 }
             }
             views.push(view);
         }
+    }
+    Ok(views)
+}
+
+async fn collect_session_summaries(
+    st: &AppState,
+    filter: SessionCollectionFilter<'_>,
+) -> ApiResult<Vec<SessionSummaryView>> {
+    let warm: HashSet<String> = watch_store::list(&st.db)
+        .await?
+        .into_iter()
+        .filter_map(|watch| watch.warm_session_id)
+        .collect();
+    let needle = search_needle(&filter);
+    let sessions = session_mod::list_visible(&st.db).await?;
+    let mut views = Vec::with_capacity(sessions.len());
+    for session in sessions {
+        if !session_in_collection(&session, &warm, &filter, false) {
+            continue;
+        }
+        let Some(branch) = branch_mod::get(&st.db, &session.branch_id).await? else {
+            continue;
+        };
+        let view = session_summary_view(&st.db, &session, &branch).await?;
+        if !view_matches_filters(&view.status, &view.branch.tags, &filter) {
+            continue;
+        }
+        if let Some(needle) = &needle {
+            let haystack = summary_search_haystack(&view, &branch);
+            if !haystack.contains(needle) {
+                continue;
+            }
+        }
+        views.push(view);
     }
     Ok(views)
 }

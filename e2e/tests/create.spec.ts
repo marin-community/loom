@@ -29,8 +29,15 @@ test.describe('creating a session via the UI form', () => {
     await page.goto(weaver.baseUrl);
     await page.getByRole('button', { name: 'New session' }).click();
 
-    await page.getByPlaceholder(repoPlaceholder).fill(weaver.repoPath);
-    await page.getByPlaceholder('Add a /health endpoint').fill('Investigate the attached trace');
+    const repo = page.getByPlaceholder(repoPlaceholder);
+    const title = page.getByLabel('Title', { exact: true });
+    const goal = page.getByPlaceholder('Add a /health endpoint');
+    await expect(repo).toHaveAttribute('autocomplete', 'off');
+    await expect(title).toHaveAttribute('autocomplete', 'off');
+    await expect(goal).toHaveAttribute('autocomplete', 'off');
+
+    await repo.fill(weaver.repoPath);
+    await goal.fill('Investigate the attached trace');
     await page.getByTestId('launch-profile-picker').selectOption('ui-launch');
     await page.getByTestId('override-mode').selectOption('plan');
     await expect(page.getByTestId('launch-settings')).toContainText('changed');

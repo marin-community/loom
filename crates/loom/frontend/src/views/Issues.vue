@@ -3,7 +3,7 @@ import { ref, reactive, computed, nextTick, onMounted, onActivated, watch } from
 import { useRoute, useRouter } from 'vue-router';
 import {
   ApiError,
-  listSessions,
+  listSessionSummaries,
   listIssues,
   createRepoIssue,
   patchIssue,
@@ -13,7 +13,7 @@ import {
   clearIssueTag,
   launchSessionForIssue,
 } from '../api';
-import type { Issue, IssueAction, IssueActionProblem, Session, Tag } from '../types';
+import type { Issue, IssueAction, IssueActionProblem, SessionSummary, Tag } from '../types';
 import ConfirmDialog from '../components/ConfirmDialog.vue';
 import TagPill from '../components/TagPill.vue';
 import { timeAgo } from '../lib/time';
@@ -37,7 +37,7 @@ const route = useRoute();
 // from (`source`) — resolve to live session links from the session list.
 
 const issues = ref<Issue[]>([]);
-const sessions = ref<Session[]>([]);
+const sessions = ref<SessionSummary[]>([]);
 const loaded = ref(false);
 const error = ref('');
 
@@ -90,7 +90,7 @@ async function load() {
     // ask for both.
     const [iss, ses] = await Promise.all([
       listIssues({ all: true, automation: true }),
-      listSessions({ archived: true, automation: true }),
+      listSessionSummaries({ archived: true, automation: true }),
     ]);
     issues.value = iss;
     sessions.value = ses;
@@ -332,7 +332,7 @@ watch(scopeKey, (_next, previous) => {
 // runs several times per row, so the rebuilt-on-change index keeps rendering
 // off the O(issues × sessions) path.
 const sessionsByBranch = computed(() => {
-  const m = new Map<string, Session[]>();
+  const m = new Map<string, SessionSummary[]>();
   for (const s of sessions.value) {
     const k = `${s.branch.repo_root}\0${s.branch.branch}`;
     const arr = m.get(k);
@@ -350,7 +350,7 @@ function isAutomationClaimed(i: Issue): boolean {
   if (!i.claimed_branch) return false;
   const held = sessionsByBranch.value.get(`${i.repo_root}\0${i.claimed_branch}`) ?? [];
   const eligible = held.filter((s) => s.status !== 'archived');
-  const active = (s: Session) => !['done', 'error'].includes(s.status);
+  const active = (s: SessionSummary) => !['done', 'error'].includes(s.status);
   const holder = eligible.sort(
     (a, b) => Number(active(b)) - Number(active(a)) || b.created_at.localeCompare(a.created_at),
   )[0];
@@ -360,8 +360,8 @@ function isAutomationClaimed(i: Issue): boolean {
 // Sessions that reference an issue: the branch working it (claimed) and the
 // branch it came from (source), matched against the live session list by
 // repo + branch name. Claimed first, deduped, each tagged with its relation.
-function refsFor(i: Issue): { session: Session; rel: string }[] {
-  const out: { session: Session; rel: string }[] = [];
+function refsFor(i: Issue): { session: SessionSummary; rel: string }[] {
+  const out: { session: SessionSummary; rel: string }[] = [];
   const seen = new Set<string>();
   const match = (branch: string | null, rel: string) => {
     if (!branch) return;

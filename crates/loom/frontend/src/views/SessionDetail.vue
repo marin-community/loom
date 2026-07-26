@@ -11,7 +11,7 @@ import {
   nextTick,
 } from 'vue';
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router';
-import { get, ideInfo } from '../api';
+import { get, getSession, ideInfo } from '../api';
 import type { Session, WeaverEvent } from '../types';
 import SessionTerminals from '../components/SessionTerminals.vue';
 import IdeFrame from '../components/IdeFrame.vue';
@@ -21,7 +21,6 @@ import SessionTabs from '../components/SessionTabs.vue';
 import SessionConversation from '../components/SessionConversation.vue';
 import ArtifactsPanel from '../components/ArtifactsPanel.vue';
 import ChangesPanel from '../components/ChangesPanel.vue';
-import { useFleet } from '../lib/sessionsStore';
 import { cancelSessionBacktrack, completeSessionOpen } from '../lib/workbenchMetrics';
 
 // Named + keyed-by-id in App.vue's <keep-alive> so the page (and its live
@@ -34,11 +33,9 @@ const props = defineProps<{ id: string; name?: string }>();
 const route = useRoute();
 const router = useRouter();
 
-// Seed from the shared fleet snapshot so the page paints immediately with the
-// row the list already had — no "Loading…" gap while the per-session refetch is
-// in flight. loadAll() still refreshes it to the full per-session view.
-const { sessionById } = useFleet();
-const ws = ref<Session | null>(sessionById(props.id) ?? null);
+// The fleet cache is intentionally compact. A session page fetches the complete
+// resource on demand rather than pretending its summary is full detail.
+const ws = ref<Session | null>(null);
 const events = ref<WeaverEvent[]>([]);
 const error = ref('');
 
@@ -236,7 +233,7 @@ const ideOpen = ref(false);
 let source: EventSource | null = null;
 
 async function loadSession() {
-  ws.value = (await get(`/sessions/${props.id}`)) as Session;
+  ws.value = await getSession(props.id);
 }
 
 async function loadAll() {

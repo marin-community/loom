@@ -85,34 +85,32 @@ export const getScratchLimits = () => get('/scratch/limits') as Promise<ScratchL
 
 // --- Sessions ----------------------------------------------------------------
 
-/** Session inventory. The compatibility default excludes automation; fleet
- * workbenches opt in. `managed` is the admin-only warm-session escape hatch. */
-export const listSessions = (
-  opts: { archived?: boolean; automation?: boolean; managed?: boolean } = {},
+/** Compact fleet inventory/search. Full session context is fetched from the
+ * item endpoint only when a row or session page discloses it. */
+export const listSessionSummaries = (
+  opts: {
+    archived?: boolean;
+    archivedOnly?: boolean;
+    automation?: boolean;
+    query?: string;
+    status?: SessionSearchOptions['status'];
+    attention?: SessionSearchOptions['attention'];
+  } = {},
+  signal?: AbortSignal,
 ) => {
   const params = new URLSearchParams();
   if (opts.archived) params.set('archived', 'true');
-  if (opts.automation !== undefined) params.set('automation', String(opts.automation));
-  if (opts.managed) params.set('automation', 'true');
-  if (opts.managed) params.set('managed', 'true');
-  const qs = params.toString();
-  return get(`/sessions${qs ? `?${qs}` : ''}`) as Promise<Session[]>;
-};
-
-/** Server-visible fleet search. `history` widens an active search;
- * `archivedOnly` keeps the History route a disjoint archived projection. */
-export const searchSessions = (
-  query: string,
-  opts: SessionSearchOptions = {},
-  signal?: AbortSignal,
-) => {
-  const params = new URLSearchParams({ q: query });
-  if (opts.history) params.set('history', 'true');
   if (opts.archivedOnly) params.set('archived_only', 'true');
+  if (opts.automation !== undefined) params.set('automation', String(opts.automation));
+  if (opts.query) params.set('q', opts.query);
   if (opts.status) params.set('status', opts.status);
   if (opts.attention) params.set('attention', opts.attention);
-  return request(`/sessions/search?${params}`, { signal }) as Promise<Session[]>;
+  const qs = params.toString();
+  return request(`/sessions/summary${qs ? `?${qs}` : ''}`, { signal }) as Promise<SessionSummary[]>;
 };
+
+export const getSession = (id: string) =>
+  get(`/sessions/${encodeURIComponent(id)}`) as Promise<Session>;
 
 /** Durable automation launch reservations, including failures that never
  *  produced a usable session (`GET /api/runs`). */
@@ -206,6 +204,7 @@ import type {
   IssueActionsResult,
   IssueTagInput,
   Session,
+  SessionSummary,
   AutomationRun,
   SessionGroupOrder,
   SessionLayoutItemKind,

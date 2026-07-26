@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import type { Session } from '../types';
+import type { SessionSummary } from '../types';
 import { remedyAction } from '../lib/sessionState';
 import { useSessionActions } from '../lib/sessionActions';
 
@@ -12,7 +12,7 @@ import { useSessionActions } from '../lib/sessionActions';
 // on every surface that shows one (the fleet-list row and the detail header), so
 // the cure travels with the diagnosis instead of hiding behind a menu. The same
 // verbs are still in the ⋯ menu for anyone who looks there.
-const props = defineProps<{ ws: Session }>();
+const props = defineProps<{ ws: SessionSummary }>();
 const emit = defineEmits<{ changed: []; error: [string] }>();
 
 const remedy = computed(() => remedyAction(props.ws));

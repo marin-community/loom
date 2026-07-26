@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, useId, watch } from 'vue';
-import type { Session } from '../types';
+import type { SessionSummary } from '../types';
 import { autoArchiveDisabled, lifecycleActions } from '../lib/sessionState';
 import { useSessionActions } from '../lib/sessionActions';
 
-const props = defineProps<{ ws: Session }>();
+const props = defineProps<{ ws: SessionSummary }>();
 const emit = defineEmits<{ changed: []; error: [string] }>();
 
 const open = ref(false);

@@ -24,6 +24,12 @@ Search, moves, ordering, collapse preferences, and placement defaults all use
 the layout REST API. Selecting a row opens the session without changing its
 group, and returning to the workbench restores the current view.
 
+The shell polls a compact summary of active sessions. It fetches archived
+summaries only when History opens, and fetches full goal, launch, policy, and
+runtime context only when a session page or row disclosure needs it. Search
+still matches goal text on the server, so this transport hierarchy does not
+weaken discovery.
+
 ## Launch
 
 New Session chooses a repository, task, profile, and optional one-launch
@@ -65,8 +71,13 @@ layout changes that would discard it are stopped with a focused save-or-cancel
 choice. Submitted review history is immutable apart from comment resolution and
 delivery retry.
 
+The session header keeps current state and frequent destinations visible. A
+linked GitHub issue or pull request opens directly from its labelled pill;
+reassociation is an adjacent secondary action, and an empty pill remains a
+discoverable setup action.
+
 **Details** is a popover, not a work tab. It owns task and launch metadata,
-associations, lifecycle actions, handoff, auto-archive policy, and Scratch.
+status history, lifecycle actions, handoff, auto-archive policy, and Scratch.
 The embedded editor is an optional **Advanced → Open editor** escape hatch,
 loaded beside the work area only when requested.
 

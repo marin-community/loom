@@ -1,22 +1,23 @@
-import { ref } from 'vue';
-import { getSessionLayout, listRuns, listSessions } from '../api';
-import type { AutomationRun, Session, SessionLayout } from '../types';
+import { computed, ref } from 'vue';
+import { getSessionLayout, listRuns, listSessionSummaries } from '../api';
+import type { AutomationRun, SessionLayout, SessionSummary } from '../types';
 
 // One shared snapshot of the fleet. The session list, the status bar, and the
-// detail page all read from here instead of each polling `/api/sessions` on
-// their own. The payoff is snappiness: the data is fetched once per tick (not
-// three overlapping times), it's already present the instant any view mounts —
-// so returning to the fleet never flashes an empty state or re-runs an entrance
-// animation — and the detail page can paint from the cached row immediately
-// rather than showing "Loading…" while it refetches what the list already has.
+// detail-page tab title all read from here instead of each polling the fleet on
+// their own. This store intentionally holds SessionSummary rows, not full
+// Session resources: opening a page or row disclosure fetches its detail on
+// demand, so the three-second poll never transfers goals, launch snapshots, MCP
+// policy, runtime identifiers, or other detail-only fields.
 //
 // This is the thin-client pattern the rest of loom follows (docs/loom-ui.md):
 // the view is a projection of REST state, never a separate browser-local truth.
 
-const sessions = ref<Session[]>([]);
+const activeSessions = ref<SessionSummary[]>([]);
+const archivedSessions = ref<SessionSummary[]>([]);
+const sessions = computed(() => [...activeSessions.value, ...archivedSessions.value]);
 const runs = ref<AutomationRun[]>([]);
 const layout = ref<SessionLayout | null>(null);
-const resourceErrors = ref<Partial<Record<'sessions' | 'runs' | 'layout', string>>>({});
+const resourceErrors = ref<Partial<Record<'sessions' | 'history' | 'runs' | 'layout', string>>>({});
 // Last fetch reached the server? Drives the status bar's online dot; the cached
 // counts dim rather than vanish while the server is briefly unreachable.
 const online = ref(true);
@@ -24,18 +25,19 @@ const online = ref(true);
 let inflight: Promise<void> | null = null;
 let refreshRequested = false;
 
-// Pull the whole inventory, archived and automation-class sessions included —
-// the superset the Spaces, Attention, and explicit History views need. Concurrent
-// callers coalesce onto one in-flight loop. A request arriving while a
-// snapshot is loading marks the loop dirty and guarantees one trailing fetch.
-async function refresh(): Promise<void> {
+// Pull the compact active fleet only. Archived history is both much larger and
+// operationally cold, so `loadHistory` fetches it when that view is opened
+// instead of transferring it on every three-second tick. Concurrent callers
+// coalesce onto one in-flight loop. A request arriving while a snapshot is
+// loading marks the loop dirty and guarantees one trailing fetch.
+async function refreshActive(): Promise<void> {
   refreshRequested = true;
   if (inflight) return inflight;
   inflight = (async () => {
     while (refreshRequested) {
       refreshRequested = false;
       const results = await Promise.allSettled([
-        listSessions({ archived: true, automation: true }),
+        listSessionSummaries({ automation: true }),
         listRuns(),
         getSessionLayout(),
       ]);
@@ -48,7 +50,7 @@ async function refresh(): Promise<void> {
           return;
         }
         delete nextErrors[resource];
-        if (resource === 'sessions') sessions.value = result.value as Session[];
+        if (resource === 'sessions') activeSessions.value = result.value as SessionSummary[];
         if (resource === 'runs') runs.value = result.value as AutomationRun[];
         if (resource === 'layout') layout.value = result.value as SessionLayout;
       });
@@ -60,12 +62,48 @@ async function refresh(): Promise<void> {
     inflight = null;
     // Cover the promise-resolution microtask gap between the loop's final
     // condition check and this cleanup.
-    if (refreshRequested) void refresh();
+    if (refreshRequested) void refreshActive();
   });
   return inflight;
 }
 
-function sessionById(id: string): Session | undefined {
+let historyInflight: Promise<void> | null = null;
+let historyLoaded = false;
+async function loadHistory(): Promise<void> {
+  if (historyInflight) return historyInflight;
+  historyInflight = listSessionSummaries({
+    archived: true,
+    archivedOnly: true,
+    automation: true,
+  })
+    .then((history) => {
+      archivedSessions.value = history;
+      historyLoaded = true;
+      const errors = { ...resourceErrors.value };
+      delete errors.history;
+      resourceErrors.value = errors;
+    })
+    .catch((cause) => {
+      resourceErrors.value = {
+        ...resourceErrors.value,
+        history: (cause as Error).message,
+      };
+      throw cause;
+    })
+    .finally(() => {
+      historyInflight = null;
+    });
+  return historyInflight;
+}
+
+// Explicit mutations refresh any history snapshot the operator has disclosed;
+// the background timer below intentionally stays on the active projection.
+async function refresh(): Promise<void> {
+  await refreshActive();
+  if (historyLoaded) await loadHistory();
+}
+
+function sessionById(id: string): SessionSummary | undefined {
   return sessions.value.find((s) => s.id === id);
 }
 
@@ -78,10 +116,10 @@ const POLL_MS = 3000;
 
 function startFleetPoll(): void {
   if (timer !== undefined) return;
-  refresh();
-  timer = window.setInterval(refresh, POLL_MS);
+  refreshActive();
+  timer = window.setInterval(refreshActive, POLL_MS);
   layoutEvents = new EventSource('/api/session-layout/events');
-  layoutEvents.addEventListener('session_layout', () => void refresh());
+  layoutEvents.addEventListener('session_layout', () => void refreshActive());
 }
 
 function stopFleetPoll(): void {
@@ -100,6 +138,7 @@ export function useFleet() {
     resourceErrors,
     online,
     refresh,
+    loadHistory,
     sessionById,
     startFleetPoll,
     stopFleetPoll,

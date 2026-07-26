@@ -1686,6 +1686,7 @@ function goTo(anchor: string) {
         rows="4"
         :disabled="sending || editingQueued"
         :placeholder="commandHint || 'Message the agent…'"
+        autocomplete="off"
         data-testid="acp-composer-input"
         class="acp-input"
         @keydown="onComposerKeydown"

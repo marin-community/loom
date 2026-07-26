@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, type PropType, useId, watch } from 'vue';
-import type { Session, SessionGroup, SessionSpace } from '../types';
+import type { Session, SessionGroup, SessionSpace, SessionSummary } from '../types';
 import AgentUsage from './AgentUsage.vue';
 import GithubStatus from './GithubStatus.vue';
 import SessionRemedyButton from './SessionRemedyButton.vue';
@@ -24,7 +24,10 @@ interface GroupOption {
 }
 
 const props = defineProps({
-  session: { type: Object as PropType<Session>, required: true },
+  session: { type: Object as PropType<SessionSummary>, required: true },
+  detail: { type: Object as PropType<Session | undefined>, default: undefined },
+  detailLoading: { type: Boolean, default: false },
+  detailError: { type: String, default: '' },
   qualified: { type: Boolean, default: false },
   selected: { type: Boolean, default: false },
   expanded: { type: Boolean, default: false },
@@ -32,8 +35,8 @@ const props = defineProps({
   destination: { type: String, default: '' },
   before: { type: String, default: '' },
   allGroups: { type: Array as PropType<GroupOption[]>, default: () => [] },
-  allSessions: { type: Array as PropType<Session[]>, default: () => [] },
-  parentSession: { type: Object as PropType<Session | undefined>, default: undefined },
+  allSessions: { type: Array as PropType<SessionSummary[]>, default: () => [] },
+  parentSession: { type: Object as PropType<SessionSummary | undefined>, default: undefined },
   dragging: { type: Boolean, default: false },
   dropBefore: { type: Boolean, default: false },
   clearingTag: { type: String, default: '' },
@@ -245,9 +248,11 @@ function onKeydown(event: KeyboardEvent) {
         <AgentUsage v-if="session.usage" :usage="session.usage" compact />
         <span v-if="session.origin !== 'user'" class="tag-pill">origin: {{ session.origin }}</span>
       </div>
-      <p v-if="session.branch.goal" class="mt-1 line-clamp-2 text-muted">
-        {{ session.branch.goal }}
+      <p v-if="detail?.branch.goal" class="mt-1 line-clamp-2 text-muted">
+        {{ detail.branch.goal }}
       </p>
+      <p v-else-if="detailLoading" class="mt-1 text-faint">Loading details…</p>
+      <p v-else-if="detailError" class="mt-1 text-block" role="alert">{{ detailError }}</p>
       <div class="mt-1 flex flex-wrap gap-x-3 gap-y-1 font-mono text-2xs text-faint">
         <span>{{ session.branch.repo_root }}</span>
         <span>{{ session.branch.branch }}</span>

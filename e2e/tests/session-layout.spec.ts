@@ -118,6 +118,56 @@ async function createFailedRun(baseUrl: string) {
 }
 
 test.describe("durable session workbench", () => {
+  test("fleet polling stays compact and row details load on demand", async ({
+    page,
+    weaver,
+  }) => {
+    const goal = "Full operator context fetched only after disclosure";
+    const session = await weaver.seedSession({
+      goal,
+      name: "compact-fleet-row",
+    });
+    const summaryResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        response.request().method() === "GET" &&
+        url.pathname === "/api/sessions/summary" &&
+        !url.searchParams.has("archived") &&
+        url.searchParams.get("automation") === "true"
+      );
+    });
+    const detailRequests: string[] = [];
+    page.on("request", (request) => {
+      const url = new URL(request.url());
+      if (
+        request.method() === "GET" &&
+        url.pathname === `/api/sessions/${session.id}`
+      ) {
+        detailRequests.push(url.pathname);
+      }
+    });
+
+    await page.goto(weaver.baseUrl);
+    const summary = (await (await summaryResponse).json()) as Array<
+      Record<string, unknown> & { id: string; branch: Record<string, unknown> }
+    >;
+    const rowSummary = summary.find(
+      (candidate) => candidate.id === session.id,
+    )!;
+    expect(rowSummary.branch.goal).toBeUndefined();
+    expect(rowSummary.resolved_launch).toBeUndefined();
+
+    const row = page.locator(`[data-session-id="${session.id}"]`);
+    await expect(row).toBeVisible();
+    expect(detailRequests).toEqual([]);
+
+    await row.getByTestId("session-details-toggle").click();
+    await expect
+      .poll(() => detailRequests)
+      .toEqual([`/api/sessions/${session.id}`]);
+    await expect(row.getByTestId("session-preview")).toContainText(goal);
+  });
+
   test("@workbench pointer, keyboard, undo, preference, and SSE share one layout", async ({
     page,
     weaver,
@@ -275,6 +325,15 @@ test.describe("durable session workbench", () => {
       .getByTestId("confirm-dialog")
       .getByTestId("confirm-dialog-confirm")
       .click();
+
+    // Archived summaries are not part of the recurring snapshot, but widened
+    // server search can still render a cold result before History is opened.
+    await search.fill("Normal searchable");
+    await expect(normalRow).toHaveCount(0);
+    await page.getByTestId("search-history").check();
+    await expect(normalRow).toBeVisible();
+    await search.fill("");
+
     await page.getByTestId("history-view").click();
     const archivedNormal = page.locator(`[data-session-id="${normal.id}"]`);
     const archivedAutomation = page.locator(

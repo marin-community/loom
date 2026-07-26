@@ -83,6 +83,7 @@ function locked(field: keyof LaunchOverrides): boolean {
           :disabled="locked('model')"
           data-testid="override-model"
           list="launch-model-options"
+          autocomplete="off"
           placeholder="Agent default"
           class="w-full rounded bg-surface px-2 py-1.5 font-mono disabled:opacity-60"
           @input="set('model', ($event.target as HTMLInputElement).value)"
