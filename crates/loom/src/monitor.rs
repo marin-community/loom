@@ -451,7 +451,7 @@ async fn promote_lifecycle(db: &Db, bus: &EventBus, session: &Session, kind: &st
     // and tags. A terminal/user/handoff mutation that wins first makes this a
     // no-op; one that waits commits afterward and is therefore unambiguously
     // newer than every artifact of this hook.
-    let mut tx = match db.begin().await {
+    let mut tx = match weaver_core::db::begin_immediate(db).await {
         Ok(tx) => tx,
         Err(error) => {
             tracing::warn!(id = %session.id, %error, "lifecycle transaction failed to start");

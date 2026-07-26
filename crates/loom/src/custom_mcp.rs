@@ -379,7 +379,7 @@ pub async fn upsert(db: &Db, req: &CustomMcpReq) -> Result<CustomMcpView> {
     let (validation_state, tools, validation_message) =
         validate_source(&req.source, &req.test_source).await;
     let now = now_iso();
-    let mut tx = db.begin().await?;
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
     sqlx::query(
         "INSERT INTO custom_mcp_servers
          (identity, group_name, label, description, enabled, current_revision, created_at, updated_at)

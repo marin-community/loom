@@ -263,7 +263,7 @@ pub async fn replace_by(
     desired: &[TagInput],
     clear: &[TagMatch],
 ) -> Result<TagReplacement> {
-    let mut tx = db.begin().await?;
+    let mut tx = crate::db::begin_immediate(db).await?;
     let before = sqlx::query_as::<_, Tag>(
         "SELECT key, value, note, set_by, set_at FROM tags
          WHERE branch_id = ? ORDER BY key",
