@@ -568,7 +568,7 @@ async fn gh_capture(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// Shared trigger state held on [`crate::web::AppState`]: the GitHub gateway and
+/// Shared trigger state held on [`crate::AppState`]: the GitHub gateway and
 /// the per-repo rate limiter. One instance per server; the gateway is an `Arc`
 /// so a test can install a fake.
 pub struct GithubTrigger {
