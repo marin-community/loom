@@ -1,6 +1,6 @@
 import { ref } from 'vue';
-import { listRuns, listSessions } from '../api';
-import type { AutomationRun, Session } from '../types';
+import { getSessionLayout, listRuns, listSessions } from '../api';
+import type { AutomationRun, Session, SessionLayout } from '../types';
 
 // One shared snapshot of the fleet. The session list, the status bar, and the
 // detail page all read from here instead of each polling `/api/sessions` on
@@ -15,34 +15,53 @@ import type { AutomationRun, Session } from '../types';
 
 const sessions = ref<Session[]>([]);
 const runs = ref<AutomationRun[]>([]);
+const layout = ref<SessionLayout | null>(null);
+const resourceErrors = ref<Partial<Record<'sessions' | 'runs' | 'layout', string>>>({});
 // Last fetch reached the server? Drives the status bar's online dot; the cached
 // counts dim rather than vanish while the server is briefly unreachable.
 const online = ref(true);
 
 let inflight: Promise<void> | null = null;
+let refreshRequested = false;
 
 // Pull the whole inventory, archived and automation-class sessions included —
-// the superset the Workspace, Automation, and explicit History views need (the
-// status bar and each view project disjoint honest counts). Concurrent callers
-// coalesce onto the one in-flight request.
+// the superset the Spaces, Attention, and explicit History views need. Concurrent
+// callers coalesce onto one in-flight loop. A request arriving while a
+// snapshot is loading marks the loop dirty and guarantees one trailing fetch.
 async function refresh(): Promise<void> {
+  refreshRequested = true;
   if (inflight) return inflight;
   inflight = (async () => {
-    try {
-      const [nextSessions, nextRuns] = await Promise.all([
+    while (refreshRequested) {
+      refreshRequested = false;
+      const results = await Promise.allSettled([
         listSessions({ archived: true, automation: true }),
         listRuns(),
+        getSessionLayout(),
       ]);
-      sessions.value = nextSessions;
-      runs.value = nextRuns;
-      online.value = true;
-    } catch {
-      // Keep the last good snapshot; the status bar's offline dot says why.
-      online.value = false;
-    } finally {
-      inflight = null;
+      const resources = ['sessions', 'runs', 'layout'] as const;
+      const nextErrors = { ...resourceErrors.value };
+      results.forEach((result, index) => {
+        const resource = resources[index];
+        if (result.status === 'rejected') {
+          nextErrors[resource] = (result.reason as Error).message;
+          return;
+        }
+        delete nextErrors[resource];
+        if (resource === 'sessions') sessions.value = result.value as Session[];
+        if (resource === 'runs') runs.value = result.value as AutomationRun[];
+        if (resource === 'layout') layout.value = result.value as SessionLayout;
+      });
+      resourceErrors.value = nextErrors;
+      // One auxiliary projection can fail without declaring the server offline.
+      online.value = results.some((result) => result.status === 'fulfilled');
     }
-  })();
+  })().finally(() => {
+    inflight = null;
+    // Cover the promise-resolution microtask gap between the loop's final
+    // condition check and this cleanup.
+    if (refreshRequested) void refresh();
+  });
   return inflight;
 }
 
@@ -54,20 +73,35 @@ function sessionById(id: string): Session | undefined {
 // caller is authenticated and stopped on sign-out. Guarded so a double-call
 // (HMR, a re-mount) can't leave two intervals running.
 let timer: number | undefined;
+let layoutEvents: EventSource | undefined;
 const POLL_MS = 3000;
 
 function startFleetPoll(): void {
   if (timer !== undefined) return;
   refresh();
   timer = window.setInterval(refresh, POLL_MS);
+  layoutEvents = new EventSource('/api/session-layout/events');
+  layoutEvents.addEventListener('session_layout', () => void refresh());
 }
 
 function stopFleetPoll(): void {
   if (timer === undefined) return;
   clearInterval(timer);
   timer = undefined;
+  layoutEvents?.close();
+  layoutEvents = undefined;
 }
 
 export function useFleet() {
-  return { sessions, runs, online, refresh, sessionById, startFleetPoll, stopFleetPoll };
+  return {
+    sessions,
+    runs,
+    layout,
+    resourceErrors,
+    online,
+    refresh,
+    sessionById,
+    startFleetPoll,
+    stopFleetPoll,
+  };
 }

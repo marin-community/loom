@@ -310,11 +310,14 @@ class Client:
     construction. Sessions and branches cross as plain dicts.
     """
 
-    def __init__(self, base=None, capabilities=None, credentials=None, profile=""):
+    def __init__(
+        self, base=None, capabilities=None, credentials=None, profile="", watch_id=None
+    ):
         self.base = _base_url(base)
         self.capabilities = list(capabilities or [])
         self.credentials = credentials
         self.profile = profile
+        self.watch_id = watch_id
 
     def can(self, cap):
         """Whether this client holds ``cap`` (``observe`` is always held)."""
@@ -359,8 +362,12 @@ class Client:
     # -- Reads (observe) ----------------------------------------------------
 
     def sessions(self):
-        """Every active session (``GET /api/sessions``)."""
-        return self._request("GET", "/sessions")
+        """Every non-automation active session.
+
+        Watch surveys must not inspect the automation sessions they launch;
+        ``class`` is the durable recursion guard.
+        """
+        return self._request("GET", "/sessions?automation=false")
 
     def session(self, key):
         """One session by id, branch id, branch name, or ``repo:branch``."""
@@ -403,15 +410,18 @@ class Client:
     def run(self, profile, idempotency_key, session, source="ops"):
         """Create an idempotent profile-scoped automation run; needs ``launch``."""
         self._gate("launch")
+        body = {
+            "profile": profile,
+            "idempotency_key": idempotency_key,
+            "source": source,
+            "session": session,
+        }
+        if self.watch_id:
+            body["watch_id"] = self.watch_id
         return self._request(
             "POST",
             "/runs",
-            {
-                "profile": profile,
-                "idempotency_key": idempotency_key,
-                "source": source,
-                "session": session,
-            },
+            body,
         )
 
     # -- Writes (capability-gated) --------------------------------------------
@@ -485,6 +495,7 @@ class Round:
         if config is None:
             config = json.loads(os.environ.get("WEAVER_WATCH", "{}"))
         self.config = config
+        self.id = config.get("id", "")
         self.name = config.get("name", "")
         self.params = config.get("params") or {}
         self.scope = config.get("scope") or {}
@@ -507,7 +518,10 @@ class Round:
         self.trigger = config.get("trigger") or {}
         self.dry_run = bool(config.get("dry_run")) or self.mode == "register"
         caps = [] if self.mode == "register" else (config.get("capabilities") or [])
-        self.client = client or Client(capabilities=caps, profile=self.profile)
+        self.client = client or Client(
+            capabilities=caps, profile=self.profile, watch_id=self.id or None
+        )
+        self.client.watch_id = self.id or None
         self.actions = []
         #: How many live sessions the last survey admitted.
         self.surveyed = 0
@@ -596,6 +610,8 @@ class Round:
         return admitted
 
     def _admits(self, session):
+        if session.get("class") == "automation":
+            return False
         branch = session.get("branch") or {}
         want = self.scope.get("attention")
         if want:

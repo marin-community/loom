@@ -1,949 +1,1332 @@
 <script setup lang="ts">
-import { ref, computed, watch, onActivated } from 'vue';
+import { computed, nextTick, onActivated, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import type { Session } from '../types';
-import StatusBadge from '../components/StatusBadge.vue';
-import SignalChip from '../components/SignalChip.vue';
-import IdleChip from '../components/IdleChip.vue';
-import TagPill from '../components/TagPill.vue';
-import GithubStatus from '../components/GithubStatus.vue';
-import SessionRowActions from '../components/SessionRowActions.vue';
-import SessionRemedyButton from '../components/SessionRemedyButton.vue';
-import AgentUsage from '../components/AgentUsage.vue';
-import AutomationSessions from '../components/AutomationSessions.vue';
-import { timeAgo } from '../lib/time';
+import type {
+  Session,
+  SessionGroup,
+  SessionSearchAttention,
+  SessionSearchStatus,
+  SessionSpace,
+} from '../types';
+import AutomationRunRow from '../components/AutomationRunRow.vue';
+import ConfirmDialog from '../components/ConfirmDialog.vue';
+import SessionWorkbenchRow from '../components/SessionWorkbenchRow.vue';
 import {
-  isAutomationHistory,
-  isAutomationRunHistory,
-  needsAutomationIntervention,
-  runNeedsIntervention,
-  unmatchedAutomationRuns,
-} from '../lib/automationSessions';
-import {
-  effectiveAttention,
-  idleTag,
-  lifecycleDot,
-  messageOf,
-  orderKey,
-  parkLabel,
-  priorityRank,
-  quietTags,
-  shelved,
-  signalChips,
-} from '../lib/sessionState';
+  archiveSession,
+  clearSessionTag,
+  createSessionGroup,
+  createSessionSpace,
+  deleteSessionGroup,
+  deleteSessionSpace,
+  moveSessions,
+  reorderSessionLayout,
+  restoreSessionGroups,
+  searchSessions,
+  setSessionGroupPreference,
+  updateSessionGroup,
+  updateSessionSpace,
+} from '../api';
+import { unmatchedAutomationRuns, unmatchedRunProjection } from '../lib/automationSessions';
+import { effectiveAttention } from '../lib/sessionState';
+import { useLayoutCommands } from '../lib/layoutCommands';
 import { useFleet } from '../lib/sessionsStore';
 import { beginSessionOpen, recordSessionListReturn } from '../lib/workbenchMetrics';
-import { del, setSessionOrder, setSessionPark } from '../api';
 
-// Named so App.vue's <keep-alive :include> matches it — the fleet list stays
-// alive across navigation (instant return, no refetch flash, no re-animate).
 defineOptions({ name: 'SessionList' });
 
-// The shared fleet snapshot — polled once for the whole app (App.vue), so this
-// view paints from cache the instant it mounts (and, kept alive, stays painted
-// across navigation — no refetch flash, no re-animate). `refresh()` forces an
-// immediate re-pull after a write (create / clear tag).
-const { sessions, runs, refresh } = useFleet();
-onActivated(recordSessionListReturn);
-
-// Attention filter — the dashboard's "which sessions need me?" control. The
-// URL query is the source of truth (`/?filter=attention`, the status bar's
-// deep-link): the buttons write it via router.replace and the ref follows, so
-// the view is shareable and survives reload/back-forward.
-type AttentionFilter = 'all' | 'attention' | 'ok';
 const route = useRoute();
 const router = useRouter();
-function filterFromQuery(q: unknown): AttentionFilter {
-  return q === 'attention' || q === 'ok' ? q : 'all';
-}
-const filter = ref<AttentionFilter>(filterFromQuery(route.query.filter));
-// The component is reused when only the query changes (status-bar click while
-// already on the fleet list), so track it.
-watch(
-  () => route.query.filter,
-  (q) => (filter.value = filterFromQuery(q)),
-);
-// Button clicks update the query (replace, not push — filter flips shouldn't
-// pollute history); the watcher above folds it back into the ref.
-function setFilter(f: AttentionFilter) {
-  filter.value = f;
-  router.replace({ query: { ...route.query, filter: f === 'all' ? undefined : f } });
-}
+const { sessions, runs, layout, resourceErrors, refresh } = useFleet();
 
-// The Sessions route has two operational surfaces. Workspace is the default
-// human workbench; Automation is the machinery view. Archived sessions are a
-// third, explicit History projection within the workspace route so historical
-// rows never inflate the actionable counts or appear in "All".
-type SessionPane = 'workspace' | 'automation';
-const pane = computed<SessionPane>(() =>
-  route.query.view === 'automation' ? 'automation' : 'workspace',
+type WorkbenchView = 'space' | 'attention' | 'all' | 'history';
+
+const liveSessions = computed(() =>
+  sessions.value.filter((session) => session.status !== 'archived'),
 );
-const interactiveSessions = computed(() =>
-  sessions.value.filter((session) => session.class !== 'automation'),
-);
-const workspaceSessions = computed(() =>
-  interactiveSessions.value.filter((session) => session.status !== 'archived'),
-);
-// History is intentionally cross-class: an archived automation session is still
-// archived work, and History is the one place where archived rows count.
 const historySessions = computed(() =>
   sessions.value.filter((session) => session.status === 'archived'),
 );
-const automationSessions = computed(() =>
-  sessions.value.filter((session) => session.class === 'automation'),
-);
-const unmatchedRuns = computed(() => unmatchedAutomationRuns(runs.value, automationSessions.value));
-const liveAutomationCount = computed(
-  () =>
-    automationSessions.value.filter((session) => !isAutomationHistory(session)).length +
-    unmatchedRuns.value.filter((run) => !isAutomationRunHistory(run)).length,
-);
-const automationInterventionCount = computed(
-  () =>
-    automationSessions.value.filter(needsAutomationIntervention).length +
-    unmatchedRuns.value.filter(runNeedsIntervention).length,
-);
-const workspaceHistoryOpen = computed(
-  () => pane.value === 'workspace' && route.query.history === 'true',
-);
-const workspaceOpen = computed(() => pane.value === 'workspace' && !workspaceHistoryOpen.value);
-const automationHistoryOpen = computed(
-  () => pane.value === 'automation' && route.query.history === 'true',
+const attentionSessions = computed(() =>
+  liveSessions.value.filter((session) => effectiveAttention(session).level !== 'ok'),
 );
 
-function paneQuery(next: SessionPane): Record<string, string | null | undefined> {
-  const query = { ...route.query };
-  if (next === 'automation') {
-    delete query.filter;
-    delete query.new;
-    query.view = 'automation';
-  } else {
-    delete query.view;
-    delete query.history;
-  }
-  return query as Record<string, string | null | undefined>;
-}
-
-function toggleAutomationHistory() {
-  const query = paneQuery('automation');
-  if (automationHistoryOpen.value) delete query.history;
-  else query.history = 'true';
-  router.replace({ query });
-}
-
-// The generic list renders either the active interactive fleet or archived
-// History, never a mixture. Automation has its own component and cannot leak
-// into Workspace threading, manual ordering, or the Parked shelf.
-const filteredBase = computed<Session[]>(() =>
-  workspaceHistoryOpen.value ? historySessions.value : workspaceSessions.value,
-);
-
-// Individual attention rows aren't pinned to the top — threading keeps related
-// work grouped — but a whole thread that contains attention floats up (see
-// treeRows), and attention rows carry their loud signal chip.
-const visibleSessions = computed<Session[]>(() => {
-  const base = filteredBase.value;
-  if (workspaceHistoryOpen.value) return base;
-  if (filter.value === 'attention') return base.filter((s) => effectiveAttention(s).level !== 'ok');
-  if (filter.value === 'ok') return base.filter((s) => effectiveAttention(s).level === 'ok');
-  return base;
+const view = computed<WorkbenchView>(() => {
+  if (route.query.history === 'true') return 'history';
+  if (route.query.view === 'attention') return 'attention';
+  if (route.query.view === 'all') return 'all';
+  return 'space';
 });
 
-// Workspace and its filters count actionable interactive sessions only.
-// Archived rows contribute exclusively to History.
-const counts = computed(() => {
-  const c = { all: workspaceSessions.value.length, attention: 0, ok: 0 };
-  for (const s of workspaceSessions.value) {
-    if (effectiveAttention(s).level === 'ok') c.ok += 1;
-    else c.attention += 1; // 'attention' and 'blocked' both need a human
-  }
-  return c;
-});
-
-// One flattened tree row: the session, its depth, and the gutter guides drawn to
-// its left. `verticals[i]` is true when an ancestor's line keeps running down
-// past this row; `isLast` picks the connector (└ vs ├). Depth 0 (top-level)
-// draws no gutter, so a flat fleet with no sub-sessions looks exactly as before.
-interface TreeRow {
-  session: Session;
-  depth: number;
-  verticals: boolean[];
-  isLast: boolean;
-}
-
-// Group the visible sessions into threads: each hangs under the session that
-// launched it (`parent_id`, a branch id), with top-level sessions under an
-// implicit root. A parent always sits directly above its children. Threads stay
-// grouped, but a thread containing attention floats to the top: roots and
-// siblings sort by their subtree's urgency first (blocked above attention above
-// ok), then newest-first within the same urgency — so a blocked/attention child
-// can never sink to the bottom of the fleet. A parent that's filtered/archived
-// out of the visible set (or was never tracked) drops its orphaned children up.
-// The shared tree build. Groups visible sessions into threads, ranks each
-// thread by its loudest member, then splits the top-level threads two ways: the
-// live list, and the resting "Parked" shelf (long-idle or hand-parked threads
-// that need nothing from you). Live threads carry the manual drag order;
-// the shelf sorts by most-recent activity. Exposes the ordered live roots so the
-// drop math can find a dragged row's new neighbours.
-const partitioned = computed(() => {
-  const list = visibleSessions.value;
-  const present = new Set(list.map((s) => s.branch.id));
-  const children = new Map<string, Session[]>();
-  const roots: Session[] = [];
-  for (const s of list) {
-    const pid = s.parent_id;
-    if (pid && pid !== s.branch.id && present.has(pid)) {
-      const arr = children.get(pid);
-      if (arr) arr.push(s);
-      else children.set(pid, [s]);
-    } else {
-      roots.push(s);
-    }
-  }
-  // Render rank for a single session: blocked is louder than attention is louder
-  // than the calm default, and a parked row (waiting on an external reviewer —
-  // nothing for the user to do) sinks below it. Used to float urgent threads to
-  // the top and sink parked ones to the bottom. Uses the resolved signal (agent's
-  // own report or a non-stale watch mark) so a triaged thread floats too —
-  // matching visibleSessions/counts above.
-  const rankOf = (s: Session): number => priorityRank(s);
-  // Memoized max render rank across a session's whole subtree (itself + all
-  // descendants), so a thread surfaces at the urgency of its loudest member — and
-  // a parked parent with live (rank-0) children stays at the calm default rather
-  // than sinking the whole thread. The cycle guard mirrors walk()'s: a parent
-  // link loop can't spin us forever.
-  const rankCache = new Map<string, number>();
-  const ranking = new Set<string>();
-  const subtreeRank = (s: Session): number => {
-    const cached = rankCache.get(s.branch.id);
-    if (cached !== undefined) return cached;
-    if (ranking.has(s.branch.id)) return rankOf(s); // mid-cycle: just self
-    ranking.add(s.branch.id);
-    let max = rankOf(s);
-    for (const kid of children.get(s.branch.id) ?? []) {
-      max = Math.max(max, subtreeRank(kid));
-    }
-    ranking.delete(s.branch.id);
-    rankCache.set(s.branch.id, max);
-    return max;
-  };
-  // Newest-first within a sibling group, matching the dashboard's default feel.
-  const byNewest = (a: Session, b: Session) =>
-    b.created_at < a.created_at ? -1 : b.created_at > a.created_at ? 1 : 0;
-  // Urgent subtree first, then newest-first as the tie-break. When no session
-  // carries attention every rank is 0 and this collapses to plain byNewest.
-  const byUrgencyThenNewest = (a: Session, b: Session) =>
-    subtreeRank(b) - subtreeRank(a) || byNewest(a, b);
-
-  // Split top-level threads. A thread goes to the shelf when its root rests AND
-  // nothing in its subtree needs a human (subtreeRank ≤ 0) — a blocked child
-  // keeps the whole thread live even under a hand-parked parent.
-  const liveRoots: Session[] = [];
-  const shelfRoots: Session[] = [];
-  for (const r of roots) {
-    if (shelved(r) && subtreeRank(r) <= 0) shelfRoots.push(r);
-    else liveRoots.push(r);
-  }
-  // Live order: the manual/auto interleave key (drag places a row exactly; the
-  // rest keep urgency-then-newest). Shelf order: most-recently-active first.
-  liveRoots.sort(
-    (a, b) => orderKey(a, subtreeRank(a)) - orderKey(b, subtreeRank(b)) || byNewest(a, b),
+const activeSpace = computed<SessionSpace | undefined>(() => {
+  const spaces = layout.value?.spaces ?? [];
+  if (!spaces.length) return undefined;
+  const requested = typeof route.query.space === 'string' ? route.query.space : '';
+  return (
+    spaces.find((space) => space.id === requested) ??
+    spaces.find((space) => space.system_key === 'user') ??
+    spaces[0]
   );
-  shelfRoots.sort((a, b) => (b.last_activity_at || '').localeCompare(a.last_activity_at || ''));
-
-  const buildRows = (rootsList: Session[]): TreeRow[] => {
-    const rows: TreeRow[] = [];
-    const seen = new Set<string>(); // guard against any cycle in the parent links
-    const walk = (node: Session, depth: number, verticals: boolean[], isLast: boolean) => {
-      if (seen.has(node.branch.id)) return;
-      seen.add(node.branch.id);
-      rows.push({ session: node, depth, verticals, isLast });
-      const kids = [...(children.get(node.branch.id) ?? [])].sort(byUrgencyThenNewest);
-      kids.forEach((kid, i) => {
-        const last = i === kids.length - 1;
-        // The implicit root isn't a drawn column, so a top-level node's children
-        // start with no ancestor lines; deeper, append this node's continuation.
-        const childVerticals = depth === 0 ? [] : [...verticals, !isLast];
-        walk(kid, depth + 1, childVerticals, last);
-      });
-    };
-    rootsList.forEach((r, i) => walk(r, 0, [], i === rootsList.length - 1));
-    return rows;
-  };
-
-  return {
-    liveRows: buildRows(liveRoots),
-    shelfRows: buildRows(shelfRoots),
-    liveRoots,
-    rankOf: (s: Session) => subtreeRank(s),
-  };
 });
 
-const liveRows = computed(() => partitioned.value.liveRows);
-const shelfRows = computed(() => partitioned.value.shelfRows);
-// Threads on the shelf (top-level rows only) — the count beside "Parked".
-const shelfCount = computed(() => shelfRows.value.filter((r) => r.depth === 0).length);
+function viewQuery(next: WorkbenchView, spaceId?: string) {
+  const query = { ...route.query };
+  delete query.view;
+  delete query.history;
+  delete query.space;
+  delete query.new;
+  if (next === 'attention') query.view = 'attention';
+  if (next === 'all') query.view = 'all';
+  if (next === 'history') query.history = 'true';
+  if (next === 'space' && spaceId) query.space = spaceId;
+  return query;
+}
 
-// ── Drag to reorder · drag to park ──────────────────────────────────────────
-// One gesture does both: drag a row within the live list to place it (persists a
-// midpoint sort key), or drag it onto the Parked shelf to rest it (and drag a
-// resting row back out to keep it live). Only top-level threads drag; children
-// ride with their root. HTML5 native DnD so keyboard/`⌘`-click on the row's link
-// still work — the grip is the only draggable handle.
-const draggingId = ref('');
-const dropBeforeId = ref(''); // the live row the dragged thread would land above
-const dropAtEnd = ref(false); // …or past the last live row
-const overShelf = ref(false); // hovering the shelf drop zone
-const parkedOpen = ref(false); // the shelf disclosure
+const SEARCH_STATUSES = new Set<SessionSearchStatus>([
+  'created',
+  'running',
+  'orphaned',
+  'done',
+  'error',
+  'archived',
+]);
+const SEARCH_ATTENTION = new Set<SessionSearchAttention>(['needs', 'ok', 'attention', 'blocked']);
+function statusFromQuery(value: unknown): SessionSearchStatus | '' {
+  return typeof value === 'string' && SEARCH_STATUSES.has(value as SessionSearchStatus)
+    ? (value as SessionSearchStatus)
+    : '';
+}
+function attentionFromQuery(value: unknown): SessionSearchAttention | '' {
+  return typeof value === 'string' && SEARCH_ATTENTION.has(value as SessionSearchAttention)
+    ? (value as SessionSearchAttention)
+    : '';
+}
+const statusFilter = ref<SessionSearchStatus | ''>(statusFromQuery(route.query.status));
+const attentionFilter = ref<SessionSearchAttention | ''>(attentionFromQuery(route.query.attention));
+watch(
+  () => [route.query.status, route.query.attention],
+  ([status, attention]) => {
+    statusFilter.value = statusFromQuery(status);
+    attentionFilter.value = attentionFromQuery(attention);
+  },
+);
+function updateFilters() {
+  router.replace({
+    query: {
+      ...route.query,
+      status: statusFilter.value || undefined,
+      attention: attentionFilter.value || undefined,
+    },
+  });
+}
 
-function onDragStart(id: string, e: DragEvent) {
-  draggingId.value = id;
-  if (e.dataTransfer) {
-    e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', id); // Firefox needs a payload to drag
+const searchText = ref('');
+const includeHistory = ref(false);
+const searchResults = ref<Session[] | null>(null);
+const searching = ref(false);
+const searchError = ref('');
+let searchTimer: number | undefined;
+let searchGeneration = 0;
+let searchAbort: AbortController | undefined;
+// Search membership is server-owned. Fleet/layout snapshots are replaced after
+// polling, SSE invalidations, and mutations; while a query is open each fresh
+// snapshot reruns the same guarded search so renamed, moved, created, and
+// deleted sessions enter or leave the result set correctly.
+function queueSearch(clearResults: boolean) {
+  window.clearTimeout(searchTimer);
+  searchAbort?.abort();
+  const generation = ++searchGeneration;
+  if (route.path !== '/') {
+    searching.value = false;
+    return;
   }
-}
-
-function onDragEnd() {
-  draggingId.value = '';
-  dropBeforeId.value = '';
-  dropAtEnd.value = false;
-  overShelf.value = false;
-}
-
-// Hovering a live row: mark whether we'd drop above or below it (pointer vs the
-// row's vertical midpoint). Only top-level rows are drop anchors.
-function onRowDragOver(rowId: string, e: DragEvent) {
-  if (!draggingId.value) return;
-  e.preventDefault();
-  overShelf.value = false;
-  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-  const below = e.clientY > rect.top + rect.height / 2;
-  const roots = partitioned.value.liveRoots;
-  const idx = roots.findIndex((r) => r.id === rowId);
-  if (idx === -1) return;
-  const anchor = below ? roots[idx + 1] : roots[idx];
-  dropAtEnd.value = below && idx === roots.length - 1;
-  dropBeforeId.value = dropAtEnd.value ? '' : (anchor?.id ?? '');
-}
-
-function neighbourKey(root: Session | undefined): number | null {
-  if (!root) return null;
-  return orderKey(root, partitioned.value.rankOf(root));
-}
-
-// Commit a live-list drop: place the dragged thread between its new neighbours by
-// giving it the midpoint sort key, and — if it came off the shelf — keep it live.
-async function commitReorder() {
-  const id = draggingId.value;
-  if (!id) return;
-  const roots = partitioned.value.liveRoots.filter((r) => r.id !== id);
-  let above: Session | undefined;
-  let below: Session | undefined;
-  if (dropAtEnd.value) {
-    above = roots[roots.length - 1];
-  } else {
-    const idx = roots.findIndex((r) => r.id === dropBeforeId.value);
-    below = idx === -1 ? roots[0] : roots[idx];
-    above = idx <= 0 ? undefined : roots[idx - 1];
+  const query = searchText.value.trim();
+  if (clearResults) {
+    searchError.value = '';
+    if (query) {
+      searchResults.value = null;
+    }
   }
-  const ka = neighbourKey(above);
-  const kb = neighbourKey(below);
-  // Midpoint, with a wide gap when dropping past an end so there's room to spare.
-  const key =
-    ka !== null && kb !== null
-      ? (ka + kb) / 2
-      : ka !== null
-        ? ka + 1e9
-        : kb !== null
-          ? kb - 1e9
-          : 0;
-  const dragged = sessions.value.find((s) => s.id === id);
-  const wasShelved = dragged ? shelved(dragged) : false;
-  // Optimistic: reflect immediately, then persist.
-  if (dragged) {
-    dragged.sort_order = key;
-    if (wasShelved) dragged.park = 'active';
+  if (!query) {
+    searchResults.value = null;
+    searching.value = false;
+    return;
   }
-  onDragEnd();
-  try {
-    if (wasShelved) await setSessionPark(id, 'active');
-    await setSessionOrder(id, key);
-    await refresh();
-  } catch (e) {
-    error.value = (e as Error).message;
-  }
+  searching.value = true;
+  searchTimer = window.setTimeout(async () => {
+    const controller = new AbortController();
+    searchAbort = controller;
+    try {
+      const archivedOnly = view.value === 'history';
+      const result = await searchSessions(
+        query,
+        {
+          history: archivedOnly || includeHistory.value,
+          archivedOnly,
+          status: statusFilter.value || undefined,
+          attention: attentionFilter.value || undefined,
+        },
+        controller.signal,
+      );
+      if (generation === searchGeneration) {
+        searchResults.value = result;
+        searchError.value = '';
+      }
+    } catch (cause) {
+      if (generation === searchGeneration && (cause as Error).name !== 'AbortError') {
+        searchError.value = (cause as Error).message;
+      }
+    } finally {
+      if (generation === searchGeneration) searching.value = false;
+    }
+  }, 160);
+}
+watch(
+  [searchText, includeHistory, statusFilter, attentionFilter, () => view.value, () => route.path],
+  () => queueSearch(true),
+  { flush: 'sync' },
+);
+watch([sessions, layout], () => queueSearch(false));
+onActivated(() => {
+  recordSessionListReturn();
+  queueSearch(true);
+});
+
+function matchesFilters(session: Session): boolean {
+  if (statusFilter.value && session.status !== statusFilter.value) return false;
+  const attention = effectiveAttention(session).level;
+  if (attentionFilter.value === 'needs' && attention === 'ok') return false;
+  if (attentionFilter.value === 'ok' && attention !== 'ok') return false;
+  if (attentionFilter.value === 'blocked' && attention !== 'blocked') return false;
+  if (attentionFilter.value === 'attention' && attention !== 'attention') return false;
+  return true;
 }
 
-// Commit a shelf drop: rest the dragged thread on the shelf.
-async function commitPark() {
-  const id = draggingId.value;
-  if (!id) return;
-  const dragged = sessions.value.find((s) => s.id === id);
-  if (dragged) dragged.park = 'parked';
-  parkedOpen.value = true;
-  onDragEnd();
-  try {
-    await setSessionPark(id, 'parked');
-    await refresh();
-  } catch (e) {
-    error.value = (e as Error).message;
+const baseSessions = computed(() => {
+  if (searchResults.value) {
+    const current = new Map(sessions.value.map((session) => [session.id, session]));
+    return searchResults.value
+      .map((result) => current.get(result.id))
+      .filter((session): session is Session => !!session);
   }
+  if (view.value === 'history') return historySessions.value;
+  if (view.value === 'attention') return attentionSessions.value;
+  if (view.value === 'all') return liveSessions.value;
+  const spaceId = activeSpace.value?.id;
+  return liveSessions.value.filter((session) => session.placement?.space_id === spaceId);
+});
+const visibleSessions = computed(() => baseSessions.value.filter(matchesFilters));
+const visibleById = computed(
+  () => new Map(visibleSessions.value.map((session) => [session.id, session])),
+);
+const sessionsByBranch = computed(() =>
+  sessions.value.reduce((byBranch, session) => {
+    const candidates = byBranch.get(session.branch.id) ?? [];
+    candidates.push(session);
+    byBranch.set(session.branch.id, candidates);
+    return byBranch;
+  }, new Map<string, Session[]>()),
+);
+const sessionsById = computed(
+  () => new Map(sessions.value.map((session) => [session.id, session])),
+);
+function parentSessionOf(session: Session) {
+  if (session.parent_session_id) {
+    return sessionsById.value.get(session.parent_session_id);
+  }
+  if (!session.parent_id) return undefined;
+  const legacyCandidates = sessionsByBranch.value.get(session.parent_id) ?? [];
+  return legacyCandidates.length === 1 ? legacyCandidates[0] : undefined;
+}
+const groupedSessions = computed(() =>
+  (activeSpace.value?.groups ?? []).map((group) => ({
+    group,
+    sessions: group.session_ids
+      .map((id) => visibleById.value.get(id))
+      .filter((session): session is Session => !!session),
+  })),
+);
+const smartSessions = computed(() =>
+  [...visibleSessions.value].sort((left, right) => {
+    if (view.value === 'attention') {
+      const rank = { blocked: 0, attention: 1, ok: 2 };
+      const difference =
+        rank[effectiveAttention(left).level] - rank[effectiveAttention(right).level];
+      if (difference) return difference;
+    }
+    const leftPlace = `${left.placement?.space_name ?? ''}/${left.placement?.group_name ?? ''}`;
+    const rightPlace = `${right.placement?.space_name ?? ''}/${right.placement?.group_name ?? ''}`;
+    return (
+      leftPlace.localeCompare(rightPlace) ||
+      (left.placement?.rank ?? 0) - (right.placement?.rank ?? 0)
+    );
+  }),
+);
+const displayedGroups = computed(() => {
+  if (view.value === 'space' && searchResults.value === null) {
+    return groupedSessions.value.map(({ group, sessions }) => ({
+      key: group.id,
+      group,
+      sessions,
+      qualified: false,
+    }));
+  }
+  return smartSessions.value.length
+    ? [{ key: 'smart', group: undefined, sessions: smartSessions.value, qualified: true }]
+    : [];
+});
+const unmatchedRuns = computed(() =>
+  unmatchedAutomationRuns(runs.value, sessions.value).sort((left, right) =>
+    right.updated_at.localeCompare(left.updated_at),
+  ),
+);
+const interventionRuns = computed(() =>
+  unmatchedRuns.value.filter((run) => unmatchedRunProjection(run) === 'intervention'),
+);
+const provisioningRuns = computed(() =>
+  unmatchedRuns.value.filter((run) => unmatchedRunProjection(run) === 'provisioning'),
+);
+const historicalRuns = computed(() =>
+  unmatchedRuns.value.filter((run) => unmatchedRunProjection(run) === 'history'),
+);
+const showInterventions = computed(
+  () =>
+    view.value === 'attention' ||
+    (view.value === 'space' && activeSpace.value?.system_key === 'ops'),
+);
+const operationalRuns = computed(() =>
+  view.value === 'attention'
+    ? interventionRuns.value
+    : [...interventionRuns.value, ...provisioningRuns.value].sort((left, right) =>
+        right.updated_at.localeCompare(left.updated_at),
+      ),
+);
+
+const expandedRows = ref(new Set<string>());
+function rowExpanded(id: string) {
+  return expandedRows.value.has(id);
+}
+function toggleRow(id: string) {
+  const next = new Set(expandedRows.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  expandedRows.value = next;
 }
 
-// The row ⋯ menu's Park / Keep-live verbs — the accessible, no-drag path.
-async function setPark(id: string, state: 'parked' | 'active' | 'auto') {
-  const dragged = sessions.value.find((s) => s.id === id);
-  if (dragged) dragged.park = state === 'auto' ? null : state;
-  if (state === 'parked') parkedOpen.value = true; // reveal where the row landed
-  try {
-    await setSessionPark(id, state);
-    await refresh();
-  } catch (e) {
-    error.value = (e as Error).message;
-  }
+const selected = ref(new Set<string>());
+watch(sessions, (next) => {
+  const existing = new Set(next.map((session) => session.id));
+  selected.value = new Set([...selected.value].filter((id) => existing.has(id)));
+});
+function isSelected(id: string) {
+  return selected.value.has(id);
 }
+function setSelected(id: string, shouldSelect: boolean) {
+  const next = new Set(selected.value);
+  if (shouldSelect) next.add(id);
+  else next.delete(id);
+  selected.value = next;
+}
+function clearSelection() {
+  selected.value = new Set();
+}
+const renderedVisibleIds = computed(() => {
+  const ids = new Set(visibleById.value.keys());
+  if (view.value !== 'space' || searchResults.value !== null) return ids;
+  for (const { group } of allGroups.value) {
+    if (!group.collapsed) continue;
+    for (const id of group.session_ids) ids.delete(id);
+  }
+  return ids;
+});
+const visibleSelectedCount = computed(
+  () => [...selected.value].filter((id) => renderedVisibleIds.value.has(id)).length,
+);
+const hiddenSelectedCount = computed(() => selected.value.size - visibleSelectedCount.value);
+
+const allGroups = computed(() =>
+  (layout.value?.spaces ?? []).flatMap((space) =>
+    space.groups.map((group) => ({
+      group,
+      space,
+      label: `${space.name} / ${group.name}`,
+    })),
+  ),
+);
+function selectedInLayoutOrder() {
+  const remaining = new Set(selected.value);
+  const ordered = allGroups.value.flatMap(({ group }) =>
+    group.session_ids.filter((id) => remaining.delete(id)),
+  );
+  return [...ordered, ...remaining];
+}
+const bulkDestination = ref('');
+watch(
+  allGroups,
+  (groups) => {
+    if (!groups.some(({ group }) => group.id === bulkDestination.value)) {
+      bulkDestination.value = groups[0]?.group.id ?? '';
+    }
+  },
+  { immediate: true },
+);
+
+interface UndoGroup {
+  group_id: string;
+  session_ids: string[];
+}
+interface UndoMove {
+  groups: UndoGroup[];
+  message: string;
+}
+const undoMove = ref<UndoMove | null>(null);
+const announcement = ref('');
 const error = ref('');
-const MISSING_GITHUB_TOKEN_ERROR = 'No GitHub token configured.';
-const tokenConfigWarning = computed(() => error.value.startsWith(MISSING_GITHUB_TOKEN_ERROR));
+const { busy: layoutBusy, error: layoutError, run: runLayout } = useLayoutCommands(layout, refresh);
+
+function snapshotUndo(ids: string[], destinationGroupId: string): UndoMove {
+  const moving = new Set(ids);
+  const affected = new Set([destinationGroupId]);
+  for (const { group } of allGroups.value) {
+    if (group.session_ids.some((id) => moving.has(id))) affected.add(group.id);
+  }
+  const groups = allGroups.value
+    .filter(({ group }) => affected.has(group.id))
+    .map(({ group }) => ({ group_id: group.id, session_ids: [...group.session_ids] }));
+  const destination = allGroups.value.find(
+    (candidate) => candidate.group.id === destinationGroupId,
+  );
+  return {
+    groups,
+    message: `Moved ${ids.length} session${ids.length === 1 ? '' : 's'} to ${
+      destination?.label ?? destinationGroupId
+    }`,
+  };
+}
+
+async function performMove(
+  ids: string[],
+  destinationGroupId: string,
+  beforeSessionId: string | null = null,
+  reversible = true,
+) {
+  if (!ids.length || !layout.value) return;
+  const outcome: { undo?: UndoMove } = {};
+  const moved = await runLayout((current) => {
+    outcome.undo = snapshotUndo(ids, destinationGroupId);
+    return moveSessions({
+      session_ids: ids,
+      destination_group_id: destinationGroupId,
+      before_session_id: beforeSessionId,
+      expected_revision: current.revision,
+    });
+  });
+  const undo = outcome.undo;
+  if (!moved || !undo) return;
+  moveOpenId.value = '';
+  if (reversible) undoMove.value = undo;
+  announcement.value = undo.message;
+  clearSelection();
+  await nextTick();
+  const movedRow =
+    ids.length === 1
+      ? document.querySelector<HTMLElement>(
+          `[data-session-id="${CSS.escape(ids[0])}"] [data-testid="session-details-toggle"]`,
+        )
+      : null;
+  const focusableMovedRow =
+    movedRow && movedRow.offsetParent !== null && !movedRow.hasAttribute('disabled')
+      ? movedRow
+      : null;
+  (focusableMovedRow ?? undoButton.value)?.focus();
+}
+
+async function restoreMove() {
+  const undo = undoMove.value;
+  if (!undo) return;
+  const restored = await runLayout((current) =>
+    restoreSessionGroups({
+      groups: undo.groups,
+      expected_revision: current.revision,
+    }),
+  );
+  if (restored) {
+    undoMove.value = null;
+    announcement.value = 'Move undone';
+  }
+}
+
+const moveOpenId = ref('');
+const rowDestination = ref<Record<string, string>>({});
+const rowBefore = ref<Record<string, string>>({});
+function openMove(session: Session) {
+  moveOpenId.value = moveOpenId.value === session.id ? '' : session.id;
+  rowDestination.value[session.id] =
+    rowDestination.value[session.id] || session.placement?.group_id || allGroups.value[0]?.group.id;
+  rowBefore.value[session.id] = '';
+}
+
+const draggingId = ref('');
+const dropGroupId = ref('');
+const dropBeforeId = ref('');
+function dragStart(id: string, event: DragEvent) {
+  draggingId.value = id;
+  event.dataTransfer?.setData('text/plain', id);
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+}
+function dragOver(groupId: string, beforeId = '') {
+  if (!draggingId.value) return;
+  dropGroupId.value = groupId;
+  dropBeforeId.value = beforeId;
+}
+function clearDrag() {
+  draggingId.value = '';
+  dropGroupId.value = '';
+  dropBeforeId.value = '';
+}
+async function drop(groupId: string, beforeId: string | null = null) {
+  const id = draggingId.value;
+  clearDrag();
+  if (id) await performMove([id], groupId, beforeId);
+}
+
+async function toggleGroup(group: SessionGroup) {
+  const collapsed = !group.collapsed;
+  await runLayout(() => setSessionGroupPreference(group.id, collapsed));
+}
+
+const organizeOpen = ref(false);
+const organizeSpaceId = ref('');
+const newSpaceName = ref('');
+const newGroupName = ref('');
+const spaceNames = ref<Record<string, string>>({});
+const groupNames = ref<Record<string, string>>({});
+const deleteDestinations = ref<Record<string, string>>({});
+const groupDestinationSpaces = ref<Record<string, string>>({});
+const dirtySpaceNames = new Set<string>();
+const dirtyGroupNames = new Set<string>();
+const dirtyGroupDestinations = new Set<string>();
+const pendingDelete = ref<
+  { kind: 'space'; item: SessionSpace } | { kind: 'group'; item: SessionGroup } | null
+>(null);
+watch(
+  layout,
+  (next) => {
+    if (!next) return;
+    if (!next.spaces.some((space) => space.id === organizeSpaceId.value)) {
+      organizeSpaceId.value = activeSpace.value?.id ?? next.spaces[0]?.id ?? '';
+    }
+    for (const space of next.spaces) {
+      if (!dirtySpaceNames.has(space.id)) spaceNames.value[space.id] = space.name;
+      for (const group of space.groups) {
+        if (!dirtyGroupNames.has(group.id)) groupNames.value[group.id] = group.name;
+        if (!dirtyGroupDestinations.has(group.id)) {
+          groupDestinationSpaces.value[group.id] = space.id;
+        }
+      }
+    }
+  },
+  { immediate: true },
+);
+const organizeSpace = computed(() =>
+  layout.value?.spaces.find((space) => space.id === organizeSpaceId.value),
+);
+const pendingDeleteGroups = computed(() => {
+  const pending = pendingDelete.value;
+  if (!pending || !layout.value) return [];
+  if (pending.kind === 'group') {
+    return allGroups.value
+      .filter(({ group }) => group.id === pending.item.id)
+      .map(({ group }) => group);
+  }
+  return layout.value.spaces.find((space) => space.id === pending.item.id)?.groups ?? [];
+});
+const pendingDeleteRequiresDestination = computed(() => {
+  const ids = new Set(pendingDeleteGroups.value.map((group) => group.id));
+  return (
+    pendingDeleteGroups.value.some((group) => group.session_ids.length > 0) ||
+    (layout.value?.defaults ?? []).some((fallback) => ids.has(fallback.group_id))
+  );
+});
+const pendingDeleteImpossible = computed(() => {
+  const pending = pendingDelete.value;
+  if (!pending || !layout.value) return true;
+  if (pending.kind === 'space') return layout.value.spaces.length <= 1;
+  const space = layout.value.spaces.find((candidate) =>
+    candidate.groups.some((group) => group.id === pending.item.id),
+  );
+  return !space || space.groups.length <= 1;
+});
+const pendingDeleteDestination = computed(() => {
+  const pending = pendingDelete.value;
+  if (!pending) return undefined;
+  const id = deleteDestinations.value[pending.item.id];
+  const sourceIds = new Set(pendingDeleteGroups.value.map((group) => group.id));
+  return allGroups.value.find(({ group }) => group.id === id && !sourceIds.has(group.id));
+});
+const deleteConfirmationDisabled = computed(
+  () =>
+    layoutBusy.value ||
+    pendingDeleteImpossible.value ||
+    (pendingDeleteRequiresDestination.value && !pendingDeleteDestination.value),
+);
+const deleteDescription = computed(() => {
+  const pending = pendingDelete.value;
+  if (!pending) return '';
+  const label = `${pending.kind} “${pending.item.name}”`;
+  if (pendingDeleteDestination.value) {
+    return `Delete ${label} and move its sessions and placement defaults to “${pendingDeleteDestination.value.label}”.`;
+  }
+  if (pendingDeleteRequiresDestination.value) {
+    return `Select a destination before deleting ${label}; it still owns sessions or placement defaults.`;
+  }
+  return `Delete empty ${label}.`;
+});
+
+function editSpaceName(id: string, name: string) {
+  dirtySpaceNames.add(id);
+  spaceNames.value[id] = name;
+}
+function editGroupName(id: string, name: string) {
+  dirtyGroupNames.add(id);
+  groupNames.value[id] = name;
+}
+function editGroupDestination(id: string, spaceId: string) {
+  dirtyGroupDestinations.add(id);
+  groupDestinationSpaces.value[id] = spaceId;
+}
+function addSpace() {
+  if (!layout.value || !newSpaceName.value.trim()) return;
+  const name = newSpaceName.value;
+  void runLayout((current) => createSessionSpace(name, current.revision)).then((created) => {
+    if (created) newSpaceName.value = '';
+  });
+}
+function renameSpace(space: SessionSpace) {
+  if (!layout.value) return;
+  void runLayout((current) =>
+    updateSessionSpace(space.id, spaceNames.value[space.id], current.revision),
+  ).then((renamed) => {
+    if (renamed) dirtySpaceNames.delete(space.id);
+  });
+}
+function removeSpace(space: SessionSpace) {
+  if (!layout.value) return;
+  void runLayout((current) =>
+    deleteSessionSpace(space.id, deleteDestinations.value[space.id] || null, current.revision),
+  );
+}
+function addGroup(space: SessionSpace) {
+  if (!layout.value || !newGroupName.value.trim()) return;
+  const name = newGroupName.value;
+  void runLayout((current) => createSessionGroup(space.id, name, current.revision)).then(
+    (created) => {
+      if (created) newGroupName.value = '';
+    },
+  );
+}
+function renameGroup(group: SessionGroup) {
+  if (!layout.value) return;
+  void runLayout((current) =>
+    updateSessionGroup(group.id, groupNames.value[group.id], current.revision),
+  ).then((renamed) => {
+    if (renamed) dirtyGroupNames.delete(group.id);
+  });
+}
+function removeGroup(group: SessionGroup) {
+  if (!layout.value) return;
+  void runLayout((current) =>
+    deleteSessionGroup(group.id, deleteDestinations.value[group.id] || null, current.revision),
+  );
+}
+function confirmLayoutDelete() {
+  const pending = pendingDelete.value;
+  if (deleteConfirmationDisabled.value) return;
+  pendingDelete.value = null;
+  if (!pending) return;
+  if (pending.kind === 'space') removeSpace(pending.item);
+  else removeGroup(pending.item);
+}
+
+function groupIsLast(group: SessionGroup) {
+  return layout.value?.spaces.find((space) => space.id === group.space_id)?.groups.length === 1;
+}
+function reorderSpace(space: SessionSpace, direction: -1 | 1) {
+  if (!layout.value) return;
+  const spaces = layout.value.spaces;
+  const index = spaces.findIndex((candidate) => candidate.id === space.id);
+  const target = index + direction;
+  if (target < 0 || target >= spaces.length) return;
+  const beforeId = direction < 0 ? spaces[target].id : spaces[target + 1]?.id;
+  void runLayout((current) =>
+    reorderSessionLayout({
+      kind: 'space',
+      id: space.id,
+      before_id: beforeId ?? null,
+      expected_revision: current.revision,
+    }),
+  );
+}
+function reorderGroup(group: SessionGroup, direction: -1 | 1) {
+  if (!layout.value) return;
+  const groups = organizeSpace.value?.groups ?? [];
+  const index = groups.findIndex((candidate) => candidate.id === group.id);
+  const target = index + direction;
+  if (target < 0 || target >= groups.length) return;
+  const beforeId = direction < 0 ? groups[target].id : groups[target + 1]?.id;
+  void runLayout((current) =>
+    reorderSessionLayout({
+      kind: 'group',
+      id: group.id,
+      before_id: beforeId ?? null,
+      destination_space_id: group.space_id,
+      expected_revision: current.revision,
+    }),
+  );
+}
+function moveGroupToSpace(group: SessionGroup) {
+  if (!layout.value) return;
+  const destination = groupDestinationSpaces.value[group.id];
+  if (!destination || destination === group.space_id) return;
+  void runLayout((current) =>
+    reorderSessionLayout({
+      kind: 'group',
+      id: group.id,
+      before_id: null,
+      destination_space_id: destination,
+      expected_revision: current.revision,
+    }),
+  ).then((moved) => {
+    if (moved) dirtyGroupDestinations.delete(group.id);
+  });
+}
+
+const pendingBulkArchive = ref(false);
+const archiveResult = ref('');
+async function confirmBulkArchive() {
+  pendingBulkArchive.value = false;
+  error.value = '';
+  const ids = [...selected.value];
+  const results = await Promise.allSettled(ids.map(archiveSession));
+  const failed = ids.filter((_, index) => results[index].status === 'rejected');
+  const archived = ids.length - failed.length;
+  selected.value = new Set(failed);
+  announcement.value = `Archived ${archived} session${archived === 1 ? '' : 's'}${
+    failed.length ? `; ${failed.length} failed and remain selected` : ''
+  }`;
+  archiveResult.value = announcement.value;
+  if (failed.length) error.value = announcement.value;
+  await refresh();
+}
+
+const undoButton = ref<HTMLButtonElement>();
 
 function openForm() {
   router.push('/sessions/new');
 }
 
-// A quiet pill's × clears that tag, then refreshes the row. The tag write
-// surface is the same DELETE the detail page uses.
 const clearingTag = ref('');
 async function clearTag(sessionId: string, key: string) {
   clearingTag.value = `${sessionId}:${key}`;
   try {
-    await del(`/sessions/${sessionId}/tags/${encodeURIComponent(key)}`);
+    await clearSessionTag(sessionId, key);
     await refresh();
-  } catch (e) {
-    error.value = (e as Error).message;
+  } catch (cause) {
+    error.value = (cause as Error).message;
   } finally {
     clearingTag.value = '';
   }
 }
+
 function recordSessionLinkOpen(event: MouseEvent, sessionId: string) {
-  // Vue Router leaves modified clicks to the browser so they can open another
-  // tab/window. Start the in-tab timer only for the activation this page owns;
-  // keyboard Enter produces an unmodified primary click and remains covered.
   if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
     return;
   beginSessionOpen(sessionId);
+}
+function scrollSpaces(direction: number) {
+  document
+    .querySelector('[data-testid="space-tabs-scroll"]')
+    ?.scrollBy({ left: direction * 240, behavior: 'smooth' });
 }
 </script>
 
 <template>
   <div class="px-5 py-3">
-    <!-- One toolbar line: the view label, live/history surfaces, the attention
-         filter, and the primary action — no page-hero heading (the rail
-         already says where you are; the h1 stays for a11y + tests). -->
-    <div class="mb-3 flex min-h-7 flex-wrap items-center gap-2.5">
-      <h1 class="text-2xs font-semibold uppercase tracking-wider text-muted">Sessions</h1>
+    <h1 class="sr-only">Sessions</h1>
 
-      <nav
-        aria-label="Session surface"
-        class="inline-flex overflow-hidden rounded border border-line text-xs"
-        data-testid="session-panes"
+    <div class="mb-3 flex flex-wrap items-center gap-2">
+      <label class="relative min-w-52 flex-1 sm:max-w-md">
+        <span class="sr-only">Search sessions</span>
+        <input
+          v-model="searchText"
+          type="search"
+          data-testid="fleet-search"
+          placeholder="Search sessions, prompts, repos, issues…"
+          class="w-full rounded border border-line bg-input px-3 py-1.5 text-sm outline-none focus:ring-1 focus:ring-accent"
+        />
+        <span v-if="searching" class="absolute right-2 top-2 text-2xs text-faint">searching…</span>
+      </label>
+      <label v-if="view !== 'history'" class="flex items-center gap-1.5 text-xs text-muted">
+        <input v-model="includeHistory" type="checkbox" data-testid="search-history" />
+        include History
+      </label>
+      <select
+        v-model="statusFilter"
+        aria-label="Filter by status"
+        data-testid="status-filter"
+        class="rounded border border-line bg-input px-2 py-1.5 text-xs"
+        @change="updateFilters"
       >
-        <router-link
-          :to="{ path: '/', query: paneQuery('workspace') }"
-          data-testid="workspace-pane-link"
-          :aria-current="workspaceOpen ? 'page' : undefined"
-          :class="[
-            'flex items-center gap-1.5 px-2.5 py-1 font-medium transition-colors',
-            workspaceOpen
-              ? 'bg-accent text-accent-fg'
-              : 'bg-input text-muted hover:bg-subtle hover:text-fg',
-          ]"
+        <option value="">Any status</option>
+        <option
+          v-for="status in ['running', 'created', 'orphaned', 'error', 'done', 'archived']"
+          :key="status"
         >
-          Workspace
-          <span
-            class="rounded-full px-1.5 text-2xs leading-4"
-            :class="workspaceOpen ? 'bg-accent-fg/20' : 'bg-subtle text-faint'"
-            :aria-label="`${workspaceSessions.length} active workspace sessions`"
-          >
-            {{ workspaceSessions.length }}
-          </span>
-        </router-link>
-        <router-link
-          :to="{ path: '/', query: { history: 'true' } }"
-          data-testid="history-pane-link"
-          :aria-current="workspaceHistoryOpen ? 'page' : undefined"
-          :class="[
-            'flex items-center gap-1.5 border-l border-line px-2.5 py-1 font-medium transition-colors',
-            workspaceHistoryOpen
-              ? 'bg-accent text-accent-fg'
-              : 'bg-input text-muted hover:bg-subtle hover:text-fg',
-          ]"
-        >
-          History
-          <span
-            class="rounded-full px-1.5 text-2xs leading-4"
-            :class="workspaceHistoryOpen ? 'bg-accent-fg/20' : 'bg-subtle text-faint'"
-            :aria-label="`${historySessions.length} archived sessions`"
-          >
-            {{ historySessions.length }}
-          </span>
-        </router-link>
-        <router-link
-          :to="{ path: '/', query: paneQuery('automation') }"
-          data-testid="automation-pane-link"
-          :aria-current="pane === 'automation' ? 'page' : undefined"
-          :class="[
-            'flex items-center gap-1.5 border-l border-line px-2.5 py-1 font-medium transition-colors',
-            pane === 'automation'
-              ? 'bg-accent text-accent-fg'
-              : 'bg-input text-muted hover:bg-subtle hover:text-fg',
-          ]"
-        >
-          Automation
-          <span
-            class="rounded-full px-1.5 text-2xs leading-4"
-            :class="pane === 'automation' ? 'bg-accent-fg/20' : 'bg-subtle text-faint'"
-            :aria-label="`${liveAutomationCount} live automation runs`"
-          >
-            {{ liveAutomationCount }}
-          </span>
-          <span
-            v-if="automationInterventionCount"
-            class="rounded bg-block-soft px-1.5 text-2xs text-block ring-1 ring-inset ring-block-line/30"
-            data-testid="automation-intervention-badge"
-            :aria-label="`${automationInterventionCount} automation runs need intervention`"
-          >
-            {{ automationInterventionCount }} need intervention
-          </span>
-        </router-link>
-      </nav>
-
-      <!-- Attention filter: jump straight to the sessions that need a human.
-           Each segment pairs a label with its count in a small pill so the
-           number reads as a count, not a suffix glued to the word. -->
-      <div
-        v-if="workspaceOpen && workspaceSessions.length"
-        class="inline-flex overflow-hidden rounded border border-line text-xs"
+          {{ status }}
+        </option>
+      </select>
+      <select
+        v-model="attentionFilter"
+        aria-label="Filter by attention"
+        data-testid="attention-filter"
+        class="rounded border border-line bg-input px-2 py-1.5 text-xs"
+        @change="updateFilters"
       >
-        <button
-          v-for="opt in ['all', 'attention', 'ok'] as const"
-          :key="opt"
-          type="button"
-          :data-testid="`filter-${opt}`"
-          :class="[
-            'flex items-center gap-1.5 border-l border-line px-2.5 py-1 font-medium transition-colors first:border-l-0',
-            filter === opt
-              ? 'bg-accent text-accent-fg'
-              : 'bg-input text-muted hover:bg-subtle hover:text-fg',
-          ]"
-          @click="setFilter(opt)"
-        >
-          {{ opt === 'all' ? 'All' : opt === 'attention' ? 'Needs attention' : 'OK' }}
-          <span
-            :class="[
-              'rounded-full px-1.5 text-2xs leading-4',
-              filter === opt ? 'bg-accent-fg/20 text-accent-fg' : 'bg-subtle text-faint',
-            ]"
-            >{{ counts[opt] }}</span
-          >
-        </button>
-      </div>
-
+        <option value="">Any attention</option>
+        <option value="needs">Needs attention</option>
+        <option value="blocked">Blocked</option>
+        <option value="attention">Attention</option>
+        <option value="ok">Calm</option>
+      </select>
       <button
-        v-if="workspaceOpen"
+        class="btn-secondary px-2.5 py-1 text-xs"
+        type="button"
+        @click="organizeOpen = !organizeOpen"
+      >
+        Organize
+      </button>
+      <button
+        v-if="view !== 'history'"
         class="btn-primary ml-auto px-2.5 py-1 text-xs font-medium"
+        type="button"
         @click="openForm"
       >
         New session
       </button>
     </div>
 
-    <div v-if="error" class="mb-4 text-sm text-block">
-      <template v-if="tokenConfigWarning">
-        {{ MISSING_GITHUB_TOKEN_ERROR }}
-        <RouterLink
-          class="text-accent underline"
-          :to="{ path: '/settings', query: { tab: 'account' } }"
-          >Add your GitHub token</RouterLink
-        >
-        or configure
-        <RouterLink
-          class="text-accent underline"
-          :to="{ path: '/settings', query: { tab: 'profiles' } }"
-          >the selected profile</RouterLink
-        >
-        with a write-only <code class="font-mono">GH_TOKEN</code> before creating an agent session.
-      </template>
-      <template v-else>{{ error }}</template>
-    </div>
-
-    <div
-      v-if="workspaceOpen && !workspaceSessions.length"
-      class="rounded-md border border-dashed border-line p-6 text-center"
-    >
-      <p class="text-sm text-muted">No active sessions.</p>
-      <p class="mt-1 text-xs text-faint">
-        Launch one with <strong>New session</strong>, or
-        <code>loom session launch "&lt;goal&gt;"</code>.
-      </p>
-    </div>
-
-    <div
-      v-if="workspaceHistoryOpen && !historySessions.length"
-      class="rounded-md border border-dashed border-line p-6 text-center"
-    >
-      <p class="text-sm text-muted">No archived sessions.</p>
-      <p class="mt-1 text-xs text-faint">Archived work remains available here for reference.</p>
-    </div>
-
-    <!--
-      One row per session. Left→right: an optional tree gutter threading child
-      sessions under their launcher, the dominant title with its loud signal
-      chips (attention/triage, each deletable) and quiet tag pills alongside, a
-      muted current-state line, a neutral lifecycle pill (shown only for
-      off-nominal states — running is the silent default), and the mono branch
-      ref pushed far-right. Rows are grouped into threads (built in script), with
-      attention-carrying threads floated up so the loud chips surface near the
-      top. The row itself stays neutral — no full-tile wash — so threading reads
-      cleanly; the chip carries the signal. Stagger via --i.
-    -->
-    <!-- No `overflow-hidden` on the list: a row's ⋯ menu drops out of its row and
-         would be clipped by it. The corners the clip used to round are rounded on
-         the first/last row instead. -->
-    <!-- Every session is resting — the live list is empty but the fleet isn't.
-         Point at the shelf below rather than reading as "no sessions". -->
-    <p
-      v-if="workspaceOpen && workspaceSessions.length && !liveRows.length"
-      class="rounded-md border border-dashed border-line px-4 py-3 text-center text-[13px] text-muted"
-    >
-      All sessions are resting on the shelf below.
-    </p>
-
-    <ul
-      v-if="pane === 'workspace' && liveRows.length"
-      data-testid="session-list"
-      class="fade-in rounded-md border border-line bg-surface"
-      @dragover.prevent
-      @drop.prevent="commitReorder"
-    >
-      <li
-        v-for="{ session: s, depth, verticals, isLast } in liveRows"
-        :key="s.id"
-        data-testid="session-card"
-        :data-session-id="s.id"
-        :data-depth="depth"
-        :class="[
-          'group relative flex cursor-pointer items-start gap-2.5 border-b border-line px-3 py-2 last:border-0',
-          'min-h-11 transition-colors hover:bg-subtle first:rounded-t-md last:rounded-b-md',
-          draggingId === s.id && 'opacity-40',
-          dropBeforeId === s.id && 'drop-before',
-          dropAtEnd && isLast && depth === 0 && 'drop-after',
-        ]"
-        @dragover="depth === 0 && onRowDragOver(s.id, $event)"
-        @drop.prevent="commitReorder"
+    <div class="mb-3 flex min-w-0 items-stretch gap-1">
+      <button
+        class="btn-secondary px-2 text-xs"
+        aria-label="Scroll spaces left"
+        @click="scrollSpaces(-1)"
       >
-        <!-- Drag grip (top-level threads only): the one draggable handle, so the
-             row's link still click/⌘-clicks. Drag within the list to reorder, or
-             onto the Parked shelf below to rest the thread. Hover/focus-revealed. -->
-        <button
-          v-if="workspaceOpen && depth === 0"
-          type="button"
-          draggable="true"
-          data-testid="session-drag"
-          class="relative z-10 -ml-1 mt-1 shrink-0 cursor-grab text-faint opacity-0 transition-opacity hover:text-fg focus-visible:opacity-100 group-hover:opacity-100 active:cursor-grabbing"
-          title="Drag to reorder, or onto Parked to rest"
-          aria-label="Reorder or park this session"
-          @dragstart="onDragStart(s.id, $event)"
-          @dragend="onDragEnd"
-          @click.prevent
+        ‹
+      </button>
+      <nav
+        data-testid="space-tabs-scroll"
+        aria-label="Session workbench views"
+        class="flex min-w-0 flex-1 gap-1 overflow-x-auto rounded border border-line bg-surface p-1"
+      >
+        <router-link
+          :to="{ path: '/', query: viewQuery('attention') }"
+          data-testid="attention-view"
+          :aria-current="view === 'attention' ? 'page' : undefined"
+          :class="view === 'attention' ? 'bg-attn-soft text-attn' : 'text-muted hover:bg-subtle'"
+          class="flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium"
         >
-          ⠿
+          Attention
+          <span class="font-mono text-2xs">{{
+            attentionSessions.length + interventionRuns.length
+          }}</span>
+        </router-link>
+        <router-link
+          v-for="space in layout?.spaces ?? []"
+          :key="space.id"
+          :to="{ path: '/', query: viewQuery('space', space.id) }"
+          :data-space-id="space.id"
+          :aria-current="view === 'space' && activeSpace?.id === space.id ? 'page' : undefined"
+          :class="
+            view === 'space' && activeSpace?.id === space.id
+              ? 'bg-accent text-accent-fg'
+              : 'text-muted hover:bg-subtle'
+          "
+          class="flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium"
+        >
+          {{ space.name }}
+          <span class="font-mono text-2xs">
+            {{ liveSessions.filter((session) => session.placement?.space_id === space.id).length }}
+          </span>
+        </router-link>
+        <router-link
+          :to="{ path: '/', query: viewQuery('all') }"
+          data-testid="all-view"
+          :aria-current="view === 'all' ? 'page' : undefined"
+          :class="view === 'all' ? 'bg-accent text-accent-fg' : 'text-muted hover:bg-subtle'"
+          class="flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium"
+        >
+          All <span class="font-mono text-2xs">{{ liveSessions.length }}</span>
+        </router-link>
+        <router-link
+          :to="{ path: '/', query: viewQuery('history') }"
+          data-testid="history-view"
+          :aria-current="view === 'history' ? 'page' : undefined"
+          :class="view === 'history' ? 'bg-accent text-accent-fg' : 'text-muted hover:bg-subtle'"
+          class="flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium"
+        >
+          History
+          <span class="font-mono text-2xs">{{
+            historySessions.length + historicalRuns.length
+          }}</span>
+        </router-link>
+      </nav>
+      <button
+        class="btn-secondary px-2 text-xs"
+        aria-label="Scroll spaces right"
+        @click="scrollSpaces(1)"
+      >
+        ›
+      </button>
+    </div>
+
+    <section
+      v-if="organizeOpen && layout"
+      data-testid="layout-organizer"
+      class="mb-4 rounded border border-line bg-surface p-3"
+    >
+      <div class="flex flex-wrap items-center gap-2">
+        <h2 class="text-xs font-semibold uppercase tracking-wide text-muted">Layout</h2>
+        <select
+          v-model="organizeSpaceId"
+          aria-label="Space to organize"
+          class="rounded bg-input px-2 py-1 text-xs"
+        >
+          <option v-for="space in layout.spaces" :key="space.id" :value="space.id">
+            {{ space.name }}
+          </option>
+        </select>
+        <input
+          v-model="newSpaceName"
+          placeholder="New space"
+          class="rounded bg-input px-2 py-1 text-xs"
+        />
+        <button class="btn-secondary px-2 py-1 text-xs" type="button" @click="addSpace">
+          Add space
         </button>
-        <span v-else class="-ml-1 w-3 shrink-0" aria-hidden="true"></span>
+      </div>
 
-        <!-- Tree gutter: threads a child session under the one that launched it.
-             Drawn only for nested rows, so a flat fleet is visually unchanged. -->
-        <div v-if="depth > 0" class="tree-gutter" aria-hidden="true">
-          <span
-            v-for="(v, c) in verticals"
-            :key="c"
-            class="tree-col"
-            :class="{ 'tree-col--through': v }"
-          ></span>
-          <span class="tree-col" :class="isLast ? 'tree-col--elbow' : 'tree-col--tee'"></span>
-        </div>
-
-        <!-- Status dot: a calm, scannable hue for the row's resolved state
-             (green live · cyan resting · amber/red raised · faint detached). -->
-        <span
-          class="mt-1.5 h-2 w-2 shrink-0 rounded-full"
-          :class="lifecycleDot(s)"
-          aria-hidden="true"
-        ></span>
-
-        <!-- Title + current-state (the work, in prose). -->
-        <div class="min-w-0 flex-1">
-          <div class="flex flex-wrap items-center gap-2">
-            <!-- Stretched link: the whole row is this anchor (see .stretched-link),
-                 so right-click → "open in new tab", middle-click, and ⌘/Ctrl-click
-                 all work. Interactive siblings below carry `relative z-10` to stay
-                 clickable above the overlay. -->
-            <router-link
-              :to="`/s/${s.id}`"
-              class="stretched-link truncate text-[15px] font-semibold text-fg hover:text-accent"
-              @click="recordSessionLinkOpen($event, s.id)"
-            >
-              {{ s.branch.title || s.branch.name }}
-            </router-link>
-            <!-- Origin: the automation surface that launched this session
-                 (github, slack, watch, actions, ops) — a quiet identity pill,
-                 shown only for a non-human origin so an ordinary session
-                 (`user`) stays unmarked. -->
-            <span
-              v-if="s.origin && s.origin !== 'user'"
-              class="tag-pill"
-              data-testid="origin-pill"
-              :title="`origin: ${s.origin}`"
-              >{{ s.origin }}</span
-            >
-            <!-- Loud signals: the agent's `attention` and a watch's
-                 `triage`, each a deletable chip. The × clears that tag (calm is
-                 its absence) — there is no separate "Mark OK" verb. -->
-            <SignalChip
-              v-for="chip in signalChips(s)"
-              :key="chip.key"
-              class="relative z-10"
-              :chip="chip"
-              :busy="clearingTag === `${s.id}:${chip.key}`"
-              @clear="(key) => clearTag(s.id, key)"
-            />
-            <!-- Lifecycle: demoted, neutral, mono pill (StatusBadge). Hidden for
-                 the running state — nearly every live row is running, so the pill
-                 would just be repeated noise; only off-nominal states show one. -->
-            <StatusBadge v-if="s.status !== 'running'" :status="s.status" class="shrink-0" />
-            <!-- The cure, next to the diagnosis: an ORPHANED row offers Adopt, an
-                 ARCHIVED one Recover, right where the badge announces the state.
-                 Renders nothing for a healthy session. -->
-            <SessionRemedyButton :ws="s" @changed="refresh" @error="error = $event" />
-            <!-- Soothing idle mark: a calm, neutral chip when the agent is
-                 resting (no loud signal). Reassures rather than alarms. -->
-            <IdleChip v-if="idleTag(s)" :tag="idleTag(s)!" />
-            <AgentUsage v-if="s.usage" :usage="s.usage" compact />
-            <!-- Quiet free-form tags: deletable pills, never the loud fill. -->
-            <TagPill
-              v-for="t in quietTags(s)"
-              :key="t.key"
-              class="relative z-10"
-              :tag="t"
-              :busy="clearingTag === `${s.id}:${t.key}`"
-              @clear="(key) => clearTag(s.id, key)"
-            />
-          </div>
-
-          <!-- Current state and launch goal stay secondary to the task title.
-               Operational list chrome uses the shared sans voice without
-               ornamental italics. -->
-          <p v-if="messageOf(s)" class="mt-0.5 truncate text-[13px] text-muted">
-            {{ messageOf(s) }}
-          </p>
-          <p
-            v-if="s.branch.goal"
-            class="mt-0.5 truncate text-[13px]"
-            :class="effectiveAttention(s).level === 'ok' ? 'text-faint' : 'text-muted'"
-          >
-            {{ s.branch.goal }}
-          </p>
-        </div>
-
-        <!-- Ref: machine identity, mono, pushed far-right and receding. -->
-        <div class="shrink-0 text-right">
-          <span class="block truncate font-mono text-2xs text-faint">{{ s.branch.branch }}</span>
-          <!-- Attribution: who/what launched this session — a subtle provenance
-               label on the shared board. Absent for older rows. -->
-          <span
-            v-if="s.created_by"
-            class="block truncate text-2xs text-faint"
-            :title="`Launched by ${s.created_by}`"
-          >
-            by <span class="font-mono">{{ s.created_by }}</span>
-          </span>
-          <!-- PR snapshot (if any) — a quiet link straight to the GitHub PR. -->
-          <GithubStatus
-            v-if="s.branch.github"
-            :gh="s.branch.github"
-            compact
-            class="relative z-10 mt-0.5 justify-end"
+      <div v-if="organizeSpace" class="mt-3 space-y-2">
+        <div class="flex flex-wrap items-center gap-1.5">
+          <input
+            :value="spaceNames[organizeSpace.id]"
+            aria-label="Space name"
+            class="rounded bg-input px-2 py-1 text-xs"
+            @input="editSpaceName(organizeSpaceId, ($event.target as HTMLInputElement).value)"
           />
-          <router-link
-            v-if="s.branch.open_issue_count"
-            :to="{
-              path: '/issues',
-              query: { repo_root: s.branch.repo_root, branch: s.branch.branch },
-            }"
-            class="relative z-10 block font-mono text-2xs text-muted hover:text-accent"
-            @click.stop
+          <button
+            class="btn-secondary px-2 py-1 text-xs"
+            type="button"
+            @click="renameSpace(organizeSpace)"
           >
-            {{ s.branch.open_issue_count }} open issue{{
-              s.branch.open_issue_count === 1 ? '' : 's'
-            }}
-          </router-link>
-          <span v-if="s.last_activity_at" class="mt-0.5 block font-mono text-2xs text-faint">
-            {{ timeAgo(s.last_activity_at) }}
-          </span>
+            Rename
+          </button>
+          <button
+            class="btn-secondary px-2 py-1 text-xs"
+            type="button"
+            aria-label="Move space left"
+            @click="reorderSpace(organizeSpace, -1)"
+          >
+            ←
+          </button>
+          <button
+            class="btn-secondary px-2 py-1 text-xs"
+            type="button"
+            aria-label="Move space right"
+            @click="reorderSpace(organizeSpace, 1)"
+          >
+            →
+          </button>
+          <select
+            v-model="deleteDestinations[organizeSpace.id]"
+            aria-label="Destination when deleting space"
+            class="ml-auto rounded bg-input px-2 py-1 text-xs"
+          >
+            <option value="">Destination if needed…</option>
+            <option
+              v-for="entry in allGroups.filter((entry) => entry.space.id !== organizeSpace?.id)"
+              :key="entry.group.id"
+              :value="entry.group.id"
+            >
+              {{ entry.label }}
+            </option>
+          </select>
+          <button
+            class="rounded px-2 py-1 text-xs text-block hover:bg-block-soft"
+            type="button"
+            :disabled="layout.spaces.length <= 1"
+            @click="pendingDelete = { kind: 'space', item: organizeSpace }"
+          >
+            Delete space
+          </button>
         </div>
+        <div class="flex items-center gap-1.5">
+          <input
+            v-model="newGroupName"
+            placeholder="New group"
+            class="rounded bg-input px-2 py-1 text-xs"
+          />
+          <button
+            class="btn-secondary px-2 py-1 text-xs"
+            type="button"
+            @click="addGroup(organizeSpace)"
+          >
+            Add empty group
+          </button>
+        </div>
+        <ul class="divide-y divide-line rounded border border-line">
+          <li
+            v-for="group in organizeSpace.groups"
+            :key="group.id"
+            class="flex flex-wrap items-center gap-1.5 p-2"
+          >
+            <input
+              :value="groupNames[group.id]"
+              :aria-label="`Name for ${group.name}`"
+              class="rounded bg-input px-2 py-1 text-xs"
+              @input="editGroupName(group.id, ($event.target as HTMLInputElement).value)"
+            />
+            <span class="font-mono text-2xs text-faint"
+              >{{ group.session_ids.length }} sessions</span
+            >
+            <button
+              class="btn-secondary px-2 py-1 text-xs"
+              type="button"
+              @click="renameGroup(group)"
+            >
+              Rename
+            </button>
+            <button
+              class="btn-secondary px-2 py-1 text-xs"
+              type="button"
+              :aria-label="`Move ${group.name} up`"
+              @click="reorderGroup(group, -1)"
+            >
+              ↑
+            </button>
+            <button
+              class="btn-secondary px-2 py-1 text-xs"
+              type="button"
+              :aria-label="`Move ${group.name} down`"
+              @click="reorderGroup(group, 1)"
+            >
+              ↓
+            </button>
+            <select
+              :value="groupDestinationSpaces[group.id]"
+              :aria-label="`Destination space for ${group.name}`"
+              class="rounded bg-input px-2 py-1 text-xs"
+              @change="editGroupDestination(group.id, ($event.target as HTMLSelectElement).value)"
+            >
+              <option v-for="space in layout.spaces" :key="space.id" :value="space.id">
+                {{ space.name }}
+              </option>
+            </select>
+            <button
+              class="btn-secondary px-2 py-1 text-xs"
+              type="button"
+              :disabled="groupDestinationSpaces[group.id] === group.space_id"
+              @click="moveGroupToSpace(group)"
+            >
+              Move group
+            </button>
+            <select
+              v-model="deleteDestinations[group.id]"
+              :aria-label="`Destination when deleting ${group.name}`"
+              class="ml-auto rounded bg-input px-2 py-1 text-xs"
+            >
+              <option value="">Destination if needed…</option>
+              <option
+                v-for="entry in allGroups.filter((entry) => entry.group.id !== group.id)"
+                :key="entry.group.id"
+                :value="entry.group.id"
+              >
+                {{ entry.label }}
+              </option>
+            </select>
+            <button
+              class="rounded px-2 py-1 text-xs text-block hover:bg-block-soft"
+              type="button"
+              :disabled="groupIsLast(group)"
+              @click="pendingDelete = { kind: 'group', item: group }"
+            >
+              Delete
+            </button>
+          </li>
+        </ul>
+      </div>
+    </section>
 
-        <!-- The row's ⋯ menu: park, then every lifecycle verb (Adopt/Recover,
-             Archive, Remove). The fleet list is where a human surveys and tidies
-             a fleet, so it acts here rather than only from inside a session. -->
-        <SessionRowActions
-          :ws="s"
-          class="mt-0.5"
+    <div
+      v-if="error || layoutError || searchError"
+      role="alert"
+      class="mb-3 rounded border border-block-line/40 bg-block-soft px-3 py-2 text-sm text-block"
+    >
+      {{ error || layoutError || searchError }}
+    </div>
+    <div
+      v-if="Object.keys(resourceErrors).length"
+      role="alert"
+      class="mb-3 rounded border border-attn-line/40 bg-attn-soft px-3 py-2 text-sm text-attn"
+    >
+      <span v-for="(message, resource) in resourceErrors" :key="resource" class="mr-3">
+        {{ resource }}: {{ message }}
+      </span>
+    </div>
+    <div
+      v-if="archiveResult"
+      data-testid="archive-result"
+      role="status"
+      class="mb-3 rounded border border-line bg-surface px-3 py-2 text-sm text-muted"
+    >
+      {{ archiveResult }}
+    </div>
+
+    <div
+      v-if="selected.size"
+      data-testid="selection-toolbar"
+      class="sticky top-2 z-20 mb-3 flex flex-wrap items-center gap-2 rounded border border-accent bg-surface px-3 py-2 shadow"
+    >
+      <strong class="text-xs">
+        {{ selected.size }} selected
+        <span v-if="hiddenSelectedCount" class="font-normal text-muted">
+          · {{ hiddenSelectedCount }} hidden by this view
+        </span>
+      </strong>
+      <select
+        v-model="bulkDestination"
+        aria-label="Move selected to group"
+        class="rounded bg-input px-2 py-1 text-xs"
+      >
+        <option v-for="entry in allGroups" :key="entry.group.id" :value="entry.group.id">
+          {{ entry.label }}
+        </option>
+      </select>
+      <button
+        class="btn-primary px-2 py-1 text-xs"
+        type="button"
+        :disabled="layoutBusy"
+        @click="performMove(selectedInLayoutOrder(), bulkDestination)"
+      >
+        Move
+      </button>
+      <button
+        class="btn-secondary px-2 py-1 text-xs"
+        type="button"
+        @click="pendingBulkArchive = true"
+      >
+        Archive
+      </button>
+      <button class="btn-secondary px-2 py-1 text-xs" type="button" @click="clearSelection">
+        Clear
+      </button>
+    </div>
+
+    <section v-if="showInterventions" class="mb-4" aria-labelledby="interventions-heading">
+      <div class="mb-1.5 flex items-center gap-2">
+        <h2
+          id="interventions-heading"
+          class="text-2xs font-semibold uppercase tracking-wider text-muted"
+        >
+          Interventions
+        </h2>
+        <span class="rounded-full bg-block-soft px-1.5 font-mono text-2xs text-block">{{
+          operationalRuns.length
+        }}</span>
+      </div>
+      <ul
+        v-if="operationalRuns.length"
+        data-testid="interventions"
+        class="rounded border border-line bg-surface"
+      >
+        <AutomationRunRow
+          v-for="run in operationalRuns"
+          :key="run.id"
+          :run="run"
+          :projection="unmatchedRunProjection(run)"
           @changed="refresh"
           @error="error = $event"
-          @park="setPark(s.id, $event)"
         />
-      </li>
-    </ul>
+      </ul>
+      <p v-else class="rounded border border-dashed border-line px-3 py-3 text-sm text-muted">
+        No automation runs need intervention.
+      </p>
+    </section>
 
-    <!-- The Parked shelf — resting threads (long idle or parked by hand)
-         collapsed out of the live list so a stale fleet doesn't drag the
-         eye. Also a drop target: drag a live row here to rest it; the "Keep live"
-         verb (and dragging a row back out) returns it. Shown while empty only
-         mid-drag, so there's always somewhere to drop. -->
     <section
-      v-if="workspaceOpen && (shelfCount || draggingId)"
-      data-testid="parked-shelf"
-      class="mt-3 rounded-md transition-shadow"
-      :class="overShelf && draggingId ? 'shadow-[inset_0_0_0_1px_var(--accent)]' : ''"
-      @dragover.prevent="draggingId && (overShelf = true)"
-      @dragleave="overShelf = false"
-      @drop.prevent="commitPark"
+      v-for="display in displayedGroups"
+      :key="display.key"
+      :data-group-id="display.group?.id"
+      :data-testid="display.group ? 'session-group' : undefined"
+      class="mb-3 rounded border border-line bg-surface"
+      :class="
+        display.group && dropGroupId === display.group.id && !dropBeforeId
+          ? 'ring-1 ring-accent'
+          : ''
+      "
+      @dragover.prevent="display.group && dragOver(display.group.id)"
+      @drop.prevent="display.group && drop(display.group.id)"
     >
-      <button
-        type="button"
-        data-testid="parked-toggle"
-        class="flex w-full items-center gap-2 px-1 py-1.5 text-2xs font-medium uppercase tracking-wider text-faint transition-colors hover:text-muted"
-        @click="parkedOpen = !parkedOpen"
+      <header
+        v-if="display.group"
+        class="flex min-h-9 items-center gap-2 border-b border-line px-3 py-1.5"
       >
-        <span
-          class="inline-block w-2 transition-transform"
-          :class="parkedOpen || draggingId ? 'rotate-90' : ''"
-          >▸</span
+        <button
+          type="button"
+          :aria-expanded="!display.group.collapsed"
+          :aria-controls="`group-${display.group.id}`"
+          :aria-label="`${display.group.collapsed ? 'Expand' : 'Collapse'} ${display.group.name}`"
+          class="flex min-w-0 flex-1 items-center gap-2 text-left"
+          @click="toggleGroup(display.group)"
         >
-        Parked
-        <span class="text-[11px] font-normal normal-case tracking-normal text-faint"
-          >resting — nothing for you</span
-        >
-        <span class="h-px flex-1 bg-line"></span>
-        <span class="font-mono lowercase tracking-normal">{{ shelfCount }}</span>
-      </button>
-
+          <span class="text-faint" :class="display.group.collapsed ? '' : 'rotate-90'">▸</span>
+          <span class="truncate text-sm font-semibold">{{ display.group.name }}</span>
+          <span class="font-mono text-2xs text-faint">{{ display.sessions.length }}</span>
+        </button>
+      </header>
       <ul
-        v-if="parkedOpen || draggingId"
-        class="fade-in overflow-hidden rounded-md border border-line bg-surface"
+        v-show="!display.group?.collapsed"
+        :id="display.group ? `group-${display.group.id}` : undefined"
+        data-testid="session-list"
       >
+        <SessionWorkbenchRow
+          v-for="session in display.sessions"
+          :key="session.id"
+          :session="session"
+          :qualified="display.qualified"
+          :selected="isSelected(session.id)"
+          :expanded="rowExpanded(session.id)"
+          :move-open="moveOpenId === session.id"
+          :destination="rowDestination[session.id]"
+          :before="rowBefore[session.id]"
+          :all-groups="allGroups"
+          :all-sessions="sessions"
+          :parent-session="parentSessionOf(session)"
+          :dragging="draggingId === session.id"
+          :drop-before="
+            dropGroupId === (display.group?.id ?? session.placement?.group_id) &&
+            dropBeforeId === session.id
+          "
+          :clearing-tag="clearingTag"
+          @toggle-select="setSelected(session.id, $event)"
+          @toggle-details="toggleRow(session.id)"
+          @open-move="openMove(session)"
+          @update-destination="rowDestination[session.id] = $event"
+          @update-before="rowBefore[session.id] = $event"
+          @move="performMove([session.id], $event.groupId, $event.beforeId || null)"
+          @drag-start="dragStart(session.id, $event)"
+          @drag-end="clearDrag"
+          @drag-over="dragOver(display.group?.id ?? session.placement?.group_id ?? '', session.id)"
+          @drop="drop(display.group?.id ?? session.placement?.group_id ?? '', session.id)"
+          @changed="refresh"
+          @error="error = $event"
+          @clear-tag="clearTag(session.id, $event)"
+          @record-open="recordSessionLinkOpen($event, session.id)"
+        />
         <li
-          v-for="{ session: s, depth } in shelfRows"
-          :key="s.id"
-          data-testid="parked-card"
-          :data-session-id="s.id"
-          class="group relative flex items-start gap-2.5 border-b border-line px-3 py-2 opacity-65 transition-opacity last:border-0 hover:bg-subtle hover:opacity-100"
+          v-if="display.group && !display.sessions.length"
+          data-testid="empty-group"
+          class="px-3 py-5 text-center text-sm text-faint"
         >
-          <button
-            v-if="depth === 0"
-            type="button"
-            draggable="true"
-            data-testid="parked-drag"
-            class="relative z-10 -ml-1 mt-1 shrink-0 cursor-grab text-faint opacity-0 transition-opacity hover:text-fg focus-visible:opacity-100 group-hover:opacity-100 active:cursor-grabbing"
-            title="Drag back into the live list to keep it going"
-            aria-label="Return this session to the live list"
-            @dragstart="onDragStart(s.id, $event)"
-            @dragend="onDragEnd"
-            @click.prevent
-          >
-            ⠿
-          </button>
-          <span v-else class="-ml-1 w-3 shrink-0" aria-hidden="true"></span>
-
-          <span
-            class="mt-1.5 h-2 w-2 shrink-0 rounded-full"
-            :class="lifecycleDot(s)"
-            aria-hidden="true"
-          ></span>
-
-          <div class="min-w-0 flex-1">
-            <div class="flex flex-wrap items-center gap-2">
-              <router-link
-                :to="`/s/${s.id}`"
-                class="stretched-link truncate text-[15px] font-medium text-fg hover:text-accent"
-                @click="recordSessionLinkOpen($event, s.id)"
-              >
-                {{ s.branch.title || s.branch.name }}
-              </router-link>
-              <span
-                v-if="s.origin && s.origin !== 'user'"
-                class="tag-pill"
-                data-testid="origin-pill"
-                :title="`origin: ${s.origin}`"
-                >{{ s.origin }}</span
-              >
-              <span class="meta-chip !text-[10px] uppercase tracking-wide text-info">{{
-                parkLabel(s)
-              }}</span>
-            </div>
-            <p v-if="s.branch.goal" class="mt-0.5 truncate text-[13px] text-faint">
-              {{ s.branch.goal }}
-            </p>
-          </div>
-
-          <div class="shrink-0 text-right">
-            <span class="block truncate font-mono text-2xs text-faint">{{ s.branch.branch }}</span>
-            <span v-if="s.last_activity_at" class="mt-0.5 block font-mono text-2xs text-faint">
-              {{ timeAgo(s.last_activity_at) }}
-            </span>
-          </div>
-
-          <button
-            v-if="depth === 0"
-            type="button"
-            data-testid="parked-keep-live"
-            class="relative z-10 mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-2xs text-muted opacity-0 transition-opacity hover:bg-subtle hover:text-fg focus-visible:opacity-100 group-hover:opacity-100"
-            title="Return this session to the live list"
-            @click.stop="setPark(s.id, 'active')"
-          >
-            Keep live
-          </button>
-        </li>
-
-        <li v-if="!shelfRows.length" class="px-3 py-4 text-center text-[13px] text-faint">
-          Drop a session here to rest it.
+          {{
+            display.group.session_ids.length
+              ? 'No sessions match the current view or filters.'
+              : 'Empty group — drop sessions here or use Move.'
+          }}
         </li>
       </ul>
     </section>
 
-    <AutomationSessions
-      v-if="pane === 'automation'"
-      :sessions="automationSessions"
-      :fleet="sessions"
-      :runs="runs"
-      :history-open="automationHistoryOpen"
-      :clearing-tag="clearingTag"
-      @toggle-history="toggleAutomationHistory"
-      @clear-tag="clearTag"
-      @changed="refresh"
-      @error="error = $event"
+    <section v-if="view === 'history' && historicalRuns.length" class="mt-4">
+      <h2 class="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">
+        Automation run history
+      </h2>
+      <ul data-testid="automation-run-history" class="rounded border border-line bg-surface">
+        <AutomationRunRow
+          v-for="run in historicalRuns"
+          :key="run.id"
+          :run="run"
+          projection="history"
+          @changed="refresh"
+          @error="error = $event"
+        />
+      </ul>
+    </section>
+
+    <div
+      v-if="
+        (view !== 'space' || searchResults !== null) &&
+        !smartSessions.length &&
+        !(view === 'history' && historicalRuns.length) &&
+        !(showInterventions && operationalRuns.length)
+      "
+      class="rounded border border-dashed border-line p-6 text-center"
+    >
+      <p class="text-sm text-muted">
+        {{
+          view === 'history'
+            ? historySessions.length
+              ? 'No archived sessions match this search or the current filters.'
+              : 'No archived sessions yet.'
+            : searchText
+              ? 'No sessions match this search.'
+              : 'No actionable sessions here.'
+        }}
+      </p>
+    </div>
+
+    <div
+      v-if="undoMove"
+      data-testid="move-undo"
+      role="status"
+      class="fixed bottom-10 right-4 z-40 flex items-center gap-3 rounded border border-line bg-surface px-3 py-2 text-sm shadow-lg"
+    >
+      <span>{{ undoMove.message }}</span>
+      <button
+        ref="undoButton"
+        type="button"
+        class="font-semibold text-accent hover:underline"
+        :disabled="layoutBusy"
+        @click="restoreMove"
+      >
+        Undo
+      </button>
+      <button
+        type="button"
+        class="text-faint hover:text-fg"
+        aria-label="Dismiss move notice"
+        @click="undoMove = null"
+      >
+        ×
+      </button>
+    </div>
+    <p class="sr-only" aria-live="polite">{{ announcement }}</p>
+    <ConfirmDialog
+      :open="pendingDelete !== null"
+      :title="`Delete ${pendingDelete?.kind ?? 'layout item'} “${pendingDelete?.item.name ?? ''}”?`"
+      :description="deleteDescription"
+      confirm-label="Delete"
+      :busy="layoutBusy"
+      :confirm-disabled="deleteConfirmationDisabled"
+      danger
+      @confirm="confirmLayoutDelete"
+      @cancel="pendingDelete = null"
+    />
+    <ConfirmDialog
+      :open="pendingBulkArchive"
+      title="Archive selected sessions?"
+      :description="`${selected.size} selected session${selected.size === 1 ? '' : 's'} will be torn down and kept in History. Failures remain selected so they can be retried.`"
+      confirm-label="Archive selected"
+      @confirm="confirmBulkArchive"
+      @cancel="pendingBulkArchive = false"
     />
   </div>
 </template>
-
-<style scoped>
-/* Drag-reorder insertion indicator: a crisp accent rule on the edge the dragged
-   thread would land against — top when dropping above a row, bottom past the
-   last one. Inset so it sits inside the row's border without shifting layout. */
-.drop-before {
-  box-shadow: inset 0 2px 0 var(--accent);
-}
-.drop-after {
-  box-shadow: inset 0 -2px 0 var(--accent);
-}
-</style>

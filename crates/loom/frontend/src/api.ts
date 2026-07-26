@@ -71,6 +71,8 @@ export const put = (path: string, body?: unknown) =>
 export const patch = (path: string, body: unknown) =>
   request(path, { method: 'PATCH', body: JSON.stringify(body) });
 export const del = (path: string) => request(path, { method: 'DELETE' });
+export const destroy = (path: string, body: unknown) =>
+  request(path, { method: 'DELETE', body: JSON.stringify(body) });
 
 /** Upload one prompt/reference attachment into the session-owned scratch dir. */
 export const uploadSessionScratch = (id: string, file: File) =>
@@ -83,24 +85,106 @@ export const getScratchLimits = () => get('/scratch/limits') as Promise<ScratchL
 
 // --- Sessions ----------------------------------------------------------------
 
-/** The fleet: every session, optionally widened past the default-hidden
- *  categories. `archived` includes torn-down sessions; `automation` includes
- *  background work; admin-only `managed` includes watch-owned warm sessions.
- *  All are off by default (`GET /api/sessions`). */
+/** Session inventory. The compatibility default excludes automation; fleet
+ * workbenches opt in. `managed` is the admin-only warm-session escape hatch. */
 export const listSessions = (
   opts: { archived?: boolean; automation?: boolean; managed?: boolean } = {},
 ) => {
   const params = new URLSearchParams();
   if (opts.archived) params.set('archived', 'true');
-  if (opts.automation || opts.managed) params.set('automation', 'true');
+  if (opts.automation !== undefined) params.set('automation', String(opts.automation));
+  if (opts.managed) params.set('automation', 'true');
   if (opts.managed) params.set('managed', 'true');
   const qs = params.toString();
   return get(`/sessions${qs ? `?${qs}` : ''}`) as Promise<Session[]>;
 };
 
+/** Server-visible fleet search. `history` widens an active search;
+ * `archivedOnly` keeps the History route a disjoint archived projection. */
+export const searchSessions = (
+  query: string,
+  opts: SessionSearchOptions = {},
+  signal?: AbortSignal,
+) => {
+  const params = new URLSearchParams({ q: query });
+  if (opts.history) params.set('history', 'true');
+  if (opts.archivedOnly) params.set('archived_only', 'true');
+  if (opts.status) params.set('status', opts.status);
+  if (opts.attention) params.set('attention', opts.attention);
+  return request(`/sessions/search?${params}`, { signal }) as Promise<Session[]>;
+};
+
 /** Durable automation launch reservations, including failures that never
  *  produced a usable session (`GET /api/runs`). */
 export const listRuns = () => get('/runs') as Promise<AutomationRun[]>;
+export const archiveSession = (id: string) => post(`/sessions/${encodeURIComponent(id)}/archive`);
+export const removeSession = (id: string) => del(`/sessions/${encodeURIComponent(id)}`);
+export const clearSessionTag = (id: string, key: string) =>
+  del(`/sessions/${encodeURIComponent(id)}/tags/${encodeURIComponent(key)}`);
+
+// --- Session layout ---------------------------------------------------------
+
+export const getSessionLayout = () => get('/session-layout') as Promise<SessionLayout>;
+export const createSessionSpace = (name: string, expectedRevision: number) =>
+  post('/session-layout/spaces', {
+    name,
+    expected_revision: expectedRevision,
+  }) as Promise<SessionLayout>;
+export const updateSessionSpace = (id: string, name: string, expectedRevision: number) =>
+  patch(`/session-layout/spaces/${encodeURIComponent(id)}`, {
+    name,
+    expected_revision: expectedRevision,
+  }) as Promise<SessionLayout>;
+export const deleteSessionSpace = (
+  id: string,
+  destinationGroupId: string | null,
+  expectedRevision: number,
+) =>
+  destroy(`/session-layout/spaces/${encodeURIComponent(id)}`, {
+    destination_group_id: destinationGroupId,
+    expected_revision: expectedRevision,
+  }) as Promise<SessionLayout>;
+export const createSessionGroup = (spaceId: string, name: string, expectedRevision: number) =>
+  post('/session-layout/groups', {
+    space_id: spaceId,
+    name,
+    expected_revision: expectedRevision,
+  }) as Promise<SessionLayout>;
+export const updateSessionGroup = (id: string, name: string, expectedRevision: number) =>
+  patch(`/session-layout/groups/${encodeURIComponent(id)}`, {
+    name,
+    expected_revision: expectedRevision,
+  }) as Promise<SessionLayout>;
+export const deleteSessionGroup = (
+  id: string,
+  destinationGroupId: string | null,
+  expectedRevision: number,
+) =>
+  destroy(`/session-layout/groups/${encodeURIComponent(id)}`, {
+    destination_group_id: destinationGroupId,
+    expected_revision: expectedRevision,
+  }) as Promise<SessionLayout>;
+export const reorderSessionLayout = (body: {
+  kind: SessionLayoutItemKind;
+  id: string;
+  before_id?: string | null;
+  destination_space_id?: string | null;
+  expected_revision: number;
+}) => post('/session-layout/reorder', body) as Promise<SessionLayout>;
+export const moveSessions = (body: {
+  session_ids: string[];
+  destination_group_id: string;
+  before_session_id?: string | null;
+  expected_revision: number;
+}) => post('/session-layout/moves', body) as Promise<SessionLayout>;
+export const restoreSessionGroups = (body: {
+  groups: SessionGroupOrder[];
+  expected_revision: number;
+}) => post('/session-layout/restores', body) as Promise<SessionLayout>;
+export const setSessionGroupPreference = (groupId: string, collapsed: boolean) =>
+  put(`/session-layout/groups/${encodeURIComponent(groupId)}/preference`, {
+    collapsed,
+  }) as Promise<SessionLayout>;
 
 // --- Issues ----------------------------------------------------------------
 
@@ -111,6 +195,10 @@ import type {
   IssueTagInput,
   Session,
   AutomationRun,
+  SessionGroupOrder,
+  SessionLayoutItemKind,
+  SessionLayout,
+  SessionSearchOptions,
   ArtifactMeta,
   ArtifactView,
   ArtifactWriteBody,
@@ -218,8 +306,8 @@ export const deleteCustomAgent = (name: string) =>
 
 /** Every issue across every repo — the Issues pane's cross-repo board. Pass
  *  `all` to include closed issues, `automation` to include issues claimed by an
- *  automation-class session (hidden by default, symmetric with `archived` on
- *  `listSessions`). */
+ *  automation-class session (the issue board retains this policy filter even
+ *  though the session fleet is unified). */
 export const listIssues = (opts: { all?: boolean; automation?: boolean } = {}) => {
   const params = new URLSearchParams();
   if (opts.all) params.set('all', 'true');
@@ -417,16 +505,6 @@ export const setSessionConfigOption = (id: string, configId: string, value: stri
     value: string | boolean;
     metadata: AcpMetadata;
   }>;
-
-/** Set a session's park override — the fleet list's resting shelf. `'parked'`
- *  pins it to the shelf, `'active'` keeps it live even when idle, `'auto'` clears
- *  the override back to idle-driven. */
-export const setSessionPark = (id: string, park: 'parked' | 'active' | 'auto') =>
-  patch(`/sessions/${id}`, { park }) as Promise<Session>;
-
-/** Set a session's manual sort key (the drag-reorder midpoint). */
-export const setSessionOrder = (id: string, sort_order: number) =>
-  patch(`/sessions/${id}`, { sort_order }) as Promise<Session>;
 
 // --- Agent environment variables -------------------------------------------
 

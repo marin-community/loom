@@ -74,6 +74,8 @@ export interface Session {
   updated_at: string;
   /** Branch id of the session that launched this one, or null at the top level. */
   parent_id: string | null;
+  /** Exact immutable session id of the launcher, when recorded. */
+  parent_session_id: string | null;
   tracking_issue: number | null;
   branch: Branch;
 }
@@ -375,7 +377,7 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       // worker's terminals never collide with another worker's or the user's real
       // sessions. WEAVER_TAPESTRY_BIN points loom at the sibling supervisor binary
       // built alongside it.
-      const childEnv = {
+      const childEnv: NodeJS.ProcessEnv = {
         ...process.env,
         WEAVER_HOME: weaverHome,
         WEAVER_DB: dbPath,

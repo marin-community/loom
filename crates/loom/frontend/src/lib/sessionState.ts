@@ -9,21 +9,6 @@ export type Attention = 'ok' | 'attention' | 'blocked';
 // pill. Mirrors weaver-core's `ATTENTION_VALUES`.
 const SEVERITY: Record<string, number> = { attention: 1, blocked: 2 };
 
-// The quiet mirror of SEVERITY: values that PARK a row *below* the calm default
-// in the fleet sort. A parked session is waiting on an external actor (a human
-// PR reviewer, …) and needs nothing from the user, so the dashboard sinks it
-// under the live-but-calm rows a scanning user should look at first. Like
-// loudness, parking is value-driven — any key holding such a value parks, so a
-// watch picks its own axis key (e.g. `awaiting`) and the value carries the
-// meaning. Quiet by design (never a badge); the two ladders are disjoint.
-// Mirrors weaver-core's `PARKED_VALUES`.
-const PARKED: Record<string, number> = { review: -1 };
-
-// Sort rank below the calm default for a parked value, or 0 if it doesn't park.
-function parkOf(value: string | undefined): number {
-  return (value && PARKED[value]) || 0;
-}
-
 // The soothing, quiet `idle` mark loom stamps when an agent goes quiet (a
 // finished turn or a `waiting` lull): the calm "resting, no one needed" state.
 // It carries the quiet value `idle`, so it is never loud — an idle agent no
@@ -141,117 +126,30 @@ export function effectiveAttention(s: Session): EffectiveAttention {
     note: '',
     stale: false,
   };
+  if (s.status === 'archived') return calm;
   const tags = loudTags(s);
-  if (tags.length === 0) return calm;
-
+  if (tags.length) {
+    const live = tags.filter((t) => !tagStale(t, s.last_activity_at));
+    const pool = live.length ? live : tags;
+    const stale = live.length === 0;
+    const top = [...pool].sort(louder)[0];
+    if (top.value === 'blocked') return { ...markOf(s, top), stale };
+  }
+  if (s.status === 'error' || s.status === 'orphaned') {
+    return {
+      level: 'attention',
+      raisedBy: 'watch',
+      by: 'loom',
+      key: 'lifecycle',
+      note: s.status === 'error' ? 'Session failed' : 'Session is detached',
+      stale: false,
+    };
+  }
+  if (!tags.length) return calm;
   const live = tags.filter((t) => !tagStale(t, s.last_activity_at));
   const pool = live.length ? live : tags;
   const stale = live.length === 0;
-  const top = [...pool].sort(louder)[0];
-
-  return { ...markOf(s, top), stale };
-}
-
-// Whether a session sits on the PARKED sort ladder: calm (no loud signal) yet
-// carrying a tag whose value parks — work waiting on an external actor (a human
-// PR reviewer, …) that needs nothing from the user. This only *sinks* the row
-// below the calm default in the fleet sort (`priorityRank`); it does not shelve
-// it (see `parkReason`). A loud signal always wins: a session that needs a human
-// never sinks, however else it's tagged. Archived sessions never sink (they read
-// through their own terminal badge).
-export function isParked(s: Session): boolean {
-  if (s.status === 'archived') return false;
-  if (loudTags(s).length > 0) return false;
-  return (s.branch.tags ?? []).some((t) => parkOf(t.value) < 0);
-}
-
-// The fleet-sort rank of a single session: the loud ladder raises a row (blocked
-// 2 > attention 1) via the resolved attention signal; a parked row sinks below
-// the calm default (-1); everything else is the calm default (0). SessionList
-// floats a thread to the max rank across its subtree, so a parked parent with
-// live children stays put — only a wholly-parked thread sinks to the bottom.
-export function priorityRank(s: Session): number {
-  const lvl = effectiveAttention(s).level;
-  if (lvl === 'blocked') return 2;
-  if (lvl === 'attention') return 1;
-  return isParked(s) ? -1 : 0;
-}
-
-// ---------------------------------------------------------------------------
-// The resting shelf ("Parked") + manual order
-// ---------------------------------------------------------------------------
-
-// How long an agent may rest before the fleet list quietly shelves its row —
-// long enough that a finished turn (idle in minutes) never parks a conversation,
-// only a genuinely abandoned one does. The list is a projection of REST state
-// (docs/loom-ui.md): this threshold is a pure view concern, applied client-side
-// over the row's `last_activity_at`, never a stored flag — only the *manual*
-// park override (`park`) is persisted.
-export const IDLE_PARK_HOURS = 8;
-const HOUR_MS = 3_600_000;
-const DAY_MS = 86_400_000;
-
-// Milliseconds since the agent last did anything (its `last_activity_at`, or the
-// creation time as a floor). Recomputed each poll tick, so idle rows drift onto
-// the shelf on their own within a poll interval.
-export function idleMs(s: Session): number {
-  const last = Date.parse(s.last_activity_at || s.created_at);
-  if (Number.isNaN(last)) return 0;
-  return Math.max(0, Date.now() - last);
-}
-
-export type ParkReason = 'manual' | 'idle';
-
-// Why a session rests on the shelf, or `null` if it belongs in the live list.
-// The shelf hides only what genuinely needs nothing from you *and* one of:
-//   • you parked it by hand                        → 'manual'  (park === 'parked')
-//   • the agent has rested past the idle threshold → 'idle'    (IDLE_PARK_HOURS)
-// A review-wait mark deliberately does NOT shelve: an open PR awaiting an
-// external reviewer is still yours to glance at, so it stays in the live list —
-// sunk below the calm rows by `priorityRank` and labelled with its quiet
-// `awaiting: review` pill — rather than hidden away the instant a turn ends.
-// A loud signal always keeps a row live (you need to see it), and an explicit
-// 'active' override pins a row live even when idle.
-export function parkReason(s: Session): ParkReason | null {
-  if (s.status === 'archived') return null;
-  if (effectiveAttention(s).level !== 'ok') return null; // needs a human → live
-  if (s.park === 'active') return null; // kept live by hand
-  if (s.park === 'parked') return 'manual';
-  if (idleMs(s) >= IDLE_PARK_HOURS * HOUR_MS) return 'idle';
-  return null;
-}
-
-export function shelved(s: Session): boolean {
-  return parkReason(s) !== null;
-}
-
-// A short mono label for the shelf badge — what kind of rest this is.
-export function parkLabel(s: Session): string {
-  const reason = parkReason(s);
-  if (reason === 'idle') {
-    const ms = idleMs(s);
-    // Shelved rows have rested at least IDLE_PARK_HOURS, so hours reads first;
-    // multi-day rests round up to days ("idle 6d").
-    if (ms >= DAY_MS) return `idle ${Math.floor(ms / DAY_MS)}d`;
-    return `idle ${Math.floor(ms / HOUR_MS)}h`;
-  }
-  return 'parked';
-}
-
-// The numeric key a top-level thread sorts by. A manual `sort_order` (assigned as
-// the midpoint of its neighbours on drag) places the row exactly; absent, it
-// falls back to the automatic order — urgency first (blocked, then attention),
-// then newest. Both live on one ascending axis (smaller = higher), so a dragged
-// row lands where dropped while every untouched row keeps its automatic spot.
-// `subtreeRank` is the thread's loudest member (SessionList floats a thread to
-// its max), so a thread with a blocked child rises as a whole.
-export function autoOrderKey(s: Session, subtreeRank: number): number {
-  const created = Date.parse(s.created_at) || 0;
-  return -subtreeRank * 1e15 - created;
-}
-
-export function orderKey(s: Session, subtreeRank: number): number {
-  return s.sort_order ?? autoOrderKey(s, subtreeRank);
+  return { ...markOf(s, [...pool].sort(louder)[0]), stale };
 }
 
 // One loud tag surfaced as an individually-dismissable chip. Unlike
@@ -345,8 +243,8 @@ export interface ConvState {
 export function conversationState(s: Session): ConvState {
   // Lifecycle first for the unambiguous mechanical states.
   if (s.status === 'archived') return { glyph: '◦', label: 'Archived', tone: 'muted' };
-  if (s.status === 'orphaned') return { glyph: '◦', label: 'Orphaned — detached', tone: 'muted' };
-  if (s.status === 'error') return { glyph: '◦', label: 'Error', tone: 'muted' };
+  if (s.status === 'orphaned') return { glyph: '●', label: 'Orphaned — detached', tone: 'attn' };
+  if (s.status === 'error') return { glyph: '●', label: 'Error', tone: 'attn' };
 
   // Then the resolved attention signal (the loudest live loud tag — the agent's
   // own, or an outside mark).

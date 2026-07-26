@@ -90,6 +90,9 @@ export interface Session {
    *  threads by it; a child whose parent is absent (archived, or never tracked)
    *  renders at the top level. Stamped on the session row at launch. */
   parent_id: string | null;
+  /** Exact session id of the launcher. Prefer this for navigation; parent_id is
+   *  only a legacy branch-ancestry fallback for older rows. */
+  parent_session_id: string | null;
   /** The principal (username) that launched this session — attribution for the
    *  shared team board. null for engine-created warm watch sessions and rows
    *  predating the column. A tracking/UX field, not
@@ -103,20 +106,15 @@ export interface Session {
    *  `ops`. Drives the origin pill on an automation-class row. */
   origin: string;
   /** `interactive` (a person's own session) or `automation` (agent/system
-   *  launched). Automation-class sessions are excluded from the default fleet
-   *  list and issue board; the Sessions view gives them a separate Automation
-   *  pane. */
+   *  launched). Both are normal workbench sessions; class remains a machine
+   *  fact used by recursion/issue policies. */
   class: string;
   /** Total agent turns run so far. */
   turn_count: number;
-  /** Manual park override for the fleet list's resting shelf: `'parked'` pins the
-   *  row to the shelf, `'active'` keeps it live even when idle, `null` = auto (the
-   *  client shelves it once idle past the threshold). Set by dragging a row
-   *  into/out of the Parked region. */
+  /** Legacy compatibility field. New clients use durable group placement;
+   *  explicit parked rows are migrated to a Later group. */
   park: 'parked' | 'active' | null;
-  /** Manual fleet-list sort key, or `null` to follow the automatic
-   *  urgency-then-recency order. Placed and untouched rows share one numeric axis
-   *  so they interleave. Set by drag-reordering. */
+  /** Legacy compatibility field. New clients use placement rank. */
   sort_order: number | null;
   /** Execution backend: `'terminal'` (a PTY + interactive TUI) or `'acp'` (a
    *  headless adapter driven over the Agent Client Protocol). Older/terminal rows
@@ -141,6 +139,8 @@ export interface Session {
   resolved_launch: ResolvedLaunch | null;
   /** Exact capability snapshot stamped at launch. Custom source is redacted. */
   mcp_policy: SessionMcpPolicy;
+  /** One canonical, shared workbench placement. */
+  placement: SessionPlacement | null;
   /** The ACP modes the adapter offers, when the server exposes them. Absent today
    *  (SessionView carries only `current_mode`), so the mode chip falls back to the
    *  well-known claude/codex mode set — see `AcpConversation`. */
@@ -148,19 +148,82 @@ export interface Session {
   branch: Branch;
 }
 
+export interface SessionPlacement {
+  session_id: string;
+  group_id: string;
+  group_name: string;
+  group_system_key: string | null;
+  space_id: string;
+  space_name: string;
+  rank: number;
+}
+
+export interface SessionGroup {
+  id: string;
+  space_id: string;
+  name: string;
+  rank: number;
+  system_key: string | null;
+  collapsed: boolean;
+  /** Includes archived session ids; each view projects its own live/history scope. */
+  session_ids: string[];
+}
+
+export interface SessionSpace {
+  id: string;
+  name: string;
+  rank: number;
+  system_key: string | null;
+  groups: SessionGroup[];
+}
+
+export type SessionPlacementSelectorKind = 'origin' | 'profile' | 'watch';
+export type SessionLayoutItemKind = 'space' | 'group';
+
+export interface SessionPlacementDefault {
+  selector_kind: SessionPlacementSelectorKind;
+  selector_value: string;
+  group_id: string;
+}
+
+export interface SessionLayout {
+  revision: number;
+  spaces: SessionSpace[];
+  defaults: SessionPlacementDefault[];
+}
+
+export interface SessionGroupOrder {
+  group_id: string;
+  session_ids: string[];
+}
+
+export type SessionSearchStatus =
+  'created' | 'running' | 'orphaned' | 'done' | 'error' | 'archived';
+export type SessionSearchAttention = 'needs' | 'ok' | 'attention' | 'blocked';
+export interface SessionSearchOptions {
+  history?: boolean;
+  archivedOnly?: boolean;
+  status?: SessionSearchStatus;
+  attention?: SessionSearchAttention;
+}
+
+export type AutomationRunStatus =
+  'creating' | 'waiting' | 'delivering' | 'running' | 'failed' | 'cancelled' | 'completed';
+
 /** Durable automation launch reservation (`GET /api/runs`). A run normally
  *  points at an automation-class Session, but a launch can fail before that
- *  session becomes usable; the Automation pane keeps those failures visible. */
+ *  session becomes usable; unmatched failures become typed interventions. */
 export interface AutomationRun {
   id: string;
   actor_subject: string;
   source: string;
+  watch_id: string | null;
   service_tag: string;
   profile: string;
   idempotency_key: string;
   channel: string | null;
   session_id: string;
-  status: string;
+  status: AutomationRunStatus;
   outcome: string | null;
   summary: string;
   created_at: string;

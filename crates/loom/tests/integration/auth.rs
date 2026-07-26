@@ -320,6 +320,37 @@ async fn session_token_is_limited_to_its_tree_and_work_items() {
         .await
         .unwrap();
     assert_eq!(admin.status(), StatusCode::FORBIDDEN);
+
+    let automation = loom::automation::mint(
+        &ts.state.db,
+        "ci",
+        vec!["github_comment".to_string()],
+        60,
+        None,
+    )
+    .await
+    .unwrap();
+    for credential in [&token, &automation.token] {
+        let layout = http
+            .get(url(&ts, "/api/session-layout"))
+            .bearer_auth(credential)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(layout.status(), StatusCode::FORBIDDEN);
+        let mutation = http
+            .post(url(&ts, "/api/session-layout/moves"))
+            .bearer_auth(credential)
+            .json(&json!({
+                "session_ids": [session_id],
+                "destination_group_id": "group-user-inbox",
+                "expected_revision": 1
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(mutation.status(), StatusCode::FORBIDDEN);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

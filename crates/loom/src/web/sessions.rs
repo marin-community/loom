@@ -27,7 +27,8 @@ use crate::{
 };
 use weaver_api::{
     CreateReq, HandoffReq, HistoryPageView, LaunchOverrides, LaunchSelection, PatchSessionReq,
-    SendReq, SessionView, SetTagsReq, TagReq,
+    SearchSessionsOptions, SendReq, SessionSearchAttention, SessionSearchStatus, SessionView,
+    SetTagsReq, TagReq,
 };
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::Branch;
@@ -53,6 +54,25 @@ const HANDOFF_SUMMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// legible without adding a per-session lock registry.
 static LIFECYCLE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+async fn insert_session_row(
+    st: &AppState,
+    session: &NewSession,
+    policy: &session_mod::SessionLaunchPolicy,
+) -> Result<Session, AppError> {
+    let (session, layout_revision) =
+        session_mod::insert_with_layout_revision(&st.db, session, policy).await?;
+    if let Some(revision) = layout_revision {
+        super::session_layout::publish_invalidation(st, revision).await;
+    }
+    Ok(session)
+}
+
+async fn delete_session_row(st: &AppState, session_id: &str) -> Result<(), AppError> {
+    if let Some(revision) = session_mod::delete(&st.db, session_id).await? {
+        super::session_layout::publish_invalidation(st, revision).await;
+    }
+    Ok(())
+}
 pub(super) async fn list_agents(State(st): State<AppState>) -> ApiResult<Json<Value>> {
     let default_agent = crate::profile::get(&st.db, crate::profile::DEFAULT_PROFILE)
         .await?
@@ -81,11 +101,10 @@ pub(super) struct ListSessionsQuery {
     /// History as disjoint views.
     #[serde(default)]
     archived: bool,
-    /// Include automation-class sessions (watch/ops machinery). Defaults to
-    /// `false` — the fleet listing shows interactive work; a machinery view
-    /// opts in with `?automation=true`, symmetric with `archived`.
+    /// Compatibility filter for automation-class sessions. Omission retains
+    /// the historical interactive-only inventory; fleet workbenches opt in.
     #[serde(default)]
-    automation: bool,
+    automation: Option<bool>,
     /// Include engine-managed warm sessions. This is an operator inventory
     /// escape hatch: normal fleet/survey callers must not see a watcher's own
     /// infrastructure and recurse into it.
@@ -108,6 +127,139 @@ pub(super) async fn list_sessions(
             "admin grant required to list managed sessions",
         ));
     }
+    collect_sessions(
+        &st,
+        SessionCollectionFilter {
+            archived: q.archived,
+            archived_only: false,
+            automation: q.automation.unwrap_or(false),
+            managed: q.managed,
+            search: q.q.as_deref(),
+            status: None,
+            attention: None,
+        },
+    )
+    .await
+    .map(Json)
+}
+
+/// Search is an explicit fleet read so non-browser clients can find the same
+/// qualified sessions as the workbench. `history=true` widens the actionable
+/// result set; `archived_only=true` is the disjoint History projection.
+pub(super) async fn search_sessions(
+    State(st): State<AppState>,
+    Query(q): Query<SearchSessionsOptions>,
+) -> ApiResult<Json<Vec<SessionView>>> {
+    collect_sessions(
+        &st,
+        SessionCollectionFilter {
+            archived: q.history || q.archived_only,
+            archived_only: q.archived_only,
+            automation: true,
+            managed: false,
+            search: Some(&q.query),
+            status: q.status,
+            attention: q.attention,
+        },
+    )
+    .await
+    .map(Json)
+}
+
+fn view_attention(view: &SessionView) -> &str {
+    if view.status == "archived" {
+        "ok"
+    } else if view.branch.tags.iter().any(|tag| tag.value == "blocked") {
+        "blocked"
+    } else if matches!(view.status.as_str(), "error" | "orphaned")
+        || view.branch.tags.iter().any(|tag| tag.value == "attention")
+    {
+        "attention"
+    } else {
+        "ok"
+    }
+}
+
+fn append_search_field(haystack: &mut String, value: &str) {
+    haystack.push(' ');
+    haystack.push_str(value);
+}
+
+fn search_haystack(view: &SessionView) -> String {
+    let mut haystack = String::new();
+    if let Some(placement) = &view.placement {
+        append_search_field(
+            &mut haystack,
+            &format!("{} / {}", placement.group_name, view.branch.title.trim()),
+        );
+        append_search_field(&mut haystack, &placement.group_name);
+    }
+    for field in [
+        view.branch.title.as_str(),
+        view.branch.goal.as_str(),
+        view.branch.description.as_str(),
+        view.github_repo.as_deref().unwrap_or_default(),
+        view.branch.repo_root.as_str(),
+        view.branch.branch.as_str(),
+        view.branch.name.as_str(),
+        view.status.as_str(),
+        view.profile.as_str(),
+        view.origin.as_str(),
+        view.class.as_str(),
+        view.created_by.as_deref().unwrap_or_default(),
+        view.parent_session_id.as_deref().unwrap_or_default(),
+        view.parent_id.as_deref().unwrap_or_default(),
+    ] {
+        append_search_field(&mut haystack, field);
+    }
+    if let Some(issue) = &view.github_issue {
+        append_search_field(&mut haystack, &format!("{}#{}", issue.repo, issue.number));
+        append_search_field(&mut haystack, &format!("#{}", issue.number));
+    }
+    if let Some(issue) = view.tracking_issue {
+        append_search_field(&mut haystack, &format!("#{issue}"));
+    }
+    if let Some(pr) = &view.branch.github {
+        append_search_field(&mut haystack, &format!("#{}", pr.pr_number));
+        for field in [
+            pr.pr_url.as_str(),
+            pr.pr_title.as_str(),
+            pr.pr_state.as_str(),
+            pr.review_decision.as_deref().unwrap_or_default(),
+            pr.checks.as_deref().unwrap_or_default(),
+        ] {
+            append_search_field(&mut haystack, field);
+        }
+    } else if let Some(pr) = view.branch.github_pr {
+        append_search_field(&mut haystack, &format!("#{pr}"));
+    }
+    for tag in &view.branch.tags {
+        for field in [
+            tag.key.as_str(),
+            tag.value.as_str(),
+            tag.note.as_str(),
+            tag.set_by.as_str(),
+        ] {
+            append_search_field(&mut haystack, field);
+        }
+    }
+    haystack.to_lowercase()
+}
+
+struct SessionCollectionFilter<'a> {
+    archived: bool,
+    archived_only: bool,
+    automation: bool,
+    managed: bool,
+    search: Option<&'a str>,
+    status: Option<SessionSearchStatus>,
+    attention: Option<SessionSearchAttention>,
+}
+
+async fn collect_sessions(
+    st: &AppState,
+    filter: SessionCollectionFilter<'_>,
+) -> ApiResult<Vec<SessionView>> {
     // The fleet listing shows work, not infrastructure: engine-managed (warm)
     // sessions are excluded here, so neither the dashboard nor a watch
     // round's survey (scripts read this route) ever sees a watcher's own
@@ -121,43 +273,62 @@ pub(super) async fn list_sessions(
         .filter_map(|o| o.warm_session_id)
         .collect();
     // A blank `q` is no filter; otherwise match case-insensitively.
-    let needle =
-        q.q.as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_lowercase);
-    let sessions = if q.managed {
+    let needle = filter
+        .search
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_lowercase);
+    let sessions = if filter.managed {
         session_mod::list(&st.db).await?
     } else {
         session_mod::list_visible(&st.db).await?
     };
     let mut views: Vec<SessionView> = Vec::with_capacity(sessions.len());
     for s in sessions {
-        if !q.managed && warm.contains(&s.id) {
+        if !filter.managed && warm.contains(&s.id) {
             continue;
         }
         // Archived sessions are torn down — hidden unless the caller opts in.
-        if !q.archived && s.status == "archived" {
+        if !filter.archived && s.status == "archived" {
             continue;
         }
-        // Automation-class sessions are machinery — hidden unless asked.
-        if !q.automation && s.class == "automation" {
+        if filter.archived_only && s.status != "archived" {
+            continue;
+        }
+        // Explicit compatibility reads can still hide automation-class rows.
+        if !filter.automation && s.class == "automation" {
             continue;
         }
         if let Some(branch) = branch_mod::get(&st.db, &s.branch_id).await? {
+            let view = session_view(&st.db, &s, &branch).await?;
+            if filter
+                .status
+                .is_some_and(|status| view.status != status.as_str())
+            {
+                continue;
+            }
+            if filter.attention.is_some_and(|attention| match attention {
+                SessionSearchAttention::Needs => view_attention(&view) == "ok",
+                SessionSearchAttention::Ok => view_attention(&view) != "ok",
+                SessionSearchAttention::Attention => view_attention(&view) != "attention",
+                SessionSearchAttention::Blocked => view_attention(&view) != "blocked",
+            }) {
+                continue;
+            }
             if let Some(needle) = &needle {
-                // Match the identifiers a human searches by: the title, the branch
-                // name, and the goal.
-                let hay =
-                    format!("{} {} {}", branch.title, branch.branch, branch.goal).to_lowercase();
+                // The wire view already carries every promised search facet:
+                // qualified placement, title/goal, repo/branch, issue/PR, tags,
+                // status, profile, and provenance. Searching only its values
+                // keeps that vocabulary synchronized without matching JSON keys.
+                let hay = search_haystack(&view);
                 if !hay.contains(needle) {
                     continue;
                 }
             }
-            views.push(session_view(&st.db, &s, &branch).await?);
+            views.push(view);
         }
     }
-    Ok(Json(views))
+    Ok(views)
 }
 
 pub(super) async fn get_session(
@@ -1378,8 +1549,8 @@ pub(crate) async fn provision_session(
                 // launching the agent into a half-provisioned worktree. The
                 // worktree is left intact for inspection; full output is in the
                 // run dir's setup.log.
-                let session = session_mod::insert_with_policy(
-                    &st.db,
+                let session = insert_session_row(
+                    &st,
                     &NewSession {
                         id: session_id.clone(),
                         branch_id: branch.id.clone(),
@@ -1488,7 +1659,7 @@ pub(crate) async fn provision_session(
             session = %session_id, branch = %branch.id, runtime = %runtime,
             work_dir = %work_dir.display(), mode = %mode, "launching acp session"
         );
-        let session = session_mod::insert_with_policy(&st.db, &new_session, &launch_policy).await?;
+        let session = insert_session_row(&st, &new_session, &launch_policy).await?;
         // A custom ACP agent supplies the exact adapter command accepted by
         // canonical resolution; registry edits after preview cannot replace it.
         let launch = agent::build_acp_launch(
@@ -1577,7 +1748,7 @@ pub(crate) async fn provision_session(
         // terminal agent may call back into loom as soon as its shell execs;
         // inserting after `agent::launch` left a race where that first request
         // saw a correctly minted token as unauthorized.
-        let session = session_mod::insert_with_policy(&st.db, &new_session, &launch_policy).await?;
+        let session = insert_session_row(&st, &new_session, &launch_policy).await?;
         if let Err(e) = agent::launch(
             &st.db,
             &agent::LaunchSpec {
@@ -1958,6 +2129,11 @@ pub(super) async fn patch_session(
     Path(key): Path<String>,
     Json(req): Json<PatchSessionReq>,
 ) -> ApiResult<Json<SessionView>> {
+    if req.park.is_some() || req.sort_order.is_some() {
+        return Err(AppError::bad_request(
+            "park and sort_order are read-only compatibility fields; use the revisioned session-layout move API",
+        ));
+    }
     let (initial_session, _) = require_session(&st.db, &key).await?;
     let _source_permit = st.launch_gate.acquire_session(&initial_session.id).await;
     let _lifecycle = LIFECYCLE_LOCK.lock().await;
@@ -1994,20 +2170,6 @@ pub(super) async fn patch_session(
         )
         .await
         .ok();
-    }
-    // Park override — the fleet list's resting shelf. `"auto"` clears the manual
-    // override back to idle-driven (stored NULL); `"parked"` / `"active"` pin it.
-    if let Some(park) = &req.park {
-        let stored = match park.as_str() {
-            "auto" => None,
-            "parked" => Some("parked"),
-            "active" => Some("active"),
-            other => return Err(AppError::bad_request(format!("invalid park '{other}'"))),
-        };
-        session_mod::set_park(&st.db, &session.id, stored).await?;
-    }
-    if let Some(order) = req.sort_order {
-        session_mod::set_sort_order(&st.db, &session.id, order).await?;
     }
     let (session, branch) = require_session(&st.db, &session.id).await?;
     Ok(Json(session_view(&st.db, &session, &branch).await?))
@@ -2100,7 +2262,7 @@ async fn remove_locked(
         .await
         .ok();
     crate::auth::revoke_session_tokens(&st.db, &session.id).await?;
-    session_mod::delete(&st.db, &session.id).await?;
+    delete_session_row(st, &session.id).await?;
     // Release this branch's claimed issues back to the repo backlog before the
     // branch row goes away — issues are repo-owned and must outlive teardown.
     weaver_core::issue::unclaim_branch(&st.db, &branch.repo_root, &branch.branch)
@@ -2587,8 +2749,8 @@ pub(crate) async fn create_warm_session(
     // deliberately requires a live bound session, so an eager agent cannot hit
     // a transient authentication failure during startup.
     let status = agent::initial_status(&st.db, &agent).await;
-    let session = session_mod::insert_with_policy(
-        &st.db,
+    let session = insert_session_row(
+        st,
         &NewSession {
             id: session_id.clone(),
             branch_id: branch.id.clone(),
@@ -2690,7 +2852,7 @@ pub(crate) async fn create_warm_session(
             .ok();
         st.acp.stop(&session_id);
         backend::kill_session(&term_session).await.ok();
-        session_mod::delete(&st.db, &session_id).await.ok();
+        delete_session_row(st, &session_id).await.ok();
         return Err(AppError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             error.to_string(),

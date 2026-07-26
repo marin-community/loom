@@ -132,14 +132,26 @@ def test_profile_scoped_run_is_capability_gated_and_preserves_idempotency():
             },
         )
     ]
+    watch_client = StubClient(capabilities=["launch"])
+    Round(
+        config={"id": "watch-1", "capabilities": ["launch"]}, client=watch_client
+    ).client.run("ops", "watch-alert", session_request)
+    assert watch_client.requests[-1][2] == {
+        "profile": "ops",
+        "idempotency_key": "watch-alert",
+        "source": "ops",
+        "watch_id": "watch-1",
+        "session": session_request,
+    }
     with pytest.raises(CapabilityDenied):
         StubClient().run("ops", "alert-1842", session_request)
 
 
-def session(id, status="running", tags=None, repo_root="/repo"):
+def session(id, status="running", tags=None, repo_root="/repo", session_class="interactive"):
     return {
         "id": id,
         "status": status,
+        "class": session_class,
         "branch": {"tags": tags or [], "repo_root": repo_root},
     }
 
@@ -226,7 +238,7 @@ def make_round(scope=None, sessions=None, capabilities=None, **config):
     client = StubClient(
         capabilities=capabilities or [],
         profile=config.get("profile", ""),
-        replies={"/sessions": sessions or []},
+        replies={"/sessions?automation=false": sessions or []},
     )
     return Round(
         config={"name": "t", "scope": scope or {}, **config},
@@ -238,12 +250,14 @@ def test_sessions_skips_terminal_and_counts_surveyed():
     rnd = make_round(
         sessions=[
             session("live"),
+            session("watch-child", session_class="automation"),
             session("done", status="done"),
             session("archived", status="archived"),
         ]
     )
     assert [s["id"] for s in rnd.sessions()] == ["live"]
     assert rnd.surveyed == 1
+    assert rnd.client.requests == [("GET", "/sessions?automation=false", None)]
 
 
 def test_scope_attention_filter_matches_exact_and_negated():
@@ -277,7 +291,9 @@ def branch_session(id, branch_id, **kw):
 
 
 def trigger_round(trigger, sessions, scope=None):
-    client = StubClient(capabilities=[], replies={"/sessions": sessions})
+    client = StubClient(
+        capabilities=[], replies={"/sessions?automation=false": sessions}
+    )
     return Round(
         config={"name": "t", "scope": scope or {}, "trigger": trigger}, client=client
     )
@@ -379,7 +395,7 @@ def test_observe_is_implicit_and_writes_are_gated():
         with pytest.raises(CapabilityDenied):
             call()
     # The gate fires before any request leaves the process.
-    assert c.requests == [("GET", "/sessions", None)]
+    assert c.requests == [("GET", "/sessions?automation=false", None)]
 
 
 def test_capabilities_constant_matches_the_ladder():

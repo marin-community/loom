@@ -19,6 +19,43 @@ use weaver_core::issue::Issue;
 use weaver_core::tags::Tag;
 use weaver_core::watch::{Watch, WatchRun};
 
+macro_rules! wire_enum {
+    ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        pub enum $name {
+            $(
+                #[serde(rename = $value)]
+                $variant,
+            )+
+        }
+
+        impl $name {
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $value,)+
+                }
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(self.as_str())
+            }
+        }
+
+        impl std::str::FromStr for $name {
+            type Err = String;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                match value {
+                    $($value => Ok(Self::$variant),)+
+                    _ => Err(format!("invalid {} '{value}'", stringify!($name))),
+                }
+            }
+        }
+    };
+}
+
 // ---------------------------------------------------------------------------
 // View payloads (responses)
 // ---------------------------------------------------------------------------
@@ -137,6 +174,11 @@ pub struct SessionView {
     /// Branch id of the session that **launched** this one — the parent in the
     /// dashboard's session tree — or `null` for a top-level session.
     pub parent_id: Option<String>,
+    /// Exact immutable session id of the launcher. New rows always stamp this;
+    /// `parent_id` remains as a legacy branch-ancestry fallback for rows created
+    /// before exact session lineage was recorded.
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
     /// The principal (username) that launched this session — attribution for the
     /// shared team board. `null` for engine-created warm watch sessions and rows
     /// that predate the column. A tracking/UX field,
@@ -147,9 +189,9 @@ pub struct SessionView {
     /// `"watch"` (engine infrastructure). Stamped once at create.
     #[serde(default = "default_origin")]
     pub origin: String,
-    /// Presentation tier: `"interactive"` fleet work or `"automation"`
-    /// machinery. The default `GET /api/sessions` listing hides
-    /// automation-class rows; `?automation=true` includes them.
+    /// Machine tier: `"interactive"` or `"automation"`. Both appear in the
+    /// normal fleet; the class remains useful for policy and compatibility
+    /// filters.
     #[serde(default = "default_class")]
     pub class: String,
     /// Completed agent turns on this session.
@@ -160,14 +202,13 @@ pub struct SessionView {
     /// launch tracked nothing. Stored on the session row, so every read path
     /// carries it.
     pub tracking_issue: Option<i64>,
-    /// Manual park override for the fleet list's resting shelf: `"parked"` (pinned
-    /// to the shelf), `"active"` (kept live even when idle), or `null` (auto — the
-    /// client parks it once idle past the threshold). See the `sessions.park`
-    /// column.
+    /// Legacy compatibility read derived from canonical placement. `"parked"`
+    /// means the session currently belongs to a system `Later` group; all
+    /// other placements read as `null`.
     pub park: Option<String>,
-    /// Manual fleet-list sort key, or `null` to follow the automatic
-    /// urgency-then-recency order. Placed rows and untouched rows share one
-    /// numeric axis so they interleave.
+    /// Legacy compatibility read: the canonical zero-based rank within the
+    /// current group. It is normalized after every move and has no meaning
+    /// across groups.
     pub sort_order: Option<f64>,
     /// Execution backend: `"terminal"` (a PTY + interactive TUI) or `"acp"` (a
     /// headless adapter driven over the Agent Client Protocol). Terminal-backend
@@ -212,7 +253,94 @@ pub struct SessionView {
     /// the launch-composition contract expose `null`.
     #[serde(default)]
     pub resolved_launch: Option<ResolvedLaunchView>,
+    /// The session's one canonical, operator-controlled fleet location.
+    #[serde(default)]
+    pub placement: Option<SessionPlacementView>,
     pub branch: BranchView,
+}
+
+wire_enum!(SessionSearchStatus {
+    Created => "created",
+    Running => "running",
+    Orphaned => "orphaned",
+    Done => "done",
+    Error => "error",
+    Archived => "archived",
+});
+
+wire_enum!(SessionSearchAttention {
+    Needs => "needs",
+    Ok => "ok",
+    Attention => "attention",
+    Blocked => "blocked",
+});
+
+/// Typed filters for `GET /api/sessions/search`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SearchSessionsOptions {
+    #[serde(default, rename = "q")]
+    pub query: String,
+    #[serde(default)]
+    pub history: bool,
+    #[serde(default)]
+    pub archived_only: bool,
+    #[serde(default)]
+    pub status: Option<SessionSearchStatus>,
+    #[serde(default)]
+    pub attention: Option<SessionSearchAttention>,
+}
+
+/// One session's canonical position in the shared Spaces → Groups layout.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionPlacementView {
+    pub session_id: String,
+    pub group_id: String,
+    pub group_name: String,
+    pub group_system_key: Option<String>,
+    pub space_id: String,
+    pub space_name: String,
+    pub rank: i64,
+}
+
+/// An ordered, flat group inside one session space.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionGroupView {
+    pub id: String,
+    pub space_id: String,
+    pub name: String,
+    pub rank: i64,
+    pub system_key: Option<String>,
+    /// Viewer-specific disclosure preference; membership/order remain shared.
+    pub collapsed: bool,
+    /// Canonically ordered session ids, including archived rows. Fleet views
+    /// decide whether to project active work or History.
+    pub session_ids: Vec<String>,
+}
+
+/// A top-level shared fleet space.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionSpaceView {
+    pub id: String,
+    pub name: String,
+    pub rank: i64,
+    pub system_key: Option<String>,
+    pub groups: Vec<SessionGroupView>,
+}
+
+/// One configurable default-placement selector.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionPlacementDefaultView {
+    pub selector_kind: SessionPlacementSelectorKind,
+    pub selector_value: String,
+    pub group_id: String,
+}
+
+/// Complete shared session layout at one optimistic-concurrency revision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionLayoutView {
+    pub revision: i64,
+    pub spaces: Vec<SessionSpaceView>,
+    pub defaults: Vec<SessionPlacementDefaultView>,
 }
 
 /// One provider-neutral conversation record returned by the session history
@@ -872,6 +1000,8 @@ pub struct RunReq {
     pub idempotency_key: String,
     #[serde(default = "actions_source")]
     pub source: String,
+    #[serde(default)]
+    pub watch_id: Option<String>,
     /// Stable conversation route for related automation deliveries. Each
     /// idempotency key remains a distinct run; channel deliveries reuse one
     /// live ACP session.
@@ -903,6 +1033,7 @@ pub struct RunView {
     pub id: String,
     pub actor_subject: String,
     pub source: String,
+    pub watch_id: Option<String>,
     pub service_tag: String,
     pub profile: String,
     pub idempotency_key: String,
@@ -1511,8 +1642,9 @@ pub struct CreateReq {
     pub mode: Option<String>,
     /// Session class override: `"interactive"` or `"automation"` (anything else
     /// is rejected). Blank/absent derives from the launch origin
-    /// (watch/actions/ops → automation, else interactive). Automation-class
-    /// sessions are hidden from the default fleet listing.
+    /// (watch/actions/ops/grafana → automation, else interactive).
+    /// Automation-class sessions remain in the default human fleet; survey
+    /// callers can explicitly request `automation=false`.
     #[serde(default)]
     pub class: Option<String>,
     /// Named launch profile. Blank/absent selects `default`.
@@ -1571,17 +1703,121 @@ pub struct PatchSessionReq {
     /// The agent's current-state message — the prose shown beside the level.
     #[serde(default)]
     pub description: Option<String>,
-    /// Park override: `"parked"` pins the row to the resting shelf, `"active"`
-    /// keeps it live even when idle, `"auto"` clears the override back to
-    /// idle-driven. Absent leaves it unchanged. (JSON can't distinguish `null`
-    /// from absent for `Option<String>`, so the reset value is the string
-    /// `"auto"`, mapped to a stored `NULL`.)
+    /// Retained only to return an explicit compatibility error. Layout clients
+    /// must use the revisioned session-layout move API.
     #[serde(default)]
     pub park: Option<String>,
-    /// New manual sort key for this row (the drag midpoint). Absent leaves the
-    /// order unchanged.
+    /// Retained only to return an explicit compatibility error. Layout clients
+    /// must use the revisioned session-layout move API.
     #[serde(default)]
     pub sort_order: Option<f64>,
+}
+
+/// Create a space and its useful empty Inbox group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSessionSpaceReq {
+    pub name: String,
+    pub expected_revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateSessionSpaceReq {
+    pub name: String,
+    pub expected_revision: i64,
+}
+
+/// Deleting a non-empty space atomically moves its sessions/defaults here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteSessionSpaceReq {
+    #[serde(default)]
+    pub destination_group_id: Option<String>,
+    pub expected_revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSessionGroupReq {
+    pub space_id: String,
+    pub name: String,
+    pub expected_revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateSessionGroupReq {
+    pub name: String,
+    pub expected_revision: i64,
+}
+
+/// Deleting a group never deletes sessions. A destination is required whenever
+/// the group owns placements or default-placement selectors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteSessionGroupReq {
+    #[serde(default)]
+    pub destination_group_id: Option<String>,
+    pub expected_revision: i64,
+}
+
+// Reorder one space, or one group (optionally into another space).
+wire_enum!(SessionLayoutItemKind {
+    Space => "space",
+    Group => "group",
+});
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReorderSessionLayoutReq {
+    pub kind: SessionLayoutItemKind,
+    pub id: String,
+    #[serde(default)]
+    pub before_id: Option<String>,
+    #[serde(default)]
+    pub destination_space_id: Option<String>,
+    pub expected_revision: i64,
+}
+
+/// Atomically move one or more sessions to an exact group insertion point.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoveSessionsReq {
+    pub session_ids: Vec<String>,
+    pub destination_group_id: String,
+    #[serde(default)]
+    pub before_session_id: Option<String>,
+    pub expected_revision: i64,
+}
+
+/// One complete group order in an atomic layout restore.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionGroupOrderReq {
+    pub group_id: String,
+    pub session_ids: Vec<String>,
+}
+
+/// Atomically restore the complete membership and order of a set of groups.
+///
+/// The supplied groups must cover exactly the sessions currently placed in
+/// those groups. This makes an undo fail as a stale whole instead of partially
+/// overwriting an intervening placement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestoreSessionGroupsReq {
+    pub groups: Vec<SessionGroupOrderReq>,
+    pub expected_revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionGroupPreferenceReq {
+    pub collapsed: bool,
+}
+
+wire_enum!(SessionPlacementSelectorKind {
+    Origin => "origin",
+    Profile => "profile",
+    Watch => "watch",
+});
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetSessionPlacementDefaultReq {
+    pub selector_kind: SessionPlacementSelectorKind,
+    pub selector_value: String,
+    pub group_id: String,
+    pub expected_revision: i64,
 }
 
 /// Body for `PUT /api/sessions/{id}/tags/{key}`: set (upsert) a tag. The `key`

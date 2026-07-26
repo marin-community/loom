@@ -84,6 +84,7 @@ mod repo_env;
 mod repos;
 mod restricted_github;
 mod scratch;
+mod session_layout;
 pub(crate) mod sessions;
 mod settings;
 mod watches;
@@ -106,6 +107,7 @@ use repo_env::*;
 use repos::*;
 use restricted_github::*;
 use scratch::*;
+use session_layout::*;
 use sessions::*;
 use settings::*;
 use watches::*;
@@ -345,6 +347,11 @@ pub(crate) async fn session_view(
                 .view,
         )
     };
+    let placement = crate::session_layout::placement(db, &session.id).await?;
+    let legacy_park = placement.as_ref().and_then(|placement| {
+        (placement.group_system_key.as_deref() == Some("later")).then_some("parked".to_string())
+    });
+    let legacy_sort_order = placement.as_ref().map(|placement| placement.rank as f64);
     Ok(SessionView {
         id: session.id.clone(),
         status: session.status.clone(),
@@ -362,13 +369,14 @@ pub(crate) async fn session_view(
         created_at: session.created_at.clone(),
         updated_at: branch.updated_at.clone(),
         parent_id: session.parent_branch_id.clone(),
+        parent_session_id: session.parent_session_id.clone(),
         created_by: session.created_by.clone(),
         origin: session.origin.clone(),
         class: session.class.clone(),
         turn_count: session.turn_count,
         tracking_issue: session.tracking_issue_id,
-        park: session.park.clone(),
-        sort_order: session.sort_order,
+        park: legacy_park,
+        sort_order: legacy_sort_order,
         protocol: session.protocol.clone(),
         acp_session_id: session.acp_session_id.clone(),
         current_mode: session.current_mode.clone(),
@@ -381,6 +389,7 @@ pub(crate) async fn session_view(
         launch_mode: session.launch_mode.clone(),
         mcp_policy,
         resolved_launch,
+        placement,
         branch: bv,
     })
 }
@@ -606,6 +615,34 @@ pub fn router(state: AppState) -> Router {
     // Everything else requires an authenticated principal — a bearer token, a
     // session cookie, or a trusted-loopback request — gated by `require_auth`.
     let protected = Router::new()
+        // Shared Spaces → Groups → Sessions workbench organization.
+        .route("/session-layout", get(get_session_layout))
+        .route("/session-layout/events", get(session_layout_events))
+        .route("/session-layout/spaces", post(create_session_space))
+        .route(
+            "/session-layout/spaces/{id}",
+            axum::routing::patch(update_session_space).delete(delete_session_space),
+        )
+        .route("/session-layout/groups", post(create_session_group))
+        .route(
+            "/session-layout/groups/{id}",
+            axum::routing::patch(update_session_group).delete(delete_session_group),
+        )
+        .route(
+            "/session-layout/groups/{id}/preference",
+            axum::routing::put(set_session_group_preference),
+        )
+        .route("/session-layout/reorder", post(reorder_session_layout))
+        .route("/session-layout/moves", post(move_session_layout))
+        .route("/session-layout/restores", post(restore_session_layout))
+        .route(
+            "/session-layout/defaults",
+            axum::routing::put(set_session_placement_default),
+        )
+        .route(
+            "/session-layout/defaults/{kind}/{value}",
+            delete(delete_session_placement_default),
+        )
         // Sessions
         .route(
             "/sessions",
@@ -617,6 +654,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/session-launches/resolve", post(resolve_session_launch))
         .route("/scratch/limits", get(scratch_limits))
+        .route("/sessions/search", get(search_sessions))
         .route(
             "/sessions/{id}",
             get(get_session).patch(patch_session).delete(delete_session),

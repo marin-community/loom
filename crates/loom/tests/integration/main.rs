@@ -25,6 +25,7 @@ mod profiles;
 mod recover;
 mod repos;
 mod scratch;
+mod session_layout;
 mod session_management;
 mod sessions;
 mod shell;

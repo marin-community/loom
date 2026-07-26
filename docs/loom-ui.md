@@ -123,40 +123,62 @@ not VS Code:
 
 ## Session surfaces
 
-Sessions has two URL-backed surfaces because a person's work and an automation
-execution have different operating rhythms:
+Sessions is one durable fleet workbench:
 
-- **Workspace** is the default human workbench. It contains interactive-class
-  sessions only, excludes archived records, and keeps the attention filters,
-  parent/child threads, manual order, Parked shelf, and New session action. Its
-  All / attention / calm counts therefore describe actionable interactive work,
-  never retained history.
+- **Spaces and groups.** Ordered User, GitHub, and Ops spaces are seeded by the
+  server and can be extended or reordered. Each contains flat, user-managed
+  groups. Every visible session has exactly one shared placement; ancestry and
+  automation provenance remain metadata rather than creating another tree.
+- **Attention and All** are URL-backed projections across spaces. Search spans
+  qualified placement, title/prompt, repo/branch, issue/PR, tags, status,
+  profile, and provenance. Status and attention controls compose with them.
+  Live `error` and `orphaned` lifecycle states are urgent even without a loud
+  tag; archived rows are never urgent.
 - **History** (`?history=true`) is the explicit retained-work projection.
-  Archived rows across interactive and automation classes stay navigable there
-  but never inflate Workspace filters or the `active sessions` status-bar
-  vital. The archived count is the size of this historical projection, not a
-  claim that those sessions are still running.
-- **Automation** is an exceptions-first operational view. It contains
-  automation-class sessions only, puts blocked/error/orphaned/attention work
-  ahead of calm active work, and collapses done/archived history. Durable
-  `/api/runs` reservations without a matching session keep provisioning and
-  launch failures visible. Rows show origin, profile revision, turns, exact
-  activity time, and parent provenance without inheriting the Workspace's
-  manual order or parking controls.
+  Archived rows keep their qualified placement and recovery returns them there,
+  and archived/cancelled unmatched automation runs remain visible as audit
+  rows, but neither inflates active fleet counts. Search from History is
+  archived-only; the include-History widening control exists only in live views.
+- **Automation is ordinary work.** Successful watch/automation launches appear
+  as normal sessions, with Actions, Ops, Grafana, and watch origins routed to
+  Ops. Failed durable `/api/runs` reservations
+  without a session appear as typed, non-draggable **Interventions** with
+  run-specific remediation. Watch authoring and audit stay under Watches.
 
-The Workspace / Automation links preserve the surface in the URL
-(`?view=automation`; `history=true` expands automation history). The Automation
-link carries a distinct intervention count even while Workspace is selected;
-archived history never inflates that live signal. The status bar's active vital
-is the human fleet and excludes automation; its separate archived link counts
-retained rows across classes and routes to History.
+Rows remain compact: title, a textual non-running lifecycle, profile exception,
+and freshness are visible at rest; prompt and full metadata reveal on hover,
+keyboard focus, or explicit Details expansion. Delegated provenance resolves
+to the immutable parent session id, with branch ancestry used only when an old
+row lacks exact lineage. Smart/search rows qualify the title as `Group / Task`;
+the surrounding space navigation already supplies the primary theme. A grip
+supports pointer moves between groups.
+The Move panel offers the same exact insertion points to keyboard/touch users,
+multi-select supports bulk moves and confirmed aggregate Archive, and every
+move offers an immediate Undo backed by one atomic restore. Empty groups remain
+visible drop targets; a non-empty group hidden by filters says that it has no
+matches instead of claiming to be empty.
 
-The SPA's one shared inventory request opts into archived and automation rows so
-each surface can project the same server truth. It does not opt into
-`managed=true`: engine-managed warm sessions are watch infrastructure and stay
-out of Workspace, Automation, History, counts, and destructive row actions.
-That admin-only query flag remains an explicit operator/CLI inventory escape
-hatch.
+Layout is REST state, not browser-local configuration. Shared mutations carry an
+optimistic revision and atomically renumber integer ranks; per-user collapse
+preferences do not advance that shared revision. Layout SSEs are invalidations:
+the SPA reloads server truth while preserving local selection and disclosure.
+Engine-managed warm watch sessions have no canonical placement and never advance
+the visible layout revision. Watch programs launch visible automation through
+the accepted Ops/Actions producer origins, whose ordinary origin defaults route
+to Ops / Inbox unless reconfigured.
+The legacy `park`/`sort_order` fields remain readable for compatibility only,
+derived from the canonical system-`Later` placement and normalized zero-based
+rank within the current group. `sort_order` has no cross-group meaning. PATCH
+writes to either field return 400 before any other requested session edit is
+applied; clients move sessions through the revisioned layout API. The migration
+maps explicit Parked rows into a normal `Later` group.
+
+The SPA's shared inventory includes archived and automation-class rows but not
+`managed=true`: engine-managed warm watch sessions are infrastructure and stay
+out of Spaces, Attention, History, counts, and destructive row actions.
+Successful automation-class sessions remain in the human fleet, while watch
+surveys explicitly request `automation=false` so a watch cannot recursively
+survey work that watch automation launched.
 
 ## Profile-first launch
 
@@ -180,30 +202,6 @@ including true class and capacity. Canonical submissions send both optimistic
 revisions and stamp a new snapshot. The CLI/API’s flattened compatibility input
 continues to change runtime selectors only and preserves the session’s existing
 stamped policy.
-
-## Workspace: order & the resting shelf
-
-The fleet list is where a long day's fatigue accumulates, so two controls keep it
-from becoming a wall of stale rows:
-
-- **The resting shelf ("Parked").** Below the live list sits a collapsed shelf
-  for threads that need nothing from you right now — hand-parked, or simply long
-  idle (the agent has rested past `IDLE_PARK_HOURS` — hours, not minutes, so a
-  finished turn never parks a conversation, only an abandoned one). Shelf rows
-  are dimmed, labelled with *why* they rest (`idle 12h` / `idle 6d` / `parked`),
-  and one click (or a drag) away from live. A loud signal always keeps a thread
-  live — a session that needs a human never hides. A session merely *awaiting an
-  external reviewer* is **not** shelved: its `awaiting: review` mark sinks it
-  below the calm rows in the live list (it's still yours to glance at) but never
-  hides it away. The idle threshold is a pure client view over
-  `last_activity_at`; only the manual override (`park`: `'parked'` / `'active'`)
-  is persisted.
-- **Manual order.** A hover-revealed grip (`⠿`) drags a top-level thread to
-  reorder it, or onto the shelf to rest it (drag back out, or "Keep live", to
-  return it). A drag persists one midpoint `sort_order`; placed and untouched
-  rows share one numeric axis (`orderKey`), so a dragged row lands exactly where
-  dropped while every other row keeps its automatic urgency-then-recency spot.
-  The grip is the only draggable handle, so the row's link still click/⌘-clicks.
 
 ## Recurring pieces
 
