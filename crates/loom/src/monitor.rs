@@ -16,7 +16,7 @@ use serde_json::json;
 use crate::db::{now_iso, Db};
 use crate::events::EventBus;
 use crate::session::{self as session_mod, Session};
-use crate::web::AppState;
+use crate::AppState;
 use crate::{backend, events};
 use weaver_core::branch as branch_mod;
 use weaver_core::config as core_config;
@@ -811,7 +811,7 @@ mod tests {
     // -- apply_hook / lifecycle promotion ----------------------------------
 
     use crate::session::{self as session_mod, NewSession};
-    use crate::web::AppState;
+    use crate::AppState;
     use weaver_core::branch as branch_mod;
     use weaver_core::tags;
 

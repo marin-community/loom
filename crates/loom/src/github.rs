@@ -22,7 +22,7 @@ use tokio::sync::OnceCell;
 
 use crate::db::{now_iso, Db};
 use crate::session::{self as session_mod, Session};
-use crate::web::AppState;
+use crate::AppState;
 use crate::{branch as branch_mod, config, events};
 use weaver_core::branch::Branch;
 use weaver_core::github::GithubStatus;

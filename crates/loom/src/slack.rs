@@ -24,7 +24,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use weaver_core::{config, events, tags};
 
-use crate::web::AppState;
+use crate::AppState;
 use crate::Db;
 
 /// Env var / settings key for the app-level token (`xapp-…`). Held outside the

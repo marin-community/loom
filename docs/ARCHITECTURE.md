@@ -45,7 +45,8 @@ other `weaver` subcommand.
 | `crates/weaver-api/` | typed loom REST client + DTOs (`Client`, `*View`/`*Req` types, `endpoint::default_client()` for resolving `$WEAVER_API`/`$LOOM_TOKEN`). Zero server deps (no `axum`, no sqlite driver) — the one cross-process seam `weaver` links against instead of `weaver-core`'s DB layer. |
 | `crates/smartdoc/` | the markdown-convention layer: parse references (`#N`, `artifact:<name>`), project live status into the render. Dependency-free of weaver. See [artifacts.md](artifacts.md). |
 | `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`summary`, `readme`, `status` [read or set level + message], `tag` [`set`/`rm`/`ls` a branch tag], `issue …`, `where`, `log`, `chatlog` [render the agent's conversation transcript], `hook`, `config` [read-only: `get`/`ls`; writes go through `loom config set` or the settings pane]) — every command drives `weaver-api::Client` over HTTP; none touch sqlite |
-| `crates/loom/src/web.rs` | axum routes, request/response types, SSE — **the API surface** (incl. the auth middleware + login/token/user handlers) |
+| `crates/loom/src/web/` | axum routes, request/response types, SSE — **the API surface** (incl. the auth middleware + login/token/user handlers) |
+| `crates/loom/src/lib.rs` | crate boundary plus the shared `AppState` process composition; runtime services and `web/*` consume this state, while the crate does not publicly re-export `weaver-core` storage/domain modules |
 | `crates/loom/src/auth.rs` | authentication core: token/password crypto, the `users`/`api_tokens`/`auth_sessions` tables, the machine-local token, and the GitHub OAuth calls. `axum`-free so it unit-tests directly |
 | `crates/loom/src/client_context.rs` | named endpoint and credential resolution for the `loom` CLI: XDG user config, private credentials, and repository context selection |
 | `crates/loom/src/server.rs` | bind, write `server.json`, spawn bg tasks |
@@ -57,8 +58,12 @@ other `weaver` subcommand.
 | `crates/loom/src/mcp/` | trusted builtin MCP registry and stdio adapters: provider-neutral versioned capability sets, exact permission translation, and the fixed GitHub/messaging/self-history bridges |
 | `crates/loom/src/custom_mcp.rs` | operator-authored MCP definitions: grouped path identities, immutable sqlite revisions, bounded `uv` validation, and exact session-snapshot execution |
 | `crates/loom/src/profile.rs` | named launch policy, including provider-neutral `mcp_access` resolution and the restricted-profile trust boundary |
+| `crates/loom/src/launch.rs` | canonical profile-template and override resolution for previews, creates, clones, and handoffs; returns the exact private launch snapshot plus its transport-safe view |
 | `crates/loom/src/session.rs` | `Session` row + sqlx queries |
+| `crates/loom/src/session_layout.rs` | durable Spaces → Groups → Sessions placement, defaults, ordering, and optimistic mutation revisions; independent of immutable provenance and launch policy |
 | `crates/loom/src/session_manager.rs` | database-backed ownership reconciliation for detached agent/debug supervisors; removes Loom-namespaced runtimes without a live session or active launch-reservation owner |
+| `crates/loom/src/review_delivery.rs` | submitted-review outbox and protected conversation-inbox delivery, including ACP claim fencing and terminal retry/rehome behavior |
+| `crates/loom/src/metadata_assist.rs` | bounded generated task-title and resumption-cue assistance, with explicit profile/privacy eligibility, source fences, and deterministic fallback |
 | `crates/loom/src/chatlog.rs` | conversation log: capture at archive (write the iris `chat.json` + rendered `chat.md` under `session.log_dir`) and serve it for the Conversation tab (`conversation()` — a terminal session's live transcript, an acp session's chat journal mapped to iris (`journal_to_log`), else the capture) |
 | `crates/loom/src/history.rs` | provider-neutral session-history records and bounded paging/literal search across the ACP journal or terminal Iris normalization; optional fields describe only source-supplied data |
 | `crates/loom/src/backend.rs` | the terminal-management seam: every programmatic terminal op (create/has/capture/send/kill/list) drives the session's `tapestry` supervisor. Also the ACP transport seam — `new_relay_session`/`subscribe_relay`/`relay_write`/`relay_ack` drive a session's tapestry **relay** supervisor (a durable JSON-RPC frame spool) |

@@ -44,7 +44,7 @@ use tokio::sync::Mutex;
 
 use crate::events;
 use crate::session as session_mod;
-use crate::web::AppState;
+use crate::AppState;
 use weaver_core::branch as branch_mod;
 use weaver_core::config as core_config;
 use weaver_core::watch::{self as watch_store, Watch};

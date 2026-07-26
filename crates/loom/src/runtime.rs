@@ -6,7 +6,8 @@
 //! creator strings.
 
 use crate::auth::{Grant, Principal};
-use crate::web::{ApiResult, AppState};
+use crate::web::ApiResult;
+use crate::AppState;
 use weaver_api::{CreateReq, SessionView};
 
 #[derive(Debug, Clone)]
