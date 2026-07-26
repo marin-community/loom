@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import type { Anchor, ChangeAnchor, Review, ReviewComment } from '../types';
 import InlineConfirm from './InlineConfirm.vue';
 
@@ -18,6 +18,7 @@ const emit = defineEmits<{
   reanchor: [commentId: number];
   cancelReanchor: [];
   resolution: [commentId: number, resolved: boolean];
+  editing: [payload: { commentId: number; editing: boolean }];
 }>();
 
 const body = ref(props.comment.body);
@@ -28,6 +29,21 @@ const editEl = ref<HTMLButtonElement | null>(null);
 const resolutionEl = ref<HTMLButtonElement | null>(null);
 const closeEl = ref<HTMLButtonElement | null>(null);
 const textareaEl = ref<HTMLTextAreaElement | null>(null);
+watch(editing, (editing) => emit('editing', { commentId: props.comment.id, editing }));
+onBeforeUnmount(() => {
+  if (editing.value) emit('editing', { commentId: props.comment.id, editing: false });
+});
+
+watch(
+  () => props.review.status,
+  (status) => {
+    if (status !== 'draft') {
+      saving.value = false;
+      editing.value = false;
+    }
+  },
+);
+
 const anchorLabel = computed(() => {
   if (props.comment.anchor_kind === 'change') {
     const anchor = props.comment.anchor as ChangeAnchor;

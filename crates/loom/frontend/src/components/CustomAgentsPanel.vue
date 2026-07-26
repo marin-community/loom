@@ -2,6 +2,7 @@
 import { ref, computed } from 'vue';
 import type { CustomAgent, CustomAgentInput } from '../types';
 import { createCustomAgent, updateCustomAgent, deleteCustomAgent } from '../api';
+import { confirmAction } from '../lib/confirmation';
 import ToggleSwitch from './ToggleSwitch.vue';
 
 const props = defineProps<{ agents: CustomAgent[] }>();
@@ -64,18 +65,23 @@ async function save() {
 }
 
 async function remove(agent: CustomAgent) {
-  if (!window.confirm(`Delete the custom agent "${agent.label}" (${agent.name})?`)) return;
-  busy.value = true;
-  error.value = '';
-  try {
-    await deleteCustomAgent(agent.name);
-    if (editing.value === agent.name) editing.value = null;
-    emit('reload');
-  } catch (e) {
-    error.value = (e as Error).message;
-  } finally {
-    busy.value = false;
-  }
+  await confirmAction({
+    title: `Delete custom agent "${agent.label}"?`,
+    description: `${agent.name} will no longer be available for new profiles or sessions.`,
+    confirmLabel: 'Delete agent',
+    danger: true,
+    action: async () => {
+      busy.value = true;
+      error.value = '';
+      try {
+        await deleteCustomAgent(agent.name);
+        if (editing.value === agent.name) editing.value = null;
+        emit('reload');
+      } finally {
+        busy.value = false;
+      }
+    },
+  });
 }
 </script>
 

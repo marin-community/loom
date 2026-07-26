@@ -171,8 +171,8 @@ test.describe('watch panel', () => {
     const doomed = await weaver.seedWatch({ name: 'doomed' });
     await page.goto(`${weaver.baseUrl}/watches/${doomed.id}`);
     await page.getByTestId('watch-tab-config').click();
-    page.on('dialog', (d) => d.accept());
     await page.getByTestId('watch-delete').click();
+    await page.getByTestId('confirm-dialog-confirm').click();
 
     // Selection falls back to the remaining watch.
     await expect(page).toHaveURL(new RegExp(`/watches/${builtin.id}$`));

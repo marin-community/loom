@@ -406,23 +406,16 @@ headlessly is on the spike checklist).
 
 ## The conversation surface
 
-Design direction per [loom-ui.md](../loom-ui.md): a reading room, not a
-dashboard. The governing choice: **typeset dialogue, not chat bubbles.** The
-transcript reads like a printed dialogue — speaker rules over full-measure
-serif prose for the humans and the agent, with the machine's apparatus (tool
-calls, command output, diffs) set as indented mono blocks between prose
-passages, the way a scholarly edition sets its footnotes apart from its
-text. The three typographic voices already encode exactly the distinction
-ACP's update types need: serif = someone said this, mono = the machine did
-this, sans = the interface is asking you something.
+Design direction follows the calm operations workbench in
+[loom-ui.md](../loom-ui.md): **typeset dialogue, not chat bubbles.** Speaker
+rules keep turns scannable, prose remains readable, and tool calls, command
+output, and diffs recede into mono activity folds.
 
 The pane keeps the name **Conversation** — it *is* today's Conversation tab
-with a live spine. For an ACP session the work-area tabs become **Conversation ·
-Overview · Shells · Artifacts**, with Conversation first and default —
-promoting shells to a slim top-level tab is deliberate IA: the Terminal tab's
-reason to be first-class (the agent lived there) is gone, and what remains
-is an occasional escape hatch plus the adapter log. Terminal-backend
-sessions keep today's tab set unchanged.
+with a live spine. ACP sessions expose **Conversation · Shells · Review**, with
+Conversation first. Review contains Artifacts and Changes; Shells is the
+occasional escape hatch. Terminal-backed sessions lead with Agent and share
+Conversation and Review.
 
 ```
 ┌────────────────────────────────────────────────────────┬──────────────┐

@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue';
 import * as api from '../api';
 import type { EnvVar } from '../types';
+import { confirmAction } from '../lib/confirmation';
 import SettingsTableSection from './SettingsTableSection.vue';
 
 // The default profile's environment variables. Other profiles have independent
@@ -71,10 +72,23 @@ const save = (v: EnvVar) =>
   });
 
 const remove = (v: EnvVar) =>
-  act(v.name, async () => {
-    if (!confirm(`Delete ${v.name}? New agent sessions will no longer see it.`)) return;
-    sync(await api.deleteEnv(v.name));
-    notice.value = `Deleted ${v.name}.`;
+  confirmAction({
+    title: `Delete ${v.name} from the default profile?`,
+    description:
+      'New sessions using the default profile will no longer receive this variable. Existing sessions are unchanged.',
+    confirmLabel: 'Delete variable',
+    danger: true,
+    action: async () => {
+      busy.value = v.name;
+      error.value = '';
+      notice.value = '';
+      try {
+        sync(await api.deleteEnv(v.name));
+        notice.value = `Deleted ${v.name}.`;
+      } finally {
+        busy.value = '';
+      }
+    },
   });
 
 const add = () =>

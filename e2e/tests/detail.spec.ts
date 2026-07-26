@@ -57,22 +57,6 @@ test.describe('session detail view', () => {
     await expect(trigger).toBeFocused();
   });
 
-  test('an old Overview deep link falls back to the operational surface', async ({
-    page,
-    weaver,
-  }) => {
-    const s = await weaver.seedSession({
-      goal: 'Legacy bookmark',
-      name: 'legacy-overview',
-    });
-
-    await page.goto(`${weaver.baseUrl}/s/${s.id}?tab=overview`);
-    await expect(page).toHaveURL(`${weaver.baseUrl}/s/${s.id}`);
-    await expect(page.getByRole('button', { name: 'Overview' })).toHaveCount(0);
-    await expect(page.locator('[data-tab="terminal"]')).toHaveText('Agent');
-    await expect(page.locator('[data-term-tab="agent"]')).toBeVisible();
-  });
-
   test('outside dismissal preserves the focus target that was clicked', async ({
     page,
     weaver,

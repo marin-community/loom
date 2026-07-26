@@ -1,5 +1,6 @@
 import { ref } from 'vue';
 import { post, patch, put, del, regenerateSessionTitle, setSessionTitleGeneration } from '../api';
+import { confirmAction } from './confirmation';
 import { AUTO_ARCHIVE_DISABLED_VALUE, AUTO_ARCHIVE_KEY, type LifecycleVerb } from './sessionState';
 
 // The session's write surface, shared by every place that can act on a session:
@@ -116,17 +117,19 @@ export function useSessionActions(
     });
 
   const archive = () =>
-    act('archive', async () => {
-      if (
-        !confirm(
-          'Archive this session? This tears down its terminal and removes the worktree, ' +
-            'but keeps the branch and its weaver history for reference.',
-        )
-      )
-        return;
-      const res = (await post(`/sessions/${getId()}/archive`)) as { branch: string };
-      notice.value = `Archived ${res.branch}.`;
-      await reload();
+    confirmAction({
+      title: 'Archive this session?',
+      description:
+        'Its terminal and worktree will be removed. The branch, conversation, placement, and Weaver history remain recoverable in History.',
+      confirmLabel: 'Archive session',
+      danger: true,
+      action: async () => {
+        error.value = '';
+        notice.value = '';
+        const res = (await post(`/sessions/${getId()}/archive`)) as { branch: string };
+        notice.value = `Archived ${res.branch}.`;
+        await reload();
+      },
     });
 
   const recover = () =>
@@ -137,11 +140,19 @@ export function useSessionActions(
     });
 
   const remove = () =>
-    act('remove', async () => {
-      if (!confirm('Remove this session, its worktree and terminal session?')) return;
-      await del(`/sessions/${getId()}`);
-      if (removed) removed();
-      else await reload();
+    confirmAction({
+      title: 'Permanently remove this session?',
+      description:
+        'Its terminal, worktree, Git branch, conversation, and Weaver history will be deleted. Claimed issues return to the backlog.',
+      confirmLabel: 'Remove session',
+      danger: true,
+      action: async () => {
+        error.value = '';
+        notice.value = '';
+        await del(`/sessions/${getId()}`);
+        if (removed) removed();
+        else await reload();
+      },
     });
 
   // The four lifecycle verbs are only ever reached by name — a caller renders a

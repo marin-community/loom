@@ -297,9 +297,14 @@ test.describe("staged artifact reviews", () => {
       (_, index) =>
         `## Section ${index}\n\nLong review body ${index}: context remains readable while scrolling.\n`,
     );
-    const longDoc = `# Long design\n\n${sections.join("\n")}\nFinal review target at the end.\n`;
+    const longDoc =
+      `# Long design\n\n${sections.join("\n")}\n` +
+      "Final review target at the end. Continue in artifact:other\n";
     await weaver.writeArtifact(session, "design", longDoc, {
       title: "Long design",
+    });
+    await weaver.writeArtifact(session, "other", "# Other artifact\n", {
+      title: "Other artifact",
     });
     await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/design`);
     await page.getByTestId("review-tray-toggle").click();
@@ -383,9 +388,108 @@ test.describe("staged artifact reviews", () => {
         page
           .getByTestId("artifact-scroll")
           .evaluate((element) => element.scrollTop),
-      )
+    )
       .toBeGreaterThan(before.max * 0.7);
     await expect(page.getByText("Final review target")).toBeInViewport();
+
+    const artifactLink = page.getByRole("link", { name: "artifact:other" });
+    await artifactLink.click();
+    await expect(page).toHaveURL(
+      `${weaver.baseUrl}/s/${session.id}/artifacts/other`,
+    );
+    await expect(page.locator(".markdown-body h1")).toContainText(
+      "Other artifact",
+    );
+    await page.goBack();
+    await expect(page).toHaveURL(
+      `${weaver.baseUrl}/s/${session.id}/artifacts/design`,
+    );
+    await expect(page.locator(".markdown-body h1")).toContainText("Long design");
+
+    await selectPhrase(page, "Final review target at the end.");
+    await page.getByTestId("review-selection-button").click();
+    const pendingComposer = page.getByTestId("review-comment-composer");
+    const pendingText = pendingComposer.locator("textarea");
+    await pendingText.fill("Keep this local composer text.");
+    await page.goForward();
+    await expect(page).toHaveURL(
+      `${weaver.baseUrl}/s/${session.id}/artifacts/design`,
+    );
+    await expect(pendingText).toBeFocused();
+    await artifactLink.click();
+    await expect(page).toHaveURL(
+      `${weaver.baseUrl}/s/${session.id}/artifacts/design`,
+    );
+    await expect(pendingText).toBeFocused();
+    await page.getByRole("button", { name: "Source", exact: true }).click();
+    await expect(page.getByTestId("artifact-source-editor")).toHaveCount(0);
+    await expect(pendingText).toBeFocused();
+    await page.getByRole("button", { name: "Edit", exact: true }).click();
+    await expect(page.getByTestId("artifact-source-editor")).toHaveCount(0);
+    await expect(pendingText).toBeFocused();
+    await page.getByTestId("artifact-pop").click();
+    await expect(page.getByTestId("artifact-pop")).toContainText("Pop out");
+    await expect(pendingComposer.getByRole("alert")).toContainText(
+      "Add or cancel this pending comment",
+    );
+    await expect(pendingText).toBeFocused();
+    await pendingComposer.getByRole("button", { name: "Cancel" }).click();
+
+    await selectPhrase(page, "Final review target at the end.");
+    await page.getByTestId("review-selection-button").click();
+    await pendingComposer.locator("textarea").fill("Saved comment body.");
+    await pendingComposer.getByRole("button", { name: "Add pending comment" }).click();
+    const commentCard = page.locator("[data-review-card]").first();
+    await commentCard.getByRole("button", { name: "Edit", exact: true }).click();
+    const commentEdit = commentCard.getByTestId("review-comment-edit");
+    await commentEdit.fill("Unsaved existing-comment edit.");
+    await page.getByTestId("artifact-pop").click();
+    await expect(page.getByTestId("artifact-pop")).toContainText("Pop out");
+    await expect(commentCard.getByRole("alert")).toContainText("Save or cancel this comment edit");
+    await expect(commentEdit).toBeFocused();
+
+    let submitAttempted = false;
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        /\/api\/reviews\/\d+\/submit$/.test(request.url())
+      ) {
+        submitAttempted = true;
+      }
+    });
+    await page.getByTestId("submit-review").click();
+    await expect(commentCard.getByRole("alert")).toContainText(
+      "Save or cancel this comment edit before submitting the review",
+    );
+    await expect(commentEdit).toBeFocused();
+    expect(submitAttempted).toBe(false);
+
+    const reviewsResponse = await page.request.get(
+      `${weaver.baseUrl}/api/sessions/${session.id}/reviews?subject_kind=artifact&subject_key=design`,
+    );
+    const reviews = (await reviewsResponse.json()) as Array<{
+      id: number;
+      draft_revision: number;
+      status: string;
+    }>;
+    const review = reviews.find((candidate) => candidate.status === "draft")!;
+    const submitResponse = await page.request.post(
+      `${weaver.baseUrl}/api/reviews/${review.id}/submit`,
+      {
+        data: {
+          expected_revision: review.draft_revision,
+          acknowledge_outdated: false,
+        },
+      },
+    );
+    expect(submitResponse.ok()).toBe(true);
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(commentEdit).toHaveCount(0);
+    await expect(commentCard.getByRole("button", { name: "Resolve" })).toBeVisible();
+    await page.getByTestId("artifact-pop").click();
+    await expect(page.getByTestId("artifact-pop")).toContainText("Dock");
+    await page.getByTestId("artifact-pop").click();
+    await expect(page.getByTestId("artifact-pop")).toContainText("Pop out");
 
     const patchStarted = deferred();
     const patchGate = deferred();

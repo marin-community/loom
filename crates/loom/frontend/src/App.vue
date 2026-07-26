@@ -2,8 +2,10 @@
 import { computed, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import AppRail from './components/AppRail.vue';
+import ConfirmDialog from './components/ConfirmDialog.vue';
 import StatusBar from './components/StatusBar.vue';
 import { me } from './auth';
+import { acceptConfirmation, cancelConfirmation, confirmation } from './lib/confirmation';
 import { useFleet } from './lib/sessionsStore';
 
 // The workbench shell (docs/loom-ui.md): nav rail on the left, a thin status
@@ -43,10 +45,13 @@ const docTitle = computed(() => {
   if (typeof id === 'string' && route.path.startsWith(`/s/${id}`)) {
     return withSection(sessionById(id)?.branch.title || sessionById(id)?.branch.name);
   }
-  if (route.path === '/' && route.query.view === 'automation') return withSection('Automation');
   return withSection(route.meta.title as string | undefined);
 });
 watch(docTitle, (t) => (document.title = t), { immediate: true });
+watch(
+  () => route.fullPath,
+  () => cancelConfirmation(),
+);
 
 // Views kept alive across navigation so returning is instant — no remount, no
 // refetch flash, no entrance-animation replay. The list views return exactly as
@@ -95,4 +100,15 @@ function cacheKey(route: { path: string; params: Record<string, string | string[
       <StatusBar />
     </div>
   </div>
+  <ConfirmDialog
+    :open="confirmation.open"
+    :title="confirmation.title"
+    :description="confirmation.description"
+    :confirm-label="confirmation.confirmLabel"
+    :danger="confirmation.danger"
+    :busy="confirmation.busy"
+    :error="confirmation.error"
+    @confirm="acceptConfirmation"
+    @cancel="cancelConfirmation"
+  />
 </template>

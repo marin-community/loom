@@ -51,13 +51,13 @@ test.describe("settings · custom agents", () => {
     const agent = page.getByTestId("profile-agent");
     await expect(agent.locator("option", { hasText: "Aider" })).toHaveCount(1);
 
-    // Delete it (accept the confirm dialog); it leaves the list and the picker.
-    page.on("dialog", (d) => d.accept());
+    // Delete it through the shared confirmation; it leaves the list and picker.
     await panel
       .locator("li")
       .filter({ hasText: "Aider" })
       .getByRole("button", { name: "Delete" })
       .click();
+    await page.getByTestId("confirm-dialog-confirm").click();
     await expect(panel.locator("li").filter({ hasText: "Aider" })).toHaveCount(
       0,
     );

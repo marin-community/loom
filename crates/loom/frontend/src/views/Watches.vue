@@ -7,6 +7,7 @@ import OutcomeBadge from '../components/OutcomeBadge.vue';
 import AgentTerminal from '../components/AgentTerminal.vue';
 import ToggleSwitch from '../components/ToggleSwitch.vue';
 import { timeAgo } from '../lib/time';
+import { confirmAction } from '../lib/confirmation';
 import {
   triggerSummary,
   scopeSummary,
@@ -175,19 +176,24 @@ async function run(dry: boolean) {
 async function remove() {
   const w = selected.value;
   if (!w || isBuiltin(w)) return;
-  if (!confirm(`Delete watch "${w.name}"? This can't be undone.`)) return;
-  busy.value = true;
-  error.value = '';
-  try {
-    await del(`/watches/${w.id}`);
-    watches.value = watches.value.filter((x) => x.id !== w.id);
-    selectedId.value = watches.value[0]?.id ?? '';
-    router.replace(selectedId.value ? `/watches/${selectedId.value}` : '/watches');
-  } catch (e) {
-    error.value = (e as Error).message;
-  } finally {
-    busy.value = false;
-  }
+  await confirmAction({
+    title: `Delete watch "${w.name}"?`,
+    description: 'Its configuration and recorded rounds will be permanently removed.',
+    confirmLabel: 'Delete watch',
+    danger: true,
+    action: async () => {
+      busy.value = true;
+      error.value = '';
+      try {
+        await del(`/watches/${w.id}`);
+        watches.value = watches.value.filter((x) => x.id !== w.id);
+        selectedId.value = watches.value[0]?.id ?? '';
+        await router.replace(selectedId.value ? `/watches/${selectedId.value}` : '/watches');
+      } finally {
+        busy.value = false;
+      }
+    },
+  });
 }
 
 // ── Config editing ──────────────────────────────────────────────────────────

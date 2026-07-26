@@ -1,9 +1,8 @@
 import { test, expect } from '../fixtures/weaver';
 
 // Covers the app-icon + UI-cleanup work: a served favicon, consistent
-// "Weaver - <Section>" tab titles, session rows that are real links (right-click
-// / middle-click / ⌘-click open in a new tab), and ⌘/Ctrl+Enter submitting the
-// New Session form.
+// "Weaver - <Section>" tab titles, and session rows that are real links
+// (right-click / middle-click / ⌘-click open in a new tab).
 
 test.describe('app icon (favicon)', () => {
   test('serves the SVG icon and links it from the document head', async ({ page, weaver }) => {
@@ -70,26 +69,5 @@ test.describe('session rows are real links', () => {
     // Left-click still navigates in-place.
     await card.click();
     await expect(page).toHaveURL(new RegExp(`/s/${s.id}$`));
-  });
-});
-
-test.describe('keyboard submit', () => {
-  test('Ctrl/⌘+Enter in the form creates the session', async ({ page, weaver }) => {
-    await page.goto(weaver.baseUrl);
-    await page.getByRole('button', { name: 'New session' }).click();
-
-    await page.getByPlaceholder('owner/name or /home/you/code/project').fill(weaver.repoPath);
-    const goal = page.getByPlaceholder('Add a /health endpoint');
-    await goal.fill('Built with the keyboard');
-
-    // Submit from inside the goal textarea (a plain Enter there is a newline).
-    await expect(page.getByTestId('create-session')).toBeEnabled();
-    await goal.press('Control+Enter');
-
-    await expect(page).toHaveURL(/\/s\/[^/]+$/);
-    await page.locator('[data-rail="sessions"]').click();
-    const card = page.getByTestId('session-card');
-    await expect(card).toHaveCount(1);
-    await expect(card.first()).toContainText('Built with the keyboard');
   });
 });

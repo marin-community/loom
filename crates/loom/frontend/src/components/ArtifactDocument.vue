@@ -314,6 +314,7 @@ const pending = ref<{
 let pendingRange: Range | null = null;
 const pendingBlock = ref(-1);
 const pendingDraft = ref('');
+const editingCommentId = ref<number | null>(null);
 const savingComment = ref(false);
 
 function locateCycle() {
@@ -749,6 +750,7 @@ async function discardDraft() {
     });
     reviews.value = reviews.value.filter((review) => review.id !== reviewId);
     activeId.value = null;
+    editingCommentId.value = null;
     reanchorCommentId.value = null;
     overallNote.value = '';
     summaryDirty.value = false;
@@ -784,6 +786,7 @@ async function retargetDraft() {
 
 async function submitDraft() {
   if (!draft.value || submitting.value) return;
+  if (!(await focusUnsavedComment('submitting the review'))) return;
   submitting.value = true;
   trayError.value = '';
   try {
@@ -850,8 +853,32 @@ async function onCommentEvent(
   await loadReviews();
 }
 
+async function focusUnsavedComment(action: string): Promise<boolean> {
+  if (pending.value) {
+    composerError.value = `Add or cancel this pending comment before ${action}.`;
+    await nextTick();
+    containerEl.value
+      ?.querySelector<HTMLTextAreaElement>('[data-testid="review-comment-composer"] textarea')
+      ?.focus();
+    return false;
+  }
+  const commentId = editingCommentId.value;
+  if (commentId != null && !allEntries.value.some((entry) => entry.comment.id === commentId)) {
+    editingCommentId.value = null;
+  } else if (commentId != null) {
+    commentErrors.value[commentId] = `Save or cancel this comment edit before ${action}.`;
+    await nextTick();
+    containerEl.value
+      ?.querySelector<HTMLTextAreaElement>('[data-testid="review-comment-edit"]')
+      ?.focus();
+    return false;
+  }
+  return true;
+}
+
 async function prepareLayoutSwap(): Promise<boolean> {
   if (layoutBusy.value) return false;
+  if (!(await focusUnsavedComment('changing the layout'))) return false;
   const active = document.activeElement;
   layoutReturnFocus =
     active instanceof HTMLElement && containerEl.value?.contains(active) ? active : null;
@@ -939,6 +966,11 @@ function renderCard(entry: ReviewEntry): VNode {
       onEdit: editComment,
       onReanchor: beginReanchor,
       onCancelReanchor: cancelReanchor,
+      onEditing: (payload: { commentId: number; editing: boolean }) => {
+        if (payload.editing) editingCommentId.value = payload.commentId;
+        else if (editingCommentId.value === payload.commentId) editingCommentId.value = null;
+        if (!payload.editing) commentErrors.value[payload.commentId] = '';
+      },
       onResolution: (commentId: number, resolved: boolean) =>
         setResolution(entry.review, commentId, resolved),
     }),

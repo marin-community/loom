@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue';
 import { createCustomMcp, deleteCustomMcp, getMcpRegistry, updateCustomMcp } from '../api';
 import type { CustomMcp, CustomMcpInput, McpRegistry } from '../types';
+import { confirmAction } from '../lib/confirmation';
 import ToggleSwitch from './ToggleSwitch.vue';
 
 const registry = ref<McpRegistry | null>(null);
@@ -74,18 +75,24 @@ async function save() {
 }
 
 async function remove(server: CustomMcp) {
-  if (!window.confirm(`Delete custom MCP ${server.identity}? Existing sessions keep snapshots.`))
-    return;
-  busy.value = true;
-  try {
-    await deleteCustomMcp(server.identity);
-    await load();
-    if (editing.value === server.identity) editing.value = null;
-  } catch (e) {
-    error.value = (e as Error).message;
-  } finally {
-    busy.value = false;
-  }
+  await confirmAction({
+    title: `Delete custom MCP "${server.identity}"?`,
+    description:
+      'New profile revisions cannot select it. Existing sessions keep their immutable snapshots.',
+    confirmLabel: 'Delete MCP',
+    danger: true,
+    action: async () => {
+      busy.value = true;
+      error.value = '';
+      try {
+        await deleteCustomMcp(server.identity);
+        await load();
+        if (editing.value === server.identity) editing.value = null;
+      } finally {
+        busy.value = false;
+      }
+    },
+  });
 }
 
 onMounted(() => void load().catch((e) => (error.value = (e as Error).message)));
