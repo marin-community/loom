@@ -29,6 +29,8 @@ const editEl = ref<HTMLButtonElement | null>(null);
 const resolutionEl = ref<HTMLButtonElement | null>(null);
 const closeEl = ref<HTMLButtonElement | null>(null);
 const textareaEl = ref<HTMLTextAreaElement | null>(null);
+watch(editing, (editing) => emit('editing', { commentId: props.comment.id, editing }));
+
 const anchorLabel = computed(() => {
   if (props.comment.anchor_kind === 'change') {
     const anchor = props.comment.anchor as ChangeAnchor;
@@ -48,7 +50,6 @@ watch(
     if (saving.value) {
       saving.value = false;
       editing.value = false;
-      emit('editing', { commentId: props.comment.id, editing: false });
       void nextTick(() => editEl.value?.focus());
     }
   },
@@ -62,7 +63,6 @@ watch(
         (editEl.value ?? resolutionEl.value ?? closeEl.value ?? cardEl.value)?.focus();
       });
     } else {
-      if (editing.value) emit('editing', { commentId: props.comment.id, editing: false });
       editing.value = false;
       saving.value = false;
     }
@@ -91,7 +91,6 @@ watch(
 
 function beginEdit() {
   editing.value = true;
-  emit('editing', { commentId: props.comment.id, editing: true });
   void nextTick(() => textareaEl.value?.focus());
 }
 
@@ -110,7 +109,6 @@ function cancelEdit() {
   body.value = props.comment.body;
   saving.value = false;
   editing.value = false;
-  emit('editing', { commentId: props.comment.id, editing: false });
   void nextTick(() => editEl.value?.focus());
 }
 </script>
