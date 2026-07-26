@@ -335,12 +335,14 @@ pub(crate) async fn session_view(
         None
     } else {
         Some(
-            serde_json::from_str(&session.launch_snapshot).map_err(|error| {
-                AppError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("invalid session launch snapshot: {error}"),
-                )
-            })?,
+            crate::launch::deserialize_snapshot(&session.launch_snapshot)
+                .map_err(|error| {
+                    AppError::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("invalid session launch snapshot: {error}"),
+                    )
+                })?
+                .view,
         )
     };
     Ok(SessionView {

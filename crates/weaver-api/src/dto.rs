@@ -612,22 +612,8 @@ pub struct ResolvedLaunchPolicyView {
     pub mcp_policy: SessionMcpPolicyView,
 }
 
-/// Exact non-secret command/runtime definition accepted for a custom agent.
-/// Builtin agents omit this field. Persisting it makes adopt/recover use the
-/// reviewed runtime even if the mutable registry is later edited or deleted.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResolvedCustomAgentView {
-    pub name: String,
-    pub label: String,
-    pub setup: String,
-    pub launch: String,
-    pub resume: String,
-    pub reports_status: bool,
-    pub protocol: String,
-}
-
-/// Concrete non-secret immutable launch snapshot returned by preview and
-/// stored with the created session (or replacement handoff runtime).
+/// Concrete source-redacted immutable launch snapshot returned by preview and
+/// exposed on the created session (or replacement handoff runtime).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedLaunchView {
     pub selection: LaunchSelection,
@@ -641,8 +627,6 @@ pub struct ResolvedLaunchView {
     pub protocol: String,
     pub mode: String,
     pub class: String,
-    #[serde(default)]
-    pub custom_agent: Option<ResolvedCustomAgentView>,
     pub locked_fields: Vec<String>,
     pub provenance: LaunchProvenanceView,
     pub capacity: LaunchCapacityView,
