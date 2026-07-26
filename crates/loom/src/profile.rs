@@ -1642,25 +1642,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clone_copies_environment_inside_created_profile() {
+    async fn clone_composes_environment_inside_created_profile() {
         let db = crate::db::connect_in_memory().await.unwrap();
         env_set(&db, DEFAULT_PROFILE, "TOKEN", "secret")
+            .await
+            .unwrap();
+        env_set(&db, DEFAULT_PROFILE, "REMOVE_ME", "discarded")
             .await
             .unwrap();
         let source = get(&db, DEFAULT_PROFILE).await.unwrap().unwrap();
         let mut clone = source.as_input().unwrap();
         clone.name = "default-copy".to_string();
+        let prepared = prepare_input(&db, &clone).await.unwrap();
 
-        let outcome = create_clone(&db, DEFAULT_PROFILE, source.revision, &clone, true)
-            .await
-            .unwrap();
+        let outcome = create_clone_prepared(
+            &db,
+            DEFAULT_PROFILE,
+            source.revision,
+            prepared,
+            &weaver_api::CloneProfileEnvironmentReq {
+                inherit: true,
+                remove: vec!["REMOVE_ME".to_string()],
+                set: vec![
+                    weaver_api::ProfileEnvMutationReq {
+                        name: "TOKEN".to_string(),
+                        value: Some("replaced".to_string()),
+                        secret_ref: None,
+                    },
+                    weaver_api::ProfileEnvMutationReq {
+                        name: "NEW_SECRET".to_string(),
+                        value: None,
+                        secret_ref: Some("projects/acme/secrets/new/versions/latest".to_string()),
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
         assert!(matches!(outcome, CloneProfileOutcome::Created(_)));
         assert_eq!(
             env_get(&db, "default-copy", "TOKEN")
                 .await
                 .unwrap()
                 .as_deref(),
-            Some("secret")
+            Some("replaced")
+        );
+        assert!(env_get(&db, "default-copy", "REMOVE_ME")
+            .await
+            .unwrap()
+            .is_none());
+        let metadata = env_meta(&db, "default-copy").await.unwrap();
+        assert_eq!(
+            metadata
+                .iter()
+                .find(|entry| entry.name == "NEW_SECRET")
+                .and_then(|entry| entry.secret_ref.as_deref()),
+            Some("projects/acme/secrets/new/versions/latest")
         );
     }
 

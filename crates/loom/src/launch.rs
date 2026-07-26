@@ -478,6 +478,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn profile_capacity_resolution_counts_only_active_sessions() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let source = crate::profile::get(&db, "default").await.unwrap().unwrap();
+        let mut input = source.as_input().unwrap();
+        input.name = "one-at-a-time".to_string();
+        input.max_concurrent = 1;
+        crate::profile::upsert(&db, &input).await.unwrap();
+        let branch = weaver_core::branch::upsert(&db, "/repo/one", "weaver/active", "main")
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions
+             (id, branch_id, work_dir, term_session, status, profile)
+             VALUES ('active', ?, '/repo/one', 'term-active', 'running', 'one-at-a-time')",
+        )
+        .bind(&branch.id)
+        .execute(&db)
+        .await
+        .unwrap();
+        let selection = LaunchSelection {
+            profile: "one-at-a-time".to_string(),
+            ..Default::default()
+        };
+
+        let full = resolve(&db, &selection, &ResolveOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(full.view.capacity.active, 1);
+        assert_eq!(full.view.capacity.maximum, Some(1));
+        assert_eq!(full.view.capacity.available, Some(0));
+        assert!(!full.view.capacity.allowed);
+        assert!(!full.view.valid);
+
+        sqlx::query("UPDATE sessions SET status = 'archived' WHERE id = 'active'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let available = resolve(&db, &selection, &ResolveOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(available.view.capacity.active, 0);
+        assert!(available.view.capacity.allowed);
+        assert!(available.view.valid);
+    }
+
+    #[tokio::test]
     async fn empty_profile_selectors_report_agent_default_provenance() {
         let db = crate::db::connect_in_memory().await.unwrap();
         sqlx::query(

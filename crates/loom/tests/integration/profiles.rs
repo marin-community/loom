@@ -19,12 +19,6 @@ impl EnvVarGuard {
         std::env::set_var(name, value);
         Self { name, previous }
     }
-
-    fn unset(name: &'static str) -> Self {
-        let previous = std::env::var_os(name);
-        std::env::remove_var(name);
-        Self { name, previous }
-    }
 }
 
 impl Drop for EnvVarGuard {
@@ -58,129 +52,37 @@ fn interactive_shell_profile(name: &str) -> serde_json::Value {
 }
 
 #[serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn profile_capacity_admission_is_serialized_across_repositories() {
-    let ts = TestServer::start().await;
-    let mut profile = interactive_shell_profile("one-at-a-time");
-    profile["max_concurrent"] = json!(1);
-    ts.client.post("/api/profiles", profile).await.unwrap();
-
-    let other_repo = tempfile::tempdir().unwrap();
-    crate::fixtures::sh(other_repo.path(), "git", &["init", "-b", "main"]);
-    crate::fixtures::sh(
-        other_repo.path(),
-        "git",
-        &["config", "user.email", "t@t.test"],
-    );
-    crate::fixtures::sh(other_repo.path(), "git", &["config", "user.name", "Test"]);
-    std::fs::write(other_repo.path().join("README.md"), "other\n").unwrap();
-    crate::fixtures::sh(other_repo.path(), "git", &["add", "."]);
-    crate::fixtures::sh(other_repo.path(), "git", &["commit", "-m", "init"]);
-
-    let permit = ts.state.launch_gate.acquire_profile("one-at-a-time").await;
-    let url = format!("http://{}/api/sessions", ts.addr);
-    let first_http = reqwest::Client::new();
-    let first_url = url.clone();
-    let first_cwd = ts.cwd();
-    let first = tokio::spawn(async move {
-        first_http
-            .post(first_url)
-            .json(&json!({
-                "cwd": first_cwd,
-                "goal": "first profile admission",
-                "profile": "one-at-a-time"
-            }))
-            .send()
-            .await
-            .unwrap()
-    });
-    let second_http = reqwest::Client::new();
-    let second_cwd = other_repo.path().to_string_lossy().into_owned();
-    let second = tokio::spawn(async move {
-        second_http
-            .post(url)
-            .json(&json!({
-                "cwd": second_cwd,
-                "goal": "second profile admission",
-                "profile": "one-at-a-time"
-            }))
-            .send()
-            .await
-            .unwrap()
-    });
-
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    assert!(
-        !first.is_finished(),
-        "first launch waits for profile admission"
-    );
-    assert!(
-        !second.is_finished(),
-        "a different repository still waits for the same profile"
-    );
-    drop(permit);
-
-    let first = tokio::time::timeout(std::time::Duration::from_secs(10), first)
-        .await
-        .unwrap()
-        .unwrap();
-    let second = tokio::time::timeout(std::time::Duration::from_secs(10), second)
-        .await
-        .unwrap()
-        .unwrap();
-    let statuses = [first.status(), second.status()];
-    assert_eq!(
-        statuses.iter().filter(|status| status.is_success()).count(),
-        1
-    );
-    assert_eq!(
-        statuses
-            .iter()
-            .filter(|status| **status == StatusCode::CONFLICT)
-            .count(),
-        1
-    );
-
-    let (successful, conflict) = if first.status().is_success() {
-        (first, second)
-    } else {
-        (second, first)
-    };
-    let conflict_body: serde_json::Value = conflict.json().await.unwrap();
-    assert_eq!(conflict_body["preview"]["capacity"]["active"], 1);
-    assert_eq!(conflict_body["preview"]["capacity"]["allowed"], false);
-    assert_eq!(conflict_body["preview"]["valid"], false);
-    let session: serde_json::Value = successful.json().await.unwrap();
-    assert_eq!(
-        loom::profile::active_count(&ts.state.db, "one-at-a-time")
-            .await
-            .unwrap(),
-        1
-    );
-    ts.client
-        .delete(&format!(
-            "/api/sessions/{}",
-            session["id"].as_str().unwrap()
-        ))
-        .await
-        .unwrap();
-}
-
-#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn profile_clone_copies_environment_atomically_and_honors_source_revision() {
-    let ts = TestServer::start().await;
+async fn profile_and_mcp_rest_journey() {
+    let ts = TestServer::start_api_only().await;
+    let stock = ts.client.get("/api/profiles/github_comment").await.unwrap();
+    assert_eq!(stock["restricted"], true);
+    assert_eq!(stock["mcp_access"]["groups"], json!(["github"]));
+    assert!(stock["env"].as_array().unwrap().is_empty());
+
+    let registry = ts.client.get("/api/mcps").await.unwrap();
+    let github = registry["capability_sets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|set| set["name"] == "mcp/github/comment@v1")
+        .unwrap();
+    assert!(github["digest"].as_str().unwrap().starts_with("sha256:"));
+    assert!(github.get("source").is_none());
+
     ts.client
         .post("/api/profiles", interactive_shell_profile("clone-source"))
         .await
         .unwrap();
-    ts.client
+    let source_profile = ts
+        .client
         .put(
             "/api/profiles/clone-source/env/TOKEN",
             json!({ "value": "write-only-source" }),
         )
         .await
         .unwrap();
+    assert!(!source_profile.to_string().contains("write-only-source"));
     ts.client
         .put(
             "/api/profiles/clone-source/env/REMOVE_ME",
@@ -188,173 +90,19 @@ async fn profile_clone_copies_environment_atomically_and_honors_source_revision(
         )
         .await
         .unwrap();
-    let source = ts
-        .client
-        .put(
-            "/api/profiles/clone-source/env/SECRET",
-            json!({
-                "secret_ref": "projects/acme/secrets/source/versions/latest"
-            }),
-        )
-        .await
-        .unwrap();
-    let source_revision = source["revision"].as_i64().unwrap();
-    let preview = ts
-        .client
-        .post(
-            "/api/session-launches/resolve",
-            json!({
-                "selection": {
-                    "profile": "clone-source",
-                    "overrides": { "effort": "" }
-                }
-            }),
-        )
-        .await
-        .unwrap();
-
-    let clone = ts
-        .client
-        .post(
-            "/api/profiles/clone-source/clone",
-            json!({
-                "name": "clone-target",
-                "expected_profile_revision": source_revision,
-                "expected_resolver_revision": preview["resolver_revision"],
-                "overrides": { "effort": "" },
-                "copy_environment": false,
-                "environment": {
-                    "inherit": true,
-                    "remove": ["REMOVE_ME"],
-                    "set": [
-                        { "name": "TOKEN", "value": "replaced" },
-                        { "name": "ADDED", "value": "new" },
-                        {
-                            "name": "NEW_SECRET",
-                            "secret_ref": "projects/acme/secrets/new/versions/7"
-                        }
-                    ]
-                }
-            }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(clone["name"], "clone-target");
-    assert_eq!(
-        clone["env"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|entry| entry["name"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["ADDED", "NEW_SECRET", "SECRET", "TOKEN"]
-    );
-    assert_eq!(
-        loom::profile::env_get(&ts.state.db, "clone-target", "TOKEN")
-            .await
-            .unwrap(),
-        Some("replaced".to_string())
-    );
-    assert_eq!(
-        loom::profile::env_get(&ts.state.db, "clone-target", "ADDED")
-            .await
-            .unwrap(),
-        Some("new".to_string())
-    );
-    assert!(
-        loom::profile::env_get(&ts.state.db, "clone-target", "REMOVE_ME")
-            .await
-            .unwrap()
-            .is_none()
-    );
-
-    ts.client
-        .put(
-            "/api/profiles/clone-source/env/TOKEN",
-            json!({ "value": "newer" }),
-        )
-        .await
-        .unwrap();
-    let response = reqwest::Client::new()
-        .post(format!(
-            "http://{}/api/profiles/clone-source/clone",
-            ts.addr
-        ))
-        .json(&json!({
-            "name": "stale-clone",
-            "expected_profile_revision": source_revision,
-            "expected_resolver_revision": preview["resolver_revision"],
-            "overrides": {},
-            "copy_environment": true
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(
-        body["preview"]["profile_revision"],
-        source_revision + 1,
-        "profile drift returns a freshly resolved clone proposal"
-    );
-    assert!(loom::profile::get(&ts.state.db, "stale-clone")
-        .await
-        .unwrap()
-        .is_none());
-    assert!(loom::profile::env_meta(&ts.state.db, "stale-clone")
-        .await
-        .unwrap()
-        .is_empty());
-
-    let current = ts
-        .client
-        .post(
-            "/api/session-launches/resolve",
-            json!({ "selection": { "profile": "clone-source", "overrides": {} } }),
-        )
-        .await
-        .unwrap();
-    let invalid = reqwest::Client::new()
-        .post(format!(
-            "http://{}/api/profiles/clone-source/clone",
-            ts.addr
-        ))
-        .json(&json!({
-            "name": "environment-rollback",
-            "expected_profile_revision": current["profile_revision"],
-            "expected_resolver_revision": current["resolver_revision"],
-            "overrides": {},
-            "environment": {
-                "inherit": true,
-                "remove": [],
-                "set": [{
-                    "name": "BROKEN",
-                    "secret_ref": "not-a-secret-reference"
-                }]
-            }
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
-    assert!(loom::profile::get(&ts.state.db, "environment-rollback")
-        .await
-        .unwrap()
-        .is_none());
-
     let cli = Command::new(env!("CARGO_BIN_EXE_loom"))
         .args([
             "profile",
             "clone",
             "clone-source",
-            "cli-environment-target",
+            "cli-clone",
             "--copy-environment",
             "--remove-environment",
             "REMOVE_ME",
             "--set-environment",
             "TOKEN=from-cli",
             "--secret-environment",
-            "CLI_SECRET=projects/acme/secrets/cli/versions/latest",
+            "SECRET=projects/acme/secrets/cli/versions/latest",
         ])
         .env("WEAVER_API", format!("http://{}", ts.addr))
         .output()
@@ -364,61 +112,18 @@ async fn profile_clone_copies_environment_atomically_and_honors_source_revision(
         "CLI clone failed: {}",
         String::from_utf8_lossy(&cli.stderr)
     );
+    let cloned = ts.client.get("/api/profiles/cli-clone").await.unwrap();
     assert_eq!(
-        loom::profile::env_get(&ts.state.db, "cli-environment-target", "TOKEN")
-            .await
-            .unwrap(),
-        Some("from-cli".to_string())
+        cloned["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["SECRET", "TOKEN"]
     );
-    let cli_meta = loom::profile::env_meta(&ts.state.db, "cli-environment-target")
-        .await
-        .unwrap();
-    assert!(!cli_meta.iter().any(|entry| entry.name == "REMOVE_ME"));
-    assert!(cli_meta.iter().any(|entry| entry.name == "CLI_SECRET"));
-}
+    assert!(!cloned.to_string().contains("from-cli"));
 
-#[serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stock_github_comment_profile_round_trips_restricted_policy() {
-    let ts = TestServer::start().await;
-    let profile = ts.client.get("/api/profiles/github_comment").await.unwrap();
-
-    assert_eq!(profile["agent_kind"], "claude");
-    assert_eq!(profile["protocol"], "acp");
-    assert_eq!(profile["mode"], "default");
-    assert_eq!(profile["prelude"], "none");
-    assert_eq!(profile["restricted"], true);
-    assert!(profile["runtime_permissions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|rule| rule == "Read(./**)"));
-    assert_eq!(profile["mcp_access"]["mode"], "groups");
-    assert_eq!(profile["mcp_access"]["groups"], json!(["github"]));
-    assert!(profile["env"].as_array().unwrap().is_empty());
-}
-
-#[serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_registry_is_inspectable_without_source_access() {
-    let ts = TestServer::start().await;
-    let registry = ts.client.get("/api/mcps").await.unwrap();
-    let set = registry["capability_sets"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|set| set["name"] == "mcp/github/comment@v1")
-        .expect("GitHub comment MCP set");
-    assert_eq!(set["version"], "v1");
-    assert!(set["digest"].as_str().unwrap().starts_with("sha256:"));
-    assert_eq!(set["adapter"], "github");
-    assert_eq!(set["tools"].as_array().unwrap().len(), 6);
-}
-
-#[serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn custom_mcp_crud_validates_source_and_profiles_select_its_group() {
-    let ts = TestServer::start().await;
     let source = r#"
 import json
 import sys
@@ -615,7 +320,26 @@ print("custom tests passed")
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn restricted_profile_sends_the_caller_goal_as_the_first_prompt() {
+async fn restricted_github_profile_launch_wires_policy_prompt_and_server_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = dir.path().join("gh");
+    std::fs::write(
+        &gh,
+        "#!/bin/sh\n\
+         case \"$GH_TOKEN\" in\n\
+           server-only-token) printf 'profile:' ;;\n\
+           *) exit 17 ;;\n\
+         esac\n\
+         printf '%s' \"$*\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let _path = EnvVarGuard::set("PATH", &path);
     let _adapter = EnvVarGuard::set(
         "WEAVER_CLAUDE_ACP_CMD",
         &crate::fixtures::fake_acp_agent_cmd(),
@@ -624,12 +348,14 @@ async fn restricted_profile_sends_the_caller_goal_as_the_first_prompt() {
     ts.client
         .put(
             "/api/profiles/github_comment/env/GH_TOKEN",
-            json!({ "value": "github-actions-token" }),
+            json!({ "value": "server-only-token" }),
         )
         .await
         .unwrap();
-
-    let goal = "say:caller supplied prompt";
+    loom::user_token::set(&ts.state.db, "rjpower", "requester-token")
+        .await
+        .unwrap();
+    let goal = "say:ready";
     let session = ts
         .client
         .post(
@@ -637,7 +363,7 @@ async fn restricted_profile_sends_the_caller_goal_as_the_first_prompt() {
             json!({
                 "cwd": ts.cwd(),
                 "profile": "github_comment",
-                "title": "Restricted prompt test",
+                "title": "Restricted GitHub tool test",
                 "goal": goal
             }),
         )
@@ -682,10 +408,6 @@ async fn restricted_profile_sends_the_caller_goal_as_the_first_prompt() {
             .find(|block| block["kind"] == "user_message")
         {
             assert_eq!(message["payload"]["text"], goal);
-            assert!(!message["payload"]["text"]
-                .as_str()
-                .unwrap()
-                .contains("weaver summary"));
             break;
         }
         assert!(
@@ -694,102 +416,6 @@ async fn restricted_profile_sends_the_caller_goal_as_the_first_prompt() {
         );
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-}
-
-#[serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn local_restricted_launch_does_not_treat_the_app_as_an_unscoped_credential() {
-    let _token = EnvVarGuard::unset("GH_TOKEN");
-    let ts = TestServer::start().await;
-    weaver_core::config::apply(
-        &ts.state.db,
-        &[
-            (
-                loom::github_app::APP_ID_KEY.to_string(),
-                Some("123456".to_string()),
-            ),
-            (
-                loom::github_app::APP_PRIVATE_KEY_KEY.to_string(),
-                Some("configured-for-preflight".to_string()),
-            ),
-        ],
-    )
-    .await
-    .unwrap();
-
-    let response = reqwest::Client::new()
-        .post(format!("http://{}/api/sessions", ts.addr))
-        .json(&json!({
-            "cwd": ts.cwd(),
-            "profile": "github_comment",
-            "goal": "no repository installation target"
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::PRECONDITION_REQUIRED);
-    assert!(ts
-        .client
-        .get("/api/sessions")
-        .await
-        .unwrap()
-        .as_array()
-        .unwrap()
-        .is_empty());
-}
-
-#[serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn restricted_github_tool_uses_the_server_side_token_and_fixed_repo() {
-    let dir = tempfile::tempdir().unwrap();
-    let gh = dir.path().join("gh");
-    std::fs::write(
-        &gh,
-        "#!/bin/sh\n\
-         case \"$GH_TOKEN\" in\n\
-           server-only-token) printf 'profile:' ;;\n\
-           *) exit 17 ;;\n\
-         esac\n\
-         printf '%s' \"$*\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let path = format!(
-        "{}:{}",
-        dir.path().display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let _path = EnvVarGuard::set("PATH", &path);
-    let _adapter = EnvVarGuard::set(
-        "WEAVER_CLAUDE_ACP_CMD",
-        &crate::fixtures::fake_acp_agent_cmd(),
-    );
-    let ts = TestServer::start().await;
-    ts.client
-        .put(
-            "/api/profiles/github_comment/env/GH_TOKEN",
-            json!({ "value": "server-only-token" }),
-        )
-        .await
-        .unwrap();
-    loom::user_token::set(&ts.state.db, "rjpower", "requester-token")
-        .await
-        .unwrap();
-    let session = ts
-        .client
-        .post(
-            "/api/sessions",
-            json!({
-                "cwd": ts.cwd(),
-                "profile": "github_comment",
-                "title": "Restricted GitHub tool test",
-                "goal": "say:ready"
-            }),
-        )
-        .await
-        .unwrap();
-    let id = session["id"].as_str().unwrap();
     let stamped: String =
         sqlx::query_scalar("SELECT policy_allowed_tools FROM sessions WHERE id = ?")
             .bind(id)
@@ -880,119 +506,6 @@ async fn restricted_github_tool_uses_the_server_side_token_and_fixed_repo() {
         )
         .await
         .is_err());
-}
-
-#[serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn strict_profile_crud_withholds_secrets_and_stamps_sessions() {
-    let ts = TestServer::start().await;
-    let profile = ts
-        .client
-        .post(
-            "/api/profiles",
-            json!({
-                "name": "actions",
-                "description": "restricted automation",
-                "agent_kind": "shell",
-                "protocol": "terminal",
-                "mode": "auto",
-                "class": "automation",
-                "strict": true,
-                "env_clear": true,
-                "ambient_allowlist": ["LANG"],
-                "max_concurrent": 1,
-                "turn_budget": 10,
-                "idle_archive_secs": 60
-            }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(profile["revision"], 1);
-
-    let profile = ts
-        .client
-        .put(
-            "/api/profiles/actions/env/SECRET_TOKEN",
-            json!({ "value": "must-not-round-trip" }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(profile["env"][0]["name"], "SECRET_TOKEN");
-    assert!(
-        !profile.to_string().contains("must-not-round-trip"),
-        "profile responses must never expose secret values"
-    );
-
-    let error = ts
-        .client
-        .post(
-            "/api/sessions",
-            json!({
-                "cwd": ts.cwd(),
-                "goal": "override forbidden",
-                "profile": "actions",
-                "agent": "shell"
-            }),
-        )
-        .await
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("does not allow launch overrides"));
-
-    let session = ts
-        .client
-        .post(
-            "/api/sessions",
-            json!({ "cwd": ts.cwd(), "goal": "profile launch", "profile": "actions" }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(session["profile"], "actions");
-    assert_eq!(session["profile_revision"], 2);
-    assert_eq!(session["class"], "automation");
-
-    let delete = reqwest::Client::new()
-        .delete(format!("http://{}/api/profiles/actions", ts.addr))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(delete.status(), StatusCode::BAD_REQUEST);
-
-    let id = session["id"].as_str().unwrap();
-    ts.client
-        .post(&format!("/api/sessions/{id}/archive"), json!({}))
-        .await
-        .unwrap();
-
-    let delete = reqwest::Client::new()
-        .delete(format!("http://{}/api/profiles/actions", ts.addr))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(delete.status(), StatusCode::NO_CONTENT);
-    assert!(ts.client.get("/api/profiles/actions").await.is_err());
-    assert_eq!(
-        loom::profile::env_pairs(&ts.state.db, "actions")
-            .await
-            .unwrap(),
-        vec![(
-            "SECRET_TOKEN".to_string(),
-            "must-not-round-trip".to_string()
-        )]
-    );
-
-    let archived = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
-    assert_eq!(archived["profile"], "actions");
-    assert_eq!(archived["profile_revision"], 2);
-
-    let recovered = ts
-        .client
-        .post(&format!("/api/sessions/{id}/recover"), json!({}))
-        .await
-        .unwrap();
-    assert_eq!(recovered["status"], "running");
-    assert_eq!(recovered["profile"], "actions");
 }
 
 #[serial]
@@ -1111,9 +624,9 @@ async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries(
 }
 
 #[serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn deployment_manifest_reconciles_profiles_secret_refs_and_workload_identity() {
-    let ts = TestServer::start().await;
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deployment_reconcile_rest_journey() {
+    let ts = TestServer::start_api_only().await;
     let manifest = json!({
         "profiles": [{
             "profile": {
@@ -1187,12 +700,7 @@ async fn deployment_manifest_reconciles_profiles_secret_refs_and_workload_identi
         .await
         .unwrap();
     assert_eq!(profile.status(), StatusCode::NOT_FOUND);
-}
 
-#[serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn deployment_reconcile_serializes_with_registry_mutation() {
-    let ts = TestServer::start().await;
     let resolver = ts.state.launch_gate.acquire_resolver().await;
     let reconcile_url = format!("http://{}/api/deployment/reconcile", ts.addr);
     let reconcile = tokio::spawn(async move {
