@@ -35,6 +35,7 @@ const MAX_PATCH_BYTES: usize = 2 * 1024 * 1024;
 const MAX_UNTRACKED_RENDER_BYTES: u64 = 512 * 1024;
 const MAX_IDENTITY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EXCLUDE_BYTES: u64 = 256 * 1024;
+const MAX_SAFE_CONFIG_BYTES: usize = 4 * 1024;
 const MAX_INDEX_BYTES: u64 = 16 * 1024 * 1024;
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const GIT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
@@ -286,6 +287,64 @@ async fn bootstrap_text(work_dir: &Path, args: &[&str]) -> Result<Option<String>
     Ok((!value.is_empty()).then_some(value))
 }
 
+fn git_bool(value: &str) -> Option<&'static str> {
+    match value {
+        "" | "1" | "yes" | "on" | "true" => Some("true"),
+        "0" | "no" | "off" | "false" => Some("false"),
+        _ => None,
+    }
+}
+
+async fn bootstrap_safe_config(work_dir: &Path) -> Result<String> {
+    let (capture, success) = capture_git_status(
+        hardened_git(work_dir),
+        &[
+            "config",
+            "--includes",
+            "--null",
+            "--get-regexp",
+            r"^core\.(filemode|ignorecase|symlinks|precomposeunicode|autocrlf|eol|safecrlf)$",
+        ],
+        MAX_SAFE_CONFIG_BYTES,
+    )
+    .await?;
+    if capture.timed_out || capture.truncated || (!success && !capture.bytes.is_empty()) {
+        bail!("safe Git configuration could not be bounded");
+    }
+    let mut values = BTreeMap::new();
+    for record in nul_records(&capture.bytes) {
+        let record = std::str::from_utf8(record).context("safe Git configuration was not UTF-8")?;
+        let (key, value) = record
+            .split_once('\n')
+            .context("safe Git configuration record was malformed")?;
+        let key = key.to_ascii_lowercase();
+        let value = value.to_ascii_lowercase();
+        let normalized = match key.as_str() {
+            "core.filemode" | "core.ignorecase" | "core.symlinks" | "core.precomposeunicode" => {
+                git_bool(&value)
+            }
+            "core.autocrlf" if value == "input" => Some("input"),
+            "core.autocrlf" => git_bool(&value),
+            "core.eol" if matches!(value.as_str(), "lf" | "crlf" | "native") => {
+                Some(value.as_str())
+            }
+            "core.safecrlf" if value == "warn" => Some("warn"),
+            "core.safecrlf" => git_bool(&value),
+            _ => None,
+        }
+        .with_context(|| format!("invalid safe Git configuration {key}"))?;
+        values.insert(key, normalized.to_string());
+    }
+    let mut config = String::new();
+    for (key, value) in values {
+        config.push_str(key.strip_prefix("core.").expect("validated core key"));
+        config.push_str(" = ");
+        config.push_str(&value);
+        config.push('\n');
+    }
+    Ok(config)
+}
+
 fn absolute_git_path(work_tree: &Path, path: String) -> PathBuf {
     let path = PathBuf::from(path);
     if path.is_absolute() {
@@ -337,17 +396,22 @@ impl GitBoundary {
             bootstrap_text(&work_tree, &["rev-parse", "--show-object-format=storage"])
                 .await?
                 .context("Git object format is unavailable")?;
-        let config = match object_format.as_str() {
-            "sha1" => "[core]\nrepositoryformatversion = 0\nbare = false\n",
-            "sha256" => {
-                "[core]\nrepositoryformatversion = 1\nbare = false\n\
-                         [extensions]\nobjectFormat = sha256\n"
-            }
+        let mut config = match object_format.as_str() {
+            "sha1" => "[core]\nrepositoryformatversion = 0\nbare = false\n".to_string(),
+            "sha256" => "[core]\nrepositoryformatversion = 1\nbare = false\n".to_string(),
             format => bail!("unsupported Git object format {format}"),
         };
+        config.push_str(&bootstrap_safe_config(&work_tree).await?);
+        if object_format == "sha256" {
+            config.push_str("[extensions]\nobjectFormat = sha256\n");
+        }
         let common_dir = tempfile::tempdir().context("creating bounded Git common directory")?;
         let info_dir = common_dir.path().join("info");
         std::fs::create_dir(&info_dir).context("creating bounded Git info directory")?;
+        std::fs::create_dir_all(common_dir.path().join("refs/heads"))
+            .context("creating bounded Git heads directory")?;
+        std::fs::create_dir(common_dir.path().join("refs/tags"))
+            .context("creating bounded Git tags directory")?;
         std::fs::write(common_dir.path().join("config"), config)
             .context("writing bounded Git configuration")?;
         std::fs::write(info_dir.join("attributes"), b"* !filter !diff\n")
