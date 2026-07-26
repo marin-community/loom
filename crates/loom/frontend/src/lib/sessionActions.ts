@@ -2,7 +2,6 @@ import { ref } from 'vue';
 import {
   archiveSession,
   clearSessionTag,
-  del,
   patch,
   post,
   put,
@@ -113,7 +112,7 @@ export function useSessionActions(
         });
         notice.value = 'Automatic archive disabled for this session.';
       } else {
-        await del(path);
+        await clearSessionTag(getId(), AUTO_ARCHIVE_KEY);
         notice.value = 'Automatic archive enabled for this session.';
       }
       await reload();

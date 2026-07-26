@@ -1,6 +1,6 @@
 use axum::{extract::State, Json};
 use serde_json::{json, Value};
-use weaver_api::{SettingView, SettingsEnvelope};
+use weaver_api::SettingsEnvelope;
 
 use crate::config;
 use crate::db::Db;
@@ -16,7 +16,7 @@ async fn settings_envelope(db: &Db) -> ApiResult<Json<SettingsEnvelope>> {
     let settings = config::describe(db)
         .await?
         .into_iter()
-        .map(SettingView::from)
+        .map(|setting| setting.into())
         .collect();
     Ok(Json(SettingsEnvelope { settings }))
 }
