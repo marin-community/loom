@@ -1,12 +1,8 @@
 //! Bounded metadata assistance for task labels and on-return conversation cues.
-//!
-//! This is deliberately one small service over the existing profile-aware
-//! transient ACP prompt. It has no scheduler: launch may detach one title
-//! refresh, while resumption cues run only through an explicit ensure request.
 
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -133,6 +129,8 @@ struct MetadataSource {
     source_profile: Option<ProfileIdentity>,
     created_by: Option<String>,
     creator_credential: (bool, Option<String>),
+    repo_env_generation: Vec<(String, String)>,
+    repo_config_generation: Option<(u64, u64)>,
     metadata_profile_name: String,
     metadata_profile: Option<ProfileIdentity>,
 }
@@ -281,6 +279,26 @@ async fn metadata_source(
         }
         None => (false, None),
     };
+    let repo_env_generation = repo_env::list(db, &branch.repo_root)
+        .await?
+        .into_iter()
+        .map(|entry| (entry.name, entry.updated_at))
+        .collect();
+    let repo_config_path =
+        std::path::Path::new(&branch.repo_root).join(weaver_core::repo_config::CONFIG_REL_PATH);
+    let repo_config_generation = match std::fs::metadata(repo_config_path) {
+        Ok(metadata) => Some((
+            metadata.len(),
+            metadata
+                .modified()?
+                .duration_since(UNIX_EPOCH)?
+                .as_nanos()
+                .try_into()
+                .context("repo config modified time exceeds u64")?,
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
     Ok(MetadataSource {
         goal: branch.goal.clone(),
         restricted: session.policy_restricted,
@@ -293,6 +311,8 @@ async fn metadata_source(
         source_profile,
         created_by: session.created_by.clone(),
         creator_credential,
+        repo_env_generation,
+        repo_config_generation,
         metadata_profile_name,
         metadata_profile: metadata_profile.map(ProfileIdentity::from),
     })
@@ -474,8 +494,6 @@ async fn title_preflight(
     Ok(Ok(read))
 }
 
-/// Start one best-effort title refresh. The model call is detached; all
-/// eligibility and CAS checks are repeated at commit.
 pub async fn spawn_title_generation(
     db: Db,
     bus: EventBus,
@@ -923,8 +941,6 @@ async fn checked_cue_boundary(
     Ok(Ok(snapshot))
 }
 
-/// Read the current cache and whether a bounded explicit ensure is due. This
-/// never invokes an agent.
 pub async fn current_cue(db: &Db, session: &Session, branch: &Branch) -> Result<ResumptionCueView> {
     if !config::get_bool(db, CUES_ENABLED_KEY, true).await {
         return Ok(view("disabled", None, None, None, Vec::new()));
@@ -962,9 +978,6 @@ pub async fn current_cue(db: &Db, session: &Session, branch: &Branch) -> Result<
     ))
 }
 
-/// Generate or reuse one cue for the current source cursor. `force` is the
-/// explicit user action; an on-return caller leaves it false and respects the
-/// configured inactivity threshold.
 pub async fn ensure_cue(
     db: &Db,
     session: &Session,
@@ -1001,10 +1014,7 @@ pub async fn ensure_cue(
         return Ok(view("unavailable", None, None, None, Vec::new()));
     };
 
-    // Reload the semantic source and evidence identity after the complete
-    // bounded preparation. This is the final awaited operation before crossing
-    // the model boundary; only synchronous eligibility/fence comparisons
-    // follow it, and no lock or transaction spans the prompt.
+    // This boundary is the final await before the model call.
     let run_snapshot =
         match checked_cue_boundary(db, &session.id, &branch.id, force, &prepared).await? {
             Ok(snapshot) => snapshot,
@@ -1025,9 +1035,7 @@ pub async fn ensure_cue(
         return Ok(prepared_view("unavailable", &prepared));
     };
 
-    // Recompute from newly loaded rows after the model returns. Goal, policy,
-    // selected profile, redaction inputs, conversation, and artifacts must all
-    // still identify the exact prompt that ran.
+    // Recompute every prompt source after the model returns.
     let Some(current_snapshot) = metadata_read(db, &session.id, &branch.id).await? else {
         return Ok(prepared_view("unavailable", &prepared));
     };
@@ -1092,6 +1100,8 @@ mod tests {
             }),
             created_by: Some("alice".into()),
             creator_credential: (true, Some("2026-07-26T00:00:00Z".into())),
+            repo_env_generation: vec![("REGISTRY_TOKEN".into(), "2026-07-26T00:00:00Z".into())],
+            repo_config_generation: Some((128, 1_722_000_000_000_000_000)),
             metadata_profile_name: "watch".into(),
             metadata_profile: Some(ProfileIdentity {
                 name: "watch".into(),
@@ -1241,6 +1251,14 @@ mod tests {
             },
             MetadataSource {
                 creator_credential: (true, Some("2026-07-26T00:01:00Z".into())),
+                ..source.clone()
+            },
+            MetadataSource {
+                repo_env_generation: vec![("REGISTRY_TOKEN".into(), "2026-07-26T00:01:00Z".into())],
+                ..source.clone()
+            },
+            MetadataSource {
+                repo_config_generation: Some((129, 1_722_000_000_000_000_001)),
                 ..source.clone()
             },
             MetadataSource {
