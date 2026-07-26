@@ -1212,6 +1212,9 @@ struct Task {
     /// The in-flight `session/prompt` request id + its turn, mirrored on the
     /// session row so a replayed turn-end response is recognized after a restart.
     inflight_prompt: Option<(u64, i64)>,
+    /// A protected review inbox claim stays recoverable until the matching ACP
+    /// prompt response proves that the adapter accepted the attempted write.
+    inflight_review: Option<(String, String)>,
 
     current_turn: i64,
     next_seq: i64,
@@ -1297,6 +1300,7 @@ impl Task {
             stream,
             next_req_id: 0,
             inflight_prompt: None,
+            inflight_review: None,
             current_turn,
             next_seq,
             turns_dispatched,
@@ -1349,6 +1353,12 @@ impl Task {
         let inflight = inflight_value
             .as_ref()
             .and_then(|v| Some((v.get("prompt_id")?.as_u64()?, v.get("turn")?.as_i64()?)));
+        let inflight_review = inflight_value.as_ref().and_then(|value| {
+            Some((
+                value.get("delivery_key")?.as_str()?.to_string(),
+                value.get("review_claim_token")?.as_str()?.to_string(),
+            ))
+        });
         let effective_mode = inflight_value
             .as_ref()
             .and_then(|v| v.get("mode"))
@@ -1375,6 +1385,7 @@ impl Task {
             stream,
             next_req_id: 0,
             inflight_prompt: inflight,
+            inflight_review,
             current_turn,
             next_seq,
             turns_dispatched,
@@ -2119,6 +2130,35 @@ impl Task {
             self.journal_block(kind::TURN_END, json!({ "stop_reason": stop }))
                 .await;
         }
+        if let Some((delivery_key, claim_token)) = self.inflight_review.take() {
+            match crate::review_delivery::consume_review_inbox(
+                &self.db,
+                &delivery_key,
+                &claim_token,
+                &self.session_id,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(
+                        session = %self.session_id,
+                        %delivery_key,
+                        "protected review prompt completed after its inbox claim was lost"
+                    );
+                }
+                Err(error) => {
+                    // Clearing the durable in-flight marker below makes the
+                    // still-delivering claim eligible for stale recovery.
+                    tracing::error!(
+                        session = %self.session_id,
+                        %delivery_key,
+                        %error,
+                        "could not acknowledge completed protected review prompt"
+                    );
+                }
+            }
+        }
         // Settle the durable turn state *before* signalling the end over SSE, so a
         // client that reacts to the event sees a consistent `live_turn`.
         self.turn_live = false;
@@ -2198,24 +2238,19 @@ impl Task {
                     %error,
                     "could not start protected review feedback turn"
                 );
-                match released {
-                    Ok(true) => false,
-                    Ok(false) => {
-                        // The durable turn boundary committed before a later
-                        // transport error. Never let this task fall through and
-                        // dispatch another queue item over the live turn.
-                        true
-                    }
-                    Err(release_error) => {
-                        tracing::error!(
-                            session = %self.session_id,
-                            delivery_key = %item.delivery_key,
-                            error = %release_error,
-                            "could not release protected review feedback after dispatch failure"
-                        );
-                        false
-                    }
+                if let Err(release_error) = released {
+                    tracing::error!(
+                        session = %self.session_id,
+                        delivery_key = %item.delivery_key,
+                        error = %release_error,
+                        "could not release protected review feedback after dispatch failure"
+                    );
                 }
+                // No durable/local turn boundary was established. The socket
+                // write may still have crossed before a later persistence
+                // error, so releasing can retry and duplicate process delivery;
+                // the immutable feedback remains recoverable either way.
+                false
             }
         }
     }
@@ -2556,6 +2591,7 @@ impl Task {
             "turn": turn,
             "mode": effective_mode,
             "delivery_key": item.delivery_key,
+            "review_claim_token": item.claim_token,
         })
         .to_string();
         let opening_payload = json!({
@@ -2568,23 +2604,22 @@ impl Task {
             &self.db,
             item,
             &self.session_id,
-            turn,
-            seq,
-            &opening_payload,
-            &inflight,
+            crate::review_delivery::ReviewTurnBoundary {
+                turn,
+                seq,
+                opening_payload: &opening_payload,
+                inflight: &inflight,
+            },
+            self.stream.write(&wire::request_line(
+                id,
+                method::SESSION_PROMPT,
+                wire::prompt_params(&self.acp_session_id, &item.payload, &[]),
+            )),
         )
         .await?;
         if !started {
             bail!("protected review inbox claim is no longer current");
         }
-
-        self.stream
-            .write(&wire::request_line(
-                id,
-                method::SESSION_PROMPT,
-                wire::prompt_params(&self.acp_session_id, &item.payload, &[]),
-            ))
-            .await?;
 
         self.current_turn = turn;
         self.next_seq = seq + 1;
@@ -2614,6 +2649,7 @@ impl Task {
         };
         self.emit("block", serde_json::to_value(&view).unwrap_or(Value::Null));
         self.inflight_prompt = Some((id, turn));
+        self.inflight_review = Some((item.delivery_key.clone(), item.claim_token.clone()));
         crate::monitor::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "working")
             .await;
         Ok(())
@@ -3205,6 +3241,34 @@ impl Task {
 
     async fn on_exit(&mut self, status: Option<i32>) {
         tracing::warn!(session = %self.session_id, ?status, "acp agent exited");
+        if let Some((delivery_key, claim_token)) = self.inflight_review.take() {
+            match crate::review_delivery::release_review_inbox(
+                &self.db,
+                &delivery_key,
+                &claim_token,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(
+                        session = %self.session_id,
+                        %delivery_key,
+                        "exited ACP turn no longer owns its protected review claim"
+                    );
+                }
+                Err(error) => {
+                    // Clearing acp_inflight below lets stale-claim recovery
+                    // reclaim this item even if the immediate release failed.
+                    tracing::error!(
+                        session = %self.session_id,
+                        %delivery_key,
+                        %error,
+                        "could not release protected review feedback after ACP exit"
+                    );
+                }
+            }
+        }
         let ending_turn = self
             .inflight_prompt
             .take()

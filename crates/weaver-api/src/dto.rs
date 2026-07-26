@@ -1482,10 +1482,6 @@ pub struct ReviewDto {
 /// Create or recover the caller's one draft for a session/subject.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateReviewReq {
-    /// Required by the branch-scoped CLI route; ignored by a session-scoped
-    /// route, whose path already identifies the delivery target.
-    #[serde(default)]
-    pub session_id: Option<String>,
     pub subject_kind: String,
     /// Artifact name for `subject_kind = "artifact"`.
     pub subject_key: String,

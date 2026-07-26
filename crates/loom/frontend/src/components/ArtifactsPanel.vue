@@ -49,7 +49,6 @@ const router = useRouter();
 
 const list = ref<ArtifactMeta[]>([]);
 const listError = ref('');
-const selected = ref<string>('');
 
 // True once we're the visible surface. Default-on so the panel works standalone.
 const isActive = computed(() => props.active !== false);
@@ -67,13 +66,24 @@ async function loadList() {
 
 // --- Viewer ----------------------------------------------------------------
 
-const view = ref<ArtifactView | null>(null);
-const viewRev = ref<number | null>(null); // null = latest
+type LoadedArtifact = {
+  name: string;
+  requestedRevision: number | null;
+  view: ArtifactView;
+};
+const loaded = ref<LoadedArtifact | null>(null);
+const selected = computed(() => loaded.value?.name ?? '');
+const view = computed(() => loaded.value?.view ?? null);
+const viewRev = computed(() => loaded.value?.requestedRevision ?? null); // null = latest
 const loading = ref(false);
 const viewError = ref('');
 const editing = ref(false);
 const saving = ref(false);
 const removing = ref(false);
+let openEpoch = 0;
+let switchGuard: Promise<boolean> | null = null;
+let switchGuardOwner: InstanceType<typeof ArtifactDocument> | null = null;
+let openingName = '';
 
 const kind = computed(() => view.value?.meta.kind ?? 'markdown');
 const isMarkdown = computed(() => kind.value === 'markdown');
@@ -106,40 +116,85 @@ const showComments = computed(
   () => !!view.value && isMarkdown.value && viewMode.value === 'preview' && !editing.value,
 );
 
-async function togglePop() {
-  // Snapshot before the parent changes layouts. Waiting for child unmount made
-  // restoration sensitive to Vue's patch order when docked and rail instances
-  // swap in the same render. Flush private review state too: draft mutations
-  // have no branch-wide SSE event that could repair a replacement mount.
-  if (commentsRef.value && !(await commentsRef.value.prepareLayoutSwap())) return;
+function togglePop() {
   emit('togglePop');
 }
+
+async function prepareLayoutSwap(): Promise<boolean> {
+  return !commentsRef.value || (await commentsRef.value.prepareLayoutSwap());
+}
+
+function finishLayoutSwap() {
+  commentsRef.value?.finishLayoutSwap();
+}
+
+defineExpose({ prepareLayoutSwap, finishLayoutSwap });
 
 // Load an artifact (optionally a specific revision) into the viewer. `keepMode`
 // refreshes content without resetting the preview/source choice — for a live
 // re-fetch (an SSE write to the open artifact), where snapping back to Preview
 // would yank the reader out of a Source view they were reading.
 async function openArtifact(name: string, rev?: number, opts?: { keepMode?: boolean }) {
-  selected.value = name;
-  viewRev.value = rev ?? null;
+  const epoch = ++openEpoch;
+  openingName = name;
+  if (!switchGuard) {
+    switchGuardOwner = commentsRef.value;
+    switchGuard = switchGuardOwner?.prepareLayoutSwap() ?? Promise.resolve(true);
+  }
+  const canSwitch = await switchGuard;
+  if (!canSwitch) {
+    if (epoch === openEpoch) {
+      switchGuard = null;
+      switchGuardOwner = null;
+      openingName = '';
+    }
+    return;
+  }
+  if (epoch !== openEpoch) return;
+
+  const retainSurface = opts?.keepMode && loaded.value?.name === name;
   editing.value = false;
   loading.value = true;
   viewError.value = '';
+  if (!retainSurface) {
+    loaded.value = null;
+    draftContent.value = '';
+  }
   // Keep the URL in step so the view is deep-linkable / refresh-stable — but
   // only while we're the surface on screen, so a hidden panel (the user moved
   // back to the terminal) never yanks the route back to artifacts.
   const target = `/s/${props.id}/artifacts/${encodeURIComponent(name)}`;
   if (isActive.value && router.currentRoute.value.path !== target) router.replace(target);
   try {
-    view.value = await getArtifact(props.id, name, rev);
-    draftContent.value = view.value.content;
-    if (!opts?.keepMode) viewMode.value = isRenderable.value ? 'preview' : 'source';
+    const nextView = await getArtifact(props.id, name, rev);
+    if (epoch !== openEpoch) return;
+    loaded.value = {
+      name,
+      requestedRevision: rev ?? null,
+      view: nextView,
+    };
+    draftContent.value = nextView.content;
+    if (!opts?.keepMode) {
+      viewMode.value =
+        nextView.meta.kind === 'markdown' || nextView.meta.kind === 'html' ? 'preview' : 'source';
+    }
   } catch (e) {
+    if (epoch !== openEpoch) return;
     viewError.value = (e as Error).message;
-    view.value = null;
-    draftContent.value = '';
+    if (!retainSurface) {
+      loaded.value = null;
+      draftContent.value = '';
+    }
   } finally {
-    loading.value = false;
+    if (epoch === openEpoch) {
+      loading.value = false;
+      switchGuard = null;
+      openingName = '';
+      const owner = switchGuardOwner;
+      switchGuardOwner = null;
+      await nextTick();
+      owner?.finishLayoutSwap();
+    }
   }
 }
 
@@ -183,16 +238,18 @@ function cancelEdit() {
 }
 
 async function save() {
-  if (!view.value) return;
+  const identity = loaded.value;
+  if (!identity) return;
   const content = draftContent.value;
   saving.value = true;
   viewError.value = '';
   try {
     // Append a new revision (author: user); the response is the refreshed view
     // at the new latest rev.
-    view.value = await putArtifact(props.id, selected.value, { content });
-    draftContent.value = view.value.content;
-    viewRev.value = null;
+    const nextView = await putArtifact(props.id, identity.name, { content });
+    if (loaded.value !== identity) return;
+    loaded.value = { name: identity.name, requestedRevision: null, view: nextView };
+    draftContent.value = nextView.content;
     editing.value = false;
     viewMode.value = isRenderable.value ? 'preview' : 'source';
     await loadList();
@@ -208,9 +265,10 @@ async function save() {
 // Remove the open artifact (every revision). After it's gone, fall back to the
 // next artifact in the list, or the empty state when none remain.
 async function remove() {
-  if (!view.value || removing.value) return;
-  const name = selected.value;
-  const count = view.value.versions.length;
+  const identity = loaded.value;
+  if (!identity || removing.value) return;
+  const name = identity.name;
+  const count = identity.view.versions.length;
   if (
     !confirm(
       `Delete artifact "${name}" and all ${count} revision${count === 1 ? '' : 's'}? ` +
@@ -222,14 +280,13 @@ async function remove() {
   viewError.value = '';
   try {
     await deleteArtifact(props.id, name);
-    view.value = null;
+    loaded.value = null;
     draftContent.value = '';
     await loadList();
     const next = list.value[0]?.name;
     if (next) {
       await openArtifact(next);
     } else {
-      selected.value = '';
       router.replace(`/s/${props.id}/artifacts`);
     }
   } catch (e) {
@@ -280,9 +337,8 @@ function openStream() {
     // The open artifact was removed elsewhere (CLI, or another tab) — clear the
     // viewer back to the empty state. Our own delete already advanced the view.
     if (d?.name && d.name === selected.value) {
-      view.value = null;
+      loaded.value = null;
       draftContent.value = '';
-      selected.value = '';
     }
   });
   // Inline comments: forward to ArtifactDocument rather than opening a second
@@ -310,7 +366,9 @@ function openStream() {
 watch(
   () => props.name,
   (name) => {
-    if (name && name !== selected.value) openArtifact(name);
+    // A local open updates the route before its response atomically installs
+    // the new identity. Do not turn that route echo into a duplicate request.
+    if (name && name !== selected.value && name !== openingName) openArtifact(name);
   },
 );
 

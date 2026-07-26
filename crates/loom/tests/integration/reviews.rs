@@ -63,9 +63,8 @@ async fn seed_artifact(ts: &TestServer, session: &weaver_api::SessionView) {
         .unwrap();
 }
 
-fn new_review(session: &weaver_api::SessionView, version: &str) -> CreateReviewReq {
+fn new_review(version: &str) -> CreateReviewReq {
     CreateReviewReq {
-        session_id: Some(session.id.clone()),
         subject_kind: "artifact".to_string(),
         subject_key: "design".to_string(),
         subject_version: version.to_string(),
@@ -94,7 +93,7 @@ async fn draft_with_comment(
 ) -> weaver_api::ReviewDto {
     let draft = ts
         .client
-        .create_session_review(&session.id, &new_review(session, "1"))
+        .create_session_review(&session.id, &new_review("1"))
         .await
         .unwrap();
     ts.client
@@ -137,12 +136,12 @@ fn assert_cli_ok(output: &Output) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn api_and_cli_share_the_private_optimistic_review_contract() {
     let ts = TestServer::start_api_only().await;
-    let session = insert_api_session(&ts, "review-api").await;
+    let session = insert_api_session(&ts, "reviewapi").await;
     seed_artifact(&ts, &session).await;
 
     let draft = ts
         .client
-        .create_session_review(&session.id, &new_review(&session, "01"))
+        .create_session_review(&session.id, &new_review("01"))
         .await
         .unwrap();
     assert_eq!(draft.subject.version, "1");
@@ -170,6 +169,25 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
         .unwrap();
     assert_eq!(added.comments[0].subject_version, "1");
     assert!(added.message.contains("\"prefix\":\"Alpha \""));
+
+    let session_token = loom::auth::create_session_token(
+        &ts.state.db,
+        Some("rjpower"),
+        &session.id,
+        &session.branch.id,
+    )
+    .await
+    .unwrap();
+    let session_client =
+        weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(session_token));
+    assert!(
+        session_client
+            .list_session_reviews(&session.id, "artifact", "design")
+            .await
+            .unwrap()
+            .is_empty(),
+        "a same-owner session credential must not inherit the operator's draft"
+    );
 
     loom::auth::add_user(&ts.state.db, "bob", None, None)
         .await
@@ -281,6 +299,15 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
         .unwrap();
     assert_eq!(submitted.message, preview);
     assert_eq!(submitted.delivery_state, "queued");
+    assert!(
+        session_client
+            .list_session_reviews(&session.id, "artifact", "design")
+            .await
+            .unwrap()
+            .iter()
+            .any(|review| review.id == submitted.id),
+        "the submitted review is visible to its session credential"
+    );
 
     let stale_retry = reqwest::Client::new()
         .post(format!(
@@ -397,24 +424,40 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
         )
         .await,
     );
-    let shown = loom_review_cli(&ts, &["review", "show", &cli_draft.id.to_string()]).await;
-    assert_cli_ok(&shown);
-    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
-    assert_eq!(shown["subject"]["version"], "3");
-    assert_eq!(shown["summary"], "CLI overall");
     assert_cli_ok(
         &loom_review_cli(
             &ts,
             &[
                 "review",
-                "discard",
-                &cli_draft.id.to_string(),
-                "--revision",
-                &shown["draft_revision"].to_string(),
+                "add",
+                &session.id,
+                "design",
+                "--rev",
+                "3",
+                "--quote",
+                "Third",
+                "--prefix",
+                "# Design\n\n",
+                "--suffix",
+                " revision.",
+                "--block",
+                "1",
+                "CLI",
+                "anchored",
+                "body",
             ],
         )
         .await,
     );
+    let shown = loom_review_cli(&ts, &["review", "show", &cli_draft.id.to_string()]).await;
+    assert_cli_ok(&shown);
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(shown["subject"]["version"], "3");
+    assert_eq!(shown["summary"], "CLI overall");
+    assert_eq!(shown["comments"][0]["anchor"]["quote"], "Third");
+    assert_eq!(shown["comments"][0]["anchor"]["prefix"], "# Design\n\n");
+    assert_eq!(shown["comments"][0]["anchor"]["suffix"], " revision.");
+    assert_eq!(shown["comments"][0]["body"], "CLI anchored body");
 }
 
 async fn poll_review_turn(ts: &TestServer, session_id: &str, payload: &str) -> Value {
@@ -655,17 +698,22 @@ async fn terminal_delivery_queues_offline_recovers_and_reports_real_failure() {
         .await
         .unwrap();
     make_delivery_due(&ts.state.db, offline.id).await;
-    loom::review_delivery::deliver_review(&ts.state, offline.id)
-        .await
-        .unwrap();
-    assert_eq!(
-        ts.client
-            .get_review(offline.id)
-            .await
-            .unwrap()
-            .delivery_state,
-        "delivered"
-    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let review = ts.client.get_review(offline.id).await.unwrap();
+        let screen = ts.client.preview(&session.id, 1_000).await.unwrap();
+        let marker_count = screen.matches(&offline.delivery_key).count();
+        if review.delivery_state == "delivered" && marker_count == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "background sweep did not deliver one structured marker: \
+             state={}, marker_count={marker_count}\n{screen}",
+            review.delivery_state
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
     super::acp::start_new(&ts, "review-transport-failure", None, None).await;
     let incompatible = ts

@@ -787,10 +787,6 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/branches/{id}/artifacts", get(list_branch_artifacts))
         .route(
-            "/branches/{id}/reviews",
-            get(list_branch_reviews).post(create_branch_review),
-        )
-        .route(
             "/branches/{id}/artifacts/{name}",
             get(get_branch_artifact)
                 .put(write_branch_artifact)

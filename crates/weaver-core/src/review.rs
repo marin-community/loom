@@ -151,13 +151,11 @@ pub struct OutboxItem {
     pub next_attempt_at: String,
     pub last_error: Option<String>,
     pub lease_token: Option<String>,
-    pub lease_generation: i64,
 }
 
 #[derive(Debug, Clone, FromRow)]
 pub struct DeliveryLease {
     pub token: String,
-    pub generation: i64,
 }
 
 const SELECT_REVIEW: &str = "SELECT id, repo_root, branch_id, session_id, subject_kind, \
@@ -848,7 +846,7 @@ pub async fn submit(
 pub async fn ready_outbox(db: &Db, limit: i64) -> Result<Vec<OutboxItem>> {
     Ok(sqlx::query_as::<_, OutboxItem>(
         "SELECT review_id, delivery_key, state, attempts, next_attempt_at, last_error,
-                lease_token, lease_generation
+                lease_token
          FROM review_delivery_outbox
          WHERE state IN ('queued', 'retrying', 'delivering') AND next_attempt_at <= ?
          ORDER BY next_attempt_at, review_id LIMIT ?",
@@ -872,11 +870,10 @@ pub async fn claim_delivery(db: &Db, review_id: i64) -> Result<Option<DeliveryLe
     let claimed = sqlx::query_as::<_, DeliveryLease>(
         "UPDATE review_delivery_outbox
          SET state = 'delivering', next_attempt_at = ?,
-             lease_token = lower(hex(randomblob(16))),
-             lease_generation = lease_generation + 1
+             lease_token = lower(hex(randomblob(16)))
          WHERE review_id = ? AND next_attempt_at <= ?
            AND state IN ('queued', 'retrying', 'delivering')
-         RETURNING lease_token AS token, lease_generation AS generation",
+         RETURNING lease_token AS token",
     )
     .bind(lease_until)
     .bind(review_id)
@@ -1399,7 +1396,7 @@ mod tests {
         .await
         .unwrap();
         let second = claim_delivery(&db, draft.id).await.unwrap().unwrap();
-        assert!(second.generation > first.generation);
+        assert_ne!(second.token, first.token);
         assert_eq!(
             mark_retry(&db, draft.id, &first.token, "stale worker")
                 .await

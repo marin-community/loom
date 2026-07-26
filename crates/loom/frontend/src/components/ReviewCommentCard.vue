@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue';
 import type { Review, ReviewComment } from '../types';
+import InlineConfirm from './InlineConfirm.vue';
 
 const props = defineProps<{
   review: Review;
@@ -8,12 +9,12 @@ const props = defineProps<{
   active: boolean;
   reanchoring: boolean;
   error: string;
+  deleteAction: (commentId: number) => Promise<void>;
 }>();
 const emit = defineEmits<{
   focus: [commentId: number];
   close: [commentId: number];
   edit: [payload: { commentId: number; body: string }];
-  delete: [commentId: number];
   reanchor: [commentId: number];
   cancelReanchor: [];
   resolution: [commentId: number, resolved: boolean];
@@ -228,13 +229,14 @@ function cancelEdit() {
         >
           {{ reanchoring ? 'Cancel re-anchor' : 'Re-anchor' }}
         </button>
-        <button
-          type="button"
-          class="btn-secondary px-2 py-1 text-2xs text-block"
-          @click.stop="emit('delete', comment.id)"
-        >
-          Delete
-        </button>
+        <InlineConfirm
+          label="Delete"
+          message="Delete this pending comment?"
+          confirm-label="Delete comment"
+          danger
+          :action="() => deleteAction(comment.id)"
+          @click.stop
+        />
       </template>
       <button
         v-if="!review.legacy && review.status === 'submitted'"

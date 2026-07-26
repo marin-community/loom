@@ -1379,7 +1379,6 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
                 .create_session_review(
                     &session,
                     &CreateReviewReq {
-                        session_id: None,
                         subject_kind: "artifact".to_string(),
                         subject_key: artifact,
                         subject_version: rev.to_string(),
@@ -1489,7 +1488,6 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
                 .create_session_review(
                     &session,
                     &CreateReviewReq {
-                        session_id: None,
                         subject_kind: "artifact".to_string(),
                         subject_key: artifact,
                         subject_version: rev.to_string(),

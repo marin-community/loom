@@ -868,36 +868,6 @@ impl Client {
         .await
     }
 
-    pub async fn list_branch_reviews(
-        &self,
-        branch: &str,
-        session: &str,
-        subject_kind: &str,
-        subject_key: &str,
-    ) -> Result<Vec<ReviewDto>> {
-        self.get_typed(&format!(
-            "/api/branches/{}/reviews?session_id={}&subject_kind={}&subject_key={}",
-            Self::seg(branch),
-            Self::seg(session),
-            Self::seg(subject_kind),
-            Self::seg(subject_key)
-        ))
-        .await
-    }
-
-    pub async fn create_branch_review(
-        &self,
-        branch: &str,
-        req: &CreateReviewReq,
-    ) -> Result<ReviewDto> {
-        self.send_typed(
-            Method::POST,
-            &format!("/api/branches/{}/reviews", Self::seg(branch)),
-            Some(req),
-        )
-        .await
-    }
-
     pub async fn add_review_comment(
         &self,
         review_id: i64,

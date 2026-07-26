@@ -295,7 +295,6 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `GET /api/sessions/{id}/artifacts` | list the branch's [artifacts](artifacts.md) plus repo-shared ones |
 | `GET PUT /api/sessions/{id}/artifacts/{name}` | read content + projected refs (`rev=N` for a revision) / write a user edit as a new revision |
 | `GET POST /api/sessions/{id}/reviews` | resolve the public artifact name to its immutable ID, then list submitted reviews plus the caller's private draft / create or recover a draft for that exact versioned subject |
-| `GET POST /api/branches/{id}/reviews` | the same review operations for CLI callers that identify both branch and delivery session |
 | `GET PATCH /api/reviews/{id}` | inspect a review by stable ID (including historical delivery after artifact deletion) / persist a draft's overall summary or advance its target revision after every older anchor has been re-anchored |
 | `POST /api/reviews/{id}/retarget-current` | guarded overall-only draft mutation that moves its target to the immutable artifact's actual latest revision |
 | `POST /api/reviews/{id}/comments` / `PATCH DELETE /api/reviews/{id}/comments/{comment_id}` | add, edit/re-anchor, or delete pending review comments; every draft mutation carries the current `expected_revision` |

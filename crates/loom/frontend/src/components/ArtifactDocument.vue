@@ -38,6 +38,8 @@ import {
   COMMENT_UI_ATTR,
   type TextAnchor,
 } from '../discussion-anchor';
+import { ReviewDraftController } from '../lib/reviewDraftController';
+import InlineConfirm from './InlineConfirm.vue';
 import ReviewCommentCard from './ReviewCommentCard.vue';
 
 // Dock/pop swaps mounts of the same document. Keep a small in-memory scroll
@@ -164,15 +166,13 @@ const activeId = ref<number | null>(null);
 const trayOpen = ref(false);
 const overallNote = ref('');
 const summarySaving = ref(false);
-const summaryHydrating = ref(false);
 const summaryDirty = ref(false);
 let summarySaveTimer: ReturnType<typeof setTimeout> | null = null;
-let summarySavePromise: Promise<Review | null> | null = null;
-let draftMutationsInFlight = 0;
-let draftMutationWaiters: Array<() => void> = [];
 const acknowledgeOutdated = ref(false);
 const submitting = ref(false);
-const discardConfirm = ref(false);
+const discarding = ref(false);
+const layoutBusy = ref(false);
+let releaseLayoutBarrier: (() => void) | null = null;
 const reanchorCommentId = ref<number | null>(null);
 
 const draft = computed(() => reviews.value.find((review) => review.status === 'draft') ?? null);
@@ -209,23 +209,6 @@ const allEntries = computed<ReviewEntry[]>(() => {
   return entries;
 });
 
-function beginDraftMutation() {
-  draftMutationsInFlight += 1;
-}
-
-function finishDraftMutation() {
-  draftMutationsInFlight = Math.max(0, draftMutationsInFlight - 1);
-  if (draftMutationsInFlight !== 0) return;
-  const waiters = draftMutationWaiters;
-  draftMutationWaiters = [];
-  for (const resolve of waiters) resolve();
-}
-
-async function waitForDraftMutations() {
-  if (draftMutationsInFlight === 0) return;
-  await new Promise<void>((resolve) => draftMutationWaiters.push(resolve));
-}
-
 function replaceReview(next: Review) {
   const index = reviews.value.findIndex((review) => review.id === next.id);
   if (index === -1) reviews.value = [next, ...reviews.value];
@@ -236,16 +219,6 @@ function replaceReview(next: Review) {
   }
 }
 
-function hydrateSummary(next: Review | null, force = false) {
-  if (summaryDirty.value && !force) return;
-  summaryHydrating.value = true;
-  overallNote.value = next?.summary ?? '';
-  summaryDirty.value = false;
-  nextTick(() => {
-    summaryHydrating.value = false;
-  });
-}
-
 function conflictReview(error: unknown): Review | null {
   if (!(error instanceof ApiError) || error.status !== 409) return null;
   const details = error.body.details;
@@ -253,8 +226,8 @@ function conflictReview(error: unknown): Review | null {
   const fresh = (details as { review?: unknown }).review;
   if (!fresh || typeof fresh !== 'object' || typeof (fresh as Review).id !== 'number') return null;
   const review = fresh as Review;
-  replaceReview(review);
-  hydrateSummary(review.status === 'draft' ? review : null, true);
+  if (review.status === 'draft') draftController.reconcile(review);
+  else replaceReview(review);
   const liveIds = new Set(allEntries.value.map((entry) => entry.comment.id));
   if (activeId.value != null && !liveIds.has(activeId.value)) activeId.value = null;
   if (reanchorCommentId.value != null && !liveIds.has(reanchorCommentId.value)) {
@@ -271,19 +244,55 @@ function mutationMessage(error: unknown): string {
   return (error as Error).message;
 }
 
-function setCommentMutationError(commentId: number, error: unknown) {
+function setCommentMutationError(commentId: number, error: unknown): string {
   const message = mutationMessage(error);
   if (allEntries.value.some((entry) => entry.comment.id === commentId)) {
     commentErrors.value[commentId] = message;
   } else {
     trayError.value = message;
   }
+  return message;
 }
 
+const draftController = new ReviewDraftController<Review>({
+  async saveSummary(item, summary) {
+    let current = item;
+    if (!current) {
+      if (!summary.trim()) return null;
+      current = await createArtifactReview(props.id, {
+        subject_kind: 'artifact',
+        subject_key: props.artifactName,
+        subject_version: String(props.rev),
+      });
+    }
+    if (current.summary === summary) return current;
+    summarySaving.value = true;
+    trayError.value = '';
+    try {
+      return await updateReview(current.id, {
+        expected_revision: current.draft_revision,
+        summary,
+      });
+    } finally {
+      summarySaving.value = false;
+    }
+  },
+  onDraft(next) {
+    if (next) replaceReview(next);
+  },
+  onSummary(summary, dirty) {
+    overallNote.value = summary;
+    summaryDirty.value = dirty;
+  },
+});
+
 async function loadReviews() {
+  const epoch = draftController.beginRefresh();
   try {
-    reviews.value = await listArtifactReviews(props.id, props.artifactName);
-    hydrateSummary(reviews.value.find((review) => review.status === 'draft') ?? null);
+    const loaded = await listArtifactReviews(props.id, props.artifactName);
+    const nextDraft = loaded.find((review) => review.status === 'draft') ?? null;
+    if (!draftController.acceptRefresh(epoch, nextDraft)) return;
+    reviews.value = loaded;
     reviewError.value = '';
     if (activeId.value != null && !allEntries.value.some((x) => x.comment.id === activeId.value)) {
       activeId.value = null;
@@ -295,16 +304,16 @@ async function loadReviews() {
   locateCycle();
 }
 
-watch(overallNote, () => {
-  if (summaryHydrating.value) return;
-  summaryDirty.value = true;
-  if (!draft.value && !overallNote.value.trim()) return;
+function editOverallNote(event: Event) {
+  const summary = (event.target as HTMLTextAreaElement).value;
+  draftController.editSummary(summary);
+  if (!draftController.draft && !summary.trim()) return;
   if (summarySaveTimer) clearTimeout(summarySaveTimer);
   summarySaveTimer = setTimeout(() => {
     summarySaveTimer = null;
     void saveOverallNote();
   }, 400);
-});
+}
 
 // --- locate + paint + group -------------------------------------------------
 
@@ -378,7 +387,6 @@ function locateCycle() {
 
 watch(activeId, locateCycle);
 watch(allEntries, () => nextTick(locateCycle));
-
 // --- keyboard/mouse selection affordance -----------------------------------
 
 const selectionButton = ref<{
@@ -503,17 +511,16 @@ async function useSelection() {
   if (reanchorCommentId.value != null && draft.value) {
     const commentId = reanchorCommentId.value;
     commentErrors.value[commentId] = '';
-    beginDraftMutation();
     try {
-      if (!(await saveOverallNote())) return;
-      if (!draft.value) return;
-      const updated = await updateReviewComment(draft.value.id, commentId, {
-        expected_revision: draft.value.draft_revision,
-        subject_version: subjectVersion,
-        anchor_kind: 'text',
-        anchor,
+      const updated = await draftController.command(async (current) => {
+        if (!current) throw new Error('review draft is no longer available');
+        return updateReviewComment(current.id, commentId, {
+          expected_revision: current.draft_revision,
+          subject_version: subjectVersion,
+          anchor_kind: 'text',
+          anchor,
+        });
       });
-      replaceReview(updated);
       activeId.value = commentId;
       reanchorCommentId.value = null;
       reviewNotice.value =
@@ -525,8 +532,6 @@ async function useSelection() {
       locateCycle();
     } catch (e) {
       setCommentMutationError(commentId, e);
-    } finally {
-      finishDraftMutation();
     }
     return;
   }
@@ -618,62 +623,16 @@ function navigateDraft(direction: number) {
 
 // --- draft mutation ---------------------------------------------------------
 
-async function ensureDraft(subjectVersion: string): Promise<Review> {
-  if (draft.value) return draft.value;
-  const created = await createArtifactReview(props.id, {
-    subject_kind: 'artifact',
-    subject_key: props.artifactName,
-    subject_version: subjectVersion,
-  });
-  replaceReview(created);
-  return created;
-}
-
 async function saveOverallNote(): Promise<Review | null> {
-  if (summaryHydrating.value) return draft.value;
   if (summarySaveTimer) {
     clearTimeout(summarySaveTimer);
     summarySaveTimer = null;
   }
-  while (summarySavePromise) await summarySavePromise;
-  if (!summaryDirty.value) return draft.value;
-
-  const saving = (async () => {
-    const summary = overallNote.value;
-    let item = draft.value;
-    if (!item) {
-      if (!summary.trim()) {
-        summaryDirty.value = false;
-        return null;
-      }
-      item = await ensureDraft(String(props.rev));
-    }
-    if (item.summary === summary) {
-      summaryDirty.value = false;
-      return item;
-    }
-    summarySaving.value = true;
-    trayError.value = '';
-    try {
-      const updated = await updateReview(item.id, {
-        expected_revision: item.draft_revision,
-        summary,
-      });
-      replaceReview(updated);
-      if (overallNote.value === summary) summaryDirty.value = false;
-      return updated;
-    } catch (error) {
-      trayError.value = mutationMessage(error);
-      return null;
-    } finally {
-      summarySaving.value = false;
-    }
-  })();
-  summarySavePromise = saving;
   try {
-    return await saving;
-  } finally {
-    if (summarySavePromise === saving) summarySavePromise = null;
+    return await draftController.flush();
+  } catch (error) {
+    trayError.value = mutationMessage(error);
+    return null;
   }
 }
 
@@ -682,20 +641,24 @@ async function createPendingComment() {
   if (!pending.value || !text || savingComment.value) return;
   const pendingComment = pending.value;
   savingComment.value = true;
-  beginDraftMutation();
   composerError.value = '';
   try {
-    const saved = await saveOverallNote();
-    if (draft.value && !saved) return;
-    const review = await ensureDraft(pendingComment.subjectVersion);
-    const updated = await addReviewComment(review.id, {
-      expected_revision: review.draft_revision,
-      subject_version: pendingComment.subjectVersion,
-      anchor_kind: 'text',
-      anchor: pendingComment.anchor,
-      body: text,
+    const updated = await draftController.command(async (current) => {
+      const review =
+        current ??
+        (await createArtifactReview(props.id, {
+          subject_kind: 'artifact',
+          subject_key: props.artifactName,
+          subject_version: pendingComment.subjectVersion,
+        }));
+      return addReviewComment(review.id, {
+        expected_revision: review.draft_revision,
+        subject_version: pendingComment.subjectVersion,
+        anchor_kind: 'text',
+        anchor: pendingComment.anchor,
+        body: text,
+      });
     });
-    replaceReview(updated);
     activeId.value = updated.comments.at(-1)?.id ?? null;
     pending.value = null;
     pendingRange = null;
@@ -708,7 +671,6 @@ async function createPendingComment() {
     composerError.value = mutationMessage(e);
   } finally {
     savingComment.value = false;
-    finishDraftMutation();
   }
 }
 
@@ -723,51 +685,41 @@ function cancelPendingComment() {
 async function editComment(payload: { commentId: number; body: string }) {
   if (!draft.value) return;
   commentErrors.value[payload.commentId] = '';
-  beginDraftMutation();
   try {
-    if (!(await saveOverallNote())) return;
-    if (!draft.value) return;
-    const updated = await updateReviewComment(draft.value.id, payload.commentId, {
-      expected_revision: draft.value.draft_revision,
-      body: payload.body,
+    await draftController.command(async (current) => {
+      if (!current) throw new Error('review draft is no longer available');
+      return updateReviewComment(current.id, payload.commentId, {
+        expected_revision: current.draft_revision,
+        body: payload.body,
+      });
     });
-    replaceReview(updated);
     reviewNotice.value = 'Pending comment updated.';
   } catch (e) {
     setCommentMutationError(payload.commentId, e);
-  } finally {
-    finishDraftMutation();
   }
 }
 
 async function removeComment(commentId: number) {
   if (!draft.value) return;
   commentErrors.value[commentId] = '';
-  beginDraftMutation();
   try {
-    if (!(await saveOverallNote())) return;
-    if (!draft.value) return;
-    const updated = await deleteReviewComment(
-      draft.value.id,
-      commentId,
-      draft.value.draft_revision,
-    );
-    replaceReview(updated);
+    await draftController.command(async (current) => {
+      if (!current) throw new Error('review draft is no longer available');
+      return deleteReviewComment(current.id, commentId, current.draft_revision);
+    });
     if (activeId.value === commentId) activeId.value = null;
     if (reanchorCommentId.value === commentId) reanchorCommentId.value = null;
     reviewNotice.value = 'Pending comment deleted.';
     await nextTick();
     locateCycle();
+    trayToggleEl.value?.focus();
   } catch (e) {
-    setCommentMutationError(commentId, e);
-  } finally {
-    finishDraftMutation();
+    throw new Error(setCommentMutationError(commentId, e));
   }
 }
 
 async function setResolution(review: Review, commentId: number, resolved: boolean) {
   commentErrors.value[commentId] = '';
-  beginDraftMutation();
   try {
     if (review.legacy) {
       if (!resolved) return;
@@ -783,8 +735,6 @@ async function setResolution(review: Review, commentId: number, resolved: boolea
     reviewNotice.value = resolved ? 'Review comment resolved.' : 'Review comment reopened.';
   } catch (e) {
     setCommentMutationError(commentId, e);
-  } finally {
-    finishDraftMutation();
   }
 }
 
@@ -801,61 +751,64 @@ function cancelReanchor() {
 }
 
 async function discardDraft() {
-  if (!draft.value) return;
+  if (!draft.value || discarding.value) return;
+  discarding.value = true;
   trayError.value = '';
-  beginDraftMutation();
   try {
-    const reviewId = draft.value.id;
-    await discardReview(reviewId, draft.value.draft_revision);
+    const reviewId = await draftController.freeze(async (current) => {
+      if (!current) throw new Error('review draft is no longer available');
+      await discardReview(current.id, current.draft_revision);
+      return { draft: null, result: current.id };
+    });
     reviews.value = reviews.value.filter((review) => review.id !== reviewId);
     activeId.value = null;
     reanchorCommentId.value = null;
     overallNote.value = '';
     summaryDirty.value = false;
     acknowledgeOutdated.value = false;
-    discardConfirm.value = false;
     trayOpen.value = false;
     reviewNotice.value = 'Draft review discarded.';
     await nextTick();
     locateCycle();
+    trayToggleEl.value?.focus();
   } catch (e) {
-    trayError.value = mutationMessage(e);
+    const message = mutationMessage(e);
+    trayError.value = message;
+    throw new Error(message);
   } finally {
-    finishDraftMutation();
+    discarding.value = false;
   }
 }
 
 async function retargetDraft() {
   if (!draft.value || draft.value.comments.length) return;
   trayError.value = '';
-  beginDraftMutation();
   try {
-    const saved = await saveOverallNote();
-    if (!saved || !draft.value) return;
-    const updated = await retargetReviewToCurrent(draft.value.id, draft.value.draft_revision);
-    replaceReview(updated);
+    const updated = await draftController.command(async (current) => {
+      if (!current) throw new Error('review draft is no longer available');
+      return retargetReviewToCurrent(current.id, current.draft_revision);
+    });
     acknowledgeOutdated.value = false;
     reviewNotice.value = `Review target moved to revision ${updated.subject.version}.`;
   } catch (error) {
     trayError.value = mutationMessage(error);
-  } finally {
-    finishDraftMutation();
   }
 }
 
 async function submitDraft() {
   if (!draft.value || submitting.value) return;
   submitting.value = true;
-  beginDraftMutation();
   trayError.value = '';
   try {
-    const saved = await saveOverallNote();
-    if (!saved || !draft.value) return;
-    const submitted = await submitReview(draft.value.id, {
-      expected_revision: draft.value.draft_revision,
-      acknowledge_outdated: acknowledgeOutdated.value,
+    const submitted = await draftController.freeze(async (current) => {
+      if (!current) throw new Error('review draft is no longer available');
+      const result = await submitReview(current.id, {
+        expected_revision: current.draft_revision,
+        acknowledge_outdated: acknowledgeOutdated.value,
+      });
+      replaceReview(result);
+      return { draft: null, result };
     });
-    replaceReview(submitted);
     activeId.value = null;
     reanchorCommentId.value = null;
     overallNote.value = '';
@@ -871,13 +824,11 @@ async function submitDraft() {
     trayError.value = mutationMessage(e);
   } finally {
     submitting.value = false;
-    finishDraftMutation();
   }
 }
 
 async function retryDelivery(review: Review) {
   deliveryErrors.value[review.id] = '';
-  beginDraftMutation();
   try {
     const updated = await retryReviewDelivery(review.id);
     replaceReview(updated);
@@ -887,8 +838,6 @@ async function retryDelivery(review: Review) {
         : 'Review delivery retry queued.';
   } catch (e) {
     deliveryErrors.value[review.id] = (e as Error).message;
-  } finally {
-    finishDraftMutation();
   }
 }
 
@@ -919,14 +868,25 @@ async function prepareLayoutSwap(): Promise<boolean> {
     clearTimeout(summarySaveTimer);
     summarySaveTimer = null;
   }
-  if (summaryDirty.value && !(await saveOverallNote())) return false;
-  await waitForDraftMutations();
-  if (summaryDirty.value && !(await saveOverallNote())) return false;
-  persistScroll();
-  return true;
+  layoutBusy.value = true;
+  try {
+    releaseLayoutBarrier = await draftController.barrier();
+    persistScroll();
+    return true;
+  } catch (error) {
+    trayError.value = mutationMessage(error);
+    layoutBusy.value = false;
+    return false;
+  }
 }
 
-defineExpose({ onCommentEvent, prepareLayoutSwap });
+function finishLayoutSwap() {
+  releaseLayoutBarrier?.();
+  releaseLayoutBarrier = null;
+  layoutBusy.value = false;
+}
+
+defineExpose({ onCommentEvent, prepareLayoutSwap, finishLayoutSwap });
 
 // --- lifecycle --------------------------------------------------------------
 
@@ -947,9 +907,6 @@ onMounted(() => {
 onBeforeUnmount(() => {
   persistScroll();
   if (summarySaveTimer) clearTimeout(summarySaveTimer);
-  if (!summaryHydrating.value && overallNote.value !== draft.value?.summary) {
-    void saveOverallNote();
-  }
   document.removeEventListener('selectionchange', onSelectionChange);
   document.removeEventListener('mousedown', onDocMouseDown, true);
   document.removeEventListener('visibilitychange', refreshPrivateDraft);
@@ -976,10 +933,10 @@ function renderCard(entry: ReviewEntry): VNode {
       active: entry.comment.id === activeId.value,
       reanchoring: entry.comment.id === reanchorCommentId.value,
       error: commentErrors.value[entry.comment.id] ?? '',
+      deleteAction: removeComment,
       onFocus: focusComment,
       onClose: closeComment,
       onEdit: editComment,
-      onDelete: removeComment,
       onReanchor: beginReanchor,
       onCancelReanchor: cancelReanchor,
       onResolution: (commentId: number, resolved: boolean) =>
@@ -1104,6 +1061,12 @@ const DocBody = () => {
 
 <template>
   <div ref="containerEl" class="relative h-full min-h-0 w-full overflow-hidden">
+    <div
+      v-if="layoutBusy"
+      class="absolute inset-0 z-50 cursor-wait"
+      aria-label="Saving review before changing layout"
+      data-testid="review-layout-barrier"
+    ></div>
     <div
       ref="scrollerEl"
       class="h-full min-h-0 w-full overflow-auto bg-surface"
@@ -1287,11 +1250,13 @@ const DocBody = () => {
           </label>
           <textarea
             id="review-overall-note"
-            v-model="overallNote"
+            :value="overallNote"
             rows="3"
             class="mt-1 w-full resize-y rounded border border-line bg-input p-2 text-xs text-fg outline-none focus:border-accent"
             placeholder="Feedback that applies to the artifact as a whole…"
             data-testid="review-overall-note"
+            :disabled="layoutBusy || submitting || discarding"
+            @input="editOverallNote"
             @blur="saveOverallNote"
           ></textarea>
           <p v-if="summarySaving" class="mt-1 text-2xs text-faint" aria-live="polite">
@@ -1328,33 +1293,22 @@ const DocBody = () => {
             >
               {{ trayError }}
             </p>
-            <template v-if="discardConfirm">
-              <span class="text-xs text-block">Discard all pending comments?</span>
-              <button type="button" class="btn-danger px-2 py-1 text-xs" @click="discardDraft">
-                Discard
-              </button>
-              <button
-                type="button"
-                class="btn-secondary px-2 py-1 text-xs"
-                @click="discardConfirm = false"
-              >
-                Cancel
-              </button>
-            </template>
-            <button
-              v-else
-              type="button"
-              class="btn-secondary px-2 py-1 text-xs text-block"
-              @click="discardConfirm = true"
-            >
-              Discard draft
-            </button>
+            <InlineConfirm
+              label="Discard draft"
+              :message="`Discard the overall note and all ${draft.comments.length} pending comment${draft.comments.length === 1 ? '' : 's'}?`"
+              confirm-label="Discard draft"
+              danger
+              :disabled="layoutBusy || submitting || discarding"
+              :action="discardDraft"
+            />
             <button
               type="button"
               class="btn-primary ml-auto px-3 py-1.5 text-xs"
               data-testid="submit-review"
               :disabled="
                 submitting ||
+                layoutBusy ||
+                discarding ||
                 summarySaving ||
                 (!draft.comments.length && !overallNote.trim()) ||
                 (draft.outdated && !acknowledgeOutdated)
@@ -1385,11 +1339,13 @@ const DocBody = () => {
           </label>
           <textarea
             id="review-new-overall-note"
-            v-model="overallNote"
+            :value="overallNote"
             rows="3"
             class="mt-1 w-full resize-y rounded border border-line bg-input p-2 text-xs text-fg outline-none focus:border-accent"
             placeholder="Feedback that applies to the artifact as a whole…"
             data-testid="review-overall-note"
+            :disabled="layoutBusy || submitting || discarding"
+            @input="editOverallNote"
             @blur="saveOverallNote"
           ></textarea>
           <p v-if="summarySaving" class="mt-1 text-2xs text-faint" aria-live="polite">

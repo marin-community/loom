@@ -6,11 +6,13 @@ CREATE TABLE reviews (
     branch_id             TEXT NOT NULL,
     session_id            TEXT NOT NULL,
     subject_kind          TEXT NOT NULL,
+    subject_id            TEXT NOT NULL,
     subject_key           TEXT NOT NULL,
     subject_label         TEXT NOT NULL,
     subject_version       TEXT NOT NULL,
     status                TEXT NOT NULL DEFAULT 'draft',
     summary               TEXT NOT NULL DEFAULT '',
+    draft_revision        INTEGER NOT NULL DEFAULT 1,
     created_by            TEXT NOT NULL,
     acknowledged_outdated INTEGER NOT NULL DEFAULT 0,
     delivery_state        TEXT NOT NULL DEFAULT 'draft',
@@ -22,10 +24,10 @@ CREATE TABLE reviews (
 );
 
 CREATE UNIQUE INDEX idx_reviews_one_draft
-    ON reviews(created_by, session_id, subject_kind, subject_key)
+    ON reviews(created_by, session_id, subject_kind, subject_id)
     WHERE status = 'draft';
 CREATE INDEX idx_reviews_subject
-    ON reviews(branch_id, session_id, subject_kind, subject_key, id);
+    ON reviews(branch_id, session_id, subject_kind, subject_id, id);
 
 CREATE TABLE review_comments (
     id              INTEGER PRIMARY KEY,
@@ -46,14 +48,16 @@ CREATE TABLE review_delivery_outbox (
     state           TEXT NOT NULL DEFAULT 'queued',
     attempts        INTEGER NOT NULL DEFAULT 0,
     next_attempt_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-    last_error      TEXT
+    last_error      TEXT,
+    lease_token     TEXT
 );
 
--- A durable receipt for the conversation queue boundary. A worker retry after
--- a crash can observe this key and mark the outbox delivered without appending
--- the same structured feedback to sessions.pending_prompt twice.
-CREATE TABLE review_prompt_deliveries (
-    delivery_key TEXT PRIMARY KEY,
-    session_id   TEXT NOT NULL,
-    enqueued_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+-- Artifact ids are immutable review subject identities. SQLite may reuse the
+-- largest deleted INTEGER PRIMARY KEY, so allocate envelopes from a durable
+-- monotonic sequence seeded after every artifact that predates reviews.
+CREATE TABLE artifact_id_sequence (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    next_id   INTEGER NOT NULL
 );
+INSERT INTO artifact_id_sequence (singleton, next_id)
+SELECT 1, COALESCE(MAX(id), 0) + 1 FROM artifacts;

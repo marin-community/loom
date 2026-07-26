@@ -18,14 +18,12 @@ use crate::auth::Principal;
 use crate::events;
 use crate::session::Session;
 
-use super::{require_branch, require_session, ApiResult, AppError, AppState};
+use super::{require_session, ApiResult, AppError, AppState};
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ReviewListQuery {
     pub subject_kind: String,
     pub subject_key: String,
-    #[serde(default)]
-    pub session_id: Option<String>,
 }
 
 fn require_operator(principal: &Principal) -> ApiResult<()> {
@@ -263,28 +261,6 @@ pub(super) async fn list_session_reviews(
     ))
 }
 
-pub(super) async fn list_branch_reviews(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(key): Path<String>,
-    Query(q): Query<ReviewListQuery>,
-) -> ApiResult<Json<Vec<ReviewDto>>> {
-    let branch = require_branch(&st.db, &key).await?;
-    let session_id = q
-        .session_id
-        .as_deref()
-        .ok_or_else(|| AppError::bad_request("session_id is required"))?;
-    let (session, session_branch) = require_session(&st.db, session_id).await?;
-    if session_branch.id != branch.id {
-        return Err(AppError::bad_request(
-            "review session does not belong to this branch",
-        ));
-    }
-    Ok(Json(
-        list_for(&st, &principal, &session, &branch, &q).await?,
-    ))
-}
-
 async fn create_for(
     st: &AppState,
     principal: &Principal,
@@ -325,28 +301,6 @@ pub(super) async fn create_session_review(
     Json(body): Json<CreateReviewReq>,
 ) -> ApiResult<Json<ReviewDto>> {
     let (session, branch) = require_session(&st.db, &key).await?;
-    Ok(Json(
-        create_for(&st, &principal, &session, &branch, &body).await?,
-    ))
-}
-
-pub(super) async fn create_branch_review(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(key): Path<String>,
-    Json(body): Json<CreateReviewReq>,
-) -> ApiResult<Json<ReviewDto>> {
-    let branch = require_branch(&st.db, &key).await?;
-    let session_id = body
-        .session_id
-        .as_deref()
-        .ok_or_else(|| AppError::bad_request("session_id is required"))?;
-    let (session, session_branch) = require_session(&st.db, session_id).await?;
-    if session_branch.id != branch.id {
-        return Err(AppError::bad_request(
-            "review session does not belong to this branch",
-        ));
-    }
     Ok(Json(
         create_for(&st, &principal, &session, &branch, &body).await?,
     ))

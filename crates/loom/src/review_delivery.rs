@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use crate::{backend, events, session, AppState};
 use weaver_core::review;
@@ -21,6 +21,13 @@ pub struct ReviewInboxItem {
     pub delivery_key: String,
     pub payload: String,
     pub claim_token: String,
+}
+
+pub struct ReviewTurnBoundary<'a> {
+    pub turn: i64,
+    pub seq: i64,
+    pub opening_payload: &'a Value,
+    pub inflight: &'a str,
 }
 
 /// Cross the core-ledger/Loom-runtime seam in one transaction: append the
@@ -65,14 +72,6 @@ async fn enqueue_review_once(
     .await?
     .rows_affected()
         == 1;
-    sqlx::query(
-        "INSERT INTO review_prompt_deliveries (delivery_key, session_id)
-         VALUES (?, ?) ON CONFLICT(delivery_key) DO NOTHING",
-    )
-    .bind(&item.delivery_key)
-    .bind(session_id)
-    .execute(&mut *tx)
-    .await?;
     let completed = sqlx::query(
         "UPDATE review_delivery_outbox
          SET state = 'delivered', attempts = attempts + 1, last_error = NULL,
@@ -143,11 +142,23 @@ pub async fn claim_review_inbox(
     let now = crate::db::now_iso();
     let mut tx = weaver_core::db::begin_immediate(db).await?;
     let key: Option<String> = sqlx::query_scalar(
-        "SELECT delivery_key
-         FROM review_conversation_inbox
-         WHERE branch_id = ?
-           AND (state = 'queued' OR (state = 'delivering' AND claimed_at <= ?))
-         ORDER BY created_at, delivery_key
+        "SELECT inbox.delivery_key
+         FROM review_conversation_inbox AS inbox
+         WHERE inbox.branch_id = ?
+           AND (
+             inbox.state = 'queued'
+             OR (
+               inbox.state = 'delivering'
+               AND inbox.claimed_at <= ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM sessions AS target
+                 WHERE target.id = inbox.claimed_session_id
+                   AND json_extract(target.acp_inflight, '$.delivery_key')
+                       = inbox.delivery_key
+               )
+             )
+           )
+         ORDER BY inbox.created_at, inbox.delivery_key
          LIMIT 1",
     )
     .bind(branch_id)
@@ -177,37 +188,57 @@ pub async fn claim_review_inbox(
     Ok(item)
 }
 
-/// Atomically establish the protected feedback's ACP turn boundary. The
-/// delivery key is persisted in the opening journal block in the same
-/// transaction that consumes the inbox claim and records the in-flight prompt.
-/// A crash after this commit can recover the turn, but can never reclaim and
-/// start the same immutable feedback as a second turn.
-pub async fn start_review_inbox_turn(
+/// Hand protected feedback to the ACP socket, then atomically persist its
+/// opening journal block and in-flight prompt. The socket has no durable
+/// supervisor acknowledgement, so the inbox claim remains recoverable until
+/// the matching ACP prompt response consumes it. A failure can retry the
+/// immutable feedback and may duplicate process delivery, but cannot lose it.
+pub async fn start_review_inbox_turn<F>(
     db: &crate::db::Db,
     item: &ReviewInboxItem,
     session_id: &str,
-    turn: i64,
-    seq: i64,
-    opening_payload: &Value,
-    inflight: &str,
-) -> Result<bool> {
-    let now = crate::db::now_iso();
-    let mut tx = weaver_core::db::begin_immediate(db).await?;
-    let consumed = sqlx::query(
-        "UPDATE review_conversation_inbox
-         SET state = 'consumed', consumed_at = ?, claimed_session_id = ?,
-             claim_token = NULL
-         WHERE delivery_key = ? AND state = 'delivering' AND claim_token = ?",
+    boundary: ReviewTurnBoundary<'_>,
+    transport: F,
+) -> Result<bool>
+where
+    F: Future<Output = Result<()>>,
+{
+    let owns_claim: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+           SELECT 1 FROM review_conversation_inbox
+           WHERE delivery_key = ? AND state = 'delivering'
+             AND claim_token = ? AND claimed_session_id = ?
+         )",
     )
-    .bind(&now)
-    .bind(session_id)
     .bind(&item.delivery_key)
     .bind(&item.claim_token)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected()
-        == 1;
-    if !consumed {
+    .bind(session_id)
+    .fetch_one(db)
+    .await?;
+    if !owns_claim {
+        return Ok(false);
+    }
+
+    transport
+        .await
+        .context("writing protected review feedback to ACP relay")?;
+
+    let now = crate::db::now_iso();
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
+    let still_owned: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+           SELECT 1 FROM review_conversation_inbox
+           WHERE delivery_key = ? AND state = 'delivering'
+             AND claim_token = ? AND claimed_session_id = ?
+         )",
+    )
+    .bind(&item.delivery_key)
+    .bind(&item.claim_token)
+    .bind(session_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !still_owned {
+        tx.rollback().await?;
         return Ok(false);
     }
     let journaled = sqlx::query(
@@ -216,9 +247,9 @@ pub async fn start_review_inbox_turn(
          ON CONFLICT DO NOTHING",
     )
     .bind(session_id)
-    .bind(turn)
-    .bind(seq)
-    .bind(opening_payload.to_string())
+    .bind(boundary.turn)
+    .bind(boundary.seq)
+    .bind(boundary.opening_payload.to_string())
     .bind(&now)
     .execute(&mut *tx)
     .await?;
@@ -228,7 +259,7 @@ pub async fn start_review_inbox_turn(
         ));
     }
     let session = sqlx::query("UPDATE sessions SET acp_inflight = ? WHERE id = ?")
-        .bind(inflight)
+        .bind(boundary.inflight)
         .bind(session_id)
         .execute(&mut *tx)
         .await?;
@@ -310,8 +341,8 @@ pub async fn deliver_review(state: &AppState, review_id: i64) -> Result<()> {
                 enqueue_review_once(state, &review, &target.id, &payload, &lease.token).await?;
             if appended {
                 if let Some(handle) = state.acp.get(&target.id) {
-                    // Best-effort wake. The durable queue is already the delivery
-                    // boundary; a task race cannot lose or duplicate the review.
+                    // Best-effort wake. The durable queue survives task races;
+                    // the unacknowledged ACP process boundary may retry.
                     match tokio::time::timeout(TRANSPORT_TIMEOUT, handle.notify_pending()).await {
                         Ok(Ok(_)) => {}
                         Ok(Err(error)) => {
@@ -552,7 +583,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_journal_and_inbox_consumption_are_one_crash_boundary() {
+    async fn turn_journal_and_claim_stay_recoverable_until_prompt_response() {
         let (db, item) = claimed_inbox().await;
         sqlx::query(
             "CREATE TRIGGER fail_review_inflight
@@ -572,10 +603,13 @@ mod tests {
             &db,
             &item,
             "acp-review",
-            1,
-            0,
-            &payload,
-            r#"{"prompt_id":7,"turn":1,"delivery_key":"review:stable"}"#,
+            ReviewTurnBoundary {
+                turn: 1,
+                seq: 0,
+                opening_payload: &payload,
+                inflight: r#"{"prompt_id":7,"turn":1,"delivery_key":"review:stable"}"#,
+            },
+            async { Ok(()) },
         )
         .await
         .unwrap_err();
@@ -604,22 +638,43 @@ mod tests {
             &db,
             &item,
             "acp-review",
-            1,
-            0,
-            &payload,
-            r#"{"prompt_id":7,"turn":1,"delivery_key":"review:stable"}"#,
+            ReviewTurnBoundary {
+                turn: 1,
+                seq: 0,
+                opening_payload: &payload,
+                inflight: r#"{"prompt_id":7,"turn":1,"delivery_key":"review:stable"}"#,
+            },
+            async { Ok(()) },
         )
         .await
         .unwrap());
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM review_conversation_inbox WHERE delivery_key = 'review:stable'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            state, "delivering",
+            "a socket write is not an ACP prompt acknowledgement"
+        );
+        assert!(
+            consume_review_inbox(&db, &item.delivery_key, &item.claim_token, "acp-review")
+                .await
+                .unwrap()
+        );
         assert!(
             !start_review_inbox_turn(
                 &db,
                 &item,
                 "acp-review",
-                2,
-                0,
-                &payload,
-                r#"{"prompt_id":8,"turn":2,"delivery_key":"review:stable"}"#,
+                ReviewTurnBoundary {
+                    turn: 2,
+                    seq: 0,
+                    opening_payload: &payload,
+                    inflight: r#"{"prompt_id":8,"turn":2,"delivery_key":"review:stable"}"#,
+                },
+                async { Ok(()) },
             )
             .await
             .unwrap(),
@@ -644,6 +699,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relay_write_failure_keeps_protected_feedback_recoverable() {
+        let (db, item) = claimed_inbox().await;
+        let error = start_review_inbox_turn(
+            &db,
+            &item,
+            "acp-review",
+            ReviewTurnBoundary {
+                turn: 1,
+                seq: 0,
+                opening_payload: &json!({
+                    "text": item.payload,
+                    "delivery_key": item.delivery_key,
+                }),
+                inflight: r#"{"prompt_id":7,"turn":1,"delivery_key":"review:stable"}"#,
+            },
+            async { Err(anyhow::anyhow!("injected relay write failure")) },
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("injected relay write failure"));
+
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM review_conversation_inbox WHERE delivery_key = 'review:stable'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(state, "delivering");
+        let blocks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_blocks")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(blocks, 0);
+        let inflight: Option<String> =
+            sqlx::query_scalar("SELECT acp_inflight FROM sessions WHERE id = 'acp-review'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(inflight.is_none());
+
+        assert!(
+            release_review_inbox(&db, &item.delivery_key, &item.claim_token)
+                .await
+                .unwrap()
+        );
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM review_conversation_inbox WHERE delivery_key = 'review:stable'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(state, "queued");
+    }
+
+    #[tokio::test]
     async fn lost_claim_cannot_create_a_turn_or_complete_the_inbox() {
         let (db, item) = claimed_inbox().await;
         sqlx::query(
@@ -654,21 +764,30 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
+        let writes = Arc::new(AtomicUsize::new(0));
+        let observed_writes = writes.clone();
         let started = start_review_inbox_turn(
             &db,
             &item,
             "acp-review",
-            1,
-            0,
-            &json!({
-                "text": item.payload,
-                "delivery_key": item.delivery_key,
-            }),
-            r#"{"prompt_id":7,"turn":1}"#,
+            ReviewTurnBoundary {
+                turn: 1,
+                seq: 0,
+                opening_payload: &json!({
+                    "text": item.payload,
+                    "delivery_key": item.delivery_key,
+                }),
+                inflight: r#"{"prompt_id":7,"turn":1}"#,
+            },
+            async move {
+                observed_writes.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
         )
         .await
         .unwrap();
         assert!(!started);
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
         let blocks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_blocks")
             .fetch_one(&db)
             .await

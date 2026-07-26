@@ -56,8 +56,41 @@ test.describe("staged artifact reviews", () => {
     await weaver.writeArtifact(session, "design", DOC, {
       title: "Design notes",
     });
+    await weaver.writeArtifact(session, "alpha", "# Alpha identity\n", {
+      title: "Alpha identity",
+    });
+    await weaver.writeArtifact(session, "beta", "# Beta identity\n", {
+      title: "Beta identity",
+    });
     await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/design`);
     const article = page.locator(".markdown-body");
+    await expect(article.locator("h1")).toContainText("Design notes");
+
+    let releaseAlpha!: () => void;
+    const alphaGate = new Promise<void>((resolve) => {
+      releaseAlpha = resolve;
+    });
+    await page.route(
+      `**/api/sessions/${session.id}/artifacts/alpha`,
+      async (route) => {
+        await alphaGate;
+        await route.continue();
+      },
+      { times: 1 },
+    );
+    await page.locator('[data-artifact="alpha"]').click();
+    await expect(page.getByText("loading…")).toBeVisible();
+    await expect(page.locator(".markdown-body")).toHaveCount(0);
+    await expect(page.getByTestId("artifact-source-editor")).toHaveCount(0);
+    await page.locator('[data-artifact="beta"]').click();
+    await expect(page.locator(".markdown-body h1")).toContainText(
+      "Beta identity",
+    );
+    releaseAlpha();
+    await expect(page.locator(".markdown-body h1")).toContainText(
+      "Beta identity",
+    );
+    await page.locator('[data-artifact="design"]').click();
     await expect(article.locator("h1")).toContainText("Design notes");
 
     // Exercise the real keyboard selection path once; later selections use the
@@ -130,6 +163,8 @@ test.describe("staged artifact reviews", () => {
       .filter({ hasText: "document title" });
     await titleComment.click();
     await titleComment.getByRole("button", { name: "Delete" }).click();
+    await expect(titleComment).toContainText("Delete this pending comment?");
+    await titleComment.getByRole("button", { name: "Delete comment" }).click();
     await page.getByTestId("review-tray-toggle").click();
     await expect(tray).toContainText("1 pending");
 
@@ -185,7 +220,7 @@ test.describe("staged artifact reviews", () => {
       "draft changed elsewhere",
     );
     await expect(page.getByTestId("review-overall-note")).toHaveValue(
-      "Newer server-side guidance.",
+      "Conflicting stale guidance.",
     );
 
     const finalSave = page.waitForResponse(
@@ -250,14 +285,25 @@ test.describe("staged artifact reviews", () => {
     });
     await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/design`);
     await page.getByTestId("review-tray-toggle").click();
-    await page.route(
-      `**/api/sessions/${session.id}/reviews`,
-      async (route) => {
-        await new Promise((resolve) => setTimeout(resolve, 200));
+    let releaseCreate!: () => void;
+    let markCreateStarted!: () => void;
+    const createGate = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    const createStarted = new Promise<void>((resolve) => {
+      markCreateStarted = resolve;
+    });
+    let createGated = false;
+    await page.route(`**/api/sessions/${session.id}/reviews`, async (route) => {
+      if (route.request().method() !== "POST" || createGated) {
         await route.continue();
-      },
-      { times: 1 },
-    );
+        return;
+      }
+      createGated = true;
+      markCreateStarted();
+      await createGate;
+      await route.continue();
+    });
     await page
       .getByTestId("review-overall-note")
       .fill("Overall feedback survives the layout swap.");
@@ -279,6 +325,12 @@ test.describe("staged artifact reviews", () => {
         response.url().endsWith(`/api/sessions/${session.id}/reviews`),
     );
     await page.getByTestId("artifact-pop").click();
+    await createStarted;
+    await expect(page.getByTestId("artifact-pop")).toContainText("Pop out");
+    await expect(page.getByTestId("artifact-rail-close")).toHaveCount(0);
+    await expect(page.getByTestId("review-layout-barrier")).toBeVisible();
+    await expect(page.getByTestId("review-overall-note")).toBeDisabled();
+    releaseCreate();
     await create;
     await expect(page.getByTestId("artifact-pop")).toContainText("Dock");
     await expect
