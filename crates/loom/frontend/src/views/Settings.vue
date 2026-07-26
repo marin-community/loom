@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { get, patch, listAgents } from '../api';
-import type { CustomAgent, SettingView } from '../types';
+import type { CustomAgent, SettingsEnvelope, SettingView } from '../types';
 import ToggleSwitch from '../components/ToggleSwitch.vue';
 import TokensPanel from '../components/TokensPanel.vue';
 import AccountPanel from '../components/AccountPanel.vue';
@@ -17,11 +17,6 @@ import SettingFieldRow from '../components/SettingFieldRow.vue';
 
 const route = useRoute();
 const router = useRouter();
-
-// The server's canonical reply for both GET and PATCH /api/settings.
-interface SettingsEnvelope {
-  settings: SettingView[];
-}
 
 type Category =
   | 'agents'

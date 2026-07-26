@@ -762,7 +762,8 @@ pub fn router(state: AppState) -> Router {
                 .post(upload_scratch)
                 .delete(delete_scratch),
         )
-        .route("/sessions/{id}/log", get(log_session))
+        // Compatibility alias for the branch-owned history endpoint below.
+        .route("/sessions/{id}/log", get(branch_events))
         .route("/sessions/{id}/conversation", get(conversation_session))
         .route("/sessions/{id}/history", get(session_history))
         .route("/sessions/{id}/history/search", get(search_session_history))
@@ -818,7 +819,10 @@ pub fn router(state: AppState) -> Router {
         // HTTP-only client of loom and these are its primary write path.
         .route("/branches/{id}/status", post(set_branch_status))
         .route("/branches/{id}/slack/reply", post(slack_reply))
-        .route("/branches/{id}/events", post(create_branch_event))
+        .route(
+            "/branches/{id}/events",
+            get(branch_events).post(create_branch_event),
+        )
         .route(
             "/branches/{id}/tags/{key}",
             axum::routing::put(set_branch_tag).delete(clear_branch_tag),

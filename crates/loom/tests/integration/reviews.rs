@@ -375,14 +375,14 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     assert!(visible.iter().any(|review| review.id == submitted.id));
     let comment_id = submitted.comments[0].id;
     assert_eq!(
-        bob.resolve_review_comment(submitted.id, comment_id, true)
+        bob.set_review_comment_resolution(submitted.id, comment_id, true)
             .await
             .unwrap()
             .status,
         "resolved"
     );
     assert_eq!(
-        bob.resolve_review_comment(submitted.id, comment_id, false)
+        bob.set_review_comment_resolution(submitted.id, comment_id, false)
             .await
             .unwrap()
             .status,

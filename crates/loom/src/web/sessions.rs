@@ -2255,9 +2255,9 @@ pub(super) async fn raw_session(
         .into_response())
 }
 
-// Session log, conversation, and event-stream endpoints.
+// Branch history compatibility alias plus session conversation/event endpoints.
 
-pub(super) async fn log_session(
+pub(super) async fn branch_events(
     State(st): State<AppState>,
     Path(key): Path<String>,
 ) -> ApiResult<Json<Vec<Event>>> {

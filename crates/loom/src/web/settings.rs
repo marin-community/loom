@@ -1,5 +1,6 @@
 use axum::{extract::State, Json};
 use serde_json::{json, Value};
+use weaver_api::{SettingView, SettingsEnvelope};
 
 use crate::config;
 use crate::db::Db;
@@ -11,18 +12,23 @@ use super::{ApiResult, AppError, AppState};
 // Settings
 // ---------------------------------------------------------------------------
 
-async fn settings_envelope(db: &Db) -> ApiResult<Json<Value>> {
-    Ok(Json(json!({ "settings": config::describe(db).await? })))
+async fn settings_envelope(db: &Db) -> ApiResult<Json<SettingsEnvelope>> {
+    let settings = config::describe(db)
+        .await?
+        .into_iter()
+        .map(SettingView::from)
+        .collect();
+    Ok(Json(SettingsEnvelope { settings }))
 }
 
-pub(super) async fn get_settings(State(st): State<AppState>) -> ApiResult<Json<Value>> {
+pub(super) async fn get_settings(State(st): State<AppState>) -> ApiResult<Json<SettingsEnvelope>> {
     settings_envelope(&st.db).await
 }
 
 pub(super) async fn patch_settings(
     State(st): State<AppState>,
     Json(body): Json<serde_json::Map<String, Value>>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<SettingsEnvelope>> {
     let mut changes: Vec<config::Change> = Vec::with_capacity(body.len());
     let mut legacy_agent_changes: Vec<config::Change> = Vec::new();
     let mut errors = serde_json::Map::new();

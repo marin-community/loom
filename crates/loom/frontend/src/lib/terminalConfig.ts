@@ -6,7 +6,7 @@
 
 import type { ITheme } from '@xterm/xterm';
 import { get } from '../api';
-import type { SettingView } from '../types';
+import type { SettingsEnvelope, SettingView } from '../types';
 
 // Terminal palettes, selected by the `terminal.theme` setting. The dark palette
 // keeps xterm's own ANSI colours (they already assume a dark terminal) but sits
@@ -125,8 +125,8 @@ export function defaultTerminalConfig(): TerminalConfig {
 // defaults.
 export async function fetchTerminalConfig(): Promise<TerminalConfig> {
   try {
-    const res = (await get('/settings')) as { settings?: SettingView[] };
-    return resolveTerminalConfig(res?.settings ?? []);
+    const res = (await get('/settings')) as SettingsEnvelope;
+    return resolveTerminalConfig(res.settings);
   } catch {
     return defaultTerminalConfig();
   }

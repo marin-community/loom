@@ -4,7 +4,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { get, patch } from '../api';
-import type { SettingView } from '../types';
+import type { SettingsEnvelope, SettingView } from '../types';
 import {
   FONT_CHOICES,
   fontStack,
@@ -78,8 +78,8 @@ function adopt(settings: SettingView[]) {
 
 async function load() {
   try {
-    const res = (await get('/settings')) as { settings?: SettingView[] };
-    adopt(res?.settings ?? []);
+    const res = (await get('/settings')) as SettingsEnvelope;
+    adopt(res.settings);
     error.value = '';
   } catch (e) {
     error.value = (e as Error).message;
@@ -97,8 +97,8 @@ async function commit(body: Record<string, string | null>, done: string) {
   error.value = '';
   notice.value = '';
   try {
-    const res = (await patch('/settings', body)) as { settings?: SettingView[] };
-    adopt(res?.settings ?? []);
+    const res = (await patch('/settings', body)) as SettingsEnvelope;
+    adopt(res.settings);
     notice.value = done;
   } catch (e) {
     error.value = (e as Error).message;

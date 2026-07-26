@@ -56,7 +56,7 @@ enum Cmd {
         cmd: ServerCmd,
     },
 
-    /// Manage sessions: launch, ls, attach, poll, wait, send, break, preview.
+    /// Manage sessions: launch, ls, attach, poll, wait, send, interrupt, preview.
     ///
     /// The uniform surface for a child session — start one, list the fleet,
     /// watch one, and interact with its agent pane:
@@ -66,7 +66,7 @@ enum Cmd {
     ///     loom session poll weaver/health      # one-shot status
     ///     loom session wait weaver/health      # block until done / needs you
     ///     loom session send weaver/health "try the curl again"
-    ///     loom session break weaver/health     # interrupt the current turn
+    ///     loom session interrupt weaver/health # interrupt the current turn
     ///     loom session preview weaver/health   # peek at the terminal screen
     ///     loom session rename weaver/health "Health endpoint + test"
     ///
@@ -212,7 +212,7 @@ enum Cmd {
     /// List active sessions — shortcut for `loom session ls`.
     Ps,
     /// Attach your terminal to a session — shortcut for `loom session attach`.
-    Attach { branch: String },
+    Attach { session: String },
 
     /// Open the loom web UI in a browser.
     Open,
@@ -465,8 +465,9 @@ enum SessionCmd {
         #[arg(long)]
         no_enter: bool,
     },
-    /// Send a break (Escape) to a session — interrupt the agent's current turn.
-    Break {
+    /// Interrupt a session's current turn (sends Escape to terminal sessions).
+    #[command(visible_alias = "break")]
+    Interrupt {
         /// Session key: id, branch id, branch name, or `repo:branch`.
         session: String,
     },
@@ -551,18 +552,18 @@ enum SessionCmd {
         force: bool,
     },
     /// Show one session's details.
-    Show { branch: String },
+    Show { session: String },
     /// Attach your terminal to a session (also `loom attach`).
-    Attach { branch: String },
+    Attach { session: String },
     /// Archive a session or failed launch: tear down runtime, keep history.
     ///
     /// An unmatched automation launch is addressed by its reserved session id,
     /// the same id shown in the Interventions section/API.
-    Archive { branch: String },
+    Archive { session: String },
     /// Recreate the terminal session for an orphaned session.
-    Adopt { branch: String },
+    Adopt { session: String },
     /// Recover an archived session: rebuild its worktree and resume the agent.
-    Recover { branch: String },
+    Recover { session: String },
     /// Replace the provider behind a live ACP session, preserving its worktree
     /// and canonical conversation journal.
     Handoff {
@@ -589,7 +590,7 @@ enum SessionCmd {
     },
     /// Remove a session or unmatched launch attempt and its runtime.
     Rm {
-        branch: String,
+        session: String,
         #[arg(long)]
         keep_branch: bool,
     },
@@ -1300,7 +1301,7 @@ async fn run() -> Result<()> {
         Cmd::Config { cmd } => run_config(cmd).await,
         Cmd::Launch(opts) => cmd_launch(opts.into()).await,
         Cmd::Ps => cmd_ps(false, false, false, None, None, None).await,
-        Cmd::Attach { branch } => cmd_attach(branch).await,
+        Cmd::Attach { session } => cmd_attach(session).await,
         Cmd::Open => cmd_open().await,
         Cmd::Completions { shell } => {
             let mut cmd = Cli::command();
@@ -1562,7 +1563,7 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
             comment_id,
         } => {
             let comment = client
-                .resolve_review_comment(review_id, comment_id, true)
+                .set_review_comment_resolution(review_id, comment_id, true)
                 .await?;
             println!("resolved comment {}", comment.id);
             Ok(())
@@ -1572,7 +1573,7 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
             comment_id,
         } => {
             let comment = client
-                .resolve_review_comment(review_id, comment_id, false)
+                .set_review_comment_resolution(review_id, comment_id, false)
                 .await?;
             println!("reopened comment {}", comment.id);
             Ok(())
@@ -1659,7 +1660,7 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
             message,
             no_enter,
         } => cmd_session_send(session, message.join(" "), !no_enter).await,
-        SessionCmd::Break { session } => cmd_session_break(session).await,
+        SessionCmd::Interrupt { session } => cmd_session_interrupt(session).await,
         SessionCmd::Preview { session, lines } => cmd_session_preview(session, lines).await,
         SessionCmd::Changes { session } => {
             let changes = client::default()?.changes(&session).await?;
@@ -1685,11 +1686,11 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
             ensure,
             force,
         } => cmd_session_cue(session, ensure || force, force).await,
-        SessionCmd::Show { branch } => cmd_show(branch).await,
-        SessionCmd::Attach { branch } => cmd_attach(branch).await,
-        SessionCmd::Archive { branch } => cmd_archive(branch).await,
-        SessionCmd::Adopt { branch } => cmd_adopt(branch).await,
-        SessionCmd::Recover { branch } => cmd_recover(branch).await,
+        SessionCmd::Show { session } => cmd_show(session).await,
+        SessionCmd::Attach { session } => cmd_attach(session).await,
+        SessionCmd::Archive { session } => cmd_archive(session).await,
+        SessionCmd::Adopt { session } => cmd_adopt(session).await,
+        SessionCmd::Recover { session } => cmd_recover(session).await,
         SessionCmd::Handoff {
             session,
             profile,
@@ -1699,9 +1700,9 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
             mode,
         } => cmd_handoff(session, profile, agent, model, effort, mode).await,
         SessionCmd::Rm {
-            branch,
+            session,
             keep_branch,
-        } => cmd_rm(branch, keep_branch).await,
+        } => cmd_rm(session, keep_branch).await,
     }
 }
 
@@ -4086,8 +4087,8 @@ async fn cmd_session_send(key: String, message: String, submit: bool) -> Result<
     Ok(())
 }
 
-/// `loom session break` — send Escape to interrupt the agent's current turn.
-async fn cmd_session_break(key: String) -> Result<()> {
+/// `loom session interrupt` — interrupt the agent's current turn.
+async fn cmd_session_interrupt(key: String) -> Result<()> {
     let client = client::default()?;
     client
         .post(
@@ -4095,7 +4096,7 @@ async fn cmd_session_break(key: String) -> Result<()> {
             json!({}),
         )
         .await?;
-    println!("sent break (Escape) to {key}");
+    println!("interrupted {key}");
     Ok(())
 }
 
@@ -5324,6 +5325,16 @@ mod tests {
                 }
             } if session == "task-1"
         ));
+
+        for verb in ["interrupt", "break"] {
+            let parsed = Cli::try_parse_from(["loom", "session", verb, "task-1"]).unwrap();
+            assert!(matches!(
+                parsed.cmd,
+                Cmd::Session {
+                    cmd: SessionCmd::Interrupt { session }
+                } if session == "task-1"
+            ));
+        }
     }
 
     /// The scaffold must honor the contract it documents — at minimum, be
