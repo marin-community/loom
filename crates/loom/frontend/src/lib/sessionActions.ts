@@ -1,5 +1,14 @@
 import { ref } from 'vue';
-import { post, patch, put, del, regenerateSessionTitle, setSessionTitleGeneration } from '../api';
+import {
+  archiveSession,
+  clearSessionTag,
+  patch,
+  post,
+  put,
+  regenerateSessionTitle,
+  removeSession,
+  setSessionTitleGeneration,
+} from '../api';
 import { confirmAction } from './confirmation';
 import { AUTO_ARCHIVE_DISABLED_VALUE, AUTO_ARCHIVE_KEY, type LifecycleVerb } from './sessionState';
 
@@ -88,7 +97,7 @@ export function useSessionActions(
   // calm (calm is the tag's absence — there is no stored `ok`).
   const clearTag = (key: string) =>
     act(`tag:${key}`, async () => {
-      await del(`/sessions/${getId()}/tags/${encodeURIComponent(key)}`);
+      await clearSessionTag(getId(), key);
       await reload();
     });
 
@@ -103,7 +112,7 @@ export function useSessionActions(
         });
         notice.value = 'Automatic archive disabled for this session.';
       } else {
-        await del(path);
+        await clearSessionTag(getId(), AUTO_ARCHIVE_KEY);
         notice.value = 'Automatic archive enabled for this session.';
       }
       await reload();
@@ -126,7 +135,7 @@ export function useSessionActions(
       action: async () => {
         error.value = '';
         notice.value = '';
-        const res = (await post(`/sessions/${getId()}/archive`)) as { branch: string };
+        const res = (await archiveSession(getId())) as { branch: string };
         notice.value = `Archived ${res.branch}.`;
         await reload();
       },
@@ -149,7 +158,7 @@ export function useSessionActions(
       action: async () => {
         error.value = '';
         notice.value = '';
-        await del(`/sessions/${getId()}`);
+        await removeSession(getId());
         if (removed) removed();
         else await reload();
       },

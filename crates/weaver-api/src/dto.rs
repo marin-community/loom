@@ -2421,17 +2421,61 @@ pub struct CreateEventReq {
     pub data: Value,
 }
 
-/// One registered setting with its effective value, as `GET /api/settings`
-/// exposes it (a subset of the server's richer `SettingSpec` — key, value,
-/// and whether it's unset-and-defaulted are all a CLI needs).
+wire_enum!(SettingKind {
+    String => "string",
+    Int => "int",
+    Bool => "bool",
+    Enum => "enum",
+});
+
+impl From<weaver_core::config::SettingKind> for SettingKind {
+    fn from(kind: weaver_core::config::SettingKind) -> Self {
+        match kind {
+            weaver_core::config::SettingKind::String => Self::String,
+            weaver_core::config::SettingKind::Int => Self::Int,
+            weaver_core::config::SettingKind::Bool => Self::Bool,
+            weaver_core::config::SettingKind::Enum => Self::Enum,
+        }
+    }
+}
+
+/// One registered setting with all registry metadata and its effective value,
+/// as both `GET` and `PATCH /api/settings` return it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingView {
     pub key: String,
+    pub label: String,
+    pub description: String,
+    pub kind: SettingKind,
+    pub default: String,
+    pub group: String,
+    pub options: Vec<String>,
     pub value: String,
     pub is_default: bool,
 }
 
-/// The envelope `GET /api/settings` returns: `{ "settings": [...] }`.
+impl From<weaver_core::config::SettingView> for SettingView {
+    fn from(setting: weaver_core::config::SettingView) -> Self {
+        Self {
+            key: setting.spec.key.to_string(),
+            label: setting.spec.label.to_string(),
+            description: setting.spec.description.to_string(),
+            kind: setting.spec.kind.into(),
+            default: setting.spec.default.to_string(),
+            group: setting.spec.group.to_string(),
+            options: setting
+                .spec
+                .options
+                .iter()
+                .map(|option| (*option).to_string())
+                .collect(),
+            value: setting.value,
+            is_default: setting.is_default,
+        }
+    }
+}
+
+/// The envelope both `GET` and `PATCH /api/settings` return.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SettingsEnvelope {
     pub settings: Vec<SettingView>,

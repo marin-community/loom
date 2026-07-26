@@ -125,8 +125,9 @@ async fn branch_issues_and_repo_board() {
 }
 
 /// The cross-repo issue board (`GET /api/issues`) and issue tags: a label set
-/// via `PUT /api/issues/{id}/tags/{key}` surfaces on the issue's `tags`, and
-/// `DELETE` clears it. Closed issues only appear with `?all=true`.
+/// through the typed client surfaces on the issue's `tags`, including when its
+/// free-form key contains reserved URL characters, and clearing removes it.
+/// Closed issues only appear with `?all=true`.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cross_repo_board_and_issue_tags() {
@@ -165,39 +166,29 @@ async fn cross_repo_board_and_issue_tags() {
         "the new issue shows on the cross-repo board"
     );
 
-    // Set a free-form label; it surfaces on the issue's tags with attribution.
+    // Set a free-form label through the typed client. The key deliberately
+    // contains path/query delimiters so the client must encode it as one path
+    // segment instead of changing the route.
+    let tag_key = "priority / now?#";
     let tagged = client
-        .put(
-            &format!("/api/issues/{issue_id}/tags/priority"),
-            json!({ "value": "high", "note": "ship first", "by": "agent" }),
-        )
+        .set_issue_tag(issue_id, tag_key, "high", "ship first", "agent")
         .await
         .unwrap();
-    let tags = tagged["tags"].as_array().unwrap();
-    assert_eq!(tags.len(), 1);
-    assert_eq!(tags[0]["key"], "priority");
-    assert_eq!(tags[0]["value"], "high");
-    assert_eq!(tags[0]["note"], "ship first");
-    assert_eq!(tags[0]["set_by"], "agent");
+    assert_eq!(tagged.tags.len(), 1);
+    assert_eq!(tagged.tags[0].key, tag_key);
+    assert_eq!(tagged.tags[0].value, "high");
+    assert_eq!(tagged.tags[0].note, "ship first");
+    assert_eq!(tagged.tags[0].set_by, "agent");
 
     // An empty value is rejected (clear the tag instead).
     let bad = client
-        .put(
-            &format!("/api/issues/{issue_id}/tags/priority"),
-            json!({ "value": "" }),
-        )
+        .set_issue_tag(issue_id, tag_key, "", "", "agent")
         .await;
     assert!(bad.is_err(), "an empty issue-tag value is rejected");
 
     // Clearing removes the label.
-    let cleared = client
-        .delete(&format!("/api/issues/{issue_id}/tags/priority"))
-        .await
-        .unwrap();
-    assert!(
-        cleared["tags"].as_array().unwrap().is_empty(),
-        "clearing removes the label"
-    );
+    let cleared = client.clear_issue_tag(issue_id, tag_key).await.unwrap();
+    assert!(cleared.tags.is_empty(), "clearing removes the label");
 
     // Close the issue: it leaves the default board but returns with ?all=true.
     client

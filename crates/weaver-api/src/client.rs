@@ -156,7 +156,7 @@ impl Client {
 
     // -- Sessions ---------------------------------------------------------
 
-    /// List every active session (`GET /api/sessions`).
+    /// List active non-automation sessions (`GET /api/sessions`).
     pub async fn list_sessions(&self) -> Result<Vec<SessionView>> {
         self.get_typed("/api/sessions").await
     }
@@ -609,10 +609,10 @@ impl Client {
     }
 
     /// Recent events for a branch, newest first, capped at 200 server-side
-    /// (`GET /api/sessions/{key}/log`). Despite the URL, `key` may be a branch
-    /// id, `repo:branch`, or unambiguous id prefix — no live session required.
+    /// (`GET /api/branches/{key}/events`). `key` may be a branch id,
+    /// `repo:branch`, or unambiguous id prefix — no live session required.
     pub async fn branch_log(&self, key: &str) -> Result<Vec<weaver_core::events::Event>> {
-        self.get_typed(&format!("/api/sessions/{}/log", Self::seg(key)))
+        self.get_typed(&format!("/api/branches/{}/events", Self::seg(key)))
             .await
     }
 
@@ -996,7 +996,7 @@ impl Client {
         .await
     }
 
-    pub async fn resolve_review_comment(
+    pub async fn set_review_comment_resolution(
         &self,
         review_id: i64,
         comment_id: i64,
@@ -1008,6 +1008,17 @@ impl Client {
             Some(&ResolveReviewCommentReq { resolved }),
         )
         .await
+    }
+
+    /// Compatibility alias for [`Self::set_review_comment_resolution`].
+    pub async fn resolve_review_comment(
+        &self,
+        review_id: i64,
+        comment_id: i64,
+        resolved: bool,
+    ) -> Result<ReviewCommentDto> {
+        self.set_review_comment_resolution(review_id, comment_id, resolved)
+            .await
     }
 
     pub async fn retry_review_delivery(&self, review_id: i64) -> Result<ReviewDto> {
@@ -1098,7 +1109,7 @@ impl Client {
         };
         self.send_typed(
             Method::PUT,
-            &format!("/api/issues/{id}/tags/{key}"),
+            &format!("/api/issues/{id}/tags/{}", Self::seg(key)),
             Some(&req),
         )
         .await
@@ -1106,7 +1117,7 @@ impl Client {
 
     /// Clear a label on an issue (`DELETE /api/issues/{id}/tags/{key}`).
     pub async fn clear_issue_tag(&self, id: i64, key: &str) -> Result<IssueView> {
-        self.delete(&format!("/api/issues/{id}/tags/{key}"))
+        self.delete(&format!("/api/issues/{id}/tags/{}", Self::seg(key)))
             .await
             .and_then(|v| {
                 serde_json::from_value(v)
@@ -1278,8 +1289,12 @@ impl Client {
 
     /// Apply setting changes: a `null` value clears a key back to its default
     /// (`PATCH /api/settings`).
-    pub async fn patch_settings(&self, changes: serde_json::Map<String, Value>) -> Result<Value> {
-        self.patch("/api/settings", Value::Object(changes)).await
+    pub async fn patch_settings(
+        &self,
+        changes: serde_json::Map<String, Value>,
+    ) -> Result<SettingsEnvelope> {
+        self.send_typed(Method::PATCH, "/api/settings", Some(&changes))
+            .await
     }
 
     // -- Watches ------------------------------------------------------

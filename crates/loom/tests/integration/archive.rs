@@ -217,15 +217,24 @@ async fn archive_keeps_branch_and_history() {
         weaver_core::git::branch_exists(ts.repo_path(), "weaver/archive-me").await,
         "archive must not delete the branch"
     );
-    // The branch event history survives the archive (unlike delete): the
-    // pre-archive manual attention event is still in the log.
-    let log = client
+    // The branch event history survives the archive (unlike delete). The typed
+    // client uses the branch-owned endpoint; the old session log remains an
+    // exact compatibility alias.
+    let branch_log = client.branch_log(&arch_id).await.unwrap();
+    let session_log = client
         .get(&format!("/api/sessions/{arch_id}/log"))
         .await
         .unwrap();
     assert!(
-        serde_json::to_string(&log).unwrap().contains("manual"),
+        serde_json::to_string(&branch_log)
+            .unwrap()
+            .contains("manual"),
         "branch history should survive archive"
+    );
+    assert_eq!(
+        serde_json::to_value(&branch_log).unwrap(),
+        session_log,
+        "the legacy session route must remain a compatibility alias"
     );
 
     // An archived session can still be fully removed afterwards.

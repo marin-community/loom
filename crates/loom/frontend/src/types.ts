@@ -154,10 +154,6 @@ export interface Session {
   mcp_policy: SessionMcpPolicy;
   /** One canonical, shared workbench placement. */
   placement: SessionPlacement | null;
-  /** The ACP modes the adapter offers, when the server exposes them. Absent today
-   *  (SessionView carries only `current_mode`), so the mode chip falls back to the
-   *  well-known claude/codex mode set — see `AcpConversation`. */
-  available_modes?: string[];
   branch: Branch;
 }
 
@@ -1085,6 +1081,11 @@ export interface SettingView {
   options: string[];
   value: string;
   is_default: boolean;
+}
+
+/** Canonical reply from both GET and PATCH /api/settings. */
+export interface SettingsEnvelope {
+  settings: SettingView[];
 }
 
 // --- Authentication --------------------------------------------------------

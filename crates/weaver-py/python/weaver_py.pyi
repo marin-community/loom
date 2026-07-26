@@ -42,7 +42,7 @@ class Client:
 
     # -- Reads (observe) --
     def sessions(self) -> list[dict[str, Any]]:
-        """Every active session, as a list of dicts. Each carries a nested
+        """Active non-automation sessions, as a list of dicts. Each carries a nested
         `branch` whose `tags` is a list of `{key, value, note, set_by, set_at}`
         (the well-known `attention`/`triage` keys plus any free-form key);
         absence of a key is the calm state."""

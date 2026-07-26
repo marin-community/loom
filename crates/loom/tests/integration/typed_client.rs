@@ -8,7 +8,8 @@
 
 use serial_test::serial;
 
-use weaver_api::CreateReq;
+use serde_json::{Map, Value};
+use weaver_api::{CreateReq, SettingKind};
 
 use crate::fixtures::TestServer;
 
@@ -88,4 +89,43 @@ async fn typed_create_list_get_and_mark() {
     );
 
     client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+}
+
+/// Both settings methods share one rich typed envelope. Registry metadata must
+/// survive a PATCH reply just as it does the initial GET.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_settings_get_and_patch_share_the_rich_envelope() {
+    let ts = TestServer::start_api_only().await;
+    let client = &ts.client;
+
+    let initial = client.list_settings().await.unwrap();
+    let initial_setting = initial
+        .settings
+        .iter()
+        .find(|setting| setting.key == "server.auto_adopt")
+        .expect("server.auto_adopt is registered");
+    assert_eq!(initial_setting.kind, SettingKind::Bool);
+    assert!(!initial_setting.label.is_empty());
+    assert!(!initial_setting.description.is_empty());
+    assert_eq!(initial_setting.default, "false");
+    assert!(!initial_setting.group.is_empty());
+    assert!(initial_setting.options.is_empty());
+
+    let mut changes = Map::new();
+    changes.insert("server.auto_adopt".to_string(), Value::Bool(true));
+    let updated = client.patch_settings(changes).await.unwrap();
+    let updated_setting = updated
+        .settings
+        .iter()
+        .find(|setting| setting.key == "server.auto_adopt")
+        .expect("PATCH returns the full registry");
+    assert_eq!(updated_setting.kind, SettingKind::Bool);
+    assert_eq!(updated_setting.label, initial_setting.label);
+    assert_eq!(updated_setting.description, initial_setting.description);
+    assert_eq!(updated_setting.default, initial_setting.default);
+    assert_eq!(updated_setting.group, initial_setting.group);
+    assert_eq!(updated_setting.options, initial_setting.options);
+    assert_eq!(updated_setting.value, "true");
+    assert!(!updated_setting.is_default);
 }
