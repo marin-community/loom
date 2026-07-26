@@ -100,7 +100,11 @@ test.describe("staged artifact reviews", () => {
       "Beta identity",
     );
     releaseAlpha();
-    await alphaResponse;
+    const completedAlphaResponse = await alphaResponse;
+    await completedAlphaResponse.finished();
+    await page.evaluate(
+      () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    );
     await expect(page.locator(".markdown-body h1")).toContainText(
       "Beta identity",
     );
