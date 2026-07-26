@@ -48,6 +48,10 @@ const docTitle = computed(() => {
   return withSection(route.meta.title as string | undefined);
 });
 watch(docTitle, (t) => (document.title = t), { immediate: true });
+watch(
+  () => route.fullPath,
+  () => cancelConfirmation(),
+);
 
 // Views kept alive across navigation so returning is instant — no remount, no
 // refetch flash, no entrance-animation replay. The list views return exactly as

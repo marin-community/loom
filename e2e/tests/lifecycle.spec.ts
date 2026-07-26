@@ -82,6 +82,13 @@ test.describe('session lifecycle actions', () => {
     await remove.scrollIntoViewIfNeeded();
     await remove.click();
     await expect(dialog).toContainText('Git branch, conversation, and Weaver history');
+    await page.goBack();
+    await expect(dialog).toHaveCount(0);
+    expect((await weaver.getSession(removed.id)).id).toBe(removed.id);
+    await page.goForward();
+    if (!(await remove.isVisible())) await page.getByRole('button', { name: /Details/ }).click();
+    await remove.scrollIntoViewIfNeeded();
+    await remove.click();
     await page.keyboard.press('Escape');
     await expect(remove).toBeFocused();
     await remove.click();

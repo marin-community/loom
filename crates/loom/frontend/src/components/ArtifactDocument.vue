@@ -785,6 +785,7 @@ async function retargetDraft() {
 
 async function submitDraft() {
   if (!draft.value || submitting.value) return;
+  if (!(await focusUnsavedComment('submitting the review'))) return;
   submitting.value = true;
   trayError.value = '';
   try {
@@ -851,25 +852,32 @@ async function onCommentEvent(
   await loadReviews();
 }
 
-async function prepareLayoutSwap(): Promise<boolean> {
-  if (layoutBusy.value) return false;
+async function focusUnsavedComment(action: string): Promise<boolean> {
   if (pending.value) {
-    composerError.value = 'Add or cancel this pending comment before changing the layout.';
+    composerError.value = `Add or cancel this pending comment before ${action}.`;
     await nextTick();
     containerEl.value
       ?.querySelector<HTMLTextAreaElement>('[data-testid="review-comment-composer"] textarea')
       ?.focus();
     return false;
   }
-  if (editingCommentId.value != null) {
-    commentErrors.value[editingCommentId.value] =
-      'Save or cancel this comment edit before changing the layout.';
+  const commentId = editingCommentId.value;
+  if (commentId != null && !allEntries.value.some((entry) => entry.comment.id === commentId)) {
+    editingCommentId.value = null;
+  } else if (commentId != null) {
+    commentErrors.value[commentId] = `Save or cancel this comment edit before ${action}.`;
     await nextTick();
     containerEl.value
       ?.querySelector<HTMLTextAreaElement>('[data-testid="review-comment-edit"]')
       ?.focus();
     return false;
   }
+  return true;
+}
+
+async function prepareLayoutSwap(): Promise<boolean> {
+  if (layoutBusy.value) return false;
+  if (!(await focusUnsavedComment('changing the layout'))) return false;
   const active = document.activeElement;
   layoutReturnFocus =
     active instanceof HTMLElement && containerEl.value?.contains(active) ? active : null;
@@ -958,7 +966,8 @@ function renderCard(entry: ReviewEntry): VNode {
       onReanchor: beginReanchor,
       onCancelReanchor: cancelReanchor,
       onEditing: (payload: { commentId: number; editing: boolean }) => {
-        editingCommentId.value = payload.editing ? payload.commentId : null;
+        if (payload.editing) editingCommentId.value = payload.commentId;
+        else if (editingCommentId.value === payload.commentId) editingCommentId.value = null;
         if (!payload.editing) commentErrors.value[payload.commentId] = '';
       },
       onResolution: (commentId: number, resolved: boolean) =>

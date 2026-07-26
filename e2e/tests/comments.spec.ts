@@ -412,7 +412,45 @@ test.describe("staged artifact reviews", () => {
     await expect(page.getByTestId("artifact-pop")).toContainText("Pop out");
     await expect(commentCard.getByRole("alert")).toContainText("Save or cancel this comment edit");
     await expect(commentEdit).toBeFocused();
-    await commentCard.getByRole("button", { name: "Cancel" }).click();
+
+    let submitAttempted = false;
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        /\/api\/reviews\/\d+\/submit$/.test(request.url())
+      ) {
+        submitAttempted = true;
+      }
+    });
+    await page.getByTestId("submit-review").click();
+    await expect(commentCard.getByRole("alert")).toContainText(
+      "Save or cancel this comment edit before submitting the review",
+    );
+    await expect(commentEdit).toBeFocused();
+    expect(submitAttempted).toBe(false);
+
+    const reviewsResponse = await page.request.get(
+      `${weaver.baseUrl}/api/sessions/${session.id}/reviews?subject_kind=artifact&subject_key=design`,
+    );
+    const reviews = (await reviewsResponse.json()) as Array<{
+      id: number;
+      draft_revision: number;
+      status: string;
+      comments: Array<{ id: number }>;
+    }>;
+    const review = reviews.find((candidate) => candidate.status === "draft")!;
+    const removedComment = review.comments[0];
+    const deleteResponse = await page.request.delete(
+      `${weaver.baseUrl}/api/reviews/${review.id}/comments/${removedComment.id}`,
+      { data: { expected_revision: review.draft_revision } },
+    );
+    expect(deleteResponse.ok()).toBe(true);
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(commentCard).toHaveCount(0);
+    await page.getByTestId("artifact-pop").click();
+    await expect(page.getByTestId("artifact-pop")).toContainText("Dock");
+    await page.getByTestId("artifact-pop").click();
+    await expect(page.getByTestId("artifact-pop")).toContainText("Pop out");
 
     const patchStarted = deferred();
     const patchGate = deferred();
