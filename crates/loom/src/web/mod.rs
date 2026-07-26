@@ -354,6 +354,8 @@ pub(crate) async fn session_view(
         (placement.group_system_key.as_deref() == Some("later")).then_some("parked".to_string())
     });
     let legacy_sort_order = placement.as_ref().map(|placement| placement.rank as f64);
+    let title_generation =
+        crate::metadata_assist::title_view(db, &session.id, branch.title_provenance).await?;
     Ok(SessionView {
         id: session.id.clone(),
         status: session.status.clone(),
@@ -370,6 +372,7 @@ pub(crate) async fn session_view(
             .unwrap_or_else(|| branch.updated_at.clone()),
         created_at: session.created_at.clone(),
         updated_at: branch.updated_at.clone(),
+        title_generation,
         parent_id: session.parent_branch_id.clone(),
         parent_session_id: session.parent_session_id.clone(),
         created_by: session.created_by.clone(),
@@ -663,6 +666,18 @@ pub fn router(state: AppState) -> Router {
         )
         // The session's own dashboard URL — the link an agent hands a human.
         .route("/sessions/{id}/url", get(session_url_route))
+        .route(
+            "/sessions/{id}/title/regenerate",
+            post(regenerate_session_title),
+        )
+        .route(
+            "/sessions/{id}/title-generation",
+            axum::routing::put(set_session_title_generation),
+        )
+        .route(
+            "/sessions/{id}/resumption-cue",
+            get(get_resumption_cue).post(ensure_resumption_cue),
+        )
         .route("/sessions/{id}/archive", post(archive_session))
         .route(
             "/sessions/{id}/restricted-github/{tool}",

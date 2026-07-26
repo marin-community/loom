@@ -180,6 +180,9 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
     [chat journal](#rest-api): one row per `(session_id, turn, seq)` block),
     `session_acp_metadata` (the latest provider-advertised composer controls,
     retained when its live task exits or Loom restarts),
+    `session_metadata_assistance` (per-session generated-title enable/status and
+    the cached resumption cue keyed by a bounded conversation/content +
+    immutable-artifact fingerprint),
     and the auth tables `users` (the approved-operator allowlist, seeded with
     the owner), `api_tokens` (hashed bearer tokens), and `auth_sessions`
     (hashed login cookies). See [Authentication](#authentication). Loom-owned
@@ -283,6 +286,8 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `GET POST /api/runs`; `GET /api/runs/{id}` | durable, subject-scoped automation runs with idempotency reservation; an optional channel routes distinct deliveries through one live ACP session, and verified GitHub callers may provide a validated deterministic key or use the workflow run/attempt |
 | `POST /api/sessions/{id}/restricted-github/{tool}` | session-token-scoped fixed GitHub operations for a restricted session; checks stamped tool policy, fixes the target repository and thread from the session, and resolves a GitHub App token or explicit App-less profile token server-side |
 | `GET PATCH DELETE /api/sessions/{id}` | session CRUD (status, title, goal, description); legacy `park`/`sort_order` reads are derived from canonical placement and writes are rejected; DELETE also accepts an unmatched automation run's reserved session id, tearing down and removing the failed launch attempt |
+| `POST /api/sessions/{id}/title/regenerate`; `PUT /api/sessions/{id}/title-generation` | explicit provenance-aware title regeneration / per-session opt-out; generation uses the selected automation-safe ACP metadata profile, commits through a goal/title/provenance CAS, and emits a session `metadata` invalidation at terminal completion |
+| `GET POST /api/sessions/{id}/resumption-cue` | model-free current cue/cache read / explicit or inactivity-gated ensure; one in-process flight per session, with bounded lazy prompt preparation and a content + immutable-artifact source fingerprint |
 | `PUT DELETE /api/sessions/{id}/tags/{key}` | set (upsert) / clear one branch tag — the well-known `attention` and `triage` keys plus any free-form key |
 | `PUT /api/sessions/{id}/tags` | atomically replace one author's complete tag set, with optional exact `(key, value)` clears for lifecycle marks; the watch-safe write path |
 | `GET /api/sessions/{id}/url` | the session's dashboard URL as `{url}`, built from the externally-visible origin (`auth.base_url`, else the request's own Host) — what `loom session url` prints, so an agent can link a PR back to its session without inventing a loopback link |

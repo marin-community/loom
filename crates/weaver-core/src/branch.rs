@@ -9,6 +9,48 @@ use std::path::{Path, PathBuf};
 use crate::artifact::{self, NewRevision};
 use crate::db::{now_iso, Db};
 
+pub const MAX_TASK_TITLE_CHARS: usize = 72;
+pub const MAX_GENERATED_TITLE_CHARS: usize = 48;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "lowercase")]
+#[sqlx(type_name = "TEXT", rename_all = "lowercase")]
+pub enum TitleProvenance {
+    Derived,
+    Generated,
+    User,
+    Issue,
+}
+
+impl TitleProvenance {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Derived => "derived",
+            Self::Generated => "generated",
+            Self::User => "user",
+            Self::Issue => "issue",
+        }
+    }
+
+    pub const fn can_generate(self, explicit: bool) -> bool {
+        matches!(self, Self::Derived) || (explicit && matches!(self, Self::Generated))
+    }
+}
+
+impl std::str::FromStr for TitleProvenance {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "derived" => Ok(Self::Derived),
+            "generated" => Ok(Self::Generated),
+            "user" => Ok(Self::User),
+            "issue" => Ok(Self::Issue),
+            _ => Err(format!("unknown title provenance '{value}'")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Branch {
     pub id: String,
@@ -17,6 +59,7 @@ pub struct Branch {
     pub base_branch: String,
     pub goal: String,
     pub title: String,
+    pub title_provenance: TitleProvenance,
     /// The agent's current-state message, set via `weaver status`. Free-form
     /// ("Wired up routes; tests pass"), shown even when the branch is calm. The
     /// attention *level* is a separate [`crate::tags`] tag.
@@ -46,12 +89,73 @@ pub fn derive_title(goal: &str) -> String {
     if first.is_empty() {
         return "Untitled".to_string();
     }
-    if first.chars().count() > 72 {
-        let t: String = first.chars().take(71).collect();
+    if first.chars().count() > MAX_TASK_TITLE_CHARS {
+        let t: String = first.chars().take(MAX_TASK_TITLE_CHARS - 1).collect();
         format!("{t}…")
     } else {
         first.to_string()
     }
+}
+
+/// Sanitize untrusted generated output into a single plain-text task label.
+/// Manual titles keep their punctuation; model-authored labels additionally
+/// lose common Markdown wrappers so no client has to interpret markup.
+pub fn sanitize_generated_title(input: &str) -> Option<String> {
+    let first = input.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let first = first
+        .strip_prefix("Title:")
+        .or_else(|| first.strip_prefix("Task:"))
+        .unwrap_or(first)
+        .trim()
+        .trim_matches(['`', '"', '\'', '*', '_', '#']);
+    let plain: String = first
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || matches!(ch, '<' | '>' | '`') {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect();
+    let collapsed = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    if collapsed.chars().count() <= MAX_GENERATED_TITLE_CHARS {
+        return Some(collapsed);
+    }
+    let prefix: String = collapsed
+        .chars()
+        .take(MAX_GENERATED_TITLE_CHARS - 1)
+        .collect();
+    Some(format!("{prefix}…"))
+}
+
+/// Normalize a human-authored task label without interpreting its punctuation.
+pub fn sanitize_user_title(input: &str) -> Option<String> {
+    let collapsed = input
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    if collapsed.chars().count() <= MAX_TASK_TITLE_CHARS {
+        return Some(collapsed);
+    }
+    let prefix: String = collapsed.chars().take(MAX_TASK_TITLE_CHARS - 1).collect();
+    Some(format!("{prefix}…"))
+}
+
+#[derive(Debug, Clone)]
+pub enum TitleUpdate {
+    Applied(Branch),
+    Stale(Branch),
+    Missing,
 }
 
 /// Turn free text into a short kebab-case slug suitable for a branch name.
@@ -221,14 +325,83 @@ pub async fn current_goal(db: &Db, branch: &Branch) -> Result<String> {
     Ok(branch.goal.clone())
 }
 
-pub async fn set_title(db: &Db, id: &str, title: &str) -> Result<()> {
-    sqlx::query("UPDATE branches SET title = ?, updated_at = ? WHERE id = ?")
-        .bind(title)
-        .bind(now_iso())
-        .bind(id)
-        .execute(db)
-        .await?;
+pub async fn set_title(db: &Db, id: &str, title: &str, provenance: TitleProvenance) -> Result<()> {
+    sqlx::query(
+        "UPDATE branches
+         SET title = ?, title_provenance = ?, updated_at = ?
+         WHERE id = ?",
+    )
+    .bind(title)
+    .bind(provenance)
+    .bind(now_iso())
+    .bind(id)
+    .execute(db)
+    .await?;
     Ok(())
+}
+
+/// Replace a title only while both the observed label and its ownership still
+/// match. Human rename and generated refresh use this same domain operation.
+pub async fn replace_title(
+    db: &Db,
+    id: &str,
+    expected_title: &str,
+    expected_provenance: TitleProvenance,
+    title: &str,
+    provenance: TitleProvenance,
+) -> Result<TitleUpdate> {
+    let result = sqlx::query(
+        "UPDATE branches
+         SET title = ?, title_provenance = ?, updated_at = ?
+         WHERE id = ? AND title = ? AND title_provenance = ?",
+    )
+    .bind(title)
+    .bind(provenance)
+    .bind(now_iso())
+    .bind(id)
+    .bind(expected_title)
+    .bind(expected_provenance)
+    .execute(db)
+    .await?;
+    let current = get(db, id).await?;
+    Ok(match (result.rows_affected(), current) {
+        (1, Some(branch)) => TitleUpdate::Applied(branch),
+        (_, Some(branch)) => TitleUpdate::Stale(branch),
+        (_, None) => TitleUpdate::Missing,
+    })
+}
+
+/// Replace a generated title only while its goal and observed label ownership
+/// still match the prompt source. Goal edits invalidate model output even when
+/// the deterministic fallback title itself has not changed.
+pub async fn replace_title_from_goal(
+    db: &Db,
+    id: &str,
+    expected_goal: &str,
+    expected_title: &str,
+    expected_provenance: TitleProvenance,
+    title: &str,
+) -> Result<TitleUpdate> {
+    let result = sqlx::query(
+        "UPDATE branches
+         SET title = ?, title_provenance = ?, updated_at = ?
+         WHERE id = ? AND goal = ? AND title = ? AND title_provenance = ?",
+    )
+    .bind(title)
+    .bind(TitleProvenance::Generated)
+    .bind(now_iso())
+    .bind(id)
+    .bind(expected_goal)
+    .bind(expected_title)
+    .bind(expected_provenance)
+    .execute(db)
+    .await?;
+    let current = get(db, id).await?;
+    Ok(match (result.rows_affected(), current) {
+        (1, Some(branch)) => TitleUpdate::Applied(branch),
+        (_, Some(branch)) => TitleUpdate::Stale(branch),
+        (_, None) => TitleUpdate::Missing,
+    })
 }
 
 pub async fn set_description(db: &Db, id: &str, description: &str) -> Result<()> {
@@ -387,6 +560,78 @@ mod tests {
         assert_eq!(derive_title("\n\nFix the bug\nmore detail"), "Fix the bug");
         assert_eq!(derive_title("   "), "Untitled");
         assert!(derive_title(&"x".repeat(200)).chars().count() <= 72);
+    }
+
+    #[test]
+    fn generated_titles_are_plain_single_line_and_bounded() {
+        assert_eq!(
+            sanitize_generated_title("  **Title: `Fix <auth>\\nflow`**\nextra"),
+            Some("Title: Fix auth \\nflow".to_string())
+        );
+        let title = sanitize_generated_title(&"x".repeat(100)).unwrap();
+        assert_eq!(title.chars().count(), MAX_GENERATED_TITLE_CHARS);
+        assert!(title.ends_with('…'));
+        assert_eq!(sanitize_generated_title("\n\t"), None);
+        assert_eq!(
+            sanitize_user_title("  Fix <auth>\n flow  "),
+            Some("Fix <auth> flow".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn title_replace_is_provenance_aware_compare_and_swap() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let branch = insert(&db, "b1", "/repo", "weaver/task", "main")
+            .await
+            .unwrap();
+        set_title(&db, &branch.id, "Initial", TitleProvenance::Derived)
+            .await
+            .unwrap();
+        let TitleUpdate::Applied(updated) = replace_title(
+            &db,
+            &branch.id,
+            "Initial",
+            TitleProvenance::Derived,
+            "Generated",
+            TitleProvenance::Generated,
+        )
+        .await
+        .unwrap() else {
+            panic!("expected applied title");
+        };
+        assert_eq!(updated.title_provenance, TitleProvenance::Generated);
+
+        let TitleUpdate::Stale(current) = replace_title(
+            &db,
+            &branch.id,
+            "Initial",
+            TitleProvenance::Derived,
+            "Late",
+            TitleProvenance::Generated,
+        )
+        .await
+        .unwrap() else {
+            panic!("expected stale title");
+        };
+        assert_eq!(current.title, "Generated");
+
+        set_title(&db, &branch.id, "Fallback", TitleProvenance::Derived)
+            .await
+            .unwrap();
+        set_goal(&db, &branch.id, "new goal", "user").await.unwrap();
+        let TitleUpdate::Stale(current) = replace_title_from_goal(
+            &db,
+            &branch.id,
+            "old goal",
+            "Fallback",
+            TitleProvenance::Derived,
+            "Stale generation",
+        )
+        .await
+        .unwrap() else {
+            panic!("expected goal fence to reject stale output");
+        };
+        assert_eq!(current.title, "Fallback");
     }
 
     #[test]

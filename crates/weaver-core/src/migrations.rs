@@ -103,6 +103,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "reviews",
         include_str!("../migrations/0016_reviews.sql"),
     ),
+    (
+        17,
+        "title_provenance",
+        include_str!("../migrations/0017_title_provenance.sql"),
+    ),
 ];
 
 /// Latest core schema version compiled into this binary.
@@ -479,6 +484,8 @@ mod tests {
         );
     }
 
+    /// Review migration 16 shipped the final review shape; later unrelated
+    /// migrations must preserve those columns and indexes.
     #[tokio::test]
     async fn review_schema_is_final_when_v16_first_ships() {
         let pool = empty_pool().await;
@@ -504,7 +511,7 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(versions, (1..=16).collect::<Vec<_>>());
+        assert_eq!(versions, all_versions());
         let review_columns = table_columns(&pool, "reviews").await.unwrap();
         assert!(review_columns.iter().any(|column| column == "subject_id"));
         assert!(review_columns
@@ -1000,5 +1007,64 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(versions, 1);
+    }
+
+    #[tokio::test]
+    async fn title_provenance_migration_only_preserves_provable_derivations() {
+        let pool = empty_pool().await;
+        STREAM.ensure_indicator(&pool).await.unwrap();
+        let migration_index = MIGRATIONS
+            .iter()
+            .position(|(_, name, _)| *name == "title_provenance")
+            .unwrap();
+        for (version, name, sql) in &MIGRATIONS[..migration_index] {
+            for stmt in split_statements(sql) {
+                sqlx::query(&stmt).execute(&pool).await.unwrap();
+            }
+            sqlx::query(
+                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+            )
+            .bind(version)
+            .bind(*name)
+            .bind("2026-01-01T00:00:00.000Z")
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        for (id, goal, title) in [
+            ("exact", "Ship the thing", "Ship the thing"),
+            ("edited", "Ship the thing", "Release carefully"),
+            ("multiline", "\nShip the thing\nDetails", "Ship the thing"),
+            ("empty", "", "Untitled session"),
+        ] {
+            sqlx::query(
+                "INSERT INTO branches (id, repo_root, branch, goal, title)
+                 VALUES (?, '/repo', ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(id)
+            .bind(goal)
+            .bind(title)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        run(&pool).await.unwrap();
+
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, title_provenance FROM branches ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("edited".into(), "user".into()),
+                ("empty".into(), "user".into()),
+                ("exact".into(), "derived".into()),
+                ("multiline".into(), "user".into()),
+            ]
+        );
     }
 }

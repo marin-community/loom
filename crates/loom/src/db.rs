@@ -75,6 +75,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "review-inbox",
         include_str!("../migrations/0013_review_inbox.sql"),
     ),
+    (
+        14,
+        "metadata-assistance",
+        include_str!("../migrations/0014_metadata_assistance.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -307,7 +312,10 @@ mod tests {
                 .fetch_all(&db)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+        assert_eq!(
+            versions,
+            (1..=latest_migration_version()).collect::<Vec<_>>()
+        );
 
         let profile_columns = table_columns(&db, "profiles").await.unwrap();
         assert!(profile_columns.iter().any(|column| column == "retired"));
@@ -321,6 +329,10 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(!table_columns(&db, "session_placements")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(!table_columns(&db, "session_metadata_assistance")
             .await
             .unwrap()
             .is_empty());
@@ -402,7 +414,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v12_database_adds_the_review_inbox_at_v13() {
+    async fn v12_database_adds_the_review_inbox_while_upgrading_to_latest() {
         let db = core_connect_in_memory().await.unwrap();
         LOOM_STREAM.ensure_indicator(&db).await.unwrap();
         for (version, name, migration) in LOOM_MIGRATIONS.iter().take(12) {
@@ -424,7 +436,10 @@ mod tests {
                 .fetch_all(&db)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+        assert_eq!(
+            versions,
+            (1..=latest_migration_version()).collect::<Vec<_>>()
+        );
         assert!(!table_columns(&db, "review_conversation_inbox")
             .await
             .unwrap()
@@ -580,7 +595,10 @@ mod tests {
                 .fetch_all(&db)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+        assert_eq!(
+            versions,
+            (1..=latest_migration_version()).collect::<Vec<_>>()
+        );
         assert!(
             crate::session_layout::placement(&db, "warm")
                 .await
@@ -736,7 +754,10 @@ mod tests {
                 .fetch_all(&db)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+        assert_eq!(
+            versions,
+            (1..=latest_migration_version()).collect::<Vec<_>>()
+        );
         let index_sql: String = sqlx::query_scalar(
             "SELECT sql FROM sqlite_master
              WHERE type = 'index' AND name = 'idx_sessions_active_branch'",
@@ -810,7 +831,7 @@ mod tests {
             .fetch_one(&db)
             .await
             .unwrap();
-        assert_eq!(count, 13);
+        assert_eq!(count, latest_migration_version());
 
         // Adoption replaced the historical index predicate: archived history
         // no longer prevents a new active session from claiming the branch.

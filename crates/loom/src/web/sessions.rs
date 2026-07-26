@@ -26,12 +26,13 @@ use crate::{
     setup,
 };
 use weaver_api::{
-    CreateReq, HandoffReq, HistoryPageView, LaunchOverrides, LaunchSelection, PatchSessionReq,
-    SearchSessionsOptions, SendReq, SessionSearchAttention, SessionSearchStatus, SessionView,
-    SetTagsReq, TagReq,
+    CreateReq, EnsureResumptionCueReq, HandoffReq, HistoryPageView, LaunchOverrides,
+    LaunchSelection, PatchSessionReq, ResumptionCueView, SearchSessionsOptions, SendReq,
+    SessionSearchAttention, SessionSearchStatus, SessionView, SetTagsReq, SetTitleGenerationReq,
+    TagReq,
 };
 use weaver_core::branch as branch_mod;
-use weaver_core::branch::Branch;
+use weaver_core::branch::{Branch, TitleProvenance, TitleUpdate};
 use weaver_core::tags;
 use weaver_core::watch::{self as watch_store, Watch};
 
@@ -1199,8 +1200,9 @@ pub(crate) async fn provision_session(
     let mut goal = req.goal.unwrap_or_default().trim().to_string();
     let mut title = req
         .title
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty());
+        .as_deref()
+        .and_then(branch_mod::sanitize_user_title);
+    let title_was_explicit = title.is_some();
     let mut description = String::new();
     let mut github_repo = None;
     let mut github_issue: Option<i64> = None;
@@ -1261,13 +1263,22 @@ pub(crate) async fn provision_session(
         }
         claimed_issue_id = Some(issue_id);
     }
-    let title = title.unwrap_or_else(|| {
-        if goal.is_empty() {
-            "Untitled session".to_string()
+    let issue_owned_title =
+        req.issue.is_some() || req.github_issue.is_some() || req.claim_issue.is_some();
+    let title_provenance = if title_was_explicit {
+        if issue_owned_title && origin == "github" {
+            TitleProvenance::Issue
         } else {
-            branch_mod::derive_title(&goal)
+            TitleProvenance::User
         }
-    });
+    } else if issue_owned_title {
+        TitleProvenance::Issue
+    } else {
+        TitleProvenance::Derived
+    };
+    let mut title = title
+        .and_then(|title| branch_mod::sanitize_user_title(&title))
+        .unwrap_or_else(|| branch_mod::derive_title(&goal));
 
     let existing = req
         .existing_branch
@@ -1379,7 +1390,18 @@ pub(crate) async fn provision_session(
     // Get-or-create the branch row, then stamp its title/goal/description.
     let branch = branch_mod::upsert(&st.db, &repo_root_str, &branch_name, &base).await?;
     tracing::debug!(branch = %branch.id, branch_name = %branch_name, "upserted branch row");
-    branch_mod::set_title(&st.db, &branch.id, &title).await?;
+    // A plain relaunch of an existing branch resumes its human-owned identity;
+    // only new task input intentionally replaces it.
+    let preserve_existing_title = existing.is_some()
+        && !title_was_explicit
+        && !issue_owned_title
+        && goal.is_empty()
+        && !branch.title.is_empty();
+    if preserve_existing_title {
+        title.clone_from(&branch.title);
+    } else {
+        branch_mod::set_title(&st.db, &branch.id, &title, title_provenance).await?;
+    }
     if !goal.is_empty() {
         branch_mod::set_goal(&st.db, &branch.id, &goal, "user").await?;
     }
@@ -1808,6 +1830,15 @@ pub(crate) async fn provision_session(
         "session created"
     );
 
+    crate::metadata_assist::spawn_title_generation(
+        st.db.clone(),
+        st.bus.clone(),
+        session.clone(),
+        branch.clone(),
+        false,
+    )
+    .await
+    .ok();
     session_view(&st.db, &session, &branch).await
 }
 
@@ -2144,7 +2175,40 @@ pub(super) async fn patch_session(
         ));
     };
     if let Some(title) = &req.title {
-        branch_mod::set_title(&st.db, &branch.id, title).await?;
+        let title = branch_mod::sanitize_user_title(title)
+            .ok_or_else(|| AppError::bad_request("title must not be empty"))?;
+        let expected_title = req.expected_title.as_deref().ok_or_else(|| {
+            AppError::bad_request("expected_title is required when renaming a session")
+        })?;
+        let expected_provenance = req
+            .expected_title_provenance
+            .as_deref()
+            .ok_or_else(|| {
+                AppError::bad_request(
+                    "expected_title_provenance is required when renaming a session",
+                )
+            })?
+            .parse::<TitleProvenance>()
+            .map_err(AppError::bad_request)?;
+        match branch_mod::replace_title(
+            &st.db,
+            &branch.id,
+            expected_title,
+            expected_provenance,
+            &title,
+            TitleProvenance::User,
+        )
+        .await?
+        {
+            TitleUpdate::Applied(_) => {}
+            TitleUpdate::Stale(current) => {
+                return Err(AppError::conflict(
+                    "the task label changed while it was being edited; review it and retry",
+                )
+                .with_fields(json!({ "branch": super::branch_view(&st.db, &current).await? })));
+            }
+            TitleUpdate::Missing => return Err(AppError::not_found("branch")),
+        }
     }
     if let Some(goal) = &req.goal {
         branch_mod::set_goal(&st.db, &branch.id, goal, "user").await?;
@@ -2173,6 +2237,55 @@ pub(super) async fn patch_session(
     }
     let (session, branch) = require_session(&st.db, &session.id).await?;
     Ok(Json(session_view(&st.db, &session, &branch).await?))
+}
+
+pub(super) async fn regenerate_session_title(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<SessionView>> {
+    let (session, branch) = require_session(&st.db, &key).await?;
+    crate::metadata_assist::spawn_title_generation(
+        st.db.clone(),
+        st.bus.clone(),
+        session.clone(),
+        branch,
+        true,
+    )
+    .await?;
+    let (session, branch) = require_session(&st.db, &session.id).await?;
+    Ok(Json(session_view(&st.db, &session, &branch).await?))
+}
+
+pub(super) async fn set_session_title_generation(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Json(req): Json<SetTitleGenerationReq>,
+) -> ApiResult<Json<SessionView>> {
+    let (session, _) = require_session(&st.db, &key).await?;
+    crate::metadata_assist::set_title_enabled(&st.db, &session.id, req.enabled).await?;
+    let (session, branch) = require_session(&st.db, &session.id).await?;
+    Ok(Json(session_view(&st.db, &session, &branch).await?))
+}
+
+pub(super) async fn get_resumption_cue(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<ResumptionCueView>> {
+    let (session, branch) = require_session(&st.db, &key).await?;
+    Ok(Json(
+        crate::metadata_assist::current_cue(&st.db, &session, &branch).await?,
+    ))
+}
+
+pub(super) async fn ensure_resumption_cue(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Json(req): Json<EnsureResumptionCueReq>,
+) -> ApiResult<Json<ResumptionCueView>> {
+    let (session, branch) = require_session(&st.db, &key).await?;
+    Ok(Json(
+        crate::metadata_assist::ensure_cue(&st.db, &session, &branch, req.force).await?,
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2704,7 +2817,13 @@ pub(crate) async fn create_warm_session(
         .map_err(|e| AppError::bad_request(e.to_string()))?;
 
     let branch = branch_mod::upsert(&st.db, &repo_root_str, &branch_name, &base).await?;
-    branch_mod::set_title(&st.db, &branch.id, &format!("watch {}", watch.name)).await?;
+    branch_mod::set_title(
+        &st.db,
+        &branch.id,
+        &format!("watch {}", watch.name),
+        TitleProvenance::Derived,
+    )
+    .await?;
     tracing::debug!(watch = %watch.id, branch = %branch.id, "upserted warm session branch row");
 
     let session_id = branch_mod::new_id();

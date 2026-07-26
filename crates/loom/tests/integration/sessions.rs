@@ -256,8 +256,9 @@ async fn settings_validate_agent_model_effort_against_registry() {
 /// The active fleet and archived history remain disjoint at the REST boundary:
 /// the default (and therefore `loom session ls`) contains only actionable work,
 /// while inventory callers can opt into both with `?archived=true`. Search
-/// narrows the selected set over title, branch, and goal; a title PATCH is
-/// reflected in that search.
+/// narrows the selected set over qualified Group / Task names and other fleet
+/// metadata. Renames use provenance-aware compare-and-swap and become
+/// user-owned labels.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
@@ -272,6 +273,8 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
         .await
         .unwrap();
     let alpha_id = alpha["id"].as_str().unwrap().to_string();
+    assert_eq!(alpha["branch"]["title"], "alpha search target");
+    assert_eq!(alpha["branch"]["title_provenance"], "derived");
 
     let beta = client
         .post(
@@ -341,21 +344,47 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
         "archived search opt-in finds beta"
     );
 
-    // Renaming a session (the title PATCH the `loom session rename` CLI wraps) is
-    // reflected in the search.
-    client
+    // Renaming a session (the title PATCH the `loom session rename` CLI wraps)
+    // claims the label for the user and is reflected in qualified fleet search.
+    let renamed_view = client
         .patch(
             &format!("/api/sessions/{alpha_id}"),
-            json!({ "title": "renamed-zeta" }),
+            json!({
+                "title": "renamed-zeta",
+                "expected_title": "alpha search target",
+                "expected_title_provenance": "derived",
+            }),
         )
         .await
         .unwrap();
-    let renamed = client.get("/api/sessions?q=zeta").await.unwrap();
+    assert_eq!(renamed_view["branch"]["title_provenance"], "user");
+    assert_eq!(renamed_view["title_generation"]["status"], "protected");
+    let renamed = client
+        .get("/api/sessions/search?q=Inbox%20%2F%20renamed-zeta")
+        .await
+        .unwrap();
     assert_eq!(
         renamed.as_array().unwrap().len(),
         1,
-        "rename is reflected in search"
+        "qualified Group / Task search follows the canonical label"
     );
+    assert_eq!(renamed[0]["placement"]["group_name"], "Inbox");
+
+    // A second tab editing the old value cannot overwrite the user-owned title.
+    let stale = reqwest::Client::new()
+        .patch(format!("http://{}/api/sessions/{alpha_id}", ts.addr))
+        .json(&json!({
+            "title": "late-overwrite",
+            "expected_title": "alpha search target",
+            "expected_title_provenance": "derived",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), reqwest::StatusCode::CONFLICT);
+    let stale: serde_json::Value = stale.json().await.unwrap();
+    assert_eq!(stale["branch"]["title"], "renamed-zeta");
+    assert_eq!(stale["branch"]["title_provenance"], "user");
 
     client
         .delete(&format!("/api/sessions/{alpha_id}"))

@@ -121,6 +121,18 @@ export const archiveSession = (id: string) => post(`/sessions/${encodeURICompone
 export const removeSession = (id: string) => del(`/sessions/${encodeURIComponent(id)}`);
 export const clearSessionTag = (id: string, key: string) =>
   del(`/sessions/${encodeURIComponent(id)}/tags/${encodeURIComponent(key)}`);
+export const regenerateSessionTitle = (id: string) =>
+  post(`/sessions/${encodeURIComponent(id)}/title/regenerate`) as Promise<Session>;
+export const setSessionTitleGeneration = (id: string, enabled: boolean) =>
+  put(`/sessions/${encodeURIComponent(id)}/title-generation`, { enabled }) as Promise<Session>;
+export const getResumptionCue = (id: string) =>
+  get(`/sessions/${encodeURIComponent(id)}/resumption-cue`) as Promise<
+    import('./types').ResumptionCue
+  >;
+export const ensureResumptionCue = (id: string, force = false) =>
+  post(`/sessions/${encodeURIComponent(id)}/resumption-cue`, { force }) as Promise<
+    import('./types').ResumptionCue
+  >;
 
 // --- Session layout ---------------------------------------------------------
 

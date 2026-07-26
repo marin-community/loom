@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { get, patch, listAgents } from '../api';
-import type { CustomAgent, SettingView } from '../types';
+import { get, patch, listAgents, listProfiles } from '../api';
+import type { CustomAgent, Profile, SettingView } from '../types';
 import ToggleSwitch from '../components/ToggleSwitch.vue';
 import TokensPanel from '../components/TokensPanel.vue';
 import AccountPanel from '../components/AccountPanel.vue';
@@ -14,6 +14,7 @@ import McpPanel from '../components/McpPanel.vue';
 import CustomAgentsPanel from '../components/CustomAgentsPanel.vue';
 import AppearancePanel from '../components/AppearancePanel.vue';
 import SettingFieldRow from '../components/SettingFieldRow.vue';
+import ProfileSelector from '../components/ProfileSelector.vue';
 
 const route = useRoute();
 const router = useRouter();
@@ -44,8 +45,8 @@ const categories: CategoryItem[] = [
   {
     id: 'agents',
     label: 'Agents',
-    groups: ['Agents'],
-    summary: 'Runtime profiles, MCP capabilities, and custom agents for new work sessions.',
+    groups: ['Agents', 'Metadata'],
+    summary: 'Runtime profiles, MCP capabilities, custom agents, and bounded metadata assistance.',
   },
   {
     id: 'sessions',
@@ -99,6 +100,7 @@ function categoryFromQuery(q: unknown): Category {
 const category = ref<Category>(categoryFromQuery(route.query.tab));
 const settings = ref<SettingView[]>([]);
 const customAgents = ref<CustomAgent[]>([]);
+const profiles = ref<Profile[]>([]);
 const profilesKey = ref(0);
 const drafts = ref<Record<string, string>>({});
 const error = ref('');
@@ -138,6 +140,16 @@ const currentSettings = computed(() => {
     .sort((a, b) => a.label.localeCompare(b.label));
 });
 
+const metadataProfiles = computed(() =>
+  profiles.value.filter(
+    (profile) =>
+      profile.protocol === 'acp' &&
+      profile.class === 'automation' &&
+      profile.strict &&
+      profile.env_clear,
+  ),
+);
+
 function setting(key: string): SettingView | undefined {
   return settings.value.find((s) => s.key === key);
 }
@@ -160,15 +172,17 @@ function defaultText(value: string): string {
 
 async function load() {
   try {
-    const [res, agentRes] = await Promise.all([
+    const [res, agentRes, profileRes] = await Promise.all([
       get('/settings') as Promise<SettingsEnvelope>,
       listAgents(),
+      listProfiles(),
     ]);
     if (!Array.isArray(res?.settings)) {
       throw new Error('Unexpected /api/settings response — the server may be out of date.');
     }
     settings.value = res.settings;
     customAgents.value = agentRes.custom;
+    profiles.value = profileRes;
     drafts.value = Object.fromEntries(res.settings.map((s) => [s.key, s.value]));
     error.value = '';
   } catch (e) {
@@ -309,13 +323,12 @@ onMounted(load);
         <EnvPanel v-if="category === 'environment'" />
         <LogsPanel v-else-if="category === 'diagnostics'" />
 
-        <div v-else-if="category === 'agents'" class="space-y-4">
-          <ProfilesPanel :key="profilesKey" />
-          <McpPanel />
-          <CustomAgentsPanel :agents="customAgents" @reload="reloadAgents" />
-        </div>
-
         <div v-else class="space-y-3">
+          <template v-if="category === 'agents'">
+            <ProfilesPanel :key="profilesKey" />
+            <McpPanel />
+            <CustomAgentsPanel :agents="customAgents" @reload="reloadAgents" />
+          </template>
           <AccountPanel v-if="category === 'access'" />
           <TokensPanel v-if="category === 'access'" />
           <AppearancePanel v-if="category === 'workspace'" />
@@ -323,6 +336,7 @@ onMounted(load);
 
           <section
             v-if="currentSettings.length"
+            :data-testid="category === 'agents' ? 'metadata-settings' : undefined"
             class="overflow-hidden rounded-md border border-line bg-surface"
           >
             <SettingFieldRow
@@ -336,7 +350,32 @@ onMounted(load);
               @save="saveSetting(s)"
               @reset="resetSetting(s)"
             >
-              <div v-if="s.kind === 'bool'" class="flex min-w-0 flex-1 items-center gap-2">
+              <div
+                v-if="s.key === 'metadata.profile'"
+                data-testid="metadata-profile-selector"
+                class="min-w-0 flex-1 space-y-1"
+              >
+                <button
+                  type="button"
+                  class="w-full rounded border px-3 py-2 text-left text-xs"
+                  :class="
+                    drafts[s.key] === ''
+                      ? 'border-accent bg-accent/10 text-fg'
+                      : 'border-line bg-input text-muted hover:bg-subtle hover:text-fg'
+                  "
+                  @click="drafts[s.key] = ''"
+                >
+                  Disabled
+                </button>
+                <ProfileSelector
+                  :profiles="metadataProfiles"
+                  :model-value="drafts[s.key] ?? ''"
+                  layout="list"
+                  @update:model-value="drafts[s.key] = $event"
+                />
+              </div>
+
+              <div v-else-if="s.kind === 'bool'" class="flex min-w-0 flex-1 items-center gap-2">
                 <ToggleSwitch
                   :id="s.key"
                   :model-value="drafts[s.key] === 'true'"

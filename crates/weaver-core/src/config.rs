@@ -442,6 +442,56 @@ pub const REGISTRY: &[SettingSpec] = &[
         group: "Sessions",
         options: &[],
     },
+    SettingSpec {
+        key: "metadata.profile",
+        label: "Metadata profile",
+        description: "Automation-safe ACP profile used for optional generated task labels and \
+            resumption cues. Empty disables model-backed metadata assistance.",
+        kind: SettingKind::String,
+        default: "",
+        group: "Metadata",
+        options: &[],
+    },
+    SettingSpec {
+        key: "metadata.title_generation",
+        label: "Generate task labels",
+        description: "Asynchronously replace eligible deterministic task labels through the \
+            configured metadata profile. Launch never waits for this.",
+        kind: SettingKind::Bool,
+        default: "true",
+        group: "Metadata",
+        options: &[],
+    },
+    SettingSpec {
+        key: "metadata.resumption_cues",
+        label: "Generate resumption cues",
+        description: "Allow explicit or inactivity-based on-return cues in Conversation. \
+            Cues are cached by their conversation and artifact cursor.",
+        kind: SettingKind::Bool,
+        default: "true",
+        group: "Metadata",
+        options: &[],
+    },
+    SettingSpec {
+        key: "metadata.resumption_inactivity_secs",
+        label: "Cue inactivity (seconds)",
+        description: "Minimum session inactivity before an on-return cue is due. Explicit \
+            Generate requests do not wait for this threshold.",
+        kind: SettingKind::Int,
+        default: "3600",
+        group: "Metadata",
+        options: &[],
+    },
+    SettingSpec {
+        key: "metadata.allow_restricted",
+        label: "Allow restricted metadata",
+        description: "Explicitly permit bounded title/cue excerpts from restricted sessions \
+            to cross into the configured metadata profile. Off by default.",
+        kind: SettingKind::Bool,
+        default: "false",
+        group: "Metadata",
+        options: &[],
+    },
 ];
 
 /// Whether the Watch engine master switch is on. On by default.

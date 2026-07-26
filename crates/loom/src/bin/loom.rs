@@ -517,6 +517,33 @@ enum SessionCmd {
         /// The new title. Multiple words are joined, so quoting is optional.
         title: Vec<String>,
     },
+    /// Ask the configured metadata profile to refresh an eligible task label.
+    RegenerateTitle {
+        /// Session key: id, branch id, branch name, or `repo:branch`.
+        session: String,
+    },
+    /// Enable or disable automatic generated task labels for one session.
+    TitleGeneration {
+        /// Session key: id, branch id, branch name, or `repo:branch`.
+        session: String,
+        /// Whether generated title refreshes are enabled.
+        #[arg(
+            value_parser = clap::value_parser!(bool),
+            action = clap::ArgAction::Set
+        )]
+        enabled: bool,
+    },
+    /// Read the cached resumption cue, optionally ensuring one now.
+    Cue {
+        /// Session key: id, branch id, branch name, or `repo:branch`.
+        session: String,
+        /// Generate when inactivity says a cue is due.
+        #[arg(long)]
+        ensure: bool,
+        /// Explicitly generate regardless of the inactivity threshold.
+        #[arg(long)]
+        force: bool,
+    },
     /// Show one session's details.
     Show { branch: String },
     /// Attach your terminal to a session (also `loom attach`).
@@ -1638,6 +1665,15 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
         } => cmd_ps(archived, automation, managed, search, status, attention).await,
         SessionCmd::Layout { cmd } => run_session_layout(cmd).await,
         SessionCmd::Rename { session, title } => cmd_session_rename(session, title.join(" ")).await,
+        SessionCmd::RegenerateTitle { session } => cmd_session_regenerate_title(session).await,
+        SessionCmd::TitleGeneration { session, enabled } => {
+            cmd_session_title_generation(session, enabled).await
+        }
+        SessionCmd::Cue {
+            session,
+            ensure,
+            force,
+        } => cmd_session_cue(session, ensure || force, force).await,
         SessionCmd::Show { branch } => cmd_show(branch).await,
         SessionCmd::Attach { branch } => cmd_attach(branch).await,
         SessionCmd::Archive { branch } => cmd_archive(branch).await,
@@ -3252,13 +3288,24 @@ async fn run_config(cmd: ConfigCmd) -> Result<()> {
 /// the settings pane's `PATCH /api/settings` against a running daemon — the
 /// form a deploy's boot sequence needs, since it must seed the auth settings
 /// *before* loom starts listening.
-async fn cmd_config_set(key: String, value: String) -> Result<()> {
+async fn cmd_config_set(key: String, mut value: String) -> Result<()> {
     if let Err(why) = weaver_core::config::validate(&key, &value) {
         bail!("{key}: {why}");
     }
     let db = loom::db::connect(&weaver_core::db::default_db_path())
         .await
         .context("opening loom's database")?;
+    if key == loom::metadata_assist::METADATA_PROFILE_KEY {
+        value = value.trim().to_string();
+        if !value.is_empty() {
+            let profile = loom::profile::get(&db, &value)
+                .await?
+                .ok_or_else(|| anyhow!("unknown or retired metadata profile '{value}'"))?;
+            if !loom::metadata_assist::metadata_profile_eligible(&profile) {
+                bail!("metadata profile '{value}' must be an active automation-safe ACP profile");
+            }
+        }
+    }
     weaver_core::config::apply(&db, &[(key.clone(), Some(value))])
         .await
         .with_context(|| format!("writing setting '{key}'"))?;
@@ -4238,10 +4285,17 @@ async fn cmd_session_rename(key: String, title: String) -> Result<()> {
         bail!("nothing to rename to — provide a new title");
     }
     let client = client::default()?;
+    let current = client
+        .get(&format!("/api/sessions/{}", enc_key(&key)))
+        .await?;
     let ws = client
         .patch(
             &format!("/api/sessions/{}", enc_key(&key)),
-            json!({ "title": title }),
+            json!({
+                "title": title,
+                "expected_title": branch_str(&current, "title"),
+                "expected_title_provenance": branch_str(&current, "title_provenance"),
+            }),
         )
         .await?;
     println!(
@@ -4252,13 +4306,82 @@ async fn cmd_session_rename(key: String, title: String) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_session_regenerate_title(key: String) -> Result<()> {
+    let client = client::default()?;
+    let ws = client
+        .post(
+            &format!("/api/sessions/{}/title/regenerate", enc_key(&key)),
+            json!({}),
+        )
+        .await?;
+    println!(
+        "{} — {}",
+        branch_str(&ws, "title"),
+        str_field(ws.get("title_generation").unwrap_or(&Value::Null), "status")
+    );
+    Ok(())
+}
+
+async fn cmd_session_title_generation(key: String, enabled: bool) -> Result<()> {
+    let client = client::default()?;
+    let ws = client
+        .put(
+            &format!("/api/sessions/{}/title-generation", enc_key(&key)),
+            json!({ "enabled": enabled }),
+        )
+        .await?;
+    println!(
+        "title generation {} ({})",
+        if enabled { "enabled" } else { "disabled" },
+        str_field(ws.get("title_generation").unwrap_or(&Value::Null), "status")
+    );
+    Ok(())
+}
+
+async fn cmd_session_cue(key: String, ensure: bool, force: bool) -> Result<()> {
+    let client = client::default()?;
+    let path = format!("/api/sessions/{}/resumption-cue", enc_key(&key));
+    let cue = if ensure {
+        client.post(&path, json!({ "force": force })).await?
+    } else {
+        client.get(&path).await?
+    };
+    println!("status: {}", str_field(&cue, "status"));
+    if let Some(text) = cue.get("text").and_then(Value::as_str) {
+        println!("{text}");
+    }
+    if let Some(at) = cue.get("generated_at").and_then(Value::as_str) {
+        println!("generated: {at}");
+    }
+    Ok(())
+}
+
 fn print_session(ws: &Value) {
     println!(
         "session {}  ({})",
         str_field(ws, "id"),
         branch_str(ws, "name")
     );
-    println!("  title:    {}", branch_str(ws, "title"));
+    println!(
+        "  title:    {} ({})",
+        branch_str(ws, "title"),
+        branch_str(ws, "title_provenance")
+    );
+    if let Some(generation) = ws.get("title_generation") {
+        println!(
+            "  title AI: {} ({})",
+            if generation
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            str_field(generation, "status")
+        );
+    }
     println!("  status:   {}", str_field(ws, "status"));
     if let Some(placement) = ws.get("placement").filter(|value| !value.is_null()) {
         println!(
@@ -5189,6 +5312,18 @@ mod tests {
     #[test]
     fn cli_is_well_formed() {
         Cli::command().debug_assert();
+        let parsed =
+            Cli::try_parse_from(["loom", "session", "title-generation", "task-1", "false"])
+                .unwrap();
+        assert!(matches!(
+            parsed.cmd,
+            Cmd::Session {
+                cmd: SessionCmd::TitleGeneration {
+                    session,
+                    enabled: false,
+                }
+            } if session == "task-1"
+        ));
     }
 
     /// The scaffold must honor the contract it documents — at minimum, be

@@ -16,16 +16,17 @@ use crate::dto::{
     CommentDto, CreateEventReq, CreateIssueReq, CreateRepoIssueReq, CreateReq, CreateReviewReq,
     CreateSessionGroupReq, CreateSessionSpaceReq, CreateTokenReq, CreateWatchReq, CreatedTokenView,
     CustomMcpReq, CustomMcpView, DeleteSessionGroupReq, DeleteSessionSpaceReq, DeploymentReq,
-    DeploymentView, DiagnosticsView, EffectiveProfileView, ExpectedReviewRevisionReq,
-    FederationReq, FederationView, HandoffReq, HistoryPageView, IssueActionsReq,
-    IssueActionsResult, IssueView, McpRegistryView, MoveSessionsReq, NewCommentBody, NewThreadBody,
-    PatchIssueReq, PatchSessionReq, PatchWatchReq, ProfileProbeView, ProfileReq, ProfileView,
-    PutProfileEnvReq, ReadinessView, ReorderSessionLayoutReq, ResolveLaunchReq,
-    ResolveReviewCommentReq, ResolvedLaunchView, RestoreSessionGroupsReq, ReviewCommentDto,
-    ReviewDto, RunReq, RunView, RunWatchReq, ScratchLimitsView, SearchSessionsOptions, SendReq,
-    SessionGroupPreferenceReq, SessionLayoutView, SessionPlacementSelectorKind, SessionView,
-    SetSessionPlacementDefaultReq, SetTagsReq, SettingsEnvelope, SubmitReviewReq, TagReq,
-    ThreadDto, TokenView, UpdateReviewCommentReq, UpdateReviewReq, UpdateSessionGroupReq,
+    DeploymentView, DiagnosticsView, EffectiveProfileView, EnsureResumptionCueReq,
+    ExpectedReviewRevisionReq, FederationReq, FederationView, HandoffReq, HistoryPageView,
+    IssueActionsReq, IssueActionsResult, IssueView, McpRegistryView, MoveSessionsReq,
+    NewCommentBody, NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq, ProfileProbeView,
+    ProfileReq, ProfileView, PutProfileEnvReq, ReadinessView, ReorderSessionLayoutReq,
+    ResolveLaunchReq, ResolveReviewCommentReq, ResolvedLaunchView, RestoreSessionGroupsReq,
+    ResumptionCueView, ReviewCommentDto, ReviewDto, RunReq, RunView, RunWatchReq,
+    ScratchLimitsView, SearchSessionsOptions, SendReq, SessionGroupPreferenceReq,
+    SessionLayoutView, SessionPlacementSelectorKind, SessionView, SetSessionPlacementDefaultReq,
+    SetTagsReq, SetTitleGenerationReq, SettingsEnvelope, SubmitReviewReq, TagReq, ThreadDto,
+    TokenView, UpdateReviewCommentReq, UpdateReviewReq, UpdateSessionGroupReq,
     UpdateSessionSpaceReq, WatchView,
 };
 
@@ -419,6 +420,50 @@ impl Client {
         self.send_typed(
             Method::PATCH,
             &format!("/api/sessions/{}", Self::seg(key)),
+            Some(req),
+        )
+        .await
+    }
+
+    pub async fn regenerate_session_title(&self, key: &str) -> Result<SessionView> {
+        self.send_typed::<(), _>(
+            Method::POST,
+            &format!("/api/sessions/{}/title/regenerate", Self::seg(key)),
+            None,
+        )
+        .await
+    }
+
+    pub async fn set_session_title_generation(
+        &self,
+        key: &str,
+        req: &SetTitleGenerationReq,
+    ) -> Result<SessionView> {
+        self.send_typed(
+            Method::PUT,
+            &format!("/api/sessions/{}/title-generation", Self::seg(key)),
+            Some(req),
+        )
+        .await
+    }
+
+    pub async fn get_resumption_cue(&self, key: &str) -> Result<ResumptionCueView> {
+        self.send_typed::<(), _>(
+            Method::GET,
+            &format!("/api/sessions/{}/resumption-cue", Self::seg(key)),
+            None,
+        )
+        .await
+    }
+
+    pub async fn ensure_resumption_cue(
+        &self,
+        key: &str,
+        req: &EnsureResumptionCueReq,
+    ) -> Result<ResumptionCueView> {
+        self.send_typed(
+            Method::POST,
+            &format!("/api/sessions/{}/resumption-cue", Self::seg(key)),
             Some(req),
         )
         .await

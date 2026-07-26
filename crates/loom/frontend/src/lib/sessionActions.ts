@@ -1,5 +1,5 @@
 import { ref } from 'vue';
-import { post, patch, put, del } from '../api';
+import { post, patch, put, del, regenerateSessionTitle, setSessionTitleGeneration } from '../api';
 import { AUTO_ARCHIVE_DISABLED_VALUE, AUTO_ARCHIVE_KEY, type LifecycleVerb } from './sessionState';
 
 // The session's write surface, shared by every place that can act on a session:
@@ -45,10 +45,39 @@ export function useSessionActions(
     }
   }
 
-  const rename = (title: string) =>
+  const rename = (title: string, expectedTitle: string, expectedProvenance: string) =>
     act('title', async () => {
-      await patch(`/sessions/${getId()}`, { title });
+      await patch(`/sessions/${getId()}`, {
+        title,
+        expected_title: expectedTitle,
+        expected_title_provenance: expectedProvenance,
+      });
       notice.value = 'Title saved.';
+      await reload();
+    });
+
+  const regenerateTitle = () =>
+    act('title-generate', async () => {
+      const updated = await regenerateSessionTitle(getId());
+      notice.value =
+        {
+          idle: 'Task-label refresh is idle.',
+          running: 'Task-label refresh started.',
+          generated: 'Task label refreshed.',
+          protected: 'Task label is protected by its human or issue source.',
+          unavailable: 'No eligible metadata profile is available.',
+          disabled: 'Generated task labels are disabled.',
+          stale: 'Task-label source changed; stale output was discarded.',
+          failed: 'Task-label refresh failed.',
+        }[updated.title_generation.status] ??
+        `Task-label refresh: ${updated.title_generation.status}.`;
+      await reload();
+    });
+
+  const setTitleGeneration = (enabled: boolean) =>
+    act('title-generation', async () => {
+      await setSessionTitleGeneration(getId(), enabled);
+      notice.value = `Generated task labels ${enabled ? 'enabled' : 'disabled'}.`;
       await reload();
     });
 
@@ -120,5 +149,15 @@ export function useSessionActions(
   // is the whole surface and the individual verbs stay internal.
   const run = (verb: LifecycleVerb) => ({ adopt, recover, archive, remove })[verb]();
 
-  return { busy, notice, error, rename, clearTag, setAutoArchiveDisabled, run };
+  return {
+    busy,
+    notice,
+    error,
+    rename,
+    regenerateTitle,
+    setTitleGeneration,
+    clearTag,
+    setAutoArchiveDisabled,
+    run,
+  };
 }

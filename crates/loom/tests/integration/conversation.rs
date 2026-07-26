@@ -83,6 +83,75 @@ async fn conversation_endpoint_returns_the_iris_log() {
         .unwrap();
     assert_eq!(search["records"].as_array().unwrap().len(), 1);
     assert_eq!(search["records"][0]["role"], "assistant");
+
+    // A cue read is source-linked but never invokes a model. With no metadata
+    // profile configured it exposes an API-ready unavailable boundary and the
+    // exact conversation/artifact cursor that a later ensure would summarize.
+    let unavailable = client
+        .get(&format!("/api/sessions/{id}/resumption-cue"))
+        .await
+        .unwrap();
+    assert_eq!(unavailable["status"], "unavailable");
+    let source_cursor = unavailable["source_cursor"].as_str().unwrap();
+    let evidence = unavailable["evidence"].as_array().unwrap();
+    assert!(evidence.iter().any(|item| item["kind"] == "conversation"));
+    assert!(evidence.iter().any(|item| item["kind"] == "artifact"
+        && item["cursor"]
+            .as_str()
+            .is_some_and(|cursor| cursor.ends_with(":1"))));
+
+    // Seed the persisted result a completed one-shot would commit. GET and an
+    // on-return ensure both reuse it while the source cursor is unchanged.
+    sqlx::query(
+        "UPDATE session_metadata_assistance
+         SET cue_source_cursor = ?, cue_text = ?, cue_generated_at = ?,
+             cue_evidence = ?, updated_at = ?
+         WHERE session_id = ?",
+    )
+    .bind(source_cursor)
+    .bind("Continue from the verified transcript.")
+    .bind("2026-07-26T00:00:00Z")
+    .bind(serde_json::to_string(evidence).unwrap())
+    .bind("2026-07-26T00:00:00Z")
+    .bind(&id)
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+    let cached = client
+        .get(&format!("/api/sessions/{id}/resumption-cue"))
+        .await
+        .unwrap();
+    assert_eq!(cached["status"], "generated");
+    assert_eq!(cached["text"], "Continue from the verified transcript.");
+    let ensured = client
+        .post(
+            &format!("/api/sessions/{id}/resumption-cue"),
+            json!({ "force": false }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ensured, cached);
+
+    // Advancing an artifact revision invalidates the cached cue even though the
+    // terminal transcript itself is unchanged.
+    let branch_id = sess["branch"]["id"].as_str().unwrap();
+    weaver_core::branch::set_goal(&ts.state.db, branch_id, "chat me, revised", "user")
+        .await
+        .unwrap();
+    let advanced = client
+        .get(&format!("/api/sessions/{id}/resumption-cue"))
+        .await
+        .unwrap();
+    assert_eq!(advanced["status"], "unavailable");
+    assert_ne!(advanced["source_cursor"], cached["source_cursor"]);
+    assert!(advanced["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["kind"] == "artifact"
+            && item["cursor"]
+                .as_str()
+                .is_some_and(|cursor| cursor.ends_with(":2"))));
 }
 
 /// The ACP endpoint opens at a bounded tail and pages backward with an exclusive
