@@ -565,9 +565,10 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
         )
         .await
         .unwrap();
-    assert!(submitted
-        .message
-        .contains("\"path_bytes\":\"UkVBRE1FLm1k\""));
+    let ReviewAnchorDto::Change(anchor) = &submitted.comments[0].anchor else {
+        panic!("submitted changes review lost its typed anchor");
+    };
+    assert_eq!(anchor.path, readme.path);
     assert_eq!(submitted.delivery_state, "queued");
 }
 

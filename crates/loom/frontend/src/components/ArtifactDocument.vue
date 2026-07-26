@@ -16,7 +16,7 @@ import { useMarkdownDoc, routeDocLink } from '../lib/markdownDoc';
 import type { Anchor, IssueRefStatus, Review, ReviewComment } from '../types';
 import {
   addReviewComment,
-  createArtifactReview,
+  createReview,
   deleteReviewComment,
   discardReview,
   listArtifactReviews,
@@ -246,7 +246,7 @@ const draftController = new ReviewDraftController<Review>({
     let current = item;
     if (!current) {
       if (!summary.trim()) return null;
-      current = await createArtifactReview(props.id, {
+      current = await createReview(props.id, {
         subject_kind: 'artifact',
         subject_key: props.artifactName,
         subject_version: String(props.rev),
@@ -633,7 +633,7 @@ async function createPendingComment() {
     const updated = await draftController.command(async (current) => {
       const review =
         current ??
-        (await createArtifactReview(props.id, {
+        (await createReview(props.id, {
           subject_kind: 'artifact',
           subject_key: props.artifactName,
           subject_version: pendingComment.subjectVersion,

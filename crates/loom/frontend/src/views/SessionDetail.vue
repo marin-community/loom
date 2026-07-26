@@ -85,9 +85,7 @@ const reviewActive = computed(() => artifactsActive.value || changesActive.value
 // Transient (defaults docked on a fresh open); only the rail *width* persists.
 const poppedOut = ref(false);
 const artifactsDocked = computed(() => artifactsActive.value && !poppedOut.value);
-const reviewDocked = computed(
-  () => (artifactsActive.value && !poppedOut.value) || changesActive.value,
-);
+const reviewDocked = computed(() => artifactsDocked.value || changesActive.value);
 const railOpen = computed(() => artifactsActive.value && poppedOut.value);
 const dockedArtifactsRef = ref<InstanceType<typeof ArtifactsPanel> | null>(null);
 const railArtifactsRef = ref<InstanceType<typeof ArtifactsPanel> | null>(null);

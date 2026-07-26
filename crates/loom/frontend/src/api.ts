@@ -448,8 +448,6 @@ export const listChangesReviews = (id: string) =>
 export const createReview = (id: string, body: CreateReviewBody) =>
   post(`/sessions/${id}/reviews`, body) as Promise<Review>;
 
-export const createArtifactReview = (id: string, body: CreateReviewBody) => createReview(id, body);
-
 export const addReviewComment = (reviewId: number, body: AddReviewCommentBody) =>
   post(`/reviews/${reviewId}/comments`, body) as Promise<Review>;
 

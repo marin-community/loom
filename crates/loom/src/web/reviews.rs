@@ -586,10 +586,7 @@ pub(super) async fn add_review_comment(
         Ok(updated) => updated,
         Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
     };
-    let current = current_review_version(&st, &updated)
-        .await?
-        .unwrap_or_else(|| updated.subject_version.clone());
-    Ok(Json(review_dto(&updated, &current)))
+    Ok(Json(durable_review_dto(&st, &updated).await?))
 }
 
 pub(super) async fn update_review_comment(
@@ -647,10 +644,7 @@ pub(super) async fn update_review_comment(
         Ok(updated) => updated,
         Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
     };
-    let current = current_review_version(&st, &updated)
-        .await?
-        .unwrap_or_else(|| updated.subject_version.clone());
-    Ok(Json(review_dto(&updated, &current)))
+    Ok(Json(durable_review_dto(&st, &updated).await?))
 }
 
 pub(super) async fn delete_review_comment(
@@ -675,10 +669,7 @@ pub(super) async fn delete_review_comment(
         Ok(updated) => updated,
         Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
     };
-    let current = current_review_version(&st, &updated)
-        .await?
-        .unwrap_or_else(|| updated.subject_version.clone());
-    Ok(Json(review_dto(&updated, &current)))
+    Ok(Json(durable_review_dto(&st, &updated).await?))
 }
 
 pub(super) async fn resolve_review_comment(
@@ -750,10 +741,7 @@ pub(super) async fn update_review(
         Ok(updated) => updated,
         Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
     };
-    let current = current_review_version(&st, &updated)
-        .await?
-        .unwrap_or_else(|| updated.subject_version.clone());
-    Ok(Json(review_dto(&updated, &current)))
+    Ok(Json(durable_review_dto(&st, &updated).await?))
 }
 
 pub(super) async fn discard_review(
@@ -873,10 +861,7 @@ pub(super) async fn submit_review(
     let refreshed = review::get(&st.db, item.id)
         .await?
         .ok_or_else(|| AppError::not_found("review"))?;
-    let current = current_review_version(&st, &refreshed)
-        .await?
-        .unwrap_or_else(|| refreshed.subject_version.clone());
-    Ok(Json(review_dto(&refreshed, &current)))
+    Ok(Json(durable_review_dto(&st, &refreshed).await?))
 }
 
 pub(super) async fn retry_review_delivery(
