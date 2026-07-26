@@ -971,16 +971,6 @@ export interface ResolvedLaunchPolicy {
   mcp_policy: SessionMcpPolicy;
 }
 
-export interface ResolvedCustomAgent {
-  name: string;
-  label: string;
-  setup: string;
-  launch: string;
-  resume: string;
-  reports_status: boolean;
-  protocol: string;
-}
-
 export interface ResolvedLaunch {
   selection: LaunchSelection;
   profile_lifetime: number;
@@ -992,7 +982,6 @@ export interface ResolvedLaunch {
   protocol: string;
   mode: string;
   class: 'interactive' | 'automation';
-  custom_agent: ResolvedCustomAgent | null;
   locked_fields: string[];
   provenance: LaunchProvenance;
   capacity: LaunchCapacity;

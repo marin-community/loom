@@ -287,36 +287,12 @@ pub async fn kill_session(name: &str) -> Result<()> {
     Ok(())
 }
 
-static INJECTED_KILL_FAILURES: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashSet<String>>,
-> = std::sync::OnceLock::new();
-
-/// Inject one pre-teardown failure for an exact supervisor name. Integration
-/// barriers use this to prove lifecycle rollback without depending on timing a
-/// real socket failure.
-#[doc(hidden)]
-pub fn inject_kill_and_wait_failure(name: &str) {
-    INJECTED_KILL_FAILURES
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap()
-        .insert(name.to_string());
-}
-
 /// Kill a session and wait until its supervisor has released the control socket.
 ///
 /// A kill request is acknowledged before the supervisor finishes teardown. A
 /// caller that immediately reuses the same name (provider handoff does this)
 /// must wait, or the replacement can connect to the dying supervisor.
 pub async fn kill_session_and_wait(name: &str) -> Result<()> {
-    if INJECTED_KILL_FAILURES
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap()
-        .remove(name)
-    {
-        bail!("injected teardown failure for terminal {name}");
-    }
     kill_session(name).await?;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     while has_session(name).await {

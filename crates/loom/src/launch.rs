@@ -7,10 +7,11 @@
 //! producers from growing subtly different launch rules.
 
 use anyhow::{anyhow, bail, Result};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use weaver_api::{
     LaunchCapacityView, LaunchOverrides, LaunchProvenanceView, LaunchSelection, ProfileEnvView,
-    ResolvedCustomAgentView, ResolvedLaunchPolicyView, ResolvedLaunchView, SessionMcpPolicyView,
+    ResolvedLaunchPolicyView, ResolvedLaunchView, SessionMcpPolicyView,
 };
 
 use crate::db::Db;
@@ -32,8 +33,8 @@ pub struct ResolveOptions {
     pub ignore_capacity: bool,
 }
 
-/// Exact server-side result. `view` is safe to return and persist;
-/// `profile`/`mcp_policy` retain the internal data provisioning needs.
+/// Exact server-side result. `view` is safe to return; the remaining fields
+/// retain the private data provisioning and persistence need.
 pub struct ResolvedLaunch {
     pub profile: Profile,
     pub mcp_policy: weaver_api::McpPolicySnapshot,
@@ -44,34 +45,79 @@ pub struct ResolvedLaunch {
     pub view: ResolvedLaunchView,
 }
 
-pub(crate) fn custom_agent_view(
-    custom: &crate::custom_agents::CustomAgent,
-) -> ResolvedCustomAgentView {
-    ResolvedCustomAgentView {
-        name: custom.name.clone(),
-        label: custom.label.clone(),
-        setup: custom.setup.clone(),
-        launch: custom.launch.clone(),
-        resume: custom.resume.clone(),
-        reports_status: custom.reports_status,
-        protocol: custom.protocol.clone(),
+/// Private extension of the public launch view stored in `sessions.launch_snapshot`.
+/// Flattening preserves the shape written before custom-agent commands were
+/// redacted from [`ResolvedLaunchView`], so existing rows remain readable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedLaunchSnapshot {
+    #[serde(flatten)]
+    view: ResolvedLaunchView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    custom_agent: Option<PersistedCustomAgent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedCustomAgent {
+    name: String,
+    label: String,
+    setup: String,
+    launch: String,
+    resume: String,
+    reports_status: bool,
+    protocol: String,
+}
+
+impl From<&crate::custom_agents::CustomAgent> for PersistedCustomAgent {
+    fn from(custom: &crate::custom_agents::CustomAgent) -> Self {
+        Self {
+            name: custom.name.clone(),
+            label: custom.label.clone(),
+            setup: custom.setup.clone(),
+            launch: custom.launch.clone(),
+            resume: custom.resume.clone(),
+            reports_status: custom.reports_status,
+            protocol: custom.protocol.clone(),
+        }
     }
 }
 
-pub(crate) fn custom_agent_from_view(
-    custom: &ResolvedCustomAgentView,
-) -> crate::custom_agents::CustomAgent {
-    crate::custom_agents::CustomAgent {
-        name: custom.name.clone(),
-        label: custom.label.clone(),
-        setup: custom.setup.clone(),
-        launch: custom.launch.clone(),
-        resume: custom.resume.clone(),
-        reports_status: custom.reports_status,
-        protocol: custom.protocol.clone(),
-        created_at: String::new(),
-        updated_at: String::new(),
+impl From<PersistedCustomAgent> for crate::custom_agents::CustomAgent {
+    fn from(custom: PersistedCustomAgent) -> Self {
+        Self {
+            name: custom.name,
+            label: custom.label,
+            setup: custom.setup,
+            launch: custom.launch,
+            resume: custom.resume,
+            reports_status: custom.reports_status,
+            protocol: custom.protocol,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
     }
+}
+
+pub(crate) struct LaunchSnapshot {
+    pub view: ResolvedLaunchView,
+    pub custom_agent: Option<crate::custom_agents::CustomAgent>,
+}
+
+pub(crate) fn serialize_snapshot(
+    view: &ResolvedLaunchView,
+    custom_agent: Option<&crate::custom_agents::CustomAgent>,
+) -> serde_json::Result<String> {
+    serde_json::to_string(&PersistedLaunchSnapshot {
+        view: view.clone(),
+        custom_agent: custom_agent.map(PersistedCustomAgent::from),
+    })
+}
+
+pub(crate) fn deserialize_snapshot(snapshot: &str) -> serde_json::Result<LaunchSnapshot> {
+    let persisted: PersistedLaunchSnapshot = serde_json::from_str(snapshot)?;
+    Ok(LaunchSnapshot {
+        view: persisted.view,
+        custom_agent: persisted.custom_agent.map(Into::into),
+    })
 }
 
 fn selected(value: &Option<String>) -> Option<&str> {
@@ -316,7 +362,6 @@ pub async fn resolve(
         protocol,
         mode,
         class,
-        custom_agent: custom_agent.as_ref().map(custom_agent_view),
         locked_fields,
         provenance: LaunchProvenanceView {
             agent: if overrides.agent.is_some() {
@@ -540,9 +585,9 @@ mod tests {
         let mut custom = crate::custom_agents::CustomAgent {
             name: "reviewed-runtime".to_string(),
             label: "Reviewed runtime".to_string(),
-            setup: String::new(),
+            setup: "printf reviewed-setup".to_string(),
             launch: "printf old > reviewed-runtime.txt".to_string(),
-            resume: String::new(),
+            resume: "printf reviewed-resume".to_string(),
             reports_status: false,
             protocol: "terminal".to_string(),
             created_at: String::new(),
@@ -560,20 +605,48 @@ mod tests {
         let reviewed = resolve(&db, &selection, &ResolveOptions::default())
             .await
             .unwrap();
+        let public = serde_json::to_string(&reviewed.view).unwrap();
+        assert!(
+            !public.contains("custom_agent")
+                && [&custom.setup, &custom.launch, &custom.resume]
+                    .into_iter()
+                    .all(|command| !public.contains(command)),
+            "the public launch view must redact the private custom-agent envelope"
+        );
+        let persisted = serialize_snapshot(&reviewed.view, reviewed.custom_agent.as_ref()).unwrap();
+        let recovered = deserialize_snapshot(&persisted)
+            .unwrap()
+            .custom_agent
+            .unwrap();
+        let accepted = reviewed.custom_agent.as_ref().unwrap();
+        assert_eq!(
+            (
+                &recovered.name,
+                &recovered.label,
+                &recovered.setup,
+                &recovered.launch,
+                &recovered.resume,
+                recovered.reports_status,
+                &recovered.protocol,
+            ),
+            (
+                &accepted.name,
+                &accepted.label,
+                &accepted.setup,
+                &accepted.launch,
+                &accepted.resume,
+                accepted.reports_status,
+                &accepted.protocol,
+            ),
+            "the legacy flattened row shape must recover the exact accepted runtime"
+        );
+
         custom.launch = "printf new > reviewed-runtime.txt".to_string();
         crate::custom_agents::set(&db, &custom).await.unwrap();
         let fresh = resolve(&db, &selection, &ResolveOptions::default())
             .await
             .unwrap();
 
-        assert_eq!(
-            reviewed.custom_agent.as_ref().unwrap().launch,
-            "printf old > reviewed-runtime.txt"
-        );
-        assert_eq!(
-            fresh.custom_agent.as_ref().unwrap().launch,
-            "printf new > reviewed-runtime.txt"
-        );
         assert_ne!(
             reviewed.view.resolver_revision,
             fresh.view.resolver_revision

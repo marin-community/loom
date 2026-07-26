@@ -876,8 +876,9 @@ pub(crate) async fn provision_session(
     let protocol = resolved.view.protocol.clone();
     let mode = resolved.view.mode.clone();
     let class = resolved.view.class.clone();
-    let launch_snapshot = serde_json::to_string(&resolved.view)
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let launch_snapshot =
+        crate::launch::serialize_snapshot(&resolved.view, resolved.custom_agent.as_ref())
+            .map_err(|error| AppError::bad_request(error.to_string()))?;
     if let Some(allowed) = actor.allowed_profiles() {
         if !allowed.iter().any(|name| name == &profile_name) {
             return Err(AppError::new(
@@ -2497,8 +2498,9 @@ pub(crate) async fn create_warm_session(
             "watch profile changed during warm launch; retry against a fresh resolution",
         ));
     }
-    let launch_snapshot = serde_json::to_string(&resolved.view)
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let launch_snapshot =
+        crate::launch::serialize_snapshot(&resolved.view, resolved.custom_agent.as_ref())
+            .map_err(|error| AppError::bad_request(error.to_string()))?;
     let custom_agent = resolved.custom_agent.clone();
     let launch_profile = resolved.profile;
     let agent = resolved.view.agent;
@@ -2761,13 +2763,13 @@ fn stamped_custom_agent(session: &Session) -> ApiResult<Option<custom_agents::Cu
             session.id
         )));
     }
-    let snapshot: weaver_api::ResolvedLaunchView = serde_json::from_str(&session.launch_snapshot)
-        .map_err(|error| {
-        AppError::conflict(format!(
-            "session '{}' has an unreadable launch snapshot: {error}",
-            session.id
-        ))
-    })?;
+    let snapshot =
+        crate::launch::deserialize_snapshot(&session.launch_snapshot).map_err(|error| {
+            AppError::conflict(format!(
+                "session '{}' has an unreadable launch snapshot: {error}",
+                session.id
+            ))
+        })?;
     let custom = snapshot.custom_agent.ok_or_else(|| {
         AppError::conflict(format!(
             "session '{}' has no captured custom-agent definition; create a canonical replacement instead of consulting the mutable registry",
@@ -2780,7 +2782,7 @@ fn stamped_custom_agent(session: &Session) -> ApiResult<Option<custom_agents::Cu
             session.id, custom.name, session.agent_kind
         )));
     }
-    Ok(Some(crate::launch::custom_agent_from_view(&custom)))
+    Ok(Some(custom))
 }
 
 async fn require_resume_capacity(
@@ -3811,35 +3813,35 @@ fn legacy_handoff_snapshot(
     if session.launch_snapshot.trim().is_empty() {
         return Ok(String::new());
     }
-    let mut snapshot: weaver_api::ResolvedLaunchView =
-        serde_json::from_str(&session.launch_snapshot)
-            .map_err(|error| AppError::bad_request(error.to_string()))?;
-    snapshot.agent = target.to_string();
-    snapshot.model = model.to_string();
-    snapshot.effort = effort.to_string();
-    snapshot.protocol = "acp".to_string();
-    snapshot.mode = mode.to_string();
-    snapshot.custom_agent = custom_agent.map(crate::launch::custom_agent_view);
-    snapshot.selection.overrides.agent = Some(target.to_string());
-    snapshot.selection.overrides.model = Some(model.to_string());
-    snapshot.selection.overrides.effort = Some(effort.to_string());
-    snapshot.selection.overrides.mode = Some(mode.to_string());
-    snapshot.provenance.agent = "launch_override".to_string();
-    snapshot.provenance.model = if model.is_empty() {
+    let mut snapshot = crate::launch::deserialize_snapshot(&session.launch_snapshot)
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    snapshot.view.agent = target.to_string();
+    snapshot.view.model = model.to_string();
+    snapshot.view.effort = effort.to_string();
+    snapshot.view.protocol = "acp".to_string();
+    snapshot.view.mode = mode.to_string();
+    snapshot.custom_agent = custom_agent.cloned();
+    snapshot.view.selection.overrides.agent = Some(target.to_string());
+    snapshot.view.selection.overrides.model = Some(model.to_string());
+    snapshot.view.selection.overrides.effort = Some(effort.to_string());
+    snapshot.view.selection.overrides.mode = Some(mode.to_string());
+    snapshot.view.provenance.agent = "launch_override".to_string();
+    snapshot.view.provenance.model = if model.is_empty() {
         "agent_default"
     } else {
         "launch_override"
     }
     .to_string();
-    snapshot.provenance.effort = if effort.is_empty() {
+    snapshot.view.provenance.effort = if effort.is_empty() {
         "agent_default"
     } else {
         "launch_override"
     }
     .to_string();
-    snapshot.provenance.protocol = "agent_default".to_string();
-    snapshot.provenance.mode = "launch_override".to_string();
-    serde_json::to_string(&snapshot).map_err(|error| AppError::bad_request(error.to_string()))
+    snapshot.view.provenance.protocol = "agent_default".to_string();
+    snapshot.view.provenance.mode = "launch_override".to_string();
+    crate::launch::serialize_snapshot(&snapshot.view, snapshot.custom_agent.as_ref())
+        .map_err(|error| AppError::bad_request(error.to_string()))
 }
 
 async fn legacy_handoff_plan(
@@ -4038,8 +4040,9 @@ pub(super) async fn handoff_session(
         let profile_environment = crate::profile::env_pairs(&st.db, &resolved.profile.name)
             .await
             .map_err(|error| AppError::bad_request(error.to_string()))?;
-        let launch_snapshot = serde_json::to_string(&resolved.view)
-            .map_err(|error| AppError::bad_request(error.to_string()))?;
+        let launch_snapshot =
+            crate::launch::serialize_snapshot(&resolved.view, resolved.custom_agent.as_ref())
+                .map_err(|error| AppError::bad_request(error.to_string()))?;
         HandoffPlan {
             target: resolved.view.agent.clone(),
             model: resolved.view.model.clone(),
