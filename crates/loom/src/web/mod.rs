@@ -347,10 +347,7 @@ pub(crate) async fn session_view(
     // The latest usage block is a cheap indexed query; `None` for a terminal
     // session (or an ACP session before the agent reports usage).
     let usage = if session.protocol == "acp" {
-        crate::chat::latest_usage(db, &session.id)
-            .await
-            .ok()
-            .flatten()
+        crate::chat::latest_usage(db, &session.id).await?
     } else {
         None
     };
@@ -449,10 +446,7 @@ pub(crate) async fn session_summary_view(
         None
     };
     let usage = if session.protocol == "acp" {
-        crate::chat::latest_usage(db, &session.id)
-            .await
-            .ok()
-            .flatten()
+        crate::chat::latest_usage(db, &session.id).await?
     } else {
         None
     };
