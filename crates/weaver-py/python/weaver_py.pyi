@@ -53,8 +53,8 @@ class Client:
     def preview(self, key: str, lines: int = ...) -> str:
         """The session's tmux pane as text, with `lines` of extra scrollback."""
 
-    def diff(self, key: str) -> dict[str, Any]:
-        """The worktree file tree + change map vs the diff base."""
+    def changes(self, key: str) -> dict[str, Any]:
+        """Typed, bounded worktree changes relative to the session's local base."""
 
     # -- Writes (capability-gated) --
     def set_tag(
