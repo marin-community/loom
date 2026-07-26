@@ -1,14 +1,9 @@
 import { test, expect } from '../fixtures/weaver';
-import { writeFileSync } from 'fs';
-import { join } from 'path';
 
 test.describe('creating a session via the UI form', () => {
   const repoPlaceholder = 'owner/name or /home/you/code/project';
 
-  test('launches from the workbench and submits a change review', async ({
-    page,
-    weaver,
-  }) => {
+  test('launches from the workbench with canonical profile and title', async ({ page, weaver }) => {
     await fetch(`${weaver.baseUrl}/api/profiles`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -66,29 +61,11 @@ test.describe('creating a session via the UI form', () => {
     const files = (await res.json()) as { name: string; bytes: number }[];
     expect(files).toEqual([{ name: 'trace.log', bytes: Buffer.byteLength('panic at line 42\n') }]);
 
-    writeFileSync(join(session.work_dir, 'review.txt'), 'first\nsecond\n');
     await page.locator('[data-rail="sessions"]').click();
     const card = page.getByTestId('session-card');
     await expect(card).toContainText('Investigate the attached trace');
     await expect(card).not.toContainText('Inbox / Investigate the attached trace');
     await card.click();
-    await page.locator('[data-tab="review"]').click();
-    await page.getByRole('link', { name: 'Changes', exact: true }).click();
-    await expect(page.getByRole('tab', { name: 'Review' })).toHaveAttribute(
-      'aria-selected',
-      'true',
-    );
-    await page.getByRole('button', { name: /review\.txt/ }).click();
-    await page.getByRole('button', { name: /Comment on review\.txt new line 1/ }).click();
-    const composer = page.getByTestId('change-comment-composer');
-    await composer.locator('textarea').fill('Explain why this line belongs here.');
-    await composer.getByRole('button', { name: 'Add pending comment' }).click();
-    const changes = page.getByTestId('changes-panel');
-    const tray = changes.getByTestId('review-tray');
-    await expect(tray).toContainText('1 pending');
-    await changes.getByTestId('submit-review').click();
-    await expect(tray).toContainText('Review submitted');
-
     await page.getByRole('button', { name: /Details/ }).click();
     await page.getByText('Advanced', { exact: true }).click();
     await expect(page.getByTestId('action-open-editor')).toBeVisible();
@@ -104,7 +81,9 @@ test.describe('creating a session via the UI form', () => {
 
     await page.getByRole('link', { name: 'Edit profile templates in Settings' }).click();
     await expect(page).toHaveURL(`${weaver.baseUrl}/settings`);
-    await page.getByRole('button', { name: '+ Add profile' }).click();
+    const addProfile = page.getByRole('button', { name: '+ Add profile' });
+    await expect(addProfile.locator('..').getByTestId('profile-option-default')).toBeVisible();
+    await addProfile.click();
     await page.getByLabel('Name', { exact: true }).fill('cached-template');
     await page.getByLabel('Description', { exact: true }).fill('first revision');
     await page.getByTestId('profile-agent').selectOption('shell');

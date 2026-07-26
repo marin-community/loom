@@ -10,7 +10,7 @@ import {
   onUnmounted,
   nextTick,
 } from 'vue';
-import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router';
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router';
 import { get, ideInfo } from '../api';
 import type { Session, WeaverEvent } from '../types';
 import SessionTerminals from '../components/SessionTerminals.vue';
@@ -299,6 +299,30 @@ onActivated(() => {
   loadAll();
   openStream();
 });
+
+function finishArtifactSwapAfterNavigation(panel: InstanceType<typeof ArtifactsPanel>) {
+  const removeAfterEach = router.afterEach(() => {
+    removeAfterEach();
+    panel.finishLayoutSwap();
+  });
+}
+
+onBeforeRouteUpdate(async (to, from) => {
+  const nextName = typeof to.params.name === 'string' ? to.params.name : '';
+  const previousName = typeof from.params.name === 'string' ? from.params.name : '';
+  const changesArtifact =
+    to.params.id === props.id &&
+    from.params.id === props.id &&
+    to.path.startsWith(`/s/${props.id}/artifacts`) &&
+    from.path.startsWith(`/s/${props.id}/artifacts`) &&
+    nextName !== previousName;
+  if (!changesArtifact) return;
+  const panel = activeArtifactsPanel();
+  if (!panel || panel.isOpeningArtifact(nextName)) return;
+  if (!(await panel.prepareLayoutSwap())) return false;
+  finishArtifactSwapAfterNavigation(panel);
+});
+
 onBeforeRouteLeave(async (to) => {
   const staysInArtifacts =
     to.params.id === props.id && to.path.startsWith(`/s/${props.id}/artifacts`);
@@ -309,10 +333,7 @@ onBeforeRouteLeave(async (to) => {
       // A direct rail link or browser-history navigation has no local layout
       // callback. Hold the frozen controller through the router commit (or
       // abort), then release the still-mounted cached surface.
-      const removeAfterEach = router.afterEach(() => {
-        removeAfterEach();
-        panel.finishLayoutSwap();
-      });
+      finishArtifactSwapAfterNavigation(panel);
     }
   }
   const staysInSession = to.params.id === props.id && to.path.startsWith(`/s/${props.id}`);

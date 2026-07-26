@@ -750,6 +750,7 @@ async function discardDraft() {
     });
     reviews.value = reviews.value.filter((review) => review.id !== reviewId);
     activeId.value = null;
+    editingCommentId.value = null;
     reanchorCommentId.value = null;
     overallNote.value = '';
     summaryDirty.value = false;

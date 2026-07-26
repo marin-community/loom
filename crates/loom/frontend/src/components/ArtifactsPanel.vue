@@ -129,7 +129,23 @@ function finishLayoutSwap() {
   commentsRef.value?.finishLayoutSwap();
 }
 
-defineExpose({ prepareLayoutSwap, finishLayoutSwap });
+function isOpeningArtifact(name: string): boolean {
+  return openingName === name;
+}
+
+async function changeDocumentView(change: () => void): Promise<boolean> {
+  const owner = commentsRef.value;
+  if (owner && !(await owner.prepareLayoutSwap())) return false;
+  try {
+    change();
+    await nextTick();
+    return true;
+  } finally {
+    owner?.finishLayoutSwap();
+  }
+}
+
+defineExpose({ prepareLayoutSwap, finishLayoutSwap, isOpeningArtifact });
 
 // Load an artifact (optionally a specific revision) into the viewer. `keepMode`
 // refreshes content without resetting the preview/source choice — for a live
@@ -199,9 +215,11 @@ async function openArtifact(name: string, rev?: number, opts?: { keepMode?: bool
   }
 }
 
-function setMode(m: ViewMode) {
+async function setMode(m: ViewMode) {
   if (viewMode.value === m || editing.value) return;
-  viewMode.value = m;
+  await changeDocumentView(() => {
+    viewMode.value = m;
+  });
 }
 
 // The version picker: selecting a revision re-fetches at that rev. The latest
@@ -226,11 +244,16 @@ const onLatest = computed(
 
 async function edit() {
   if (!view.value) return;
-  draftContent.value = view.value.content;
-  editing.value = true;
-  viewMode.value = 'source';
-  await nextTick();
-  sourceInput.value?.focus();
+  const content = view.value.content;
+  if (
+    await changeDocumentView(() => {
+      draftContent.value = content;
+      editing.value = true;
+      viewMode.value = 'source';
+    })
+  ) {
+    sourceInput.value?.focus();
+  }
 }
 
 function cancelEdit() {
