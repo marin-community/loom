@@ -484,6 +484,8 @@ mod tests {
         );
     }
 
+    /// Review migration 16 shipped the final review shape; later unrelated
+    /// migrations must preserve those columns and indexes.
     #[tokio::test]
     async fn review_schema_is_final_when_v16_first_ships() {
         let pool = empty_pool().await;
@@ -509,7 +511,7 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(versions, (1..=16).collect::<Vec<_>>());
+        assert_eq!(versions, all_versions());
         let review_columns = table_columns(&pool, "reviews").await.unwrap();
         assert!(review_columns.iter().any(|column| column == "subject_id"));
         assert!(review_columns
