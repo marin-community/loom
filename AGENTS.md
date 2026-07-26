@@ -25,8 +25,9 @@ Diagram and module-by-module map: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ```sh
 cargo build              # backend + Vue SPA (build.rs drives npm/rspack)
-cargo test --workspace   # backend unit + integration (needs git; spawns tapestry PTYs)
-cd e2e && npm test       # Playwright UI suite against a real loom
+./scripts/test-representative.sh # ~5 minute local feedback over logic + feature journeys
+cargo test --workspace   # exhaustive backend unit + integration suite
+cd e2e && npm test       # exhaustive Playwright UI suite against a real loom
 cd python/weaver-loom && uv run pytest   # weaver_loom + builtin watch program logic (server-free)
 ```
 
