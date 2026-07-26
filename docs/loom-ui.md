@@ -1,119 +1,109 @@
 # Loom UI
 
-Loom is a calm operations workbench for supervising coding sessions. The
-interface keeps fleet state, active work, review, and intervention close
-together without turning routine monitoring into a wall of controls.
+Loom is a calm operations workbench for supervising coding sessions. The UI is
+a thin client of the REST API: organization, drafts, issue mutations, and
+lifecycle state are server-backed so the CLI observes the same system.
 
-## Principles
+## App shell and workbench
 
-- Show the current state before offering an action.
-- Keep the primary path obvious and secondary controls quiet.
-- Preserve context when moving between fleet, conversation, review, and
-  settings.
-- Use durable routes and server-backed state rather than browser-only features.
-- Reserve modal interruption for choices that need explicit confirmation.
+The rail has five stable destinations: **Sessions**, **Issues**, **Watch**,
+**Shell**, and **Settings**. Session Artifacts and Changes are not global
+destinations; they live together under that session's Review surface.
 
-## App shell
+Sessions is organized as shared **Spaces → Groups → Sessions**. A session has
+one canonical placement and one unqualified task label. A group row shows that
+label; cross-group smart views qualify it as `Group / Task`. Attention, All, and
+History are views over the same placement rather than separate ownership models.
 
-The left sidebar holds the stable destinations: Fleet, Issues, Artifacts, and
-Settings. The active destination is visually distinct and remains available at
-desktop and narrow widths.
+Successful automation is an ordinary session placed in the Ops space. A failed
+or incomplete run without a session appears as a typed **Intervention** in
+Attention and Ops, where the operator can inspect or clean it up. There is no
+separate Automations destination.
 
-Fleet is the working home. Its tree groups sessions by space and group, while
-smart views expose useful cross-cutting states such as running, needs attention,
-and completed work. Counts describe the visible session set, and selecting a
-row opens that session without changing its grouping.
+Search, moves, ordering, collapse preferences, and placement defaults all use
+the layout REST API. Selecting a row opens the session without changing its
+group, and returning to the workbench restores the current view.
 
-The main pane owns the current route. Detail routes are deep-linkable, browser
-history behaves normally, and returning to Fleet restores the operator's place.
+## Launch
 
-## Visual system
+New Session chooses a repository, task, profile, and optional one-launch
+overrides. The resolver previews the concrete agent/model/effort/protocol/mode,
+policy provenance, capacity, and validation before creation. Profiles are
+templates; each runtime launch receives a concrete resolved snapshot. Later
+profile or registry edits cannot silently mutate it, while an explicit handoff
+can replace it with a newly resolved snapshot.
 
-The palette is neutral and low-contrast, with saturated color reserved for
-status, selection, destructive actions, and focused controls. Typography favors
-compact labels and readable working text. Monospace is used for terminal output,
-paths, identifiers, and structured data—not general prose.
-
-Spacing and borders establish hierarchy before shadows do. Dense lists remain
-scannable, while editors and conversation content receive more breathing room.
-Loading, empty, error, and disabled states occupy the same layout as their
-resolved content so the interface does not jump.
-
-## Fleet and launch
-
-Spaces and groups are organizational views over sessions. A session may be
-unqualified, in which case Fleet shows it in the unqualified group rather than
-hiding it. Moving and qualifying sessions use the REST API so the CLI and UI
-observe the same result.
-
-The launch composer supports prompt text, workspace, agent profile, and mode.
-The resolved profile is shown before launch. A successful launch opens the
-session and uses the server-derived title; Fleet shows that same canonical
-title when the operator returns.
-
-Keyboard submission is available when the composer is valid. Validation and
-launch failures remain next to the composer, and the draft stays available for
-correction.
+The composer also accepts bounded Scratch attachments by browse or drag/drop.
+Validation and launch errors stay beside the composer without clearing the
+task, overrides, or attachments. A successful launch opens the new session.
 
 ## Session detail
 
-Session detail has three stable surfaces:
+An ACP session leads with **Conversation**, followed by **Shells** and
+**Review**. A terminal-backed session leads with **Agent**, followed by
+**Conversation** and **Review**. There is no Overview tab.
 
-- **Conversation** follows the agent exchange and exposes intervention controls.
-- **Review** contains Changes and Artifacts for examining and commenting on
-  produced work.
-- **Details** contains metadata and advanced controls.
+Conversation is the durable operator/agent exchange. Mid-turn feedback steers
+when the adapter supports it and otherwise queues for the next turn. Unseen
+queued text can be retracted into the composer for editing without rewriting
+already-dispatched history. Permission requests and runtime controls stay in
+the conversation that produced them; elapsed quiet time is evidence, not an
+automatic “stuck” verdict.
 
-Review comments preserve unfinished text across route changes and failed saves.
-When a pending comment or edit would be lost by changing the artifact layout,
-the UI keeps the current layout, focuses the draft, and asks the operator to
-save or cancel first.
+Review contains **Changes** and **Artifacts**. Both use the same staged review
+workflow:
 
-Archive and remove are distinct lifecycle actions. Archive stops active work
-while preserving the branch, conversation, placement, and Weaver history.
-Remove deletes the terminal, worktree, Git branch, conversation, and Weaver
-history, while returning claimed issues to the backlog.
+1. Start or recover a private, server-backed draft for the exact subject
+   version.
+2. Add anchored comments and an optional overall note. Failed saves leave input
+   available for retry, and stale mutations reload the authoritative draft.
+3. Submit once to freeze the payload and deliver one coherent review into the
+   agent conversation.
 
-## Issues and artifacts
+Draft text that has not yet been saved stays local to its editor. Navigation or
+layout changes that would discard it are stopped with a focused save-or-cancel
+choice. Submitted review history is immutable apart from comment resolution and
+delivery retry.
 
-Issues provide server-backed backlog and assignment state. Operators can inspect
-an issue, assign it through the supported workflow, and see the resulting
-session state without a separate browser-only model.
+**Details** is a popover, not a work tab. It owns task and launch metadata,
+associations, lifecycle actions, handoff, auto-archive policy, and Scratch.
+The embedded editor is an optional **Advanced → Open editor** escape hatch,
+loaded beside the work area only when requested.
 
-Artifacts are available globally and within a session's Review surface. The
-same artifact route and comment data are used in both places. Layout changes
-must not discard unsaved review text.
+Archive stops the runtime and removes the worktree while preserving the branch,
+conversation, placement, artifacts, and Weaver history. Remove deletes the
+session, runtime, worktree, Git branch, and Weaver history and returns claimed
+issues to the backlog.
 
-## Confirmations and feedback
+## Issues and Scratch
 
-Destructive or consequential actions use the shared in-app confirmation dialog.
-Each prompt names the exact target and describes the scope of the action. The
-dialog owns its pending and failure states, keeps failures visible for retry,
-and returns focus to the invoking control when dismissed.
+Issues is the server-backed repo board. Selection is stable by issue ID across
+filtering and pagination. Close, reopen, tag, untag, and delete apply as one
+validated bulk action: if any ID or precondition is invalid, none of the
+selected issues changes.
 
-The dialog traps focus, closes with Escape when idle, and enters on Cancel so an
-accidental confirmation is not the default keyboard outcome. Destructive
-actions are explicitly labeled in text as well as color.
+Scratch is inbound reference material, kept out of Git. Launch-time and live
+drop targets share the server's file-count, per-file, total-size, and filename
+validation. Each drop target is scoped to its active route so a cached session
+cannot consume files intended for another session.
 
-Inline confirmations remain appropriate for local, reversible edits that do
-not need a modal interruption.
+## Confirmation and feedback
 
-## Responsive and accessible behavior
+Consequential fleet or lifecycle actions use the shared focus-managed
+confirmation dialog, with the exact target, scope, pending state, and retryable
+failure visible in the application. Contextual draft/comment actions use an
+inline confirmation when a modal interruption would be disproportionate. The
+SPA does not delegate confirmation to native browser prompts.
 
-Narrow layouts retain the same route and action model. Navigation may collapse
-and panels may stack, but lifecycle controls, review drafts, and confirmation
-semantics do not change. Short viewports keep primary content scrollable rather
-than moving actions off-screen.
+Status, selection, destructive intent, and failures are expressed with text as
+well as color. Controls have visible focus and accessible names. Narrow layouts
+retain the same routes and actions; panels may stack, but lifecycle, review, and
+confirmation semantics do not change.
 
-Interactive controls have visible focus, meaningful accessible names, and
-keyboard behavior equivalent to pointer behavior. Status is communicated with
-text in addition to color. Persistent failures use an alert region; transient
-success feedback may use a polite live region.
+## Visual system
 
-## Recurring components
-
-Use shared primitives for status badges, empty states, row actions, panel
-headers, and confirmation dialogs. Row actions appear through a trailing menu
-or compact button instead of making the entire row ambiguous. New UI behavior
-should extend these primitives and the REST client rather than introduce a
-parallel interaction model.
+The palette is neutral and low-contrast, reserving saturated color for status,
+selection, destructive actions, and focus. Typography favors compact labels and
+readable working text; monospace is for terminal output, paths, identifiers, and
+structured data. Borders and spacing establish hierarchy before shadows do, and
+loading, empty, error, and disabled states keep the resolved layout stable.

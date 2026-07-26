@@ -70,11 +70,12 @@ itself is `loom`'s to manage; the ledger that tracks it stays in `weaver`:
   live status. `weaver issue wait <id>` blocks until it closes or the sub-agent
   raises `attention`/`blocked` (`--timeout <secs>`; prints why it woke).
   `weaver issue ls` lists your delegations under "Delegated by this branch".
-- Drive the child's terminal directly when you need to nudge it:
-  `loom session poll|wait|send|break|preview <session>` (one-shot status /
-  block on the session itself / type a message into its pane / send Escape /
-  read its screen). A session key is an id, branch id, branch name, or
-  `repo:branch`.
+- Drive the child directly when you need to nudge it:
+  `loom session poll|wait|send|interrupt|preview <session>` (one-shot status /
+  block on the session itself / deliver immediate control input / interrupt the
+  current turn / read compact recent output). Loom maps those verbs onto the
+  session's terminal or ACP protocol. A session key is an id, branch id, branch
+  name, or `repo:branch`.
 - `loom session url [<session>]` — the dashboard URL, defaulting to your own;
   the link to hand a human (see "Finishing work").
 
@@ -82,13 +83,10 @@ Unlike a coding agent's builtin sub-agents, a weaver sub-session is fully
 decoupled: it survives independently, has its own git history, and can be
 handed off or revisited later.
 
-`loom session launch` cuts the worktree from *one* repo — whatever checkout you
-run it in, unless you pass `--repo <path>` (`--base` pins only the branch, not
-the repo). Repos live under `/home/power/code/<repo>/`; `iris` and `grug` are
-subsystems of the marin monorepo, so launch their work with `--repo
-/home/power/code/marin`. Branches are always named `weaver/<slug>` regardless
-of repo — after launching, check the printed `dir:` line sits under the
-intended repo's `.worktrees/`.
+`loom session launch` cuts the worktree from one repository: the current
+checkout unless you pass `--repo <path-or-owner/name>`. `--base` pins the
+branch/ref inside that repository, not the repository itself. Check the printed
+repository and worktree before handing work off.
 
 ## Signalling your status
 
@@ -125,10 +123,11 @@ moved on since it was set.
 
 - Make a well-reasoned decision, record it with `weaver status`, and keep
   going. Default to recording and continuing rather than stopping.
-- Ask the user in plain prose when a choice genuinely matters — but **never
-  block on an interactive TUI prompt**; those cannot be answered from the
-  dashboard. State the question as text, set `weaver status attention
-  "<the question>"`, and continue on your best assumption.
+- Ask the user in plain prose when a product choice genuinely matters. ACP
+  runtime permission requests are answerable in Conversation; do not turn an
+  ordinary product decision into a runtime permission card or an ad hoc
+  terminal TUI. State the question as text, set `weaver status attention
+  "<the question>"`, and continue on your best safe assumption when possible.
 
 ## Working a GitHub issue
 
@@ -163,33 +162,17 @@ migration, an API contract, anything expensive to reverse — write the design
 down and have it reviewed before building. Skip this for quick fixes, renames,
 doc tweaks, review comments: no tradeoff, no review, just write the code.
 
-1. `weaver artifact write design <file>` — the reasoning, the rejected
-   alternatives, the open questions. Name it `design` (`plan` means the
-   issue-referencing task list). Stay `ok` — a draft awaiting review is not
-   something the user needs to see.
-2. Send it to two reviewers, each checking it against the code. If you are
-   `claude`:
-
-   ```sh
-   ask="Peer-review the design on stdin against this repo. What is wrong, missing,
-   or over-built? Be concrete and blunt — no praise, no summary."
-   weaver artifact show design | codex exec -s read-only "$ask"
-   weaver artifact show design | env -u WEAVER_BRANCH claude -p --model fable "$ask"
-   ```
-
-   If you are `codex`: one of your own sub-agents, plus `claude -p --model
-   fable`. Run both in the background, in parallel. If a reviewer isn't on
-   `PATH`, note it and go with one.
-
-   The `env -u WEAVER_BRANCH` above is load-bearing: a nested `claude -p` reads
-   this worktree's `.claude/settings.local.json` and fires weaver's lifecycle
-   hooks. Carrying `$WEAVER_BRANCH` in would stamp a spurious `idle` on your
-   branch mid-turn. Strip it from any `claude -p` you launch inside the worktree.
-3. Incorporate findings with judgment — reviews are partly wrong; fix what
-   lands, record what you rejected and why, and rev the artifact. Only now
-   surface it: raise `attention` with the URL, and if the session came from a
-   GitHub thread, paste the design there (`gh issue comment` / `gh pr
-   comment`) — a reader there can't open a loopback dashboard URL.
+1. `weaver artifact write design <file>` — record the reasoning, rejected
+   alternatives, and open questions. Name it `design` (`plan` is the
+   issue-referencing task-list convention). Stay `ok` while the draft itself
+   needs no user action.
+2. Apply the repository's review policy proportionately to reversibility and
+   risk. Use a code-grounded peer review when the decision is expensive to
+   reverse; do not create a fixed reviewer ceremony for routine work.
+3. Incorporate findings with judgment, record important rejections, and revise
+   the artifact. Then raise `attention` with its URL. If the session came from a
+   GitHub thread, put the durable design or a public link there—a reader cannot
+   open a loopback dashboard URL.
 
 ## Finishing work
 
@@ -206,14 +189,13 @@ yours to drive.
   the server knows loom's public address — `$WEAVER_API` is a loopback URL
   that resolves to nothing on a reviewer's machine.
 - **Drive the PR to green — opening it starts integration, it doesn't finish
-  it.** Watch CI (`gh pr checks <N> --watch`), fetch reviews (`gh pr view <N>
-  --json reviews,comments`) and inline comments (`gh api
-  repos/{owner}/{repo}/pulls/<N>/comments`), fix and push on the same branch,
-  re-watch. Local green is not CI green. Keep status honest while you wait
-  (`weaver status ok "waiting on CI"`).
-- Once CI is green and review addressed: `weaver status attention "ready for
-  review"` (the message doubles as your summary), and file follow-ups with
-  `weaver issue add`.
+  it.** Watch CI (`gh pr checks <N> --watch`), fix failures, and push on the
+  same branch. Once green, address review comments already present. Do not poll
+  or wait for future reviews. Local green is not CI green; keep status honest
+  while you wait (`weaver status ok "waiting on CI"`).
+- Once CI is green and present comments are addressed: `weaver status
+  attention "ready for review"` (the message doubles as your summary), and file
+  follow-ups with `weaver issue add`.
 
 When a session is finished with, the user may **archive** it from the
 dashboard: the terminal and worktree go, the branch and weaver history stay.

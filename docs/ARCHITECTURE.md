@@ -15,9 +15,9 @@ weaver ships **two binaries** over **loom's REST API**:
   issues, set tags, and emit hook events. It **requires a reachable `loom server run`** —
   every command fails with a friendly error if the server can't be reached.
 - **`loom`** — the **orchestrator**: the REST + SSE server, the Vue web UI, the
-  per-branch terminal supervisor + agent process (via the `sessions` table), the
-  background monitor, and the `git worktree` shell-outs. It is the only process
-  that opens the sqlite database directly.
+  per-session detached Tapestry runtime supervisor + agent process (via the
+  `sessions` table), the background monitor, and the `git worktree` shell-outs.
+  It is the only process that opens the sqlite database directly.
 
 ```
 weaver CLI ──HTTP (REST)──▶ loom server run
@@ -58,9 +58,9 @@ other `weaver` subcommand.
 | `crates/loom/src/mcp/` | trusted builtin MCP registry and stdio adapters: provider-neutral versioned capability sets, exact permission translation, and the fixed GitHub/messaging/self-history bridges |
 | `crates/loom/src/custom_mcp.rs` | operator-authored MCP definitions: grouped path identities, immutable sqlite revisions, bounded `uv` validation, and exact session-snapshot execution |
 | `crates/loom/src/profile.rs` | named launch policy, including provider-neutral `mcp_access` resolution and the restricted-profile trust boundary |
-| `crates/loom/src/launch.rs` | canonical profile-template and override resolution for previews, creates, clones, and handoffs; returns the exact private launch snapshot plus its transport-safe view |
+| `crates/loom/src/launch.rs` | canonical profile-template and override resolution for previews, creates, clones, and handoffs; returns the concrete private launch snapshot plus its transport-safe view |
 | `crates/loom/src/handoff.rs` | provider handoff orchestration: canonical/legacy target resolution, conversation continuity, lifecycle fencing, rollback, and replacement cleanup; depends on runtime/domain owners, never the REST adapter |
-| `crates/loom/src/provision.rs` | ordinary session provisioning: trusted actor attribution, canonical launch resolution, repository/worktree/setup lifecycle, immutable launch snapshots, tracking, recoverable launch-failure surfacing, and title generation; returns only the created `Session` + `Branch` domain facts |
+| `crates/loom/src/provision.rs` | ordinary session provisioning: trusted actor attribution, canonical launch resolution, repository/worktree/setup lifecycle, stamped launch snapshots, tracking, recoverable launch-failure surfacing, and title generation; returns only the created `Session` + `Branch` domain facts |
 | `crates/loom/src/scratch.rs` | shared Scratch validation and filesystem storage for launch-time attachments and live route mutations; Axum-free semantic errors keep transport mapping in `web/` |
 | `crates/loom/src/session.rs` | `Session` row + sqlx queries |
 | `crates/loom/src/session_layout.rs` | durable Spaces → Groups → Sessions placement, defaults, ordering, optimistic mutation revisions, and revision-invalidation publication; independent of immutable provenance and launch policy |
@@ -72,6 +72,7 @@ other `weaver` subcommand.
 | `crates/loom/src/backend.rs` | the terminal-management seam: every programmatic terminal op (create/has/capture/send/kill/list) drives the session's `tapestry` supervisor. Also the ACP transport seam — `new_relay_session`/`subscribe_relay`/`relay_write`/`relay_ack` drive a session's tapestry **relay** supervisor (a durable JSON-RPC frame spool) |
 | `crates/tapestry/` | the per-session detached supervisor that outlives loom. Two modes: a **terminal** (PTY + vt100 screen emulator + unix control socket, streaming raw PTY bytes so an attached xterm owns its own scrollback/search), and a **relay** (a headless stdio subprocess whose stdout is split into newline-delimited frames, spooled with monotonic seqs, and replayed to a subscriber from any cursor — the durable transport under `loom::acp`) |
 | `crates/loom/src/terminal.rs` | WebSocket ⇄ live-terminal bridge: xterm.js ⇄ the tapestry session socket |
+| `crates/loom/src/ide.rs` | lazy per-session code-server ownership plus the authenticated same-origin HTTP/WebSocket reverse proxy used by the advanced editor panel |
 | `crates/loom/src/acp/` | the [Agent Client Protocol](https://agentclientprotocol.com) client: one `tokio` task per `protocol='acp'` session drives a headless adapter subprocess (under a tapestry relay) over JSON-RPC 2.0 — consolidating streaming `session/update`s into journal blocks, block-boundary acking the relay spool, running the turn state machine, and answering permission requests. `start`/`attach` register a task into the `AppState.acp` registry the `/chat`, `/prompt`, `/permissions`, `/mode`, `/interrupt` routes drive. `acp/wire.rs` holds the JSON-RPC line codec + serde types |
 | `crates/loom/src/chat.rs` | the ACP **chat journal**: the durable, block-structured (`chat_blocks`, one row per `(session_id, turn, seq)`) conversation record `loom::acp` writes idempotently and the `/chat` routes read |
 | `crates/loom/src/github.rs` | `gh` CLI shell-out: issue seeding, PR opening, and the PR-status poll loop (snapshots each branch's PR; archives on merge) |
@@ -88,44 +89,24 @@ other `weaver` subcommand.
 `cargo build` builds the SPA into `static/dist` via `build.rs`; loom serves it
 from there at runtime (`web::static_dir`). `rerun-if-changed` makes the SPA build
 a no-op when no frontend source changed, so backend-only edits don't re-run
-rspack; a Node-less checkout still builds (the backend) and serves a placeholder.
-There is no skip flag — backend and frontend are separated at the **test** level
-(`cargo test` for the backend, the Playwright `e2e/` suite for the frontend), not
-the build level.
+rspack; a Node-less checkout still builds the backend and serves a placeholder.
+There is no skip flag.
+
+Tests are proportional by layer. Rust and frontend unit tests own pure module
+logic; `crates/loom/tests/integration/` proves cross-module wiring against an
+isolated live server; Playwright owns browser journeys; Python package and
+builtin-watch logic lives in pytest. `scripts/test-representative.sh` amortizes
+one selected journey from each setup-heavy feature after running the unit
+suites. Full workspace and Playwright suites remain the exhaustive CI gates.
+
+`scripts/pre-commit.sh` is the deterministic local/CI gate: Rust formatting and
+clippy plus frontend unit tests, typecheck, and Prettier when npm is available.
+The separate agent lint-review policy and invocation live in
+[`docs/lint.md`](lint.md) and the pull-request skill, not in the commit hook.
 
 The integration tests shell out to real `git` and spawn `tapestry` terminal
 supervisors (detached PTY processes). The harness kills its supervisors on drop;
 if one hangs, look for stray `tapestry supervise` processes.
-
-### Agent lint review
-
-`scripts/lint-review.py` — a self-contained `uv run` script — catches the *agent
-slop* fmt and clippy can't: the judgement calls of naming, API shape,
-dead/speculative code, duplication, and comment/test quality. It builds one
-prompt from the [`docs/lint.md`](lint.md) catalog (`wl-...` rules) plus the diff
-and pipes it to a headless `claude -p` sub-agent, run as a fresh session — the
-calling session's `CLAUDE_CODE_*` / `ANTHROPIC_API_KEY` markers are stripped so
-it neither nests in the caller's transcript nor bills the metered API. It parses
-the findings and **errors on any at or above a confidence threshold**; the rest
-print as advisory.
-
-It is **not** wired into the pre-commit hook. `scripts/pre-commit.sh` stays a
-fast fmt + clippy gate identical to CI; the lint review is a separate, explicit
-decision in the commit → PR flow. Agents apply the proportional
-[run/skip policy](lint.md#when-to-run) via the `pull-request` skill after
-committing and before opening the PR. Keeping the agent out of the commit path
-means a slow or flaky review never wedges a commit. When warranted,
-`scripts/lint-review.py` reviews the whole branch against its merge-base with
-`main`.
-
-It **self-skips** (exit 0) when `claude` isn't on PATH, when there are no
-Rust/TS/Vue changes, or when the agent times out or errors — so a flaky or
-absent agent can't block progress, and only real findings do.
-
-Knobs: `WEAVER_SKIP_AGENT_LINT=1` to skip a run, `WEAVER_LINT_MIN_CONFIDENCE`
-(default `0.9`), `WEAVER_LINT_AGENT_CMD` (default `claude -p`), and
-`WEAVER_LINT_TIMEOUT` (default `600`s). Suppress a false positive with a trailing
-`// wl-allow: <code>` on the cited line.
 
 ### End-to-end (Playwright)
 
@@ -208,6 +189,18 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
     database is brought to the baseline by a one-time `legacy_bootstrap` on
     first run.
 
+Issues are repository-owned. `source_branch` is immutable provenance;
+`claimed_branch` is the optional current owner and alone defines a branch's
+working set. Removing a session clears its claims back to the backlog rather
+than deleting issues. The in-worktree CLI reads its claims plus a bounded
+unclaimed backlog; the Loom board reads the repository-wide set.
+
+Visible sessions have one shared Spaces → Groups → Sessions placement.
+Attention, All, and History are projections over it. Successful automation is
+placed as an ordinary session in Ops; an unmatched provisioning or failed run
+is projected as an Intervention in Attention/Ops without inventing a browser-
+local session. Hidden warm infrastructure has no placement.
+
 ### Database ownership and the PostgreSQL seam
 
 The schema has two owners even though both currently share one SQLite file:
@@ -267,7 +260,10 @@ local SQLite.
 
 ## REST API
 
-All routes live under `/api`. The Vue SPA is the primary consumer.
+Routes live under `/api`; the Vue SPA and CLIs are clients of the same surface.
+This table catalogs the stable operator/client contract. The router in
+[`crates/loom/src/web/mod.rs`](../crates/loom/src/web/mod.rs) is the exhaustive
+route truth, including internal proxy and compatibility paths.
 
 | Method + path | What it does |
 |---|---|
@@ -293,29 +289,33 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `POST /api/auth/federate` | exchange an exact mapped, signature-verified GitHub or Google OIDC identity for a ten-minute Ed25519-signed, profile-scoped Loom automation token |
 | `GET POST /api/runs`; `GET /api/runs/{id}` | durable, subject-scoped automation runs with idempotency reservation; an optional channel routes distinct deliveries through one live ACP session, and verified GitHub callers may provide a validated deterministic key or use the workflow run/attempt |
 | `POST /api/sessions/{id}/restricted-github/{tool}` | session-token-scoped fixed GitHub operations for a restricted session; checks stamped tool policy, fixes the target repository and thread from the session, and resolves a GitHub App token or explicit App-less profile token server-side |
-| `GET PATCH DELETE /api/sessions/{id}` | session CRUD (status, title, goal, description); legacy `park`/`sort_order` reads are derived from canonical placement and writes are rejected; DELETE also accepts an unmatched automation run's reserved session id, tearing down and removing the failed launch attempt |
+| `GET PATCH DELETE /api/sessions/{id}` | session CRUD (status, title, goal, description); legacy placement fields are read-only derivatives of canonical placement; DELETE also accepts an unmatched automation run's reserved session id, tearing down and removing the failed launch attempt |
 | `POST /api/sessions/{id}/title/regenerate`; `PUT /api/sessions/{id}/title-generation` | explicit provenance-aware title regeneration / per-session opt-out; generation uses a one-prompt economy model on the session's ACP runtime with no environment authority, tools, or MCP, commits through a goal/title/provenance CAS, and emits a session `metadata` invalidation at terminal completion |
 | `GET POST /api/sessions/{id}/resumption-cue` | model-free current cue/cache read / explicit or inactivity-gated ensure; one in-process flight per session, with bounded lazy prompt preparation and a content + immutable-artifact source fingerprint |
 | `PUT DELETE /api/sessions/{id}/tags/{key}` | set (upsert) / clear one branch tag — the well-known `attention` and `triage` keys plus any free-form key |
 | `PUT /api/sessions/{id}/tags` | atomically replace one author's complete tag set, with optional exact `(key, value)` clears for lifecycle marks; the watch-safe write path |
 | `GET /api/sessions/{id}/url` | the session's dashboard URL as `{url}`, built from the externally-visible origin (`auth.base_url`, else the request's own Host) — what `loom session url` prints, so an agent can link a PR back to its session without inventing a loopback link |
-| `POST /api/sessions/{id}/{archive,adopt}` | actions; archive also accepts an unmatched automation run's reserved session id, cancelling its runtime while preserving run history |
+| `POST /api/sessions/{id}/{archive,adopt,recover}` | lifecycle actions; archive also accepts an unmatched automation run's reserved session id, cancelling its runtime while preserving run history |
 | `POST /api/sessions/{id}/handoff/resolve` | session-derived canonical handoff preview: resolves the target profile's true class, capacity (crediting only a slot-consuming source), policy, provenance, and optimistic revisions |
 | `POST /api/sessions/{id}/handoff` | replace an idle ACP runtime while preserving the loom session, worktree, branch, and journal; canonical `selection` requires preview revisions, holds target-profile admission through the final write, and stamps a new snapshot; legacy flattened agent/model/effort/mode input remains runtime-only and preserves the session's stamped profile/policy even after template edits or retirement; the incoming runtime also receives a best-effort digest and recent authored messages |
-| `POST /api/sessions/{id}/github` | re-poll the branch's GitHub PR now and return the updated session |
+| `POST PUT DELETE /api/sessions/{id}/github` | re-poll, explicitly set, or clear the session's GitHub association |
 | `GET /api/scratch/limits`; `GET POST DELETE /api/sessions/{id}/scratch` | shared Scratch contract and live list/drop/remove: 20 files, 25 MiB each, 50 MiB decoded total; accepted dotfiles count, while `.gitignore` is reserved |
-| `PUT /api/sessions/{id}/file?path=…` | write raw bytes to a worktree file (the editor save primitive) |
+| `GET /api/sessions/{id}/files?q=…` | bounded worktree resource search for ACP `@file` completion; the old browser file editor routes are gone |
+| `GET /api/sessions/{id}/ide-info`; `ANY /api/sessions/{id}/ide[/…]` | availability probe and authenticated same-origin HTTP/WebSocket proxy for the optional code-server side panel |
+| `GET /api/sessions/{id}/shells`; `DELETE /api/sessions/{id}/shell/{idx}`; `GET /api/sessions/{id}/shell/{idx}/terminal` | list, close, or open per-session debug shells through WebSocket |
 | `GET /api/sessions/{id}/artifacts` | list the branch's [artifacts](artifacts.md) plus repo-shared ones |
 | `GET PUT /api/sessions/{id}/artifacts/{name}` | read content + projected refs (`rev=N` for a revision) / write a user edit as a new revision |
 | `GET /api/sessions/{id}/changes` | bounded typed worktree change set relative to the session base: file status/totals plus hunk lines with stable old/new line coordinates; backs the SPA and `loom session changes` |
-| `GET POST /api/sessions/{id}/reviews` | resolve the public artifact name to its immutable ID, then list submitted reviews plus the caller's private draft / create or recover a draft for that exact versioned subject |
-| `GET PATCH /api/reviews/{id}` | inspect a review by stable ID (including historical delivery after artifact deletion) / persist a draft's overall summary or advance its target revision after every older anchor has been re-anchored |
-| `POST /api/reviews/{id}/retarget-current` | guarded overall-only draft mutation that moves its target to the immutable artifact's actual latest revision |
+| `GET POST /api/sessions/{id}/reviews` | list submitted reviews plus the caller's private draft / create or recover a draft for an exact artifact revision or Changes version |
+| `GET PATCH /api/reviews/{id}` | inspect a review by stable ID (including history after artifact deletion) / persist a draft's overall summary or guarded target version |
+| `POST /api/reviews/{id}/retarget-current` | guarded overall-only draft mutation that moves its target to the subject's current version |
 | `POST /api/reviews/{id}/comments` / `PATCH DELETE /api/reviews/{id}/comments/{comment_id}` | add, edit/re-anchor, or delete pending review comments; every draft mutation carries the current `expected_revision` |
 | `POST /api/reviews/{id}/comments/{comment_id}/resolve` | any authenticated operator may resolve or reopen the one mutable lifecycle bit on an otherwise immutable submitted comment |
-| `DELETE /api/reviews/{id}` / `POST /api/reviews/{id}/submit` | guarded discard / atomically check the artifact revision, freeze the exact server-rendered message, record its event, and enqueue it |
+| `DELETE /api/reviews/{id}` / `POST /api/reviews/{id}/submit` | guarded discard / atomically check the subject version, freeze the exact server-rendered message, record its event, and enqueue it |
 | `POST /api/reviews/{id}/retry-delivery` | any authenticated operator may retry a failed submitted-review delivery using its stable delivery key |
-| `GET /api/sessions/{id}/{log,events}` | recent branch events + SSE stream |
+| `GET /api/branches/{id}/events` | canonical bounded branch event history |
+| `GET /api/sessions/{id}/log` | compatibility route for bounded branch event history |
+| `GET /api/sessions/{id}/events` | SSE stream of session events |
 | `GET /api/sessions/{id}/conversation` | the agent conversation as a normalized iris log (live transcript, else the archive capture); 404 when there is none — backs the Conversation tab |
 | `GET /api/sessions/{id}/history` | a bounded newest-tail page of provider-neutral records in chronological display order; `before`, `limit`, and `kinds` own backward pagination/filtering |
 | `GET /api/sessions/{id}/history/search` | case-insensitive literal `q` search over the same session-scoped records and cursor/filter contract |
@@ -385,20 +385,19 @@ not just the create response)) plus a nested
 agent's self-report) and `triage` (a watch's assessment), and any other
 key is a free-form, quiet pill. Absence of a key is the calm/default state —
 there is no stored `ok` value; the list is empty for an unmarked branch. The
-signal is **value-driven**, with a ladder on either side of calm: a value on the
-attention ladder (`attention`/`blocked`) raises the branch on the dashboard
-whatever its key, while a value on the *parked* ladder (`review` — the review
-watch's `awaiting: review` mark) sinks it *below* the calm default in the fleet
-sort, the quiet "waiting on an external actor, nothing for the user to do" end of
-the spectrum (`weaver_core::tags::{ATTENTION_VALUES, PARKED_VALUES}`).
+signal is **value-driven**. An attention value (`attention`/`blocked`) raises
+the branch on the dashboard whatever its key. The review watch's quiet
+`awaiting: review` mark sorts below the calm default because it describes work
+waiting on an external actor with nothing for the operator to do. The internal
+value sets live in `weaver_core::tags`.
 
 `SessionView::parent_id` is the branch id of the session that **launched** this
 one — the parent in loom's session tree — or `null` for a top-level session. It
 is stamped onto the `sessions` row at create time from the resolved
 `parent_branch` (so reads need no extra query and the link can't drift), and is
-`null` too when that parent is later untracked. The dashboard's session list
-groups sessions into threads by it (children under their launcher, siblings by
-launch time); a flat fleet with no sub-sessions is unchanged.
+`null` too when that parent is later untracked. It is launch provenance for
+delegation displays; workbench grouping and ordering come from the session's
+canonical space/group placement.
 
 `BranchView::github` is the branch's latest GitHub pull-request snapshot
 (`pr_number`, `pr_url`, `pr_state`, `pr_title`, `is_draft`, `review_decision`,
@@ -434,8 +433,9 @@ inherit through the template, agent metadata, and policy defaults. Resolve
 returns field provenance plus `profile_revision` and a stable
 `resolver_revision`. Canonical create, clone, and handoff carry those guards and
 receive 409 with a fresh preview on drift. Once accepted, `resolved_launch` is
-the concrete immutable non-secret snapshot stamped for that runtime launch;
-subsequent template/default/registry edits do not mutate it.
+the concrete non-secret snapshot stamped for that runtime launch. Subsequent
+template/default/registry edits cannot silently mutate it; an explicit handoff
+can replace it with a newly resolved snapshot.
 
 **Launch base.** A new session's worktree forks from `base`. When the create
 request omits it, `git::default_base` resolves the repo's default branch on
@@ -450,11 +450,21 @@ primitives over the supervisor's control socket (see `backend::send_literal`,
 let an agent or script type into, interrupt, or read back a child session
 uniformly. For a `terminal` session each requires a live terminal (else 409). An
 `acp` session has no PTY, so the same verbs map onto the protocol — keeping the
-CLI (`loom session {send,break,preview}`) and its `nudge` audit uniform across
+CLI (`loom session {send,interrupt,preview}`) and its `nudge` audit uniform across
 backends: `send` delegates to the prompt path (steered when supported, otherwise
 cancelled and restarted with the message), `interrupt` is a `session/cancel`,
 and `preview` renders the last journal blocks as compact plain text instead of
 a vt100 screen capture.
+
+**Embedded editor.** The optional editor is a lazy per-session code-server
+process rooted at the worktree and bound to loopback with its own authentication
+disabled. It is reachable only through Loom's authenticated same-origin
+HTTP/WebSocket proxy, so the iframe carries the Loom cookie and cannot choose an
+arbitrary upstream or another session's worktree. The proxy preserves
+Host/Origin for code-server's WebSocket checks. `/ide-info` is the availability
+probe; a development install without code-server remains usable. Archive and
+remove stop the editor with the session. The UI exposes it under
+Details → Advanced, not as the primary file or work surface.
 
 ## Runtime conventions
 
@@ -464,14 +474,14 @@ a vt100 screen capture.
 - **Errors:** the server returns `AppError` (status + message + optional
   `details` map of per-field reasons); the `loom` CLI uses `anyhow` and prints
   `error: {e:#}`.
-- **Async:** tokio everywhere on the server side. Long-running subprocesses
-  (the terminal supervisor, git, gh, the agent) go through
-  `tokio::process::Command`. The
-  `weaver` CLI is synchronous-feeling (just a few `sqlx` calls per command).
+- **Async:** tokio everywhere on the server side. External processes (Tapestry
+  runtime supervisors, git, gh, and agent adapters) go through
+  `tokio::process::Command`. The `weaver` CLI remains synchronous-feeling while
+  delegating its reads and writes to `weaver-api` over HTTP.
 - **Events:** state changes flow through `EventBus`; the SSE handler in
-  `web.rs` fans them out. `weaver hook` writes directly to the `events`
-  table, and loom's monitor tick promotes the new row into a session status
-  change and a fresh `EventBus` notification.
+  `web.rs` fans them out. `weaver hook` posts to the branch events route; Loom
+  writes the row, and the monitor tick promotes it into session status and a
+  fresh `EventBus` notification.
 - **No tracking-branch state in the server:** loom can be killed and restarted
   at any time. Terminal *and* relay supervisors and worktrees survive (the
   supervisor is a detached process, independent of `loom server run`); "orphaned"
@@ -866,8 +876,8 @@ session-scoped Loom API context. Custom code is
 admin-authored and dependency-contained, not sandboxed; it cannot use
 builtin-reserved group names or enter restricted sessions. Loom also refuses to
 remove a server pinned by a profile, or the last server in a group while an
-explicit profile selection still references it. The detailed rationale and diagrams are in
-[plans/mcp-profiles.md](plans/mcp-profiles.md).
+explicit profile selection still references it. See
+[MCP and profile control plane](mcp-profiles.md).
 
 **Cookies** are `HttpOnly; SameSite=Lax; Path=/`; the `Secure` attribute is
 added when `auth.cookie_secure` is on (set it when loom is reached over HTTPS).
@@ -880,9 +890,8 @@ registry so the secret never rides `GET /api/settings`.
 
 A **watch** is a periodic / triggered program over the fleet: it
 wakes on a trigger (a cron tick or a session event), surveys the sessions in
-scope, and acts within an explicit capability set. The design of record is
-[docs/plans/watches.md](plans/watches.md). The engine
-(`loom::watch`, spawned in `server::serve`, self-gated on the
+scope, and acts within an explicit capability set. The engine (`loom::watch`,
+spawned in `server::serve`, self-gated on the
 `watch.enabled` setting) runs each **round** under non-optional guardrails
 — no-overlap, cooldown, a wall-clock timeout, no-recursion — and records it in
 `watch_runs`, the audit trail the panel's round history renders.
@@ -895,8 +904,8 @@ A round runs the **program** the watch names:
   stale in-scope session, judging
   via the configured `prompt` through the daemon's one-shot agent when
   available, otherwise leaving its marks untouched),
-  `builtin:review-wait` (park a session whose open, non-draft PR awaits an
-  external review — `review_decision` `REVIEW_REQUIRED` — under a quiet
+  `builtin:review-wait` (mark a session whose open, non-draft PR awaits an
+  external review — `review_decision` `REVIEW_REQUIRED` — with a quiet
   `awaiting: review` mark that sinks it below the calm default in the fleet
   sort, and clear it once review lands, the PR merges, or it un-drafts; needs
   `mark`), `builtin:pr-label` (flag sessions whose open PR lacks the loom label)

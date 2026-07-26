@@ -274,7 +274,7 @@ if [ "${1:-}" = loom ] && [ "${2:-}" = server ]; then
   fi
   if ! command -v claude-agent-acp >/dev/null 2>&1 || ! command -v codex-acp >/dev/null 2>&1; then
     echo "loom: installing the ACP adapters into $HOME/.npm-global ..." >&2
-    # The ACP adapters loom's sessions speak through (docs/plans/acp.md). Exact
+    # The ACP adapters Loom's sessions speak through. Exact
     # pins, not dist-tags: two upstream projects releasing weekly sit between
     # loom and the agents, so the fleet moves versions only via a deliberate
     # CLAUDE_ACP_VERSION / CODEX_ACP_VERSION bump. Installed on the volume so

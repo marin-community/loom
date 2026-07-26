@@ -1116,7 +1116,7 @@ pub async fn env_set(db: &Db, profile: &str, name: &str, value: &str) -> Result<
         bail!("unknown profile '{profile}'");
     }
     let now = now_iso();
-    let mut tx = db.begin().await?;
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
     let changed = sqlx::query(
         "INSERT INTO profile_env
          (profile_name, name, value, source, secret_ref, updated_at)
@@ -1154,7 +1154,7 @@ pub async fn env_set_secret(db: &Db, profile: &str, name: &str, secret_ref: &str
     }
     validate_gcp_secret_ref(secret_ref)?;
     let now = now_iso();
-    let mut tx = db.begin().await?;
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
     let changed = sqlx::query(
         "INSERT INTO profile_env
          (profile_name, name, value, source, secret_ref, updated_at)
@@ -1252,7 +1252,7 @@ async fn resolve_gcp_secret(secret_ref: &str) -> Result<String> {
 }
 
 pub async fn env_remove(db: &Db, profile: &str, name: &str) -> Result<bool> {
-    let mut tx = db.begin().await?;
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
     let removed = sqlx::query("DELETE FROM profile_env WHERE profile_name = ? AND name = ?")
         .bind(profile)
         .bind(name)

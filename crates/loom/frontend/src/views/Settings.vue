@@ -40,7 +40,7 @@ const categories: CategoryItem[] = [
     id: 'agents',
     label: 'Agents',
     groups: ['Agents', 'Metadata'],
-    summary: 'Runtime profiles, MCP capabilities, custom agents, and bounded metadata assistance.',
+    summary: 'Launch profiles, MCP capabilities, custom agents, and bounded metadata assistance.',
   },
   {
     id: 'sessions',

@@ -31,7 +31,7 @@
 	#     default AND adds X-Forwarded-For / -Proto / -Host. loom's terminal
 	#     handshake requires both: it accepts the WS Origin when it matches the
 	#     request Host *and* an X-Forwarded-* header proves the request transited a
-	#     proxy (see crates/loom/src/terminal.rs / docs/browser-terminal.md). The
+	#     proxy (see crates/loom/src/terminal.rs). The
 	#     X-Forwarded-Proto=https also lets loom build correct https:// OAuth
 	#     callback URLs.
 	reverse_proxy loom:7878

@@ -666,7 +666,7 @@ pub async fn get_acp_metadata(db: &Db, id: &str) -> Result<Option<String>> {
 /// loom session, journal, runtime profile, and durable human prompt queue stay
 /// intact so the failed session can be inspected or handed off.
 pub async fn clear_acp_state(db: &Db, id: &str) -> Result<()> {
-    let mut tx = db.begin().await?;
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
     sqlx::query(
         "UPDATE sessions
          SET acp_session_id = NULL, acp_ack_seq = 0, acp_inflight = NULL,
@@ -713,7 +713,7 @@ pub async fn claim_handoff(
     id: &str,
     expected_mutation_revision: i64,
 ) -> Result<Option<HandoffSourceState>> {
-    let mut tx = db.begin().await?;
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
     let query = select_sessions("WHERE id = ? AND mutation_revision = ?");
     let Some(session) = sqlx::query_as::<_, Session>(&query)
         .bind(id)
@@ -762,7 +762,7 @@ pub async fn clear_claimed_handoff_source(
     id: &str,
     expected_mutation_revision: i64,
 ) -> Result<bool> {
-    let mut tx = db.begin().await?;
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
     let changed = sqlx::query(
         "UPDATE sessions
          SET acp_session_id = NULL, acp_ack_seq = 0, acp_inflight = NULL,
@@ -796,7 +796,7 @@ pub async fn rollback_handoff_claim(
     expected_mutation_revision: i64,
     source: &HandoffSourceState,
 ) -> Result<Option<i64>> {
-    let mut tx = db.begin().await?;
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
     let next_generation = expected_mutation_revision + 1;
     let changed = sqlx::query(
         "UPDATE sessions
@@ -845,7 +845,7 @@ pub async fn fail_handoff_claim(
     id: &str,
     expected_mutation_revision: i64,
 ) -> Result<bool> {
-    let mut tx = db.begin().await?;
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
     let changed = sqlx::query(
         "UPDATE sessions
          SET status = 'error', acp_session_id = NULL, acp_ack_seq = 0,

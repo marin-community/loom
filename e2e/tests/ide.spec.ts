@@ -22,8 +22,8 @@ test.describe('embedded editor panel', () => {
     // The panel mounts with its header…
     await expect(page.getByText('Editor', { exact: true })).toBeVisible();
     // …and its body settles into a valid state: the live editor iframe when
-    // code-server is installed, else the graceful not-installed note (e.g. CI;
-    // see docs/embedded-ide.md). Either is correct — neither is a broken frame.
+    // code-server is installed, else the graceful not-installed note (e.g. CI).
+    // Either is correct — neither is a broken frame.
     const liveEditor = page.locator('iframe[title="VS Code"]');
     const notInstalled = page.getByText("code-server isn't installed");
     await expect(liveEditor.or(notInstalled)).toBeVisible();

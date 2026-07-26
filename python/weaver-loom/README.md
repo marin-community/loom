@@ -56,3 +56,10 @@ Credentials are cached only in memory, refreshed early with jitter, and
 invalidated for one retry after a 401. The helper never logs either upstream or
 Loom tokens. The caller still needs the `launch` capability in its client
 capability set if it constructs `Client` with an explicit restricted set.
+
+## Tests
+
+```sh
+cd python/weaver-loom
+uv run pytest
+```
