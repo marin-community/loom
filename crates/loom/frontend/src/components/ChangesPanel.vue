@@ -61,8 +61,10 @@ function conflictReview(cause: unknown): Review | null {
   const review = fresh as Review;
   if (review.status === 'draft') controller.reconcile(review);
   else {
+    const dirtySummary = controller.summaryDirty ? overallNote.value : null;
     replaceReview(review);
     controller.clearOwnership();
+    if (dirtySummary != null) controller.editSummary(dirtySummary);
     activeComment.value = null;
     reanchorComment.value = null;
   }

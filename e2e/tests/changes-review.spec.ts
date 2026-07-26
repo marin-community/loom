@@ -66,6 +66,53 @@ test('reviews a worktree change from the shared Review surface', async ({ page, 
   await submit;
   await expect(tray).toContainText('Review submitted');
 
+  const overall = page.getByTestId('review-overall-note');
+  const initialSave = page.waitForResponse(
+    (response) =>
+      response.ok() &&
+      response.request().method() === 'PATCH' &&
+      /\/api\/reviews\/\d+$/.test(response.url()),
+  );
+  await overall.fill('Shared overall note.');
+  await overall.press('Tab');
+  await initialSave;
+
+  const peer = await page.context().newPage();
+  await peer.goto(`${weaver.baseUrl}/s/${session.id}/changes`);
+  await peer.getByTestId('review-tray-toggle').click();
+  await overall.fill('Keep this local edit after the conflict.');
+  const peerSubmit = peer.waitForResponse(
+    (response) =>
+      response.ok() &&
+      response.request().method() === 'POST' &&
+      /\/api\/reviews\/\d+\/submit$/.test(response.url()),
+  );
+  await peer.getByTestId('submit-review').click();
+  await peerSubmit;
+
+  const saveConflict = page.waitForResponse(
+    (response) =>
+      response.status() === 409 &&
+      response.request().method() === 'PATCH' &&
+      /\/api\/reviews\/\d+$/.test(response.url()),
+  );
+  await overall.focus();
+  await overall.press('Tab');
+  await saveConflict;
+  await expect(overall).toHaveValue('Keep this local edit after the conflict.');
+
+  const retrySave = page.waitForResponse(
+    (response) =>
+      response.ok() &&
+      response.request().method() === 'PATCH' &&
+      /\/api\/reviews\/\d+$/.test(response.url()),
+  );
+  await overall.focus();
+  await overall.press('Tab');
+  await retrySave;
+  await expect(tray).toContainText('0 pending');
+  await peer.close();
+
   await page.setViewportSize({ width: 390, height: 720 });
   await expect(page.getByRole('link', { name: 'Artifacts', exact: true })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Changes', exact: true })).toBeVisible();

@@ -14,8 +14,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::Command;
+use tokio::time::Instant;
 use weaver_api::{
     ChangeAnchorDto, ChangeBaseDto, ChangeBaseUnavailableReasonDto, ChangeContentDto,
     ChangeFileDto, ChangeFileStatusDto, ChangeHunkDto, ChangeLimitsDto, ChangeLineDto,
@@ -34,11 +36,13 @@ const MAX_UNTRACKED_RENDER_BYTES: u64 = 512 * 1024;
 const MAX_IDENTITY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CONFIG_BYTES: usize = 256 * 1024;
 const MAX_INDEX_BYTES: u64 = 16 * 1024 * 1024;
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 struct Capture {
     bytes: Vec<u8>,
     truncated: bool,
+    timed_out: bool,
 }
 
 #[derive(Debug)]
@@ -82,7 +86,8 @@ fn hardened_git(work_dir: &Path, policy: &GitReadPolicy) -> Command {
         .env_remove("GIT_EXTERNAL_DIFF")
         .env_remove("GIT_DIFF_OPTS")
         .stdin(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
     for driver in &policy.filter_drivers {
         command
             .arg("-c")
@@ -97,12 +102,12 @@ fn hardened_git(work_dir: &Path, policy: &GitReadPolicy) -> Command {
     command
 }
 
-async fn capture_git(
+async fn capture_git_status(
     work_dir: &Path,
     policy: &GitReadPolicy,
     args: &[&str],
     retain: usize,
-) -> Result<Capture> {
+) -> Result<(Capture, bool)> {
     let mut child = hardened_git(work_dir, policy)
         .args(args)
         .stdout(Stdio::piped())
@@ -112,25 +117,64 @@ async fn capture_git(
     let mut reader = BufReader::new(stdout);
     let mut bytes = Vec::with_capacity(retain.min(64 * 1024));
     let mut chunk = vec![0_u8; 32 * 1024];
-    let mut truncated = false;
-    loop {
-        let read = reader.read(&mut chunk).await?;
-        if read == 0 {
-            break;
+    let deadline = Instant::now() + GIT_COMMAND_TIMEOUT;
+    let result = tokio::time::timeout_at(deadline, async {
+        let mut truncated = false;
+        loop {
+            let read = reader.read(&mut chunk).await?;
+            if read == 0 {
+                break;
+            }
+            let room = retain.saturating_sub(bytes.len());
+            bytes.extend_from_slice(&chunk[..read.min(room)]);
+            if read > room {
+                truncated = true;
+                child.start_kill().context("stopping bounded git capture")?;
+                break;
+            }
         }
-        let room = retain.saturating_sub(bytes.len());
-        bytes.extend_from_slice(&chunk[..read.min(room)]);
-        if read > room {
-            truncated = true;
-            child.start_kill().context("stopping bounded git capture")?;
-            break;
+        let status = child.wait().await?;
+        Ok::<_, anyhow::Error>((status.success(), truncated))
+    })
+    .await;
+    match result {
+        Ok(result) => {
+            let (success, truncated) = result?;
+            Ok((
+                Capture {
+                    bytes,
+                    truncated,
+                    timed_out: false,
+                },
+                success,
+            ))
+        }
+        Err(_) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            Ok((
+                Capture {
+                    bytes,
+                    truncated: true,
+                    timed_out: true,
+                },
+                false,
+            ))
         }
     }
-    let status = child.wait().await?;
-    if !status.success() && !truncated {
+}
+
+async fn capture_git(
+    work_dir: &Path,
+    policy: &GitReadPolicy,
+    args: &[&str],
+    retain: usize,
+) -> Result<Capture> {
+    let (capture, success) = capture_git_status(work_dir, policy, args, retain).await?;
+    if !success && !capture.truncated {
         bail!("git {} failed", args.join(" "));
     }
-    Ok(Capture { bytes, truncated })
+    Ok(capture)
 }
 
 async fn capture_diff(
@@ -155,18 +199,17 @@ async fn git_text(
     policy: &GitReadPolicy,
     args: &[&str],
 ) -> Result<Option<String>> {
-    let output = hardened_git(work_dir, policy)
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("spawning git {}", args.join(" ")))?;
-    if !output.status.success() {
-        return Ok(None);
+    let (capture, success) = capture_git_status(work_dir, policy, args, 4 * 1024).await?;
+    if capture.timed_out {
+        bail!("git {} exceeded its deadline", args.join(" "));
     }
-    if output.stdout.len() > 4 * 1024 {
+    if capture.truncated {
         bail!("git identity output exceeded its bound");
     }
-    let value = String::from_utf8(output.stdout).context("git identity was not UTF-8")?;
+    if !success {
+        return Ok(None);
+    }
+    let value = String::from_utf8(capture.bytes).context("git identity was not UTF-8")?;
     let value = value.trim().to_string();
     Ok((!value.is_empty()).then_some(value))
 }
@@ -252,8 +295,7 @@ fn validate_path(raw: &[u8]) -> Result<()> {
 
 fn safe_file(work_dir: &Path, raw: &[u8]) -> Result<Option<(std::fs::File, std::fs::Metadata)>> {
     validate_path(raw)?;
-    let relative = CString::new(raw)?;
-    let root = match std::fs::OpenOptions::new()
+    let mut directory = match std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(work_dir)
@@ -261,31 +303,36 @@ fn safe_file(work_dir: &Path, raw: &[u8]) -> Result<Option<(std::fs::File, std::
         Ok(root) => root,
         Err(_) => return Ok(None),
     };
-    #[cfg(target_os = "linux")]
-    let fd = {
-        // SAFETY: open_how is a plain kernel ABI struct whose zero value is valid.
-        let mut how: libc::open_how = unsafe { std::mem::zeroed() };
-        how.flags = (libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC) as u64;
-        how.resolve =
-            libc::RESOLVE_BENEATH | libc::RESOLVE_NO_MAGICLINKS | libc::RESOLVE_NO_SYMLINKS;
-        // SAFETY: root, CString, and open_how remain valid for the syscall.
-        unsafe {
-            libc::syscall(
-                libc::SYS_openat2,
-                root.as_raw_fd(),
-                relative.as_ptr(),
-                &how,
-                std::mem::size_of::<libc::open_how>(),
-            ) as i32
+    let mut components = Path::new(OsStr::from_bytes(raw))
+        .components()
+        .filter_map(|part| match part {
+            Component::Normal(value) => Some(value),
+            _ => None,
+        })
+        .peekable();
+    while let Some(component) = components.next() {
+        let component = CString::new(component.as_bytes())?;
+        let leaf = components.peek().is_none();
+        let flags = libc::O_RDONLY
+            | libc::O_NOFOLLOW
+            | libc::O_CLOEXEC
+            | if leaf {
+                libc::O_NONBLOCK
+            } else {
+                libc::O_DIRECTORY
+            };
+        // SAFETY: the owned directory descriptor and CString remain valid.
+        let fd = unsafe { libc::openat(directory.as_raw_fd(), component.as_ptr(), flags) };
+        if fd < 0 {
+            return Ok(None);
         }
-    };
-    #[cfg(not(target_os = "linux"))]
-    let fd = -1;
-    if fd >= 0 {
-        // SAFETY: a successful `openat` returns a new owned descriptor.
-        let file = unsafe { std::fs::File::from_raw_fd(fd) };
-        let metadata = file.metadata()?;
-        return Ok(metadata.is_file().then_some((file, metadata)));
+        // SAFETY: a successful openat returns a new owned descriptor.
+        let opened = unsafe { std::fs::File::from_raw_fd(fd) };
+        if leaf {
+            let metadata = opened.metadata()?;
+            return Ok(metadata.is_file().then_some((opened, metadata)));
+        }
+        directory = opened;
     }
     Ok(None)
 }
@@ -998,7 +1045,7 @@ async fn load_once(
         files,
         limits: limits(),
     };
-    let Some(identity) = state.identity else {
+    let Some(identity) = state.identity.filter(|_| !patch.timed_out) else {
         return Ok((changes, true));
     };
 
