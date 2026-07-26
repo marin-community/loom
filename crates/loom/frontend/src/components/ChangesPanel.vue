@@ -39,7 +39,7 @@ const acknowledgeOutdated = ref(false);
 const submitting = ref(false);
 const discarding = ref(false);
 
-type Pending = { anchor: ChangeAnchor; body: string };
+type Pending = { anchor: ChangeAnchor; body: string; version: string };
 const pending = ref<Pending | null>(null);
 const savingComment = ref(false);
 const composerInput = ref<HTMLTextAreaElement | null>(null);
@@ -54,11 +54,19 @@ function replaceReview(next: Review) {
 
 function conflictReview(cause: unknown): Review | null {
   if (!(cause instanceof ApiError) || cause.status !== 409) return null;
-  const fresh = (cause.body.details as { review?: Review } | undefined)?.review;
-  if (!fresh) return null;
-  replaceReview(fresh);
-  if (fresh.status === 'draft') controller.reconcile(fresh);
-  return fresh;
+  const details = cause.body.details;
+  if (!details || typeof details !== 'object') return null;
+  const fresh = (details as { review?: unknown }).review;
+  if (!fresh || typeof fresh !== 'object' || typeof (fresh as Review).id !== 'number') return null;
+  const review = fresh as Review;
+  if (review.status === 'draft') controller.reconcile(review);
+  else {
+    replaceReview(review);
+    controller.clearOwnership();
+    activeComment.value = null;
+    reanchorComment.value = null;
+  }
+  return review;
 }
 
 function mutationMessage(cause: unknown): string {
@@ -101,12 +109,10 @@ async function load() {
       getChanges(props.id),
       listChangesReviews(props.id),
     ]);
+    const nextDraft = nextReviews.find((review) => review.status === 'draft') ?? null;
+    if (!controller.acceptRefresh(epoch, nextDraft)) return;
     changes.value = nextChanges;
     reviews.value = nextReviews;
-    controller.acceptRefresh(
-      epoch,
-      nextReviews.find((review) => review.status === 'draft') ?? null,
-    );
     error.value = '';
   } catch (cause) {
     error.value = (cause as Error).message;
@@ -142,7 +148,7 @@ function anchorFor(
   const side = lineSide(line);
   const start = lineNumber(line, side);
   const end = lineNumber(last, side);
-  if (start == null || end == null || lineSide(last) !== side) return null;
+  if (start == null || end == null) return null;
   const low = Math.min(start, end);
   const high = Math.max(start, end);
   const eligible = hunk.lines.filter((line) => lineNumber(line, side) != null);
@@ -166,6 +172,8 @@ function anchorFor(
 }
 
 function selectLine(file: ChangeFile, hunk: ChangeHunk, line: ChangeLine) {
+  const version = changes.value?.version;
+  if (!version) return;
   const next = anchorFor(file, hunk, line);
   if (!next) return;
   if (reanchorComment.value != null) {
@@ -174,6 +182,7 @@ function selectLine(file: ChangeFile, hunk: ChangeHunk, line: ChangeLine) {
   }
   const current = pending.value?.anchor;
   if (
+    pending.value?.version === version &&
     current?.path.bytes === file.path.bytes &&
     current.side === next.side &&
     current.hunk_header === hunk.header
@@ -187,15 +196,58 @@ function selectLine(file: ChangeFile, hunk: ChangeHunk, line: ChangeLine) {
       return;
     }
   }
-  pending.value = { anchor: next, body: '' };
+  pending.value = { anchor: next, body: pending.value?.body ?? '', version };
   void nextTick(() => composerInput.value?.focus());
 }
 
-async function saveComment() {
-  const body = pending.value?.body.trim();
+function extendSelection(file: ChangeFile, hunk: ChangeHunk, line: ChangeLine, direction: -1 | 1) {
   const version = changes.value?.version;
-  if (!pending.value || !body || !version || savingComment.value) return;
+  if (!version) return;
+  const side = lineSide(line);
+  const eligible = hunk.lines.filter((candidate) => lineNumber(candidate, side) != null);
+  const current = pending.value;
+  const sameRange =
+    current?.version === version &&
+    current.anchor.path.bytes === file.path.bytes &&
+    current.anchor.side === side &&
+    current.anchor.hunk_header === hunk.header;
+  const boundary = sameRange
+    ? direction < 0
+      ? current!.anchor.start_line
+      : current!.anchor.end_line
+    : lineNumber(line, side);
+  const boundaryIndex = eligible.findIndex((candidate) => lineNumber(candidate, side) === boundary);
+  const target = eligible[boundaryIndex + direction];
+  if (boundaryIndex < 0 || !target) return;
+  let range: ChangeAnchor | null;
+  if (!sameRange) {
+    range =
+      direction < 0 ? anchorFor(file, hunk, target, line) : anchorFor(file, hunk, line, target);
+  } else {
+    const first = hunk.lines.find(
+      (candidate) => lineNumber(candidate, side) === current!.anchor.start_line,
+    );
+    const last =
+      direction < 0
+        ? hunk.lines.find((candidate) => lineNumber(candidate, side) === current!.anchor.end_line)
+        : target;
+    range =
+      first && last && direction < 0
+        ? anchorFor(file, hunk, target, last)
+        : first && last
+          ? anchorFor(file, hunk, first, target)
+          : null;
+  }
+  if (!range) return;
+  pending.value = { anchor: range, body: current?.body ?? '', version };
+}
+
+async function saveComment() {
+  const capture = pending.value;
+  const body = capture?.body.trim();
+  if (!capture || !body || savingComment.value) return;
   savingComment.value = true;
+  trayError.value = '';
   try {
     const updated = await controller.command(async (current) => {
       const review =
@@ -203,13 +255,13 @@ async function saveComment() {
         (await createReview(props.id, {
           subject_kind: 'changes',
           subject_key: 'changes',
-          subject_version: version,
+          subject_version: capture.version,
         }));
       return addReviewComment(review.id, {
         expected_revision: review.draft_revision,
-        subject_version: version,
+        subject_version: capture.version,
         anchor_kind: 'change',
-        anchor: pending.value!.anchor,
+        anchor: capture.anchor,
         body,
       });
     });
@@ -429,6 +481,8 @@ onMounted(load);
               }"
               :aria-label="`Comment on ${file.path.display} ${lineSide(line)} line ${lineNumber(line, lineSide(line))}`"
               @click="selectLine(file, hunk, line)"
+              @keydown.shift.up.prevent="extendSelection(file, hunk, line, -1)"
+              @keydown.shift.down.prevent="extendSelection(file, hunk, line, 1)"
             >
               <span class="select-none px-1 text-right text-faint">{{ line.old_line }}</span>
               <span class="select-none px-1 text-right text-faint">{{ line.new_line }}</span>

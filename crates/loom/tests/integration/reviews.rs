@@ -7,6 +7,7 @@
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 use serial_test::serial;
+use std::os::unix::fs::MetadataExt;
 use std::{process::Output, time::Duration};
 use tokio::process::Command;
 use weaver_api::{
@@ -472,6 +473,9 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     assert_eq!(shown["comments"][0]["anchor"]["suffix"], " revision.");
     assert_eq!(shown["comments"][0]["body"], "CLI anchored body");
 
+    let index_path = ts.repo_path().join(".git/index");
+    let index_before = std::fs::read(&index_path).unwrap();
+    let index_stat_before = std::fs::metadata(&index_path).unwrap();
     let changes = ts.client.changes(&session.id).await.unwrap();
     let version = changes.version.clone().unwrap();
     let readme = changes
@@ -494,6 +498,31 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     let cli_changes: weaver_api::ChangeSetDto =
         serde_json::from_slice(&cli_changes.stdout).unwrap();
     assert_eq!(cli_changes.version.as_deref(), Some(version.as_str()));
+    let index_stat_after = std::fs::metadata(&index_path).unwrap();
+    assert_eq!(std::fs::read(&index_path).unwrap(), index_before);
+    assert_eq!(
+        (
+            index_stat_after.dev(),
+            index_stat_after.ino(),
+            index_stat_after.mode(),
+            index_stat_after.len(),
+            index_stat_after.mtime(),
+            index_stat_after.mtime_nsec(),
+            index_stat_after.ctime(),
+            index_stat_after.ctime_nsec(),
+        ),
+        (
+            index_stat_before.dev(),
+            index_stat_before.ino(),
+            index_stat_before.mode(),
+            index_stat_before.len(),
+            index_stat_before.mtime(),
+            index_stat_before.mtime_nsec(),
+            index_stat_before.ctime(),
+            index_stat_before.ctime_nsec(),
+        ),
+        "Changes reads must not refresh or rewrite the real index"
+    );
 
     let line = readme
         .hunks

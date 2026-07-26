@@ -485,7 +485,7 @@ async fn require_anchor(
             let changes =
                 crate::changes::load(std::path::Path::new(&session.work_dir), &branch.base_branch)
                     .await?;
-            crate::changes::validate_anchor(&changes, subject_version, anchor)
+            let anchor = crate::changes::validate_anchor(&changes, subject_version, anchor)
                 .map_err(|error| AppError::conflict(error.to_string()))?;
             Ok((
                 review::ReviewAnchor::Change(review::ChangeLineAnchor {

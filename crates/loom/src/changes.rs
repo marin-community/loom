@@ -7,8 +7,11 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::ffi::OsString;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::ffi::{CString, OsStr};
+use std::io::ErrorKind;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncReadExt, BufReader};
@@ -28,6 +31,9 @@ pub const MAX_LINE_BYTES: usize = 2_048;
 const MAX_INVENTORY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PATCH_BYTES: usize = 2 * 1024 * 1024;
 const MAX_UNTRACKED_RENDER_BYTES: u64 = 512 * 1024;
+const MAX_IDENTITY_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_CONFIG_BYTES: usize = 256 * 1024;
+const MAX_INDEX_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug)]
 struct Capture {
@@ -48,21 +54,56 @@ struct NumStat {
     deletions: Option<u32>,
 }
 
-fn hardened_git(work_dir: &Path) -> Command {
+#[derive(Debug, Default)]
+struct GitReadPolicy {
+    filter_drivers: Vec<String>,
+}
+
+fn hardened_git(work_dir: &Path, policy: &GitReadPolicy) -> Command {
     let mut command = Command::new("git");
     command
         .arg("-C")
         .arg(work_dir)
-        .args(["-c", "color.ui=false"])
+        .args([
+            "-c",
+            "color.ui=false",
+            "-c",
+            "diff.autoRefreshIndex=false",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "submodule.recurse=false",
+        ])
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_CONFIG_COUNT", "0")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_ATTR_NOSYSTEM", "1")
         .env_remove("GIT_EXTERNAL_DIFF")
         .env_remove("GIT_DIFF_OPTS")
         .stdin(Stdio::null())
         .stderr(Stdio::null());
+    for driver in &policy.filter_drivers {
+        command
+            .arg("-c")
+            .arg(format!("filter.{driver}.clean="))
+            .arg("-c")
+            .arg(format!("filter.{driver}.process="))
+            .arg("-c")
+            .arg(format!("filter.{driver}.smudge="))
+            .arg("-c")
+            .arg(format!("filter.{driver}.required=false"));
+    }
     command
 }
 
-async fn capture_git(work_dir: &Path, args: &[&str], retain: usize) -> Result<Capture> {
-    let mut child = hardened_git(work_dir)
+async fn capture_git(
+    work_dir: &Path,
+    policy: &GitReadPolicy,
+    args: &[&str],
+    retain: usize,
+) -> Result<Capture> {
+    let mut child = hardened_git(work_dir, policy)
         .args(args)
         .stdout(Stdio::piped())
         .spawn()
@@ -70,7 +111,7 @@ async fn capture_git(work_dir: &Path, args: &[&str], retain: usize) -> Result<Ca
     let stdout = child.stdout.take().context("capturing git stdout")?;
     let mut reader = BufReader::new(stdout);
     let mut bytes = Vec::with_capacity(retain.min(64 * 1024));
-    let mut chunk = [0_u8; 32 * 1024];
+    let mut chunk = vec![0_u8; 32 * 1024];
     let mut truncated = false;
     loop {
         let read = reader.read(&mut chunk).await?;
@@ -79,23 +120,42 @@ async fn capture_git(work_dir: &Path, args: &[&str], retain: usize) -> Result<Ca
         }
         let room = retain.saturating_sub(bytes.len());
         bytes.extend_from_slice(&chunk[..read.min(room)]);
-        truncated |= read > room;
+        if read > room {
+            truncated = true;
+            child.start_kill().context("stopping bounded git capture")?;
+            break;
+        }
     }
     let status = child.wait().await?;
-    if !status.success() {
+    if !status.success() && !truncated {
         bail!("git {} failed", args.join(" "));
     }
     Ok(Capture { bytes, truncated })
 }
 
-async fn capture_diff(work_dir: &Path, args: &[&str], retain: usize) -> Result<Capture> {
-    let mut full = vec!["diff", "--no-ext-diff", "--no-textconv", "--no-color"];
+async fn capture_diff(
+    work_dir: &Path,
+    policy: &GitReadPolicy,
+    args: &[&str],
+    retain: usize,
+) -> Result<Capture> {
+    let mut full = vec![
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--ignore-submodules=all",
+    ];
     full.extend_from_slice(args);
-    capture_git(work_dir, &full, retain).await
+    capture_git(work_dir, policy, &full, retain).await
 }
 
-async fn git_text(work_dir: &Path, args: &[&str]) -> Result<Option<String>> {
-    let output = hardened_git(work_dir)
+async fn git_text(
+    work_dir: &Path,
+    policy: &GitReadPolicy,
+    args: &[&str],
+) -> Result<Option<String>> {
+    let output = hardened_git(work_dir, policy)
         .args(args)
         .output()
         .await
@@ -109,6 +169,46 @@ async fn git_text(work_dir: &Path, args: &[&str]) -> Result<Option<String>> {
     let value = String::from_utf8(output.stdout).context("git identity was not UTF-8")?;
     let value = value.trim().to_string();
     Ok((!value.is_empty()).then_some(value))
+}
+
+impl GitReadPolicy {
+    async fn load(work_dir: &Path) -> Result<Self> {
+        let empty = Self::default();
+        let capture = capture_git(
+            work_dir,
+            &empty,
+            &["config", "--includes", "--null", "--name-only", "--list"],
+            MAX_CONFIG_BYTES,
+        )
+        .await?;
+        if capture.truncated {
+            bail!("git configuration exceeded its safe read bound");
+        }
+        let mut filter_drivers = Vec::new();
+        for raw in nul_records(&capture.bytes) {
+            let key = std::str::from_utf8(raw).context("git configuration key was not UTF-8")?;
+            let Some((driver, setting)) =
+                key.strip_prefix("filter.").and_then(|v| v.rsplit_once('.'))
+            else {
+                continue;
+            };
+            if !driver.is_empty() && matches!(setting, "clean" | "process" | "required" | "smudge")
+            {
+                filter_drivers.push(driver.to_string());
+            }
+        }
+        filter_drivers.sort();
+        filter_drivers.dedup();
+        Ok(Self { filter_drivers })
+    }
+}
+
+fn hash_record(hasher: &mut Sha256, tag: &[u8], bytes: &[u8]) {
+    hasher.update(b"weaver-change-record-v1");
+    hasher.update((tag.len() as u64).to_be_bytes());
+    hasher.update(tag);
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
 }
 
 fn path_dto(raw: &[u8]) -> ChangePathDto {
@@ -132,11 +232,11 @@ fn decode_path(path: &ChangePathDto) -> Result<Vec<u8>> {
         .context("change path identity is not valid base64url")
 }
 
-fn worktree_path(work_dir: &Path, raw: &[u8]) -> Result<PathBuf> {
+fn validate_path(raw: &[u8]) -> Result<()> {
     if raw.is_empty() || raw.contains(&0) {
         bail!("change path is empty or contains NUL");
     }
-    let relative = PathBuf::from(OsString::from_vec(raw.to_vec()));
+    let relative = Path::new(OsStr::from_bytes(raw));
     if relative.is_absolute()
         || relative.components().any(|part| {
             matches!(
@@ -147,7 +247,68 @@ fn worktree_path(work_dir: &Path, raw: &[u8]) -> Result<PathBuf> {
     {
         bail!("change path escapes the worktree");
     }
-    Ok(work_dir.join(relative))
+    Ok(())
+}
+
+fn safe_file(work_dir: &Path, raw: &[u8]) -> Result<Option<(std::fs::File, std::fs::Metadata)>> {
+    validate_path(raw)?;
+    let relative = CString::new(raw)?;
+    let root = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(work_dir)
+    {
+        Ok(root) => root,
+        Err(_) => return Ok(None),
+    };
+    #[cfg(target_os = "linux")]
+    let fd = {
+        // SAFETY: open_how is a plain kernel ABI struct whose zero value is valid.
+        let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+        how.flags = (libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC) as u64;
+        how.resolve =
+            libc::RESOLVE_BENEATH | libc::RESOLVE_NO_MAGICLINKS | libc::RESOLVE_NO_SYMLINKS;
+        // SAFETY: root, CString, and open_how remain valid for the syscall.
+        unsafe {
+            libc::syscall(
+                libc::SYS_openat2,
+                root.as_raw_fd(),
+                relative.as_ptr(),
+                &how,
+                std::mem::size_of::<libc::open_how>(),
+            ) as i32
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let fd = -1;
+    if fd >= 0 {
+        // SAFETY: a successful `openat` returns a new owned descriptor.
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let metadata = file.metadata()?;
+        return Ok(metadata.is_file().then_some((file, metadata)));
+    }
+    Ok(None)
+}
+
+fn metadata_identity(metadata: &std::fs::Metadata) -> Vec<u8> {
+    let fields = [
+        metadata.dev(),
+        metadata.ino(),
+        metadata.mode() as u64,
+        metadata.len(),
+        metadata.mtime() as u64,
+        metadata.mtime_nsec() as u64,
+        metadata.ctime() as u64,
+        metadata.ctime_nsec() as u64,
+    ];
+    fields
+        .iter()
+        .flat_map(|field| field.to_be_bytes())
+        .collect()
+}
+
+fn same_metadata(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    metadata_identity(left) == metadata_identity(right)
 }
 
 fn nul_records(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
@@ -376,41 +537,64 @@ fn parse_hunks(
     (ChangeContentDto::Text, hunks, truncated)
 }
 
-async fn hash_path(work_dir: &Path, raw: &[u8], hasher: &mut Sha256) -> Result<Option<u32>> {
-    let path = worktree_path(work_dir, raw)?;
-    let metadata = tokio::fs::symlink_metadata(&path).await?;
-    hasher.update(raw);
-    if metadata.file_type().is_symlink() {
-        hasher.update(b"symlink\0");
-        let target = tokio::fs::read_link(path).await?;
-        hasher.update(target.as_os_str().as_bytes());
-        Ok(None)
-    } else if metadata.is_file() {
-        hasher.update(b"file\0");
-        let mut file = tokio::fs::File::open(path).await?;
-        let mut chunk = [0_u8; 32 * 1024];
-        let mut bytes = 0_u64;
-        let mut lines = 0_u64;
-        let mut last = 0_u8;
-        let mut binary = false;
-        loop {
-            let read = file.read(&mut chunk).await?;
-            if read == 0 {
-                break;
+enum HashPathResult {
+    Complete(Option<u32>),
+    Incomplete,
+}
+
+async fn hash_path(
+    work_dir: &Path,
+    raw: &[u8],
+    hasher: &mut Sha256,
+    remaining: &mut u64,
+) -> Result<HashPathResult> {
+    hash_record(hasher, b"path", raw);
+    match safe_file(work_dir, raw)? {
+        None => Ok(HashPathResult::Incomplete),
+        Some((file, initial)) => {
+            if initial.len() > *remaining {
+                return Ok(HashPathResult::Incomplete);
             }
-            hasher.update(&chunk[..read]);
-            bytes += read as u64;
-            lines += chunk[..read].iter().filter(|byte| **byte == b'\n').count() as u64;
-            binary |= chunk[..read].contains(&0);
-            last = chunk[read - 1];
+            *remaining -= initial.len();
+            hash_record(hasher, b"kind", b"file");
+            hash_record(hasher, b"file-stat", &metadata_identity(&initial));
+            hash_record(hasher, b"content-length", &initial.len().to_be_bytes());
+
+            let mut file = tokio::fs::File::from_std(file);
+            let mut chunk = [0_u8; 32 * 1024];
+            let mut left = initial.len();
+            let mut lines = 0_u64;
+            let mut last = 0_u8;
+            let mut binary = false;
+            while left > 0 {
+                let wanted = left.min(chunk.len() as u64) as usize;
+                if file.read_exact(&mut chunk[..wanted]).await.is_err() {
+                    return Ok(HashPathResult::Incomplete);
+                }
+                hash_record(hasher, b"file-chunk", &chunk[..wanted]);
+                lines += chunk[..wanted]
+                    .iter()
+                    .filter(|byte| **byte == b'\n')
+                    .count() as u64;
+                binary |= chunk[..wanted].contains(&0);
+                last = chunk[wanted - 1];
+                left -= wanted as u64;
+            }
+            let mut extra = [0_u8; 1];
+            if file.read(&mut extra).await? != 0 {
+                return Ok(HashPathResult::Incomplete);
+            }
+            let final_metadata = file.metadata().await?;
+            if !same_metadata(&initial, &final_metadata) {
+                return Ok(HashPathResult::Incomplete);
+            }
+            if initial.len() > 0 && last != b'\n' {
+                lines += 1;
+            }
+            Ok(HashPathResult::Complete(
+                (!binary).then_some(lines.min(u32::MAX as u64) as u32),
+            ))
         }
-        if bytes > 0 && last != b'\n' {
-            lines += 1;
-        }
-        Ok((!binary).then_some(lines.min(u32::MAX as u64) as u32))
-    } else {
-        hasher.update(b"unsupported\0");
-        Ok(None)
     }
 }
 
@@ -420,8 +604,6 @@ async fn untracked_file(
     sources: Vec<ChangeSourceDto>,
     remaining_total: &mut usize,
 ) -> Result<ChangeFileDto> {
-    let path = worktree_path(work_dir, raw)?;
-    let metadata = tokio::fs::symlink_metadata(&path).await?;
     let mut file = ChangeFileDto {
         status: ChangeFileStatusDto::Untracked,
         path: path_dto(raw),
@@ -433,15 +615,26 @@ async fn untracked_file(
         hunks: Vec::new(),
         truncated: false,
     };
-    if !metadata.is_file() {
-        return Ok(file);
-    }
+    let (handle, metadata) = match safe_file(work_dir, raw)? {
+        Some(file) => file,
+        None => return Ok(file),
+    };
     if metadata.len() > MAX_UNTRACKED_RENDER_BYTES {
         file.content = ChangeContentDto::Oversize;
         file.truncated = true;
         return Ok(file);
     }
-    let bytes = tokio::fs::read(path).await?;
+    let mut handle = tokio::fs::File::from_std(handle);
+    let mut bytes = vec![0_u8; metadata.len() as usize];
+    if handle.read_exact(&mut bytes).await.is_err() {
+        file.truncated = true;
+        return Ok(file);
+    }
+    let mut extra = [0_u8; 1];
+    if handle.read(&mut extra).await? != 0 || !same_metadata(&metadata, &handle.metadata().await?) {
+        file.truncated = true;
+        return Ok(file);
+    }
     if bytes.contains(&0) {
         file.content = ChangeContentDto::Binary;
         return Ok(file);
@@ -476,6 +669,158 @@ async fn untracked_file(
     Ok(file)
 }
 
+async fn hash_index(path: &Path, hasher: &mut Sha256) -> Result<bool> {
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            hash_record(hasher, b"index-state", b"absent");
+            return Ok(true);
+        }
+        Err(_) => return Ok(false),
+    };
+    let initial = file.metadata()?;
+    if !initial.is_file() || initial.len() > MAX_INDEX_BYTES {
+        return Ok(false);
+    }
+    let mut file = tokio::fs::File::from_std(file);
+    let mut bytes = vec![0_u8; initial.len() as usize];
+    if file.read_exact(&mut bytes).await.is_err() {
+        return Ok(false);
+    }
+    let mut extra = [0_u8; 1];
+    if file.read(&mut extra).await? != 0 || !same_metadata(&initial, &file.metadata().await?) {
+        return Ok(false);
+    }
+    hash_record(hasher, b"index-stat", &metadata_identity(&initial));
+    hash_record(hasher, b"index-bytes", &bytes);
+    Ok(true)
+}
+
+struct StateCapture {
+    final_raw: Capture,
+    numstat: Capture,
+    committed: Capture,
+    staged: Capture,
+    unstaged: Capture,
+    untracked_paths: Vec<Vec<u8>>,
+    untracked_additions: u32,
+    identity: Option<[u8; 32]>,
+}
+
+async fn capture_state(
+    work_dir: &Path,
+    policy: &GitReadPolicy,
+    base_reference: &str,
+    base_oid: &str,
+    head_oid: &str,
+    index_path: &Path,
+) -> Result<StateCapture> {
+    macro_rules! diff {
+        ($args:expr) => {
+            async { capture_diff(work_dir, policy, $args, MAX_INVENTORY_BYTES).await }
+        };
+    }
+    let (final_raw, numstat, committed, staged, unstaged, untracked) = tokio::try_join!(
+        diff!(&[
+            "--raw",
+            "--full-index",
+            "--find-renames",
+            "-z",
+            base_oid,
+            "--"
+        ]),
+        diff!(&["--numstat", "--find-renames", "-z", base_oid, "--"]),
+        diff!(&[
+            "--name-only",
+            "--find-renames",
+            "-z",
+            base_oid,
+            head_oid,
+            "--"
+        ]),
+        diff!(&[
+            "--cached",
+            "--name-only",
+            "--find-renames",
+            "-z",
+            head_oid,
+            "--"
+        ]),
+        diff!(&["--name-only", "--find-renames", "-z", "--"]),
+        capture_git(
+            work_dir,
+            policy,
+            &["ls-files", "--others", "--exclude-standard", "-z", "--"],
+            MAX_INVENTORY_BYTES,
+        ),
+    )?;
+    let truncated = [
+        &final_raw, &numstat, &committed, &staged, &unstaged, &untracked,
+    ]
+    .iter()
+    .any(|capture| capture.truncated);
+    let untracked_paths: Vec<Vec<u8>> = nul_records(&untracked.bytes)
+        .map(ToOwned::to_owned)
+        .collect();
+    let mut untracked_additions = 0;
+    let mut identity = None;
+    if !truncated {
+        let mut hasher = Sha256::new();
+        hash_record(&mut hasher, b"schema", b"changes-state-v2");
+        hash_record(&mut hasher, b"base-reference", base_reference.as_bytes());
+        hash_record(&mut hasher, b"base-oid", base_oid.as_bytes());
+        hash_record(&mut hasher, b"head-oid", head_oid.as_bytes());
+        for (tag, capture) in [
+            (b"final-raw".as_slice(), &final_raw),
+            (b"numstat".as_slice(), &numstat),
+            (b"committed".as_slice(), &committed),
+            (b"staged".as_slice(), &staged),
+            (b"unstaged".as_slice(), &unstaged),
+            (b"untracked".as_slice(), &untracked),
+        ] {
+            hash_record(&mut hasher, tag, &capture.bytes);
+        }
+        let mut complete = hash_index(index_path, &mut hasher).await?;
+        let mut remaining = MAX_IDENTITY_BYTES;
+        let raw_files = parse_raw_files(&final_raw.bytes);
+        for file in raw_files
+            .iter()
+            .filter(|file| file.status != ChangeFileStatusDto::Deleted)
+        {
+            match hash_path(work_dir, &file.path, &mut hasher, &mut remaining).await? {
+                HashPathResult::Complete(_) => {}
+                HashPathResult::Incomplete => complete = false,
+            }
+        }
+        for path in &untracked_paths {
+            match hash_path(work_dir, path, &mut hasher, &mut remaining).await? {
+                HashPathResult::Complete(Some(lines)) => {
+                    untracked_additions += lines;
+                }
+                HashPathResult::Complete(None) => {}
+                HashPathResult::Incomplete => complete = false,
+            }
+        }
+        if complete {
+            identity = Some(hasher.finalize().into());
+        }
+    }
+    Ok(StateCapture {
+        final_raw,
+        numstat,
+        committed,
+        staged,
+        unstaged,
+        untracked_paths,
+        untracked_additions,
+        identity,
+    })
+}
+
 fn limits() -> ChangeLimitsDto {
     ChangeLimitsDto {
         max_files: MAX_FILES as u32,
@@ -505,13 +850,20 @@ fn unavailable(
     }
 }
 
-/// Read one session worktree without fetching or changing Git state.
-pub async fn load(work_dir: &Path, base_reference: &str) -> Result<ChangeSetDto> {
-    let Some(head_oid) = git_text(work_dir, &["rev-parse", "--verify", "HEAD"]).await? else {
-        return Ok(unavailable(
-            base_reference,
-            ChangeBaseUnavailableReasonDto::UnbornHead,
-            None,
+async fn load_once(
+    work_dir: &Path,
+    policy: &GitReadPolicy,
+    base_reference: &str,
+) -> Result<(ChangeSetDto, bool)> {
+    let Some(head_oid) = git_text(work_dir, policy, &["rev-parse", "--verify", "HEAD"]).await?
+    else {
+        return Ok((
+            unavailable(
+                base_reference,
+                ChangeBaseUnavailableReasonDto::UnbornHead,
+                None,
+            ),
+            true,
         ));
     };
     let local_base = if base_reference.starts_with("refs/heads/") {
@@ -520,130 +872,63 @@ pub async fn load(work_dir: &Path, base_reference: &str) -> Result<ChangeSetDto>
         format!("refs/heads/{base_reference}")
     };
     let base_spec = format!("{local_base}^{{commit}}");
-    let Some(base_tip) = git_text(work_dir, &["rev-parse", "--verify", &base_spec]).await? else {
-        return Ok(unavailable(
-            base_reference,
-            ChangeBaseUnavailableReasonDto::MissingBase,
-            Some(head_oid),
+    let Some(base_tip) = git_text(work_dir, policy, &["rev-parse", "--verify", &base_spec]).await?
+    else {
+        return Ok((
+            unavailable(
+                base_reference,
+                ChangeBaseUnavailableReasonDto::MissingBase,
+                Some(head_oid),
+            ),
+            true,
         ));
     };
-    let Some(base_oid) = git_text(work_dir, &["merge-base", &head_oid, &base_tip]).await? else {
-        return Ok(unavailable(
-            base_reference,
-            ChangeBaseUnavailableReasonDto::NoMergeBase,
-            Some(head_oid),
+    let Some(base_oid) = git_text(work_dir, policy, &["merge-base", &head_oid, &base_tip]).await?
+    else {
+        return Ok((
+            unavailable(
+                base_reference,
+                ChangeBaseUnavailableReasonDto::NoMergeBase,
+                Some(head_oid),
+            ),
+            true,
         ));
     };
-
-    let final_raw = capture_diff(
+    let index_path = git_text(work_dir, policy, &["rev-parse", "--git-path", "index"])
+        .await?
+        .map(PathBuf::from)
+        .context("git index path is unavailable")?;
+    let index_path = if index_path.is_absolute() {
+        index_path
+    } else {
+        work_dir.join(index_path)
+    };
+    let state = capture_state(
         work_dir,
-        &[
-            "--raw",
-            "--full-index",
-            "--find-renames",
-            "-z",
-            &base_oid,
-            "--",
-        ],
-        MAX_INVENTORY_BYTES,
+        policy,
+        base_reference,
+        &base_oid,
+        &head_oid,
+        &index_path,
     )
     .await?;
-    let numstat = capture_diff(
-        work_dir,
-        &["--numstat", "--find-renames", "-z", &base_oid, "--"],
-        MAX_INVENTORY_BYTES,
-    )
-    .await?;
-    let committed = capture_diff(
-        work_dir,
-        &[
-            "--name-only",
-            "--find-renames",
-            "-z",
-            &base_oid,
-            "HEAD",
-            "--",
-        ],
-        MAX_INVENTORY_BYTES,
-    )
-    .await?;
-    let staged = capture_diff(
-        work_dir,
-        &[
-            "--cached",
-            "--name-only",
-            "--find-renames",
-            "-z",
-            "HEAD",
-            "--",
-        ],
-        MAX_INVENTORY_BYTES,
-    )
-    .await?;
-    let unstaged = capture_diff(
-        work_dir,
-        &["--name-only", "--find-renames", "-z", "--"],
-        MAX_INVENTORY_BYTES,
-    )
-    .await?;
-    let untracked = capture_git(
-        work_dir,
-        &["ls-files", "--others", "--exclude-standard", "-z", "--"],
-        MAX_INVENTORY_BYTES,
-    )
-    .await?;
-    let inventory_truncated = [
-        &final_raw, &numstat, &committed, &staged, &unstaged, &untracked,
-    ]
-    .iter()
-    .any(|capture| capture.truncated);
-    let mut raw_files = parse_raw_files(&final_raw.bytes);
-
-    let mut hasher = Sha256::new();
-    hasher.update(b"weaver-changes-v1\0");
-    hasher.update(base_oid.as_bytes());
-    hasher.update([0]);
-    hasher.update(head_oid.as_bytes());
-    hasher.update([0]);
-    hasher.update(&final_raw.bytes);
-    for capture in [&committed, &staged, &unstaged, &untracked] {
-        hasher.update([0]);
-        hasher.update(&capture.bytes);
-    }
-    let untracked_paths: Vec<Vec<u8>> = nul_records(&untracked.bytes)
-        .map(ToOwned::to_owned)
-        .collect();
-    let mut untracked_additions = BTreeMap::new();
-    if !inventory_truncated {
-        for file in raw_files
-            .iter()
-            .filter(|file| file.status != ChangeFileStatusDto::Deleted)
-        {
-            hash_path(work_dir, &file.path, &mut hasher).await?;
-        }
-        for path in &untracked_paths {
-            if let Some(lines) = hash_path(work_dir, path, &mut hasher).await? {
-                untracked_additions.insert(path.clone(), lines);
-            }
-        }
-    }
-    let version =
-        (!inventory_truncated).then(|| format!("changes-v1:{}", hex::encode(hasher.finalize())));
+    let mut raw_files = parse_raw_files(&state.final_raw.bytes);
 
     let patch = capture_diff(
         work_dir,
+        policy,
         &["--patch", "--find-renames", "--unified=3", &base_oid, "--"],
         MAX_PATCH_BYTES,
     )
     .await?;
     let mut sections = patch_sections(&patch.bytes);
-    let stats = parse_numstat(&numstat.bytes);
-    let committed = source_paths(&committed.bytes);
-    let staged = source_paths(&staged.bytes);
-    let unstaged = source_paths(&unstaged.bytes);
-    let untracked_set: BTreeSet<Vec<u8>> = untracked_paths.iter().cloned().collect();
+    let stats = parse_numstat(&state.numstat.bytes);
+    let committed = source_paths(&state.committed.bytes);
+    let staged = source_paths(&state.staged.bytes);
+    let unstaged = source_paths(&state.unstaged.bytes);
+    let untracked_set: BTreeSet<Vec<u8>> = state.untracked_paths.iter().cloned().collect();
 
-    for path in &untracked_paths {
+    for path in &state.untracked_paths {
         if !raw_files.iter().any(|file| file.path == *path) {
             raw_files.push(RawFile {
                 status: ChangeFileStatusDto::Untracked,
@@ -693,26 +978,74 @@ pub async fn load(work_dir: &Path, base_reference: &str) -> Result<ChangeSetDto>
         additions: stats
             .values()
             .filter_map(|stat| stat.additions)
-            .chain(untracked_additions.values().copied())
+            .chain(std::iter::once(state.untracked_additions))
             .sum(),
         deletions: stats.values().filter_map(|stat| stat.deletions).sum(),
-        truncated: numstat.truncated || inventory_truncated,
+        truncated: state.identity.is_none(),
     };
-    Ok(ChangeSetDto {
-        version,
+    let mut changes = ChangeSetDto {
+        version: None,
         base: ChangeBaseDto::Available {
             reference: base_reference.to_string(),
-            oid: base_oid,
+            oid: base_oid.clone(),
         },
-        head_oid: Some(head_oid),
+        head_oid: Some(head_oid.clone()),
         totals,
-        truncated: inventory_truncated
+        truncated: state.identity.is_none()
             || patch.truncated
             || raw_files.len() > MAX_FILES
             || remaining_total == 0,
         files,
         limits: limits(),
-    })
+    };
+    let Some(identity) = state.identity else {
+        return Ok((changes, true));
+    };
+
+    let post = capture_state(
+        work_dir,
+        policy,
+        base_reference,
+        &base_oid,
+        &head_oid,
+        &index_path,
+    )
+    .await?;
+    let head_after = git_text(work_dir, policy, &["rev-parse", "--verify", "HEAD"]).await?;
+    let base_after = git_text(work_dir, policy, &["rev-parse", "--verify", &base_spec]).await?;
+    let stable = post.identity == Some(identity)
+        && head_after.as_deref() == Some(head_oid.as_str())
+        && base_after.as_deref() == Some(base_tip.as_str());
+    if !stable {
+        changes.truncated = true;
+        changes.totals.truncated = true;
+        return Ok((changes, false));
+    }
+
+    let rendered = serde_json::to_vec(&changes).context("serializing stable change response")?;
+    let mut hasher = Sha256::new();
+    hash_record(&mut hasher, b"state-identity", &identity);
+    hash_record(&mut hasher, b"rendered-response", &rendered);
+    changes.version = Some(format!("changes-v1:{}", hex::encode(hasher.finalize())));
+    Ok((changes, true))
+}
+
+/// Read one session worktree without fetching or changing Git state.
+pub async fn load(work_dir: &Path, base_reference: &str) -> Result<ChangeSetDto> {
+    let policy = GitReadPolicy::load(work_dir).await?;
+    for attempt in 0..2 {
+        let (mut changes, stable) = load_once(work_dir, &policy, base_reference).await?;
+        if stable {
+            return Ok(changes);
+        }
+        if attempt == 1 {
+            changes.version = None;
+            changes.truncated = true;
+            changes.totals.truncated = true;
+            return Ok(changes);
+        }
+    }
+    unreachable!("bounded change read always returns or retries once")
 }
 
 /// Validate a mutable comment anchor against the exact snapshot on screen.
@@ -720,7 +1053,7 @@ pub fn validate_anchor(
     changes: &ChangeSetDto,
     version: &str,
     anchor: &ChangeAnchorDto,
-) -> Result<()> {
+) -> Result<ChangeAnchorDto> {
     if changes.version.as_deref() != Some(version) {
         bail!("change-set version moved; refresh before anchoring");
     }
@@ -733,32 +1066,54 @@ pub fn validate_anchor(
         .iter()
         .find(|file| decode_path(&file.path).ok().as_deref() == Some(identity.as_slice()))
         .context("change anchor path is not present in this version")?;
-    let mut expected = anchor.start_line;
-    for line in file.hunks.iter().flat_map(|hunk| &hunk.lines) {
-        let (number, allowed) = match anchor.side {
-            ChangeSideDto::Old => (
-                line.old_line,
-                matches!(
-                    line.kind,
-                    ChangeLineKindDto::Deletion | ChangeLineKindDto::Context
-                ),
-            ),
-            ChangeSideDto::New => (
-                line.new_line,
-                matches!(
-                    line.kind,
-                    ChangeLineKindDto::Addition | ChangeLineKindDto::Context
-                ),
-            ),
+    let count = (anchor.end_line - anchor.start_line + 1) as usize;
+    for hunk in &file.hunks {
+        let eligible: Vec<_> = hunk
+            .lines
+            .iter()
+            .filter(|line| line_number(line, anchor.side).is_some())
+            .collect();
+        let Some(first) = eligible
+            .iter()
+            .position(|line| line_number(line, anchor.side) == Some(anchor.start_line))
+        else {
+            continue;
         };
-        if allowed && number == Some(expected) {
-            expected += 1;
-            if expected > anchor.end_line {
-                return Ok(());
-            }
+        let Some(selected) = eligible.get(first..first.saturating_add(count)) else {
+            continue;
+        };
+        let contiguous = selected.iter().enumerate().all(|(offset, line)| {
+            let expected = anchor.start_line.checked_add(offset as u32);
+            line_number(line, anchor.side) == expected
+        });
+        if contiguous {
+            return Ok(ChangeAnchorDto {
+                path: file.path.clone(),
+                side: anchor.side,
+                start_line: anchor.start_line,
+                end_line: anchor.end_line,
+                hunk_header: hunk.header.clone(),
+                context_before: eligible[first.saturating_sub(2)..first]
+                    .iter()
+                    .map(|line| line.text.clone())
+                    .collect(),
+                selected: selected.iter().map(|line| line.text.clone()).collect(),
+                context_after: eligible[first + count..]
+                    .iter()
+                    .take(2)
+                    .map(|line| line.text.clone())
+                    .collect(),
+            });
         }
     }
     bail!("change anchor does not name a contiguous visible line range")
+}
+
+fn line_number(line: &ChangeLineDto, side: ChangeSideDto) -> Option<u32> {
+    match side {
+        ChangeSideDto::Old => line.old_line,
+        ChangeSideDto::New => line.new_line,
+    }
 }
 
 #[cfg(test)]
@@ -800,16 +1155,24 @@ mod tests {
             limits: limits(),
         };
         let anchor = ChangeAnchorDto {
-            path,
+            path: ChangePathDto {
+                bytes: path.bytes,
+                display: "spoofed.rs".to_string(),
+            },
             side: ChangeSideDto::New,
             start_line: 3,
             end_line: 4,
-            hunk_header: "@@ -2,2 +2,3 @@".to_string(),
-            context_before: vec![],
-            selected: vec!["new".to_string(), "next".to_string()],
-            context_after: vec![],
+            hunk_header: "@@ spoofed @@".to_string(),
+            context_before: vec!["spoofed before".to_string()],
+            selected: vec!["spoofed selection".to_string()],
+            context_after: vec!["spoofed after".to_string()],
         };
-        validate_anchor(&changes, "changes-v1:test", &anchor).unwrap();
+        let canonical = validate_anchor(&changes, "changes-v1:test", &anchor).unwrap();
+        assert_eq!(canonical.path.display, "src/a.rs");
+        assert_eq!(canonical.hunk_header, "@@ -2,2 +2,3 @@ fn main() {");
+        assert_eq!(canonical.context_before, vec!["same"]);
+        assert_eq!(canonical.selected, vec!["new", "next"]);
+        assert!(canonical.context_after.is_empty());
         let wrong_side = ChangeAnchorDto {
             side: ChangeSideDto::Old,
             ..anchor
@@ -835,5 +1198,39 @@ mod tests {
         assert!(hunks[0].truncated);
         assert!(hunks[0].lines[0].text.ends_with('…'));
         assert_eq!(hunks[0].lines.len(), 1);
+    }
+
+    #[test]
+    fn framed_identity_separates_cross_file_boundaries() {
+        fn legacy(files: &[(&[u8], &[u8])]) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            for (path, content) in files {
+                bytes.extend_from_slice(path);
+                bytes.extend_from_slice(b"file\0");
+                bytes.extend_from_slice(content);
+            }
+            bytes
+        }
+
+        fn framed(files: &[(&[u8], &[u8])]) -> Vec<u8> {
+            let mut hasher = Sha256::new();
+            for (path, content) in files {
+                hash_record(&mut hasher, b"path", path);
+                hash_record(&mut hasher, b"kind", b"file");
+                hash_record(
+                    &mut hasher,
+                    b"content-length",
+                    &(content.len() as u64).to_be_bytes(),
+                );
+                hash_record(&mut hasher, b"file-chunk", content);
+            }
+            hasher.finalize().to_vec()
+        }
+
+        let combined = b"xbfile\0y";
+        let split = [(b"a".as_slice(), b"x".as_slice()), (b"b", b"y")];
+        let joined = [(b"a".as_slice(), combined.as_slice())];
+        assert_eq!(legacy(&split), legacy(&joined));
+        assert_ne!(framed(&split), framed(&joined));
     }
 }
