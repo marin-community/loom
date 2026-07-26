@@ -116,7 +116,7 @@ preferably as a deployment-managed Secret Manager reference. The existing
 ordinary interactive launch path uses the approved requester's stored GitHub
 token by default; restricted sessions do not.
 
-## Production rollout
+## Deployment checklist
 
 1. Configure and install the production GitHub App on each target repository.
    For an App-less deployment, declare `github_comment` in the Pulumi profile
@@ -131,9 +131,9 @@ token by default; restricted sessions do not.
    the first turn without `WEAVER.md`, a duplicate body-hash key returns the
    original run, no shell or code-writing tool is visible, the agent environment
    contains no GitHub token, and only the requested GitHub mutation occurs.
-5. Change the Marin prose-cleanup action from posting `@weaverbot` to the OIDC
-   exchange above, keeping its current body-hash/stale-write prompt. Roll the
-   action revision through `marin-community/*` consumers in batches.
+5. Move callers to the OIDC exchange without changing their idempotency keys or
+   stale-write preconditions, then roll the workflow revision out in controlled
+   batches.
 
 Disable the federation mapping to stop new runs. On an App-less deployment,
 removing the profile token also disables the fixed GitHub operations. Neither

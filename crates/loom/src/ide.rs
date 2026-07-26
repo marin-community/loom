@@ -7,10 +7,10 @@
 //! reverse proxy (`/api/sessions/{id}/ide/*`), so it needs no password of its
 //! own and the iframe rides loom's session cookie.
 //!
-//! See `docs/embedded-ide.md` for the design. The code-server is a **child of
-//! loom** (not detached like tapestry): it holds no irreplaceable state — the
-//! files are on disk — so a loom restart drops it and the next access respawns
-//! it. That keeps the manager a plain in-memory map with no DB table.
+//! The code-server is a **child of loom** (not detached like tapestry): it holds
+//! no irreplaceable state — the files are on disk — so a loom restart drops it
+//! and the next access respawns it. That keeps the manager a plain in-memory map
+//! with no DB table. See the embedded editor section in `docs/ARCHITECTURE.md`.
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;

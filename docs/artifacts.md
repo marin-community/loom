@@ -1,446 +1,123 @@
-# Artifacts: agent-authored documents, out of the repo
+# Artifacts and reviews
 
-Status: **proposal** (weaver issue #117). This supersedes the task-sync half of
-[structured-projects.md](structured-projects.md): the projection principle it
-established — *structure in a document, state in the DB, the render joins
-them* — survives and generalizes; the plan noun, the slug rules, and the
-reconcile engine built around it do not.
+Artifacts are versioned documents stored by Loom for a user to read: designs,
+reports, plans, diagrams, and the session goal. They are not worktree scratch
+files and do not need to be committed to survive session archive.
 
-## The problem
+Review is the staged feedback system shared by Artifacts and Changes. A review
+draft stays private until one explicit submission freezes and delivers it to the
+agent conversation.
 
-The `plan` feature bundles three jobs into one repo-committed file:
+## Artifact contract
 
-1. **Telling agents what to do** — the design surface, the spec.
-2. **Expressing a set of steps and syncing them to weaver** — task headings
-   with stable IDs, materialized into issues by `weaver plan sync`.
-3. **Showing structured content to the user** — rendered markdown, mermaid,
-   live status badges on the dashboard.
+An artifact belongs to a repository and optionally to a branch. Branch-scoped
+and repo-shared artifacts use the same public name; a branch-scoped artifact
+shadows a shared artifact of that name for the session. The immutable internal
+artifact ID keeps history and reviews attached to the document that was actually
+read even if a name is deleted, reused, or shadowed later.
 
-The bundle leaks everywhere the jobs pull apart:
+Every write appends a revision. Reads use the latest revision by default and can
+select an older one. Concurrent user and agent writes therefore create history
+instead of overwriting a revision. Removing an artifact removes all of its
+revisions; individual revisions are not pruned.
 
-- **A plan must be committed to exist.** It is a worktree file, so every
-  "let me sketch this for you" produces a document in the user's repo that
-  nobody wants to check in. The ecosystem has codified the opposite
-  convention — agent scratch is gitignored, only instructions are committed
-  ([Agents.gitignore](https://github.com/github/gitignore/blob/main/Global/Agents.gitignore));
-  aider, which writes its history files into the working tree, is the
-  standing cautionary tale.
-- **A plan dies with its worktree.** Archiving a session preserves the goal,
-  status trail, events, and issues — everything except the one document that
-  explains them, unless it was committed (see above).
-- **Goal and plan say the same thing twice.** `plan new` copies the branch
-  goal into the file's "Problem & goal" section once
-  (`crates/weaver-core/src/plan.rs` scaffold); after that the DB goal and the
-  file
-  drift with no link in either direction. Agents are routinely unsure which
-  one to update — the confusion that filed #117.
-- **The machinery tax is high for an opt-in feature.** Repo-wide slug
-  identity, branch-scoping subtleties, in-flight flag rules, a reconcile
-  verb, `.weaver/config.toml [plan].dir` — all to keep one markdown file and
-  one SQLite table agreeing.
-- **The sync engine is a worse agent.** `plan sync` computes a literal diff
-  (create / close / retitle / flag). But every weaver session has a resident
-  agent that, told "make the issues match the plan", applies judgment about
-  in-flight work, partial overlaps, and renames. We built a dumb reconciler
-  next to a smart one.
+Markdown is the primary format. The renderer supports GFM and Mermaid and
+projects two live reference forms:
 
-## What the field settled
+- `#41` resolves an issue and renders its current ledger status.
+- `artifact:design` links another artifact.
 
-A survey of agent products, protocols, and doc↔tracker systems (June 2026)
-points one direction. The decisive datapoints:
+References inside code spans or blocks remain literal. Smartdoc projection is a
+read-time join: the document references issues, while the issue ledger owns task
+state. A plan is simply an artifact convention; there is no plan parser or sync
+engine.
 
-- **GitHub ran our experiment and walked it back.** Tasklist blocks —
-  markdown-encoded task hierarchy synced to issue relations — ran ~2.5 years
-  in beta, never GA'd, and were retired April 2025 in favor of DB-native
-  sub-issues, pitched verbatim as tracking work "without relying on
-  Markdown". What survived is the classic task list: the doc *references*
-  issues (`- [ ] #123`), the tracker owns state, the render unfurls it, and
-  closing the issue checks the box — two one-way flows, no reconciliation.
-- **Render-time projection is the architecture that survived everywhere.**
-  Confluence's Jira macro (the page stores a query handle; Jira owns state;
-  view time joins them) has run twenty years with failure modes that are
-  only operational (latency, caching) — never divergence. Notion's tracker
-  integrations are deliberately one-way and read-only. GitLab `#123+` refs
-  render live state. Org-mode and Obsidian — doc-as-database designs — break
-  exactly at concurrent writers, which weaver has by construction (agent,
-  user, sub-agents).
-- **Every hosted agent stores deliverables platform-side, not in the
-  repo.** Devin's plans/playbooks/wikis, Amp's URL-addressable threads,
-  Claude's artifacts (immutable versions + a picker + a publish URL),
-  Manus's library (share the artifacts, never the sandbox), Cursor's agent
-  to-dos. Repo output is commits and PRs, full stop.
-- **But the export hatch is also blessed.** Factory's Specification Mode
-  saves an approved spec to a configurable repo path; Ultraplan's cancel
-  path saves the plan to a file; OpenAI tells Codex users to keep `plan.md`
-  in-repo precisely because Codex *lacks* an artifact store. Out-of-repo by
-  default, committable on request.
-- **A2A's artifact model:** named, MIME-typed, versioned by snapshot — and
-  the *client* owns version lineage, not the agent. MCP's `resource_link`
-  shows the complement: a tool result that returns a URI handle another
-  agent can fetch later.
+Image input to `weaver artifact write` is wrapped as a bounded data-URI Markdown
+document so it renders through the same surface without adding a blob API.
 
-Full survey with citations: [Sources](#sources).
+### The goal artifact
 
-## The proposal
+The session goal is the branch-scoped artifact named `goal`. It is the editable,
+versioned source read by session restart, handoff, summary, and metadata
+assistance. `branches.goal` is a synchronized cache for list and search paths,
+not a second independently editable owner. Historical rows without a goal
+artifact retain the cache as a compatibility fallback.
 
-One new noun, one demotion, one deletion — and a thin shared layer:
+### CLI and UI
 
-| Job the plan tab did | New home |
-|---|---|
-| Tell agents what to do | **goal** — a branch-scoped `goal` artifact (markdown), set via `weaver artifact write goal <file|->` or the Artifacts editor |
-| Steps synced to weaver | **issues** — the only task ledger; created directly, never parsed out of a doc |
-| Structured content for the user | **artifacts** — named, versioned documents in weaver.db, rendered by loom |
+The agent-facing commands are:
 
-**smartdoc** is the read-side glue: the markdown-convention layer (parse
-references, probe live status, project it into the render) that lets each of
-the three point at the others without duplicating their facts.
-
-### Artifacts: the new noun
-
-An artifact is a document an agent (or the user) writes *to weaver*, not to
-the repo: a design, a report, a diagram, a plan. Properties, each earned by
-the survey above:
-
-- **Named and scoped like issues.** An artifact belongs to a repo and
-  optionally to a branch — the same shape issues already have
-  (claimed vs repo backlog). `weaver artifact write plan design.md` scopes
-  to the current branch; `--repo` publishes it repo-shared (the fan-out
-  case: one plan, many child sessions). Listings show branch-scoped names
-  prefixed by their branch, which is the "prefixed with the session ID"
-  behavior as a display rule rather than a string convention.
-- **Versioned by snapshot, never mutated.** Every write appends an immutable
-  revision; the viewer gets a version picker; "latest" is the default read.
-  This is the Claude-artifacts / A2A model, and it makes concurrent
-  agent/user edits safe — last write is a new revision, not a lost update.
-- **Kind-typed, markdown-first.** `kind` defaults to `markdown` (GFM +
-  mermaid via the existing `MarkdownView`); other kinds render as source
-  until they earn a renderer. Two more render natively:
-  - **`html`** — a self-contained HTML document (a report, a chart, a small
-    interactive demo) shown as a live page in a sandboxed `<iframe>`. The frame
-    is `srcdoc` with `allow-scripts` but **not** `allow-same-origin`, so its
-    scripts run in a unique opaque origin and cannot read loom's cookies or call
-    the API as the signed-in user — a hostile artifact is sealed off from the
-    session. A `.html`/`.htm` file picks the kind on its own (like image
-    sniffing); `--kind html` is the explicit form. Preview ⇄ Source toggles
-    between the rendered page and the raw HTML; "↗ Open" loads it full-screen in
-    a new tab (its own `blob:` origin, still isolated).
-  - **Images** (screenshots, diagrams) need no blob store: `write` recognises an
-    image file — by extension, or by magic bytes on stdin — and embeds it as a
-    base64 data-URI inside a markdown wrapper, which `MarkdownView` already
-    renders inline (the renderer passes `data:` URIs through untouched; DOMPurify
-    permits them on `<img>`).
-- **URL-addressable.** `weaver artifact write` prints the dashboard URL
-  (`/s/<session>/artifacts/<name>`) so the agent can hand it to the user in
-  a status message or PR comment — the Amp-thread lesson: the URL is the
-  collaboration feature. The server resolves that link from its
-  externally-visible origin (`auth.base_url`, else the request's own Host):
-  the loopback/wildcard `$WEAVER_API` an agent dials (often
-  `http://0.0.0.0:7878`) is not an address anyone else can open, the same
-  reason `loom session url` resolves server-side. The write itself is a REST
-  call (`weaver-api::Client`, resolving the server the same way every loom
-  client does: `$WEAVER_API`, then the recorded `server.json` address), so a
-  reachable loom is required — without one the command fails with a friendly
-  error rather than falling back to a local write.
-- **It survives archive.** Artifacts live in weaver.db next to the goal,
-  events, and issues, so tearing down the worktree no longer deletes the
-  design doc. This fixes the worst current asymmetry for free.
-
-Storage — two tables, content in the DB (documents are kilobytes; this is a
-hundreds-of-rows database):
-
-```sql
-CREATE TABLE artifacts (
-    id          INTEGER PRIMARY KEY,
-    repo_root   TEXT NOT NULL,
-    branch_id   TEXT REFERENCES branches(id) ON DELETE CASCADE, -- NULL = repo-shared
-    name        TEXT NOT NULL,
-    kind        TEXT NOT NULL DEFAULT 'markdown',
-    title       TEXT NOT NULL DEFAULT '',
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-    UNIQUE(repo_root, branch_id, name)
-);
--- SQLite UNIQUE treats NULLs as distinct; repo-shared names need their own guard:
-CREATE UNIQUE INDEX idx_artifacts_shared ON artifacts(repo_root, name)
-    WHERE branch_id IS NULL;
-
-CREATE TABLE artifact_versions (
-    artifact_id INTEGER NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
-    rev         INTEGER NOT NULL,
-    author      TEXT NOT NULL DEFAULT '',     -- 'agent' | 'user'
-    content     TEXT NOT NULL,
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-    PRIMARY KEY (artifact_id, rev)
-);
+```sh
+weaver artifact write <name> [<file>]  # stdin with -
+weaver artifact ls [--repo]
+weaver artifact show <name> [--rev N]
+weaver artifact rm <name> [--repo]
 ```
 
-CLI and API, in the house idiom:
+Session **Review → Artifacts** lists branch and shared documents, renders a
+selected revision, and exposes source editing as a secondary mode. Saving an
+edit creates a new revision. The panel can dock in the work area or open beside
+Conversation/Agent without creating a global Artifacts destination.
 
-```
-weaver artifact write <name> [<file>]    # stdin with '-'; --title, --kind, --repo
-weaver artifact ls [--repo]              # this branch's + shared; --repo for all
-weaver artifact show <name> [--rev N]    # content; --meta for the envelope
-weaver artifact rm <name> [--repo]       # remove it + its history; --repo = shared
+Scratch is the inbound complement: Scratch is reference material the user gives
+the agent; artifacts are documents the agent gives the user.
 
-GET    /api/sessions/{id}/artifacts                 # list: branch-scoped + shared
-GET    /api/sessions/{id}/artifacts/{name}?rev=N    # content + projected refs (below)
-PUT    /api/sessions/{id}/artifacts/{name}          # user edit -> new revision
-DELETE /api/sessions/{id}/artifacts/{name}          # remove it + its history
-```
+## Review contract
 
-Each write records an `artifact_written` event (`{name, rev, title}`) through
-the existing bus, and a delete records `artifact_deleted` (`{name, branch_id}`),
-so the SSE stream, the activity feed, and watches see both with no new
-plumbing. `rm`/DELETE resolve the name the way `show` does (branch-scoped first,
-then repo-shared — the single row the listing shows), so removing from the UI
-takes exactly the artifact on screen; `--repo` targets the shared row when a
-branch copy shadows it. Removing an artifact removes every revision — history is
-not individually prunable.
+A review subject is exact and versioned:
 
-Artifacts are the outbound twin of `scratch/`: scratch is material the user
-hands the agent; artifacts are documents the agent hands the user. Scratch
-stays as-is.
+- an artifact subject is the immutable artifact ID plus revision;
+- the Changes subject is the session's bounded change-set version.
 
-### Goal: a well-known `goal` artifact
+Listing a session's reviews returns submitted history plus the authenticated
+creator's private draft. Creating a draft is recoverable: repeated creation for
+the same creator and subject returns the existing draft rather than splitting
+feedback across drafts.
 
-The session goal is a branch-scoped artifact named `goal`. `weaver artifact
-write goal <file|->` reads a file (or stdin) and appends a revision; the
-dashboard and the Artifacts tab edit it like any other document. So the goal is versioned, renders
-through the same markdown pipeline as every artifact (projection included — `the
-breakdown is #41 #42 #43, design in [the plan](artifact:plan)` stays live), and
-carries the same inline comment layer. This is what lets the goal *shift* over a
-session and still be the thing a restart or compaction re-reads — always its
-newest revision.
+### Draft
 
-The `goal` artifact is the **single source of truth**. `branches.goal` remains
-as a denormalized cache — the hot path for the fleet list and `?q=` search —
-refreshed from the artifact at every write: `branch::set_goal` (the setter that
-session-create / PATCH funnel through) and the direct
-artifact-write paths (the Artifacts editor, `weaver artifact write goal`) both
-call `branch::sync_goal_cache`. `branch::current_goal` reads the artifact, so
-`weaver summary`, the compact re-orientation, and `adopt()` on restart reflect
-the newest revision.
+A draft contains an optional overall note and zero or more pending comments.
+Artifact comments carry quote, prefix, suffix, block position, and revision
+anchors; Changes comments carry stable old/new line coordinates from the typed
+change set. Comments can be edited, deleted, and re-anchored before submission.
 
-Issue #117 floated auto-creating an artifact on every goal write and warned against
-putting the same text in two places. That objection is answered by *ownership*,
-not avoidance: there is one owner (the artifact) and one derived cache kept in
-lockstep with it — not a second editable copy. The goal earns the artifact
-surface precisely because it is a document that evolves and wants history,
-rendering, and comments.
+Every persisted mutation carries the current `expected_revision` and advances a
+monotonic draft revision. A stale mutation returns the authoritative review so
+the client can reload it for inspection instead of silently merging competing
+edits. Moving a draft to a newer subject version is guarded: old anchors must be
+re-anchored or explicitly acknowledged, while an overall-only draft can retarget
+directly.
 
-### Plans: a convention, not a noun
+Draft mutations are creator-private and emit no branch-wide event. Other tabs
+owned by that creator refresh their draft when they regain focus. Text still in
+an open comment editor is browser-local until saved; dock, pop, and route changes
+that would lose it are blocked with a save-or-cancel instruction.
 
-A plan becomes *an artifact named `plan`* that follows smartdoc conventions —
-prose, a mermaid architecture diagram, and a task list whose items
-**reference issues** instead of declaring tasks:
+### Submit
 
-```markdown
-## Tasks
-- #41 Index layer — storage + read path
-- #42 Executor — depends on #41
-- [ ] decide single-node vs distributed (open question, not yet an issue)
-```
+`Submit review` performs one transaction:
 
-The doc never states status; the renderer asks the issue ledger at view time
-and stamps each `#41` with a live chip (open / claimed-by-branch / closed) —
-exactly the GitHub-task-list / Confluence-macro shape, the one that survived
-two decades while every doc-as-database design died. There is **no sync
-engine**: the agent that writes the plan also files the issues
-(`weaver issue add --repo …`) and edits the doc to reference them. When the
-user changes the plan mid-flight, they tell the agent — which adjusts the
-ledger with judgment (close the unstarted, *talk about* the in-flight)
-instead of receiving a flag table. The agent is the reconciler; the smartdoc
-skill is its instructions.
+1. Verify the optimistic draft revision and current subject version.
+2. Freeze the overall note and comments.
+3. Render the exact delivery message on the server.
+4. Record one `review_submitted` event.
+5. Enqueue one delivery item.
 
-What this deletes from today's implementation: the `T1` task grammar with
-`exec:`/`value:`/`deps:` annotations, repo-wide slug identity, the
-`plan sync` diff/apply engine and its flag rules, `issues.plan_task`, the
-`/plan` routes, and `[plan].dir` repo config. If a fan-out ever needs
-machine-readable ordering or value, `issue_tags` (already shipped) can carry
-`deps`/`value` per issue — closer to where GitHub ended up (relations on the
-DB rows, not in the markdown). The auto-generated dependency graph goes too:
-the agent authors mermaid directly, which it does better than a renderer
-guessing from `deps:` lines.
+The submitted review is immutable. Any authenticated operator may resolve or
+reopen a submitted comment or retry failed delivery, but only the draft creator
+may mutate or discard draft content.
 
-Committed design docs remain a normal thing — written as ordinary repo files
-riding ordinary PRs, like this one. weaver just stops being their manager.
-For users who want both, the export hatch (Factory / Ultraplan precedent) is
-one flag away: `weaver artifact show plan > docs/plans/x.md`, or a future
-`artifact export`.
+ACP delivery enters a protected conversation inbox separate from retractable
+operator prompts. Inbox consumption, journal delivery key, and live-turn claim
+share one logical boundary so recovery cannot start a second turn for a review
+already recorded in the journal. Offline delivery remains queued without
+consuming an attempt, and fenced leases prevent a stale worker from regressing
+state. Terminal delivery is at-least-once.
 
-### smartdoc: the projection layer
+If the reviewed artifact is later removed, submitted history remains readable by
+stable review ID. Legacy artifact discussion threads are accepted only as
+compatibility history; new feedback uses staged reviews.
 
-A new `crates/smartdoc`, dependency-free of weaver, owning the conventions:
-
-```rust
-pub struct Doc { /* parsed blocks */ }
-pub enum Ref { Issue(u64), Artifact(String), Session(String) }
-
-pub fn parse(src: &str) -> Doc;                 // extract refs, checklists, frontmatter
-pub fn refs(doc: &Doc) -> Vec<Ref>;
-pub fn project(doc: &Doc, status: &HashMap<Ref, RefStatus>) -> Projection;
-```
-
-weaver-core implements the probes (`Ref::Issue` → the issues table, etc.);
-the artifact `GET` returns content *plus the resolved ref map*, so the SPA
-chips and a terminal `weaver artifact show` render the same projection —
-API-first, no browser-only logic. The generic framing is the point of the
-crate boundary (doc conventions wired to pluggable status probes), but v1
-honestly has one wiring: weaver. Keep it thin until a second consumer exists.
-
-"Actions" — the write-side of #117's smartdoc sketch — are deliberately
-deferred to one verb: **promote**, turning a bare checklist line into an
-issue and rewriting the line to reference it (GitHub's surviving doc→DB
-flow, Linear's create-from-selection). It ships after projection proves out,
-if agents don't simply do it themselves.
-
-### The skill, and WEAVER.md
-
-A `smartdoc` skill (`.agents/skills/`) plus a rewritten WEAVER.md section
-replace the plan instructions. The content, tersely: when to write an
-artifact (design loops, reports, anything the user should *read* rather than
-*run*); the reference conventions (`#N`, `artifact:<name>`, mermaid); the
-division of labor (goal = charter, issues = ledger, artifacts = documents);
-and the maintenance duty — *you are the sync engine: when the plan changes,
-update the issues; when issues change shape, update the doc's references.*
-
-### Loom UI
-
-- **Session detail → Review → Artifacts** is the canonical document surface
-  (`ArtifactsPanel`): list +
-  viewer (`ArtifactDocument` for markdown, `HtmlArtifactView` for html, a
-  raw-source pane for everything else), version picker, a preview ⇄ source toggle
-  with a plain-text source editor for user edits (each save = new revision,
-  `author: user`). It is kept alive *within* the session page — a
-  kept-alive panel served from `SessionDetail` (the `/s/:id/artifacts/:name`
-  deep link resolves to the same instance), so moving terminal ⇄ artifacts is an
-  instant flip on the warm page, not a route swap. The panel can **pop out** into
-  a resizable rail beside the live work surface, so the user reads an artifact
-  and watches the agent at once. Changes is its sibling under Review.
-- **Session detail** keeps the branch goal/prompt as a collapsed, bounded
-  disclosure in Details. Documents, including the well-known `plan`, remain on
-  the canonical Artifacts surface instead of being duplicated into a summary.
-- **Projection pass** in the markdown renderer: `#123` → live status chip
-  linking to the issue, `artifact:` links resolve, checked state for a
-  referenced issue comes from the ledger, never the text.
-- `artifact_written` joins the activity feed and SSE-driven refresh.
-- **Review mode** stages feedback before it crosses into the conversation.
-  Selecting rendered text creates a pending comment in a creator-private,
-  session-and-artifact-scoped server draft. Pending comments can be edited,
-  deleted, navigated, or re-anchored after a new artifact revision. The overall
-  note is persisted too, so a review may contain only overall feedback and
-  survives reload or dock/pop. Every mutation advances an optimistic draft
-  revision; a stale tab receives the fresh review and must re-review the exact
-  payload, including when it retries an already-submitted review. A review is
-  attached to the artifact's immutable numeric ID; the public artifact name is
-  resolved only when listing or creating, so a shared artifact that is shadowed,
-  or a deleted artifact name that is later reused, cannot inherit old feedback.
-  Re-anchoring the final old comment truthfully advances the envelope; an
-  overall-only draft can instead be moved to the current revision with one
-  guarded mutation. Remaining old anchors require an explicit acknowledgement.
-  The docked and popped viewers await summary and comment writes before swapping
-  layouts and preserve a rendered content sentinel through reflow. A pending
-  composer or existing-comment editor is intentionally browser-local until
-  saved; pop, dock, and route moves therefore stop with a focused “save or
-  cancel” instruction instead of discarding its text.
-
-  `Submit review` freezes the draft and its comments in one transaction,
-  checks the current artifact revision, records one `review_submitted` event,
-  and inserts one delivery-outbox item. REST returns the server-authoritative
-  structured message—including the full quote, prefix, suffix, and block
-  position—as the exact preview. ACP feedback enters a protected immutable
-  conversation inbox, separate from retractable user prompts. Inbox consumption,
-  the stable delivery key in the ACP journal, and the in-flight turn marker
-  commit at one logical dispatch boundary, so recovery never starts a second
-  turn for an already-journaled review. Unconsumed feedback can be rehomed to
-  the next live ACP or terminal session on the branch. Fenced leases prevent
-  stale workers from regressing delivery; offline feedback stays queued without
-  consuming attempts. Terminal delivery remains at-least-once. Every authorized
-  operator can resolve or reopen submitted comments and retry a failed
-  delivery; content mutation and discard remain creator-private draft actions.
-  Earlier discussion threads are projected as submitted compatibility history.
-  Drafts emit no branch-wide SSE event; submitted reviews do.
-
-  The operator CLI exposes the same REST contract:
-
-  ```
-  loom review ls <session> <artifact>
-  loom review show <review-id>
-  loom review add <session> <artifact> --rev N --quote TEXT COMMENT
-  loom review overall <session> <artifact> --rev N NOTE
-  loom review edit|reanchor|delete-comment ... --revision DRAFT_REV
-  loom review resolve|reopen <review-id> <comment-id>
-  loom review retarget <review-id> --revision DRAFT_REV
-  loom review discard|submit <review-id> --revision DRAFT_REV
-  loom review retry <review-id>
-  ```
-
-## Lifecycle walkthrough
-
-1. `loom session launch "Plan the search rewrite"`.
-2. The agent drafts, then `weaver artifact write plan design.md --title
-   "Search rewrite"` → prints `http://…/s/ab12cd34/artifacts/plan`; sets
-   `attention "plan ready — see artifact"`.
-3. The user reads it rendered (mermaid and all), edits the source (rev 2) or
-   replies; the agent revises (rev 3).
-4. On blessing, the agent files the breakdown — `weaver issue add --repo
-   "Index layer"` … — and rewrites the plan's task section to `- #41 …`,
-   republishing `--repo` so children share it.
-5. Fan-out: `loom session launch --claim 41` per task, unchanged.
-6. The dashboard projects each `#41` live; the doc never changes as work
-   proceeds. Mid-flight scope change = user tells the agent; the agent
-   adjusts issues with judgment. No reconcile engine, no flags.
-7. Archive: the plan and its revisions survive in weaver.db with the rest of
-   the branch's history.
-
-Small tasks stay goal-plus-issues, as today — an artifact is one command,
-not a ceremony, so right-sizing takes care of itself.
-
-## Delivery
-
-Each step shippable alone:
-
-1. **Tables + CLI + events** — `artifacts`/`artifact_versions`, `weaver
-   artifact write|ls|show`, `artifact_written`. Useful immediately as a
-   durable, out-of-repo doc store.
-2. **Loom surface** — routes, viewer, session Details context, activity/SSE.
-3. **smartdoc + projection** — the crate, ref resolution in `GET`, status
-   chips in `MarkdownView`, the `goal` artifact.
-4. **The deletion** — retire `weaver plan`, the sync engine, `/plan` routes,
-   `plan_task` (migration drops the column), `[plan].dir`; rewrite WEAVER.md
-   and ship the skill; mark structured-projects.md superseded. Pre-launch,
-   no deprecation window.
-
-## Open questions
-
-- **Binary kinds** (screenshots, the Cursor "demo artifact" pattern):
-  resolved by embedding — `write` wraps an image as a base64 data-URI markdown
-  doc (cap: 10 MB raw), so it renders inline with no blob store or raw route.
-  A dedicated binary column stays a future option if large media ever warrants
-  it; for kilobyte-to-low-megabyte screenshots, embedding is enough.
-- **Cross-branch reads in the CLI**: `artifact ls --repo` covers discovery;
-  is a branch-qualified `show` needed, or do shared artifacts cover fan-out?
-- **Promote** timing, per above.
-- **Retention**: keep forever (rows are tiny, archive already preserves) —
-  stated as policy so ephemerality is never an accident.
-
-## Sources
-
-- GitHub tasklist-blocks retirement ([changelog](https://github.blog/changelog/2025-02-18-github-issues-projects-february-18th-update/)),
-  [task lists](https://docs.github.com/en/issues/tracking-your-work-with-issues/about-task-lists),
-  [sub-issues](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/adding-sub-issues)
-- [Confluence Jira issues macro](https://confluence.atlassian.com/doc/jira-issues-macro-139380.html);
-  [Notion synced databases](https://www.notion.com/help/synced-databases)
-- Claude [artifacts](https://support.claude.com/en/articles/9487310-what-are-artifacts-and-how-do-i-use-them) and
-  [Ultraplan](https://code.claude.com/docs/en/ultraplan);
-  [Amp threads](https://ampcode.com/manual);
-  [Devin interactive planning](https://docs.devin.ai/work-with-devin/interactive-planning);
-  [Jules plan API](https://jules.google/docs/api/reference/sessions/);
-  [Factory Specification Mode](https://docs.factory.ai/cli/user-guides/specification-mode);
-  [Manus sandbox/sharing](https://manus.im/blog/manus-sandbox);
-  [Cursor cloud agents](https://cursor.com/docs/cloud-agent)
-- [A2A artifacts](https://a2a-protocol.org/latest/specification/);
-  [MCP resources](https://modelcontextprotocol.io/specification/2025-06-18/server/resources)
-- [Agents.gitignore](https://github.com/github/gitignore/blob/main/Global/Agents.gitignore);
-  org-sync's own caveat ([README](https://github.com/arbox/org-sync));
-  Graphite's refs→SQLite migration ([git as KV](https://graphite.com/blog/git-key-value))
+The REST routes and storage ownership are catalogued in
+[Architecture](ARCHITECTURE.md#rest-api). The agent workflow and reference
+conventions live in [the smartdoc skill](../.agents/skills/smartdoc.md).

@@ -17,8 +17,11 @@ lint-review decision, and driving CI green are not optional.
 WIP checkpoint: **1, 2, 4, 5, 7**, stop. Full list before opening/updating a PR.
 
 1. Self-review the diff.
-2. Gate — `./scripts/pre-commit.sh` (fmt + clippy). Not the lint review — that's step 6.
-3. Tests when warranted — `cargo test --workspace`; `cd e2e && npm test` for UI.
+2. Gate — `./scripts/pre-commit.sh` (Rust + frontend deterministic checks). Not
+   the lint review — that's step 6.
+3. Tests when warranted — select the relevant layer; use
+   `./scripts/test-representative.sh` for broad cross-layer feedback and the
+   exhaustive suites when the change's risk warrants them.
 4. Stage the specific files.
 5. Commit. ← clean checkpoint.
 6. Lint-review decision — run `scripts/lint-review.py` when warranted; otherwise
@@ -43,8 +46,14 @@ Don't `--no-verify` without a reason.
 
 ## 3. Tests (when relevant)
 
-- `cargo test --workspace` — backend unit + integration (needs git; spawns tapestry PTYs).
-- `cd e2e && npm test` — Playwright UI, when you touched the SPA or a route it hits.
+- `./scripts/test-representative.sh` — unit suites plus selected cross-layer
+  journeys for broad local feedback.
+- `cargo test --workspace` — exhaustive Rust unit + integration coverage when
+  backend scope or risk warrants it.
+- `cd e2e && npm test` — exhaustive Playwright coverage when UI behavior or a
+  route it consumes warrants it.
+- `cd python/weaver-loom && uv run pytest` — Python client and watch-program
+  logic when that package changes.
 
 Don't disturb the user's live loom — see AGENTS.md.
 

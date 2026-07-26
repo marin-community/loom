@@ -819,7 +819,7 @@ fn weaver_bin_path() -> String {
 // The ACP analogue of the terminal launch path: instead of building an argv the
 // PTY runs, it builds an [`AcpLaunch`] the relay runs (adapter command + env +
 // `_meta` options + the goal as the first prompt), which [`crate::acp::start`]
-// then brings up. See docs/plans/acp.md "Launch mapping".
+// then brings up. See `docs/ARCHITECTURE.md` and `docs/mcp-profiles.md`.
 // ---------------------------------------------------------------------------
 
 /// The permission posture every ACP session boots in when the create request

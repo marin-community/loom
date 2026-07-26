@@ -1,11 +1,11 @@
 # weaver-py
 
 A Pythonic, synchronous wrapper over [`weaver-api`](../weaver-api) — drive the
-loom fleet from Python, capability-gated. This is the out-of-process seam of the
-[watch design](../../docs/plans/watches.md): a scripted watch (or an
-agent iterating on one, or a human at a REPL) talks to the loom daemon through
-the same typed REST surface the `loom` CLI uses, never touching the terminal runtime directly.
-The daemon stays the single owner of the live runtime.
+loom fleet from Python through the same typed REST surface as the CLIs, never
+through sqlite or the terminal runtime directly. The daemon stays the single
+owner of live state. Loom's watch executor uses the separate stdlib-only
+[`weaver_loom`](../../python/weaver-loom) package that it can vendor into script
+subprocesses.
 
 ## Install
 
@@ -31,7 +31,7 @@ The wheel is `abi3` for CPython ≥ 3.9, so one build runs on any supported Pyth
 import weaver_py
 
 # observe-only by default; grant the rungs of the ladder you need
-c = weaver_py.Client(base="http://127.0.0.1:7420",
+c = weaver_py.Client(base="http://127.0.0.1:7878",
                      capabilities=["observe", "mark", "nudge"])
 
 for s in c.sessions():
@@ -55,8 +55,8 @@ c.interrupt("abc123")                                       # needs "interrupt"
 ```
 
 `base` defaults to `$WEAVER_API` (a URL or a bare `host:port`), falling back to
-the loom default `http://127.0.0.1:7878` — the same env convention
-`loom::endpoint` uses. So a bare `weaver_py.Client()` targets the local loom.
+the loom default `http://127.0.0.1:7878`. So a bare `weaver_py.Client()` targets
+the local daemon.
 
 Responses cross into Python as plain dicts/lists (via `serde_json` →
 `pythonize`), so you read `s["branch"]["tags"]` directly; there is no wrapper
@@ -87,15 +87,6 @@ grant is absent.
 The gate itself is a pure function, `weaver_api::capability::require`, unit-tested
 in the `weaver-api` crate (the workspace `test` job) — the security-relevant
 core lives below the pyo3 glue, not buried in it.
-
-### Not yet available
-
-`warm_session()` (the watch's persistent session) and `run_agent()` (a
-fresh one-shot judgement agent) are named in the design but not backed by the
-REST client today: `warm_session` is the warm-session lifecycle (plan T12), and
-`run_agent` is an in-process engine helper, not an out-of-process endpoint. They
-raise `NotImplementedError` rather than faking a result — `run_agent` checks the
-`launch` capability first.
 
 ## Example
 

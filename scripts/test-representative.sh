@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Fast local feedback over pure logic plus one amortized journey for each
-# setup-heavy feature changed in the profile-first launch round. CI remains the
-# exhaustive cargo-workspace and Playwright gate.
+# Fast local feedback over pure logic plus one amortized journey from each
+# setup-heavy feature area. CI remains the exhaustive cargo-workspace and
+# Playwright gate.
 
 set -euo pipefail
 

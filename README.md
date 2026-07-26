@@ -1,20 +1,19 @@
 # weaver
 
-A lightweight per-branch task tracker, plus an optional orchestrator that runs
-coding agents in managed terminals.
+A lightweight per-branch task tracker and orchestrator for coding agents.
 
 weaver ships two binaries:
 
 - **`weaver`** — the **agent-facing CLI**. It is a thin HTTP client of loom's
   REST API (via the `weaver-api` crate) — every command needs a reachable
   `loom server run`. The agent inside a worktree uses it to read and update
-  the branch's **goal**, **description**, **notes**, and the repo's
+  the branch's **goal**, **description**, and the repo's
   **issues** (each claimed by a branch or sitting in the shared backlog).
   Without a running loom, `weaver` fails fast with a plain-text error.
 - **`loom`** — the **orchestrator**. It runs the REST + SSE server, hosts a
-  Vue dashboard, creates worktrees, launches agents into managed terminals,
-  and periodically summarizes each branch's diff against its merge base. It
-  is the only process that opens the sqlite database directly.
+  Vue dashboard, creates worktrees, launches agents under managed runtime
+  supervisors, and monitors their lifecycle. It is the only process that opens
+  the sqlite database directly.
 
 `loom` owns the sqlite database at `~/.weaver/weaver.db`; `weaver` never opens
 it — every read and write goes over HTTP to `loom`.
@@ -65,7 +64,7 @@ written for it to run; do them yourself if you'd rather.
 Then start the orchestrator and open the dashboard:
 
 ```sh
-loom server run     # REST + SSE server, terminal launcher, background monitor
+loom server run     # REST + SSE server, runtime manager, background monitor
 loom open      # open the web UI (http://127.0.0.1:7878)
 ```
 
@@ -77,106 +76,45 @@ to work on weaver itself.
 
 ## Architecture
 
-```
-weaver CLI ──HTTP (REST)──▶ loom server run
-                                │
-                                ├─ sqlite ─▶ ~/.weaver/weaver.db
-                                ├─ axum REST + SSE (127.0.0.1:7878)
-                                ├─ terminal supervisors + git worktree wrappers
-                                ├─ agent launcher (Claude / Codex / custom agents)
-                                ├─ background monitor (status, orphan detection, hook ingest)
-                                ├─ background summarizer (headless agent → branch description)
-                                └─ Vue SPA at /
-```
-
-Agents call `weaver hook` to report status; the loom monitor sees the new
-`events` row on its next tick and flips the session's status. `weaver hook`,
-like every other subcommand, is just another HTTP call through the
-`weaver-api` client.
+`weaver` and the Vue SPA are REST clients of `loom`; only `loom` owns sqlite,
+worktrees, supervisors, agents, and background services. See
+[Architecture](docs/ARCHITECTURE.md) for the module map, flows, storage model,
+and route catalogue.
 
 ## Usage
 
-```sh
-# Orchestrator (optional)
-loom server run                            # run the daemon (REST + UI + terminals + monitor)
-loom session launch "Add a /health endpoint"               # new worktree + terminal + agent, seeded with the task
-loom session launch "Refactor the parser" --name parser-refactor   # override the branch slug
-loom session launch "Big refactor" --model opus --effort high      # pick model tier + reasoning effort
-loom session launch "Fix the flaky test" --repo ~/code/other       # a local checkout other than the cwd
-loom session launch "How do I run this?" --repo acme/widgets       # a GitHub repo — cloned on first use
-loom session poll <session>           # one-shot status (lifecycle + attention)
-loom session wait <session>           # block until it finishes or needs you
-loom session send <session> "try the curl again"   # deliver now (steer ACP, or interrupt + restart)
-loom session break <session>          # send Escape — interrupt the current turn
-loom session preview <session>        # print the recent terminal screen
-loom session url [<session>]          # its dashboard URL (yours by default) — the link to share
-loom session rename <session> "Short task label"
-loom session regenerate-title <session>       # refresh an eligible derived/generated label
-loom session title-generation <session> false # per-session generated-label opt-out
-loom session cue <session>                    # read the current source-linked cache
-loom session cue <session> --ensure           # generate only when inactivity says it is due
-loom session cue <session> --force            # explicit regeneration
-loom ps                               # list active sessions
-loom session show <branch>                    # session detail
-loom session layout show                      # spaces, groups, placements, defaults, revision
-loom session layout group-add space-user Focused
-loom session layout move --to <group-id> <session>...
-loom session layout reorder group <group-id> --before <group-id>
-loom attach <branch>                  # attach your terminal to the session (or use the browser terminal)
-loom session archive <branch>                 # tear down terminal + worktree, keep branch + history
-loom session adopt <branch>                   # recreate the terminal for an orphaned session
-loom session handoff <branch> --profile codex-review  # profile-first handoff, previewed with optimistic revisions
-loom session handoff <branch> --agent codex           # legacy runtime-only handoff compatibility
-loom session rm <branch>                      # remove worktree + terminal + db row
-loom open                             # open the web UI
+The common operator loop is launch, supervise, review, and archive:
 
-# Agent-facing (requires a reachable `loom server run`, via $WEAVER_API)
-weaver artifact show goal             # print the current goal (the `goal` artifact)
-weaver artifact write goal -          # update it from stdin
-weaver summary                        # goal + outstanding tasks + next-step hints
-weaver status attention "ready for review"   # level (ok|attention|blocked) + current-state message
-weaver issue add "Backfill old rows" --body "ETA after the schema change"
-weaver issue add "Audit the logger" --repo   # unclaimed repo backlog item
-weaver issue ls                       # this branch's work + the repo backlog
-weaver issue ls --mine                # just this branch's claimed issues
-weaver issue ls --repo                # the whole repo, grouped by branch
-weaver issue close 7
-weaver issue show 7                   # an issue + the live status of the branch working it
-weaver issue wait 7                   # block until a sub-session finishes or needs you
-weaver status                     # read: goal + status + open-issue count
-weaver where                          # debug: print the current branch's repo / branch / branch-id
-weaver log --limit 50                 # recent events for the current branch
-weaver chatlog                        # render this worktree's agent conversation as markdown
+```sh
+loom session launch "Add a /health endpoint"
+loom session poll <session>
+loom session wait <session>
+loom session send <session> "try the curl again"
+loom session interrupt <session>
+loom session url [<session>]
+loom session archive <session>
 ```
 
-`loom session` is the uniform surface for driving a child session. `loom
-session launch`'s positional argument is the **task**: it becomes the branch
-goal and the agent's opening prompt, and the `weaver/<slug>` branch name is
-derived from it (override with `--name`). Launches resolve the `default` profile
-unless you pass `--profile`; a non-strict profile can still be overridden with
-`--agent`, `--model`, `--effort`, `--protocol`, or `--mode`. The common case is
-just `loom session launch "<what to do>"`. A launch with no task and nothing to pick up prints a
-usage hint and exits without launching. New branches fork from a
-freshly-fetched `origin/<default branch>` — the latest mainline — unless you
-pin a parent with `--base` (also a field in the web create form).
+The task becomes the branch goal and opening prompt; Loom derives the
+`weaver/<slug>` branch name and forks from a freshly fetched default branch.
+Use `--repo` for another checkout or managed GitHub repository, `--base` to pin
+a parent branch, and `--claim` or `--issue` to seed the task from existing work.
+Run `loom session launch --help` for the complete launch surface.
 
 Profiles are reusable templates, not live session configuration. Omitted
-selectors inherit from the template and then the selected agent/default policy;
-the resolve preflight reports that provenance, capacity, and validation. Create
-sends the returned profile and resolver revisions, and the resulting
-`resolved_launch` is the concrete immutable snapshot for that runtime launch.
-Later profile, environment, registry, or default edits cannot silently change
-it. The New Session route exposes the same profile picker, one-launch overrides,
-resolved summary, editable “save as new” composition, and bounded Scratch
-drop/browse target as the REST/CLI workflow.
+selectors inherit from the selected template and agent defaults. The resolver
+previews concrete selectors, policy provenance, capacity, and validation before
+create. The result is a concrete snapshot stamped for that runtime launch.
+Later profile, environment, registry, or default edits cannot silently mutate
+it; an explicit handoff can replace it with a newly resolved snapshot. New
+Session exposes the same profile picker, editable launch fields, save-as-new
+composition, and bounded Scratch drop target as the CLI.
 
-Once a session is up, the other verbs interact with it: `loom session poll`
-reads its status, `loom session wait` blocks until it finishes or raises
-attention, `loom session send` delivers a message immediately (typing and
-submitting it for a terminal agent; steering or restarting an ACP turn),
-`loom session break` interrupts the current turn, and `loom session preview`
-prints the recent terminal screen. Each takes a session key — an id, branch id,
-branch name, or `repo:branch`.
+`poll` reads lifecycle and attention, `wait` blocks until completion or human
+attention, `send` delivers immediate control input, and `interrupt` stops the
+current turn. For ACP, a supported live turn is steered; otherwise Loom safely
+cancels/restarts or queues through the conversation contract. Session commands
+accept an id, branch id, branch name, or `repo:branch`.
 
 The session title is one canonical, unqualified task label; fleet views add its
 Group only when they need a qualified `Group / Task` name. Loom records whether
@@ -184,7 +122,7 @@ that label was deterministic, model-generated, human-authored, or issue-owned.
 Human and issue labels always take precedence: metadata generation can replace
 only an unchanged derived label, or an unchanged generated label after an
 explicit regenerate request. Renames use compare-and-swap so a stale tab cannot
-overwrite a newer label.
+overwrite a newer label. Generated labels can be disabled per session.
 
 The dashboard presents the fleet as shared **Spaces → Groups → Sessions**.
 Attention, All, and History are smart views over that placement; successful
@@ -201,17 +139,22 @@ stable multi-selection and atomic bulk triage. Destructive actions use
 focus-managed in-app confirmation with explicit scope and retryable inline
 errors; the SPA never delegates that work to browser prompts.
 
+On return after configured inactivity, Loom may prepare a short source-linked
+resumption cue from bounded conversation and immutable artifact inputs. Reading
+the cue is model-free; explicit ensure/force actions control generation. Cue and
+title assistance run with a cleared environment, no tools, and no MCP. Restricted
+session content is excluded unless the operator explicitly enables it, and
+source fingerprints prevent stale generated text from overwriting newer state.
+
 `loom session url` prints a session's dashboard URL — the link to hand a person,
 resolved against loom's externally-visible address (the `auth.base_url` setting,
 else the address you reached it on). With no key it is the session you are
 running inside, which is how an agent links a PR back to the work behind it.
 
-Three flags seed the task from existing work instead of a fresh description:
-`loom session launch --issue 123` takes the branch's title / goal / description
-from a GitHub issue (via the `gh` CLI), `--claim 7` takes them from an existing
-weaver issue and moves it out of the repo backlog, and `--branch <name>` resumes
-an existing branch. `loom issue ls` prints the repo's board across branches.
-Batch commands use the same atomic API as the Issues pane:
+Issues belong to a repository. `source_branch` records provenance;
+`claimed_branch` records the branch currently working the issue. The agent CLI
+defaults to this branch's claims plus the unclaimed backlog, while the Loom board
+shows the repository. Batch commands use the same atomic API as the Issues pane:
 `loom issue close 7 9`, `loom issue reopen 7 9`,
 `loom issue tag --key area --value ui 7 9`,
 `loom issue untag --key area 7 9`, and `loom issue delete 7 9`.
@@ -228,29 +171,28 @@ tracking issue is attributed to it (`source_branch`), so its sub-trees show up
 under "Delegated by this branch" in `weaver issue ls` — agents can fan work out
 into parallel sub-sessions and poll or block on them the same way a human does.
 
-`loom session launch --model <model> --effort <effort>` (both also selectors in
-the web create form) pins the session's model selector and reasoning effort.
-The selected agent type advertises its available models/efforts and translates
-them into its own launch flags (`claude` and `codex` are built in; a custom
-agent takes no model/effort selectors). Both are stored per session, so adopting
-a recovered session
-resumes with the same settings. Omit either to use the configured default, or
-the runtime's own default when no configured default is set.
+Inside a worktree, the compact agent loop is:
+
+```sh
+weaver summary
+weaver status ok "implementing the API"
+weaver issue add "Backfill old rows"
+weaver artifact write design design.md
+weaver issue close <id>
+```
+
+`weaver readme` prints the complete in-workspace workflow. Each command requires
+the current `WEAVER_BRANCH` and a reachable Loom server.
 
 ## Status & attention
 
 Status has two independent axes.
 
 The **lifecycle** (`session.status`) is mechanical and orchestrator-owned:
-`created`, `launching`, `running`, `orphaned`, `done`, or `error`. `done` and
-`error` are terminal; the rest, including `orphaned`, are recoverable. Claude-
-backed sessions drive it via Claude Code hooks installed into
-`.claude/settings.local.json` by `loom session launch`. Each hook shells out to
-`weaver hook --event {working|waiting|idle|session-start}`, writing an `events`
-row the monitor consumes on its next tick; any hook means the agent process is
-alive → `running`. When Claude blocks asking the user (the `waiting`/Notification
-hook), the monitor raises the branch's **attention** to `attention`; the live
-prompt itself is read straight from the terminal, one tab away.
+`created`, `running`, `orphaned`, `done`, `error`, or `archived`.
+ACP turn boundaries and terminal-agent hooks feed one promotion path; supervisor
+loss marks a recoverable session orphaned. Runtime permission requests remain in
+the ACP Conversation surface rather than becoming guessed lifecycle state.
 
 The **attention** axis is the agent's own signal of whether it needs you:
 `ok` (going fine, or blocked on something external like a CI run or PR review),
@@ -265,13 +207,14 @@ workflow.
 
 ## Adoption
 
-A session's terminal supervisor is independent of the loom daemon: restarting
-loom leaves it running, though it does not survive a machine reboot (the sqlite
-rows and worktrees do). When the monitor finds a session whose terminal has
-vanished, it marks it `orphaned` rather than `done`.
+A session's detached Tapestry runtime supervisor is independent of the loom
+daemon: restarting loom leaves it running, though it does not survive a machine
+reboot (the sqlite rows and worktrees do). When the monitor finds a session
+whose runtime supervisor has vanished, it marks it `orphaned` rather than
+`done`.
 
-An orphaned session can be adopted — its terminal recreated and its
-agent resumed (`claude --continue`):
+An orphaned session can be adopted: Loom recreates the stamped runtime and
+resumes it through that runtime's recovery contract.
 
 ```sh
 loom session adopt <branch>                   # or the "Adopt" button in the web UI
@@ -353,52 +296,6 @@ signature and authorizes the commenter against the **approved-user allowlist**
 grant). Set `LOOM_GITHUB_WEBHOOK_SECRET` and point a repo/org webhook at
 `{base}/api/github/webhook` (issue-comment events, `application/json`). See
 [docs/github-trigger.md](docs/github-trigger.md).
-
-## REST API (brief)
-
-Loom serves a JSON API under `/api`; the Vue SPA is the primary consumer.
-
-- `GET /api/health`, `GET /api/health/live` (process liveness), and
-  `GET /api/ready` (database + migration readiness)
-- `GET /metrics` (bounded-label OpenMetrics) and `GET /api/diagnostics`
-  (admin-only operational inventory used by Settings → Diagnostics)
-- `GET POST /api/sessions`, `GET /api/sessions/search`,
-  `GET PATCH DELETE /api/sessions/{id}`,
-  `POST /api/sessions/{id}/title/regenerate`,
-  `PUT /api/sessions/{id}/title-generation`,
-  `GET POST /api/sessions/{id}/resumption-cue`,
-  `POST /api/session-launches/resolve`,
-  `GET /api/session-layout`, `POST /api/session-layout/{moves,reorder}`,
-  and space/group/default CRUD under `/api/session-layout`,
-  `POST /api/sessions/{id}/handoff/resolve`,
-  `POST /api/sessions/{id}/{note,archive,adopt,handoff,github}`,
-  `PUT /api/sessions/{id}/tags` (atomic author-scoped replacement),
-  `GET /api/sessions/{id}/{changes,log,events}`,
-  `GET /api/sessions/{id}/terminal` (WebSocket: xterm.js ⇄ the tapestry PTY)
-- `GET /api/mcps`, `GET POST /api/mcps/custom`, and
-  `GET PUT DELETE /api/mcps/custom/{path}` (builtin discovery and validated,
-  revisioned custom MCP administration)
-- `GET POST /api/profiles`, `GET PUT DELETE /api/profiles/{name}`,
-  `GET /api/profiles/{name}/effective`, and
-  `POST /api/profiles/{name}/{probe,clone}`
-- `GET /api/scratch/limits`,
-  `GET POST DELETE /api/sessions/{id}/scratch`
-- `GET /api/branches`, `GET PATCH /api/branches/{id}`,
-  `GET POST /api/branches/{id}/issues` (issues claimed by the branch),
-  `GET PATCH DELETE /api/issues/{id}`, `POST /api/issues/actions`
-- `GET POST /api/sessions/{id}/reviews`,
-  `GET PATCH DELETE /api/reviews/{id}`,
-  `POST /api/reviews/{id}/comments`,
-  `PATCH DELETE /api/reviews/{id}/comments/{comment_id}`,
-  `POST /api/reviews/{id}/{submit,retry-delivery}`
-- `GET /api/repos/recent`, `GET /api/repos/branches?cwd=…`,
-  `GET POST /api/repos/issues?repo_root=…` (the repo-wide board / backlog)
-- `GET POST /api/repos` (the managed repo store / clone allowlist)
-- `POST /api/github/webhook` (the inbound GitHub trigger; HMAC-authenticated,
-  outside the login middleware — see [docs/github-trigger.md](docs/github-trigger.md))
-- `GET PATCH /api/settings`
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the shape of `SessionView`.
 
 ## Server address
 
@@ -496,133 +393,45 @@ genuinely remote callers need to present a token or log in.
 
 ## Configuration
 
-General settings live in the `settings` table of the sqlite database, which only
-`loom` opens directly. Agent launch policy and agent environment live in named
-profiles instead. `weaver config` is read-only — it fetches general settings
-over the REST API. Each known setting is declared in a registry (`config.rs`)
-with a label, help text, type, and default.
-
-Edit them in the **Settings** pane of the web UI, or write them straight to
-sqlite with `loom config set` (no running server needed):
+General settings and named launch profiles have separate ownership. Settings
+control the server and shared services. Profiles control agent selection,
+runtime policy, capacity, environment posture, and MCP access. Edit both in
+Settings or use the operator CLI:
 
 ```sh
 weaver config ls
 loom profile ls
 loom profile show default
-loom profile show github_comment
+loom profile show ops --effective
+loom profile probe ops
 loom mcp ls
 loom mcp show mcp/github/comment@v1
 loom profile add ops --agent codex --mcp github,messaging
-loom profile show ops --effective
-loom profile probe ops
-# Add or update a dependency-self-contained custom MCP (save validates it):
 loom mcp add /engineering/search/docs --label "Docs search" \
   --file server.py --tests test_mcp.py
-# App-less deployments can give restricted GitHub tools a shared identity:
-loom profile env secret github_comment GH_TOKEN \
-  projects/my-project/secrets/loom-github-ci-token/versions/latest
 ```
 
-Notable settings:
+Strict profiles reject one-launch overrides. Environment-cleared profiles start
+from a minimal baseline plus explicit ambient, profile, and repository values.
+Environment reads expose names and source metadata, never literal secret values.
 
-- Profiles select the agent, model, effort, protocol, ACP mode, session class,
-  concurrency/turn/idle limits, prelude, and environment posture. `strict`
-  profiles reject launch-time overrides; `env_clear` profiles start from a
-  minimal baseline plus their explicit ambient allowlist and layered
-  profile/repo env.
-- Profile and environment edits advance one optimistic revision. Creation and
-  clone are insert-only, clone optionally copies environment in the same
-  transaction, and retired names retain a tombstone generation so an old
-  preview can never match a recreated template.
-- Restricted profiles are Claude ACP automation envelopes for caller-supplied
-  prompts. They suppress the Weaver prelude and repository setup/config, clear
-  Claude setting sources, expose repository-scoped read tools plus fixed
-  server-side GitHub tools selected by the built-in `mcp/github/comment@v1`
-  capability set, and have Loom reject every unmatched permission request.
-  Loom expands profile capability sets into exact permissions when it stamps a
-  session and derives adapter processes from its trusted MCP registry; profiles
-  never supply executable MCP configuration. The GitHub credential never enters
-  the agent process. Loom uses the configured GitHub App's short-lived,
-  repository-scoped installation token. An App-less deployment can explicitly
-  configure a profile `GH_TOKEN`; personal user tokens remain exclusive to
-  ordinary interactive sessions. The stock `github_comment` profile is seeded
-  from its reviewed declarative manifest and remains operator-editable after the
-  first seed. See
-  [Restricted GitHub sessions](docs/restricted-sessions.md).
-- MCP capability sets are stable, provider-neutral profile policy. Inspect
-  their adapter, exact tool surface, version, and content digest with `loom mcp
-  ls` / `loom mcp show`; the Settings profile editor exposes the same registry.
-  Profiles choose `none`, `all`, or an explicit comma-separated group list with
-  `--mcp`. Saving pins the exact capabilities to that profile revision; editing
-  the registry cannot silently widen it, and saving the profile again is the
-  explicit reconciliation point. The builtins cover fixed-repository GitHub
-  work, durable status updates, fixed-thread Slack replies, and normalized
-  self-history/search; all reuse Loom's existing session-scoped routes, so
-  provider credentials remain server-side.
-  Provider-specific runtime permission rules remain an implementation detail of
-  the selected agent, rather than the vocabulary used to name MCP access.
-- Administrators can add Python MCP servers under identities such as
-  `/engineering/search/docs`. Loom stores immutable source revisions in sqlite,
-  runs real MCP discovery plus optional tests through `uv`, and excludes failed
-  or disabled definitions from newly saved profile revisions. Custom scripts run with a
-  cleared environment, Loom-controlled uv dependency paths, and session-scoped
-  Loom API context, are never admitted to restricted profiles, and are operator
-  code rather than an OS sandbox. See the
-  [MCP/profile design](docs/plans/mcp-profiles.md).
-- Profile environment values are write-only: API, CLI, and Settings responses
-  expose names and update times, never secret values.
-- Optional metadata assistance reuses each session's ACP runtime for one
-  economy-model prompt under an internal cleared-environment, no-tools, no-MCP
-  posture; it is unavailable when that runtime advertises no economy model.
-  Restricted-session excerpts remain blocked unless
-  `metadata.allow_restricted` is explicitly enabled, and failure to resolve any
-  configured secret source aborts generation rather than sending unredacted
-  content. Title generation is asynchronous and fenced by the exact
-  goal/title/provenance/profile source it read. Resumption cues are generated
-  only by an explicit request or an on-return ensure after
-  `metadata.resumption_inactivity_secs`; GET is model-free, and cached prose is
-  reused only while its bounded conversation/content fingerprint and immutable
-  artifact identities still match.
-- `server.auto_adopt` — adopt every recoverable session on daemon startup.
-- `github.poll` — poll GitHub (via `gh`) for each session's PR, review, and
-  check status (on by default; a no-op without `gh` or a GitHub remote).
-- `github.archive_on_merge` — archive a session automatically once its PR
-  merges (on by default).
-- `session.log_dir` — where a session's agent conversation log is captured on
-  archive (a normalized `chat.json` + a rendered `chat.md` under
-  `<dir>/<branch>/`). Blank ⇒ `~/.iris/logs/sessions`; point it at a persistent
-  path when the home dir isn't a mounted volume.
-- `terminal.theme` — colour palette for the in-browser terminal: `dark` (the
-  classic black background, default) or `light`.
-- `auth.trust_loopback` — trust loopback requests as the machine owner (on by
-  default; turn off behind a same-host proxy). See [Authentication](#authentication).
-- `auth.cookie_secure` — mark the login cookie `Secure` (enable when served over
-  HTTPS).
-- `auth.base_url` — the public URL loom is reached at, used for the GitHub OAuth
-  callback (blank ⇒ derived from the request's Host header).
+MCP selection is provider-neutral: `none`, `all`, or named groups. Saving a
+profile pins exact capability identities and revisions; registry edits cannot
+silently widen saved profiles or running sessions. Custom MCP programs are
+validated administrator code, not a sandbox. See
+[MCP and profile control plane](docs/mcp-profiles.md).
+
+Restricted automation profiles additionally suppress repository-controlled
+configuration, expose only stamped tools, reject unmatched permission requests,
+and keep provider credentials server-side. See
+[Restricted sessions](docs/restricted-sessions.md).
+
+The complete setting registry is self-documenting in Settings and
+`weaver config ls`. Environment variables and runtime defaults are catalogued in
+[Architecture](docs/ARCHITECTURE.md#environment); standalone deployment values
+live in [deploy/README.md](deploy/README.md).
 
 ## Developing weaver
 
-To build, test, or hack on weaver itself, see [AGENTS.md](AGENTS.md) — it has
-the full loop, the pre-commit gate, and the project conventions. The short of
-it: `cargo build` compiles the backend and bundles the Vue dashboard into the
-`loom` binary (needs Node + npm; a Node-less checkout still builds and serves a
-placeholder page), `cargo test --workspace` runs the backend suites, and `cd e2e
-&& npm test` runs the Playwright UI suite.
-
-## Environment
-
-- `WEAVER_HOME` — state directory (default `~/.weaver`)
-- `WEAVER_DB` — database path (default `$WEAVER_HOME/weaver.db`)
-- `WEAVER_API` — explicit loom URL; overrides automatic named-context selection
-- `LOOM_CONTEXT` — named context to use when `--context` and `WEAVER_API` are unset
-- `WEAVER_BRANCH` — override the branch resolver (set by `loom session launch`
-  in the worktree)
-- `LOOM_TOKEN` — explicit bearer token for CLI clients and automation; normally
-  overrides saved context credentials (see [Authentication](#authentication))
-- `LOOM_OWNER_GITHUB` — GitHub login seeded as the owner on a fresh database.
-  No default; leave it unset and no owner is seeded (GitHub sign-in won't work
-  until it is set).
-- `LOOM_GITHUB_CLIENT_ID` / `LOOM_GITHUB_CLIENT_SECRET` — GitHub OAuth app credentials
-- `LOOM_GITHUB_WEBHOOK_SECRET` — shared secret for the inbound GitHub trigger; until set, the webhook rejects every delivery ([docs/github-trigger.md](docs/github-trigger.md))
-- `WEAVER_REPOS_DIR` — managed repo store root (default `$WEAVER_HOME/repos`)
+See [AGENTS.md](AGENTS.md) for the proportional test loop, pre-commit gate,
+repository conventions, and PR workflow.

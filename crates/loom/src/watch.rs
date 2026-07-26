@@ -3,8 +3,7 @@
 //!
 //! The storage + model (`Watch`, `Trigger`, `Scope`, the run audit) lives
 //! in [`weaver_core::watch`]; this module is the live machinery that turns
-//! those rows into action. It is built as **two halves of one event loop**, the
-//! design of record in `docs/plans/watches.md`:
+//! those rows into action. It is built as **two halves of one event loop**:
 //!
 //! * **The timer (producer).** For each enabled scheduled watch it keeps a
 //!   `next_run_at`, and when due writes a `cron` system event into the same

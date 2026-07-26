@@ -9,7 +9,8 @@
 //!   stamping its name here.
 //!
 //! "The branch's working set" is therefore `claimed_branch = <branch>`, and the
-//! per-session badge counts the same. See `docs/repo-scoped-issues.md`.
+//! per-session badge counts the same. See the storage model in
+//! `docs/ARCHITECTURE.md`.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

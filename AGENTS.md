@@ -14,10 +14,10 @@ Two binaries over loom's REST API:
 - **`weaver`** — the agent CLI: status, issues, artifacts, hook events. A thin HTTP
   client of `loom` (`weaver-api::Client`) — every command needs a reachable
   `loom server run`.
-- **`loom`** — the orchestrator: REST + SSE server, Vue SPA, per-branch
-  terminal supervisor + agent process, the monitor, and `git worktree`
-  shell-outs. The only process that opens the sqlite db (`~/.weaver/weaver.db`)
-  directly.
+- **`loom`** — the orchestrator: REST + SSE server, Vue SPA, per-session
+  detached Tapestry runtime supervisor + agent process, the monitor, and
+  `git worktree` shell-outs. The only process that opens the sqlite db
+  (`~/.weaver/weaver.db`) directly.
 
 Diagram and module-by-module map: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -31,14 +31,16 @@ cd e2e && npm test       # exhaustive Playwright UI suite against a real loom
 cd python/weaver-loom && uv run pytest   # weaver_loom + builtin watch program logic (server-free)
 ```
 
-Test placement: pure program/module logic lives in pytest
-(`python/weaver-loom/tests/`, `crates/weaver-py/tests/`); Rust integration
-tests prove wiring against a live server — don't duplicate logic across them.
+Test placement: Python client/watch and binding logic lives in pytest
+(`python/weaver-loom/tests/`, `crates/weaver-py/tests/`); Rust and frontend
+module logic stays in unit tests; integration and Playwright tests prove
+cross-layer wiring and user journeys. Don't duplicate the same contract across
+tiers.
 
-Run `./scripts/pre-commit.sh` before committing — the fmt + clippy gate CI
-enforces; wire it up as a hook with `git config core.hooksPath .githooks`. Keep
-compile, type, and relevant test checks proportional to the change, but always
-run the ones that apply.
+Run `./scripts/pre-commit.sh` before committing — it is CI's deterministic Rust
+fmt/clippy plus frontend unit/type/format gate. Wire it up as a hook with
+`git config core.hooksPath .githooks`. Keep compile and relevant test checks
+proportional to the change, but always run the ones that apply.
 
 Separately, follow the canonical [agent lint-review
 policy](docs/lint.md#when-to-run): run `scripts/lint-review.py` for substantive
@@ -54,13 +56,13 @@ in the commit path. Build/test internals and the Playwright setup live in
 ## Don't disturb the user's live loom
 
 A real `loom server run` is **machine-global**: one shared `~/.weaver/weaver.db` and a
-set of detached `tapestry` terminal supervisors (under `~/.weaver/sock`),
+set of detached Tapestry runtime supervisors (under `~/.weaver/sock`),
 normally running the user's agents — including the one running *you*. The
 supervisors are detached, so they outlive `loom server run` and a broad kill is what
 wipes them. So unless the user explicitly asks:
 
 - **Don't** start your own `loom server run` or `loom session launch` against the default
-  `~/.weaver`, kill the user's terminal supervisors, or run broad process cleanup
+  `~/.weaver`, kill the user's runtime supervisors, or run broad process cleanup
   (`pkill -f tapestry`, `pkill -f weaver`). Each wipes the user's agents at a
   stroke.
 - **If a task seems to need a live loom, ask first.**
