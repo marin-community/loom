@@ -44,20 +44,31 @@ pub(super) async fn logs_stream() -> Sse<impl Stream<Item = Result<sse::Event, I
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-/// A small "what am I looking at" status blob for the debug panel — enough to
-/// tell whether a redeploy landed (pid + start time change on restart).
+/// A small "what am I looking at" status blob for the debug panel: build and
+/// image identity plus process identity, so both deploys and restarts are
+/// attributable.
 #[derive(Debug, Serialize)]
 pub(super) struct ServerStatus {
     version: &'static str,
+    build_revision: &'static str,
+    build_profile: &'static str,
+    /// Digest-pinned image reference when a container deployment supplies one.
+    image: Option<String>,
     pid: u32,
     /// When this process started capturing logs (≈ process start), RFC3339.
     started_at: String,
 }
 
-/// `GET /api/status` — build version + pid + start time (operator-only).
+/// `GET /api/status` — build and process identity (operator-only).
 pub(super) async fn server_status() -> Json<ServerStatus> {
     Json(ServerStatus {
         version: env!("CARGO_PKG_VERSION"),
+        build_revision: env!("LOOM_BUILD_REVISION"),
+        build_profile: env!("LOOM_BUILD_PROFILE"),
+        image: std::env::var("LOOM_IMAGE")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
         pid: std::process::id(),
         started_at: logs::buffer().started_at().to_string(),
     })

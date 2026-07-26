@@ -12,6 +12,10 @@ COPY . .
 # `debug` (default) is far faster to compile — fine for local/standalone
 # try-outs; pass `release` for a production image (`CARGO_PROFILE=release`).
 ARG CARGO_PROFILE=debug
+# Immutable remote Git build contexts normally omit `.git`, so deployment
+# tooling can pass the resolved source SHA explicitly. Local contexts may leave
+# this empty and loom's build script discovers HEAD itself.
+ARG LOOM_BUILD_REVISION
 
 # BuildKit cache mounts persist the cargo registry/git and the target dir across
 # builds *without* baking them into the image, so an incremental rebuild only

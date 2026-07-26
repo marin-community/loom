@@ -193,6 +193,13 @@ const uptime = computed(() => {
   return h ? `${h}h ${m}m` : m ? `${m}m ${s}s` : `${s}s`;
 });
 
+const shortIdentity = (value: string): string => {
+  if (value === 'unknown') return value;
+  const digest = value.includes('@') ? value.slice(value.lastIndexOf('@') + 1) : value;
+  if (digest.startsWith('sha256:')) return `${digest.slice(0, 19)}…`;
+  return digest.slice(0, 12);
+};
+
 const currentSessionCount = computed(
   () =>
     diagnostics.value?.sessions
@@ -239,7 +246,7 @@ onUnmounted(() => {
   <div>
     <p v-if="error" class="mb-3 text-sm text-block">{{ error }}</p>
 
-    <!-- Status line: server identity, so a redeploy is visible (pid/start change). -->
+    <!-- Build + process identity, so a redeploy is visible and attributable. -->
     <div
       v-if="status"
       class="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border border-line bg-surface px-3 py-2 font-mono text-2xs text-muted"
@@ -247,6 +254,15 @@ onUnmounted(() => {
       <span
         >v<span class="text-accent">{{ status.version }}</span></span
       >
+      <span :title="status.build_revision">
+        rev <span class="text-accent">{{ shortIdentity(status.build_revision) }}</span>
+      </span>
+      <span>
+        profile <span class="text-accent">{{ status.build_profile }}</span>
+      </span>
+      <span v-if="status.image" :title="status.image">
+        image <span class="text-accent">{{ shortIdentity(status.image) }}</span>
+      </span>
       <span
         >pid <span class="text-accent">{{ status.pid }}</span></span
       >

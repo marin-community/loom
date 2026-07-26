@@ -1450,6 +1450,9 @@ export interface LogLine {
 /** Build/runtime status of the server. Mirrors `loom::web::logview::ServerStatus`. */
 export interface ServerStatus {
   version: string;
+  build_revision: string;
+  build_profile: string;
+  image: string | null;
   pid: number;
   started_at: string;
 }
