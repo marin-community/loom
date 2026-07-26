@@ -78,7 +78,7 @@ async fn make_session(ts: &TestServer, id: &str) {
 
 /// Bring up a fresh ACP session (relay + handshake + task) with the given launch
 /// mode and optional goal.
-async fn start_new(ts: &TestServer, id: &str, mode: Option<&str>, goal: Option<&str>) {
+pub(super) async fn start_new(ts: &TestServer, id: &str, mode: Option<&str>, goal: Option<&str>) {
     start_new_with_env(ts, id, mode, goal, vec![]).await;
 }
 

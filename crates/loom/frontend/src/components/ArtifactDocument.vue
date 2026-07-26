@@ -1,10 +1,34 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, onBeforeUnmount, nextTick, h, isVNode, type VNode } from 'vue';
+import {
+  computed,
+  h,
+  isVNode,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+  type VNode,
+} from 'vue';
 import { useRouter } from 'vue-router';
 import { renderTokens } from '../markdown-render';
 import { useMarkdownDoc, routeDocLink } from '../lib/markdownDoc';
-import type { IssueRefStatus, Thread } from '../types';
-import { listThreads, createThread, addComment, resolveThread } from '../api';
+import type { IssueRefStatus, Review, ReviewComment } from '../types';
+import {
+  addReviewComment,
+  createArtifactReview,
+  deleteReviewComment,
+  discardReview,
+  listArtifactReviews,
+  retryReviewDelivery,
+  retargetReviewToCurrent,
+  resolveThread,
+  setReviewCommentResolution,
+  submitReview,
+  updateReview,
+  updateReviewComment,
+  ApiError,
+} from '../api';
 import {
   captureAnchor,
   locate,
@@ -14,49 +38,31 @@ import {
   COMMENT_UI_ATTR,
   type TextAnchor,
 } from '../discussion-anchor';
-import CommentThread from './CommentThread.vue';
+import { ReviewDraftController } from '../lib/reviewDraftController';
+import InlineConfirm from './InlineConfirm.vue';
+import ReviewCommentCard from './ReviewCommentCard.vue';
 
 // Dock/pop swaps mounts of the same document. Keep a small in-memory scroll
 // ledger keyed by session + artifact + revision so the document remains where
 // the reader left it across that layout change.
-const scrollPositions = new Map<string, number>();
+type ScrollSnapshot = { top: number; block?: number; offset?: number };
+const scrollPositions = new Map<string, ScrollSnapshot>();
 const MAX_SCROLL_POSITIONS = 100;
 const LAST_SCROLL_POSITION = 'loom.artifactScrollPosition';
 
-// The collaborative markdown surface: one component that renders the artifact as
-// a real Vue tree (the same token→vnode renderer MarkdownView uses) AND owns the
-// inline comment layer, Google-Wave style — each thread's card renders *in the
-// document flow* as a plain vnode right after the block its quote anchors to.
-//
-// This replaces the old MarkdownView+ArtifactComments pair, whose comment layer
-// was hand-wired imperative DOM (a mouseup listener bolted onto an innerHTML
-// blob, cards teleported into spliced-in placeholders). That wiring silently
-// died when the panel went through a keep-alive / v-show round-trip. Here the
-// <article> is owned by this component and never swapped, the mouseup handler is
-// a Vue template binding (so it can't detach), and the cards are real vnodes
-// keyed by block — so a warm panel keeps working.
-//
-// Anchoring is unchanged and correct: stand-off W3C text-quote selectors located
-// in the rendered DOM (`discussion-anchor.ts`) and painted via the CSS Custom
-// Highlight API — no wrapper elements, no source-offset map.
 const props = defineProps<{
-  /** Session id — for the markdown image/link context and the comment API. */
   id: string;
-  /** Pseudo-path (e.g. `goal.md`) — anchors relative image resolution. */
   path: string;
-  /** Raw markdown source of the artifact revision on screen. */
   source: string;
-  /** Live `#N` issue status map for the smartdoc projection. */
   refs?: Record<string, IssueRefStatus>;
-  /** The artifact name — the comment threads' owning document. */
   artifactName: string;
-  /** The artifact's current latest revision — stamped on a new thread's anchor. */
+  /** The artifact revision currently rendered, which may be historical. */
   rev: number;
 }>();
 
 const router = useRouter();
 
-// --- markdown body ----------------------------------------------------------
+// --- markdown body + scroll ownership --------------------------------------
 
 const containerEl = ref<HTMLElement | null>(null);
 const scrollerEl = ref<HTMLElement | null>(null);
@@ -66,46 +72,67 @@ function scrollKey(): string {
   return `${props.id}:${props.artifactName}:${props.rev}`;
 }
 
-function cacheScroll(key = activeScrollKey): number | undefined {
+function cacheScroll(key = activeScrollKey): ScrollSnapshot | undefined {
   if (!key || !scrollerEl.value) return;
-  const top = scrollerEl.value.scrollTop;
+  const scroller = scrollerEl.value;
+  const viewportTop = scroller.getBoundingClientRect().top;
+  const visible = [...scroller.querySelectorAll<HTMLElement>('[data-block]')].find(
+    (element) => element.getBoundingClientRect().bottom > viewportTop,
+  );
+  const snapshot: ScrollSnapshot = { top: scroller.scrollTop };
+  const block = visible?.getAttribute('data-block');
+  if (visible && block != null) {
+    snapshot.block = Number(block);
+    snapshot.offset = visible.getBoundingClientRect().top - viewportTop;
+  }
   if (!scrollPositions.has(key) && scrollPositions.size >= MAX_SCROLL_POSITIONS) {
     const oldest = scrollPositions.keys().next().value;
     if (oldest) scrollPositions.delete(oldest);
   }
-  scrollPositions.set(key, top);
-  return top;
+  scrollPositions.set(key, snapshot);
+  return snapshot;
 }
 
 function persistScroll(key = activeScrollKey): void {
-  const top = cacheScroll(key);
-  if (top === undefined) return;
-  // Dock/pop can load the same SFC through separate async bundle instances.
-  // One tab-local handoff record keeps that transition correct without making
-  // the reading position durable or sending document identity anywhere.
+  const snapshot = cacheScroll(key);
+  if (snapshot === undefined) return;
   try {
-    sessionStorage.setItem(LAST_SCROLL_POSITION, JSON.stringify({ key, top }));
+    sessionStorage.setItem(LAST_SCROLL_POSITION, JSON.stringify({ key, ...snapshot }));
   } catch {
-    // Storage may be disabled; the in-module ledger still covers ordinary swaps.
+    // The in-module ledger still covers ordinary dock/pop swaps.
   }
 }
 
 async function restoreScroll(key: string): Promise<void> {
   await nextTick();
   if (key !== activeScrollKey || !scrollerEl.value) return;
-  let top = scrollPositions.get(key);
-  if (top === undefined) {
+  let snapshot = scrollPositions.get(key);
+  if (snapshot === undefined) {
     try {
       const last = JSON.parse(sessionStorage.getItem(LAST_SCROLL_POSITION) ?? 'null') as {
         key?: string;
         top?: number;
+        block?: number;
+        offset?: number;
       } | null;
-      if (last?.key === key && typeof last.top === 'number') top = last.top;
+      if (last?.key === key && typeof last.top === 'number') {
+        snapshot = { top: last.top, block: last.block, offset: last.offset };
+      }
     } catch {
-      // An invalid tab-local hint is equivalent to no saved reading position.
+      // Invalid tab-local state is equivalent to no saved position.
     }
   }
-  scrollerEl.value.scrollTop = top ?? 0;
+  const scroller = scrollerEl.value;
+  scroller.scrollTop = snapshot?.top ?? 0;
+  if (snapshot?.block != null && snapshot.offset != null) {
+    const sentinel = scroller.querySelector<HTMLElement>(`[data-block="${snapshot.block}"]`);
+    if (sentinel) {
+      scroller.scrollTop +=
+        sentinel.getBoundingClientRect().top -
+        scroller.getBoundingClientRect().top -
+        snapshot.offset;
+    }
+  }
 }
 
 watch(
@@ -114,194 +141,422 @@ watch(
     if (previous) persistScroll(`${previous[0]}:${previous[1]}:${previous[2]}`);
     activeScrollKey = scrollKey();
     void restoreScroll(activeScrollKey);
+    void loadReviews();
   },
+  { flush: 'sync' },
 );
 
-// The shared markdown build pipeline: parse → reactive `tokens`/`ctx`, with the
-// out-of-order guard and the source watch. After each build lands (the fresh
-// tree painted) we re-run the comment locate pass against the new DOM.
 const { body, error, tokens, ctx } = useMarkdownDoc(props, () => {
   locateCycle();
-  // Markdown rendering is asynchronous; restore again once the long body exists,
-  // otherwise an early assignment can clamp to zero before content overflows.
   if (activeScrollKey) void restoreScroll(activeScrollKey);
 });
 
-// --- comment state ----------------------------------------------------------
+// --- review state -----------------------------------------------------------
 
-const threads = ref<Thread[]>([]);
+type ReviewEntry = { review: Review; comment: ReviewComment };
+
+const reviews = ref<Review[]>([]);
+const reviewError = ref('');
+const reviewNotice = ref('');
+const composerError = ref('');
+const trayError = ref('');
+const commentErrors = ref<Record<number, string>>({});
+const deliveryErrors = ref<Record<number, string>>({});
 const activeId = ref<number | null>(null);
+const trayOpen = ref(false);
+const overallNote = ref('');
+const summarySaving = ref(false);
+const summaryDirty = ref(false);
+let summarySaveTimer: ReturnType<typeof setTimeout> | null = null;
+const acknowledgeOutdated = ref(false);
+const submitting = ref(false);
+const discarding = ref(false);
+const layoutBusy = ref(false);
+let releaseLayoutBarrier: (() => void) | null = null;
+let layoutReturnFocus: HTMLElement | null = null;
+const reanchorCommentId = ref<number | null>(null);
 
-// Located open threads grouped by the top-level block index they sit under, plus
-// the live ranges backing the paint (read by the click hit-test and focus scroll)
-// and the open threads whose quote no longer locates (the unanchored footer).
-const cardsByBlock = ref<Map<number, Thread[]>>(new Map());
-const locatedThreads = ref<{ thread: Thread; range: Range }[]>([]);
-const orphaned = ref<Thread[]>([]);
-const showOrphaned = ref(false);
+const draft = computed(() => reviews.value.find((review) => review.status === 'draft') ?? null);
+const recentSubmitted = computed(
+  () =>
+    [...reviews.value]
+      .filter((review) => review.status === 'submitted' && !review.legacy)
+      .sort((a, b) => b.id - a.id)[0] ?? null,
+);
+const failedSubmissions = computed(() =>
+  [...reviews.value]
+    .filter(
+      (review) =>
+        review.status === 'submitted' && !review.legacy && review.delivery_state === 'failed',
+    )
+    .sort((a, b) => b.id - a.id),
+);
+const draftEntries = computed<ReviewEntry[]>(() =>
+  (draft.value?.comments ?? []).map((comment) => ({ review: draft.value!, comment })),
+);
+const feedbackPreview = computed(() => {
+  return draft.value?.message ?? '';
+});
+const allEntries = computed<ReviewEntry[]>(() => {
+  const entries: ReviewEntry[] = [];
+  for (const review of reviews.value) {
+    if (review.legacy) {
+      const first = review.comments[0];
+      if (first) entries.push({ review, comment: first });
+    } else {
+      for (const comment of review.comments) entries.push({ review, comment });
+    }
+  }
+  return entries;
+});
 
-// New-thread composer: the captured anchor, its live range (to place the card
-// under the right block), the block it lands under, and the draft body.
-const pending = ref<{ anchor: TextAnchor } | null>(null);
-let pendingRange: Range | null = null;
-const pendingBlock = ref<number>(-1);
-const pendingDraft = ref('');
+function replaceReview(next: Review) {
+  const index = reviews.value.findIndex((review) => review.id === next.id);
+  if (index === -1) reviews.value = [next, ...reviews.value];
+  else {
+    const copy = [...reviews.value];
+    copy[index] = next;
+    reviews.value = copy;
+  }
+}
 
-// The floating "💬 Comment" button after a selection.
-const selectionButton = ref<{ anchor: TextAnchor; top: number; left: number } | null>(null);
-const buttonEl = ref<HTMLElement | null>(null);
+function conflictReview(error: unknown): Review | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  const details = error.body.details;
+  if (!details || typeof details !== 'object') return null;
+  const fresh = (details as { review?: unknown }).review;
+  if (!fresh || typeof fresh !== 'object' || typeof (fresh as Review).id !== 'number') return null;
+  const review = fresh as Review;
+  if (review.status === 'draft') draftController.reconcile(review);
+  else {
+    replaceReview(review);
+    draftController.clearOwnership();
+  }
+  const liveIds = new Set(allEntries.value.map((entry) => entry.comment.id));
+  if (activeId.value != null && !liveIds.has(activeId.value)) activeId.value = null;
+  if (reanchorCommentId.value != null && !liveIds.has(reanchorCommentId.value)) {
+    reanchorCommentId.value = null;
+  }
+  void nextTick(locateCycle);
+  return review;
+}
 
-async function loadThreads() {
+function mutationMessage(error: unknown): string {
+  if (conflictReview(error)) {
+    return 'This draft changed elsewhere. The latest review is loaded; review it before retrying.';
+  }
+  return (error as Error).message;
+}
+
+function setCommentMutationError(commentId: number, error: unknown): string {
+  const message = mutationMessage(error);
+  if (allEntries.value.some((entry) => entry.comment.id === commentId)) {
+    commentErrors.value[commentId] = message;
+  } else {
+    trayError.value = message;
+  }
+  return message;
+}
+
+const draftController = new ReviewDraftController<Review>({
+  async saveSummary(item, summary) {
+    let current = item;
+    if (!current) {
+      if (!summary.trim()) return null;
+      current = await createArtifactReview(props.id, {
+        subject_kind: 'artifact',
+        subject_key: props.artifactName,
+        subject_version: String(props.rev),
+      });
+    }
+    if (current.summary === summary) return current;
+    summarySaving.value = true;
+    trayError.value = '';
+    try {
+      return await updateReview(current.id, {
+        expected_revision: current.draft_revision,
+        summary,
+      });
+    } finally {
+      summarySaving.value = false;
+    }
+  },
+  onDraft(next) {
+    if (next) replaceReview(next);
+  },
+  onSummary(summary, dirty) {
+    overallNote.value = summary;
+    summaryDirty.value = dirty;
+  },
+});
+
+async function loadReviews() {
+  const epoch = draftController.beginRefresh();
   try {
-    threads.value = await listThreads(props.id, props.artifactName);
+    const loaded = await listArtifactReviews(props.id, props.artifactName);
+    const nextDraft = loaded.find((review) => review.status === 'draft') ?? null;
+    if (!draftController.acceptRefresh(epoch, nextDraft)) return;
+    reviews.value = loaded;
+    reviewError.value = '';
+    if (activeId.value != null && !allEntries.value.some((x) => x.comment.id === activeId.value)) {
+      activeId.value = null;
+    }
   } catch (e) {
-    // A transient failure shouldn't wipe already-loaded threads; keep what we
-    // have and recover on the next render / SSE refetch.
-    console.warn('failed to load comment threads', e);
+    reviewError.value = (e as Error).message;
   }
   await nextTick();
   locateCycle();
 }
 
+function editOverallNote(event: Event) {
+  const summary = (event.target as HTMLTextAreaElement).value;
+  draftController.editSummary(summary);
+  if (!draftController.draft && !summary.trim()) return;
+  if (summarySaveTimer) clearTimeout(summarySaveTimer);
+  summarySaveTimer = setTimeout(() => {
+    summarySaveTimer = null;
+    void saveOverallNote();
+  }, 400);
+}
+
 // --- locate + paint + group -------------------------------------------------
 
-// Locate every open thread against the rendered DOM, paint the highlights, and
-// group each into the block it annotates so the render function can interleave
-// its card. Placeholders and cards are marked COMMENT_UI_ATTR, which
-// `buildTextMap` skips — so a card's own echo of a quote never pollutes a search.
+const cardsByBlock = ref<Map<number, ReviewEntry[]>>(new Map());
+const locatedEntries = ref<{ entry: ReviewEntry; range: Range }[]>([]);
+const orphaned = ref<ReviewEntry[]>([]);
+
+const pending = ref<{
+  anchor: TextAnchor & { block_index?: number | null };
+  subjectVersion: string;
+} | null>(null);
+let pendingRange: Range | null = null;
+const pendingBlock = ref(-1);
+const pendingDraft = ref('');
+const savingComment = ref(false);
+
 function locateCycle() {
   const root = body.value;
   if (!root) {
     cardsByBlock.value = new Map();
-    locatedThreads.value = [];
-    orphaned.value = threads.value.filter((t) => t.status === 'orphaned');
+    locatedEntries.value = [];
+    orphaned.value = allEntries.value;
     clearHighlights();
     return;
   }
-  const open = threads.value.filter((t) => t.status === 'open');
-  const located: { thread: Thread; range: Range; block: number }[] = [];
-  const unlocated: Thread[] = [];
-  for (const thread of open) {
-    const r = locate(root, thread.anchor);
-    if (!r) {
-      unlocated.push(thread);
+  const located: { entry: ReviewEntry; range: Range; block: number }[] = [];
+  const unlocated: ReviewEntry[] = [];
+  for (const entry of allEntries.value) {
+    const range = locate(root, entry.comment.anchor);
+    if (!range) {
+      unlocated.push(entry);
       continue;
     }
-    const el = blockContaining(root, r.endContainer) ?? blockContaining(root, r.startContainer);
-    const attr = el?.getAttribute('data-block');
-    located.push({ thread, range: r, block: attr != null ? Number(attr) : -1 });
+    const element =
+      blockContaining(root, range.endContainer) ?? blockContaining(root, range.startContainer);
+    const attr = element?.getAttribute('data-block');
+    const capturedBlock = entry.comment.anchor.block_index;
+    const block =
+      attr != null ? Number(attr) : typeof capturedBlock === 'number' ? capturedBlock : -1;
+    located.push({ entry, range, block });
   }
-  locatedThreads.value = located.map((x) => ({ thread: x.thread, range: x.range }));
+  locatedEntries.value = located.map(({ entry, range }) => ({ entry, range }));
 
-  const activeRange = located.find((x) => x.thread.id === activeId.value)?.range ?? null;
+  const paintable = located.filter(({ entry }) => entry.comment.status !== 'resolved');
+  const activeRange =
+    paintable.find(({ entry }) => entry.comment.id === activeId.value)?.range ?? null;
   paintHighlights(
-    located.map((x) => x.range),
+    paintable.map(({ range }) => range),
     activeRange,
   );
 
-  // Document order within a block: several cards on one block stack in reading
-  // order beneath it.
   located.sort((a, b) => a.range.compareBoundaryPoints(Range.START_TO_START, b.range));
-  const byBlock = new Map<number, Thread[]>();
-  for (const { thread, block } of located) {
-    const arr = byBlock.get(block);
-    if (arr) arr.push(thread);
-    else byBlock.set(block, [thread]);
+  const byBlock = new Map<number, ReviewEntry[]>();
+  for (const { entry, block } of located) {
+    const entries = byBlock.get(block);
+    if (entries) entries.push(entry);
+    else byBlock.set(block, [entry]);
   }
   cardsByBlock.value = byBlock;
+  orphaned.value = unlocated;
 
-  orphaned.value = [...unlocated, ...threads.value.filter((t) => t.status === 'orphaned')];
-
-  // The composer sits under the block its selection ended in (else the very end).
   if (pending.value && pendingRange && root.contains(pendingRange.endContainer)) {
-    const el = blockContaining(root, pendingRange.endContainer);
-    const attr = el?.getAttribute('data-block');
+    const element = blockContaining(root, pendingRange.endContainer);
+    const attr = element?.getAttribute('data-block');
     pendingBlock.value = attr != null ? Number(attr) : -1;
+    pending.value.anchor.block_index = pendingBlock.value;
   } else if (!pending.value) {
     pendingBlock.value = -1;
   }
 }
 
-// Repaint / re-place when the focused thread changes.
-watch(activeId, () => locateCycle());
+watch(activeId, locateCycle);
+watch(allEntries, () => nextTick(locateCycle));
+// --- keyboard/mouse selection affordance -----------------------------------
 
-// --- selection → new comment ------------------------------------------------
+const selectionButton = ref<{
+  anchor: TextAnchor & { block_index?: number | null };
+  subjectVersion: string;
+  top: number;
+  left: number;
+} | null>(null);
+const buttonEl = ref<HTMLElement | null>(null);
+const trayToggleEl = ref<HTMLButtonElement | null>(null);
 
-function onMouseUp() {
+function updateSelectionButton() {
   const root = body.value;
-  const sel = window.getSelection();
-  if (!root || !sel || sel.rangeCount === 0) {
+  const selection = window.getSelection();
+  if (!root || !selection || selection.rangeCount === 0 || selection.isCollapsed) {
     selectionButton.value = null;
     return;
   }
-  const range = sel.getRangeAt(0);
-  if (
-    range.collapsed ||
-    !root.contains(range.startContainer) ||
-    !root.contains(range.endContainer)
-  ) {
+  const range = selection.getRangeAt(0);
+  if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) {
     selectionButton.value = null;
     return;
   }
-  // A selection inside an existing card (reply/quote text) is not a new anchor.
   const start = range.startContainer;
   if ((start instanceof Element ? start : start.parentElement)?.closest(`[${COMMENT_UI_ATTR}]`)) {
     selectionButton.value = null;
     return;
   }
-  const anchor = captureAnchor(root, range);
+  const anchor = captureAnchor(root, range) as
+    (TextAnchor & { block_index?: number | null }) | null;
   if (!anchor) {
     selectionButton.value = null;
     return;
   }
+  const element =
+    blockContaining(root, range.endContainer) ?? blockContaining(root, range.startContainer);
+  const attr = element?.getAttribute('data-block');
+  anchor.block_index = attr != null ? Number(attr) : null;
   const container = containerEl.value;
   if (!container) return;
-  const cRect = container.getBoundingClientRect();
+  const containerRect = container.getBoundingClientRect();
   const rect = range.getBoundingClientRect();
   selectionButton.value = {
     anchor,
-    top: rect.bottom - cRect.top + 4,
-    left: Math.max(0, rect.right - cRect.left - 96),
+    subjectVersion: String(props.rev),
+    top: rect.bottom - containerRect.top + 4,
+    left: Math.max(0, rect.right - containerRect.left - 150),
   };
 }
 
-function openComposer() {
-  if (!selectionButton.value) return;
-  const sel = window.getSelection();
-  pendingRange = sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
-  pending.value = { anchor: selectionButton.value.anchor };
-  pendingDraft.value = '';
-  selectionButton.value = null;
-  sel?.removeAllRanges();
-  locateCycle();
+function onMouseUp() {
+  updateSelectionButton();
 }
 
 function onSelectionChange() {
-  const sel = window.getSelection();
-  if (!sel || sel.isCollapsed) selectionButton.value = null;
+  updateSelectionButton();
 }
 
-function onDocMouseDown(e: MouseEvent) {
-  const target = e.target as Node;
-  if (buttonEl.value && buttonEl.value.contains(target)) return;
+function firstDocumentText(root: HTMLElement): Text | null {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (!(node as Text).data.length) return NodeFilter.FILTER_REJECT;
+      return node.parentElement?.closest(`[${COMMENT_UI_ATTR}]`)
+        ? NodeFilter.FILTER_REJECT
+        : NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  return walker.nextNode() as Text | null;
+}
+
+function onArticleKeydown(event: KeyboardEvent) {
+  const root = body.value;
+  if (!root) return;
+  if (event.key === 'Escape') {
+    if (reanchorCommentId.value != null) cancelReanchor();
+    window.getSelection()?.removeAllRanges();
+    selectionButton.value = null;
+    return;
+  }
+  if (!event.shiftKey || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+
+  const selection = window.getSelection();
+  if (!selection) return;
+  const current = selection.rangeCount ? selection.getRangeAt(0) : null;
+  if (
+    !current ||
+    !root.contains(current.startContainer) ||
+    (current.collapsed && current.startContainer.nodeType !== Node.TEXT_NODE)
+  ) {
+    const text = firstDocumentText(root);
+    if (!text) return;
+    const range = document.createRange();
+    const offset = event.key === 'ArrowLeft' ? text.data.length : 0;
+    range.setStart(text, offset);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+  const directional = selection as Selection & {
+    modify?: (alter: string, direction: string, granularity: string) => void;
+  };
+  if (!directional.modify) return;
+  event.preventDefault();
+  directional.modify('extend', event.key === 'ArrowLeft' ? 'backward' : 'forward', 'character');
+  updateSelectionButton();
+}
+
+function onDocMouseDown(event: MouseEvent) {
+  const target = event.target as Node;
+  if (buttonEl.value?.contains(target)) return;
   selectionButton.value = null;
 }
 
-// --- click: links + click-to-focus ------------------------------------------
+async function useSelection() {
+  if (!selectionButton.value) return;
+  const selection = window.getSelection();
+  const range = selection?.rangeCount ? selection.getRangeAt(0).cloneRange() : null;
+  const anchor = selectionButton.value.anchor;
+  const subjectVersion = selectionButton.value.subjectVersion;
+  selectionButton.value = null;
 
-// A click on a rendered link routes it (smartdoc SPA links / in-page scroll);
-// otherwise a plain click on a painted span expands its thread. The CSS Custom
-// Highlight API paints without wrapper elements, so there's no element to click —
-// this falls back to the browser's caret-from-point APIs and checks which located
-// Range contains that caret. Best-effort: an unsupported browser simply does
-// nothing (the inline chips remain the reliable path).
-function onArticleClick(e: MouseEvent) {
-  // A click on any in-document link is routed by the shared helper (or left to
-  // the browser for external links); only a plain, non-link click falls through
-  // to the caret hit-test that focuses the thread sitting under the caret.
-  if (routeDocLink(e, router, body.value)) return;
-  const sel = window.getSelection();
-  if (sel && !sel.isCollapsed) return; // a drag-selection, not a plain click
+  if (reanchorCommentId.value != null && draft.value) {
+    const commentId = reanchorCommentId.value;
+    commentErrors.value[commentId] = '';
+    try {
+      const updated = await draftController.command(async (current) => {
+        if (!current) throw new Error('review draft is no longer available');
+        return updateReviewComment(current.id, commentId, {
+          expected_revision: current.draft_revision,
+          subject_version: subjectVersion,
+          anchor_kind: 'text',
+          anchor,
+        });
+      });
+      activeId.value = commentId;
+      reanchorCommentId.value = null;
+      reviewNotice.value =
+        updated.subject.version === subjectVersion
+          ? `Comment re-anchored; review target is now revision ${subjectVersion}.`
+          : `Comment re-anchored to revision ${subjectVersion}; older anchors still remain.`;
+      selection?.removeAllRanges();
+      await nextTick();
+      locateCycle();
+    } catch (e) {
+      setCommentMutationError(commentId, e);
+    }
+    return;
+  }
+
+  pendingRange = range;
+  pending.value = { anchor, subjectVersion };
+  pendingDraft.value = '';
+  selection?.removeAllRanges();
+  locateCycle();
+  await nextTick();
+  containerEl.value
+    ?.querySelector<HTMLTextAreaElement>('[data-testid="review-comment-composer"] textarea')
+    ?.focus();
+}
+
+// --- links + click-to-focus -------------------------------------------------
+
+function onArticleClick(event: MouseEvent) {
+  if (routeDocLink(event, router, body.value)) return;
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed) return;
   const doc = document as Document & {
     caretRangeFromPoint?: (x: number, y: number) => Range | null;
     caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
@@ -309,170 +564,400 @@ function onArticleClick(e: MouseEvent) {
   let node: Node | null = null;
   let offset = 0;
   if (doc.caretRangeFromPoint) {
-    const r = doc.caretRangeFromPoint(e.clientX, e.clientY);
-    if (r) {
-      node = r.startContainer;
-      offset = r.startOffset;
+    const range = doc.caretRangeFromPoint(event.clientX, event.clientY);
+    if (range) {
+      node = range.startContainer;
+      offset = range.startOffset;
     }
   } else if (doc.caretPositionFromPoint) {
-    const p = doc.caretPositionFromPoint(e.clientX, e.clientY);
-    if (p) {
-      node = p.offsetNode;
-      offset = p.offset;
+    const position = doc.caretPositionFromPoint(event.clientX, event.clientY);
+    if (position) {
+      node = position.offsetNode;
+      offset = position.offset;
     }
   }
   if (!node) return;
-  const hit = locatedThreads.value.find(({ range }) => {
+  const hit = locatedEntries.value.find(({ range }) => {
     try {
       return range.isPointInRange(node as Node, offset);
     } catch {
       return false;
     }
   });
-  if (hit) focusThread(hit.thread.id);
+  if (hit) focusComment(hit.entry.comment.id);
 }
 
-// --- thread events ----------------------------------------------------------
-
-function focusThread(tid: number) {
-  activeId.value = tid;
-  const entry = locatedThreads.value.find((x) => x.thread.id === tid);
+async function focusComment(commentId: number) {
+  activeId.value = commentId;
+  await nextTick();
+  const located = locatedEntries.value.find((entry) => entry.entry.comment.id === commentId);
   const scroller = scrollerEl.value;
-  if (!entry || !scroller) return;
-  const sRect = scroller.getBoundingClientRect();
-  const rect = entry.range.getBoundingClientRect();
-  if (rect.top >= sRect.top && rect.bottom <= sRect.bottom) return;
-  type ScrollableRange = Range & { scrollIntoView?: (opts?: ScrollIntoViewOptions) => void };
-  const r = entry.range as ScrollableRange;
-  if (typeof r.scrollIntoView === 'function') {
-    r.scrollIntoView({ block: 'center' });
-  } else {
-    const el =
-      entry.range.startContainer.nodeType === Node.TEXT_NODE
-        ? entry.range.startContainer.parentElement
-        : (entry.range.startContainer as Element);
-    el?.scrollIntoView({ block: 'center' });
+  if (!scroller) return;
+  if (!located) {
+    const card = scroller.querySelector<HTMLElement>(`[data-review-card="${commentId}"]`);
+    card?.scrollIntoView({ block: 'center' });
+    card?.focus();
+    return;
   }
+  const scrollerRect = scroller.getBoundingClientRect();
+  const rect = located.range.getBoundingClientRect();
+  if (rect.top < scrollerRect.top || rect.bottom > scrollerRect.bottom) {
+    const element =
+      located.range.startContainer.nodeType === Node.TEXT_NODE
+        ? located.range.startContainer.parentElement
+        : (located.range.startContainer as Element);
+    element?.scrollIntoView({ block: 'center' });
+  }
+  scroller.querySelector<HTMLElement>(`[data-review-card="${commentId}"]`)?.focus();
 }
 
-async function onReply(payload: { tid: number; body: string }) {
-  const body = payload.body.trim();
-  if (!body) return;
+async function closeComment(commentId: number) {
+  if (activeId.value === commentId) activeId.value = null;
+  await nextTick();
+  scrollerEl.value?.querySelector<HTMLElement>(`[data-review-collapsed="${commentId}"]`)?.focus();
+}
+
+function navigateDraft(direction: number) {
+  const entries = draftEntries.value;
+  if (!entries.length) return;
+  const current = entries.findIndex((entry) => entry.comment.id === activeId.value);
+  const next = (current + direction + entries.length) % entries.length;
+  void focusComment(entries[next].comment.id);
+}
+
+// --- draft mutation ---------------------------------------------------------
+
+async function saveOverallNote(): Promise<Review | null> {
+  if (summarySaveTimer) {
+    clearTimeout(summarySaveTimer);
+    summarySaveTimer = null;
+  }
   try {
-    const comment = await addComment(props.id, props.artifactName, payload.tid, { body });
-    const t = threads.value.find((t) => t.id === payload.tid);
-    // The comment count growing is CommentThread's cue to clear its draft; a
-    // failure leaves the count (and draft) untouched for a retry.
-    if (t) t.comments = [...t.comments, comment];
-  } catch (e) {
-    console.warn('failed to post reply', e);
+    return await draftController.flush();
+  } catch (error) {
+    trayError.value = mutationMessage(error);
+    return null;
   }
 }
 
-async function onResolve(tid: number) {
-  try {
-    const updated = await resolveThread(props.id, props.artifactName, tid);
-    const idx = threads.value.findIndex((t) => t.id === tid);
-    if (idx !== -1) {
-      const copy = [...threads.value];
-      copy[idx] = updated;
-      threads.value = copy;
-    }
-    if (activeId.value === tid) activeId.value = null;
-    await nextTick();
-    locateCycle();
-  } catch {
-    /* leave it open; the user can retry */
-  }
-}
-
-async function onCreate() {
+async function createPendingComment() {
   const text = pendingDraft.value.trim();
-  if (!pending.value || !text) return;
+  if (!pending.value || !text || savingComment.value) return;
+  const pendingComment = pending.value;
+  savingComment.value = true;
+  composerError.value = '';
   try {
-    const thread = await createThread(props.id, props.artifactName, {
-      base_rev: props.rev,
-      anchor: pending.value.anchor,
-      body: text,
+    const updated = await draftController.command(async (current) => {
+      const review =
+        current ??
+        (await createArtifactReview(props.id, {
+          subject_kind: 'artifact',
+          subject_key: props.artifactName,
+          subject_version: pendingComment.subjectVersion,
+        }));
+      return addReviewComment(review.id, {
+        expected_revision: review.draft_revision,
+        subject_version: pendingComment.subjectVersion,
+        anchor_kind: 'text',
+        anchor: pendingComment.anchor,
+        body: text,
+      });
     });
-    threads.value = [...threads.value, thread];
-    activeId.value = thread.id;
-    // Only close the composer on success; a failure keeps it open with the draft.
+    activeId.value = updated.comments.at(-1)?.id ?? null;
     pending.value = null;
     pendingRange = null;
     pendingDraft.value = '';
+    trayOpen.value = true;
+    reviewNotice.value = 'Pending comment saved. Submit the review when your feedback is complete.';
     await nextTick();
     locateCycle();
   } catch (e) {
-    console.warn('failed to create comment thread', e);
+    composerError.value = mutationMessage(e);
+  } finally {
+    savingComment.value = false;
   }
 }
 
-function onCancel() {
+function cancelPendingComment() {
   pending.value = null;
   pendingRange = null;
   pendingDraft.value = '';
   locateCycle();
+  void nextTick(() => trayToggleEl.value?.focus());
 }
 
-// --- SSE forwarding (ArtifactsPanel owns the one EventSource) ----------------
-
-async function onCommentEvent(
-  kind: string,
-  data: { artifact?: string; thread?: number },
-): Promise<void> {
-  if (data.artifact && data.artifact !== props.artifactName) return;
-  if (kind !== 'comment_added' && kind !== 'comment_resolved') return;
-  await loadThreads();
-  if (activeId.value != null && !threads.value.some((t) => t.id === activeId.value)) {
-    activeId.value = null;
+async function editComment(payload: { commentId: number; body: string }) {
+  if (!draft.value) return;
+  commentErrors.value[payload.commentId] = '';
+  try {
+    await draftController.command(async (current) => {
+      if (!current) throw new Error('review draft is no longer available');
+      return updateReviewComment(current.id, payload.commentId, {
+        expected_revision: current.draft_revision,
+        body: payload.body,
+      });
+    });
+    reviewNotice.value = 'Pending comment updated.';
+  } catch (e) {
+    setCommentMutationError(payload.commentId, e);
   }
 }
 
-function snapshotScroll(): void {
-  persistScroll();
+async function removeComment(commentId: number) {
+  if (!draft.value) return;
+  commentErrors.value[commentId] = '';
+  try {
+    await draftController.command(async (current) => {
+      if (!current) throw new Error('review draft is no longer available');
+      return deleteReviewComment(current.id, commentId, current.draft_revision);
+    });
+    if (activeId.value === commentId) activeId.value = null;
+    if (reanchorCommentId.value === commentId) reanchorCommentId.value = null;
+    reviewNotice.value = 'Pending comment deleted.';
+    await nextTick();
+    locateCycle();
+    trayToggleEl.value?.focus();
+  } catch (e) {
+    throw new Error(setCommentMutationError(commentId, e));
+  }
 }
 
-defineExpose({ onCommentEvent, snapshotScroll });
+async function setResolution(review: Review, commentId: number, resolved: boolean) {
+  commentErrors.value[commentId] = '';
+  try {
+    if (review.legacy) {
+      if (!resolved) return;
+      await resolveThread(props.id, props.artifactName, -review.id);
+      await loadReviews();
+    } else {
+      const updated = await setReviewCommentResolution(review.id, commentId, resolved);
+      replaceReview({
+        ...review,
+        comments: review.comments.map((comment) => (comment.id === updated.id ? updated : comment)),
+      });
+    }
+    reviewNotice.value = resolved ? 'Review comment resolved.' : 'Review comment reopened.';
+  } catch (e) {
+    setCommentMutationError(commentId, e);
+  }
+}
+
+function beginReanchor(commentId: number) {
+  reanchorCommentId.value = commentId;
+  activeId.value = commentId;
+  reviewNotice.value = 'Select replacement text in the artifact.';
+}
+
+function cancelReanchor() {
+  reanchorCommentId.value = null;
+  selectionButton.value = null;
+  reviewNotice.value = 'Re-anchor cancelled.';
+}
+
+async function discardDraft() {
+  if (!draft.value || discarding.value) return;
+  discarding.value = true;
+  trayError.value = '';
+  try {
+    const reviewId = await draftController.freeze(async (current) => {
+      if (!current) throw new Error('review draft is no longer available');
+      await discardReview(current.id, current.draft_revision);
+      return { draft: null, result: current.id };
+    });
+    reviews.value = reviews.value.filter((review) => review.id !== reviewId);
+    activeId.value = null;
+    reanchorCommentId.value = null;
+    overallNote.value = '';
+    summaryDirty.value = false;
+    acknowledgeOutdated.value = false;
+    trayOpen.value = false;
+    reviewNotice.value = 'Draft review discarded.';
+    await nextTick();
+    locateCycle();
+    trayToggleEl.value?.focus();
+  } catch (e) {
+    const message = mutationMessage(e);
+    trayError.value = message;
+    throw new Error(message);
+  } finally {
+    discarding.value = false;
+  }
+}
+
+async function retargetDraft() {
+  if (!draft.value || draft.value.comments.length) return;
+  trayError.value = '';
+  try {
+    const updated = await draftController.command(async (current) => {
+      if (!current) throw new Error('review draft is no longer available');
+      return retargetReviewToCurrent(current.id, current.draft_revision);
+    });
+    acknowledgeOutdated.value = false;
+    reviewNotice.value = `Review target moved to revision ${updated.subject.version}.`;
+  } catch (error) {
+    trayError.value = mutationMessage(error);
+  }
+}
+
+async function submitDraft() {
+  if (!draft.value || submitting.value) return;
+  submitting.value = true;
+  trayError.value = '';
+  try {
+    const submitted = await draftController.freeze(async (current) => {
+      if (!current) throw new Error('review draft is no longer available');
+      const result = await submitReview(current.id, {
+        expected_revision: current.draft_revision,
+        acknowledge_outdated: acknowledgeOutdated.value,
+      });
+      replaceReview(result);
+      return { draft: null, result };
+    });
+    activeId.value = null;
+    reanchorCommentId.value = null;
+    overallNote.value = '';
+    summaryDirty.value = false;
+    acknowledgeOutdated.value = false;
+    reviewNotice.value =
+      submitted.delivery_state === 'delivered'
+        ? 'Review submitted to the conversation.'
+        : 'Review submitted and queued for the conversation.';
+    await nextTick();
+    locateCycle();
+  } catch (e) {
+    trayError.value = mutationMessage(e);
+  } finally {
+    submitting.value = false;
+  }
+}
+
+async function retryDelivery(review: Review) {
+  deliveryErrors.value[review.id] = '';
+  try {
+    const updated = await retryReviewDelivery(review.id);
+    replaceReview(updated);
+    reviewNotice.value =
+      updated.delivery_state === 'delivered'
+        ? 'Review delivered to the conversation.'
+        : 'Review delivery retry queued.';
+  } catch (e) {
+    deliveryErrors.value[review.id] = (e as Error).message;
+  }
+}
+
+// --- SSE forwarding ---------------------------------------------------------
+
+async function onCommentEvent(
+  kind: string,
+  data: { artifact?: string; subject_key?: string; session_id?: string },
+): Promise<void> {
+  if (data.artifact && data.artifact !== props.artifactName) return;
+  if (data.session_id && data.session_id !== props.id) return;
+  if (
+    ![
+      'comment_added',
+      'comment_resolved',
+      'review_submitted',
+      'review_delivery',
+      'review_comment_resolved',
+    ].includes(kind)
+  ) {
+    return;
+  }
+  await loadReviews();
+}
+
+async function prepareLayoutSwap(): Promise<boolean> {
+  if (layoutBusy.value) return false;
+  const active = document.activeElement;
+  layoutReturnFocus =
+    active instanceof HTMLElement && containerEl.value?.contains(active) ? active : null;
+  // Blur synchronously so any blur-owned save enters the controller queue
+  // before the barrier. No user event can interleave before the surface turns
+  // inert and the controller freezes below.
+  layoutReturnFocus?.blur();
+  if (summarySaveTimer) {
+    clearTimeout(summarySaveTimer);
+    summarySaveTimer = null;
+  }
+  layoutBusy.value = true;
+  try {
+    releaseLayoutBarrier = await draftController.barrier();
+    persistScroll();
+    return true;
+  } catch (error) {
+    trayError.value = mutationMessage(error);
+    layoutBusy.value = false;
+    const restore = layoutReturnFocus;
+    layoutReturnFocus = null;
+    await nextTick();
+    if (restore?.isConnected) restore.focus();
+    return false;
+  }
+}
+
+function finishLayoutSwap() {
+  releaseLayoutBarrier?.();
+  releaseLayoutBarrier = null;
+  layoutBusy.value = false;
+  layoutReturnFocus = null;
+}
+
+defineExpose({ onCommentEvent, prepareLayoutSwap, finishLayoutSwap });
 
 // --- lifecycle --------------------------------------------------------------
+
+function refreshPrivateDraft() {
+  if (document.visibilityState === 'visible') void loadReviews();
+}
 
 onMounted(() => {
   activeScrollKey = scrollKey();
   void restoreScroll(activeScrollKey);
   document.addEventListener('selectionchange', onSelectionChange);
   document.addEventListener('mousedown', onDocMouseDown, true);
-  // `useMarkdownDoc` already runs the initial build on mount; we just load the
-  // threads that overlay it.
-  loadThreads();
+  document.addEventListener('visibilitychange', refreshPrivateDraft);
+  window.addEventListener('focus', refreshPrivateDraft);
+  void loadReviews();
 });
 
 onBeforeUnmount(() => {
   persistScroll();
+  if (summarySaveTimer) clearTimeout(summarySaveTimer);
   document.removeEventListener('selectionchange', onSelectionChange);
   document.removeEventListener('mousedown', onDocMouseDown, true);
+  document.removeEventListener('visibilitychange', refreshPrivateDraft);
+  window.removeEventListener('focus', refreshPrivateDraft);
   clearHighlights();
 });
 
-// --- render -----------------------------------------------------------------
+// --- interleaved render -----------------------------------------------------
 
-function withStop(fn: () => void) {
-  return (e: Event) => {
-    e.stopPropagation();
+function stop<T extends Event>(fn: () => void) {
+  return (event: T) => {
+    event.stopPropagation();
     fn();
   };
 }
 
-function renderCard(t: Thread): VNode {
+function renderCard(entry: ReviewEntry): VNode {
   return h(
     'div',
-    { [COMMENT_UI_ATTR]: '', key: `t${t.id}` },
-    h(CommentThread, {
-      thread: t,
-      active: t.id === activeId.value,
-      onFocus: focusThread,
-      onReply: onReply,
-      onResolve: onResolve,
+    { [COMMENT_UI_ATTR]: '', key: `review-${entry.review.id}-${entry.comment.id}` },
+    h(ReviewCommentCard, {
+      review: entry.review,
+      comment: entry.comment,
+      active: entry.comment.id === activeId.value,
+      reanchoring: entry.comment.id === reanchorCommentId.value,
+      error: commentErrors.value[entry.comment.id] ?? '',
+      deleteAction: removeComment,
+      onFocus: focusComment,
+      onClose: closeComment,
+      onEdit: editComment,
+      onReanchor: beginReanchor,
+      onCancelReanchor: cancelReanchor,
+      onResolution: (commentId: number, resolved: boolean) =>
+        setResolution(entry.review, commentId, resolved),
     }),
   );
 }
@@ -481,133 +966,130 @@ function renderComposer(): VNode {
   return h(
     'div',
     {
-      key: 'pending',
+      key: 'pending-review-comment',
       [COMMENT_UI_ATTR]: '',
-      class: 'my-2 rounded border border-accent bg-subtle/40 p-2 text-xs ring-1 ring-accent',
-      'data-testid': 'comment-pending',
-      onClick: (e: Event) => e.stopPropagation(),
+      class: 'my-2 rounded border border-accent bg-subtle/50 p-2 text-xs ring-1 ring-accent/40',
+      'data-testid': 'review-comment-composer',
+      onClick: (event: Event) => event.stopPropagation(),
     },
     [
+      h(
+        'div',
+        { class: 'mb-1 text-2xs font-semibold uppercase tracking-wide text-accent' },
+        'Pending review comment',
+      ),
       h('textarea', {
         value: pendingDraft.value,
-        rows: 2,
-        placeholder: 'Comment…',
+        rows: 3,
+        placeholder: 'Leave feedback for this selection…',
         class:
-          'w-full resize-none rounded border border-line bg-input p-1.5 text-xs text-fg outline-none focus:border-accent',
-        onInput: (e: Event) => {
-          pendingDraft.value = (e.target as HTMLTextAreaElement).value;
+          'w-full resize-y rounded border border-line bg-input p-1.5 text-xs text-fg outline-none focus:border-accent',
+        onInput: (event: Event) => {
+          pendingDraft.value = (event.target as HTMLTextAreaElement).value;
         },
-        onClick: (e: Event) => e.stopPropagation(),
-        onMousedown: (e: Event) => e.stopPropagation(),
+        onKeydown: (event: KeyboardEvent) => {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            cancelPendingComment();
+          }
+          if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+            event.preventDefault();
+            void createPendingComment();
+          }
+        },
+        onClick: (event: Event) => event.stopPropagation(),
+        onMousedown: (event: Event) => event.stopPropagation(),
       }),
       h('div', { class: 'mt-1.5 flex items-center gap-1.5' }, [
         h(
           'button',
-          { type: 'button', class: 'btn-primary px-2 py-1 text-2xs', onClick: withStop(onCreate) },
-          'Comment',
+          {
+            type: 'button',
+            class: 'btn-primary px-2 py-1 text-2xs',
+            disabled: savingComment.value,
+            onClick: stop(() => void createPendingComment()),
+          },
+          savingComment.value ? 'Saving…' : 'Add pending comment',
         ),
         h(
           'button',
           {
             type: 'button',
             class: 'btn-secondary px-2 py-1 text-2xs',
-            onClick: withStop(onCancel),
+            onClick: stop(cancelPendingComment),
           },
           'Cancel',
         ),
       ]),
-    ],
-  );
-}
-
-function renderOrphaned(): VNode {
-  return h(
-    'div',
-    {
-      key: 'orphaned',
-      [COMMENT_UI_ATTR]: '',
-      class: 'my-3 border-t border-line pt-2',
-      'data-testid': 'comment-orphaned',
-      onClick: (e: Event) => e.stopPropagation(),
-    },
-    [
-      h(
-        'button',
-        {
-          type: 'button',
-          class: 'pill flex w-full items-center justify-between px-2 py-1 text-2xs',
-          onClick: withStop(() => {
-            showOrphaned.value = !showOrphaned.value;
-          }),
-        },
-        [
-          h('span', `Unanchored comments (${orphaned.value.length})`),
-          h('span', showOrphaned.value ? '▾' : '▸'),
-        ],
-      ),
-      showOrphaned.value
+      composerError.value
         ? h(
-            'div',
-            { class: 'mt-1.5 space-y-2' },
-            orphaned.value.map((t) =>
-              h(
-                'div',
-                { key: t.id, class: 'rounded border border-line bg-subtle/40 p-2 text-xs' },
-                [
-                  h('div', { class: 'truncate italic text-faint' }, `“${t.anchor.quote}”`),
-                  h(
-                    'div',
-                    { class: 'mt-0.5 truncate text-fg' },
-                    t.comments[t.comments.length - 1]?.body,
-                  ),
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      class: 'btn-secondary mt-1 px-2 py-0.5 text-2xs',
-                      onClick: withStop(() => onResolve(t.id)),
-                    },
-                    'Resolve',
-                  ),
-                ],
-              ),
-            ),
+            'p',
+            {
+              class: 'mt-1.5 rounded bg-block-soft px-2 py-1 text-2xs text-block',
+              role: 'alert',
+            },
+            composerError.value,
           )
         : null,
     ],
   );
 }
 
-// The document body: markdown blocks, each followed by the comment cards (and,
-// where the selection landed, the composer) that annotate it. Recreated every
-// render — fresh vnodes, keyed so Vue reuses the block/card DOM (and its child
-// component state) across renders and locate cycles.
 const DocBody = () => {
-  const c = ctx.value;
-  if (!c) return null;
-  const blocks = renderTokens(tokens.value, c);
-  const out: (VNode | string)[] = [];
+  const renderContext = ctx.value;
+  if (!renderContext) return null;
+  const blocks = renderTokens(tokens.value, renderContext);
+  const output: (VNode | string)[] = [];
   const placed = new Set<number>();
-  blocks.forEach((blk, i) => {
-    out.push(blk);
-    for (const t of cardsByBlock.value.get(i) ?? []) out.push(renderCard(t));
-    if (pending.value && pendingBlock.value === i) out.push(renderComposer());
-    placed.add(i);
+  blocks.forEach((block, index) => {
+    output.push(isVNode(block) ? block : String(block));
+    for (const entry of cardsByBlock.value.get(index) ?? []) output.push(renderCard(entry));
+    if (pending.value && pendingBlock.value === index) output.push(renderComposer());
+    placed.add(index);
   });
-  // Cards whose block index fell outside the block list (a bare top-level text
-  // node, or a stale index after an edit) and a composer with no located block:
-  // render them at the end so nothing is silently dropped.
-  for (const [bi, list] of cardsByBlock.value) {
-    if (!placed.has(bi)) for (const t of list) out.push(renderCard(t));
+  for (const [block, entries] of cardsByBlock.value) {
+    if (!placed.has(block)) for (const entry of entries) output.push(renderCard(entry));
   }
-  if (pending.value && !placed.has(pendingBlock.value)) out.push(renderComposer());
-  if (orphaned.value.length) out.push(renderOrphaned());
-  return out;
+  if (pending.value && !placed.has(pendingBlock.value)) output.push(renderComposer());
+  if (orphaned.value.length) {
+    output.push(
+      h(
+        'section',
+        {
+          key: 'stale-review-anchors',
+          [COMMENT_UI_ATTR]: '',
+          class: 'my-4 border-t border-line pt-3',
+          'data-testid': 'review-stale-anchors',
+        },
+        [
+          h(
+            'h3',
+            { class: 'mb-2 text-xs font-semibold text-block' },
+            `Stale anchors (${orphaned.value.length})`,
+          ),
+          ...orphaned.value.map(renderCard),
+        ],
+      ),
+    );
+  }
+  return output;
 };
 </script>
 
 <template>
-  <div ref="containerEl" class="relative h-full min-h-0 w-full overflow-hidden">
+  <div
+    ref="containerEl"
+    class="relative h-full min-h-0 w-full overflow-hidden"
+    data-testid="review-surface"
+    :inert="layoutBusy"
+    :aria-busy="layoutBusy"
+  >
+    <div
+      v-if="layoutBusy"
+      class="absolute inset-0 z-50 cursor-wait"
+      aria-label="Saving review before changing layout"
+      data-testid="review-layout-barrier"
+    ></div>
     <div
       ref="scrollerEl"
       class="h-full min-h-0 w-full overflow-auto bg-surface"
@@ -620,10 +1102,20 @@ const DocBody = () => {
       >
         {{ error }}
       </p>
+      <p
+        v-if="reviewError"
+        class="mx-auto mt-3 max-w-3xl rounded border border-block-line bg-block-soft px-3 py-2 text-xs text-block"
+        data-testid="review-error"
+        role="alert"
+      >
+        {{ reviewError }}
+      </p>
       <article
         ref="body"
-        class="markdown-body mx-auto max-w-3xl px-6 py-5"
+        class="markdown-body mx-auto max-w-3xl px-6 pb-32 pt-5"
+        tabindex="0"
         @click="onArticleClick"
+        @keydown="onArticleKeydown"
         @mouseup="onMouseUp"
       >
         <DocBody />
@@ -634,13 +1126,271 @@ const DocBody = () => {
       v-if="selectionButton"
       ref="buttonEl"
       type="button"
-      class="btn-primary absolute z-20 gap-1 px-2 py-1 text-xs shadow-sm"
-      data-testid="comment-select-button"
+      class="btn-primary absolute z-30 gap-1 px-2 py-1 text-xs shadow-sm"
+      data-testid="review-selection-button"
+      :aria-label="
+        reanchorCommentId == null
+          ? 'Add pending review comment to selection'
+          : 'Re-anchor pending comment to selection'
+      "
       :style="{ top: selectionButton.top + 'px', left: selectionButton.left + 'px' }"
       @mousedown.prevent
-      @click="openComposer"
+      @click="useSelection"
+      @keydown.esc.stop.prevent="cancelReanchor"
     >
-      💬 Comment
+      {{ reanchorCommentId == null ? '＋ Add comment' : '↪ Re-anchor selection' }}
     </button>
+
+    <aside
+      class="absolute bottom-3 right-3 z-20 w-[min(28rem,calc(100%-1.5rem))] rounded-lg border border-line bg-surface shadow-xl"
+      data-testid="review-tray"
+      aria-label="Review tray"
+    >
+      <div class="flex min-h-10 items-center gap-1.5 px-2">
+        <button
+          ref="trayToggleEl"
+          type="button"
+          class="min-w-0 flex-1 px-1 py-2 text-left text-xs font-semibold text-fg"
+          data-testid="review-tray-toggle"
+          :aria-expanded="trayOpen"
+          @click="trayOpen = !trayOpen"
+        >
+          <template v-if="draft">
+            Review · {{ draft.comments.length }} pending
+            <span v-if="draft.outdated" class="ml-1 text-block">· stale</span>
+            <span v-if="failedSubmissions.length" class="ml-1 text-block">
+              · {{ failedSubmissions.length }} delivery failed
+            </span>
+          </template>
+          <template v-else-if="failedSubmissions.length">
+            Review delivery · {{ failedSubmissions.length }} failed
+          </template>
+          <template v-else-if="recentSubmitted">
+            Review submitted · {{ recentSubmitted.delivery_state }}
+          </template>
+          <template v-else>Review artifact</template>
+        </button>
+        <template v-if="draft?.comments.length">
+          <button
+            type="button"
+            class="btn-secondary px-2 py-1 text-xs"
+            aria-label="Previous pending comment"
+            @click="navigateDraft(-1)"
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            class="btn-secondary px-2 py-1 text-xs"
+            aria-label="Next pending comment"
+            @click="navigateDraft(1)"
+          >
+            ↓
+          </button>
+        </template>
+        <button
+          type="button"
+          class="btn-secondary px-2 py-1 text-xs"
+          :aria-label="trayOpen ? 'Collapse review tray' : 'Expand review tray'"
+          @click="trayOpen = !trayOpen"
+        >
+          {{ trayOpen ? '▾' : '▴' }}
+        </button>
+      </div>
+
+      <div v-if="trayOpen" class="max-h-[min(60vh,34rem)] overflow-auto border-t border-line p-3">
+        <div
+          v-if="failedSubmissions.length"
+          class="mb-3 space-y-2"
+          aria-label="Failed review deliveries"
+        >
+          <div
+            v-for="item in failedSubmissions"
+            :key="`failed-${item.id}`"
+            class="rounded border border-block-line bg-block-soft p-2 text-xs"
+            :data-testid="`failed-review-delivery-${item.id}`"
+          >
+            <p class="font-medium text-block">Review {{ item.id }} delivery failed</p>
+            <p v-if="item.delivery_error" class="mt-1 text-block">{{ item.delivery_error }}</p>
+            <button
+              type="button"
+              class="btn-primary mt-2 px-2 py-1 text-xs"
+              @click="retryDelivery(item)"
+            >
+              Retry delivery
+            </button>
+            <p
+              v-if="deliveryErrors[item.id]"
+              class="mt-2 rounded bg-surface/70 px-2 py-1 text-2xs text-block"
+              role="alert"
+            >
+              {{ deliveryErrors[item.id] }}
+            </p>
+          </div>
+        </div>
+
+        <template v-if="draft">
+          <p
+            v-if="draft.outdated"
+            class="mb-3 rounded border border-block-line bg-block-soft p-2 text-xs text-block"
+            data-testid="review-stale-warning"
+          >
+            This artifact is now revision {{ draft.subject.current_version }}. Stale anchors are
+            preserved; re-anchor them, or acknowledge the older context before submitting.
+          </p>
+          <button
+            v-if="draft.outdated && !draft.comments.length"
+            type="button"
+            class="btn-secondary mb-3 px-2 py-1 text-xs"
+            data-testid="review-retarget-current"
+            :disabled="summarySaving"
+            @click="retargetDraft"
+          >
+            Move review target to revision {{ draft.subject.current_version }}
+          </button>
+
+          <div class="space-y-1.5" aria-label="Pending comments">
+            <button
+              v-for="(entry, index) in draftEntries"
+              :key="entry.comment.id"
+              type="button"
+              class="flex w-full items-center gap-2 rounded border border-line px-2 py-1.5 text-left text-xs hover:border-accent"
+              @click="focusComment(entry.comment.id)"
+            >
+              <span class="shrink-0 font-mono text-2xs text-faint">{{ index + 1 }}</span>
+              <span class="min-w-0 flex-1 truncate text-fg">{{ entry.comment.body }}</span>
+              <span
+                v-if="entry.comment.subject_version !== draft.subject.current_version"
+                class="shrink-0 text-2xs text-block"
+              >
+                rev {{ entry.comment.subject_version }}
+              </span>
+            </button>
+          </div>
+
+          <label class="mt-3 block text-xs font-medium text-muted" for="review-overall-note">
+            Overall note <span class="font-normal text-faint">(optional)</span>
+          </label>
+          <textarea
+            id="review-overall-note"
+            :value="overallNote"
+            rows="3"
+            class="mt-1 w-full resize-y rounded border border-line bg-input p-2 text-xs text-fg outline-none focus:border-accent"
+            placeholder="Feedback that applies to the artifact as a whole…"
+            data-testid="review-overall-note"
+            :disabled="layoutBusy || submitting || discarding"
+            @input="editOverallNote"
+            @blur="saveOverallNote"
+          ></textarea>
+          <p v-if="summarySaving" class="mt-1 text-2xs text-faint" aria-live="polite">
+            Saving overall note…
+          </p>
+
+          <label
+            v-if="draft.outdated"
+            class="mt-2 flex cursor-pointer items-start gap-2 rounded bg-subtle/50 p-2 text-xs text-muted"
+          >
+            <input
+              v-model="acknowledgeOutdated"
+              type="checkbox"
+              class="mt-0.5"
+              data-testid="review-stale-ack"
+            />
+            Submit against the captured revision context intentionally.
+          </label>
+
+          <div class="mt-3 border-t border-line pt-3">
+            <p class="mb-2 text-2xs font-semibold uppercase tracking-wide text-faint">
+              Conversation feedback preview
+            </p>
+            <pre
+              class="max-h-32 overflow-auto whitespace-pre-wrap rounded bg-code p-2 text-xs text-code-fg"
+              >{{ feedbackPreview }}</pre>
+          </div>
+
+          <div class="mt-3 flex flex-wrap items-center gap-2">
+            <p
+              v-if="trayError"
+              class="w-full rounded bg-block-soft px-2 py-1 text-2xs text-block"
+              role="alert"
+            >
+              {{ trayError }}
+            </p>
+            <InlineConfirm
+              label="Discard draft"
+              :message="`Discard the overall note and all ${draft.comments.length} pending comment${draft.comments.length === 1 ? '' : 's'}?`"
+              confirm-label="Discard draft"
+              danger
+              :disabled="layoutBusy || submitting || discarding"
+              :action="discardDraft"
+            />
+            <button
+              type="button"
+              class="btn-primary ml-auto px-3 py-1.5 text-xs"
+              data-testid="submit-review"
+              :disabled="
+                submitting ||
+                layoutBusy ||
+                discarding ||
+                summarySaving ||
+                (!draft.comments.length && !overallNote.trim()) ||
+                (draft.outdated && !acknowledgeOutdated)
+              "
+              @click="submitDraft"
+            >
+              {{ submitting ? 'Submitting…' : 'Submit review' }}
+            </button>
+          </div>
+        </template>
+
+        <template v-else>
+          <div
+            v-if="
+              recentSubmitted &&
+              !failedSubmissions.some((review) => review.id === recentSubmitted?.id)
+            "
+            class="mb-3 text-xs text-muted"
+          >
+            <p class="font-medium text-fg">Review {{ recentSubmitted.id }} submitted</p>
+            <p class="mt-1">
+              Delivery:
+              <span class="text-accent">{{ recentSubmitted.delivery_state }}</span>
+            </p>
+          </div>
+          <label class="block text-xs font-medium text-muted" for="review-new-overall-note">
+            Start a new review with an overall note
+          </label>
+          <textarea
+            id="review-new-overall-note"
+            :value="overallNote"
+            rows="3"
+            class="mt-1 w-full resize-y rounded border border-line bg-input p-2 text-xs text-fg outline-none focus:border-accent"
+            placeholder="Feedback that applies to the artifact as a whole…"
+            data-testid="review-overall-note"
+            :disabled="layoutBusy || submitting || discarding"
+            @input="editOverallNote"
+            @blur="saveOverallNote"
+          ></textarea>
+          <p v-if="summarySaving" class="mt-1 text-2xs text-faint" aria-live="polite">
+            Saving overall note…
+          </p>
+          <p
+            v-if="trayError"
+            class="mt-2 rounded bg-block-soft px-2 py-1 text-2xs text-block"
+            role="alert"
+          >
+            {{ trayError }}
+          </p>
+        </template>
+      </div>
+    </aside>
+
+    <div
+      v-if="reviewNotice"
+      class="pointer-events-none absolute bottom-1 left-1/2 z-40 -translate-x-1/2 rounded bg-fg px-2 py-1 text-2xs text-surface opacity-90"
+      aria-live="polite"
+    >
+      {{ reviewNotice }}
+    </div>
   </div>
 </template>

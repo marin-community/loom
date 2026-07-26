@@ -8,6 +8,7 @@ import {
   onActivated,
   onDeactivated,
   onUnmounted,
+  nextTick,
 } from 'vue';
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router';
 import { get, ideInfo } from '../api';
@@ -82,6 +83,13 @@ const artifactsActive = computed(() => route.path.startsWith(`/s/${props.id}/art
 const poppedOut = ref(false);
 const artifactsDocked = computed(() => artifactsActive.value && !poppedOut.value);
 const railOpen = computed(() => artifactsActive.value && poppedOut.value);
+const dockedArtifactsRef = ref<InstanceType<typeof ArtifactsPanel> | null>(null);
+const railArtifactsRef = ref<InstanceType<typeof ArtifactsPanel> | null>(null);
+let layoutNavigationAuthorized = false;
+
+function activeArtifactsPanel(): InstanceType<typeof ArtifactsPanel> | null {
+  return railOpen.value ? railArtifactsRef.value : dockedArtifactsRef.value;
+}
 
 // The pane the work area shows: the artifacts panel when docked, else the
 // effective local tab (so a popped-out artifact leaves the work pane in place).
@@ -114,12 +122,28 @@ watch(
   { immediate: true },
 );
 
-function selectTab(t: WorkTab) {
+async function guardedArtifactLayout(change: () => void | Promise<void>): Promise<boolean> {
+  const panel = activeArtifactsPanel();
+  if (panel && !(await panel.prepareLayoutSwap())) return false;
+  try {
+    layoutNavigationAuthorized = true;
+    await change();
+    await nextTick();
+    return true;
+  } finally {
+    layoutNavigationAuthorized = false;
+    panel?.finishLayoutSwap();
+  }
+}
+
+async function selectTab(t: WorkTab) {
   if (t === 'artifacts') {
     // The Artifacts tab is the docked view: bring the surface into the work
     // area (docking it if it was popped out), opening it if it was closed.
-    poppedOut.value = false;
-    if (!artifactsActive.value) router.push(`/s/${props.id}/artifacts`);
+    await guardedArtifactLayout(async () => {
+      poppedOut.value = false;
+      if (!artifactsActive.value) await router.push(`/s/${props.id}/artifacts`);
+    });
     return;
   }
   if (t === 'conversation' || t === 'shells') mounted[t] = true;
@@ -127,17 +151,25 @@ function selectTab(t: WorkTab) {
   // Leaving a docked artifacts surface for a local tab closes it (back to the
   // plain session URL); when it's popped out the rail stays and we just swap the
   // work-area pane.
-  if (artifactsDocked.value) router.push(`/s/${props.id}`);
+  if (artifactsDocked.value) {
+    await guardedArtifactLayout(async () => {
+      await router.push(`/s/${props.id}`);
+    });
+  }
 }
 
 // Pop the artifact out beside the terminal / dock it back into the tab.
-function togglePop() {
-  poppedOut.value = !poppedOut.value;
+async function togglePop() {
+  await guardedArtifactLayout(() => {
+    poppedOut.value = !poppedOut.value;
+  });
 }
 // Close the rail entirely — back to the plain session page.
-function closeRail() {
-  poppedOut.value = false;
-  router.push(`/s/${props.id}`);
+async function closeRail() {
+  await guardedArtifactLayout(async () => {
+    poppedOut.value = false;
+    await router.push(`/s/${props.id}`);
+  });
 }
 
 // --- Resizable side rails --------------------------------------------------
@@ -264,7 +296,22 @@ onActivated(() => {
   loadAll();
   openStream();
 });
-onBeforeRouteLeave((to) => {
+onBeforeRouteLeave(async (to) => {
+  const staysInArtifacts =
+    to.params.id === props.id && to.path.startsWith(`/s/${props.id}/artifacts`);
+  if (artifactsActive.value && !staysInArtifacts && !layoutNavigationAuthorized) {
+    const panel = activeArtifactsPanel();
+    if (panel && !(await panel.prepareLayoutSwap())) return false;
+    if (panel) {
+      // A direct rail link or browser-history navigation has no local layout
+      // callback. Hold the frozen controller through the router commit (or
+      // abort), then release the still-mounted cached surface.
+      const removeAfterEach = router.afterEach(() => {
+        removeAfterEach();
+        panel.finishLayoutSwap();
+      });
+    }
+  }
   const staysInSession = to.params.id === props.id && to.path.startsWith(`/s/${props.id}`);
   if (to.path !== '/' && !staysInSession) cancelSessionBacktrack();
 });
@@ -333,6 +380,7 @@ onUnmounted(() => {
              copy below takes over. -->
         <div v-if="mounted.artifacts && !railOpen" v-show="artifactsDocked" class="h-full">
           <ArtifactsPanel
+            ref="dockedArtifactsRef"
             :id="props.id"
             :name="props.name"
             :active="artifactsActive"
@@ -357,6 +405,7 @@ onUnmounted(() => {
         :style="panelWidth(artifactWidth)"
       >
         <ArtifactsPanel
+          ref="railArtifactsRef"
           :id="props.id"
           :name="props.name"
           :active="railOpen"

@@ -339,6 +339,7 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     }
     tokio::spawn(monitor::run(state.clone()));
     tokio::spawn(session_manager::run(state.db.clone()));
+    tokio::spawn(crate::review_delivery::run(state.clone()));
     // The GitHub poller is always spawned; it self-gates on the `github.poll`
     // setting and on `gh` being available, so it idles cheaply when GitHub
     // integration is off or unavailable.
@@ -354,7 +355,7 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     // here cheaply.
     tokio::spawn(crate::slack::run(state.clone()));
     tracing::debug!(
-        "background tasks spawned (monitor, session reconciler, github poll, watch, ide reaper, slack)"
+        "background tasks spawned (monitor, session reconciler, review delivery, github poll, watch, ide reaper, slack)"
     );
     // `into_make_service_with_connect_info` surfaces the peer `SocketAddr` to the
     // auth middleware, which uses it to recognise (and optionally trust) loopback.

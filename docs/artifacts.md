@@ -323,6 +323,53 @@ update the issues; when issues change shape, update the doc's references.*
   linking to the issue, `artifact:` links resolve, checked state for a
   referenced issue comes from the ledger, never the text.
 - `artifact_written` joins the activity feed and SSE-driven refresh.
+- **Review mode** stages feedback before it crosses into the conversation.
+  Selecting rendered text creates a pending comment in a creator-private,
+  session-and-artifact-scoped server draft. Pending comments can be edited,
+  deleted, navigated, or re-anchored after a new artifact revision. The overall
+  note is persisted too, so a review may contain only overall feedback and
+  survives reload or dock/pop. Every mutation advances an optimistic draft
+  revision; a stale tab receives the fresh review and must re-review the exact
+  payload, including when it retries an already-submitted review. A review is
+  attached to the artifact's immutable numeric ID; the public artifact name is
+  resolved only when listing or creating, so a shared artifact that is shadowed,
+  or a deleted artifact name that is later reused, cannot inherit old feedback.
+  Re-anchoring the final old comment truthfully advances the envelope; an
+  overall-only draft can instead be moved to the current revision with one
+  guarded mutation. Remaining old anchors require an explicit acknowledgement.
+  The docked and popped viewers await summary and comment writes before swapping
+  layouts and preserve a rendered content sentinel through reflow.
+
+  `Submit review` freezes the draft and its comments in one transaction,
+  checks the current artifact revision, records one `review_submitted` event,
+  and inserts one delivery-outbox item. REST returns the server-authoritative
+  structured message—including the full quote, prefix, suffix, and block
+  position—as the exact preview. ACP feedback enters a protected immutable
+  conversation inbox, separate from retractable user prompts. Inbox consumption,
+  the stable delivery key in the ACP journal, and the in-flight turn marker
+  commit at one logical dispatch boundary, so recovery never starts a second
+  turn for an already-journaled review. Unconsumed feedback can be rehomed to
+  the next live ACP or terminal session on the branch. Fenced leases prevent
+  stale workers from regressing delivery; offline feedback stays queued without
+  consuming attempts. Terminal delivery remains at-least-once. Every authorized
+  operator can resolve or reopen submitted comments and retry a failed
+  delivery; content mutation and discard remain creator-private draft actions.
+  Earlier discussion threads are projected as submitted compatibility history.
+  Drafts emit no branch-wide SSE event; submitted reviews do.
+
+  The operator CLI exposes the same REST contract:
+
+  ```
+  loom review ls <session> <artifact>
+  loom review show <review-id>
+  loom review add <session> <artifact> --rev N --quote TEXT COMMENT
+  loom review overall <session> <artifact> --rev N NOTE
+  loom review edit|reanchor|delete-comment ... --revision DRAFT_REV
+  loom review resolve|reopen <review-id> <comment-id>
+  loom review retarget <review-id> --revision DRAFT_REV
+  loom review discard|submit <review-id> --revision DRAFT_REV
+  loom review retry <review-id>
+  ```
 
 ## Lifecycle walkthrough
 

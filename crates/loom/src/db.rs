@@ -70,6 +70,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "session-layout",
         include_str!("../migrations/0012_session_layout.sql"),
     ),
+    (
+        13,
+        "review-inbox",
+        include_str!("../migrations/0013_review_inbox.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -302,7 +307,7 @@ mod tests {
                 .fetch_all(&db)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
 
         let profile_columns = table_columns(&db, "profiles").await.unwrap();
         assert!(profile_columns.iter().any(|column| column == "retired"));
@@ -358,6 +363,22 @@ mod tests {
                 "{expected}"
             );
         }
+        let inbox_columns = table_columns(&db, "review_conversation_inbox")
+            .await
+            .unwrap();
+        for expected in [
+            "delivery_key",
+            "branch_id",
+            "preferred_session_id",
+            "payload",
+            "claim_token",
+            "claim_owner",
+        ] {
+            assert!(
+                inbox_columns.iter().any(|column| column == expected),
+                "missing review inbox column {expected}"
+            );
+        }
 
         let stock = crate::profile::get(&db, "github_comment")
             .await
@@ -378,6 +399,36 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn v12_database_adds_the_review_inbox_at_v13() {
+        let db = core_connect_in_memory().await.unwrap();
+        LOOM_STREAM.ensure_indicator(&db).await.unwrap();
+        for (version, name, migration) in LOOM_MIGRATIONS.iter().take(12) {
+            for statement in split_statements(migration) {
+                sqlx::query(&statement).execute(&db).await.unwrap();
+            }
+            LOOM_STREAM.stamp(&db, *version, name).await.unwrap();
+        }
+        assert!(table_columns(&db, "review_conversation_inbox")
+            .await
+            .unwrap()
+            .is_empty());
+
+        LOOM_STREAM.apply_pending(&db).await.unwrap();
+        LOOM_STREAM.apply_pending(&db).await.unwrap();
+
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM loom_schema_migrations ORDER BY version")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+        assert!(!table_columns(&db, "review_conversation_inbox")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -529,7 +580,7 @@ mod tests {
                 .fetch_all(&db)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
         assert!(
             crate::session_layout::placement(&db, "warm")
                 .await
@@ -685,7 +736,7 @@ mod tests {
                 .fetch_all(&db)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
         let index_sql: String = sqlx::query_scalar(
             "SELECT sql FROM sqlite_master
              WHERE type = 'index' AND name = 'idx_sessions_active_branch'",
@@ -759,7 +810,7 @@ mod tests {
             .fetch_one(&db)
             .await
             .unwrap();
-        assert_eq!(count, 12);
+        assert_eq!(count, 13);
 
         // Adoption replaced the historical index predicate: archived history
         // no longer prevents a new active session from claiming the branch.

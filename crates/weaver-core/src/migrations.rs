@@ -98,6 +98,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "watch_profiles",
         include_str!("../migrations/0015_watch_profiles.sql"),
     ),
+    (
+        16,
+        "reviews",
+        include_str!("../migrations/0016_reviews.sql"),
+    ),
 ];
 
 /// Latest core schema version compiled into this binary.
@@ -472,6 +477,66 @@ mod tests {
             table_columns(&pool, "notes").await.unwrap().is_empty(),
             "the notes table must be dropped"
         );
+    }
+
+    #[tokio::test]
+    async fn review_schema_is_final_when_v16_first_ships() {
+        let pool = empty_pool().await;
+        STREAM.ensure_indicator(&pool).await.unwrap();
+        for (version, name, sql) in MIGRATIONS.iter().take(15) {
+            for statement in split_statements(sql) {
+                sqlx::query(&statement).execute(&pool).await.unwrap();
+            }
+            STREAM.stamp(&pool, *version, name).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO artifacts (id, repo_root, name, title)
+             VALUES (42, '/repo', 'design', 'Design')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        STREAM.apply_pending(&pool).await.unwrap();
+
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM schema_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(versions, (1..=16).collect::<Vec<_>>());
+        let review_columns = table_columns(&pool, "reviews").await.unwrap();
+        assert!(review_columns.iter().any(|column| column == "subject_id"));
+        assert!(review_columns
+            .iter()
+            .any(|column| column == "draft_revision"));
+        let outbox_columns = table_columns(&pool, "review_delivery_outbox")
+            .await
+            .unwrap();
+        assert!(outbox_columns.iter().any(|column| column == "lease_token"));
+        assert!(!outbox_columns
+            .iter()
+            .any(|column| column == "lease_generation"));
+        assert!(table_columns(&pool, "review_prompt_deliveries")
+            .await
+            .unwrap()
+            .is_empty());
+        let indexes: Vec<String> = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'index' AND name IN ('idx_reviews_one_draft', 'idx_reviews_subject')
+             ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(indexes.len(), 2);
+        assert!(indexes.iter().all(|sql| sql.contains("subject_id")));
+        let next_id: i64 =
+            sqlx::query_scalar("SELECT next_id FROM artifact_id_sequence WHERE singleton = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(next_id, 43);
     }
 
     /// Running twice is a no-op: nothing re-applies and the recorded set is

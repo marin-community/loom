@@ -1413,6 +1413,134 @@ pub struct NewCommentBody {
     pub body: String,
 }
 
+// ---------------------------------------------------------------------------
+// Reviews — creator-private draft feedback over versioned artifacts. The
+// generic subject/anchor shapes are shared with the future changes viewer.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewSubjectDto {
+    pub kind: String,
+    /// Stable internal artifact envelope id.
+    pub id: String,
+    /// Stable public subject key: the artifact name accepted by list/create.
+    pub key: String,
+    pub label: String,
+    pub version: String,
+    pub current_version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactTextAnchorDto {
+    pub quote: String,
+    #[serde(default)]
+    pub prefix: String,
+    #[serde(default)]
+    pub suffix: String,
+    #[serde(default)]
+    pub block_index: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewCommentDto {
+    pub id: i64,
+    pub subject_version: String,
+    pub anchor_kind: String,
+    pub anchor: ArtifactTextAnchorDto,
+    pub body: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewDto {
+    pub id: i64,
+    pub session_id: String,
+    pub subject: ReviewSubjectDto,
+    pub status: String,
+    pub summary: String,
+    /// Monotonic optimistic revision for the editable draft envelope.
+    pub draft_revision: i64,
+    /// Server-authoritative exact conversation payload preview.
+    pub message: String,
+    pub created_by: String,
+    pub outdated: bool,
+    pub acknowledged_outdated: bool,
+    pub delivery_state: String,
+    pub delivery_error: Option<String>,
+    pub delivery_key: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub submitted_at: Option<String>,
+    pub comments: Vec<ReviewCommentDto>,
+    #[serde(default)]
+    pub legacy: bool,
+}
+
+/// Create or recover the caller's one draft for a session/subject.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateReviewReq {
+    pub subject_kind: String,
+    /// Artifact name for `subject_kind = "artifact"`.
+    pub subject_key: String,
+    pub subject_version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddReviewCommentReq {
+    pub expected_revision: i64,
+    pub subject_version: String,
+    pub anchor_kind: String,
+    pub anchor: ArtifactTextAnchorDto,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateReviewCommentReq {
+    pub expected_revision: i64,
+    #[serde(default)]
+    pub subject_version: Option<String>,
+    #[serde(default)]
+    pub anchor_kind: Option<String>,
+    #[serde(default)]
+    pub anchor: Option<ArtifactTextAnchorDto>,
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitReviewReq {
+    pub expected_revision: i64,
+    #[serde(default)]
+    pub acknowledge_outdated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateReviewReq {
+    pub expected_revision: i64,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub subject_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectedReviewRevisionReq {
+    pub expected_revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolveReviewCommentReq {
+    pub resolved: bool,
+}
+
 /// One watch, as the API exposes it. The JSON-bearing columns
 /// (`trigger`, `scope`, `params`) are returned as **parsed** structured JSON so
 /// a UI never re-parses strings; `capabilities` is a real array; the rest is the

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Shared pre-commit / CI gate: Rust formatting + lints and the frontend
-# typecheck must all pass.
+# Shared pre-commit / CI gate: Rust formatting + lints and the frontend unit,
+# typecheck, and formatting checks must all pass.
 #
 # This is the single source of truth for "is the tree clean?". It is run by:
 #   - the git pre-commit hook (.githooks/pre-commit), enabled per-clone with
@@ -41,6 +41,8 @@ if command -v npm >/dev/null 2>&1; then
     echo "  installing frontend deps (npm install)…"
     npm --prefix "$frontend" install
   fi
+  echo "▶ frontend unit tests ($frontend)"
+  npm --prefix "$frontend" run test:unit
   npm --prefix "$frontend" run typecheck
   echo "▶ prettier --check ($frontend/src)"
   if ! npm --prefix "$frontend" run format:check; then
@@ -48,7 +50,7 @@ if command -v npm >/dev/null 2>&1; then
     echo "✗ frontend formatting check failed — run \`npm --prefix $frontend run format\`, then re-stage and commit." >&2
     exit 1
   fi
-  echo "✓ fmt + clippy + typecheck + prettier clean"
+  echo "✓ fmt + clippy + frontend unit + typecheck + prettier clean"
 else
   echo "▶ vue-tsc typecheck + prettier — skipped (npm not found)"
   echo "✓ fmt + clippy clean"

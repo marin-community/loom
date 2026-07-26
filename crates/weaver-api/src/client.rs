@@ -11,19 +11,21 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::dto::{
-    AnchorDto, ArtifactMeta, ArtifactUpsertReq, ArtifactView, AutomationTokenReq,
-    AutomationTokenView, BranchStatusReq, BranchView, CloneProfileReq, CommentDto, CreateEventReq,
-    CreateIssueReq, CreateRepoIssueReq, CreateReq, CreateSessionGroupReq, CreateSessionSpaceReq,
-    CreateTokenReq, CreateWatchReq, CreatedTokenView, CustomMcpReq, CustomMcpView,
-    DeleteSessionGroupReq, DeleteSessionSpaceReq, DeploymentReq, DeploymentView, DiagnosticsView,
-    EffectiveProfileView, FederationReq, FederationView, HandoffReq, HistoryPageView,
-    IssueActionsReq, IssueActionsResult, IssueView, McpRegistryView, MoveSessionsReq,
-    NewCommentBody, NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq, ProfileProbeView,
-    ProfileReq, ProfileView, PutProfileEnvReq, ReadinessView, ReorderSessionLayoutReq,
-    ResolveLaunchReq, ResolvedLaunchView, RestoreSessionGroupsReq, RunReq, RunView, RunWatchReq,
-    ScratchLimitsView, SearchSessionsOptions, SendReq, SessionGroupPreferenceReq,
-    SessionLayoutView, SessionPlacementSelectorKind, SessionView, SetSessionPlacementDefaultReq,
-    SetTagsReq, SettingsEnvelope, TagReq, ThreadDto, TokenView, UpdateSessionGroupReq,
+    AddReviewCommentReq, AnchorDto, ArtifactMeta, ArtifactUpsertReq, ArtifactView,
+    AutomationTokenReq, AutomationTokenView, BranchStatusReq, BranchView, CloneProfileReq,
+    CommentDto, CreateEventReq, CreateIssueReq, CreateRepoIssueReq, CreateReq, CreateReviewReq,
+    CreateSessionGroupReq, CreateSessionSpaceReq, CreateTokenReq, CreateWatchReq, CreatedTokenView,
+    CustomMcpReq, CustomMcpView, DeleteSessionGroupReq, DeleteSessionSpaceReq, DeploymentReq,
+    DeploymentView, DiagnosticsView, EffectiveProfileView, ExpectedReviewRevisionReq,
+    FederationReq, FederationView, HandoffReq, HistoryPageView, IssueActionsReq,
+    IssueActionsResult, IssueView, McpRegistryView, MoveSessionsReq, NewCommentBody, NewThreadBody,
+    PatchIssueReq, PatchSessionReq, PatchWatchReq, ProfileProbeView, ProfileReq, ProfileView,
+    PutProfileEnvReq, ReadinessView, ReorderSessionLayoutReq, ResolveLaunchReq,
+    ResolveReviewCommentReq, ResolvedLaunchView, RestoreSessionGroupsReq, ReviewCommentDto,
+    ReviewDto, RunReq, RunView, RunWatchReq, ScratchLimitsView, SearchSessionsOptions, SendReq,
+    SessionGroupPreferenceReq, SessionLayoutView, SessionPlacementSelectorKind, SessionView,
+    SetSessionPlacementDefaultReq, SetTagsReq, SettingsEnvelope, SubmitReviewReq, TagReq,
+    ThreadDto, TokenView, UpdateReviewCommentReq, UpdateReviewReq, UpdateSessionGroupReq,
     UpdateSessionSpaceReq, WatchView,
 };
 
@@ -832,6 +834,144 @@ impl Client {
                 Self::seg(name)
             ),
             Value::Null,
+        )
+        .await
+    }
+
+    // -- Staged reviews ------------------------------------------------------
+
+    pub async fn list_session_reviews(
+        &self,
+        session: &str,
+        subject_kind: &str,
+        subject_key: &str,
+    ) -> Result<Vec<ReviewDto>> {
+        self.get_typed(&format!(
+            "/api/sessions/{}/reviews?subject_kind={}&subject_key={}",
+            Self::seg(session),
+            Self::seg(subject_kind),
+            Self::seg(subject_key)
+        ))
+        .await
+    }
+
+    pub async fn create_session_review(
+        &self,
+        session: &str,
+        req: &CreateReviewReq,
+    ) -> Result<ReviewDto> {
+        self.send_typed(
+            Method::POST,
+            &format!("/api/sessions/{}/reviews", Self::seg(session)),
+            Some(req),
+        )
+        .await
+    }
+
+    pub async fn add_review_comment(
+        &self,
+        review_id: i64,
+        req: &AddReviewCommentReq,
+    ) -> Result<ReviewDto> {
+        self.send_typed(
+            Method::POST,
+            &format!("/api/reviews/{review_id}/comments"),
+            Some(req),
+        )
+        .await
+    }
+
+    pub async fn get_review(&self, review_id: i64) -> Result<ReviewDto> {
+        self.get_typed(&format!("/api/reviews/{review_id}")).await
+    }
+
+    pub async fn update_review_comment(
+        &self,
+        review_id: i64,
+        comment_id: i64,
+        req: &UpdateReviewCommentReq,
+    ) -> Result<ReviewDto> {
+        self.send_typed(
+            Method::PATCH,
+            &format!("/api/reviews/{review_id}/comments/{comment_id}"),
+            Some(req),
+        )
+        .await
+    }
+
+    pub async fn update_review(&self, review_id: i64, req: &UpdateReviewReq) -> Result<ReviewDto> {
+        self.send_typed(
+            Method::PATCH,
+            &format!("/api/reviews/{review_id}"),
+            Some(req),
+        )
+        .await
+    }
+
+    pub async fn delete_review_comment(
+        &self,
+        review_id: i64,
+        comment_id: i64,
+        expected_revision: i64,
+    ) -> Result<ReviewDto> {
+        self.send_typed(
+            Method::DELETE,
+            &format!("/api/reviews/{review_id}/comments/{comment_id}"),
+            Some(&ExpectedReviewRevisionReq { expected_revision }),
+        )
+        .await
+    }
+
+    pub async fn discard_review(&self, review_id: i64, expected_revision: i64) -> Result<Value> {
+        self.send_typed(
+            Method::DELETE,
+            &format!("/api/reviews/{review_id}"),
+            Some(&ExpectedReviewRevisionReq { expected_revision }),
+        )
+        .await
+    }
+
+    pub async fn submit_review(&self, review_id: i64, req: &SubmitReviewReq) -> Result<ReviewDto> {
+        self.send_typed(
+            Method::POST,
+            &format!("/api/reviews/{review_id}/submit"),
+            Some(req),
+        )
+        .await
+    }
+
+    pub async fn retarget_review_to_current(
+        &self,
+        review_id: i64,
+        expected_revision: i64,
+    ) -> Result<ReviewDto> {
+        self.send_typed(
+            Method::POST,
+            &format!("/api/reviews/{review_id}/retarget-current"),
+            Some(&ExpectedReviewRevisionReq { expected_revision }),
+        )
+        .await
+    }
+
+    pub async fn resolve_review_comment(
+        &self,
+        review_id: i64,
+        comment_id: i64,
+        resolved: bool,
+    ) -> Result<ReviewCommentDto> {
+        self.send_typed(
+            Method::POST,
+            &format!("/api/reviews/{review_id}/comments/{comment_id}/resolve"),
+            Some(&ResolveReviewCommentReq { resolved }),
+        )
+        .await
+    }
+
+    pub async fn retry_review_delivery(&self, review_id: i64) -> Result<ReviewDto> {
+        self.send_typed::<Value, ReviewDto>(
+            Method::POST,
+            &format!("/api/reviews/{review_id}/retry-delivery"),
+            Some(&Value::Object(Default::default())),
         )
         .await
     }

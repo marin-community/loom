@@ -632,6 +632,8 @@ export interface Anchor {
   quote: string;
   prefix: string;
   suffix: string;
+  /** Stable rendered block position captured with the quote selector. */
+  block_index?: number | null;
 }
 
 /** One reply in a thread. */
@@ -670,6 +672,83 @@ export interface NewThreadBody {
  *  append a reply to an existing thread. */
 export interface NewCommentBody {
   body: string;
+}
+
+// --- Staged reviews --------------------------------------------------------
+
+export interface ReviewSubject {
+  kind: string;
+  /** Stable internal subject id. */
+  id: string;
+  /** Public round-trippable key; artifact reviews use the artifact name. */
+  key: string;
+  label: string;
+  version: string;
+  current_version: string;
+}
+
+export interface ReviewComment {
+  id: number;
+  subject_version: string;
+  anchor_kind: string;
+  anchor: Anchor;
+  body: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Review {
+  id: number;
+  session_id: string;
+  subject: ReviewSubject;
+  /** `draft` | `submitted`. */
+  status: string;
+  summary: string;
+  /** Monotonic optimistic revision for every editable draft mutation. */
+  draft_revision: number;
+  /** Exact server-rendered payload that will be delivered on submit. */
+  message: string;
+  created_by: string;
+  outdated: boolean;
+  acknowledged_outdated: boolean;
+  /** `draft` | `queued` | `delivering` | `retrying` | `delivered` | `failed`. */
+  delivery_state: string;
+  delivery_error: string | null;
+  delivery_key: string;
+  created_at: string;
+  updated_at: string;
+  submitted_at: string | null;
+  comments: ReviewComment[];
+  legacy: boolean;
+}
+
+export interface CreateReviewBody {
+  subject_kind: 'artifact';
+  subject_key: string;
+  subject_version: string;
+}
+
+export interface AddReviewCommentBody {
+  expected_revision: number;
+  subject_version: string;
+  anchor_kind: 'text';
+  anchor: Anchor;
+  body: string;
+}
+
+export interface UpdateReviewCommentBody {
+  expected_revision: number;
+  subject_version?: string;
+  anchor_kind?: 'text';
+  anchor?: Anchor;
+  body?: string;
+}
+
+export interface UpdateReviewBody {
+  expected_revision: number;
+  summary?: string;
+  subject_version?: string;
 }
 
 export interface RecentRepo {
