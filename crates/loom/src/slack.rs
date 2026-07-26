@@ -875,21 +875,21 @@ async fn launch(
         req.name = Some(branch_name.clone());
     }
 
-    let actor = crate::runtime::Actor::producer("slack", "slack");
-    let view = crate::runtime::create_session(state.clone(), req, actor)
+    let actor = crate::provision::Actor::producer("slack", "slack");
+    let created = crate::provision::create(state.clone(), req, actor)
         .await
         .map_err(|e| anyhow!("{e:?}"))?;
 
     // Wire the branch to the thread — what `sync_status_message` reads to mirror
     // every `weaver status` write. Left untouched if already wired to this thread.
     let already = matches!(
-        tags::get(&state.db, &view.branch.id, WIRED_TAG).await,
+        tags::get(&state.db, &created.branch.id, WIRED_TAG).await,
         Ok(Some(ref t)) if t.value == wiring
     );
     if !already {
         tags::set(
             &state.db,
-            &view.branch.id,
+            &created.branch.id,
             WIRED_TAG,
             &wiring,
             "wired by /marinbot",
@@ -910,7 +910,10 @@ async fn launch(
     let card_body = if base.is_empty() {
         "On it — session started (set loom's public base URL to link it here).".to_string()
     } else {
-        format!("On it — <{}>", crate::web::session_url(&base, &view.id))
+        format!(
+            "On it — <{}>",
+            crate::web::session_url(&base, &created.session.id)
+        )
     };
     let ts = match card_ts {
         Some(ts) => {
@@ -924,10 +927,10 @@ async fn launch(
             .await
             .context("posting the mention card")?,
     };
-    record_status_message(&state.db, &view.branch.id, &wiring, &ts).await;
-    tracing::info!(session = %view.id, repo = %repo, channel = %trigger.channel_id, "slack: launched session");
+    record_status_message(&state.db, &created.branch.id, &wiring, &ts).await;
+    tracing::info!(session = %created.session.id, repo = %repo, channel = %trigger.channel_id, "slack: launched session");
     drop(_guard);
-    sync_status_message(state.clone(), view.branch.id.clone()).await;
+    sync_status_message(state.clone(), created.branch.id.clone()).await;
     Ok(())
 }
 

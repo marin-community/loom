@@ -453,9 +453,9 @@ async fn handle_trigger(
             req.name = Some(format!("issue-{number}"));
         }
     }
-    let actor = crate::runtime::Actor::producer("github", username);
-    let view = match crate::runtime::create_session(st.clone(), req, actor).await {
-        Ok(v) => v,
+    let actor = crate::provision::Actor::producer("github", username);
+    let created = match crate::provision::create(st.clone(), req, actor).await {
+        Ok(created) => created,
         Err(e) => {
             tracing::warn!(repo = %slug.slug(), error = ?e, "github webhook: session create failed");
             return Err(format!("session create failed: {e:?}"));
@@ -470,13 +470,13 @@ async fn handle_trigger(
     //     `set_at` scopes the mirrored trail, and re-stamping would truncate it.
     let wired_to = format!("{}#{number}", slug.slug());
     let already_wired = matches!(
-        weaver_core::tags::get(&st.db, &view.branch.id, crate::github::WIRED_TAG).await,
+        weaver_core::tags::get(&st.db, &created.branch.id, crate::github::WIRED_TAG).await,
         Ok(Some(ref t)) if t.value == wired_to
     );
     if !already_wired {
         weaver_core::tags::set(
             &st.db,
-            &view.branch.id,
+            &created.branch.id,
             crate::github::WIRED_TAG,
             &wired_to,
             "wired by the @loom trigger",
@@ -490,7 +490,7 @@ async fn handle_trigger(
     //     session's **status card**: its comment id is recorded so later status
     //     writes edit it in place into the live trail.
     let base = public_base(&st, &headers).await;
-    let reply = format!("On it — {}", super::session_url(&base, &view.id));
+    let reply = format!("On it — {}", super::session_url(&base, &created.session.id));
     match st
         .trigger
         .gh()
@@ -502,9 +502,12 @@ async fn handle_trigger(
             // frozen mid-arc — point its readers at the live one. The full
             // trail re-renders onto the new card (the wiring's `set_at`
             // predates it), so nothing is lost.
-            if let Ok(Some(prev)) =
-                weaver_core::tags::get(&st.db, &view.branch.id, crate::github::STATUS_COMMENT_TAG)
-                    .await
+            if let Ok(Some(prev)) = weaver_core::tags::get(
+                &st.db,
+                &created.branch.id,
+                crate::github::STATUS_COMMENT_TAG,
+            )
+            .await
             {
                 if prev.note == wired_to {
                     if let Ok(prev_id) = prev.value.parse::<i64>() {
@@ -524,7 +527,7 @@ async fn handle_trigger(
             }
             crate::github::record_status_comment(
                 &st.db,
-                &view.branch.id,
+                &created.branch.id,
                 &slug.slug(),
                 number,
                 comment_id,
@@ -536,7 +539,7 @@ async fn handle_trigger(
             if already_wired {
                 tokio::spawn(crate::github::sync_status_comment(
                     st.clone(),
-                    view.branch.id.clone(),
+                    created.branch.id.clone(),
                 ));
             }
         }
@@ -545,7 +548,7 @@ async fn handle_trigger(
         }
     }
     tracing::info!(
-        session = %view.id,
+        session = %created.session.id,
         repo = %slug.slug(),
         number,
         is_pr,
@@ -559,16 +562,16 @@ async fn handle_trigger(
     if is_pr {
         weaver_core::tags::set(
             &st.db,
-            &view.branch.id,
+            &created.branch.id,
             crate::github::LINKED_TAG,
-            &view.id,
+            &created.session.id,
             "loom back-link posted with the trigger reply",
             "loom",
         )
         .await
         .ok();
     }
-    Ok(Some(view.id))
+    Ok(Some(created.session.id))
 }
 
 /// Build the opening goal for a trigger-launched session: the issue/PR title and

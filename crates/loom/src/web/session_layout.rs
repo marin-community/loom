@@ -18,7 +18,6 @@ use weaver_api::{
 };
 
 use crate::auth::Principal;
-use crate::events;
 use crate::session_layout::{self, MutationError};
 
 use super::{ApiResult, AppError, AppState};
@@ -34,17 +33,6 @@ fn require_admin(principal: &Principal) -> ApiResult<()> {
     }
 }
 
-pub(crate) async fn publish_invalidation(st: &AppState, revision: i64) {
-    events::record_system(
-        &st.db,
-        &st.bus,
-        "session_layout",
-        json!({ "revision": revision }),
-    )
-    .await
-    .ok();
-}
-
 async fn mutation_response(
     st: &AppState,
     username: &str,
@@ -52,14 +40,7 @@ async fn mutation_response(
 ) -> ApiResult<Json<SessionLayoutView>> {
     match result {
         Ok(layout) => {
-            events::record_system(
-                &st.db,
-                &st.bus,
-                "session_layout",
-                json!({ "revision": layout.revision }),
-            )
-            .await
-            .ok();
+            session_layout::publish_invalidation(&st.db, &st.bus, layout.revision).await;
             Ok(Json(layout))
         }
         Err(MutationError::Conflict) => {
