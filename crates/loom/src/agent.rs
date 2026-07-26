@@ -1505,6 +1505,18 @@ enum OneShotPolicy<'a> {
     Metadata,
 }
 
+struct OneShotLaunchPolicy<'a> {
+    extra_env: Vec<(String, String)>,
+    env_clear: bool,
+    mode: &'a str,
+    prelude: &'a str,
+    restricted: bool,
+    allowed_tools: String,
+    mcp_access: String,
+    profile_model: &'a str,
+    profile_effort: &'a str,
+}
+
 /// Central agent-resolution and non-interactive prompt surface. Interactive
 /// launches and transient prompts both resolve the same registered runtime;
 /// provider-specific execution remains behind that runtime's ACP adapter.
@@ -1667,17 +1679,7 @@ impl<'a> AgentManager<'a> {
                 return None;
             }
         };
-        let (
-            extra_env,
-            env_clear,
-            mode,
-            prelude,
-            restricted,
-            allowed_tools,
-            mcp_access,
-            profile_model,
-            profile_effort,
-        ) = match profile {
+        let launch_policy = match profile {
             Some(profile) => {
                 let mut extra_env = match crate::profile::env_pairs(self.db, &profile.name).await {
                     Ok(env) => env,
@@ -1709,17 +1711,17 @@ impl<'a> AgentManager<'a> {
                         return None;
                     }
                 };
-                (
+                OneShotLaunchPolicy {
                     extra_env,
-                    profile.env_clear,
-                    profile.mode.as_str(),
-                    profile.prelude.as_str(),
-                    profile.restricted,
+                    env_clear: profile.env_clear,
+                    mode: profile.mode.as_str(),
+                    prelude: profile.prelude.as_str(),
+                    restricted: profile.restricted,
                     allowed_tools,
-                    profile.mcp_policy.clone(),
-                    profile.model.as_str(),
-                    profile.effort.as_str(),
-                )
+                    mcp_access: profile.mcp_policy.clone(),
+                    profile_model: profile.model.as_str(),
+                    profile_effort: profile.effort.as_str(),
+                }
             }
             None => {
                 let mcp_access = match serde_json::to_string(
@@ -1731,17 +1733,17 @@ impl<'a> AgentManager<'a> {
                         return None;
                     }
                 };
-                (
-                    Vec::new(),
-                    true,
-                    "plan",
-                    "none",
-                    true,
-                    "[]".to_string(),
+                OneShotLaunchPolicy {
+                    extra_env: Vec::new(),
+                    env_clear: true,
+                    mode: "plan",
+                    prelude: "none",
+                    restricted: true,
+                    allowed_tools: "[]".to_string(),
                     mcp_access,
-                    "",
-                    "",
-                )
+                    profile_model: "",
+                    profile_effort: "",
+                }
             }
         };
         let launch = match build_acp_launch(
@@ -1756,13 +1758,13 @@ impl<'a> AgentManager<'a> {
                 effort: "",
                 goal_file: None,
                 primer_file: None,
-                extra_env: &extra_env,
-                env_clear,
-                mode,
-                prelude,
-                restricted,
-                allowed_tools: &allowed_tools,
-                mcp_access: &mcp_access,
+                extra_env: &launch_policy.extra_env,
+                env_clear: launch_policy.env_clear,
+                mode: launch_policy.mode,
+                prelude: launch_policy.prelude,
+                restricted: launch_policy.restricted,
+                allowed_tools: &launch_policy.allowed_tools,
+                mcp_access: &launch_policy.mcp_access,
                 custom: custom.as_ref(),
             },
             AcpOpen::Fresh,
@@ -1776,12 +1778,12 @@ impl<'a> AgentManager<'a> {
             }
         };
         let selected_model = if model.trim().is_empty() {
-            profile_model
+            launch_policy.profile_model
         } else {
             model.trim()
         };
         let selected_effort = if effort.trim().is_empty() {
-            profile_effort
+            launch_policy.profile_effort
         } else {
             effort.trim()
         };
