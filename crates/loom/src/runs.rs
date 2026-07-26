@@ -28,10 +28,14 @@ pub struct Run {
 
 impl From<Run> for RunView {
     fn from(run: Run) -> Self {
+        let watch_id = serde_json::from_str::<serde_json::Value>(&run.request_json)
+            .ok()
+            .and_then(|value| value["watch_id"].as_str().map(str::to_string));
         Self {
             id: run.id,
             actor_subject: run.actor_subject,
             source: run.source,
+            watch_id,
             service_tag: run.service_tag,
             profile: run.profile,
             idempotency_key: run.idempotency_key,

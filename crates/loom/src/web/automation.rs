@@ -305,6 +305,11 @@ pub(super) async fn create_run(
             "run source must be 'actions', 'ops', or 'grafana'",
         ));
     }
+    if let Some(watch_id) = req.watch_id.as_deref() {
+        if weaver_core::watch::get(&st.db, watch_id).await?.is_none() {
+            return Err(AppError::bad_request(format!("unknown watch '{watch_id}'")));
+        }
+    }
     req.session.profile = Some(profile.clone());
     req.session.class = None;
     req.channel = match req.channel.take() {

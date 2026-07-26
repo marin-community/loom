@@ -248,7 +248,20 @@ pub(crate) async fn insert_default_placement_tx(
     };
     let mut group_id = inherited;
     if group_id.is_none() {
+        let watch_id = if let Some(run_id) = policy.automation_run_id.as_deref() {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT json_extract(request_json, '$.watch_id')
+                 FROM automation_runs WHERE id = ?",
+            )
+            .bind(run_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .flatten()
+        } else {
+            None
+        };
         let selectors = [
+            watch_id.as_deref().map(|id| ("watch", id)),
             Some(("profile", policy.profile.as_str())),
             Some(("origin", session.origin.as_str())),
             Some(("origin", "*")),

@@ -177,7 +177,7 @@ export interface SessionSpace {
   groups: SessionGroup[];
 }
 
-export type SessionPlacementSelectorKind = 'origin' | 'profile';
+export type SessionPlacementSelectorKind = 'origin' | 'profile' | 'watch';
 export type SessionLayoutItemKind = 'space' | 'group';
 
 export interface SessionPlacementDefault {
@@ -217,6 +217,7 @@ export interface AutomationRun {
   id: string;
   actor_subject: string;
   source: string;
+  watch_id: string | null;
   service_tag: string;
   profile: string;
   idempotency_key: string;

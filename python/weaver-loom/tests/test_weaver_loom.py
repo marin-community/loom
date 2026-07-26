@@ -132,6 +132,17 @@ def test_profile_scoped_run_is_capability_gated_and_preserves_idempotency():
             },
         )
     ]
+    watch_client = StubClient(capabilities=["launch"])
+    Round(
+        config={"id": "watch-1", "capabilities": ["launch"]}, client=watch_client
+    ).client.run("ops", "watch-alert", session_request)
+    assert watch_client.requests[-1][2] == {
+        "profile": "ops",
+        "idempotency_key": "watch-alert",
+        "source": "ops",
+        "watch_id": "watch-1",
+        "session": session_request,
+    }
     with pytest.raises(CapabilityDenied):
         StubClient().run("ops", "alert-1842", session_request)
 

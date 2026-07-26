@@ -1236,6 +1236,91 @@ mod tests {
                 .group_id,
             focused_id
         );
+
+        let mut revision = crate::session_layout::get_layout(&db, "test")
+            .await
+            .unwrap()
+            .revision;
+        for (kind, value, group_id) in [
+            (
+                weaver_api::SessionPlacementSelectorKind::Profile,
+                "default",
+                "group-github-inbox",
+            ),
+            (
+                weaver_api::SessionPlacementSelectorKind::Watch,
+                "watch-1",
+                focused_id.as_str(),
+            ),
+        ] {
+            revision = crate::session_layout::set_default(
+                &db,
+                "test",
+                &weaver_api::SetSessionPlacementDefaultReq {
+                    selector_kind: kind,
+                    selector_value: value.to_string(),
+                    group_id: group_id.to_string(),
+                    expected_revision: revision,
+                },
+            )
+            .await
+            .unwrap()
+            .revision;
+        }
+        sqlx::query(
+            "INSERT INTO automation_runs
+             (id, actor_subject, source, profile, idempotency_key, request_json,
+              session_id, status, created_at, updated_at)
+             VALUES ('run-watch', 'watch-1', 'ops', 'default', 'placement',
+              '{\"watch_id\":\"watch-1\"}', 'reserved', 'creating', '', '')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let run_view: weaver_api::RunView = crate::runs::get(&db, "run-watch")
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+        assert_eq!(run_view.watch_id.as_deref(), Some("watch-1"));
+
+        for (id, expected, remove) in [
+            (
+                "by-watch",
+                focused_id.as_str(),
+                Some((weaver_api::SessionPlacementSelectorKind::Watch, "watch-1")),
+            ),
+            (
+                "by-profile",
+                "group-github-inbox",
+                Some((weaver_api::SessionPlacementSelectorKind::Profile, "default")),
+            ),
+            ("by-origin", "group-ops-inbox", None),
+        ] {
+            let branch = branch_id(&db, &format!("weaver/{id}")).await;
+            let mut launched = new_session(id, &branch, None);
+            launched.origin = "actions".to_string();
+            let mut policy = SessionLaunchPolicy::compatible(&launched);
+            policy.automation_run_id = Some("run-watch".to_string());
+            insert_with_policy(&db, &launched, &policy).await.unwrap();
+            assert_eq!(
+                crate::session_layout::placement(&db, id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .group_id,
+                expected
+            );
+            if let Some((kind, value)) = remove {
+                let revision = crate::session_layout::get_layout(&db, "test")
+                    .await
+                    .unwrap()
+                    .revision;
+                crate::session_layout::delete_default(&db, "test", kind, value, revision)
+                    .await
+                    .unwrap();
+            }
+        }
     }
 
     /// Regression: archive kills the terminal before its final status write, so

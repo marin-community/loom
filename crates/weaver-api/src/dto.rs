@@ -1000,6 +1000,8 @@ pub struct RunReq {
     pub idempotency_key: String,
     #[serde(default = "actions_source")]
     pub source: String,
+    #[serde(default)]
+    pub watch_id: Option<String>,
     /// Stable conversation route for related automation deliveries. Each
     /// idempotency key remains a distinct run; channel deliveries reuse one
     /// live ACP session.
@@ -1031,6 +1033,7 @@ pub struct RunView {
     pub id: String,
     pub actor_subject: String,
     pub source: String,
+    pub watch_id: Option<String>,
     pub service_tag: String,
     pub profile: String,
     pub idempotency_key: String,
@@ -1806,6 +1809,7 @@ pub struct SessionGroupPreferenceReq {
 wire_enum!(SessionPlacementSelectorKind {
     Origin => "origin",
     Profile => "profile",
+    Watch => "watch",
 });
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
