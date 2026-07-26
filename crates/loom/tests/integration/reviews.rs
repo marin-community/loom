@@ -19,9 +19,10 @@ use weaver_api::{
 use super::fixtures::TestServer;
 
 async fn insert_api_session(ts: &TestServer, id: &str) -> weaver_api::SessionView {
-    let branch = loom::branch::upsert(&ts.state.db, &ts.cwd(), &format!("weaver/{id}"), "main")
-        .await
-        .unwrap();
+    let branch =
+        weaver_core::branch::upsert(&ts.state.db, &ts.cwd(), &format!("weaver/{id}"), "main")
+            .await
+            .unwrap();
     loom::session::insert(
         &ts.state.db,
         &loom::session::NewSession {

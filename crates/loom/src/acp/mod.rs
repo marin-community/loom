@@ -62,7 +62,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use crate::chat::{self, kind, ChatBlockView};
 use crate::db::{now_iso, Db};
 use crate::session;
-use crate::web::AppState;
+use crate::AppState;
 use weaver_api::{AcpCost, AcpUsage};
 use weaver_core::tags;
 use wire::{

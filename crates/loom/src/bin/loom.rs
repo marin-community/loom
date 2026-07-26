@@ -2786,11 +2786,11 @@ struct ExistingApp {
 /// stored (a fresh instance, or one that only ever used the ambient `GH_TOKEN`).
 async fn existing_app(db: &Db) -> Option<ExistingApp> {
     let nonempty = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let id = nonempty(loom::config::get(db, loom::github_app::APP_ID_KEY).await)?;
+    let id = nonempty(weaver_core::config::get(db, loom::github_app::APP_ID_KEY).await)?;
     Some(ExistingApp {
         id,
-        slug: nonempty(loom::config::get(db, loom::github_app::APP_SLUG_KEY).await),
-        org: nonempty(loom::config::get(db, loom::github_app::APP_OWNER_KEY).await),
+        slug: nonempty(weaver_core::config::get(db, loom::github_app::APP_SLUG_KEY).await),
+        org: nonempty(weaver_core::config::get(db, loom::github_app::APP_OWNER_KEY).await),
     })
 }
 
@@ -3021,7 +3021,7 @@ async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
     );
     println!("  {}", conv.html_url);
 
-    loom::config::apply(
+    weaver_core::config::apply(
         &db,
         &[
             (

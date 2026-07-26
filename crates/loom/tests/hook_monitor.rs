@@ -8,12 +8,12 @@ use std::process::Command;
 use std::time::Duration;
 
 use loom::client;
-use loom::events::EventBus;
 use loom::session as session_mod;
-use loom::web::AppState;
+use loom::AppState;
 use loom::{db, server};
 use serde_json::json;
 use tokio::net::TcpListener;
+use weaver_core::events::EventBus;
 
 fn sh(dir: &Path, program: &str, args: &[&str]) {
     let status = Command::new(program)

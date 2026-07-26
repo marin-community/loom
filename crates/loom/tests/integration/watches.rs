@@ -22,10 +22,9 @@ use chrono::Utc;
 use serde_json::json;
 use serial_test::serial;
 
-use loom::events::EventBus;
-use loom::web::AppState;
-use loom::{backend, db, events, monitor, server, session as session_mod, watch};
+use loom::{backend, db, monitor, server, session as session_mod, watch, AppState};
 use weaver_core::config as core_config;
+use weaver_core::events::{self, EventBus};
 use weaver_core::watch as watch_store;
 
 use crate::fixtures::{branch_tag, branch_tag_value, TestServer};

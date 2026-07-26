@@ -141,34 +141,13 @@ use tower_http::services::{ServeDir, ServeFile};
 use tracing::Instrument;
 
 use crate::db::Db;
-use crate::events::EventBus;
 use crate::github;
 use crate::session::{self as session_mod, Session};
+use crate::AppState;
 use weaver_api::{BranchView, McpPolicySnapshot, SessionMcpPolicyView, SessionView};
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::Branch;
 use weaver_core::tags;
-
-#[derive(Clone)]
-pub struct AppState {
-    pub db: Db,
-    pub bus: EventBus,
-    /// host:port the server is bound to, used to build child-process env.
-    pub addr: String,
-    /// Per-session embedded code-server lifecycle + reverse-proxy registry.
-    pub ide: std::sync::Arc<crate::ide::IdeManager>,
-    /// The inbound GitHub trigger: its GitHub gateway (the `gh`-backed default)
-    /// and per-repo rate limiter. Shared across requests; a test swaps in a fake
-    /// gateway via [`crate::github_trigger::GithubTrigger::with_gateway`].
-    pub trigger: std::sync::Arc<crate::github_trigger::GithubTrigger>,
-    /// The registry of live ACP session tasks ([`crate::acp`]) — the seam the
-    /// `/chat`, `/prompt`, `/permissions`, `/mode`, and `/interrupt` routes drive
-    /// an `acp` session through, and subscribe to its SSE stream on.
-    pub acp: crate::acp::AcpRegistry,
-    /// Namespaced repository provisioning, capped-profile admission, and
-    /// per-session Scratch mutation locks.
-    pub launch_gate: crate::launch_gate::RepoLaunchGate,
-}
 
 // ---------------------------------------------------------------------------
 // Error handling

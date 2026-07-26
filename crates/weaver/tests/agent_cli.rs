@@ -13,11 +13,11 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::process::{Command, Stdio};
 
-use loom::events::EventBus;
-use loom::web::AppState;
+use loom::AppState;
 use loom::{db, server};
 use serial_test::serial;
 use tokio::net::TcpListener;
+use weaver_core::events::EventBus;
 
 /// Path to the freshly-built `weaver` binary the test will drive.
 fn weaver_bin() -> std::path::PathBuf {
@@ -558,7 +558,7 @@ async fn artifact_write_url_honours_the_public_base() {
     // Once the operator declares a public origin, the printed link is one an
     // off-box reader (of a PR, say) can actually open — and the dialed address
     // no longer leaks into it.
-    loom::config::apply(
+    weaver_core::config::apply(
         &env.db,
         &[(
             "auth.base_url".to_string(),

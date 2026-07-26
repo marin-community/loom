@@ -10,7 +10,7 @@ use tokio::net::TcpListener;
 
 use crate::events::EventBus;
 use crate::session as session_mod;
-use crate::web::AppState;
+use crate::AppState;
 use crate::{backend, config, db, github, monitor, runner, session_manager, watch, web};
 use weaver_core::branch as branch_mod;
 use weaver_core::watch as watch_store;

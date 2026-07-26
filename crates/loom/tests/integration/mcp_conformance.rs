@@ -221,7 +221,7 @@ for line in sys.stdin:
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn messaging_status_tool_uses_the_session_scoped_status_route() {
     let ts = TestServer::start().await;
-    let branch = loom::branch::upsert(&ts.state.db, &ts.cwd(), "weaver/mcp-status", "main")
+    let branch = weaver_core::branch::upsert(&ts.state.db, &ts.cwd(), "weaver/mcp-status", "main")
         .await
         .unwrap();
     loom::session::insert(
@@ -275,7 +275,7 @@ async fn messaging_status_tool_uses_the_session_scoped_status_route() {
     assert_eq!(response["result"]["isError"], false, "{response}");
     assert!(child.wait().await.unwrap().success());
 
-    let branch = loom::branch::get(&ts.state.db, &branch.id)
+    let branch = weaver_core::branch::get(&ts.state.db, &branch.id)
         .await
         .unwrap()
         .unwrap();
@@ -292,7 +292,7 @@ async fn messaging_status_tool_uses_the_session_scoped_status_route() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn history_tools_resolve_self_and_call_the_rest_contract() {
     let ts = TestServer::start().await;
-    let branch = loom::branch::upsert(&ts.state.db, &ts.cwd(), "weaver/mcp-history", "main")
+    let branch = weaver_core::branch::upsert(&ts.state.db, &ts.cwd(), "weaver/mcp-history", "main")
         .await
         .unwrap();
     loom::session::insert(

@@ -15,13 +15,13 @@ use std::time::Duration;
 
 use futures_util::SinkExt;
 use loom::client::Client;
-use loom::events::EventBus;
-use loom::web::AppState;
+use loom::AppState;
 use loom::{db, server};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use weaver_core::config as core_config;
+use weaver_core::events::EventBus;
 
 /// Run `program args` in `dir`, asserting it succeeds.
 pub fn sh(dir: &Path, program: &str, args: &[&str]) {

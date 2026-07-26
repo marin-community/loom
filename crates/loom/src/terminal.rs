@@ -27,7 +27,8 @@ use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 
 use crate::backend;
-use crate::web::{require_session, AppState};
+use crate::web::require_session;
+use crate::AppState;
 
 /// Cap on a single inbound WebSocket frame. Keystrokes and resizes are tiny and
 /// even a large paste is bounded; this stops a hostile client forcing a huge

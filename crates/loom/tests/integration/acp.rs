@@ -48,9 +48,10 @@ impl Drop for EnvVarSet {
 /// Insert a fresh (branch, session) pair directly — the session row `acp::start`
 /// binds a relay to. `term_session` doubles as the relay name.
 async fn make_session(ts: &TestServer, id: &str) {
-    let branch = loom::branch::upsert(&ts.state.db, &ts.cwd(), &format!("weaver/{id}"), "main")
-        .await
-        .unwrap();
+    let branch =
+        weaver_core::branch::upsert(&ts.state.db, &ts.cwd(), &format!("weaver/{id}"), "main")
+            .await
+            .unwrap();
     session_mod::insert(
         &ts.state.db,
         &NewSession {
@@ -2153,7 +2154,7 @@ async fn rest_create_drives_the_turn_lifecycle() {
     .await;
 
     // The send is also a `nudge` audit event — parity with the terminal path.
-    let nudges = loom::events::since(&ts.state.db, 0)
+    let nudges = weaver_core::events::since(&ts.state.db, 0)
         .await
         .unwrap()
         .into_iter()
@@ -2967,7 +2968,7 @@ async fn conversation_is_live_and_archive_captures_it() {
 
     // Pin the capture log dir to a temp dir so the archive never touches ~/.iris.
     let logs = tempfile::tempdir().unwrap();
-    loom::config::apply(
+    weaver_core::config::apply(
         &ts.state.db,
         &[(
             "session.log_dir".to_string(),
@@ -3134,7 +3135,7 @@ async fn builtin_codex_launches_over_codex_acp() {
     // A builtin launch passes the GitHub-token gate; CI has no ambient token.
     let _token = EnvVarSet::set("GH_TOKEN", "test-token");
     let ts = TestServer::start().await;
-    loom::config::apply(
+    weaver_core::config::apply(
         &ts.state.db,
         &[("acp.codex_cmd".to_string(), Some(agent_cmd()))],
     )
@@ -3303,14 +3304,14 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn adopt_converts_a_terminal_builtin_session_to_acp() {
     let ts = TestServer::start().await;
-    loom::config::apply(
+    weaver_core::config::apply(
         &ts.state.db,
         &[("acp.claude_cmd".to_string(), Some(agent_cmd()))],
     )
     .await
     .unwrap();
 
-    let branch = loom::branch::upsert(&ts.state.db, &ts.cwd(), "weaver/acp-convert", "main")
+    let branch = weaver_core::branch::upsert(&ts.state.db, &ts.cwd(), "weaver/acp-convert", "main")
         .await
         .unwrap();
     session_mod::insert(

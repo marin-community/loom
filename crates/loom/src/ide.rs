@@ -39,7 +39,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, OnceCell};
 
 use crate::db::Db;
-use crate::web::{require_session, AppState};
+use crate::web::require_session;
+use crate::AppState;
 use weaver_core::config;
 
 /// How often the reaper wakes to retire idle editors.
