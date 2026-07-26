@@ -109,8 +109,9 @@ fn init_repo(dir: &Path) {
 }
 
 /// A running loom server with fully isolated state: its own temp `WEAVER_HOME`
-/// (and therefore its own sqlite db and `tapestry` socket dir), and a throwaway
-/// git repo. Drop kills any supervisors it spawned; the temp dirs clean
+/// (and therefore its own sqlite db and `tapestry` socket dir), plus a temporary
+/// working directory that launch-capable constructors initialize as a Git
+/// repository. Drop kills any supervisors it spawned; the temp dirs clean
 /// themselves up.
 pub struct TestServer {
     pub client: Client,
@@ -141,7 +142,14 @@ impl TestServer {
     /// answer `/api/health`. The caller must be `#[serial]`: setup writes
     /// process-global env.
     pub async fn start() -> Self {
-        Self::start_inner(None).await
+        Self::start_inner(None, true).await
+    }
+
+    /// Boot the REST server and database without initializing the fixture
+    /// directory as a Git repository. API journeys that never provision a
+    /// session should use this cheaper boundary.
+    pub async fn start_api_only() -> Self {
+        Self::start_inner(None, false).await
     }
 
     /// Like [`start`](Self::start) but installs `gh` as the GitHub trigger's
@@ -150,10 +158,13 @@ impl TestServer {
     pub async fn start_with_github(
         gh: std::sync::Arc<dyn loom::github_trigger::GithubApi>,
     ) -> Self {
-        Self::start_inner(Some(gh)).await
+        Self::start_inner(Some(gh), true).await
     }
 
-    async fn start_inner(gh: Option<std::sync::Arc<dyn loom::github_trigger::GithubApi>>) -> Self {
+    async fn start_inner(
+        gh: Option<std::sync::Arc<dyn loom::github_trigger::GithubApi>>,
+        initialize_repo: bool,
+    ) -> Self {
         // Isolate weaver state in a temp home (its own db) for the lifetime of
         // the test; that home also scopes the `tapestry` socket dir. Point loom
         // at the sibling supervisor binary.
@@ -168,7 +179,9 @@ impl TestServer {
         std::env::set_var("LOOM_OWNER_GITHUB", "rjpower");
 
         let repo = tempfile::tempdir().unwrap();
-        init_repo(repo.path());
+        if initialize_repo {
+            init_repo(repo.path());
+        }
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -234,6 +247,9 @@ impl TestServer {
     }
 
     /// Path to the throwaway repo used as `cwd` when creating sessions.
+    ///
+    /// This is only a Git repository when the server came from [`Self::start`]
+    /// or [`Self::start_with_github`].
     pub fn repo_path(&self) -> &Path {
         self.repo.path()
     }
