@@ -208,5 +208,24 @@ for line in sys.stdin:
       page.getByRole("button", { name: "Account", exact: true }),
     ).toHaveCount(0);
     await expect(page.locator('[data-rail="chat"]')).toHaveCount(0);
+    expect(
+      await page.getByTestId("metadata-settings").evaluate((section) => ({
+        settingsVisible: [
+          "metadata.profile",
+          "metadata.title_generation",
+          "metadata.resumption_cues",
+          "metadata.resumption_inactivity_secs",
+          "metadata.allow_restricted",
+        ].every((key) => section.textContent?.includes(key)),
+        selectableProfiles: Array.from(
+          section.querySelectorAll('[data-testid^="profile-option-"]'),
+        ).map((option) =>
+          option.getAttribute("data-testid")?.replace("profile-option-", ""),
+        ),
+      })),
+    ).toEqual({
+      settingsVisible: true,
+      selectableProfiles: ["github_comment", "watch"],
+    });
   });
 });

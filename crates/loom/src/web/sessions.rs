@@ -1198,14 +1198,11 @@ pub(crate) async fn provision_session(
 
     // Build title/goal/description; an optional GitHub issue seeds all three.
     let mut goal = req.goal.unwrap_or_default().trim().to_string();
-    let title_was_explicit = req
-        .title
-        .as_deref()
-        .is_some_and(|title| !title.trim().is_empty());
     let mut title = req
         .title
         .as_deref()
         .and_then(branch_mod::sanitize_user_title);
+    let title_was_explicit = title.is_some();
     let mut description = String::new();
     let mut github_repo = None;
     let mut github_issue: Option<i64> = None;
@@ -1279,7 +1276,9 @@ pub(crate) async fn provision_session(
     } else {
         TitleProvenance::Derived
     };
-    let mut title = title.unwrap_or_else(|| branch_mod::derive_title(&goal));
+    let mut title = title
+        .and_then(|title| branch_mod::sanitize_user_title(&title))
+        .unwrap_or_else(|| branch_mod::derive_title(&goal));
 
     let existing = req
         .existing_branch
@@ -1833,6 +1832,7 @@ pub(crate) async fn provision_session(
 
     crate::metadata_assist::spawn_title_generation(
         st.db.clone(),
+        st.bus.clone(),
         session.clone(),
         branch.clone(),
         false,
@@ -2244,8 +2244,14 @@ pub(super) async fn regenerate_session_title(
     Path(key): Path<String>,
 ) -> ApiResult<Json<SessionView>> {
     let (session, branch) = require_session(&st.db, &key).await?;
-    crate::metadata_assist::spawn_title_generation(st.db.clone(), session.clone(), branch, true)
-        .await?;
+    crate::metadata_assist::spawn_title_generation(
+        st.db.clone(),
+        st.bus.clone(),
+        session.clone(),
+        branch,
+        true,
+    )
+    .await?;
     let (session, branch) = require_session(&st.db, &session.id).await?;
     Ok(Json(session_view(&st.db, &session, &branch).await?))
 }

@@ -271,7 +271,7 @@ pub struct SessionView {
 pub struct TitleGenerationView {
     pub enabled: bool,
     /// `idle`, `running`, `generated`, `protected`, `disabled`, `unavailable`,
-    /// or `failed`.
+    /// `stale`, or `failed`.
     pub status: String,
 }
 
@@ -294,13 +294,14 @@ pub struct ResumptionEvidenceView {
     pub kind: String,
     pub label: String,
     pub href: String,
-    /// Source-stable history cursor or artifact name/revision cursor.
+    /// Source-stable history cursor or immutable artifact id/revision cursor.
     pub cursor: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResumptionCueView {
-    /// `generated`, `due`, `not_due`, `disabled`, or `unavailable`.
+    /// `generated`, `generating`, `due`, `not_due`, `disabled`, or
+    /// `unavailable`.
     pub status: String,
     #[serde(default)]
     pub source_cursor: Option<String>,

@@ -88,7 +88,15 @@ export interface Session {
   updated_at: string;
   title_generation: {
     enabled: boolean;
-    status: 'idle' | 'running' | 'generated' | 'protected' | 'disabled' | 'unavailable' | 'failed';
+    status:
+      | 'idle'
+      | 'running'
+      | 'generated'
+      | 'protected'
+      | 'disabled'
+      | 'unavailable'
+      | 'stale'
+      | 'failed';
   };
   /** Branch id of the session that launched this one (its parent in the session
    *  tree), or null for a top-level session. The dashboard groups the list into

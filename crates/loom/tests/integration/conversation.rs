@@ -95,9 +95,10 @@ async fn conversation_endpoint_returns_the_iris_log() {
     let source_cursor = unavailable["source_cursor"].as_str().unwrap();
     let evidence = unavailable["evidence"].as_array().unwrap();
     assert!(evidence.iter().any(|item| item["kind"] == "conversation"));
-    assert!(evidence
-        .iter()
-        .any(|item| item["cursor"] == "artifact:goal:1"));
+    assert!(evidence.iter().any(|item| item["kind"] == "artifact"
+        && item["cursor"]
+            .as_str()
+            .is_some_and(|cursor| cursor.ends_with(":1"))));
 
     // Seed the persisted result a completed one-shot would commit. GET and an
     // on-return ensure both reuse it while the source cursor is unchanged.
@@ -147,7 +148,10 @@ async fn conversation_endpoint_returns_the_iris_log() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|item| item["cursor"] == "artifact:goal:2"));
+        .any(|item| item["kind"] == "artifact"
+            && item["cursor"]
+                .as_str()
+                .is_some_and(|cursor| cursor.ends_with(":2"))));
 }
 
 /// The ACP endpoint opens at a bounded tail and pages backward with an exclusive

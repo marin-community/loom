@@ -371,6 +371,39 @@ pub async fn replace_title(
     })
 }
 
+/// Replace a generated title only while its goal and observed label ownership
+/// still match the prompt source. Goal edits invalidate model output even when
+/// the deterministic fallback title itself has not changed.
+pub async fn replace_title_from_goal(
+    db: &Db,
+    id: &str,
+    expected_goal: &str,
+    expected_title: &str,
+    expected_provenance: TitleProvenance,
+    title: &str,
+) -> Result<TitleUpdate> {
+    let result = sqlx::query(
+        "UPDATE branches
+         SET title = ?, title_provenance = ?, updated_at = ?
+         WHERE id = ? AND goal = ? AND title = ? AND title_provenance = ?",
+    )
+    .bind(title)
+    .bind(TitleProvenance::Generated)
+    .bind(now_iso())
+    .bind(id)
+    .bind(expected_goal)
+    .bind(expected_title)
+    .bind(expected_provenance)
+    .execute(db)
+    .await?;
+    let current = get(db, id).await?;
+    Ok(match (result.rows_affected(), current) {
+        (1, Some(branch)) => TitleUpdate::Applied(branch),
+        (_, Some(branch)) => TitleUpdate::Stale(branch),
+        (_, None) => TitleUpdate::Missing,
+    })
+}
+
 pub async fn set_description(db: &Db, id: &str, description: &str) -> Result<()> {
     sqlx::query("UPDATE branches SET description = ?, updated_at = ? WHERE id = ?")
         .bind(description)
@@ -581,6 +614,24 @@ mod tests {
             panic!("expected stale title");
         };
         assert_eq!(current.title, "Generated");
+
+        set_title(&db, &branch.id, "Fallback", TitleProvenance::Derived)
+            .await
+            .unwrap();
+        set_goal(&db, &branch.id, "new goal", "user").await.unwrap();
+        let TitleUpdate::Stale(current) = replace_title_from_goal(
+            &db,
+            &branch.id,
+            "old goal",
+            "Fallback",
+            TitleProvenance::Derived,
+            "Stale generation",
+        )
+        .await
+        .unwrap() else {
+            panic!("expected goal fence to reject stale output");
+        };
+        assert_eq!(current.title, "Fallback");
     }
 
     #[test]

@@ -36,7 +36,7 @@ pub(super) async fn patch_settings(
             errors.insert(key, json!("unknown setting"));
             continue;
         }
-        let value = match raw {
+        let mut value = match raw {
             Value::Null => None,
             Value::String(s) => Some(s),
             Value::Bool(b) => Some(b.to_string()),
@@ -49,6 +49,9 @@ pub(super) async fn patch_settings(
                 continue;
             }
         };
+        if key == crate::metadata_assist::METADATA_PROFILE_KEY {
+            value = value.map(|value| value.trim().to_string());
+        }
         if !legacy_agent {
             if let Some(value) = &value {
                 if let Err(why) = config::validate(&key, value) {
@@ -61,6 +64,32 @@ pub(super) async fn patch_settings(
             legacy_agent_changes.push((key, value));
         } else {
             changes.push((key, value));
+        }
+    }
+
+    if errors.is_empty() {
+        if let Some((_, Some(name))) = changes
+            .iter()
+            .find(|(key, _)| key == crate::metadata_assist::METADATA_PROFILE_KEY)
+        {
+            if !name.is_empty() {
+                match profile::get(&st.db, name).await? {
+                    Some(candidate)
+                        if crate::metadata_assist::metadata_profile_eligible(&candidate) => {}
+                    Some(_) => {
+                        errors.insert(
+                            crate::metadata_assist::METADATA_PROFILE_KEY.to_string(),
+                            json!("profile must be an active automation-safe ACP profile"),
+                        );
+                    }
+                    None => {
+                        errors.insert(
+                            crate::metadata_assist::METADATA_PROFILE_KEY.to_string(),
+                            json!("unknown or retired profile"),
+                        );
+                    }
+                }
+            }
         }
     }
 

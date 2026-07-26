@@ -58,8 +58,19 @@ export function useSessionActions(
 
   const regenerateTitle = () =>
     act('title-generate', async () => {
-      await regenerateSessionTitle(getId());
-      notice.value = 'Task-label refresh started.';
+      const updated = await regenerateSessionTitle(getId());
+      notice.value =
+        {
+          idle: 'Task-label refresh is idle.',
+          running: 'Task-label refresh started.',
+          generated: 'Task label refreshed.',
+          protected: 'Task label is protected by its human or issue source.',
+          unavailable: 'No eligible metadata profile is available.',
+          disabled: 'Generated task labels are disabled.',
+          stale: 'Task-label source changed; stale output was discarded.',
+          failed: 'Task-label refresh failed.',
+        }[updated.title_generation.status] ??
+        `Task-label refresh: ${updated.title_generation.status}.`;
       await reload();
     });
 

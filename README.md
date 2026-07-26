@@ -110,6 +110,12 @@ loom session send <session> "try the curl again"   # deliver now (steer ACP, or 
 loom session break <session>          # send Escape — interrupt the current turn
 loom session preview <session>        # print the recent terminal screen
 loom session url [<session>]          # its dashboard URL (yours by default) — the link to share
+loom session rename <session> "Short task label"
+loom session regenerate-title <session>       # refresh an eligible derived/generated label
+loom session title-generation <session> false # per-session generated-label opt-out
+loom session cue <session>                    # read the current source-linked cache
+loom session cue <session> --ensure           # generate only when inactivity says it is due
+loom session cue <session> --force            # explicit regeneration
 loom ps                               # list active sessions
 loom session show <branch>                    # session detail
 loom session layout show                      # spaces, groups, placements, defaults, revision
@@ -171,6 +177,14 @@ submitting it for a terminal agent; steering or restarting an ACP turn),
 `loom session break` interrupts the current turn, and `loom session preview`
 prints the recent terminal screen. Each takes a session key — an id, branch id,
 branch name, or `repo:branch`.
+
+The session title is one canonical, unqualified task label; fleet views add its
+Group only when they need a qualified `Group / Task` name. Loom records whether
+that label was deterministic, model-generated, human-authored, or issue-owned.
+Human and issue labels always take precedence: metadata generation can replace
+only an unchanged derived label, or an unchanged generated label after an
+explicit regenerate request. Renames use compare-and-swap so a stale tab cannot
+overwrite a newer label.
 
 `loom session url` prints a session's dashboard URL — the link to hand a person,
 resolved against loom's externally-visible address (the `auth.base_url` setting,
@@ -335,6 +349,9 @@ Loom serves a JSON API under `/api`; the Vue SPA is the primary consumer.
   (admin-only operational inventory used by Settings → Diagnostics)
 - `GET POST /api/sessions`, `GET /api/sessions/search`,
   `GET PATCH DELETE /api/sessions/{id}`,
+  `POST /api/sessions/{id}/title/regenerate`,
+  `PUT /api/sessions/{id}/title-generation`,
+  `GET POST /api/sessions/{id}/resumption-cue`,
   `POST /api/session-launches/resolve`,
   `GET /api/session-layout`, `POST /api/session-layout/{moves,reorder}`,
   and space/group/default CRUD under `/api/session-layout`,
@@ -473,6 +490,7 @@ weaver config ls
 loom profile ls
 loom profile show default
 loom profile show github_comment
+loom config set metadata.profile watch
 loom mcp ls
 loom mcp show mcp/github/comment@v1
 loom profile add ops --agent codex --mcp github,messaging
@@ -534,6 +552,17 @@ Notable settings:
   [MCP/profile design](docs/plans/mcp-profiles.md).
 - Profile environment values are write-only: API, CLI, and Settings responses
   expose names and update times, never secret values.
+- Optional metadata assistance uses one explicitly selected, active,
+  automation-safe ACP profile. An empty `metadata.profile` disables model-backed
+  assistance. Restricted-session excerpts remain blocked unless
+  `metadata.allow_restricted` is explicitly enabled, and failure to resolve any
+  configured secret source aborts generation rather than sending unredacted
+  content. Title generation is asynchronous and fenced by the exact
+  goal/title/provenance/profile source it read. Resumption cues are generated
+  only by an explicit request or an on-return ensure after
+  `metadata.resumption_inactivity_secs`; GET is model-free, and cached prose is
+  reused only while its bounded conversation/content fingerprint and immutable
+  artifact identities still match.
 - `server.auto_adopt` — adopt every recoverable session on daemon startup.
 - `github.poll` — poll GitHub (via `gh`) for each session's PR, review, and
   check status (on by default; a no-op without `gh` or a GitHub remote).
