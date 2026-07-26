@@ -15,6 +15,8 @@ use crate::{backend, config, db, github, monitor, runner, session_manager, watch
 use weaver_core::branch as branch_mod;
 use weaver_core::watch as watch_store;
 
+const ACP_REPAIR_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerState {
     pub pid: u32,
@@ -142,7 +144,7 @@ pub async fn run(addr: &str) -> Result<()> {
     // adopting an orphan): without it the relay keeps spooling frames loom no
     // longer journals. A dead relay is left for the monitor to mark `orphaned`,
     // exactly as for a terminal session.
-    reattach_acp_sessions(&state).await;
+    repair_acp_sessions(&state).await;
 
     // Two independent startup adopt policies. The fleet-wide one recreates every
     // recoverable *ordinary* session's terminal, gated on `server.auto_adopt`. The
@@ -175,16 +177,19 @@ pub async fn run(addr: &str) -> Result<()> {
     result
 }
 
-/// On startup, re-attach to every `protocol='acp'` session whose relay supervisor
-/// is still alive — resuming the journal/SSE/ack task loom lost on restart. A dead
-/// relay is left untouched here; the monitor marks it `orphaned` on its next tick,
-/// and adopt (manual or auto) respawns it. Runs unconditionally, before the
-/// `server.auto_adopt` pass, so a live agent is never mistaken for an orphan.
-async fn reattach_acp_sessions(state: &AppState) {
+/// Restore the Loom-side driver for every live ACP relay that currently lacks
+/// one. Startup calls this once, and the active server repeats it in the
+/// background so a transport disconnect cannot leave a durable session row in
+/// a permanently undriveable state.
+///
+/// The relay remains the runtime authority: a missing relay is left for the
+/// monitor to mark orphaned, while a surviving relay is re-subscribed from the
+/// persisted ACK cursor.
+pub async fn repair_acp_sessions(state: &AppState) {
     let sessions = match session_mod::list(&state.db).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::warn!("acp reattach: listing sessions failed: {e}");
+            tracing::warn!("acp repair: listing sessions failed: {e}");
             return;
         }
     };
@@ -199,19 +204,41 @@ async fn reattach_acp_sessions(state: &AppState) {
             continue; // dead relay — the monitor will mark it orphaned.
         }
         match crate::acp::attach(state, &session.id).await {
-            Ok(()) => tracing::info!("acp reattach: re-attached session {}", session.id),
+            Ok(()) => tracing::info!("acp repair: re-attached session {}", session.id),
             Err(e) => tracing::warn!(
-                "acp reattach: could not re-attach session {}: {e}",
+                "acp repair: could not re-attach session {}: {e}",
                 session.id
             ),
         }
     }
 }
 
+/// Keep repairing live relays only while this process owns `loom.json`.
+///
+/// `loom server restart` deliberately overlaps the draining old process with
+/// its replacement. Without the ownership fence, both generations could notice
+/// the other's evicted ACP subscription and repeatedly steal Tapestry's
+/// single-subscriber relay from one another.
+async fn repair_acp_sessions_loop(state: AppState) {
+    let my_pid = std::process::id();
+    let mut interval = tokio::time::interval(ACP_REPAIR_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Startup already performed the first repair pass.
+    interval.tick().await;
+    loop {
+        interval.tick().await;
+        if read_state().map(|owner| owner.pid) != Some(my_pid) {
+            tracing::info!("acp repair loop stopped because a newer server owns loom.json");
+            return;
+        }
+        repair_acp_sessions(&state).await;
+    }
+}
+
 /// On startup, adopt every recoverable *ordinary* session whose terminal is gone.
 /// Engine-managed (warm) sessions are skipped here — they have their own adopt
 /// policy in [`reconcile_managed_sessions`], gated on `watch.adopt_warm`. A live
-/// ACP session was already re-attached by [`reattach_acp_sessions`]; a dead-relay
+/// ACP session was already re-attached by [`repair_acp_sessions`]; a dead-relay
 /// ACP session falls through to `web::adopt`, which respawns it via `session/load`.
 async fn reconcile_sessions(state: &AppState) {
     let sessions = match session_mod::list(&state.db).await {
@@ -338,6 +365,7 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
         Err(e) => tracing::warn!("could not prepare the machine-local token: {e}"),
     }
     tokio::spawn(monitor::run(state.clone()));
+    tokio::spawn(repair_acp_sessions_loop(state.clone()));
     tokio::spawn(session_manager::run(state.db.clone()));
     tokio::spawn(crate::review_delivery::run(state.clone()));
     // The GitHub poller is always spawned; it self-gates on the `github.poll`
@@ -355,7 +383,7 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     // here cheaply.
     tokio::spawn(crate::slack::run(state.clone()));
     tracing::debug!(
-        "background tasks spawned (monitor, session reconciler, review delivery, github poll, watch, ide reaper, slack)"
+        "background tasks spawned (monitor, ACP repair, session reconciler, review delivery, github poll, watch, ide reaper, slack)"
     );
     // `into_make_service_with_connect_info` surfaces the peer `SocketAddr` to the
     // auth middleware, which uses it to recognise (and optionally trust) loopback.

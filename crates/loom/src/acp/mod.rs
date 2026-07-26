@@ -70,6 +70,11 @@ use wire::{
     SessionUpdate, ToolCall, ToolCallContent, ToolCallLocation,
 };
 
+/// Persisting the relay cursor for every streaming delta turns a restart replay
+/// into thousands of SQLite writes. A short periodic flush keeps the possible
+/// duplicate replay bounded while allowing catch-up to run at spool speed.
+const ACK_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
+
 // ---------------------------------------------------------------------------
 // Public surface
 // ---------------------------------------------------------------------------
@@ -1915,6 +1920,11 @@ impl Task {
 
     async fn run(mut self, mut cmd_rx: mpsc::Receiver<Command>) {
         let mut handoff_reply = None;
+        let mut ack_tick = tokio::time::interval(ACK_FLUSH_INTERVAL);
+        ack_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Consume interval's immediate first tick; the handshake already
+        // flushed everything safe before the main loop starts.
+        ack_tick.tick().await;
         loop {
             tokio::select! {
                 ev = self.stream.recv() => match ev {
@@ -1924,8 +1934,8 @@ impl Task {
                             Ok(inc) => self.dispatch_frame(seq, inc).await,
                             Err(e) => tracing::warn!(session = %self.session_id, error = %e, "unparseable acp frame"),
                         }
-                        if let Err(e) = self.maybe_ack().await {
-                            tracing::warn!(session = %self.session_id, error = %e, "acp ack failed");
+                        if self.journal_replay_needed() {
+                            break;
                         }
                     }
                     Some(RelayEvent::Exit { status }) => {
@@ -1953,8 +1963,18 @@ impl Task {
                             }
                         }
                     }
-                    Some(c) => self.on_command(c).await,
+                    Some(c) => {
+                        self.on_command(c).await;
+                        if self.journal_replay_needed() {
+                            break;
+                        }
+                    }
                     None => break,
+                },
+                _ = ack_tick.tick() => {
+                    if let Err(e) = self.maybe_ack().await {
+                        tracing::warn!(session = %self.session_id, error = %e, "acp ack failed");
+                    }
                 },
             }
         }
@@ -1963,6 +1983,18 @@ impl Task {
             let _ = reply.send(Ok(snapshot));
         }
         tracing::info!(session = %self.session_id, "acp task stopped");
+    }
+
+    fn journal_replay_needed(&self) -> bool {
+        if !self.journal_failed {
+            return false;
+        }
+        tracing::warn!(
+            session = %self.session_id,
+            acked = self.acked,
+            "acp task yielding after journal failure so the durable relay backlog can replay"
+        );
+        true
     }
 
     /// Route one inbound frame (notification / agent request / response).

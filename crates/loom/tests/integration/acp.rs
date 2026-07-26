@@ -1724,6 +1724,85 @@ async fn crash_recovery_replays_without_duplicates() {
     );
 }
 
+/// A relay can survive while its Loom-side task exits (for example after a
+/// journal write loses a prolonged SQLite lock race). The repair pass must
+/// re-register the driver, replay the unacked frames, and leave the session
+/// driveable instead of preserving a `running` zombie.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repair_restores_a_live_relay_after_journal_failure() {
+    let ts = TestServer::start().await;
+    start_new(&ts, "acp-repair", None, None).await;
+
+    // Fail one durable block write while leaving the session row and relay
+    // intact. The ACP task should yield immediately so the frame stays in
+    // Tapestry's spool for a clean replay.
+    sqlx::query(
+        "CREATE TRIGGER fail_acp_usage
+         BEFORE INSERT ON chat_blocks
+         WHEN NEW.session_id = 'acp-repair' AND NEW.kind = 'usage'
+         BEGIN
+           SELECT RAISE(FAIL, 'forced journal failure');
+         END",
+    )
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+    ts.client
+        .post(
+            "/api/sessions/acp-repair/prompt",
+            json!({ "text": "usage:1:10|say:survived" }),
+        )
+        .await
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while ts.state.acp.is_live("acp-repair") {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "journal failure did not retire the damaged ACP task"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        backend::has_session("weaver-acp-repair").await,
+        "the relay and provider survive the Loom-side failure"
+    );
+
+    sqlx::query("DROP TRIGGER fail_acp_usage")
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    loom::server::repair_acp_sessions(&ts.state).await;
+    assert!(
+        ts.state.acp.is_live("acp-repair"),
+        "repair registers a replacement ACP task"
+    );
+
+    let chat = poll_chat(&ts, "acp-repair", Duration::from_secs(10), |blocks| {
+        blocks
+            .iter()
+            .any(|block| block["kind"] == "agent_message" && block["payload"]["text"] == "survived")
+            && blocks.iter().any(|block| block["kind"] == "turn_end")
+    })
+    .await;
+    assert_eq!(chat["live_turn"], Value::Null);
+
+    ts.client
+        .post(
+            "/api/sessions/acp-repair/prompt",
+            json!({ "text": "say:still-driveable" }),
+        )
+        .await
+        .expect("the repaired ACP task accepts another prompt");
+    poll_chat(&ts, "acp-repair", Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|block| {
+            block["kind"] == "agent_message" && block["payload"]["text"] == "still-driveable"
+        })
+    })
+    .await;
+}
+
 /// 5b. Adapter user echoes never re-journal: a `user_message_chunk` streamed
 ///    mid-turn (claude re-streams retained user turns after `/compact`) must not
 ///    duplicate the history — the prompt loom journaled at dispatch is the only

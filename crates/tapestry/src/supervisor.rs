@@ -608,6 +608,14 @@ mod relay {
         Exit { code: i32 },
     }
 
+    /// A subscriber catching up to a stable spool snapshot. It is promoted to
+    /// `subscriber` only after successive replay passes reach the live tail.
+    struct Replay {
+        id: u64,
+        out_tx: mpsc::Sender<Out>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
     /// Control messages to the relay core (the single owner of the spool +
     /// subscriber). Spooled frames travel on their own bounded channel (so the
     /// reader thread can park under back-pressure), not through here.
@@ -623,6 +631,14 @@ mod relay {
             cursor: u64,
             out_tx: mpsc::Sender<Out>,
             resp: oneshot::Sender<u64>,
+        },
+        /// One bounded replay pass reached the spool snapshot it started from.
+        /// The core either starts another pass for frames appended meanwhile or
+        /// promotes the subscriber to the live stream.
+        ReplayComplete {
+            id: u64,
+            through: u64,
+            delivered: bool,
         },
         /// A subscriber's connection ended; clear it if still current.
         Unsubscribe(u64),
@@ -789,6 +805,7 @@ mod relay {
         let mut spool = Spool::create(crate::paths::spool_dir(&cfg.name), segment_max)
             .context("creating frame spool")?;
         let mut subscriber: Option<(u64, mpsc::Sender<Out>)> = None;
+        let mut replaying: Option<Replay> = None;
         let mut next_sub_id: u64 = 0;
         let mut exited: Option<i32> = None;
         let mut frame_open = true;
@@ -812,39 +829,53 @@ mod relay {
                         }
                         Cmd::Subscribe { cursor, out_tx, resp } => {
                             // A new subscriber evicts the previous one.
-                            subscriber = None;
-                            let mut wedged = false;
-                            // Replay spooled frames strictly after the cursor,
-                            // segment by segment (bounding memory to one segment).
-                            'replay: for path in spool.replay_segments(cursor) {
-                                for (seq, body) in read_records(&path) {
-                                    if seq > cursor
-                                        && !deliver(&out_tx, Out::Frame { seq, body }).await
-                                    {
-                                        wedged = true;
-                                        break 'replay;
-                                    }
-                                }
-                            }
-                            // If the child is already fully done, the late
-                            // subscriber still learns the terminal state.
-                            if !wedged && finished {
-                                if let Some(code) = exited {
-                                    if !deliver(&out_tx, Out::Exit { code }).await {
-                                        wedged = true;
-                                    }
-                                }
+                            drop(subscriber.take());
+                            if let Some(replay) = replaying.take() {
+                                replay.task.abort();
                             }
                             let id = next_sub_id;
                             next_sub_id += 1;
-                            if !wedged {
-                                subscriber = Some((id, out_tx));
-                            }
+                            (replaying, subscriber) = place_subscriber(
+                                id,
+                                cursor,
+                                &spool,
+                                out_tx,
+                                cmd_tx.clone(),
+                                finished,
+                                exited,
+                            ).await;
+                            // Registration completes immediately. Replay owns
+                            // its own task, so ACK/WRITE/PING remain responsive
+                            // even when the durable backlog is much larger than
+                            // the subscriber's bounded buffers.
                             let _ = resp.send(id);
+                        }
+                        Cmd::ReplayComplete { id, through, delivered } => {
+                            if !matches!(&replaying, Some(replay) if replay.id == id) {
+                                continue;
+                            }
+                            let Replay { out_tx, .. } = replaying.take().expect("matched above");
+                            if !delivered {
+                                continue;
+                            }
+                            (replaying, subscriber) = place_subscriber(
+                                id,
+                                through,
+                                &spool,
+                                out_tx,
+                                cmd_tx.clone(),
+                                finished,
+                                exited,
+                            ).await;
                         }
                         Cmd::Unsubscribe(id) => {
                             if matches!(&subscriber, Some((cur, _)) if *cur == id) {
                                 subscriber = None;
+                            }
+                            if matches!(&replaying, Some(replay) if replay.id == id) {
+                                if let Some(replay) = replaying.take() {
+                                    replay.task.abort();
+                                }
                             }
                         }
                         Cmd::Capture { resp } => {
@@ -904,6 +935,9 @@ mod relay {
         // session's artifacts (socket, spool, stderr log) — reached only on an
         // explicit kill, which destroys the session.
         drop(subscriber);
+        if let Some(replay) = replaying {
+            replay.task.abort();
+        }
         drop(write_tx);
         let _ = writer_thread.join();
         let _ = std::fs::remove_file(&socket);
@@ -921,6 +955,72 @@ mod relay {
             tokio::time::timeout(EVICT_AFTER, tx.send(msg)).await,
             Ok(Ok(()))
         )
+    }
+
+    /// Put a new or caught-up subscriber in exactly one state: draining the
+    /// durable tail, following live frames, or finished after receiving EXIT.
+    async fn place_subscriber(
+        id: u64,
+        cursor: u64,
+        spool: &Spool,
+        out_tx: mpsc::Sender<Out>,
+        cmd_tx: mpsc::UnboundedSender<Cmd>,
+        finished: bool,
+        exited: Option<i32>,
+    ) -> (Option<Replay>, Option<(u64, mpsc::Sender<Out>)>) {
+        let through = spool.spooled();
+        if cursor < through {
+            let task = spawn_replay(
+                id,
+                cursor,
+                through,
+                spool.replay_segments(cursor),
+                out_tx.clone(),
+                cmd_tx,
+            );
+            return (Some(Replay { id, out_tx, task }), None);
+        }
+        if finished {
+            if let Some(code) = exited {
+                let _ = deliver(&out_tx, Out::Exit { code }).await;
+            }
+            return (None, None);
+        }
+        (None, Some((id, out_tx)))
+    }
+
+    /// Replay a stable spool snapshot without blocking the relay core. A slow
+    /// but connected consumer applies ordinary channel/socket back-pressure;
+    /// disconnecting closes the channel, and a replacement subscriber aborts
+    /// this task. Once the snapshot is drained the core catches up any frames
+    /// appended in parallel before promoting the subscriber to live delivery.
+    fn spawn_replay(
+        id: u64,
+        cursor: u64,
+        through: u64,
+        paths: Vec<PathBuf>,
+        out_tx: mpsc::Sender<Out>,
+        cmd_tx: mpsc::UnboundedSender<Cmd>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut delivered = true;
+            'replay: for path in paths {
+                for (seq, body) in read_records(&path) {
+                    if seq > cursor
+                        && seq <= through
+                        && out_tx.send(Out::Frame { seq, body }).await.is_err()
+                    {
+                        delivered = false;
+                        break 'replay;
+                    }
+                }
+            }
+            let _ = cmd_tx.send(Cmd::ReplayComplete {
+                id,
+                through,
+                delivered,
+            });
+        })
     }
 
     /// Once the child has exited *and* its stdout has drained (`!frame_open`),

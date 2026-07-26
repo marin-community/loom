@@ -10,6 +10,11 @@ pub type Db = SqlitePool;
 
 const MIGRATION_POOL_CONNECTIONS: u32 = 1;
 const SHARED_POOL_CONNECTIONS: u32 = 5;
+/// Ordinary WAL writer contention should queue rather than leak SQLITE_BUSY
+/// into user-facing reads or durable ACP journal writes. This is intentionally
+/// longer than a normal transaction; exhausting it indicates a genuinely
+/// abnormal external/schema lock, which callers may then recover from.
+const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// An on-disk database whose core schema is migrated, but whose shared pool has
 /// not opened yet.
@@ -39,6 +44,11 @@ impl DatabaseBootstrap {
         } = self;
         migrator.close().await;
         let pool = SqlitePoolOptions::new()
+            // Open and configure every connection before the server starts
+            // serving. `journal_mode = WAL` is a connection setup pragma that
+            // can itself need a schema lock; opening a cold extra connection
+            // under live write load must not introduce surprise lock failures.
+            .min_connections(SHARED_POOL_CONNECTIONS)
             .max_connections(SHARED_POOL_CONNECTIONS)
             .connect_with(options)
             .await
@@ -192,7 +202,7 @@ pub async fn begin_bootstrap(path: &Path) -> Result<DatabaseBootstrap> {
         // A writer that loses the lock race waits its turn instead of failing
         // with SQLITE_BUSY "database is locked". Only effective for writes that
         // take the lock up front — see [`begin_immediate`].
-        .busy_timeout(std::time::Duration::from_secs(5));
+        .busy_timeout(SQLITE_BUSY_TIMEOUT);
 
     // Keep the migration connection alive after the core stream completes so
     // higher-level schema owners can migrate through it too. Only `finish`
@@ -219,7 +229,7 @@ pub async fn connect_in_memory() -> Result<Db> {
     let options = SqliteConnectOptions::new()
         .in_memory(true)
         .journal_mode(SqliteJournalMode::Wal)
-        .busy_timeout(std::time::Duration::from_secs(5));
+        .busy_timeout(SQLITE_BUSY_TIMEOUT);
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(options)
@@ -337,6 +347,16 @@ mod tests {
 
         let db = bootstrap.finish().await.unwrap();
         assert_eq!(db.options().get_max_connections(), SHARED_POOL_CONNECTIONS);
+        assert_eq!(
+            db.size(),
+            SHARED_POOL_CONNECTIONS,
+            "the shared pool is fully configured before it is returned"
+        );
+        let busy_timeout_ms = sqlx::query_scalar::<_, i64>("PRAGMA busy_timeout")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(busy_timeout_ms, SQLITE_BUSY_TIMEOUT.as_millis() as i64);
     }
 
     #[tokio::test]
@@ -363,8 +383,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = connect(&dir.path().join("weaver.db")).await.unwrap();
 
-        // Pre-open the whole pool so polling each waiter once gets as far as
-        // the writer lock rather than pausing to establish a connection.
+        // Check out the whole eagerly-opened pool so polling each waiter once
+        // gets as far as the writer lock.
         let mut connections = Vec::new();
         for _ in 0..5 {
             connections.push(db.acquire().await.unwrap());
