@@ -52,6 +52,8 @@ test('serializes revisions, freezes finalization, and rejects stale refreshes', 
 
 test('flush preserves summary typed while an earlier save is in flight', async () => {
   let releaseSave;
+  let observedSummary = '';
+  let observedDirty = false;
   const saveGate = new Promise((resolve) => {
     releaseSave = resolve;
   });
@@ -63,7 +65,10 @@ test('flush preserves summary typed while an earlier save is in flight', async (
       return draft((current?.draft_revision ?? 0) + 1, summary);
     },
     onDraft() {},
-    onSummary() {},
+    onSummary(summary, dirty) {
+      observedSummary = summary;
+      observedDirty = dirty;
+    },
   });
   controller.hydrate(draft(1));
   controller.editSummary('first');
@@ -84,12 +89,25 @@ test('flush preserves summary typed while an earlier save is in flight', async (
     /finalizing/,
   );
   releaseBarrier();
-  assert.equal(
-    (
-      await controller.command(async (current) =>
-        draft(current.draft_revision + 1, current.summary),
-      )
-    ).draft_revision,
-    4,
+  const resumed = await controller.command(async (current) =>
+    draft(current.draft_revision + 1, current.summary),
   );
+  assert.equal(resumed.draft_revision, 4);
+
+  controller.editSummary('local conflict');
+  controller.reconcile(draft(10, 'fresh server baseline'));
+  assert.equal(controller.draft.draft_revision, 10);
+  assert.equal(observedSummary, 'local conflict');
+  assert.equal(observedDirty, true);
+  await controller.flush();
+  assert.equal(saved.at(-1), 'local conflict');
+  assert.equal(controller.draft.draft_revision, 11);
+
+  controller.editSummary('submitted baseline');
+  controller.reconcile(draft(12, 'submitted baseline'));
+  assert.equal(observedDirty, false);
+  controller.clearOwnership();
+  assert.equal(controller.draft, null);
+  assert.equal(observedSummary, '');
+  assert.equal(observedDirty, false);
 });

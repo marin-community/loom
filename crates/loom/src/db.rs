@@ -372,6 +372,7 @@ mod tests {
             "preferred_session_id",
             "payload",
             "claim_token",
+            "claim_owner",
         ] {
             assert!(
                 inbox_columns.iter().any(|column| column == expected),

@@ -55,13 +55,16 @@ export class ReviewDraftController<T extends RevisionedDraft> {
 
   reconcile(draft: T): void {
     this.current = draft;
+    if (!this.dirty) this.summary = draft.summary;
+    this.persistedSummary = draft.summary;
+    this.dirty = this.summary !== this.persistedSummary;
     this.state += 1;
     this.options.onDraft(draft);
-    if (!this.dirty) {
-      this.summary = draft.summary;
-      this.persistedSummary = draft.summary;
-      this.options.onSummary(this.summary, false);
-    }
+    this.options.onSummary(this.summary, this.dirty);
+  }
+
+  clearOwnership(): void {
+    this.setCurrent(null);
   }
 
   editSummary(summary: string): void {

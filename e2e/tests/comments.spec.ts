@@ -44,6 +44,14 @@ async function selectPhrase(page: Page, phrase: string) {
   }, phrase);
 }
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 test.describe("staged artifact reviews", () => {
   test("drafts, conflicts, re-anchors, and submits one coherent review", async ({
     page,
@@ -78,6 +86,11 @@ test.describe("staged artifact reviews", () => {
       },
       { times: 1 },
     );
+    const alphaResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "GET" &&
+        response.url().endsWith(`/api/sessions/${session.id}/artifacts/alpha`),
+    );
     await page.locator('[data-artifact="alpha"]').click();
     await expect(page.getByText("loading…")).toBeVisible();
     await expect(page.locator(".markdown-body")).toHaveCount(0);
@@ -87,6 +100,7 @@ test.describe("staged artifact reviews", () => {
       "Beta identity",
     );
     releaseAlpha();
+    await alphaResponse;
     await expect(page.locator(".markdown-body h1")).toContainText(
       "Beta identity",
     );
@@ -285,14 +299,8 @@ test.describe("staged artifact reviews", () => {
     });
     await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/design`);
     await page.getByTestId("review-tray-toggle").click();
-    let releaseCreate!: () => void;
-    let markCreateStarted!: () => void;
-    const createGate = new Promise<void>((resolve) => {
-      releaseCreate = resolve;
-    });
-    const createStarted = new Promise<void>((resolve) => {
-      markCreateStarted = resolve;
-    });
+    const createGate = deferred();
+    const createStarted = deferred();
     let createGated = false;
     await page.route(`**/api/sessions/${session.id}/reviews`, async (route) => {
       if (route.request().method() !== "POST" || createGated) {
@@ -300,8 +308,8 @@ test.describe("staged artifact reviews", () => {
         return;
       }
       createGated = true;
-      markCreateStarted();
-      await createGate;
+      createStarted.resolve();
+      await createGate.promise;
       await route.continue();
     });
     await page
@@ -325,12 +333,31 @@ test.describe("staged artifact reviews", () => {
         response.url().endsWith(`/api/sessions/${session.id}/reviews`),
     );
     await page.getByTestId("artifact-pop").click();
-    await createStarted;
+    await createStarted.promise;
     await expect(page.getByTestId("artifact-pop")).toContainText("Pop out");
     await expect(page.getByTestId("artifact-rail-close")).toHaveCount(0);
     await expect(page.getByTestId("review-layout-barrier")).toBeVisible();
+    await expect(page.getByTestId("review-surface")).toHaveAttribute(
+      "inert",
+      "",
+    );
     await expect(page.getByTestId("review-overall-note")).toBeDisabled();
-    releaseCreate();
+    const frozenValue = await page
+      .getByTestId("review-overall-note")
+      .inputValue();
+    await page
+      .getByTestId("review-overall-note")
+      .evaluate((element: HTMLTextAreaElement) => element.focus());
+    await page.keyboard.type("must not enter the frozen review");
+    await expect(page.getByTestId("review-overall-note")).toHaveValue(
+      frozenValue,
+    );
+    expect(
+      await page.evaluate(() =>
+        document.activeElement?.getAttribute("data-testid"),
+      ),
+    ).not.toBe("review-overall-note");
+    createGate.resolve();
     await create;
     await expect(page.getByTestId("artifact-pop")).toContainText("Dock");
     await expect
@@ -355,5 +382,68 @@ test.describe("staged artifact reviews", () => {
       )
       .toBeGreaterThan(before.max * 0.7);
     await expect(page.getByText("Final review target")).toBeInViewport();
+
+    const patchStarted = deferred();
+    const patchGate = deferred();
+    let failPatches = true;
+    let firstFailedPatch = true;
+    await page.route("**/api/reviews/*", async (route) => {
+      if (
+        route.request().method() !== "PATCH" ||
+        !/\/api\/reviews\/\d+$/.test(route.request().url()) ||
+        !failPatches
+      ) {
+        await route.continue();
+        return;
+      }
+      if (firstFailedPatch) {
+        firstFailedPatch = false;
+        patchStarted.resolve();
+        await patchGate.promise;
+      }
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "injected route save failure" }),
+      });
+    });
+    const trayToggle = page.getByTestId("review-tray-toggle");
+    if ((await trayToggle.getAttribute("aria-expanded")) !== "true") {
+      await trayToggle.click();
+    }
+    const reviewNote = page.getByTestId("review-overall-note");
+    const artifactUrl = `${weaver.baseUrl}/s/${session.id}/artifacts/design`;
+
+    await reviewNote.fill("Route feedback must block a failed leave.");
+    await page.locator('[data-rail="issues"]').click();
+    await patchStarted.promise;
+    await expect(page).toHaveURL(artifactUrl);
+    await expect(reviewNote).toBeDisabled();
+    patchGate.resolve();
+    await expect(page.getByRole("alert")).toContainText(
+      "injected route save failure",
+    );
+    await expect(page).toHaveURL(artifactUrl);
+    await expect(reviewNote).toBeEnabled();
+
+    failPatches = false;
+    const successfulSave = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PATCH" &&
+        /\/api\/reviews\/\d+$/.test(response.url()),
+    );
+    await reviewNote.fill("Route feedback survives app-rail navigation.");
+    await page.locator('[data-rail="issues"]').click();
+    await successfulSave;
+    await expect(page).toHaveURL(`${weaver.baseUrl}/issues`);
+
+    await page.goBack();
+    await expect(page).toHaveURL(artifactUrl);
+    if ((await trayToggle.getAttribute("aria-expanded")) !== "true") {
+      await trayToggle.click();
+    }
+    await expect(reviewNote).toHaveValue(
+      "Route feedback survives app-rail navigation.",
+    );
   });
 });

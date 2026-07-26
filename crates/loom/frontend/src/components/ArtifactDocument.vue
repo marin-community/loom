@@ -173,6 +173,7 @@ const submitting = ref(false);
 const discarding = ref(false);
 const layoutBusy = ref(false);
 let releaseLayoutBarrier: (() => void) | null = null;
+let layoutReturnFocus: HTMLElement | null = null;
 const reanchorCommentId = ref<number | null>(null);
 
 const draft = computed(() => reviews.value.find((review) => review.status === 'draft') ?? null);
@@ -227,7 +228,10 @@ function conflictReview(error: unknown): Review | null {
   if (!fresh || typeof fresh !== 'object' || typeof (fresh as Review).id !== 'number') return null;
   const review = fresh as Review;
   if (review.status === 'draft') draftController.reconcile(review);
-  else replaceReview(review);
+  else {
+    replaceReview(review);
+    draftController.clearOwnership();
+  }
   const liveIds = new Set(allEntries.value.map((entry) => entry.comment.id));
   if (activeId.value != null && !liveIds.has(activeId.value)) activeId.value = null;
   if (reanchorCommentId.value != null && !liveIds.has(reanchorCommentId.value)) {
@@ -864,6 +868,14 @@ async function onCommentEvent(
 }
 
 async function prepareLayoutSwap(): Promise<boolean> {
+  if (layoutBusy.value) return false;
+  const active = document.activeElement;
+  layoutReturnFocus =
+    active instanceof HTMLElement && containerEl.value?.contains(active) ? active : null;
+  // Blur synchronously so any blur-owned save enters the controller queue
+  // before the barrier. No user event can interleave before the surface turns
+  // inert and the controller freezes below.
+  layoutReturnFocus?.blur();
   if (summarySaveTimer) {
     clearTimeout(summarySaveTimer);
     summarySaveTimer = null;
@@ -876,6 +888,10 @@ async function prepareLayoutSwap(): Promise<boolean> {
   } catch (error) {
     trayError.value = mutationMessage(error);
     layoutBusy.value = false;
+    const restore = layoutReturnFocus;
+    layoutReturnFocus = null;
+    await nextTick();
+    if (restore?.isConnected) restore.focus();
     return false;
   }
 }
@@ -884,6 +900,7 @@ function finishLayoutSwap() {
   releaseLayoutBarrier?.();
   releaseLayoutBarrier = null;
   layoutBusy.value = false;
+  layoutReturnFocus = null;
 }
 
 defineExpose({ onCommentEvent, prepareLayoutSwap, finishLayoutSwap });
@@ -1060,7 +1077,13 @@ const DocBody = () => {
 </script>
 
 <template>
-  <div ref="containerEl" class="relative h-full min-h-0 w-full overflow-hidden">
+  <div
+    ref="containerEl"
+    class="relative h-full min-h-0 w-full overflow-hidden"
+    data-testid="review-surface"
+    :inert="layoutBusy"
+    :aria-busy="layoutBusy"
+  >
     <div
       v-if="layoutBusy"
       class="absolute inset-0 z-50 cursor-wait"

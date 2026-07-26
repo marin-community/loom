@@ -30,6 +30,32 @@ pub struct ReviewTurnBoundary<'a> {
     pub inflight: &'a str,
 }
 
+#[derive(Debug)]
+pub enum ReviewTurnStartOutcome {
+    ClaimLostBeforeWrite,
+    TransportNotWritten { error: anyhow::Error },
+    Persisted,
+    TransportWrittenUnpersisted { error: anyhow::Error },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReviewClaimSettlement {
+    MatchingPromptResponse,
+    Abandoned,
+}
+
+impl ReviewTurnStartOutcome {
+    /// Once the transport write succeeds, the task must hold a local live-turn
+    /// boundary even if journaling fails. Returning true is the dispatch gate:
+    /// neither the ordinary prompt queue nor another inbox claim may start.
+    pub fn blocks_followup_dispatch(&self) -> bool {
+        matches!(
+            self,
+            Self::Persisted | Self::TransportWrittenUnpersisted { .. }
+        )
+    }
+}
+
 /// Cross the core-ledger/Loom-runtime seam in one transaction: append the
 /// payload to Loom's durable ACP queue, record the stable delivery receipt,
 /// and complete the core outbox item. Returns true only for the append owner.
@@ -134,15 +160,37 @@ pub async fn claim_review_inbox(
     db: &crate::db::Db,
     branch_id: &str,
     session_id: &str,
+    claim_owner: Option<&str>,
+    owner_is_live: impl Fn(&str, &str) -> bool,
 ) -> Result<Option<ReviewInboxItem>> {
-    let stale = chrono::Utc::now()
+    claim_review_inbox_at(
+        db,
+        branch_id,
+        session_id,
+        claim_owner,
+        owner_is_live,
+        chrono::Utc::now(),
+    )
+    .await
+}
+
+async fn claim_review_inbox_at(
+    db: &crate::db::Db,
+    branch_id: &str,
+    session_id: &str,
+    claim_owner: Option<&str>,
+    owner_is_live: impl Fn(&str, &str) -> bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<ReviewInboxItem>> {
+    let stale = now
         .checked_sub_signed(chrono::TimeDelta::minutes(1))
         .map(|instant| instant.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
         .unwrap_or_else(crate::db::now_iso);
-    let now = crate::db::now_iso();
+    let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
     let mut tx = weaver_core::db::begin_immediate(db).await?;
-    let key: Option<String> = sqlx::query_scalar(
-        "SELECT inbox.delivery_key
+    let candidates: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT inbox.delivery_key, inbox.state,
+                inbox.claimed_session_id, inbox.claim_owner
          FROM review_conversation_inbox AS inbox
          WHERE inbox.branch_id = ?
            AND (
@@ -158,13 +206,26 @@ pub async fn claim_review_inbox(
                )
              )
            )
-         ORDER BY inbox.created_at, inbox.delivery_key
-         LIMIT 1",
+         ORDER BY inbox.created_at, inbox.delivery_key",
     )
     .bind(branch_id)
     .bind(stale)
-    .fetch_optional(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
+    let key = candidates
+        .into_iter()
+        .find_map(|(key, state, owner_session, owner)| {
+            if state == "queued"
+                || !owner_session
+                    .as_deref()
+                    .zip(owner.as_deref())
+                    .is_some_and(|(session, owner)| owner_is_live(session, owner))
+            {
+                Some(key)
+            } else {
+                None
+            }
+        });
     let item = match key {
         Some(key) => {
             sqlx::query_as::<_, ReviewInboxItem>(
@@ -172,11 +233,13 @@ pub async fn claim_review_inbox(
                  SET state = 'delivering',
                      claimed_session_id = ?,
                      claim_token = lower(hex(randomblob(16))),
+                     claim_owner = ?,
                      claimed_at = ?
                  WHERE delivery_key = ?
                  RETURNING delivery_key, payload, claim_token",
             )
             .bind(session_id)
+            .bind(claim_owner)
             .bind(now)
             .bind(key)
             .fetch_optional(&mut *tx)
@@ -188,41 +251,12 @@ pub async fn claim_review_inbox(
     Ok(item)
 }
 
-/// Hand protected feedback to the ACP socket, then atomically persist its
-/// opening journal block and in-flight prompt. The socket has no durable
-/// supervisor acknowledgement, so the inbox claim remains recoverable until
-/// the matching ACP prompt response consumes it. A failure can retry the
-/// immutable feedback and may duplicate process delivery, but cannot lose it.
-pub async fn start_review_inbox_turn<F>(
+async fn persist_review_inbox_turn(
     db: &crate::db::Db,
     item: &ReviewInboxItem,
     session_id: &str,
     boundary: ReviewTurnBoundary<'_>,
-    transport: F,
-) -> Result<bool>
-where
-    F: Future<Output = Result<()>>,
-{
-    let owns_claim: bool = sqlx::query_scalar(
-        "SELECT EXISTS(
-           SELECT 1 FROM review_conversation_inbox
-           WHERE delivery_key = ? AND state = 'delivering'
-             AND claim_token = ? AND claimed_session_id = ?
-         )",
-    )
-    .bind(&item.delivery_key)
-    .bind(&item.claim_token)
-    .bind(session_id)
-    .fetch_one(db)
-    .await?;
-    if !owns_claim {
-        return Ok(false);
-    }
-
-    transport
-        .await
-        .context("writing protected review feedback to ACP relay")?;
-
+) -> Result<()> {
     let now = crate::db::now_iso();
     let mut tx = weaver_core::db::begin_immediate(db).await?;
     let still_owned: bool = sqlx::query_scalar(
@@ -239,7 +273,7 @@ where
     .await?;
     if !still_owned {
         tx.rollback().await?;
-        return Ok(false);
+        anyhow::bail!("protected review inbox claim was lost after the relay write");
     }
     let journaled = sqlx::query(
         "INSERT INTO chat_blocks (session_id, turn, seq, kind, payload, created_at)
@@ -254,9 +288,7 @@ where
     .execute(&mut *tx)
     .await?;
     if journaled.rows_affected() != 1 {
-        return Err(anyhow::anyhow!(
-            "protected review turn journal position is already occupied"
-        ));
+        anyhow::bail!("protected review turn journal position is already occupied");
     }
     let session = sqlx::query("UPDATE sessions SET acp_inflight = ? WHERE id = ?")
         .bind(boundary.inflight)
@@ -264,12 +296,64 @@ where
         .execute(&mut *tx)
         .await?;
     if session.rows_affected() != 1 {
-        return Err(anyhow::anyhow!(
-            "protected review target session disappeared"
-        ));
+        anyhow::bail!("protected review target session disappeared");
     }
     tx.commit().await?;
-    Ok(true)
+    Ok(())
+}
+
+/// Hand protected feedback to the ACP socket, then persist its opening journal
+/// block and in-flight prompt. The exact live task that owns the durable inbox
+/// claim fences stale recovery even if this persistence step fails. The
+/// explicit outcome separates a transport failure (safe to release/retry) from
+/// a successful write whose journal failed (adopt until its matching response).
+/// The socket has no durable supervisor acknowledgement, so a crash remains
+/// recoverable at-least-once and may duplicate process delivery.
+pub async fn start_review_inbox_turn<F>(
+    db: &crate::db::Db,
+    item: &ReviewInboxItem,
+    session_id: &str,
+    boundary: ReviewTurnBoundary<'_>,
+    transport: F,
+) -> ReviewTurnStartOutcome
+where
+    F: Future<Output = Result<()>>,
+{
+    let owns_claim = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+           SELECT 1 FROM review_conversation_inbox
+           WHERE delivery_key = ? AND state = 'delivering'
+             AND claim_token = ? AND claimed_session_id = ?
+         )",
+    )
+    .bind(&item.delivery_key)
+    .bind(&item.claim_token)
+    .bind(session_id)
+    .fetch_one(db)
+    .await;
+    let owns_claim = match owns_claim {
+        Ok(owns_claim) => owns_claim,
+        Err(error) => {
+            return ReviewTurnStartOutcome::TransportNotWritten {
+                error: error.into(),
+            };
+        }
+    };
+    if !owns_claim {
+        return ReviewTurnStartOutcome::ClaimLostBeforeWrite;
+    }
+
+    if let Err(error) = transport
+        .await
+        .context("writing protected review feedback to ACP relay")
+    {
+        return ReviewTurnStartOutcome::TransportNotWritten { error };
+    }
+
+    match persist_review_inbox_turn(db, item, session_id, boundary).await {
+        Ok(()) => ReviewTurnStartOutcome::Persisted,
+        Err(error) => ReviewTurnStartOutcome::TransportWrittenUnpersisted { error },
+    }
 }
 
 pub async fn release_review_inbox(
@@ -277,15 +361,34 @@ pub async fn release_review_inbox(
     delivery_key: &str,
     claim_token: &str,
 ) -> Result<bool> {
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
+    sqlx::query(
+        "UPDATE sessions
+         SET acp_inflight = NULL
+         WHERE id = (
+           SELECT claimed_session_id FROM review_conversation_inbox
+           WHERE delivery_key = ? AND state = 'delivering' AND claim_token = ?
+         )
+           AND json_extract(acp_inflight, '$.delivery_key') = ?
+           AND json_extract(acp_inflight, '$.review_claim_token') = ?",
+    )
+    .bind(delivery_key)
+    .bind(claim_token)
+    .bind(delivery_key)
+    .bind(claim_token)
+    .execute(&mut *tx)
+    .await?;
     let released = sqlx::query(
         "UPDATE review_conversation_inbox
-         SET state = 'queued', claim_token = NULL, claimed_at = NULL
+         SET state = 'queued', claimed_session_id = NULL,
+             claim_token = NULL, claim_owner = NULL, claimed_at = NULL
          WHERE delivery_key = ? AND state = 'delivering' AND claim_token = ?",
     )
     .bind(delivery_key)
     .bind(claim_token)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(released.rows_affected() == 1)
 }
 
@@ -295,20 +398,53 @@ pub async fn consume_review_inbox(
     claim_token: &str,
     session_id: &str,
 ) -> Result<bool> {
-    Ok(sqlx::query(
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
+    let consumed = sqlx::query(
         "UPDATE review_conversation_inbox
          SET state = 'consumed', consumed_at = ?, claimed_session_id = ?,
-             claim_token = NULL
+             claim_token = NULL, claim_owner = NULL
          WHERE delivery_key = ? AND state = 'delivering' AND claim_token = ?",
     )
     .bind(crate::db::now_iso())
     .bind(session_id)
     .bind(delivery_key)
     .bind(claim_token)
-    .execute(db)
+    .execute(&mut *tx)
     .await?
     .rows_affected()
-        == 1)
+        == 1;
+    if consumed {
+        sqlx::query(
+            "UPDATE sessions SET acp_inflight = NULL
+             WHERE id = ?
+               AND json_extract(acp_inflight, '$.delivery_key') = ?
+               AND json_extract(acp_inflight, '$.review_claim_token') = ?",
+        )
+        .bind(session_id)
+        .bind(delivery_key)
+        .bind(claim_token)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(consumed)
+}
+
+pub async fn settle_review_inbox_claim(
+    db: &crate::db::Db,
+    delivery_key: &str,
+    claim_token: &str,
+    session_id: &str,
+    settlement: ReviewClaimSettlement,
+) -> Result<bool> {
+    match settlement {
+        ReviewClaimSettlement::MatchingPromptResponse => {
+            consume_review_inbox(db, delivery_key, claim_token, session_id).await
+        }
+        ReviewClaimSettlement::Abandoned => {
+            release_review_inbox(db, delivery_key, claim_token).await
+        }
+    }
 }
 
 pub async fn deliver_review(state: &AppState, review_id: i64) -> Result<()> {
@@ -474,7 +610,12 @@ async fn drain_with_timeout(state: &AppState, transport_timeout: Duration) -> Re
                 }
                 continue;
             }
-            let Some(item) = claim_review_inbox(&state.db, &branch_id, &target.id).await? else {
+            let Some(item) =
+                claim_review_inbox(&state.db, &branch_id, &target.id, None, |session, owner| {
+                    state.acp.is_claim_owner_live(session, owner)
+                })
+                .await?
+            else {
                 continue;
             };
             let sent = tokio::time::timeout(transport_timeout, async {
@@ -575,7 +716,7 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
-        let item = claim_review_inbox(&db, &branch.id, "acp-review")
+        let item = claim_review_inbox(&db, &branch.id, "acp-review", Some("owner-a"), |_, _| false)
             .await
             .unwrap()
             .unwrap();
@@ -583,8 +724,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_journal_and_claim_stay_recoverable_until_prompt_response() {
+    async fn post_write_persistence_failure_holds_every_followup_until_prompt_response() {
         let (db, item) = claimed_inbox().await;
+        sqlx::query(
+            "UPDATE sessions SET pending_prompt = 'ordinary queued prompt'
+             WHERE id = 'acp-review'",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
         sqlx::query(
             "CREATE TRIGGER fail_review_inflight
              BEFORE UPDATE OF acp_inflight ON sessions
@@ -599,7 +747,7 @@ mod tests {
             "resources": [],
             "delivery_key": item.delivery_key,
         });
-        let error = start_review_inbox_turn(
+        let outcome = start_review_inbox_turn(
             &db,
             &item,
             "acp-review",
@@ -611,9 +759,15 @@ mod tests {
             },
             async { Ok(()) },
         )
-        .await
-        .unwrap_err();
+        .await;
+        let ReviewTurnStartOutcome::TransportWrittenUnpersisted { error } = &outcome else {
+            panic!("expected a written but unpersisted outcome: {outcome:?}");
+        };
         assert!(error.to_string().contains("injected failure"));
+        assert!(
+            outcome.blocks_followup_dispatch(),
+            "the caller must adopt the ambiguous live-turn boundary"
+        );
         let state: String = sqlx::query_scalar(
             "SELECT state FROM review_conversation_inbox WHERE delivery_key = 'review:stable'",
         )
@@ -629,79 +783,192 @@ mod tests {
             blocks, 0,
             "the failed transaction must not leak a journal marker"
         );
+        let ordinary_started = if outcome.blocks_followup_dispatch() {
+            None
+        } else {
+            crate::session::take_pending_prompt(&db, "acp-review")
+                .await
+                .unwrap()
+        };
+        assert!(
+            ordinary_started.is_none(),
+            "the dispatch caller must not drain an ordinary prompt after the relay write"
+        );
+        assert_eq!(
+            crate::session::read_pending_prompt(&db, "acp-review")
+                .await
+                .unwrap(),
+            "ordinary queued prompt"
+        );
+        let branch_id: String =
+            sqlx::query_scalar("SELECT branch_id FROM sessions WHERE id = 'acp-review'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let after_stale_cutoff = chrono::Utc::now() + chrono::TimeDelta::minutes(2);
+        assert!(
+            claim_review_inbox_at(
+                &db,
+                &branch_id,
+                "acp-other",
+                Some("owner-b"),
+                |session, owner| session == "acp-review" && owner == "owner-a",
+                after_stale_cutoff,
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "the ambiguous write stays unavailable past the age cutoff while its task is live"
+        );
 
         sqlx::query("DROP TRIGGER fail_review_inflight")
             .execute(&db)
             .await
             .unwrap();
-        assert!(start_review_inbox_turn(
-            &db,
-            &item,
-            "acp-review",
-            ReviewTurnBoundary {
-                turn: 1,
-                seq: 0,
-                opening_payload: &payload,
-                inflight: r#"{"prompt_id":7,"turn":1,"delivery_key":"review:stable"}"#,
-            },
-            async { Ok(()) },
-        )
-        .await
-        .unwrap());
-        let state: String = sqlx::query_scalar(
-            "SELECT state FROM review_conversation_inbox WHERE delivery_key = 'review:stable'",
-        )
-        .fetch_one(&db)
-        .await
-        .unwrap();
-        assert_eq!(
-            state, "delivering",
-            "a socket write is not an ACP prompt acknowledgement"
-        );
         assert!(
             consume_review_inbox(&db, &item.delivery_key, &item.claim_token, "acp-review")
                 .await
                 .unwrap()
         );
+        assert_eq!(
+            crate::session::take_pending_prompt(&db, "acp-review")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("ordinary queued prompt"),
+            "the ordinary queue becomes eligible only after the matching response"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_owner_fence_tracks_local_activation_rotation_and_task_death() {
+        let (db, _item) = claimed_inbox().await;
+        let registry = crate::acp::AcpRegistry::new();
+        let (generation, probe) = registry.register_claim_liveness_probe("acp-review");
+        let owner_a = registry
+            .activate_review_claim("acp-review", generation)
+            .unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-26T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        sqlx::query(
+            "UPDATE review_conversation_inbox
+             SET claimed_at = '2026-07-26T11:00:00.000Z', claim_owner = ?
+             WHERE delivery_key = 'review:stable'",
+        )
+        .bind(owner_a.owner())
+        .execute(&db)
+        .await
+        .unwrap();
+        let branch_id: String =
+            sqlx::query_scalar("SELECT branch_id FROM sessions WHERE id = 'acp-review'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+
         assert!(
-            !start_review_inbox_turn(
+            claim_review_inbox_at(
                 &db,
-                &item,
-                "acp-review",
-                ReviewTurnBoundary {
-                    turn: 2,
-                    seq: 0,
-                    opening_payload: &payload,
-                    inflight: r#"{"prompt_id":8,"turn":2,"delivery_key":"review:stable"}"#,
-                },
-                async { Ok(()) },
+                &branch_id,
+                "acp-replacement",
+                Some("owner-b"),
+                |session, owner| registry.is_claim_owner_live(session, owner),
+                now,
             )
             .await
-            .unwrap(),
-            "a consumed or lost claim is never accepted as another turn"
+            .unwrap()
+            .is_none(),
+            "age alone cannot steal a claim from its exact live task"
         );
-        let row: (String, i64, String) = sqlx::query_as(
-            "SELECT i.state, COUNT(b.id), b.payload
-             FROM review_conversation_inbox i
-             JOIN chat_blocks b
-               ON json_extract(b.payload, '$.delivery_key') = i.delivery_key
-             WHERE i.delivery_key = 'review:stable'",
+        drop(owner_a);
+        let owner_b = registry
+            .activate_review_claim("acp-review", generation)
+            .unwrap();
+        claim_review_inbox_at(
+            &db,
+            &branch_id,
+            "acp-review",
+            Some(owner_b.owner()),
+            |session, owner| registry.is_claim_owner_live(session, owner),
+            now,
+        )
+        .await
+        .unwrap()
+        .expect("a relinquished old token must not revive when the task rotates owners");
+
+        let later = now + chrono::TimeDelta::minutes(2);
+        assert!(
+            claim_review_inbox_at(
+                &db,
+                &branch_id,
+                "acp-final",
+                Some("owner-c"),
+                |session, owner| registry.is_claim_owner_live(session, owner),
+                later,
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "the rotated token fences only the currently active claim"
+        );
+        drop(probe);
+        assert!(
+            claim_review_inbox_at(
+                &db,
+                &branch_id,
+                "acp-final",
+                Some("owner-c"),
+                |session, owner| registry.is_claim_owner_live(session, owner),
+                later,
+            )
+            .await
+            .unwrap()
+            .is_some(),
+            "a closed command receiver cannot leave a dead registry slot live"
+        );
+    }
+
+    #[tokio::test]
+    async fn abandoned_turn_settlement_requeues_the_real_claim_boundary() {
+        let (db, item) = claimed_inbox().await;
+        sqlx::query("UPDATE sessions SET acp_inflight = ? WHERE id = 'acp-review'")
+            .bind(format!(
+                r#"{{"delivery_key":"{}","review_claim_token":"{}"}}"#,
+                item.delivery_key, item.claim_token
+            ))
+            .execute(&db)
+            .await
+            .unwrap();
+
+        assert!(settle_review_inbox_claim(
+            &db,
+            &item.delivery_key,
+            &item.claim_token,
+            "acp-review",
+            ReviewClaimSettlement::Abandoned,
+        )
+        .await
+        .unwrap());
+        let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT state, claim_owner, claim_token
+             FROM review_conversation_inbox WHERE delivery_key = 'review:stable'",
         )
         .fetch_one(&db)
         .await
         .unwrap();
-        assert_eq!(row.0, "consumed");
-        assert_eq!(row.1, 1);
-        assert_eq!(
-            serde_json::from_str::<Value>(&row.2).unwrap()["delivery_key"],
-            "review:stable"
-        );
+        assert_eq!(row, ("queued".to_string(), None, None));
+        let inflight: Option<String> =
+            sqlx::query_scalar("SELECT acp_inflight FROM sessions WHERE id = 'acp-review'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(inflight.is_none());
     }
 
     #[tokio::test]
     async fn relay_write_failure_keeps_protected_feedback_recoverable() {
         let (db, item) = claimed_inbox().await;
-        let error = start_review_inbox_turn(
+        let outcome = start_review_inbox_turn(
             &db,
             &item,
             "acp-review",
@@ -716,8 +983,10 @@ mod tests {
             },
             async { Err(anyhow::anyhow!("injected relay write failure")) },
         )
-        .await
-        .unwrap_err();
+        .await;
+        let ReviewTurnStartOutcome::TransportNotWritten { error } = outcome else {
+            panic!("expected an unwritten transport failure: {outcome:?}");
+        };
         assert!(format!("{error:#}").contains("injected relay write failure"));
 
         let state: String = sqlx::query_scalar(
@@ -766,7 +1035,7 @@ mod tests {
         .unwrap();
         let writes = Arc::new(AtomicUsize::new(0));
         let observed_writes = writes.clone();
-        let started = start_review_inbox_turn(
+        let outcome = start_review_inbox_turn(
             &db,
             &item,
             "acp-review",
@@ -784,9 +1053,11 @@ mod tests {
                 Ok(())
             },
         )
-        .await
-        .unwrap();
-        assert!(!started);
+        .await;
+        assert!(matches!(
+            outcome,
+            ReviewTurnStartOutcome::ClaimLostBeforeWrite
+        ));
         assert_eq!(writes.load(Ordering::SeqCst), 0);
         let blocks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_blocks")
             .fetch_one(&db)

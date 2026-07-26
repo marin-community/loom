@@ -11,6 +11,7 @@ CREATE TABLE review_conversation_inbox (
     payload             TEXT NOT NULL,
     state               TEXT NOT NULL DEFAULT 'queued',
     claim_token         TEXT,
+    claim_owner         TEXT,
     claimed_at          TEXT,
     consumed_at         TEXT,
     created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
