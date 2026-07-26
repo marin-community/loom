@@ -23,7 +23,7 @@ use crate::agent::AgentManager;
 use crate::history::{self, PageOptions};
 use crate::profile::Profile;
 use crate::session::Session;
-use crate::{config, events, profile, repo_env, session, Db};
+use crate::{config, events, profile, repo_env, session, user_token, Db};
 
 pub const METADATA_PROFILE_KEY: &str = "metadata.profile";
 pub const TITLE_ENABLED_KEY: &str = "metadata.title_generation";
@@ -84,6 +84,7 @@ struct AssistanceRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct CueCursor {
+    source: String,
     history: String,
     fingerprint: String,
     artifacts: Vec<(i64, String, i64)>,
@@ -103,9 +104,10 @@ struct CueInputs {
 struct PreparedCue {
     identity: CueIdentity,
     prompt: String,
+    fence: CueFence,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct ProfileIdentity {
     name: String,
     lifetime: i64,
@@ -122,25 +124,50 @@ impl From<&Profile> for ProfileIdentity {
     }
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct MetadataSource {
+    goal: String,
+    restricted: bool,
+    allow_restricted: bool,
+    session_profile: ProfileIdentity,
+    source_profile: Option<ProfileIdentity>,
+    created_by: Option<String>,
+    creator_credential: (bool, Option<String>),
+    metadata_profile_name: String,
+    metadata_profile: Option<ProfileIdentity>,
+}
+
+struct MetadataRead {
+    session: Session,
+    branch: Branch,
+    profile: Option<Profile>,
+    source: MetadataSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CueFence {
+    source: MetadataSource,
+    cursor: String,
+    prompt_fingerprint: String,
+}
+
 #[derive(Debug, Clone)]
 struct TitleFence {
-    goal: String,
+    source: MetadataSource,
     title: String,
     provenance: TitleProvenance,
-    restricted: bool,
-    profile: ProfileIdentity,
 }
 
 struct CurrentTitleState<'a> {
-    goal: &'a str,
+    source: Option<&'a MetadataSource>,
     title: &'a str,
     provenance: TitleProvenance,
-    restricted: bool,
     session_enabled: bool,
     globally_enabled: bool,
-    allow_restricted: bool,
-    profile: Option<&'a ProfileIdentity>,
 }
+
+type TitlePreflight = std::result::Result<MetadataRead, &'static str>;
+type CueBoundaryCheck = std::result::Result<MetadataRead, ResumptionCueView>;
 
 async fn row(db: &Db, session_id: &str) -> Result<AssistanceRow> {
     sqlx::query(
@@ -202,24 +229,16 @@ pub async fn set_title_enabled(db: &Db, session_id: &str, enabled: bool) -> Resu
     Ok(())
 }
 
-async fn selected_profile(db: &Db, session: &Session) -> Result<Option<Profile>> {
+async fn configured_profile(db: &Db) -> Result<(String, Option<Profile>)> {
     let name = config::get(db, METADATA_PROFILE_KEY)
         .await
         .unwrap_or_default();
-    let name = name.trim();
+    let name = name.trim().to_string();
     if name.is_empty() {
-        return Ok(None);
+        return Ok((name, None));
     }
-    if !privacy_allows_metadata(
-        session.policy_restricted,
-        config::get_bool(db, ALLOW_RESTRICTED_KEY, false).await,
-    ) {
-        return Ok(None);
-    }
-    let Some(profile) = profile::get(db, name).await? else {
-        return Ok(None);
-    };
-    Ok(metadata_profile_eligible(&profile).then_some(profile))
+    let selected = profile::get(db, &name).await?;
+    Ok((name, selected))
 }
 
 pub fn metadata_profile_eligible(profile: &Profile) -> bool {
@@ -228,6 +247,90 @@ pub fn metadata_profile_eligible(profile: &Profile) -> bool {
 
 fn privacy_allows_metadata(restricted: bool, allow_restricted: bool) -> bool {
     !restricted || allow_restricted
+}
+
+fn serialized_fingerprint<T: Serialize>(value: &T) -> Result<String> {
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(value)?)))
+}
+
+async fn launching_user_token(db: &Db, created_by: Option<&str>) -> Result<Option<String>> {
+    let Some(username) = created_by else {
+        return Ok(None);
+    };
+    Ok(user_token::get(db, username)
+        .await?
+        .filter(|value| !value.trim().is_empty()))
+}
+
+async fn metadata_source(
+    db: &Db,
+    session: &Session,
+    branch: &Branch,
+    allow_restricted: bool,
+    metadata_profile_name: String,
+    metadata_profile: Option<&Profile>,
+) -> Result<MetadataSource> {
+    let source_profile = profile::get(db, &session.profile)
+        .await?
+        .as_ref()
+        .map(ProfileIdentity::from);
+    let creator_credential = match session.created_by.as_deref() {
+        Some(username) => {
+            let status = user_token::status(db, username).await?;
+            (status.set, status.updated_at)
+        }
+        None => (false, None),
+    };
+    Ok(MetadataSource {
+        goal: branch.goal.clone(),
+        restricted: session.policy_restricted,
+        allow_restricted,
+        session_profile: ProfileIdentity {
+            name: session.profile.clone(),
+            lifetime: session.profile_lifetime,
+            revision: session.profile_revision,
+        },
+        source_profile,
+        created_by: session.created_by.clone(),
+        creator_credential,
+        metadata_profile_name,
+        metadata_profile: metadata_profile.map(ProfileIdentity::from),
+    })
+}
+
+async fn metadata_read(db: &Db, session_id: &str, branch_id: &str) -> Result<Option<MetadataRead>> {
+    let Some(session) = session::get(db, session_id).await? else {
+        return Ok(None);
+    };
+    let Some(branch) = branch::get(db, branch_id).await? else {
+        return Ok(None);
+    };
+    let allow_restricted = config::get_bool(db, ALLOW_RESTRICTED_KEY, false).await;
+    let (metadata_profile_name, profile) = configured_profile(db).await?;
+    let source = metadata_source(
+        db,
+        &session,
+        &branch,
+        allow_restricted,
+        metadata_profile_name,
+        profile.as_ref(),
+    )
+    .await?;
+    Ok(Some(MetadataRead {
+        session,
+        branch,
+        profile,
+        source,
+    }))
+}
+
+fn metadata_read_is_eligible(read: &MetadataRead) -> bool {
+    privacy_allows_metadata(read.source.restricted, read.source.allow_restricted)
+        && read.profile.as_ref().is_some_and(metadata_profile_eligible)
+}
+
+fn generation_profile(read: &MetadataRead) -> &Profile {
+    read.profile.as_ref().expect("eligible metadata profile")
 }
 
 fn collect_secret_sources(
@@ -264,7 +367,16 @@ async fn known_secret_values(
         .map(|pairs| pairs.into_iter().map(|(_, value)| value).collect());
     let repo_file = weaver_core::repo_config::load(std::path::Path::new(&branch.repo_root))
         .map(|config| config.env.into_values().collect());
-    collect_secret_sources([source_profile, metadata_profile, repo, repo_file])
+    let creator_token = launching_user_token(db, session.created_by.as_deref())
+        .await
+        .map(|value| value.into_iter().collect());
+    collect_secret_sources([
+        source_profile,
+        metadata_profile,
+        repo,
+        repo_file,
+        creator_token,
+    ])
 }
 
 fn redact_known_secrets(mut text: String, secrets: &[String]) -> String {
@@ -318,20 +430,48 @@ fn title_fence_status(fence: &TitleFence, current: &CurrentTitleState<'_>) -> Op
     if !current.provenance.can_generate(true) {
         return Some("protected");
     }
-    if !privacy_allows_metadata(current.restricted, current.allow_restricted) {
+    let Some(source) = current.source else {
+        return Some("unavailable");
+    };
+    if !privacy_allows_metadata(source.restricted, source.allow_restricted) {
         return Some("unavailable");
     }
-    if current.profile != Some(&fence.profile) {
+    if source.metadata_profile != fence.source.metadata_profile {
         return Some("unavailable");
     }
-    if current.restricted != fence.restricted
-        || current.goal != fence.goal
+    if source != &fence.source
         || current.title != fence.title
         || current.provenance != fence.provenance
     {
         return Some("stale");
     }
     None
+}
+
+async fn title_preflight(
+    db: &Db,
+    session_id: &str,
+    branch_id: &str,
+    fence: &TitleFence,
+) -> Result<TitlePreflight> {
+    let state = row(db, session_id).await?;
+    let globally_enabled = config::get_bool(db, TITLE_ENABLED_KEY, true).await;
+    let Some(read) = metadata_read(db, session_id, branch_id).await? else {
+        return Ok(Err("failed"));
+    };
+    let current_title = read.branch.title.clone();
+    let current_provenance = read.branch.title_provenance;
+    let current = CurrentTitleState {
+        source: metadata_read_is_eligible(&read).then_some(&read.source),
+        title: &current_title,
+        provenance: current_provenance,
+        session_enabled: state.title_generation_enabled,
+        globally_enabled,
+    };
+    if let Some(status) = title_fence_status(fence, &current) {
+        return Ok(Err(status));
+    }
+    Ok(Ok(read))
 }
 
 /// Start one best-effort title refresh. The model call is detached; all
@@ -348,29 +488,37 @@ pub async fn spawn_title_generation(
         mark_title_status(&db, &session.id, "disabled").await?;
         return Ok(());
     }
-    if !branch.title_provenance.can_generate(explicit) {
-        mark_title_status(&db, &session.id, "protected").await?;
-        return Ok(());
-    }
-    let Some(metadata_profile) = selected_profile(&db, &session).await? else {
+    let Some(snapshot) = metadata_read(&db, &session.id, &branch.id).await? else {
         mark_title_status(&db, &session.id, "unavailable").await?;
         return Ok(());
     };
+    if !snapshot.branch.title_provenance.can_generate(explicit) {
+        mark_title_status(&db, &snapshot.session.id, "protected").await?;
+        return Ok(());
+    }
+    if !metadata_read_is_eligible(&snapshot) {
+        mark_title_status(&db, &session.id, "unavailable").await?;
+        return Ok(());
+    }
+    let MetadataRead {
+        session,
+        branch,
+        source,
+        ..
+    } = snapshot;
     let Some(claim) = PromptClaim::acquire(title_claim_key(&session.id)) else {
         return Ok(());
     };
     let fence = TitleFence {
-        goal: branch.goal.clone(),
+        source,
         title: branch.title.clone(),
         provenance: branch.title_provenance,
-        restricted: session.policy_restricted,
-        profile: ProfileIdentity::from(&metadata_profile),
     };
     mark_title_status(&db, &session.id, "running").await?;
 
     tokio::spawn(async move {
         let _claim = claim;
-        let status = match generate_title(&db, &session, &branch, &metadata_profile, &fence).await {
+        let status = match generate_title(&db, &session, &branch, &fence).await {
             Ok(status) => status,
             Err(error) => {
                 tracing::warn!(session = %session.id, %error, "metadata title generation failed");
@@ -401,24 +549,36 @@ async fn generate_title(
     db: &Db,
     session: &Session,
     branch: &Branch,
-    metadata_profile: &Profile,
     fence: &TitleFence,
 ) -> Result<&'static str> {
     let _permit = PROMPT_SLOTS.acquire().await?;
+    let prepared = match title_preflight(db, &session.id, &branch.id, fence).await? {
+        Ok(snapshot) => snapshot,
+        Err(status) => return Ok(status),
+    };
     let secrets = tokio::time::timeout(
         PREPARATION_TIMEOUT,
-        known_secret_values(db, session, branch, metadata_profile),
+        known_secret_values(
+            db,
+            &prepared.session,
+            &prepared.branch,
+            generation_profile(&prepared),
+        ),
     )
     .await
     .context("metadata title preparation timed out")??;
-    let prompt = title_prompt(branch, &secrets);
+    let prompt = title_prompt(&prepared.branch, &secrets);
+    let run = match title_preflight(db, &session.id, &branch.id, fence).await? {
+        Ok(snapshot) => snapshot,
+        Err(status) => return Ok(status),
+    };
     let output = AgentManager::new(db)
         .run_oneshot(
-            &metadata_profile.agent_kind,
+            &generation_profile(&run).agent_kind,
             &prompt,
             "",
             "",
-            Some(metadata_profile),
+            Some(generation_profile(&run)),
             PROMPT_TIMEOUT,
         )
         .await
@@ -426,35 +586,15 @@ async fn generate_title(
         .context("metadata agent returned no usable task label")?;
     drop(_permit);
 
-    let Some(current_session) = session::get(db, &session.id).await? else {
-        return Ok("failed");
+    let _current = match title_preflight(db, &session.id, &branch.id, fence).await? {
+        Ok(snapshot) => snapshot,
+        Err(status) => return Ok(status),
     };
-    let Some(current_branch) = branch::get(db, &branch.id).await? else {
-        return Ok("failed");
-    };
-    let state = row(db, &session.id).await?;
-    let globally_enabled = config::get_bool(db, TITLE_ENABLED_KEY, true).await;
-    let allow_restricted = config::get_bool(db, ALLOW_RESTRICTED_KEY, false).await;
-    let current_profile = selected_profile(db, &current_session).await?;
-    let current_profile = current_profile.as_ref().map(ProfileIdentity::from);
-    let current = CurrentTitleState {
-        goal: &current_branch.goal,
-        title: &current_branch.title,
-        provenance: current_branch.title_provenance,
-        restricted: current_session.policy_restricted,
-        session_enabled: state.title_generation_enabled,
-        globally_enabled,
-        allow_restricted,
-        profile: current_profile.as_ref(),
-    };
-    if let Some(status) = title_fence_status(fence, &current) {
-        return Ok(status);
-    }
     Ok(
         match branch::replace_title_from_goal(
             db,
             &branch.id,
-            &fence.goal,
+            &fence.source.goal,
             &fence.title,
             fence.provenance,
             &output,
@@ -515,16 +655,11 @@ async fn cue_inputs(db: &Db, session: &Session, branch: &Branch) -> Result<Optio
     Ok(Some(CueInputs { page, artifacts }))
 }
 
-fn source_fingerprint<T: Serialize>(
-    source: &str,
-    records: &T,
-    artifacts: &[(i64, String, i64)],
-) -> Result<String> {
-    let encoded = serde_json::to_vec(&(source, records, artifacts))?;
-    Ok(hex::encode(Sha256::digest(encoded)))
-}
-
-fn cue_identity_from(session: &Session, inputs: &CueInputs) -> Result<CueIdentity> {
+fn cue_identity_from(
+    session: &Session,
+    inputs: &CueInputs,
+    source: &MetadataSource,
+) -> Result<CueIdentity> {
     let last = inputs
         .page
         .records
@@ -536,12 +671,13 @@ fn cue_identity_from(session: &Session, inputs: &CueInputs) -> Result<CueIdentit
         .map(|artifact| (artifact.id, artifact.name.clone(), artifact.rev))
         .collect::<Vec<_>>();
     let cursor = CueCursor {
+        source: serialized_fingerprint(source)?,
         history: last.cursor.clone(),
-        fingerprint: source_fingerprint(
+        fingerprint: serialized_fingerprint(&(
             &inputs.page.source,
             &inputs.page.records,
             &artifact_versions,
-        )?,
+        ))?,
         artifacts: artifact_versions,
     };
     let cursor = serde_json::to_string(&cursor)?;
@@ -571,9 +707,14 @@ fn cue_identity_from(session: &Session, inputs: &CueInputs) -> Result<CueIdentit
     Ok(CueIdentity { cursor, evidence })
 }
 
-async fn cue_identity(db: &Db, session: &Session, branch: &Branch) -> Result<Option<CueIdentity>> {
+async fn cue_identity(
+    db: &Db,
+    session: &Session,
+    branch: &Branch,
+    source: &MetadataSource,
+) -> Result<Option<CueIdentity>> {
     Ok(match cue_inputs(db, session, branch).await? {
-        Some(inputs) => Some(cue_identity_from(session, &inputs)?),
+        Some(inputs) => Some(cue_identity_from(session, &inputs, source)?),
         None => None,
     })
 }
@@ -611,16 +752,11 @@ fn recent_transcript(page: &HistoryPageView) -> String {
     take_tail_chars(&transcript, CUE_SOURCE_CHARS)
 }
 
-async fn prepare_cue(
-    db: &Db,
-    session: &Session,
-    branch: &Branch,
-    metadata_profile: &Profile,
-) -> Result<Option<PreparedCue>> {
-    let Some(inputs) = cue_inputs(db, session, branch).await? else {
+async fn prepare_cue(db: &Db, snapshot: &MetadataRead) -> Result<Option<PreparedCue>> {
+    let Some(inputs) = cue_inputs(db, &snapshot.session, &snapshot.branch).await? else {
         return Ok(None);
     };
-    let identity = cue_identity_from(session, &inputs)?;
+    let identity = cue_identity_from(&snapshot.session, &inputs, &snapshot.source)?;
     let artifact_lines = inputs
         .artifacts
         .iter()
@@ -634,7 +770,13 @@ async fn prepare_cue(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let secrets = known_secret_values(db, session, branch, metadata_profile).await?;
+    let secrets = known_secret_values(
+        db,
+        &snapshot.session,
+        &snapshot.branch,
+        generation_profile(snapshot),
+    )
+    .await?;
     let prompt = redact_known_secrets(
         format!(
             "Write a compact on-return cue for this work session. Cover current intent, \
@@ -642,13 +784,22 @@ async fn prepare_cue(
              Use only the evidence below; say when a category is unknown. Maximum 160 words. \
              Do not present the cue as authoritative state.\n\nGoal:\n{}\n\n\
              Recent source-linked conversation:\n{}\nArtifacts:\n{}",
-            take_chars(&branch.goal, TITLE_GOAL_CHARS),
+            take_chars(&snapshot.branch.goal, TITLE_GOAL_CHARS),
             recent_transcript(&inputs.page),
             artifact_lines,
         ),
         &secrets,
     );
-    Ok(Some(PreparedCue { identity, prompt }))
+    let fence = CueFence {
+        source: snapshot.source.clone(),
+        cursor: identity.cursor.clone(),
+        prompt_fingerprint: serialized_fingerprint(&prompt)?,
+    };
+    Ok(Some(PreparedCue {
+        identity,
+        prompt,
+        fence,
+    }))
 }
 
 fn inactivity_elapsed(last_activity_at: Option<&str>, threshold_secs: i64) -> bool {
@@ -658,6 +809,50 @@ fn inactivity_elapsed(last_activity_at: Option<&str>, threshold_secs: i64) -> bo
     DateTime::parse_from_rfc3339(last)
         .map(|last| Utc::now().signed_duration_since(last).num_seconds() >= threshold_secs)
         .unwrap_or(false)
+}
+
+async fn cue_inactivity_threshold(db: &Db) -> i64 {
+    config::get(db, CUE_INACTIVITY_KEY)
+        .await
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(3_600)
+        .max(0)
+}
+
+async fn cue_is_due(db: &Db, session: &Session) -> bool {
+    inactivity_elapsed(
+        session.last_activity_at.as_deref(),
+        cue_inactivity_threshold(db).await,
+    )
+}
+
+async fn bounded_prepare_cue(db: &Db, snapshot: &MetadataRead) -> Result<Option<PreparedCue>> {
+    tokio::time::timeout(PREPARATION_TIMEOUT, prepare_cue(db, snapshot))
+        .await
+        .context("resumption cue preparation timed out")?
+}
+
+fn cue_fence_status(expected: &CueFence, current: &CueFence) -> Option<&'static str> {
+    cue_boundary_status(expected, &current.source, &current.cursor)
+        .or_else(|| (current.prompt_fingerprint != expected.prompt_fingerprint).then_some("due"))
+}
+
+fn cue_boundary_status(
+    expected: &CueFence,
+    source: &MetadataSource,
+    cursor: &str,
+) -> Option<&'static str> {
+    if source.metadata_profile != expected.source.metadata_profile {
+        Some("unavailable")
+    } else if source != &expected.source || cursor != expected.cursor {
+        Some("due")
+    } else {
+        None
+    }
+}
+
+fn prepared_view(status: &str, prepared: &PreparedCue) -> ResumptionCueView {
+    identity_view(status, &prepared.identity)
 }
 
 fn cue_cache_matches(state: &AssistanceRow, source_cursor: &str) -> bool {
@@ -688,16 +883,59 @@ fn view(
     }
 }
 
+fn identity_view(status: &str, identity: &CueIdentity) -> ResumptionCueView {
+    view(
+        status,
+        Some(identity.cursor.clone()),
+        None,
+        None,
+        identity.evidence.clone(),
+    )
+}
+
+async fn checked_cue_boundary(
+    db: &Db,
+    session_id: &str,
+    branch_id: &str,
+    force: bool,
+    expected: &PreparedCue,
+) -> Result<CueBoundaryCheck> {
+    let enabled = config::get_bool(db, CUES_ENABLED_KEY, true).await;
+    let threshold = cue_inactivity_threshold(db).await;
+    let snapshot = match metadata_read(db, session_id, branch_id).await? {
+        Some(snapshot) if metadata_read_is_eligible(&snapshot) => snapshot,
+        _ => return Ok(Err(prepared_view("unavailable", expected))),
+    };
+    let Some(identity) =
+        cue_identity(db, &snapshot.session, &snapshot.branch, &snapshot.source).await?
+    else {
+        return Ok(Err(prepared_view("unavailable", expected)));
+    };
+    if !enabled {
+        return Ok(Err(view("disabled", None, None, None, Vec::new())));
+    }
+    if !force && !inactivity_elapsed(snapshot.session.last_activity_at.as_deref(), threshold) {
+        return Ok(Err(identity_view("not_due", &identity)));
+    }
+    if let Some(status) = cue_boundary_status(&expected.fence, &snapshot.source, &identity.cursor) {
+        return Ok(Err(identity_view(status, &identity)));
+    }
+    Ok(Ok(snapshot))
+}
+
 /// Read the current cache and whether a bounded explicit ensure is due. This
 /// never invokes an agent.
 pub async fn current_cue(db: &Db, session: &Session, branch: &Branch) -> Result<ResumptionCueView> {
     if !config::get_bool(db, CUES_ENABLED_KEY, true).await {
         return Ok(view("disabled", None, None, None, Vec::new()));
     }
-    let Some(identity) = cue_identity(db, session, branch).await? else {
+    let Some(read) = metadata_read(db, &session.id, &branch.id).await? else {
         return Ok(view("unavailable", None, None, None, Vec::new()));
     };
-    let state = row(db, &session.id).await?;
+    let Some(identity) = cue_identity(db, &read.session, &read.branch, &read.source).await? else {
+        return Ok(view("unavailable", None, None, None, Vec::new()));
+    };
+    let state = row(db, &read.session.id).await?;
     if cue_cache_matches(&state, &identity.cursor) {
         let evidence = serde_json::from_str(&state.cue_evidence).unwrap_or_default();
         return Ok(view(
@@ -708,39 +946,19 @@ pub async fn current_cue(db: &Db, session: &Session, branch: &Branch) -> Result<
             evidence,
         ));
     }
-    if PromptClaim::active(&cue_claim_key(&session.id)) {
-        return Ok(view(
-            "generating",
-            Some(identity.cursor),
-            None,
-            None,
-            identity.evidence,
-        ));
+    if PromptClaim::active(&cue_claim_key(&read.session.id)) {
+        return Ok(identity_view("generating", &identity));
     }
-    if selected_profile(db, session).await?.is_none() {
-        return Ok(view(
-            "unavailable",
-            Some(identity.cursor),
-            None,
-            None,
-            identity.evidence,
-        ));
+    if !metadata_read_is_eligible(&read) {
+        return Ok(identity_view("unavailable", &identity));
     }
-    let threshold = config::get(db, CUE_INACTIVITY_KEY)
-        .await
-        .and_then(|value| value.parse::<i64>().ok())
-        .unwrap_or(3_600)
-        .max(0);
-    Ok(view(
-        if inactivity_elapsed(session.last_activity_at.as_deref(), threshold) {
+    Ok(identity_view(
+        if cue_is_due(db, &read.session).await {
             "due"
         } else {
             "not_due"
         },
-        Some(identity.cursor),
-        None,
-        None,
-        identity.evidence,
+        &identity,
     ))
 }
 
@@ -769,84 +987,74 @@ pub async fn ensure_cue(
             current.evidence,
         ));
     };
-    let Some(metadata_profile) = selected_profile(db, session).await? else {
-        return Ok(view("unavailable", None, None, None, Vec::new()));
-    };
-    let profile_identity = ProfileIdentity::from(&metadata_profile);
     let _permit = PROMPT_SLOTS.acquire().await?;
-    let Some(prepared) = tokio::time::timeout(
-        PREPARATION_TIMEOUT,
-        prepare_cue(db, session, branch, &metadata_profile),
-    )
-    .await
-    .context("resumption cue preparation timed out")??
-    else {
+    if !config::get_bool(db, CUES_ENABLED_KEY, true).await {
+        return Ok(view("disabled", None, None, None, Vec::new()));
+    }
+    let Some(snapshot) = metadata_read(db, &session.id, &branch.id).await? else {
         return Ok(view("unavailable", None, None, None, Vec::new()));
     };
+    if !metadata_read_is_eligible(&snapshot) {
+        return Ok(view("unavailable", None, None, None, Vec::new()));
+    };
+    let Some(prepared) = bounded_prepare_cue(db, &snapshot).await? else {
+        return Ok(view("unavailable", None, None, None, Vec::new()));
+    };
+
+    // Reload the semantic source and evidence identity after the complete
+    // bounded preparation. This is the final awaited operation before crossing
+    // the model boundary; only synchronous eligibility/fence comparisons
+    // follow it, and no lock or transaction spans the prompt.
+    let run_snapshot =
+        match checked_cue_boundary(db, &session.id, &branch.id, force, &prepared).await? {
+            Ok(snapshot) => snapshot,
+            Err(view) => return Ok(view),
+        };
     let output = AgentManager::new(db)
         .run_oneshot(
-            &metadata_profile.agent_kind,
+            &generation_profile(&run_snapshot).agent_kind,
             &prepared.prompt,
             "",
             "",
-            Some(&metadata_profile),
+            Some(generation_profile(&run_snapshot)),
             PROMPT_TIMEOUT,
         )
         .await
         .and_then(|text| sanitize_cue(&text));
-    drop(_permit);
     let Some(text) = output else {
-        return Ok(view(
-            "unavailable",
-            Some(prepared.identity.cursor),
-            None,
-            None,
-            prepared.identity.evidence,
-        ));
+        return Ok(prepared_view("unavailable", &prepared));
     };
-    // Conversation/artifact state may have advanced during the bounded model
-    // call. Recompute the content fingerprint and never label stale prose with
-    // a newer cursor.
-    let Some(current_identity) = cue_identity(db, session, branch).await? else {
+
+    // Recompute from newly loaded rows after the model returns. Goal, policy,
+    // selected profile, redaction inputs, conversation, and artifacts must all
+    // still identify the exact prompt that ran.
+    let Some(current_snapshot) = metadata_read(db, &session.id, &branch.id).await? else {
+        return Ok(prepared_view("unavailable", &prepared));
+    };
+    if !metadata_read_is_eligible(&current_snapshot) {
+        return Ok(prepared_view("unavailable", &prepared));
+    };
+    let Some(current_prepared) = bounded_prepare_cue(db, &current_snapshot).await? else {
         return Ok(view("unavailable", None, None, None, Vec::new()));
     };
-    if current_identity.cursor != prepared.identity.cursor {
-        return Ok(view(
-            "due",
-            Some(current_identity.cursor),
-            None,
-            None,
-            current_identity.evidence,
-        ));
+    if let Some(status) = cue_fence_status(&prepared.fence, &current_prepared.fence) {
+        return Ok(prepared_view(status, &current_prepared));
     }
-    if !config::get_bool(db, CUES_ENABLED_KEY, true).await {
-        return Ok(view("disabled", None, None, None, Vec::new()));
-    }
-    if selected_profile(db, session)
-        .await?
-        .as_ref()
-        .map(ProfileIdentity::from)
-        .as_ref()
-        != Some(&profile_identity)
+    row(db, &session.id).await?;
+    if let Err(view) =
+        checked_cue_boundary(db, &session.id, &branch.id, force, &current_prepared).await?
     {
-        return Ok(view(
-            "unavailable",
-            Some(prepared.identity.cursor),
-            None,
-            None,
-            prepared.identity.evidence,
-        ));
+        return Ok(view);
     }
     let generated_at = weaver_core::db::now_iso();
-    let evidence = serde_json::to_string(&prepared.identity.evidence)?;
-    row(db, &session.id).await?;
+    let evidence = serde_json::to_string(&current_prepared.identity.evidence)?;
     sqlx::query(
         "UPDATE session_metadata_assistance
          SET cue_source_cursor = ?, cue_text = ?, cue_generated_at = ?,
              cue_evidence = ?, updated_at = ?
          WHERE session_id = ?",
     )
-    .bind(&prepared.identity.cursor)
+    .bind(&current_prepared.identity.cursor)
     .bind(&text)
     .bind(&generated_at)
     .bind(evidence)
@@ -856,16 +1064,50 @@ pub async fn ensure_cue(
     .await?;
     Ok(view(
         "generated",
-        Some(prepared.identity.cursor),
+        Some(current_prepared.identity.cursor),
         Some(text),
         Some(generated_at),
-        prepared.identity.evidence,
+        current_prepared.identity.evidence,
     ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn source() -> MetadataSource {
+        MetadataSource {
+            goal: "ship it".into(),
+            restricted: false,
+            allow_restricted: false,
+            session_profile: ProfileIdentity {
+                name: "default".into(),
+                lifetime: 1,
+                revision: 4,
+            },
+            source_profile: Some(ProfileIdentity {
+                name: "default".into(),
+                lifetime: 1,
+                revision: 9,
+            }),
+            created_by: Some("alice".into()),
+            creator_credential: (true, Some("2026-07-26T00:00:00Z".into())),
+            metadata_profile_name: "watch".into(),
+            metadata_profile: Some(ProfileIdentity {
+                name: "watch".into(),
+                lifetime: 1,
+                revision: 7,
+            }),
+        }
+    }
+
+    fn source_fingerprint<T: Serialize>(
+        source: &str,
+        records: &T,
+        artifacts: &[(i64, String, i64)],
+    ) -> Result<String> {
+        serialized_fingerprint(&(source, records, artifacts))
+    }
 
     #[test]
     fn redaction_and_bounds_are_deterministic() {
@@ -897,13 +1139,14 @@ mod tests {
     #[test]
     fn cursor_and_cache_identity_include_artifact_revisions() {
         let cursor = CueCursor {
+            source: "source-v1".into(),
             history: "iris:1:0".into(),
             fingerprint: "abc123".into(),
             artifacts: vec![(42, "goal".into(), 1)],
         };
         assert_eq!(
             serde_json::to_string(&cursor).unwrap(),
-            r#"{"history":"iris:1:0","fingerprint":"abc123","artifacts":[[42,"goal",1]]}"#
+            r#"{"source":"source-v1","history":"iris:1:0","fingerprint":"abc123","artifacts":[[42,"goal",1]]}"#
         );
         let state = AssistanceRow {
             title_generation_enabled: true,
@@ -961,146 +1204,256 @@ mod tests {
     }
 
     #[test]
+    fn durable_source_fingerprint_covers_semantic_prompt_inputs() {
+        let source = source();
+        let baseline = serialized_fingerprint(&source).unwrap();
+        let changed_sources = [
+            MetadataSource {
+                goal: "changed goal".into(),
+                ..source.clone()
+            },
+            MetadataSource {
+                restricted: true,
+                allow_restricted: true,
+                ..source.clone()
+            },
+            MetadataSource {
+                allow_restricted: true,
+                ..source.clone()
+            },
+            MetadataSource {
+                session_profile: ProfileIdentity {
+                    revision: 5,
+                    ..source.session_profile.clone()
+                },
+                ..source.clone()
+            },
+            MetadataSource {
+                source_profile: Some(ProfileIdentity {
+                    revision: 10,
+                    ..source.source_profile.clone().unwrap()
+                }),
+                ..source.clone()
+            },
+            MetadataSource {
+                created_by: Some("bob".into()),
+                ..source.clone()
+            },
+            MetadataSource {
+                creator_credential: (true, Some("2026-07-26T00:01:00Z".into())),
+                ..source.clone()
+            },
+            MetadataSource {
+                metadata_profile_name: String::new(),
+                metadata_profile: None,
+                ..source.clone()
+            },
+            MetadataSource {
+                metadata_profile: Some(ProfileIdentity {
+                    revision: 8,
+                    ..source.metadata_profile.clone().unwrap()
+                }),
+                ..source.clone()
+            },
+        ];
+        for changed in changed_sources {
+            assert_ne!(baseline, serialized_fingerprint(&changed).unwrap());
+        }
+    }
+
+    #[test]
     fn title_fence_rejects_every_source_and_eligibility_change() {
-        let profile = ProfileIdentity {
-            name: "watch".into(),
-            lifetime: 1,
-            revision: 7,
-        };
+        let source = source();
         let fence = TitleFence {
-            goal: "ship it".into(),
+            source: source.clone(),
             title: "ship it".into(),
             provenance: TitleProvenance::Derived,
-            restricted: false,
-            profile: profile.clone(),
         };
-        let status = |goal,
+        let status = |source: Option<&MetadataSource>,
                       title,
                       provenance,
-                      restricted,
                       session_enabled,
-                      global_enabled,
-                      allow_restricted,
-                      profile: Option<&ProfileIdentity>| {
+                      global_enabled| {
             let current = CurrentTitleState {
-                goal,
+                source,
                 title,
                 provenance,
-                restricted,
                 session_enabled,
                 globally_enabled: global_enabled,
-                allow_restricted,
-                profile,
             };
             title_fence_status(&fence, &current)
         };
         assert_eq!(
             status(
-                "ship it",
+                Some(&source),
                 "ship it",
                 TitleProvenance::Derived,
-                false,
                 true,
                 true,
-                false,
-                Some(&profile)
             ),
             None
         );
+        let changed_goal = MetadataSource {
+            goal: "changed".into(),
+            ..source.clone()
+        };
         assert_eq!(
             status(
-                "changed",
+                Some(&changed_goal),
                 "ship it",
                 TitleProvenance::Derived,
-                false,
                 true,
                 true,
-                false,
-                Some(&profile)
             ),
             Some("stale")
         );
         assert_eq!(
-            status(
-                "ship it",
-                "human",
-                TitleProvenance::User,
-                false,
-                true,
-                true,
-                false,
-                Some(&profile)
-            ),
+            status(Some(&source), "human", TitleProvenance::User, true, true,),
             Some("protected")
         );
         assert_eq!(
             status(
-                "ship it",
+                Some(&source),
                 "ship it",
                 TitleProvenance::Derived,
                 false,
-                false,
                 true,
-                false,
-                Some(&profile)
             ),
             Some("disabled")
         );
         assert_eq!(
             status(
-                "ship it",
+                Some(&source),
                 "ship it",
                 TitleProvenance::Derived,
-                false,
                 true,
                 false,
-                false,
-                Some(&profile)
             ),
             Some("disabled")
         );
         assert_eq!(
-            status(
-                "ship it",
-                "ship it",
-                TitleProvenance::Derived,
-                true,
-                true,
-                true,
-                false,
-                Some(&profile)
-            ),
+            status(None, "ship it", TitleProvenance::Derived, true, true,),
             Some("unavailable")
         );
-        assert_eq!(
-            status(
-                "ship it",
-                "ship it",
-                TitleProvenance::Derived,
-                true,
-                true,
-                true,
-                true,
-                Some(&profile)
-            ),
-            Some("stale"),
-            "a changed restricted-session policy invalidates the source fence"
-        );
-        let changed_profile = ProfileIdentity {
-            revision: 8,
-            ..profile.clone()
+        let revoked = MetadataSource {
+            restricted: true,
+            allow_restricted: false,
+            ..source.clone()
         };
         assert_eq!(
             status(
-                "ship it",
+                Some(&revoked),
                 "ship it",
                 TitleProvenance::Derived,
-                false,
                 true,
                 true,
-                false,
-                Some(&changed_profile)
             ),
+            Some("unavailable")
+        );
+        let changed_session_profile = MetadataSource {
+            session_profile: ProfileIdentity {
+                revision: 5,
+                ..source.session_profile.clone()
+            },
+            ..source.clone()
+        };
+        assert_eq!(
+            status(
+                Some(&changed_session_profile),
+                "ship it",
+                TitleProvenance::Derived,
+                true,
+                true,
+            ),
+            Some("stale"),
+            "a changed source-session profile invalidates the prompt fence"
+        );
+        let changed_profile = MetadataSource {
+            metadata_profile: Some(ProfileIdentity {
+                revision: 8,
+                ..source.metadata_profile.clone().unwrap()
+            }),
+            ..source.clone()
+        };
+        assert_eq!(
+            status(
+                Some(&changed_profile),
+                "ship it",
+                TitleProvenance::Derived,
+                true,
+                true,
+            ),
+            Some("unavailable")
+        );
+    }
+
+    #[test]
+    fn cue_fence_and_post_preparation_boundary_cover_every_prompt_source() {
+        let source = source();
+        let fence = CueFence {
+            source: source.clone(),
+            cursor: "cursor-v1".into(),
+            prompt_fingerprint: "prompt-v1".into(),
+        };
+        assert_eq!(cue_fence_status(&fence, &fence), None);
+        for changed in [
+            CueFence {
+                source: MetadataSource {
+                    goal: "changed goal".into(),
+                    ..source.clone()
+                },
+                ..fence.clone()
+            },
+            CueFence {
+                source: MetadataSource {
+                    creator_credential: (true, Some("2026-07-26T00:01:00Z".into())),
+                    ..source.clone()
+                },
+                ..fence.clone()
+            },
+            CueFence {
+                cursor: "cursor-v2".into(),
+                ..fence.clone()
+            },
+            CueFence {
+                prompt_fingerprint: "prompt-v2".into(),
+                ..fence.clone()
+            },
+        ] {
+            assert_eq!(cue_fence_status(&fence, &changed), Some("due"));
+        }
+        let changed_profile = CueFence {
+            source: MetadataSource {
+                metadata_profile: Some(ProfileIdentity {
+                    revision: 8,
+                    ..source.metadata_profile.unwrap()
+                }),
+                ..source
+            },
+            ..fence.clone()
+        };
+        assert_eq!(
+            cue_fence_status(&fence, &changed_profile),
+            Some("unavailable")
+        );
+        assert_eq!(
+            cue_boundary_status(&fence, &fence.source, &fence.cursor),
+            None
+        );
+        let changed_goal = MetadataSource {
+            goal: "changed after preparation".into(),
+            ..fence.source.clone()
+        };
+        assert_eq!(
+            cue_boundary_status(&fence, &changed_goal, &fence.cursor),
+            Some("due")
+        );
+        assert_eq!(
+            cue_boundary_status(&fence, &fence.source, "cursor-v2"),
+            Some("due")
+        );
+        assert_eq!(
+            cue_boundary_status(&fence, &changed_profile.source, &fence.cursor),
             Some("unavailable")
         );
     }
@@ -1116,6 +1469,38 @@ mod tests {
             result.unwrap_err().to_string(),
             "secret backend unavailable"
         );
+    }
+
+    #[tokio::test]
+    async fn launching_user_token_is_a_fail_closed_secret_source() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        sqlx::query("INSERT INTO users (username) VALUES ('alice')")
+            .execute(&db)
+            .await
+            .unwrap();
+        user_token::set(&db, "alice", "github_pat_secret")
+            .await
+            .unwrap();
+        let status = user_token::status(&db, "alice").await.unwrap();
+        assert!(status.set);
+        assert!(status.updated_at.is_some());
+        assert!(!serde_json::to_string(&status)
+            .unwrap()
+            .contains("github_pat_secret"));
+        assert_eq!(
+            launching_user_token(&db, Some("alice")).await.unwrap(),
+            Some("github_pat_secret".into())
+        );
+        user_token::set(&db, "alice", "").await.unwrap();
+        assert_eq!(
+            launching_user_token(&db, Some("alice")).await.unwrap(),
+            None
+        );
+        sqlx::query("DROP TABLE user_github_tokens")
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(launching_user_token(&db, Some("alice")).await.is_err());
     }
 
     #[test]
