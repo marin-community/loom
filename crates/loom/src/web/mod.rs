@@ -251,7 +251,50 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
     }
 }
 
+fn provision_error(error: crate::provision::ProvisionError) -> AppError {
+    use crate::provision::ProvisionError::*;
+    let (status, message, preview, session_id) = match error {
+        Invalid(message, preview) => (
+            StatusCode::BAD_REQUEST,
+            message,
+            preview.map(|preview| *preview),
+            None,
+        ),
+        Forbidden(message) => (StatusCode::FORBIDDEN, message, None, None),
+        NotFound(message) => (StatusCode::NOT_FOUND, message, None, None),
+        Conflict(message, preview) => (
+            StatusCode::CONFLICT,
+            message,
+            preview.map(|preview| *preview),
+            None,
+        ),
+        CredentialRequired(message) => (StatusCode::PRECONDITION_REQUIRED, message, None, None),
+        ExternalFailure(message, session_id) => {
+            (StatusCode::BAD_GATEWAY, message, None, session_id)
+        }
+        Internal(error) => return error.into(),
+    };
+    let mut fields = serde_json::Map::new();
+    if let Some(preview) = preview {
+        fields.insert("preview".to_string(), json!(preview));
+    }
+    if let Some(session_id) = session_id {
+        fields.insert("session_id".to_string(), json!(session_id));
+    }
+    let mapped = AppError::new(status, message);
+    if fields.is_empty() {
+        mapped
+    } else {
+        mapped.with_fields(Value::Object(fields))
+    }
+}
+
 pub(crate) type ApiResult<T> = Result<T, AppError>;
+
+/// JSON base64 expands a valid 50 MiB Scratch batch by roughly one third.
+/// Keep this route envelope above that encoded payload while retaining the
+/// smaller protected-router default for unrelated endpoints.
+const MAX_SESSION_CREATE_BODY_BYTES: usize = 72 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // View payloads
@@ -634,9 +677,7 @@ pub fn router(state: AppState) -> Router {
             "/sessions",
             get(list_sessions)
                 .post(create_session)
-                .layer(DefaultBodyLimit::max(
-                    scratch::MAX_SESSION_CREATE_BODY_BYTES,
-                )),
+                .layer(DefaultBodyLimit::max(MAX_SESSION_CREATE_BODY_BYTES)),
         )
         .route("/session-launches/resolve", post(resolve_session_launch))
         .route("/scratch/limits", get(scratch_limits))

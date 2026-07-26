@@ -6,6 +6,7 @@
 //! advances the revision exactly once.
 
 use anyhow::Result;
+use serde_json::json;
 use sqlx::{FromRow, Row, SqliteConnection};
 use std::collections::HashSet;
 use weaver_api::{
@@ -17,9 +18,30 @@ use weaver_api::{
 };
 
 use crate::db::{now_iso, Db};
-use crate::session::{NewSession, SessionLaunchPolicy};
+use crate::events::EventBus;
+use crate::session::{NewSession, Session, SessionLaunchPolicy};
 
 const USER_INBOX: &str = "group-user-inbox";
+
+pub(crate) async fn publish_invalidation(db: &Db, bus: &EventBus, revision: i64) {
+    crate::events::record_system(db, bus, "session_layout", json!({ "revision": revision }))
+        .await
+        .ok();
+}
+
+pub(crate) async fn insert_session(
+    db: &Db,
+    bus: &EventBus,
+    session: &NewSession,
+    policy: &SessionLaunchPolicy,
+) -> Result<Session> {
+    let (session, revision) =
+        crate::session::insert_with_layout_revision(db, session, policy).await?;
+    if let Some(revision) = revision {
+        publish_invalidation(db, bus, revision).await;
+    }
+    Ok(session)
+}
 
 #[derive(Debug)]
 pub enum MutationError {

@@ -161,19 +161,19 @@ async fn launch_run(
     run: crate::runs::Run,
     failure: LaunchFailure,
 ) -> ApiResult<Json<RunView>> {
-    let actor = crate::runtime::Actor::automation(
+    let actor = crate::provision::Actor::automation(
         req.source,
         subject,
         profiles,
         run.id.clone(),
         run.session_id.clone(),
     );
-    match crate::runtime::create_session(st.clone(), req.session, actor).await {
-        Ok(session) => {
-            if crate::runs::launched(&st.db, &run.id, &session.id).await? {
+    match crate::provision::create(st.clone(), req.session, actor).await {
+        Ok(created) => {
+            if crate::runs::launched(&st.db, &run.id, &created.session.id).await? {
                 run_view(st, &run.id).await
             } else {
-                remove_late_session(st, &session.id).await;
+                remove_late_session(st, &created.session.id).await;
                 Err(AppError::conflict(
                     "automation launch was archived or removed while provisioning",
                 ))
@@ -209,7 +209,7 @@ async fn launch_run(
             if !still_owned {
                 remove_late_session(st, &run.session_id).await;
             }
-            Err(error)
+            Err(super::provision_error(error))
         }
     }
 }

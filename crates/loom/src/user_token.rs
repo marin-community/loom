@@ -2,7 +2,7 @@
 //! `user_github_tokens` table.
 //!
 //! For an ordinary interactive session, loom injects the token as `GH_TOKEN`
-//! into the session env ([`crate::runtime::create_session`]), overriding the
+//! into the session env ([`crate::provision::create`]), overriding the
 //! selected profile credential. Restricted sessions use the GitHub App (or an
 //! explicit App-less profile credential) instead. Combined with the per-user
 //! commit author identity loom already sets

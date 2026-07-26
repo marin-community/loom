@@ -60,8 +60,10 @@ other `weaver` subcommand.
 | `crates/loom/src/profile.rs` | named launch policy, including provider-neutral `mcp_access` resolution and the restricted-profile trust boundary |
 | `crates/loom/src/launch.rs` | canonical profile-template and override resolution for previews, creates, clones, and handoffs; returns the exact private launch snapshot plus its transport-safe view |
 | `crates/loom/src/handoff.rs` | provider handoff orchestration: canonical/legacy target resolution, conversation continuity, lifecycle fencing, rollback, and replacement cleanup; depends on runtime/domain owners, never the REST adapter |
+| `crates/loom/src/provision.rs` | ordinary session provisioning: trusted actor attribution, canonical launch resolution, repository/worktree/setup lifecycle, immutable launch snapshots, tracking, recoverable launch-failure surfacing, and title generation; returns only the created `Session` + `Branch` domain facts |
+| `crates/loom/src/scratch.rs` | shared Scratch validation and filesystem storage for launch-time attachments and live route mutations; Axum-free semantic errors keep transport mapping in `web/` |
 | `crates/loom/src/session.rs` | `Session` row + sqlx queries |
-| `crates/loom/src/session_layout.rs` | durable Spaces → Groups → Sessions placement, defaults, ordering, and optimistic mutation revisions; independent of immutable provenance and launch policy |
+| `crates/loom/src/session_layout.rs` | durable Spaces → Groups → Sessions placement, defaults, ordering, optimistic mutation revisions, and revision-invalidation publication; independent of immutable provenance and launch policy |
 | `crates/loom/src/session_manager.rs` | database-backed ownership reconciliation for detached agent/debug supervisors; removes Loom-namespaced runtimes without a live session or active launch-reservation owner |
 | `crates/loom/src/review_delivery.rs` | submitted-review outbox and protected conversation-inbox delivery, including ACP claim fencing and terminal retry/rehome behavior |
 | `crates/loom/src/metadata_assist.rs` | bounded generated task-title and resumption-cue assistance on the session's ACP runtime, with privacy eligibility, source fences, and deterministic fallback |
