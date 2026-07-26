@@ -220,6 +220,7 @@ import type {
   AddReviewCommentBody,
   UpdateReviewCommentBody,
   UpdateReviewBody,
+  ChangeSet,
   IdeInfo,
   AgentMetadata,
   CustomAgent,
@@ -439,8 +440,15 @@ export const listArtifactReviews = (id: string, name: string) =>
     `/sessions/${id}/reviews?subject_kind=artifact&subject_key=${encodeURIComponent(name)}`,
   ) as Promise<Review[]>;
 
-export const createArtifactReview = (id: string, body: CreateReviewBody) =>
+export const getChanges = (id: string) => get(`/sessions/${id}/changes`) as Promise<ChangeSet>;
+
+export const listChangesReviews = (id: string) =>
+  get(`/sessions/${id}/reviews?subject_kind=changes&subject_key=changes`) as Promise<Review[]>;
+
+export const createReview = (id: string, body: CreateReviewBody) =>
   post(`/sessions/${id}/reviews`, body) as Promise<Review>;
+
+export const createArtifactReview = (id: string, body: CreateReviewBody) => createReview(id, body);
 
 export const addReviewComment = (reviewId: number, body: AddReviewCommentBody) =>
   post(`/reviews/${reviewId}/comments`, body) as Promise<Review>;

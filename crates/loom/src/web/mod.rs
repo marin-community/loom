@@ -71,6 +71,7 @@ mod artifacts;
 mod auth;
 mod automation;
 mod branches;
+mod changes;
 mod deployment;
 mod diagnostics;
 mod discussion;
@@ -95,6 +96,7 @@ use artifacts::*;
 use auth::*;
 use automation::*;
 use branches::*;
+use changes::*;
 use deployment::*;
 use diagnostics::*;
 use discussion::*;
@@ -745,6 +747,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/history", get(session_history))
         .route("/sessions/{id}/history/search", get(search_session_history))
         .route("/sessions/{id}/files", get(list_session_files))
+        .route("/sessions/{id}/changes", get(get_session_changes))
         .route("/sessions/{id}/events", get(events_sse))
         .route("/sessions/{id}/terminal", get(crate::terminal::terminal_ws))
         // Per-session worktree debug shells: `shells` lists the live ones (so the

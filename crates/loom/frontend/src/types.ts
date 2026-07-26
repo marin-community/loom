@@ -705,7 +705,7 @@ export interface NewCommentBody {
 // --- Staged reviews --------------------------------------------------------
 
 export interface ReviewSubject {
-  kind: string;
+  kind: 'artifact' | 'changes';
   /** Stable internal subject id. */
   id: string;
   /** Public round-trippable key; artifact reviews use the artifact name. */
@@ -718,8 +718,8 @@ export interface ReviewSubject {
 export interface ReviewComment {
   id: number;
   subject_version: string;
-  anchor_kind: string;
-  anchor: Anchor;
+  anchor_kind: 'text' | 'change';
+  anchor: Anchor | ChangeAnchor;
   body: string;
   status: string;
   created_at: string;
@@ -752,7 +752,7 @@ export interface Review {
 }
 
 export interface CreateReviewBody {
-  subject_kind: 'artifact';
+  subject_kind: 'artifact' | 'changes';
   subject_key: string;
   subject_version: string;
 }
@@ -760,16 +760,16 @@ export interface CreateReviewBody {
 export interface AddReviewCommentBody {
   expected_revision: number;
   subject_version: string;
-  anchor_kind: 'text';
-  anchor: Anchor;
+  anchor_kind: 'text' | 'change';
+  anchor: Anchor | ChangeAnchor;
   body: string;
 }
 
 export interface UpdateReviewCommentBody {
   expected_revision: number;
   subject_version?: string;
-  anchor_kind?: 'text';
-  anchor?: Anchor;
+  anchor_kind?: 'text' | 'change';
+  anchor?: Anchor | ChangeAnchor;
   body?: string;
 }
 
@@ -777,6 +777,80 @@ export interface UpdateReviewBody {
   expected_revision: number;
   summary?: string;
   subject_version?: string;
+}
+
+// --- Changes ---------------------------------------------------------------
+
+export type ChangeFileStatus =
+  'added' | 'modified' | 'deleted' | 'renamed' | 'copied' | 'type_changed' | 'untracked';
+export type ChangeSource = 'committed' | 'staged' | 'unstaged' | 'untracked';
+export type ChangeContent = 'text' | 'binary' | 'oversize' | 'unsupported';
+export type ChangeLineKind = 'context' | 'addition' | 'deletion';
+export type ChangeSide = 'old' | 'new';
+
+export interface ChangePath {
+  bytes: string;
+  display: string;
+}
+
+export interface ChangeLine {
+  kind: ChangeLineKind;
+  old_line: number | null;
+  new_line: number | null;
+  text: string;
+}
+
+export interface ChangeHunk {
+  header: string;
+  lines: ChangeLine[];
+  truncated: boolean;
+}
+
+export interface ChangeFile {
+  status: ChangeFileStatus;
+  path: ChangePath;
+  old_path: ChangePath | null;
+  sources: ChangeSource[];
+  additions: number | null;
+  deletions: number | null;
+  content: ChangeContent;
+  hunks: ChangeHunk[];
+  truncated: boolean;
+}
+
+export type ChangeBase =
+  | { state: 'available'; reference: string; oid: string }
+  | {
+      state: 'unavailable';
+      reference: string;
+      reason: 'unborn_head' | 'missing_base' | 'no_merge_base';
+    };
+
+export interface ChangeSet {
+  version: string | null;
+  base: ChangeBase;
+  head_oid: string | null;
+  totals: { files: number; additions: number; deletions: number; truncated: boolean };
+  files: ChangeFile[];
+  truncated: boolean;
+  limits: {
+    max_files: number;
+    max_hunks_per_file: number;
+    max_lines_per_file: number;
+    max_total_lines: number;
+    max_line_bytes: number;
+  };
+}
+
+export interface ChangeAnchor {
+  path: ChangePath;
+  side: ChangeSide;
+  start_line: number;
+  end_line: number;
+  hunk_header: string;
+  context_before: string[];
+  selected: string[];
+  context_after: string[];
 }
 
 export interface RecentRepo {

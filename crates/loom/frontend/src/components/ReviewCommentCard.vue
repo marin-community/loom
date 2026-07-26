@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue';
-import type { Review, ReviewComment } from '../types';
+import { computed, nextTick, ref, watch } from 'vue';
+import type { Anchor, ChangeAnchor, Review, ReviewComment } from '../types';
 import InlineConfirm from './InlineConfirm.vue';
 
 const props = defineProps<{
@@ -28,6 +28,17 @@ const editEl = ref<HTMLButtonElement | null>(null);
 const resolutionEl = ref<HTMLButtonElement | null>(null);
 const closeEl = ref<HTMLButtonElement | null>(null);
 const textareaEl = ref<HTMLTextAreaElement | null>(null);
+const anchorLabel = computed(() => {
+  if (props.comment.anchor_kind === 'change') {
+    const anchor = props.comment.anchor as ChangeAnchor;
+    const range =
+      anchor.start_line === anchor.end_line
+        ? `${anchor.side} ${anchor.start_line}`
+        : `${anchor.side} ${anchor.start_line}–${anchor.end_line}`;
+    return `${anchor.path.display}:${range}`;
+  }
+  return (props.comment.anchor as Anchor).quote;
+});
 
 watch(
   () => props.comment.body,
@@ -152,8 +163,8 @@ function cancelEdit() {
     @keydown.esc.stop.prevent="reanchoring ? emit('cancelReanchor') : emit('close', comment.id)"
   >
     <div class="mb-1.5 flex items-start gap-2">
-      <div class="min-w-0 flex-1 truncate italic text-muted" :title="comment.anchor.quote">
-        &ldquo;{{ comment.anchor.quote }}&rdquo;
+      <div class="min-w-0 flex-1 truncate italic text-muted" :title="anchorLabel">
+        {{ comment.anchor_kind === 'text' ? `“${anchorLabel}”` : anchorLabel }}
       </div>
       <span
         v-if="comment.subject_version !== review.subject.current_version"
@@ -269,7 +280,11 @@ function cancelEdit() {
       {{ error }}
     </p>
     <p v-if="reanchoring" class="mt-2 rounded bg-subtle px-2 py-1 text-2xs text-accent">
-      Select the replacement text in this artifact, then choose Re-anchor selection.
+      {{
+        comment.anchor_kind === 'change'
+          ? 'Choose the replacement line in the current changes.'
+          : 'Select the replacement text in this artifact, then choose Re-anchor selection.'
+      }}
     </p>
   </div>
 </template>

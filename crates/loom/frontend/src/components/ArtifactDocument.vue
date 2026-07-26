@@ -13,7 +13,7 @@ import {
 import { useRouter } from 'vue-router';
 import { renderTokens } from '../markdown-render';
 import { useMarkdownDoc, routeDocLink } from '../lib/markdownDoc';
-import type { IssueRefStatus, Review, ReviewComment } from '../types';
+import type { Anchor, IssueRefStatus, Review, ReviewComment } from '../types';
 import {
   addReviewComment,
   createArtifactReview,
@@ -39,8 +39,8 @@ import {
   type TextAnchor,
 } from '../discussion-anchor';
 import { ReviewDraftController } from '../lib/reviewDraftController';
-import InlineConfirm from './InlineConfirm.vue';
 import ReviewCommentCard from './ReviewCommentCard.vue';
+import ReviewTray from './ReviewTray.vue';
 
 // Dock/pop swaps mounts of the same document. Keep a small in-memory scroll
 // ledger keyed by session + artifact + revision so the document remains where
@@ -177,26 +177,9 @@ let layoutReturnFocus: HTMLElement | null = null;
 const reanchorCommentId = ref<number | null>(null);
 
 const draft = computed(() => reviews.value.find((review) => review.status === 'draft') ?? null);
-const recentSubmitted = computed(
-  () =>
-    [...reviews.value]
-      .filter((review) => review.status === 'submitted' && !review.legacy)
-      .sort((a, b) => b.id - a.id)[0] ?? null,
-);
-const failedSubmissions = computed(() =>
-  [...reviews.value]
-    .filter(
-      (review) =>
-        review.status === 'submitted' && !review.legacy && review.delivery_state === 'failed',
-    )
-    .sort((a, b) => b.id - a.id),
-);
 const draftEntries = computed<ReviewEntry[]>(() =>
   (draft.value?.comments ?? []).map((comment) => ({ review: draft.value!, comment })),
 );
-const feedbackPreview = computed(() => {
-  return draft.value?.message ?? '';
-});
 const allEntries = computed<ReviewEntry[]>(() => {
   const entries: ReviewEntry[] = [];
   for (const review of reviews.value) {
@@ -308,8 +291,7 @@ async function loadReviews() {
   locateCycle();
 }
 
-function editOverallNote(event: Event) {
-  const summary = (event.target as HTMLTextAreaElement).value;
+function editOverallValue(summary: string) {
   draftController.editSummary(summary);
   if (!draftController.draft && !summary.trim()) return;
   if (summarySaveTimer) clearTimeout(summarySaveTimer);
@@ -346,7 +328,8 @@ function locateCycle() {
   const located: { entry: ReviewEntry; range: Range; block: number }[] = [];
   const unlocated: ReviewEntry[] = [];
   for (const entry of allEntries.value) {
-    const range = locate(root, entry.comment.anchor);
+    const anchor = entry.comment.anchor as Anchor;
+    const range = locate(root, anchor);
     if (!range) {
       unlocated.push(entry);
       continue;
@@ -354,7 +337,7 @@ function locateCycle() {
     const element =
       blockContaining(root, range.endContainer) ?? blockContaining(root, range.startContainer);
     const attr = element?.getAttribute('data-block');
-    const capturedBlock = entry.comment.anchor.block_index;
+    const capturedBlock = anchor.block_index;
     const block =
       attr != null ? Number(attr) : typeof capturedBlock === 'number' ? capturedBlock : -1;
     located.push({ entry, range, block });
@@ -400,7 +383,7 @@ const selectionButton = ref<{
   left: number;
 } | null>(null);
 const buttonEl = ref<HTMLElement | null>(null);
-const trayToggleEl = ref<HTMLButtonElement | null>(null);
+const reviewTrayRef = ref<InstanceType<typeof ReviewTray> | null>(null);
 
 function updateSelectionButton() {
   const root = body.value;
@@ -683,7 +666,7 @@ function cancelPendingComment() {
   pendingRange = null;
   pendingDraft.value = '';
   locateCycle();
-  void nextTick(() => trayToggleEl.value?.focus());
+  void nextTick(() => reviewTrayRef.value?.focusToggle());
 }
 
 async function editComment(payload: { commentId: number; body: string }) {
@@ -716,7 +699,7 @@ async function removeComment(commentId: number) {
     reviewNotice.value = 'Pending comment deleted.';
     await nextTick();
     locateCycle();
-    trayToggleEl.value?.focus();
+    reviewTrayRef.value?.focusToggle();
   } catch (e) {
     throw new Error(setCommentMutationError(commentId, e));
   }
@@ -774,7 +757,7 @@ async function discardDraft() {
     reviewNotice.value = 'Draft review discarded.';
     await nextTick();
     locateCycle();
-    trayToggleEl.value?.focus();
+    reviewTrayRef.value?.focusToggle();
   } catch (e) {
     const message = mutationMessage(e);
     trayError.value = message;
@@ -1141,249 +1124,31 @@ const DocBody = () => {
       {{ reanchorCommentId == null ? '＋ Add comment' : '↪ Re-anchor selection' }}
     </button>
 
-    <aside
-      class="absolute bottom-3 right-3 z-20 w-[min(28rem,calc(100%-1.5rem))] rounded-lg border border-line bg-surface shadow-xl"
-      data-testid="review-tray"
-      aria-label="Review tray"
-    >
-      <div class="flex min-h-10 items-center gap-1.5 px-2">
-        <button
-          ref="trayToggleEl"
-          type="button"
-          class="min-w-0 flex-1 px-1 py-2 text-left text-xs font-semibold text-fg"
-          data-testid="review-tray-toggle"
-          :aria-expanded="trayOpen"
-          @click="trayOpen = !trayOpen"
-        >
-          <template v-if="draft">
-            Review · {{ draft.comments.length }} pending
-            <span v-if="draft.outdated" class="ml-1 text-block">· stale</span>
-            <span v-if="failedSubmissions.length" class="ml-1 text-block">
-              · {{ failedSubmissions.length }} delivery failed
-            </span>
-          </template>
-          <template v-else-if="failedSubmissions.length">
-            Review delivery · {{ failedSubmissions.length }} failed
-          </template>
-          <template v-else-if="recentSubmitted">
-            Review submitted · {{ recentSubmitted.delivery_state }}
-          </template>
-          <template v-else>Review artifact</template>
-        </button>
-        <template v-if="draft?.comments.length">
-          <button
-            type="button"
-            class="btn-secondary px-2 py-1 text-xs"
-            aria-label="Previous pending comment"
-            @click="navigateDraft(-1)"
-          >
-            ↑
-          </button>
-          <button
-            type="button"
-            class="btn-secondary px-2 py-1 text-xs"
-            aria-label="Next pending comment"
-            @click="navigateDraft(1)"
-          >
-            ↓
-          </button>
-        </template>
-        <button
-          type="button"
-          class="btn-secondary px-2 py-1 text-xs"
-          :aria-label="trayOpen ? 'Collapse review tray' : 'Expand review tray'"
-          @click="trayOpen = !trayOpen"
-        >
-          {{ trayOpen ? '▾' : '▴' }}
-        </button>
-      </div>
-
-      <div v-if="trayOpen" class="max-h-[min(60vh,34rem)] overflow-auto border-t border-line p-3">
-        <div
-          v-if="failedSubmissions.length"
-          class="mb-3 space-y-2"
-          aria-label="Failed review deliveries"
-        >
-          <div
-            v-for="item in failedSubmissions"
-            :key="`failed-${item.id}`"
-            class="rounded border border-block-line bg-block-soft p-2 text-xs"
-            :data-testid="`failed-review-delivery-${item.id}`"
-          >
-            <p class="font-medium text-block">Review {{ item.id }} delivery failed</p>
-            <p v-if="item.delivery_error" class="mt-1 text-block">{{ item.delivery_error }}</p>
-            <button
-              type="button"
-              class="btn-primary mt-2 px-2 py-1 text-xs"
-              @click="retryDelivery(item)"
-            >
-              Retry delivery
-            </button>
-            <p
-              v-if="deliveryErrors[item.id]"
-              class="mt-2 rounded bg-surface/70 px-2 py-1 text-2xs text-block"
-              role="alert"
-            >
-              {{ deliveryErrors[item.id] }}
-            </p>
-          </div>
-        </div>
-
-        <template v-if="draft">
-          <p
-            v-if="draft.outdated"
-            class="mb-3 rounded border border-block-line bg-block-soft p-2 text-xs text-block"
-            data-testid="review-stale-warning"
-          >
-            This artifact is now revision {{ draft.subject.current_version }}. Stale anchors are
-            preserved; re-anchor them, or acknowledge the older context before submitting.
-          </p>
-          <button
-            v-if="draft.outdated && !draft.comments.length"
-            type="button"
-            class="btn-secondary mb-3 px-2 py-1 text-xs"
-            data-testid="review-retarget-current"
-            :disabled="summarySaving"
-            @click="retargetDraft"
-          >
-            Move review target to revision {{ draft.subject.current_version }}
-          </button>
-
-          <div class="space-y-1.5" aria-label="Pending comments">
-            <button
-              v-for="(entry, index) in draftEntries"
-              :key="entry.comment.id"
-              type="button"
-              class="flex w-full items-center gap-2 rounded border border-line px-2 py-1.5 text-left text-xs hover:border-accent"
-              @click="focusComment(entry.comment.id)"
-            >
-              <span class="shrink-0 font-mono text-2xs text-faint">{{ index + 1 }}</span>
-              <span class="min-w-0 flex-1 truncate text-fg">{{ entry.comment.body }}</span>
-              <span
-                v-if="entry.comment.subject_version !== draft.subject.current_version"
-                class="shrink-0 text-2xs text-block"
-              >
-                rev {{ entry.comment.subject_version }}
-              </span>
-            </button>
-          </div>
-
-          <label class="mt-3 block text-xs font-medium text-muted" for="review-overall-note">
-            Overall note <span class="font-normal text-faint">(optional)</span>
-          </label>
-          <textarea
-            id="review-overall-note"
-            :value="overallNote"
-            rows="3"
-            class="mt-1 w-full resize-y rounded border border-line bg-input p-2 text-xs text-fg outline-none focus:border-accent"
-            placeholder="Feedback that applies to the artifact as a whole…"
-            data-testid="review-overall-note"
-            :disabled="layoutBusy || submitting || discarding"
-            @input="editOverallNote"
-            @blur="saveOverallNote"
-          ></textarea>
-          <p v-if="summarySaving" class="mt-1 text-2xs text-faint" aria-live="polite">
-            Saving overall note…
-          </p>
-
-          <label
-            v-if="draft.outdated"
-            class="mt-2 flex cursor-pointer items-start gap-2 rounded bg-subtle/50 p-2 text-xs text-muted"
-          >
-            <input
-              v-model="acknowledgeOutdated"
-              type="checkbox"
-              class="mt-0.5"
-              data-testid="review-stale-ack"
-            />
-            Submit against the captured revision context intentionally.
-          </label>
-
-          <div class="mt-3 border-t border-line pt-3">
-            <p class="mb-2 text-2xs font-semibold uppercase tracking-wide text-faint">
-              Conversation feedback preview
-            </p>
-            <pre
-              class="max-h-32 overflow-auto whitespace-pre-wrap rounded bg-code p-2 text-xs text-code-fg"
-              >{{ feedbackPreview }}</pre>
-          </div>
-
-          <div class="mt-3 flex flex-wrap items-center gap-2">
-            <p
-              v-if="trayError"
-              class="w-full rounded bg-block-soft px-2 py-1 text-2xs text-block"
-              role="alert"
-            >
-              {{ trayError }}
-            </p>
-            <InlineConfirm
-              label="Discard draft"
-              :message="`Discard the overall note and all ${draft.comments.length} pending comment${draft.comments.length === 1 ? '' : 's'}?`"
-              confirm-label="Discard draft"
-              danger
-              :disabled="layoutBusy || submitting || discarding"
-              :action="discardDraft"
-            />
-            <button
-              type="button"
-              class="btn-primary ml-auto px-3 py-1.5 text-xs"
-              data-testid="submit-review"
-              :disabled="
-                submitting ||
-                layoutBusy ||
-                discarding ||
-                summarySaving ||
-                (!draft.comments.length && !overallNote.trim()) ||
-                (draft.outdated && !acknowledgeOutdated)
-              "
-              @click="submitDraft"
-            >
-              {{ submitting ? 'Submitting…' : 'Submit review' }}
-            </button>
-          </div>
-        </template>
-
-        <template v-else>
-          <div
-            v-if="
-              recentSubmitted &&
-              !failedSubmissions.some((review) => review.id === recentSubmitted?.id)
-            "
-            class="mb-3 text-xs text-muted"
-          >
-            <p class="font-medium text-fg">Review {{ recentSubmitted.id }} submitted</p>
-            <p class="mt-1">
-              Delivery:
-              <span class="text-accent">{{ recentSubmitted.delivery_state }}</span>
-            </p>
-          </div>
-          <label class="block text-xs font-medium text-muted" for="review-new-overall-note">
-            Start a new review with an overall note
-          </label>
-          <textarea
-            id="review-new-overall-note"
-            :value="overallNote"
-            rows="3"
-            class="mt-1 w-full resize-y rounded border border-line bg-input p-2 text-xs text-fg outline-none focus:border-accent"
-            placeholder="Feedback that applies to the artifact as a whole…"
-            data-testid="review-overall-note"
-            :disabled="layoutBusy || submitting || discarding"
-            @input="editOverallNote"
-            @blur="saveOverallNote"
-          ></textarea>
-          <p v-if="summarySaving" class="mt-1 text-2xs text-faint" aria-live="polite">
-            Saving overall note…
-          </p>
-          <p
-            v-if="trayError"
-            class="mt-2 rounded bg-block-soft px-2 py-1 text-2xs text-block"
-            role="alert"
-          >
-            {{ trayError }}
-          </p>
-        </template>
-      </div>
-    </aside>
+    <ReviewTray
+      ref="reviewTrayRef"
+      :reviews="reviews"
+      :draft="draft"
+      :open="trayOpen"
+      :overall-note="overallNote"
+      :summary-saving="summarySaving"
+      :acknowledge-outdated="acknowledgeOutdated"
+      :error="trayError"
+      :layout-busy="layoutBusy"
+      :submitting="submitting"
+      :discarding="discarding"
+      :delivery-errors="deliveryErrors"
+      subject-label="artifact"
+      :discard-action="discardDraft"
+      @update:open="trayOpen = $event"
+      @update:overall-note="editOverallValue"
+      @update:acknowledge-outdated="acknowledgeOutdated = $event"
+      @navigate="navigateDraft"
+      @focus-comment="focusComment"
+      @save-overall="saveOverallNote"
+      @retarget="retargetDraft"
+      @submit="submitDraft"
+      @retry="retryDelivery"
+    />
 
     <div
       v-if="reviewNotice"

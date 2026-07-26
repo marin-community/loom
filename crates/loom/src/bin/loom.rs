@@ -13,7 +13,8 @@ use weaver_api::{
     AddReviewCommentReq, ArtifactTextAnchorDto, CreateReviewReq, CreateSessionGroupReq,
     CreateSessionSpaceReq, DeleteSessionGroupReq, DeleteSessionSpaceReq, IssueAction,
     IssueActionsReq, MoveSessionsReq, ReorderSessionLayoutReq, RestoreSessionGroupsReq,
-    SearchSessionsOptions, SessionGroupPreferenceReq, SessionLayoutItemKind, SessionLayoutView,
+    ReviewAnchorDto, ReviewAnchorKindDto, ReviewSubjectKindDto, SearchSessionsOptions,
+    SessionGroupPreferenceReq, SessionLayoutItemKind, SessionLayoutView,
     SessionPlacementSelectorKind, SessionSearchAttention, SessionSearchStatus,
     SetSessionPlacementDefaultReq, SubmitReviewReq, UpdateReviewCommentReq, UpdateReviewReq,
     UpdateSessionGroupReq, UpdateSessionSpaceReq,
@@ -476,6 +477,11 @@ enum SessionCmd {
         /// Extra scrollback lines above the visible screen (0 = visible only).
         #[arg(long, default_value = "0")]
         lines: usize,
+    },
+    /// Print the typed, bounded worktree changes relative to the local base.
+    Changes {
+        /// Session key: id, branch id, branch name, or `repo:branch`.
+        session: String,
     },
     /// List active sessions (also `loom ps`).
     ///
@@ -1406,7 +1412,7 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
                 .create_session_review(
                     &session,
                     &CreateReviewReq {
-                        subject_kind: "artifact".to_string(),
+                        subject_kind: ReviewSubjectKindDto::Artifact,
                         subject_key: artifact,
                         subject_version: rev.to_string(),
                     },
@@ -1418,13 +1424,13 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
                     &AddReviewCommentReq {
                         expected_revision: draft.draft_revision,
                         subject_version: rev.to_string(),
-                        anchor_kind: "text".to_string(),
-                        anchor: ArtifactTextAnchorDto {
+                        anchor_kind: ReviewAnchorKindDto::Text,
+                        anchor: ReviewAnchorDto::Text(ArtifactTextAnchorDto {
                             quote,
                             prefix,
                             suffix,
                             block_index: block,
-                        },
+                        }),
                         body,
                     },
                 )
@@ -1484,13 +1490,13 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
                     &UpdateReviewCommentReq {
                         expected_revision: revision,
                         subject_version: Some(rev.to_string()),
-                        anchor_kind: Some("text".to_string()),
-                        anchor: Some(ArtifactTextAnchorDto {
+                        anchor_kind: Some(ReviewAnchorKindDto::Text),
+                        anchor: Some(ReviewAnchorDto::Text(ArtifactTextAnchorDto {
                             quote,
                             prefix,
                             suffix,
                             block_index: block,
-                        }),
+                        })),
                         body: None,
                     },
                 )
@@ -1515,7 +1521,7 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
                 .create_session_review(
                     &session,
                     &CreateReviewReq {
-                        subject_kind: "artifact".to_string(),
+                        subject_kind: ReviewSubjectKindDto::Artifact,
                         subject_key: artifact,
                         subject_version: rev.to_string(),
                     },
@@ -1655,6 +1661,11 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
         } => cmd_session_send(session, message.join(" "), !no_enter).await,
         SessionCmd::Break { session } => cmd_session_break(session).await,
         SessionCmd::Preview { session, lines } => cmd_session_preview(session, lines).await,
+        SessionCmd::Changes { session } => {
+            let changes = client::default()?.changes(&session).await?;
+            println!("{}", serde_json::to_string_pretty(&changes)?);
+            Ok(())
+        }
         SessionCmd::Ls {
             archived,
             automation,

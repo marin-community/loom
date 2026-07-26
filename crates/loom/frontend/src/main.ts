@@ -48,6 +48,7 @@ const router = createRouter({
     // the same SessionDetail instance and stay deep-linkable.
     { path: '/s/:id/artifacts', component: SessionDetail, props: true },
     { path: '/s/:id/artifacts/:name', component: SessionDetail, props: true },
+    { path: '/s/:id/changes', component: SessionDetail, props: true },
     { path: '/issues', component: Issues, meta: { title: 'Issues' } },
     { path: '/watches', component: Watches, meta: { title: 'Watches' } },
     { path: '/watches/:id', component: Watches, props: true, meta: { title: 'Watches' } },

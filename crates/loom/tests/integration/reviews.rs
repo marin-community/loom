@@ -10,8 +10,9 @@ use serial_test::serial;
 use std::{process::Output, time::Duration};
 use tokio::process::Command;
 use weaver_api::{
-    AddReviewCommentReq, ArtifactTextAnchorDto, ArtifactUpsertReq, CreateReq, CreateReviewReq,
-    SubmitReviewReq, UpdateReviewCommentReq, UpdateReviewReq,
+    AddReviewCommentReq, ArtifactTextAnchorDto, ArtifactUpsertReq, ChangeAnchorDto, ChangeSideDto,
+    ChangeSourceDto, CreateReq, CreateReviewReq, ReviewAnchorDto, ReviewAnchorKindDto,
+    ReviewSubjectKindDto, SubmitReviewReq, UpdateReviewCommentReq, UpdateReviewReq,
 };
 
 use super::fixtures::TestServer;
@@ -65,7 +66,7 @@ async fn seed_artifact(ts: &TestServer, session: &weaver_api::SessionView) {
 
 fn new_review(version: &str) -> CreateReviewReq {
     CreateReviewReq {
-        subject_kind: "artifact".to_string(),
+        subject_kind: ReviewSubjectKindDto::Artifact,
         subject_key: "design".to_string(),
         subject_version: version.to_string(),
     }
@@ -75,13 +76,13 @@ fn comment(expected_revision: i64, version: &str, body: &str) -> AddReviewCommen
     AddReviewCommentReq {
         expected_revision,
         subject_version: version.to_string(),
-        anchor_kind: "text".to_string(),
-        anchor: ArtifactTextAnchorDto {
+        anchor_kind: ReviewAnchorKindDto::Text,
+        anchor: ReviewAnchorDto::Text(ArtifactTextAnchorDto {
             quote: "beta".to_string(),
             prefix: "Alpha ".to_string(),
             suffix: " gamma".to_string(),
             block_index: Some(1),
-        },
+        }),
         body: body.to_string(),
     }
 }
@@ -135,7 +136,19 @@ fn assert_cli_ok(output: &Output) {
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn api_and_cli_share_the_private_optimistic_review_contract() {
-    let ts = TestServer::start_api_only().await;
+    let ts = TestServer::start().await;
+    super::fixtures::sh(ts.repo_path(), "git", &["switch", "-c", "weaver/reviewapi"]);
+    std::fs::write(ts.repo_path().join("committed.txt"), "committed\n").unwrap();
+    super::fixtures::sh(ts.repo_path(), "git", &["add", "committed.txt"]);
+    super::fixtures::sh(ts.repo_path(), "git", &["commit", "-m", "branch change"]);
+    std::fs::write(ts.repo_path().join("README.md"), "hello\nstaged\n").unwrap();
+    super::fixtures::sh(ts.repo_path(), "git", &["add", "README.md"]);
+    std::fs::write(
+        ts.repo_path().join("README.md"),
+        "hello\nstaged\nunstaged\n",
+    )
+    .unwrap();
+    std::fs::write(ts.repo_path().join("untracked.txt"), "untracked\n").unwrap();
     let session = insert_api_session(&ts, "reviewapi").await;
     seed_artifact(&ts, &session).await;
 
@@ -270,13 +283,13 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
             &UpdateReviewCommentReq {
                 expected_revision: added.draft_revision,
                 subject_version: Some("02".to_string()),
-                anchor_kind: Some("text".to_string()),
-                anchor: Some(ArtifactTextAnchorDto {
+                anchor_kind: Some(ReviewAnchorKindDto::Text),
+                anchor: Some(ReviewAnchorDto::Text(ArtifactTextAnchorDto {
                     quote: "beta gamma, revised".to_string(),
                     prefix: "Alpha ".to_string(),
                     suffix: ".".to_string(),
                     block_index: Some(1),
-                }),
+                })),
                 body: None,
             },
         )
@@ -458,6 +471,104 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     assert_eq!(shown["comments"][0]["anchor"]["prefix"], "# Design\n\n");
     assert_eq!(shown["comments"][0]["anchor"]["suffix"], " revision.");
     assert_eq!(shown["comments"][0]["body"], "CLI anchored body");
+
+    let changes = ts.client.changes(&session.id).await.unwrap();
+    let version = changes.version.clone().unwrap();
+    let readme = changes
+        .files
+        .iter()
+        .find(|file| file.path.display == "README.md")
+        .unwrap();
+    assert_eq!(
+        readme.sources,
+        vec![ChangeSourceDto::Staged, ChangeSourceDto::Unstaged]
+    );
+    assert!(changes.files.iter().any(|file| {
+        file.path.display == "committed.txt" && file.sources == vec![ChangeSourceDto::Committed]
+    }));
+    assert!(changes.files.iter().any(|file| {
+        file.path.display == "untracked.txt" && file.sources == vec![ChangeSourceDto::Untracked]
+    }));
+    let cli_changes = loom_review_cli(&ts, &["session", "changes", &session.id]).await;
+    assert_cli_ok(&cli_changes);
+    let cli_changes: weaver_api::ChangeSetDto =
+        serde_json::from_slice(&cli_changes.stdout).unwrap();
+    assert_eq!(cli_changes.version.as_deref(), Some(version.as_str()));
+
+    let line = readme
+        .hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .find(|line| line.new_line == Some(2))
+        .unwrap();
+    let change_draft = ts
+        .client
+        .create_session_review(
+            &session.id,
+            &CreateReviewReq {
+                subject_kind: ReviewSubjectKindDto::Changes,
+                subject_key: "changes".to_string(),
+                subject_version: version.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    let change_draft = ts
+        .client
+        .add_review_comment(
+            change_draft.id,
+            &AddReviewCommentReq {
+                expected_revision: change_draft.draft_revision,
+                subject_version: version,
+                anchor_kind: ReviewAnchorKindDto::Change,
+                anchor: ReviewAnchorDto::Change(ChangeAnchorDto {
+                    path: readme.path.clone(),
+                    side: ChangeSideDto::New,
+                    start_line: 2,
+                    end_line: 2,
+                    hunk_header: readme.hunks[0].header.clone(),
+                    context_before: vec!["hello".to_string()],
+                    selected: vec![line.text.clone()],
+                    context_after: vec!["unstaged".to_string()],
+                }),
+                body: "Explain this staged line.".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    std::fs::write(
+        ts.repo_path().join("README.md"),
+        "hello\nstaged\nunstaged\nmoved\n",
+    )
+    .unwrap();
+    assert!(ts
+        .client
+        .submit_review(
+            change_draft.id,
+            &SubmitReviewReq {
+                expected_revision: change_draft.draft_revision,
+                acknowledge_outdated: false,
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("outdated"));
+    let submitted = ts
+        .client
+        .submit_review(
+            change_draft.id,
+            &SubmitReviewReq {
+                expected_revision: change_draft.draft_revision,
+                acknowledge_outdated: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(submitted
+        .message
+        .contains("\"path_bytes\":\"UkVBRE1FLm1k\""));
+    assert_eq!(submitted.delivery_state, "queued");
 }
 
 async fn poll_review_turn(ts: &TestServer, session_id: &str, payload: &str) -> Value {

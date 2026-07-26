@@ -454,18 +454,20 @@ async function submitHandoff() {
                     </button>
                   </div>
                 </div>
-                <button
-                  v-if="ideEnabled"
-                  type="button"
-                  data-testid="action-open-editor"
-                  class="block w-full rounded px-2 py-1.5 text-left text-fg transition-colors hover:bg-subtle"
-                  @click="openEditor"
-                >
-                  <span class="block text-xs font-medium">Open editor</span>
-                  <span class="block text-2xs text-faint"
-                    >Open the worktree in the side panel.</span
+                <details v-if="ideEnabled" class="rounded border border-line bg-input">
+                  <summary class="cursor-pointer px-2 py-1.5 text-xs text-muted">Advanced</summary>
+                  <button
+                    type="button"
+                    data-testid="action-open-editor"
+                    class="block w-full border-t border-line px-2 py-1.5 text-left text-fg transition-colors hover:bg-subtle"
+                    @click="openEditor"
                   >
-                </button>
+                    <span class="block text-xs font-medium">Open editor</span>
+                    <span class="block text-2xs text-faint"
+                      >Open the worktree in the side panel.</span
+                    >
+                  </button>
+                </details>
                 <button
                   v-if="canHandoff"
                   type="button"

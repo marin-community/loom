@@ -24,7 +24,7 @@ pub const MAX_SUMMARY_BYTES: usize = 8 * 1024;
 pub const MAX_QUOTE_BYTES: usize = 4 * 1024;
 pub const MAX_CONTEXT_BYTES: usize = 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactTextAnchor {
     pub quote: String,
     #[serde(default)]
@@ -33,6 +33,51 @@ pub struct ArtifactTextAnchor {
     pub suffix: String,
     #[serde(default)]
     pub block_index: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeLineAnchor {
+    pub path_bytes: String,
+    pub path_display: String,
+    pub side: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub hunk_header: String,
+    #[serde(default)]
+    pub context_before: Vec<String>,
+    pub selected: Vec<String>,
+    #[serde(default)]
+    pub context_after: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum ReviewAnchor {
+    Text(ArtifactTextAnchor),
+    Change(ChangeLineAnchor),
+}
+
+impl From<ArtifactTextAnchor> for ReviewAnchor {
+    fn from(value: ArtifactTextAnchor) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl ReviewAnchor {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Text(_) => "text",
+            Self::Change(_) => "change",
+        }
+    }
+
+    fn json(&self) -> Result<String> {
+        Ok(serde_json::to_string(self)?)
+    }
+
+    fn value(&self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
+    }
 }
 
 #[derive(Debug)]
@@ -93,13 +138,15 @@ pub struct ReviewComment {
 }
 
 impl ReviewComment {
-    pub fn anchor(&self) -> ArtifactTextAnchor {
-        serde_json::from_str(&self.anchor_json).unwrap_or(ArtifactTextAnchor {
-            quote: String::new(),
-            prefix: String::new(),
-            suffix: String::new(),
-            block_index: None,
-        })
+    pub fn anchor(&self) -> ReviewAnchor {
+        match self.anchor_kind.as_str() {
+            "change" => serde_json::from_str(&self.anchor_json)
+                .map(ReviewAnchor::Change)
+                .unwrap_or_else(|_| ReviewAnchor::Change(ChangeLineAnchor::default())),
+            _ => serde_json::from_str(&self.anchor_json)
+                .map(ReviewAnchor::Text)
+                .unwrap_or_else(|_| ReviewAnchor::Text(ArtifactTextAnchor::default())),
+        }
     }
 }
 
@@ -119,14 +166,14 @@ pub struct NewReview<'a> {
 #[derive(Debug, Clone)]
 pub struct NewComment<'a> {
     pub subject_version: &'a str,
-    pub anchor: &'a ArtifactTextAnchor,
+    pub anchor: &'a ReviewAnchor,
     pub body: &'a str,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct CommentPatch<'a> {
     pub subject_version: Option<&'a str>,
-    pub anchor: Option<&'a ArtifactTextAnchor>,
+    pub anchor: Option<&'a ReviewAnchor>,
     pub body: Option<&'a str>,
 }
 
@@ -166,26 +213,54 @@ const SELECT_REVIEW: &str = "SELECT id, repo_root, branch_id, session_id, subjec
 const SELECT_COMMENT: &str = "SELECT id, review_id, subject_version, anchor_kind, anchor_json, \
     body, status, created_at, updated_at FROM review_comments";
 
-fn validate_anchor(anchor: &ArtifactTextAnchor) -> Result<()> {
-    if anchor.quote.trim().is_empty() {
-        bail!("a non-empty text quote is required");
+fn validate_anchor(anchor: &ReviewAnchor) -> Result<()> {
+    match anchor {
+        ReviewAnchor::Text(anchor) => {
+            if anchor.quote.trim().is_empty() {
+                bail!("a non-empty text quote is required");
+            }
+            if anchor.quote.len() > MAX_QUOTE_BYTES {
+                bail!("anchor quote exceeds the 4 KiB limit");
+            }
+            if anchor.prefix.len() > MAX_CONTEXT_BYTES || anchor.suffix.len() > MAX_CONTEXT_BYTES {
+                bail!("anchor prefix and suffix are limited to 1 KiB each");
+            }
+            if anchor.block_index.is_some_and(|index| index < 0) {
+                bail!("anchor block_index must be non-negative");
+            }
+        }
+        ReviewAnchor::Change(anchor) => {
+            if anchor.path_bytes.is_empty() {
+                bail!("a change path identity is required");
+            }
+            if !matches!(anchor.side.as_str(), "old" | "new") {
+                bail!("change anchor side must be old or new");
+            }
+            if anchor.start_line == 0 || anchor.end_line < anchor.start_line {
+                bail!("change anchor range is invalid");
+            }
+            if anchor.selected.is_empty() {
+                bail!("change anchor selected context is required");
+            }
+            for line in anchor
+                .context_before
+                .iter()
+                .chain(&anchor.selected)
+                .chain(&anchor.context_after)
+            {
+                if line.len() > MAX_CONTEXT_BYTES {
+                    bail!("change anchor context lines are limited to 1 KiB");
+                }
+            }
+        }
     }
-    if anchor.quote.len() > MAX_QUOTE_BYTES {
-        bail!("anchor quote exceeds the 4 KiB limit");
-    }
-    if anchor.prefix.len() > MAX_CONTEXT_BYTES || anchor.suffix.len() > MAX_CONTEXT_BYTES {
-        bail!("anchor prefix and suffix are limited to 1 KiB each");
-    }
-    if anchor.block_index.is_some_and(|index| index < 0) {
-        bail!("anchor block_index must be non-negative");
-    }
-    if serde_json::to_string(anchor)?.len() > MAX_ANCHOR_BYTES {
+    if anchor.json()?.len() > MAX_ANCHOR_BYTES {
         bail!("comment anchor exceeds the 8 KiB limit");
     }
     Ok(())
 }
 
-fn validate_comment(body: &str, anchor: &ArtifactTextAnchor) -> Result<()> {
+fn validate_comment(body: &str, anchor: &ReviewAnchor) -> Result<()> {
     let body = body.trim();
     if body.is_empty() {
         bail!("comment body is required");
@@ -378,7 +453,7 @@ pub async fn add_comment(
 ) -> Result<Review> {
     validate_comment(new.body, new.anchor)?;
     let body = new.body.trim();
-    let anchor_json = serde_json::to_string(new.anchor)?;
+    let anchor_json = new.anchor.json()?;
     let mut tx = crate::db::begin_immediate(db).await?;
     require_creator_draft(&mut tx, review_id, creator, expected_revision).await?;
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM review_comments WHERE review_id = ?")
@@ -404,10 +479,11 @@ pub async fn add_comment(
     sqlx::query(
         "INSERT INTO review_comments
             (review_id, subject_version, anchor_kind, anchor_json, body, created_at, updated_at)
-         VALUES (?, ?, 'text', ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(review_id)
     .bind(new.subject_version)
+    .bind(new.anchor.kind())
     .bind(anchor_json)
     .bind(body)
     .bind(&now)
@@ -455,12 +531,18 @@ pub async fn patch_comment(
     let subject_version = patch.subject_version.unwrap_or(&current.subject_version);
     let anchor_json = patch
         .anchor
-        .map(serde_json::to_string)
+        .map(ReviewAnchor::json)
         .transpose()?
         .unwrap_or(current.anchor_json);
     let body = patch.body.unwrap_or(&current.body).trim();
-    let anchor: ArtifactTextAnchor =
-        serde_json::from_str(&anchor_json).context("decoding stored review anchor")?;
+    let anchor = match current.anchor_kind.as_str() {
+        "change" => ReviewAnchor::Change(
+            serde_json::from_str(&anchor_json).context("decoding stored change anchor")?,
+        ),
+        _ => ReviewAnchor::Text(
+            serde_json::from_str(&anchor_json).context("decoding stored text anchor")?,
+        ),
+    };
     validate_comment(body, &anchor)?;
     let total_without: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(
@@ -478,10 +560,16 @@ pub async fn patch_comment(
     let now = now_iso();
     sqlx::query(
         "UPDATE review_comments
-         SET subject_version = ?, anchor_kind = 'text', anchor_json = ?, body = ?, updated_at = ?
+         SET subject_version = ?, anchor_kind = ?, anchor_json = ?, body = ?, updated_at = ?
          WHERE id = ? AND review_id = ?",
     )
     .bind(subject_version)
+    .bind(
+        patch
+            .anchor
+            .map(ReviewAnchor::kind)
+            .unwrap_or(&current.anchor_kind),
+    )
     .bind(anchor_json)
     .bind(body)
     .bind(&now)
@@ -701,6 +789,46 @@ pub async fn submit(
     expected_revision: i64,
     acknowledge_outdated: bool,
 ) -> Result<Submission> {
+    submit_inner(
+        db,
+        review_id,
+        creator,
+        expected_revision,
+        acknowledge_outdated,
+        None,
+    )
+    .await
+}
+
+/// Submit a non-database subject against the current version resolved by its
+/// authoritative handler immediately before this transaction.
+pub async fn submit_at_version(
+    db: &Db,
+    review_id: i64,
+    creator: &str,
+    expected_revision: i64,
+    acknowledge_outdated: bool,
+    current_version: &str,
+) -> Result<Submission> {
+    submit_inner(
+        db,
+        review_id,
+        creator,
+        expected_revision,
+        acknowledge_outdated,
+        Some(current_version),
+    )
+    .await
+}
+
+async fn submit_inner(
+    db: &Db,
+    review_id: i64,
+    creator: &str,
+    expected_revision: i64,
+    acknowledge_outdated: bool,
+    provided_current_version: Option<&str>,
+) -> Result<Submission> {
     let mut tx = crate::db::begin_immediate(db).await?;
     let mut review =
         sqlx::query_as::<_, Review>(&format!("{SELECT_REVIEW} WHERE id = ? AND created_by = ?"))
@@ -732,24 +860,28 @@ pub async fn submit(
     if comments.is_empty() && review.summary.trim().is_empty() {
         bail!("add a comment or overall note before submitting");
     }
-    if review.subject_kind != "artifact" {
-        bail!("unsupported review subject kind");
-    }
-    let artifact_id: i64 = review
-        .subject_id
-        .parse()
-        .context("invalid artifact review subject id")?;
-    // Artifact writes use the same immediate transaction discipline. Reading
-    // the current revision here makes the stale decision, immutable event, and
-    // outbox insertion one serializable decision with respect to a write.
-    let current_version = sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT MAX(rev) FROM artifact_versions WHERE artifact_id = ?",
-    )
-    .bind(artifact_id)
-    .fetch_one(&mut *tx)
-    .await?
-    .ok_or_else(|| anyhow!("artifact review subject not found"))?
-    .to_string();
+    let current_version = match review.subject_kind.as_str() {
+        "artifact" => {
+            let artifact_id: i64 = review
+                .subject_id
+                .parse()
+                .context("invalid artifact review subject id")?;
+            // Artifact writes use the same immediate transaction discipline.
+            sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT MAX(rev) FROM artifact_versions WHERE artifact_id = ?",
+            )
+            .bind(artifact_id)
+            .fetch_one(&mut *tx)
+            .await?
+            .ok_or_else(|| anyhow!("artifact review subject not found"))?
+            .to_string()
+        }
+        "changes" => provided_current_version
+            .filter(|version| !version.is_empty())
+            .context("current change-set version is unavailable")?
+            .to_string(),
+        _ => bail!("unsupported review subject kind"),
+    };
     let outdated = is_outdated(&review, &comments, &current_version);
     if outdated && !acknowledge_outdated {
         bail!("review is outdated; acknowledge the reviewed revision before submitting");
@@ -781,7 +913,7 @@ pub async fn submit(
                 "id": comment.id,
                 "revision": comment.subject_version,
                 "anchor_kind": comment.anchor_kind,
-                "anchor": comment.anchor(),
+                "anchor": comment.anchor().value(),
                 "body": comment.body,
             })
         })
@@ -1033,17 +1165,25 @@ pub async fn retry_delivery(db: &Db, review_id: i64) -> Result<()> {
 }
 
 pub fn structured_message(review: &Review) -> String {
-    let mut message = format!(
-        "The user submitted feedback on artifact `{}`, revision {}.",
-        review.subject_label, review.subject_version
-    );
+    let subject = if review.subject_kind == "changes" {
+        format!(
+            "The user submitted feedback on changes version `{}`.",
+            review.subject_version
+        )
+    } else {
+        format!(
+            "The user submitted feedback on artifact `{}`, revision {}.",
+            review.subject_label, review.subject_version
+        )
+    };
+    let mut message = subject;
     if !review.summary.trim().is_empty() {
         message.push_str("\n\nOverall:\n");
         message.push_str(review.summary.trim());
     }
     for (index, comment) in review.comments.iter().enumerate() {
         let anchor = comment.anchor();
-        let anchor_json = serde_json::to_string(&anchor).unwrap_or_else(|_| "{}".to_string());
+        let anchor_json = anchor.json().unwrap_or_else(|_| "{}".to_string());
         message.push_str(&format!(
             "\n\n{}. Revision {}, {} anchor {}:\n",
             index + 1,
@@ -1109,13 +1249,14 @@ mod tests {
         .unwrap()
     }
 
-    fn anchor(quote: &str) -> ArtifactTextAnchor {
+    fn anchor(quote: &str) -> ReviewAnchor {
         ArtifactTextAnchor {
             quote: quote.to_string(),
             prefix: "before".to_string(),
             suffix: "after".to_string(),
             block_index: Some(0),
         }
+        .into()
     }
 
     async fn add(db: &Db, draft: &Review, body: &str) -> Review {
@@ -1135,7 +1276,7 @@ mod tests {
         .unwrap()
     }
 
-    fn comment<'a>(body: &'a str, anchor: &'a ArtifactTextAnchor) -> NewComment<'a> {
+    fn comment<'a>(body: &'a str, anchor: &'a ReviewAnchor) -> NewComment<'a> {
         NewComment {
             subject_version: "1",
             anchor,
@@ -1453,12 +1594,13 @@ mod tests {
     async fn anchors_are_bounded_individually_and_in_the_review_total() {
         let (db, artifact) = seeded().await;
         let mut draft = draft(&db, &artifact, "alice").await;
-        let oversized = ArtifactTextAnchor {
+        let oversized: ReviewAnchor = ArtifactTextAnchor {
             quote: "x".repeat(MAX_QUOTE_BYTES + 1),
             prefix: String::new(),
             suffix: String::new(),
             block_index: None,
-        };
+        }
+        .into();
         let error = add_comment(
             &db,
             draft.id,
@@ -1471,12 +1613,13 @@ mod tests {
         assert!(error.to_string().contains("quote exceeds"));
 
         let body = "b".repeat(MAX_COMMENT_BYTES);
-        let near_limit = ArtifactTextAnchor {
+        let near_limit: ReviewAnchor = ArtifactTextAnchor {
             quote: "x".repeat(MAX_QUOTE_BYTES),
             prefix: "p".repeat(MAX_CONTEXT_BYTES),
             suffix: "s".repeat(MAX_CONTEXT_BYTES),
             block_index: Some(0),
-        };
+        }
+        .into();
         let mut inserted = 0;
         loop {
             match add_comment(

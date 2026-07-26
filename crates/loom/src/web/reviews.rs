@@ -6,8 +6,9 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use weaver_api::{
-    AddReviewCommentReq, ArtifactTextAnchorDto, CreateReviewReq, ExpectedReviewRevisionReq,
-    ResolveReviewCommentReq, ReviewCommentDto, ReviewDto, ReviewSubjectDto, SubmitReviewReq,
+    AddReviewCommentReq, ArtifactTextAnchorDto, ChangeAnchorDto, CreateReviewReq,
+    ExpectedReviewRevisionReq, ResolveReviewCommentReq, ReviewAnchorDto, ReviewAnchorKindDto,
+    ReviewCommentDto, ReviewDto, ReviewSubjectDto, ReviewSubjectKindDto, SubmitReviewReq,
     UpdateReviewCommentReq, UpdateReviewReq,
 };
 use weaver_core::artifact::{self, Artifact};
@@ -22,7 +23,7 @@ use super::{require_session, ApiResult, AppError, AppState};
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ReviewListQuery {
-    pub subject_kind: String,
+    pub subject_kind: ReviewSubjectKindDto,
     pub subject_key: String,
 }
 
@@ -39,16 +40,42 @@ fn require_operator(principal: &Principal) -> ApiResult<()> {
 
 fn comment_dto(comment: &review::ReviewComment) -> ReviewCommentDto {
     let anchor = comment.anchor();
+    let (anchor_kind, anchor) = match anchor {
+        review::ReviewAnchor::Text(anchor) => (
+            ReviewAnchorKindDto::Text,
+            ReviewAnchorDto::Text(ArtifactTextAnchorDto {
+                quote: anchor.quote,
+                prefix: anchor.prefix,
+                suffix: anchor.suffix,
+                block_index: anchor.block_index,
+            }),
+        ),
+        review::ReviewAnchor::Change(anchor) => (
+            ReviewAnchorKindDto::Change,
+            ReviewAnchorDto::Change(ChangeAnchorDto {
+                path: weaver_api::ChangePathDto {
+                    bytes: anchor.path_bytes,
+                    display: anchor.path_display,
+                },
+                side: if anchor.side == "old" {
+                    weaver_api::ChangeSideDto::Old
+                } else {
+                    weaver_api::ChangeSideDto::New
+                },
+                start_line: anchor.start_line,
+                end_line: anchor.end_line,
+                hunk_header: anchor.hunk_header,
+                context_before: anchor.context_before,
+                selected: anchor.selected,
+                context_after: anchor.context_after,
+            }),
+        ),
+    };
     ReviewCommentDto {
         id: comment.id,
         subject_version: comment.subject_version.clone(),
-        anchor_kind: comment.anchor_kind.clone(),
-        anchor: ArtifactTextAnchorDto {
-            quote: anchor.quote,
-            prefix: anchor.prefix,
-            suffix: anchor.suffix,
-            block_index: anchor.block_index,
-        },
+        anchor_kind,
+        anchor,
         body: comment.body.clone(),
         status: comment.status.clone(),
         created_at: comment.created_at.clone(),
@@ -66,7 +93,11 @@ fn review_dto(review: &review::Review, current_version: &str) -> ReviewDto {
         id: review.id,
         session_id: review.session_id.clone(),
         subject: ReviewSubjectDto {
-            kind: review.subject_kind.clone(),
+            kind: if review.subject_kind == "changes" {
+                ReviewSubjectKindDto::Changes
+            } else {
+                ReviewSubjectKindDto::Artifact
+            },
             id: review.subject_id.clone(),
             key: review.subject_key.clone(),
             label: review.subject_label.clone(),
@@ -92,16 +123,37 @@ fn review_dto(review: &review::Review, current_version: &str) -> ReviewDto {
 }
 
 async fn durable_review_dto(st: &AppState, item: &review::Review) -> ApiResult<ReviewDto> {
-    let artifact_id = item
-        .subject_id
-        .parse::<i64>()
-        .map_err(|_| AppError::bad_request("invalid artifact review subject"))?;
-    let current_version = artifact::get_by_id(&st.db, artifact_id)
+    let current_version = current_review_version(st, item)
         .await?
-        .filter(|artifact| artifact.repo_root == item.repo_root)
-        .map(|artifact| artifact.rev.to_string())
         .unwrap_or_else(|| item.subject_version.clone());
     Ok(review_dto(item, &current_version))
+}
+
+async fn current_review_version(st: &AppState, item: &review::Review) -> ApiResult<Option<String>> {
+    match item.subject_kind.as_str() {
+        "artifact" => {
+            let artifact_id = item
+                .subject_id
+                .parse::<i64>()
+                .map_err(|_| AppError::bad_request("invalid artifact review subject"))?;
+            Ok(artifact::get_by_id(&st.db, artifact_id)
+                .await?
+                .filter(|artifact| artifact.repo_root == item.repo_root)
+                .map(|artifact| artifact.rev.to_string()))
+        }
+        "changes" => {
+            let (session, branch) = require_session(&st.db, &item.session_id).await?;
+            if item.subject_id != branch.id {
+                return Err(AppError::bad_request("invalid changes review subject"));
+            }
+            Ok(
+                crate::changes::load(std::path::Path::new(&session.work_dir), &branch.base_branch)
+                    .await?
+                    .version,
+            )
+        }
+        _ => Err(AppError::bad_request("unsupported review subject kind")),
+    }
 }
 
 fn legacy_review_dto(
@@ -115,13 +167,13 @@ fn legacy_review_dto(
         .map(|comment| ReviewCommentDto {
             id: -(thread.id.saturating_mul(10_000) + comment.seq),
             subject_version: thread.base_rev.to_string(),
-            anchor_kind: "text".to_string(),
-            anchor: ArtifactTextAnchorDto {
+            anchor_kind: ReviewAnchorKindDto::Text,
+            anchor: ReviewAnchorDto::Text(ArtifactTextAnchorDto {
                 quote: thread.anchor_quote.clone(),
                 prefix: thread.anchor_prefix.clone(),
                 suffix: thread.anchor_suffix.clone(),
                 block_index: None,
-            },
+            }),
             body: comment.body.clone(),
             status: thread.status.clone(),
             created_at: comment.created_at.clone(),
@@ -132,7 +184,7 @@ fn legacy_review_dto(
         id: -thread.id,
         session_id: session_id.to_string(),
         subject: ReviewSubjectDto {
-            kind: "artifact".to_string(),
+            kind: ReviewSubjectKindDto::Artifact,
             id: artifact.id.to_string(),
             key: artifact.name.clone(),
             label: artifact.name.clone(),
@@ -214,14 +266,33 @@ async fn list_for(
     branch: &Branch,
     q: &ReviewListQuery,
 ) -> ApiResult<Vec<ReviewDto>> {
-    if q.subject_kind != "artifact" {
-        return Err(AppError::bad_request(
-            "only artifact reviews are supported in this release",
-        ));
-    }
-    let artifact = artifact::get(&st.db, &branch.repo_root, &branch.id, &q.subject_key)
-        .await?
-        .ok_or_else(|| AppError::not_found("artifact"))?;
+    let (subject_kind, subject_id, current_version) = match q.subject_kind {
+        ReviewSubjectKindDto::Artifact => {
+            let artifact = artifact::get(&st.db, &branch.repo_root, &branch.id, &q.subject_key)
+                .await?
+                .ok_or_else(|| AppError::not_found("artifact"))?;
+            (
+                "artifact",
+                artifact.id.to_string(),
+                artifact.rev.to_string(),
+            )
+        }
+        ReviewSubjectKindDto::Changes => {
+            if q.subject_key != "changes" {
+                return Err(AppError::bad_request(
+                    "changes review subject_key must be 'changes'",
+                ));
+            }
+            let changes =
+                crate::changes::load(std::path::Path::new(&session.work_dir), &branch.base_branch)
+                    .await?;
+            (
+                "changes",
+                branch.id.clone(),
+                changes.version.unwrap_or_default(),
+            )
+        }
+    };
     // Session-scoped agent grants may inspect submitted compatibility feedback,
     // but never inherit their operator owner's private draft merely because the
     // username is the same.
@@ -234,17 +305,25 @@ async fn list_for(
         &st.db,
         &branch.id,
         &session.id,
-        "artifact",
-        &artifact.id.to_string(),
+        subject_kind,
+        &subject_id,
         viewer,
     )
     .await?;
     let mut out: Vec<ReviewDto> = reviews
         .iter()
-        .map(|item| review_dto(item, &artifact.rev.to_string()))
+        .map(|item| review_dto(item, &current_version))
         .collect();
-    for thread in discussion::list_for_artifact(&st.db, artifact.id, true).await? {
-        out.push(legacy_review_dto(&thread, &session.id, &artifact));
+    if q.subject_kind == ReviewSubjectKindDto::Artifact {
+        let artifact_id = subject_id
+            .parse()
+            .map_err(|_| AppError::bad_request("invalid artifact subject"))?;
+        let artifact = artifact::get_by_id(&st.db, artifact_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("artifact"))?;
+        for thread in discussion::list_for_artifact(&st.db, artifact.id, true).await? {
+            out.push(legacy_review_dto(&thread, &session.id, &artifact));
+        }
     }
     Ok(out)
 }
@@ -269,29 +348,65 @@ async fn create_for(
     body: &CreateReviewReq,
 ) -> ApiResult<ReviewDto> {
     require_operator(principal)?;
-    if body.subject_kind != "artifact" {
-        return Err(AppError::bad_request(
-            "only artifact reviews are supported in this release",
-        ));
-    }
-    let (artifact, subject_version) =
-        artifact_subject(st, branch, &body.subject_key, &body.subject_version).await?;
+    let (subject_kind, subject_id, subject_key, subject_label, subject_version, current_version) =
+        match body.subject_kind {
+            ReviewSubjectKindDto::Artifact => {
+                let (artifact, subject_version) =
+                    artifact_subject(st, branch, &body.subject_key, &body.subject_version).await?;
+                (
+                    "artifact",
+                    artifact.id.to_string(),
+                    artifact.name.clone(),
+                    artifact.name,
+                    subject_version,
+                    artifact.rev.to_string(),
+                )
+            }
+            ReviewSubjectKindDto::Changes => {
+                if body.subject_key != "changes" {
+                    return Err(AppError::bad_request(
+                        "changes review subject_key must be 'changes'",
+                    ));
+                }
+                let changes = crate::changes::load(
+                    std::path::Path::new(&session.work_dir),
+                    &branch.base_branch,
+                )
+                .await?;
+                let version = changes.version.ok_or_else(|| {
+                    AppError::conflict("changes are unavailable until the branch base resolves")
+                })?;
+                if body.subject_version != version {
+                    return Err(AppError::conflict(
+                        "change-set version moved; refresh before starting a review",
+                    ));
+                }
+                (
+                    "changes",
+                    branch.id.clone(),
+                    "changes".to_string(),
+                    "Changes".to_string(),
+                    version.clone(),
+                    version,
+                )
+            }
+        };
     let review = review::get_or_create(
         &st.db,
         &review::NewReview {
             repo_root: &branch.repo_root,
             branch_id: &branch.id,
             session_id: &session.id,
-            subject_kind: "artifact",
-            subject_id: &artifact.id.to_string(),
-            subject_key: &artifact.name,
-            subject_label: &artifact.name,
+            subject_kind,
+            subject_id: &subject_id,
+            subject_key: &subject_key,
+            subject_label: &subject_label,
             subject_version: &subject_version,
             created_by: &principal.username,
         },
     )
     .await?;
-    Ok(review_dto(&review, &artifact.rev.to_string()))
+    Ok(review_dto(&review, &current_version))
 }
 
 pub(super) async fn create_session_review(
@@ -343,22 +458,61 @@ pub(super) async fn get_review(
     Ok(Json(durable_review_dto(&st, &item).await?))
 }
 
-fn text_anchor(anchor: &ArtifactTextAnchorDto) -> review::ArtifactTextAnchor {
-    review::ArtifactTextAnchor {
-        quote: anchor.quote.clone(),
-        prefix: anchor.prefix.clone(),
-        suffix: anchor.suffix.clone(),
-        block_index: anchor.block_index,
-    }
-}
-
-fn require_text_anchor_kind(kind: &str) -> ApiResult<()> {
-    if kind == "text" {
-        Ok(())
-    } else {
-        Err(AppError::bad_request(
-            "artifact review anchor_kind must be 'text'",
-        ))
+async fn require_anchor(
+    st: &AppState,
+    item: &review::Review,
+    subject_version: &str,
+    kind: ReviewAnchorKindDto,
+    anchor: &ReviewAnchorDto,
+) -> ApiResult<(review::ReviewAnchor, String)> {
+    match (item.subject_kind.as_str(), kind, anchor) {
+        ("artifact", ReviewAnchorKindDto::Text, ReviewAnchorDto::Text(anchor)) => {
+            let artifact = review_artifact(st, item).await?;
+            let version =
+                require_artifact_version(st, &artifact, subject_version, "comment").await?;
+            Ok((
+                review::ReviewAnchor::Text(review::ArtifactTextAnchor {
+                    quote: anchor.quote.clone(),
+                    prefix: anchor.prefix.clone(),
+                    suffix: anchor.suffix.clone(),
+                    block_index: anchor.block_index,
+                }),
+                version,
+            ))
+        }
+        ("changes", ReviewAnchorKindDto::Change, ReviewAnchorDto::Change(anchor)) => {
+            let (session, branch) = require_session(&st.db, &item.session_id).await?;
+            let changes =
+                crate::changes::load(std::path::Path::new(&session.work_dir), &branch.base_branch)
+                    .await?;
+            crate::changes::validate_anchor(&changes, subject_version, anchor)
+                .map_err(|error| AppError::conflict(error.to_string()))?;
+            Ok((
+                review::ReviewAnchor::Change(review::ChangeLineAnchor {
+                    path_bytes: anchor.path.bytes.clone(),
+                    path_display: anchor.path.display.clone(),
+                    side: match anchor.side {
+                        weaver_api::ChangeSideDto::Old => "old",
+                        weaver_api::ChangeSideDto::New => "new",
+                    }
+                    .to_string(),
+                    start_line: anchor.start_line,
+                    end_line: anchor.end_line,
+                    hunk_header: anchor.hunk_header.clone(),
+                    context_before: anchor.context_before.clone(),
+                    selected: anchor.selected.clone(),
+                    context_after: anchor.context_after.clone(),
+                }),
+                subject_version.to_string(),
+            ))
+        }
+        ("artifact", _, _) => Err(AppError::bad_request(
+            "artifact reviews require a text anchor",
+        )),
+        ("changes", _, _) => Err(AppError::bad_request(
+            "changes reviews require a change anchor",
+        )),
+        _ => Err(AppError::bad_request("unsupported review subject kind")),
     }
 }
 
@@ -376,10 +530,12 @@ async fn draft_mutation_error(
             .contains("draft changed while applying the mutation");
     if drift {
         let fresh = match review::get(&st.db, item.id).await {
-            Ok(Some(fresh)) => match review_artifact(st, &fresh).await {
-                Ok(artifact) => serde_json::to_value(review_dto(&fresh, &artifact.rev.to_string()))
-                    .unwrap_or(Value::Null),
+            Ok(Some(fresh)) => match current_review_version(st, &fresh).await {
+                Ok(Some(current)) => {
+                    serde_json::to_value(review_dto(&fresh, &current)).unwrap_or(Value::Null)
+                }
                 Err(_) => Value::Null,
+                Ok(None) => Value::Null,
             },
             _ => Value::Null,
         };
@@ -389,11 +545,9 @@ async fn draft_mutation_error(
 }
 
 async fn submitted_draft_conflict(st: &AppState, item: &review::Review) -> AppError {
-    let artifact = review_artifact(st, item).await.ok();
-    let fresh = artifact
-        .map(|artifact| {
-            serde_json::to_value(review_dto(item, &artifact.rev.to_string())).unwrap_or(Value::Null)
-        })
+    let current = current_review_version(st, item).await.ok().flatten();
+    let fresh = current
+        .map(|current| serde_json::to_value(review_dto(item, &current)).unwrap_or(Value::Null))
         .unwrap_or(Value::Null);
     AppError::conflict("submitted reviews are immutable").with_details(json!({ "review": fresh }))
 }
@@ -408,10 +562,14 @@ pub(super) async fn add_review_comment(
     if item.status != "draft" {
         return Err(submitted_draft_conflict(&st, &item).await);
     }
-    let artifact = review_artifact(&st, &item).await?;
-    let subject_version =
-        require_artifact_version(&st, &artifact, &body.subject_version, "comment").await?;
-    require_text_anchor_kind(&body.anchor_kind)?;
+    let (anchor, subject_version) = require_anchor(
+        &st,
+        &item,
+        &body.subject_version,
+        body.anchor_kind,
+        &body.anchor,
+    )
+    .await?;
     let updated = match review::add_comment(
         &st.db,
         item.id,
@@ -419,7 +577,7 @@ pub(super) async fn add_review_comment(
         body.expected_revision,
         &review::NewComment {
             subject_version: &subject_version,
-            anchor: &text_anchor(&body.anchor),
+            anchor: &anchor,
             body: &body.body,
         },
     )
@@ -428,7 +586,10 @@ pub(super) async fn add_review_comment(
         Ok(updated) => updated,
         Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
     };
-    Ok(Json(review_dto(&updated, &artifact.rev.to_string())))
+    let current = current_review_version(&st, &updated)
+        .await?
+        .unwrap_or_else(|| updated.subject_version.clone());
+    Ok(Json(review_dto(&updated, &current)))
 }
 
 pub(super) async fn update_review_comment(
@@ -441,15 +602,6 @@ pub(super) async fn update_review_comment(
     if item.status != "draft" {
         return Err(submitted_draft_conflict(&st, &item).await);
     }
-    let subject_version = if let Some(version) = &body.subject_version {
-        let artifact = review_artifact(&st, &item).await?;
-        Some(require_artifact_version(&st, &artifact, version, "comment").await?)
-    } else {
-        None
-    };
-    if let Some(kind) = &body.anchor_kind {
-        require_text_anchor_kind(kind)?;
-    }
     if body.body.is_none() && body.subject_version.is_none() && body.anchor.is_none() {
         return Err(AppError::bad_request("comment update is empty"));
     }
@@ -458,12 +610,26 @@ pub(super) async fn update_review_comment(
             "a replacement anchor is required when changing comment revision",
         ));
     }
-    if body.anchor.is_some() && body.anchor_kind.as_deref() != Some("text") {
+    if body.anchor.is_some() && body.anchor_kind.is_none() {
         return Err(AppError::bad_request(
-            "anchor_kind 'text' is required when replacing an anchor",
+            "anchor_kind is required when replacing an anchor",
         ));
     }
-    let anchor = body.anchor.as_ref().map(text_anchor);
+    let replacement = match (
+        body.subject_version.as_deref(),
+        body.anchor_kind,
+        body.anchor.as_ref(),
+    ) {
+        (Some(version), Some(kind), Some(anchor)) => {
+            Some(require_anchor(&st, &item, version, kind, anchor).await?)
+        }
+        (None, None, None) => None,
+        _ => {
+            return Err(AppError::bad_request(
+                "subject_version, anchor_kind, and anchor must be replaced together",
+            ))
+        }
+    };
     let updated = match review::patch_comment(
         &st.db,
         item.id,
@@ -471,8 +637,8 @@ pub(super) async fn update_review_comment(
         &principal.username,
         body.expected_revision,
         &review::CommentPatch {
-            subject_version: subject_version.as_deref(),
-            anchor: anchor.as_ref(),
+            subject_version: replacement.as_ref().map(|(_, version)| version.as_str()),
+            anchor: replacement.as_ref().map(|(anchor, _)| anchor),
             body: body.body.as_deref(),
         },
     )
@@ -481,8 +647,10 @@ pub(super) async fn update_review_comment(
         Ok(updated) => updated,
         Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
     };
-    let artifact = review_artifact(&st, &updated).await?;
-    Ok(Json(review_dto(&updated, &artifact.rev.to_string())))
+    let current = current_review_version(&st, &updated)
+        .await?
+        .unwrap_or_else(|| updated.subject_version.clone());
+    Ok(Json(review_dto(&updated, &current)))
 }
 
 pub(super) async fn delete_review_comment(
@@ -507,8 +675,10 @@ pub(super) async fn delete_review_comment(
         Ok(updated) => updated,
         Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
     };
-    let artifact = review_artifact(&st, &updated).await?;
-    Ok(Json(review_dto(&updated, &artifact.rev.to_string())))
+    let current = current_review_version(&st, &updated)
+        .await?
+        .unwrap_or_else(|| updated.subject_version.clone());
+    Ok(Json(review_dto(&updated, &current)))
 }
 
 pub(super) async fn resolve_review_comment(
@@ -547,9 +717,22 @@ pub(super) async fn update_review(
     if item.status != "draft" {
         return Err(submitted_draft_conflict(&st, &item).await);
     }
-    let artifact = review_artifact(&st, &item).await?;
     let subject_version = match &body.subject_version {
-        Some(version) => Some(require_artifact_version(&st, &artifact, version, "review").await?),
+        Some(version) if item.subject_kind == "artifact" => {
+            let artifact = review_artifact(&st, &item).await?;
+            Some(require_artifact_version(&st, &artifact, version, "review").await?)
+        }
+        Some(version) => {
+            let current = current_review_version(&st, &item)
+                .await?
+                .ok_or_else(|| AppError::conflict("current change-set version is unavailable"))?;
+            if version != &current {
+                return Err(AppError::conflict(
+                    "change-set version moved; refresh before retargeting",
+                ));
+            }
+            Some(current)
+        }
         None => None,
     };
     let updated = match review::update_draft(
@@ -567,7 +750,10 @@ pub(super) async fn update_review(
         Ok(updated) => updated,
         Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
     };
-    Ok(Json(review_dto(&updated, &artifact.rev.to_string())))
+    let current = current_review_version(&st, &updated)
+        .await?
+        .unwrap_or_else(|| updated.subject_version.clone());
+    Ok(Json(review_dto(&updated, &current)))
 }
 
 pub(super) async fn discard_review(
@@ -598,19 +784,35 @@ pub(super) async fn retarget_review_to_current(
     if item.status != "draft" {
         return Err(submitted_draft_conflict(&st, &item).await);
     }
-    let updated = match review::retarget_draft_to_current(
-        &st.db,
-        item.id,
-        &principal.username,
-        body.expected_revision,
-    )
-    .await
-    {
+    let current = current_review_version(&st, &item)
+        .await?
+        .ok_or_else(|| AppError::conflict("current review subject is unavailable"))?;
+    let result = if item.subject_kind == "artifact" {
+        review::retarget_draft_to_current(
+            &st.db,
+            item.id,
+            &principal.username,
+            body.expected_revision,
+        )
+        .await
+    } else {
+        review::update_draft(
+            &st.db,
+            item.id,
+            &principal.username,
+            body.expected_revision,
+            &review::DraftPatch {
+                summary: None,
+                subject_version: Some(&current),
+            },
+        )
+        .await
+    };
+    let updated = match result {
         Ok(updated) => updated,
         Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
     };
-    let artifact = review_artifact(&st, &updated).await?;
-    Ok(Json(review_dto(&updated, &artifact.rev.to_string())))
+    Ok(Json(review_dto(&updated, &current)))
 }
 
 pub(super) async fn submit_review(
@@ -620,15 +822,31 @@ pub(super) async fn submit_review(
     Json(body): Json<SubmitReviewReq>,
 ) -> ApiResult<Json<ReviewDto>> {
     let item = creator_review(&st, &principal, review_id).await?;
-    let submission = match review::submit(
-        &st.db,
-        item.id,
-        &principal.username,
-        body.expected_revision,
-        body.acknowledge_outdated,
-    )
-    .await
-    {
+    let current = current_review_version(&st, &item).await?;
+    let result = if item.subject_kind == "changes" {
+        let current = current
+            .as_deref()
+            .ok_or_else(|| AppError::conflict("current change-set version is unavailable"))?;
+        review::submit_at_version(
+            &st.db,
+            item.id,
+            &principal.username,
+            body.expected_revision,
+            body.acknowledge_outdated,
+            current,
+        )
+        .await
+    } else {
+        review::submit(
+            &st.db,
+            item.id,
+            &principal.username,
+            body.expected_revision,
+            body.acknowledge_outdated,
+        )
+        .await
+    };
+    let submission = match result {
         Ok(submission) => submission,
         Err(error) => {
             if error
@@ -636,9 +854,11 @@ pub(super) async fn submit_review(
                 .contains("acknowledge the reviewed revision")
             {
                 let fresh = review::get(&st.db, item.id).await?.unwrap_or(item);
-                let artifact = review_artifact(&st, &fresh).await?;
+                let current = current_review_version(&st, &fresh)
+                    .await?
+                    .unwrap_or_else(|| fresh.subject_version.clone());
                 return Err(AppError::conflict(error.to_string()).with_details(json!({
-                    "review": review_dto(&fresh, &artifact.rev.to_string()),
+                    "review": review_dto(&fresh, &current),
                 })));
             }
             return Err(draft_mutation_error(&st, &item, error).await);
@@ -653,8 +873,10 @@ pub(super) async fn submit_review(
     let refreshed = review::get(&st.db, item.id)
         .await?
         .ok_or_else(|| AppError::not_found("review"))?;
-    let artifact = review_artifact(&st, &refreshed).await?;
-    Ok(Json(review_dto(&refreshed, &artifact.rev.to_string())))
+    let current = current_review_version(&st, &refreshed)
+        .await?
+        .unwrap_or_else(|| refreshed.subject_version.clone());
+    Ok(Json(review_dto(&refreshed, &current)))
 }
 
 pub(super) async fn retry_review_delivery(

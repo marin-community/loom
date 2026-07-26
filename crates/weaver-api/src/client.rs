@@ -610,6 +610,12 @@ impl Client {
             .await
     }
 
+    /// Typed, bounded worktree changes relative to the session's local base.
+    pub async fn changes(&self, key: &str) -> Result<crate::ChangeSetDto> {
+        self.get_typed(&format!("/api/sessions/{}/changes", Self::seg(key)))
+            .await
+    }
+
     /// Recent events for a branch, newest first, capped at 200 server-side
     /// (`GET /api/sessions/{key}/log`). Despite the URL, `key` may be a branch
     /// id, `repo:branch`, or unambiguous id prefix — no live session required.
