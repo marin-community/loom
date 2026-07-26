@@ -21,10 +21,7 @@ use crate::auth::Principal;
 use crate::db::Db;
 use crate::events::Event;
 use crate::session::{self as session_mod, NewSession, Session};
-use crate::{
-    agent, agent_env, backend, config, custom_agents, db, events, git, github, repo, repo_env,
-    setup,
-};
+use crate::{agent, backend, config, custom_agents, db, events, git, github, repo, setup};
 use weaver_api::{
     CreateReq, EnsureResumptionCueReq, HandoffReq, HistoryPageView, LaunchOverrides,
     LaunchSelection, PatchSessionReq, ResumptionCueView, SearchSessionsOptions, SendReq,
@@ -39,21 +36,9 @@ use weaver_core::watch::{self as watch_store, Watch};
 use super::scratch::{prepare_initial_scratch, scratch_note, write_prepared_initial_scratch};
 use super::{author_or_manual, require_branch, require_session, session_view};
 use super::{ApiResult, AppError, AppState};
-
-const MISSING_GITHUB_TOKEN_MESSAGE: &str = "No GitHub token configured. Add your personal GitHub token in Settings > Account, or configure a write-only GH_TOKEN on the selected profile.";
-// A Unicode scalar occupies at most four UTF-8 bytes, so this character bound
-// also fits the ACP transient prompt's 128 KiB byte ceiling.
-const HANDOFF_SUMMARY_CHARS: usize = 32 * 1024;
-const HANDOFF_RECENT_MESSAGES: usize = 8;
-const HANDOFF_RECENT_CHARS: usize = 16 * 1024;
-const HANDOFF_SUMMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
-
-/// External lifecycle work (terminal supervisors + git worktrees) cannot share
-/// a SQLite transaction. Serialize those operations process-wide, then use
-/// compare-and-set database transitions at their commit boundaries. The app
-/// manages only hundreds of sessions, so a coarse lock keeps the invariant
-/// legible without adding a per-session lock registry.
-static LIFECYCLE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+use crate::runtime::{
+    apply_user_github_token, layer_launch_environment, repo_cfg_or_default, set_env,
+};
 
 async fn insert_session_row(
     st: &AppState,
@@ -424,39 +409,6 @@ async fn ensure_repo_registered(db: &Db, input: &str) -> ApiResult<()> {
     Ok(())
 }
 
-/// The valid `[env]` entries from a repo's `.weaver/config.toml`, as launch
-/// pairs. A name that isn't a shell identifier, or that uses loom's reserved
-/// `WEAVER_`/`LOOM_` prefixes, is dropped with a warning — it would corrupt the
-/// `export` or shadow the environment loom relies on (the same rule `agent_env`
-/// enforces on operator vars).
-fn config_env_pairs(cfg: &weaver_core::repo_config::RepoConfig) -> Vec<(String, String)> {
-    cfg.env
-        .iter()
-        .filter(|(name, _)| match agent_env::validate_name(name) {
-            Ok(()) => true,
-            Err(why) => {
-                tracing::warn!(name = %name, why = %why,
-                    "ignoring .weaver/config.toml [env] entry");
-                false
-            }
-        })
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect()
-}
-
-/// Load a repo's `.weaver/config.toml`, logging and degrading to the empty config
-/// on a parse error. For the infra launch paths (warm watch session, adopt)
-/// where there is no create-time request to reject: the file only supplies env
-/// and defaults there, so a malformed one must not block resuming a session — but
-/// it still gets logged rather than silently swallowed.
-fn repo_cfg_or_default(repo_root: &std::path::Path) -> weaver_core::repo_config::RepoConfig {
-    weaver_core::repo_config::load(repo_root).unwrap_or_else(|e| {
-        tracing::warn!(repo = %repo_root.display(), error = %e,
-            "ignoring malformed .weaver/config.toml");
-        weaver_core::repo_config::RepoConfig::default()
-    })
-}
-
 /// Build the environment exported into a session's agent terminal, starting
 /// with the selected profile and then layering the per-repo [`repo_env`] and
 /// committed `.weaver/config.toml` `[env]`. A strict profile keeps ownership of
@@ -476,40 +428,6 @@ async fn launch_env_for_profile(
         .await
         .unwrap_or_default();
     layer_launch_environment(db, repo_root, cfg, profile_name, env, strict, restricted).await
-}
-
-async fn layer_launch_environment(
-    db: &Db,
-    repo_root: &std::path::Path,
-    cfg: &weaver_core::repo_config::RepoConfig,
-    profile_name: &str,
-    mut env: Vec<(String, String)>,
-    strict: bool,
-    restricted: bool,
-) -> Vec<(String, String)> {
-    let repo_root_str = repo_root.display().to_string();
-    if restricted {
-        tracing::debug!(repo = %repo_root_str, profile = profile_name, "restricted launch uses profile environment only");
-        return env;
-    }
-    let repo_pairs = repo_env::pairs(db, &repo_root_str)
-        .await
-        .unwrap_or_default();
-    let config_pairs = config_env_pairs(cfg);
-    if strict {
-        // A strict profile's declared names are policy, not defaults. Repo
-        // layers may add variables but cannot replace a profile-owned value.
-        for (name, value) in repo_pairs.into_iter().chain(config_pairs) {
-            if !env.iter().any(|(existing, _)| existing == &name) {
-                env.push((name, value));
-            }
-        }
-    } else {
-        repo_env::layer(&mut env, repo_pairs);
-        repo_env::layer(&mut env, config_pairs);
-    }
-    tracing::debug!(repo = %repo_root_str, profile = profile_name, strict, env_vars = env.len(), "layered launch environment");
-    env
 }
 
 /// Build the explicit ambient baseline used when Tapestry clears inheritance.
@@ -538,41 +456,6 @@ async fn resume_environment(
     crate::profile::cleared_environment(env, &allowlist)
 }
 
-/// Overlay the launching user's personal GitHub token onto `env` as `GH_TOKEN`,
-/// so the session's `git push` / `gh` act as that user (their pushes and PRs are
-/// attributed to them, matching the per-user commit identity loom already sets).
-/// The user's registered token takes precedence over any `GH_TOKEN` from the
-/// selected profile, repository environment, or committed repo config. Only for
-/// a launch that carries a `created_by` username. Best-effort: a lookup failure
-/// is logged, never fatal, so a token-store hiccup can't block a launch.
-async fn apply_user_github_token(
-    db: &Db,
-    env: &mut Vec<(String, String)>,
-    created_by: Option<&str>,
-) {
-    let Some(username) = created_by else { return };
-    match crate::user_token::get(db, username).await {
-        Ok(Some(token)) if !token.trim().is_empty() => {
-            set_env(env, "GH_TOKEN", token);
-            tracing::info!(%username, "applied user github token as GH_TOKEN");
-        }
-        Ok(_) => {
-            tracing::debug!(%username, "no personal github token on file, retaining session GH_TOKEN")
-        }
-        Err(e) => tracing::warn!(%username, "failed to load user github token: {e}"),
-    }
-}
-
-/// Set `name` in `env`, replacing an existing entry in place (so a user token
-/// overrides a lower-precedence value) or appending it when absent.
-fn set_env(env: &mut Vec<(String, String)>, name: &str, value: String) {
-    if let Some(slot) = env.iter_mut().find(|(k, _)| k == name) {
-        slot.1 = value;
-    } else {
-        env.push((name.to_string(), value));
-    }
-}
-
 async fn rotate_session_token(
     db: &Db,
     session: &Session,
@@ -590,20 +473,6 @@ async fn rotate_session_token(
     Ok(())
 }
 
-fn env_has_key(env: &[(String, String)], name: &str) -> bool {
-    env.iter().any(|(k, _)| k == name)
-}
-
-fn env_has_nonempty(env: &[(String, String)], name: &str) -> bool {
-    env.iter().any(|(k, v)| k == name && !v.trim().is_empty())
-}
-
-fn ambient_env_has_nonempty(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false)
-}
-
 async fn ensure_github_token_available(
     db: &Db,
     env: &[(String, String)],
@@ -611,48 +480,16 @@ async fn ensure_github_token_available(
     runtime: &str,
     restricted_github_app: Option<&crate::github_app::GithubApp>,
 ) -> ApiResult<()> {
-    // Only the builtin PR-driving agents (claude/codex) need GitHub credentials to
-    // push as the user. A custom agent is operator-defined — it may be a manual
-    // terminal or never touch GitHub, and the operator supplies whatever
-    // credentials it needs via env — so it is exempt, as the old manual "shell"
-    // terminal was.
-    if agent::builtin_agent_type(runtime).is_none() {
-        return Ok(());
-    }
-    let Some(username) = created_by else {
-        return Ok(());
-    };
-    // Webhook launches carry an attribution string, not a real approved user.
-    // Their GitHub credentials come from the app/ambient path rather than a
-    // per-user token row.
-    if crate::auth::get_user(db, username).await?.is_none() {
-        return Ok(());
-    }
-    if env_has_nonempty(env, "GH_TOKEN")
-        || (!env_has_key(env, "GH_TOKEN") && ambient_env_has_nonempty("GH_TOKEN"))
-    {
-        return Ok(());
-    }
-    if crate::user_token::get(db, username)
+    if crate::runtime::github_token_available(db, env, created_by, runtime, restricted_github_app)
         .await?
-        .as_deref()
-        .is_some_and(|token| !token.trim().is_empty())
     {
-        return Ok(());
+        Ok(())
+    } else {
+        Err(AppError::new(
+            StatusCode::PRECONDITION_REQUIRED,
+            crate::runtime::MISSING_GITHUB_TOKEN_MESSAGE,
+        ))
     }
-    // Restricted sessions do not push directly. Their fixed GitHub tools can
-    // mint a repository-scoped installation token on demand; callers pass the
-    // App only for that launch posture.
-    if let Some(app) = restricted_github_app {
-        if app.is_configured().await {
-            return Ok(());
-        }
-    }
-    tracing::warn!(created_by = ?created_by, runtime = %runtime, "launch blocked: no github token available");
-    Err(AppError::new(
-        StatusCode::PRECONDITION_REQUIRED,
-        MISSING_GITHUB_TOKEN_MESSAGE,
-    ))
 }
 
 async fn fetch_launch_issue(
@@ -819,106 +656,25 @@ fn create_selection(req: &CreateReq) -> ApiResult<LaunchSelection> {
     Ok(selection.clone())
 }
 
-fn legacy_handoff_mode(requested: &Option<String>, current: &str) -> String {
-    requested
-        .as_deref()
-        .map(str::trim)
-        .filter(|mode| !mode.is_empty())
-        .unwrap_or(current)
-        .to_string()
-}
-
-fn handoff_selection(req: &HandoffReq, session: &Session) -> ApiResult<LaunchSelection> {
-    if let Some(selection) = &req.selection {
-        if !req.agent.trim().is_empty()
-            || req.model.is_some()
-            || req.effort.is_some()
-            || req.mode.is_some()
-        {
-            return Err(AppError::bad_request(
-                "canonical handoff selection cannot be combined with flattened agent/model/effort/mode fields",
-            ));
-        }
-        return Ok(selection.clone());
+fn map_handoff_error(error: crate::handoff::HandoffError) -> AppError {
+    use crate::handoff::HandoffError::*;
+    let (status, message, preview) = match error {
+        BadRequest(message) => (StatusCode::BAD_REQUEST, message, None),
+        Forbidden(message) => (StatusCode::FORBIDDEN, message, None),
+        NotFound(message) => (StatusCode::NOT_FOUND, message, None),
+        Conflict(message, preview) => (
+            StatusCode::CONFLICT,
+            message,
+            preview.map(|preview| *preview),
+        ),
+        PreconditionRequired(message) => (StatusCode::PRECONDITION_REQUIRED, message, None),
+        Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message, None),
+    };
+    let mut mapped = AppError::new(status, message);
+    if let Some(preview) = preview {
+        mapped = mapped.with_fields(json!({ "preview": preview }));
     }
-    let target = req.agent.trim();
-    if target.is_empty() {
-        return Err(AppError::bad_request("handoff agent is required"));
-    }
-    Ok(LaunchSelection {
-        profile: session.profile.clone(),
-        overrides: LaunchOverrides {
-            agent: Some(target.to_string()),
-            model: req.model.clone(),
-            effort: req.effort.clone(),
-            // A flattened handoff historically retained the live session's
-            // permission posture when mode was absent or blank.
-            mode: Some(legacy_handoff_mode(&req.mode, &session.launch_mode)),
-            ..Default::default()
-        },
-    })
-}
-
-fn handoff_resolve_options(session: &Session) -> crate::launch::ResolveOptions {
-    crate::launch::ResolveOptions {
-        // Resolve the selected template's real class. The handoff boundary
-        // compares it with the existing session instead of coercing it first.
-        default_class: None,
-        capacity_credit_profile: crate::profile::status_consumes_capacity(&session.status)
-            .then(|| session.profile.clone()),
-        ..Default::default()
-    }
-}
-
-async fn resolve_handoff_selection(
-    st: &AppState,
-    session: &Session,
-    selection: &LaunchSelection,
-) -> ApiResult<crate::launch::ResolvedLaunch> {
-    let mut resolved =
-        super::launches::resolve_launch(st, selection, &handoff_resolve_options(session)).await?;
-    if resolved.view.class != session.class {
-        resolved.view.errors.push(format!(
-            "profile '{}' is {}-class; this {} session cannot change class during handoff",
-            resolved.profile.name, resolved.view.class, session.class
-        ));
-    }
-    if resolved.view.protocol != "acp" {
-        resolved.view.errors.push(format!(
-            "agent '{}' does not resolve to the ACP protocol required for handoff",
-            resolved.view.agent
-        ));
-    }
-    if resolved.profile.restricted {
-        resolved
-            .view
-            .errors
-            .push("restricted profiles cannot be applied by handoff".to_string());
-    }
-    resolved.view.valid = resolved.view.errors.is_empty();
-    Ok(resolved)
-}
-
-fn require_handoff_source(session: &Session) -> ApiResult<()> {
-    require_acp(session)?;
-    if session.policy_restricted {
-        return Err(AppError::new(
-            StatusCode::FORBIDDEN,
-            "restricted sessions cannot change agent runtime",
-        ));
-    }
-    if !matches!(session.status.as_str(), "running" | "orphaned" | "error") {
-        return Err(AppError::conflict(format!(
-            "session '{}' is {}, not handoff-capable",
-            session.id, session.status
-        )));
-    }
-    if session.managed_by.is_some() {
-        return Err(AppError::conflict(
-            "engine-managed sessions cannot be handed off manually",
-        ));
-    }
-    Ok(())
+    mapped
 }
 
 pub(super) async fn resolve_session_handoff(
@@ -927,18 +683,10 @@ pub(super) async fn resolve_session_handoff(
     Json(req): Json<weaver_api::ResolveLaunchReq>,
 ) -> ApiResult<Json<weaver_api::ResolvedLaunchView>> {
     let (session, _) = require_session(&st.db, &key).await?;
-    require_handoff_source(&session)?;
-    let profile_name = match req.selection.profile.trim() {
-        "" => crate::profile::DEFAULT_PROFILE,
-        name => name,
-    };
-    let _profile_permit = st.launch_gate.acquire_profile(profile_name).await;
-    let _resolver_permit = st.launch_gate.acquire_resolver().await;
-    Ok(Json(
-        resolve_handoff_selection(&st, &session, &req.selection)
-            .await?
-            .view,
-    ))
+    let view = crate::handoff::resolve_session_handoff(&st, &session, &req.selection)
+        .await
+        .map_err(map_handoff_error)?;
+    Ok(Json(view))
 }
 
 /// The session-creation core shared by every producer. The actor supplies trusted
@@ -2167,7 +1915,7 @@ pub(super) async fn patch_session(
     }
     let (initial_session, _) = require_session(&st.db, &key).await?;
     let _source_permit = st.launch_gate.acquire_session(&initial_session.id).await;
-    let _lifecycle = LIFECYCLE_LOCK.lock().await;
+    let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
     let Some((session, branch)) = session_mod::with_branch(&st.db, &initial_session.id).await?
     else {
         return Err(AppError::conflict(
@@ -2326,7 +2074,7 @@ pub(crate) async fn remove(
     _branch: &Branch,
     keep_branch: bool,
 ) -> Result<Vec<String>, AppError> {
-    let _lifecycle = LIFECYCLE_LOCK.lock().await;
+    let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
     let Some((current_session, current_branch)) =
         session_mod::with_branch(&st.db, &session.id).await?
     else {
@@ -2336,7 +2084,7 @@ pub(crate) async fn remove(
     remove_locked(st, &current_session, &current_branch, keep_branch).await
 }
 
-/// Shared deletion after the caller has acquired [`LIFECYCLE_LOCK`] and
+/// Shared deletion after the caller has acquired the runtime lifecycle lock and
 /// refreshed the session row.
 async fn remove_locked(
     st: &AppState,
@@ -2440,7 +2188,7 @@ pub(crate) async fn archive(
     session: &Session,
     _branch: &Branch,
 ) -> Result<Vec<String>, AppError> {
-    let _lifecycle = LIFECYCLE_LOCK.lock().await;
+    let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
     let Some((current_session, current_branch)) =
         session_mod::with_branch(&st.db, &session.id).await?
     else {
@@ -2458,7 +2206,7 @@ pub(crate) async fn auto_archive(
     session: &Session,
     _branch: &Branch,
 ) -> Result<Option<Vec<String>>, AppError> {
-    let _lifecycle = LIFECYCLE_LOCK.lock().await;
+    let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
     let Some((current_session, current_branch)) =
         session_mod::with_branch(&st.db, &session.id).await?
     else {
@@ -2477,7 +2225,7 @@ pub(crate) async fn auto_archive(
         .map(Some)
 }
 
-/// Shared teardown after the caller has acquired [`LIFECYCLE_LOCK`] and
+/// Shared teardown after the caller has acquired the runtime lifecycle lock and
 /// refreshed the session row.
 async fn archive_locked(
     st: &AppState,
@@ -3098,7 +2846,7 @@ pub(crate) async fn adopt(
     // lifecycle mutation, then profile lifetime/admission. Profile CRUD never
     // waits on a session/lifecycle lock, so this order cannot form a cycle.
     let _source_permit = st.launch_gate.acquire_session(&session.id).await;
-    let _lifecycle = LIFECYCLE_LOCK.lock().await;
+    let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
     let Some((current_session, _current_branch)) =
         session_mod::with_branch(&st.db, &session.id).await?
     else {
@@ -3477,7 +3225,7 @@ pub(super) async fn adopt_session(
 /// [`adopt`] does). The session rejoins the active fleet.
 async fn recover(st: &AppState, session: &Session, _branch: &Branch) -> Result<(), AppError> {
     let _source_permit = st.launch_gate.acquire_session(&session.id).await;
-    let _lifecycle = LIFECYCLE_LOCK.lock().await;
+    let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
     let Some((current_session, current_branch)) =
         session_mod::with_branch(&st.db, &session.id).await?
     else {
@@ -4061,180 +3809,7 @@ fn require_acp_task(st: &AppState, session: &Session) -> ApiResult<crate::acp::A
     })
 }
 
-struct HandoffPlan {
-    target: String,
-    model: String,
-    effort: String,
-    mode: String,
-    profile: String,
-    profile_revision: i64,
-    profile_lifetime: i64,
-    env_clear: bool,
-    ambient_allowlist: String,
-    idle_archive_secs: Option<i64>,
-    turn_budget: i64,
-    prelude: String,
-    restricted: bool,
-    strict: bool,
-    allowed_tools: String,
-    mcp_access: String,
-    launch_snapshot: String,
-    profile_environment: Vec<(String, String)>,
-    custom_agent: Option<custom_agents::CustomAgent>,
-}
-
-fn legacy_handoff_snapshot(
-    session: &Session,
-    target: &str,
-    model: &str,
-    effort: &str,
-    mode: &str,
-    custom_agent: Option<&custom_agents::CustomAgent>,
-) -> ApiResult<String> {
-    if session.launch_snapshot.trim().is_empty() {
-        return Ok(String::new());
-    }
-    let mut snapshot = crate::launch::deserialize_snapshot(&session.launch_snapshot)
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
-    snapshot.view.agent = target.to_string();
-    snapshot.view.model = model.to_string();
-    snapshot.view.effort = effort.to_string();
-    snapshot.view.protocol = "acp".to_string();
-    snapshot.view.mode = mode.to_string();
-    snapshot.custom_agent = custom_agent.cloned();
-    snapshot.view.selection.overrides.agent = Some(target.to_string());
-    snapshot.view.selection.overrides.model = Some(model.to_string());
-    snapshot.view.selection.overrides.effort = Some(effort.to_string());
-    snapshot.view.selection.overrides.mode = Some(mode.to_string());
-    snapshot.view.provenance.agent = "launch_override".to_string();
-    snapshot.view.provenance.model = if model.is_empty() {
-        "agent_default"
-    } else {
-        "launch_override"
-    }
-    .to_string();
-    snapshot.view.provenance.effort = if effort.is_empty() {
-        "agent_default"
-    } else {
-        "launch_override"
-    }
-    .to_string();
-    snapshot.view.provenance.protocol = "agent_default".to_string();
-    snapshot.view.provenance.mode = "launch_override".to_string();
-    crate::launch::serialize_snapshot(&snapshot.view, snapshot.custom_agent.as_ref())
-        .map_err(|error| AppError::bad_request(error.to_string()))
-}
-
-async fn legacy_handoff_plan(
-    st: &AppState,
-    req: &HandoffReq,
-    session: &Session,
-) -> ApiResult<HandoffPlan> {
-    let target = req.agent.trim();
-    if target.is_empty() {
-        return Err(AppError::bad_request("handoff agent is required"));
-    }
-    let custom_agent = if crate::agent::builtin_agent_type(target).is_some() {
-        None
-    } else {
-        Some(
-            custom_agents::get(&st.db, target)
-                .await?
-                .ok_or_else(|| AppError::bad_request(format!("unknown agent '{target}'")))?,
-        )
-    };
-    let metadata = match custom_agent.as_ref() {
-        Some(custom) => crate::agent::custom_metadata(custom),
-        None => crate::agent::metadata_for(&st.db, target)
-            .await?
-            .ok_or_else(|| AppError::bad_request(format!("unknown agent '{target}'")))?,
-    };
-    let model = req
-        .model
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or_default()
-        .to_string();
-    let effort = req
-        .effort
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or_default()
-        .to_string();
-    crate::agent::validate_model(&metadata, &model).map_err(AppError::bad_request)?;
-    crate::agent::validate_effort(&metadata, &effort).map_err(AppError::bad_request)?;
-    let protocol =
-        crate::agent::resolve_protocol(&metadata, None).map_err(AppError::bad_request)?;
-    if protocol != "acp" {
-        return Err(AppError::bad_request(format!(
-            "agent '{target}' does not resolve to the ACP protocol required for handoff"
-        )));
-    }
-    let mode = legacy_handoff_mode(&req.mode, &session.launch_mode);
-    if !matches!(
-        mode.as_str(),
-        "auto" | "default" | "acceptEdits" | "plan" | "bypassPermissions"
-    ) {
-        return Err(AppError::bad_request(format!(
-            "invalid handoff mode '{mode}'"
-        )));
-    }
-    let lifetime = crate::profile::get_including_retired(&st.db, &session.profile)
-        .await?
-        .ok_or_else(|| {
-            AppError::conflict(
-                "the session's original profile lifetime is unavailable; review a canonical handoff preview",
-            )
-        })?;
-    if session.profile_lifetime == 0 || lifetime.lifetime != session.profile_lifetime {
-        return Err(AppError::conflict(
-            "the session's profile name now refers to a different template lifetime; review a canonical handoff preview",
-        ));
-    }
-    let keeps_same_slot = crate::profile::status_consumes_capacity(&session.status);
-    if lifetime.max_concurrent > 0
-        && !keeps_same_slot
-        && crate::profile::active_count(&st.db, &session.profile).await? >= lifetime.max_concurrent
-    {
-        return Err(AppError::conflict(format!(
-            "profile '{}' has reached its max_concurrent limit ({})",
-            session.profile, lifetime.max_concurrent
-        )));
-    }
-    let profile_environment = crate::profile::env_pairs(&st.db, &session.profile)
-        .await
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
-    Ok(HandoffPlan {
-        target: target.to_string(),
-        model: model.clone(),
-        effort: effort.clone(),
-        mode: mode.clone(),
-        profile: session.profile.clone(),
-        profile_revision: session.profile_revision,
-        profile_lifetime: session.profile_lifetime,
-        env_clear: session.policy_env_clear,
-        ambient_allowlist: session.policy_ambient_allowlist.clone(),
-        idle_archive_secs: session.policy_idle_archive_secs,
-        turn_budget: session.policy_turn_budget,
-        prelude: session.policy_prelude.clone(),
-        restricted: session.policy_restricted,
-        strict: session.policy_strict,
-        allowed_tools: session.policy_allowed_tools.clone(),
-        mcp_access: session.policy_mcp_access.clone(),
-        launch_snapshot: legacy_handoff_snapshot(
-            session,
-            target,
-            &model,
-            &effort,
-            &mode,
-            custom_agent.as_ref(),
-        )?,
-        profile_environment,
-        custom_agent,
-    })
-}
-
-/// Replace the provider behind an idle ACP work session while preserving loom's
+/// Replace the provider behind an idle ACP work session while preserving Loom's
 /// stable session/branch/worktree identity and canonical journal.
 pub(super) async fn handoff_session(
     State(st): State<AppState>,
@@ -4242,479 +3817,11 @@ pub(super) async fn handoff_session(
     Json(req): Json<HandoffReq>,
 ) -> ApiResult<Json<SessionView>> {
     let (initial_session, _) = require_session(&st.db, &key).await?;
-    require_handoff_source(&initial_session)?;
-    let canonical = req.selection.is_some();
-    if canonical
-        && (req.expected_profile_revision.is_none() || req.expected_resolver_revision.is_none())
-    {
-        return Err(AppError::bad_request(
-            "canonical handoff selection requires expected_profile_revision and expected_resolver_revision from a handoff preview",
-        ));
-    }
-    let _source_permit = st.launch_gate.acquire_session(&initial_session.id).await;
-    let _lifecycle = LIFECYCLE_LOCK.lock().await;
-    let Some((session, branch)) = session_mod::with_branch(&st.db, &initial_session.id).await?
-    else {
-        return Err(AppError::conflict(
-            "session changed while the handoff request was waiting; review it again",
-        ));
-    };
-    require_handoff_source(&session)?;
-    let unchanged_source = session.status == initial_session.status
-        && session.agent_kind == initial_session.agent_kind
-        && session.model == initial_session.model
-        && session.effort == initial_session.effort
-        && session.profile == initial_session.profile
-        && session.profile_revision == initial_session.profile_revision
-        && session.profile_lifetime == initial_session.profile_lifetime
-        && session.launch_mode == initial_session.launch_mode
-        && session.launch_snapshot == initial_session.launch_snapshot
-        && session.mutation_revision == initial_session.mutation_revision;
-    if !unchanged_source {
-        return Err(AppError::conflict(
-            "session changed while the handoff request was waiting; review it again",
-        ));
-    }
-    let selection = canonical
-        .then(|| handoff_selection(&req, &session))
-        .transpose()?;
-    let permit_profile = selection
-        .as_ref()
-        .map(|selection| match selection.profile.trim() {
-            "" => crate::profile::DEFAULT_PROFILE,
-            name => name,
-        })
-        .unwrap_or(session.profile.as_str())
-        .to_string();
-    let _profile_permit = st.launch_gate.acquire_profile(&permit_profile).await;
-    let _resolver_permit = st.launch_gate.acquire_resolver().await;
-    let plan = if let Some(selection) = selection {
-        let resolved = match resolve_handoff_selection(&st, &session, &selection).await {
-            Ok(resolved) => resolved,
-            Err(error) if req.expected_resolver_revision.is_some() => {
-                return Err(AppError::conflict(format!(
-                    "handoff settings can no longer be resolved after preview: {}",
-                    error.message()
-                )));
-            }
-            Err(error) => return Err(error),
-        };
-        if req
-            .expected_profile_revision
-            .is_some_and(|expected| expected != resolved.view.profile_revision)
-            || req
-                .expected_resolver_revision
-                .as_deref()
-                .is_some_and(|expected| expected != resolved.view.resolver_revision)
-        {
-            return Err(AppError::conflict(
-                "handoff settings changed after preview; review the fresh resolution",
-            )
-            .with_fields(json!({ "preview": resolved.view })));
-        }
-        if !resolved.view.valid {
-            return Err(AppError::conflict(
-                "resolved handoff settings are not currently launchable",
-            )
-            .with_fields(json!({ "preview": resolved.view })));
-        }
-        let profile_environment = crate::profile::env_pairs(&st.db, &resolved.profile.name)
-            .await
-            .map_err(|error| AppError::bad_request(error.to_string()))?;
-        let launch_snapshot =
-            crate::launch::serialize_snapshot(&resolved.view, resolved.custom_agent.as_ref())
-                .map_err(|error| AppError::bad_request(error.to_string()))?;
-        HandoffPlan {
-            target: resolved.view.agent.clone(),
-            model: resolved.view.model.clone(),
-            effort: resolved.view.effort.clone(),
-            mode: resolved.view.mode.clone(),
-            profile: resolved.profile.name.clone(),
-            profile_revision: resolved.profile.revision,
-            profile_lifetime: resolved.profile.lifetime,
-            env_clear: resolved.profile.env_clear,
-            ambient_allowlist: resolved.profile.ambient_allowlist.clone(),
-            idle_archive_secs: resolved.view.policy.idle_archive_secs,
-            turn_budget: resolved.view.policy.turn_budget.unwrap_or(0),
-            prelude: resolved.profile.prelude.clone(),
-            restricted: resolved.profile.restricted,
-            strict: resolved.profile.strict,
-            allowed_tools: serde_json::to_string(&resolved.runtime_permissions)
-                .map_err(|error| AppError::bad_request(error.to_string()))?,
-            mcp_access: serde_json::to_string(&resolved.mcp_policy)
-                .map_err(|error| AppError::bad_request(error.to_string()))?,
-            launch_snapshot,
-            profile_environment,
-            custom_agent: resolved.custom_agent,
-        }
-    } else {
-        legacy_handoff_plan(&st, &req, &session).await?
-    };
-    let target = plan.target.clone();
-    let model = plan.model.clone();
-    let effort = plan.effort.clone();
-    let mode = plan.mode.clone();
-    if target == session.agent_kind
-        && model == session.model
-        && effort == session.effort
-        && plan.profile == session.profile
-        && plan.profile_revision == session.profile_revision
-        && mode == session.launch_mode
-    {
-        return Err(AppError::bad_request(
-            "handoff target matches the current runtime profile",
-        ));
-    }
-    let handoff_policy = session_mod::SessionHandoffPolicy {
-        agent_kind: target.clone(),
-        model: model.clone(),
-        effort: effort.clone(),
-        profile: plan.profile.clone(),
-        launch_mode: mode.clone(),
-        profile_revision: plan.profile_revision,
-        profile_lifetime: plan.profile_lifetime,
-        strict: plan.strict,
-        env_clear: plan.env_clear,
-        ambient_allowlist: plan.ambient_allowlist.clone(),
-        idle_archive_secs: plan.idle_archive_secs,
-        turn_budget: plan.turn_budget,
-        prelude: plan.prelude.clone(),
-        restricted: plan.restricted,
-        allowed_tools: plan.allowed_tools.clone(),
-        mcp_access: plan.mcp_access.clone(),
-        launch_snapshot: plan.launch_snapshot.clone(),
-    };
-
-    // Resolve every fallible launch input before quiescing the current task.
-    let repo_root = PathBuf::from(&branch.repo_root);
-    let work_dir = PathBuf::from(&session.work_dir);
-    if !work_dir.exists() {
-        return Err(AppError::bad_request(format!(
-            "worktree {} no longer exists on disk — cannot hand off",
-            session.work_dir
-        )));
-    }
-    let repo_cfg = repo_cfg_or_default(&repo_root);
-    let mut extra_env = layer_launch_environment(
-        &st.db,
-        &repo_root,
-        &repo_cfg,
-        &plan.profile,
-        plan.profile_environment.clone(),
-        plan.strict,
-        plan.restricted,
-    )
-    .await;
-    if plan.env_clear {
-        let allowlist: Vec<String> = serde_json::from_str(&plan.ambient_allowlist)
-            .map_err(|error| AppError::bad_request(error.to_string()))?;
-        extra_env = crate::profile::cleared_environment(extra_env, &allowlist);
-    }
-    apply_user_github_token(&st.db, &mut extra_env, session.created_by.as_deref()).await;
-    // Restricted sessions return before this handoff path, so an App credential
-    // cannot be relevant here.
-    ensure_github_token_available(
-        &st.db,
-        &extra_env,
-        session.created_by.as_deref(),
-        &target,
-        None,
-    )
-    .await?;
-    // A healthy task quiesces on its ordered command channel, preserving the
-    // active-turn/queue safety gate. A missing task is the recovery case: settle
-    // its persisted in-flight turn, retain the durable queue, and continue.
-    let snapshot = if let Some(handle) = st.acp.get(&session.id) {
-        match handle.prepare_handoff().await {
-            Ok(snapshot) => Some(snapshot),
-            Err(error) => {
-                tokio::task::yield_now().await;
-                if st.acp.is_live(&session.id) {
-                    return Err(AppError::conflict(error.to_string()));
-                }
-                tracing::warn!(session = %session.id, %error,
-                    "ACP task vanished while preparing handoff; using persisted recovery state");
-                None
-            }
-        }
-    } else {
-        tracing::warn!(session = %session.id,
-            "handing off without a live ACP task; using persisted recovery state");
-        None
-    };
-    let source_task_quiesced = snapshot.is_some();
-    // Re-read after the task handshake: it may have vanished after our initial
-    // route snapshot while persisting a newer in-flight turn.
-    let persisted = session_mod::get(&st.db, &session.id)
-        .await?
-        .ok_or_else(|| AppError::not_found("session"))?;
-    if let Some(turn) = session_mod::acp_inflight_turn(&persisted) {
-        crate::chat::close_abandoned_turn(&st.db, &session.id, turn).await?;
-    }
-    let blocks = match snapshot {
-        Some(blocks) => blocks,
-        None => crate::chat::list(&st.db, &session.id).await?,
-    };
-    let current_goal = branch_mod::current_goal(&st.db, &branch).await?;
-    let context = crate::chat::handoff_context(
-        &current_goal,
-        &blocks,
-        HANDOFF_SUMMARY_CHARS,
-        HANDOFF_RECENT_MESSAGES,
-        HANDOFF_RECENT_CHARS,
-    );
-    // Only after the source provider has accepted the handoff preflight do we
-    // mint a replacement credential. The old credential remains valid until
-    // the replacement policy commits; every failure below revokes only this
-    // staged token.
-    let staged_token = crate::auth::stage_session_token(
-        &st.db,
-        session.created_by.as_deref(),
-        &session.id,
-        &session.branch_id,
-    )
-    .await?;
-    set_env(&mut extra_env, "LOOM_TOKEN", staged_token.value.clone());
-    let mut launch = match agent::build_acp_launch(
-        &st.db,
-        &agent::AcpLaunchSpec {
-            session_id: &session.id,
-            branch_id: &branch.id,
-            runtime: &target,
-            work_dir: &work_dir,
-            server_addr: &st.addr,
-            model: &model,
-            effort: &effort,
-            goal_file: None,
-            primer_file: None,
-            extra_env: &extra_env,
-            env_clear: plan.env_clear,
-            mode: &mode,
-            prelude: &plan.prelude,
-            restricted: plan.restricted,
-            allowed_tools: &handoff_policy.allowed_tools,
-            mcp_access: &handoff_policy.mcp_access,
-            custom: plan.custom_agent.as_ref(),
-        },
-        agent::AcpOpen::Fresh,
-    )
-    .await
-    {
-        Ok(launch) => launch,
-        Err(error) => {
-            crate::auth::revoke_staged_session_token(&st.db, &staged_token.id)
-                .await
-                .ok();
-            if source_task_quiesced {
-                crate::acp::attach(&st, &session.id).await.ok();
-            }
-            return Err(AppError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                error.to_string(),
-            ));
-        }
-    };
-    let digest = agent::AgentManager::new(&st.db)
-        .summarize_handoff(
-            &target,
-            &context.summary_request,
-            &launch,
-            HANDOFF_SUMMARY_TIMEOUT,
-        )
-        .await;
-    launch.goal = Some(crate::chat::handoff_prompt(
-        &current_goal,
-        digest.text.as_deref(),
-        &context.recent_dialogue,
-    ));
-    // The source may emit its final idle lifecycle edge while acknowledging
-    // preflight. It is quiesced now, so fence provider replacement against this
-    // post-handshake generation rather than the route's earlier snapshot.
-    let claimed_generation = persisted.mutation_revision + 1;
-    let Some(source_state) =
-        session_mod::claim_handoff(&st.db, &session.id, persisted.mutation_revision).await?
-    else {
-        crate::auth::revoke_staged_session_token(&st.db, &staged_token.id)
-            .await
-            .ok();
-        if source_task_quiesced {
-            let current = session_mod::get(&st.db, &session.id).await?;
-            if current
-                .as_ref()
-                .is_some_and(|current| !session_mod::is_terminal(&current.status))
-            {
-                crate::acp::attach(&st, &session.id).await.map_err(|error| {
-                    AppError::new(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!(
-                            "session changed before provider replacement, and its source task could not be restored: {error}"
-                        ),
-                    )
-                })?;
-            }
-        }
-        return Err(AppError::conflict(
-            "session changed before the handoff could replace its provider; review it again",
-        ));
-    };
-    if let Err(kill_error) = backend::kill_session_and_wait(&session.term_session).await {
-        crate::auth::revoke_staged_session_token(&st.db, &staged_token.id)
-            .await
-            .ok();
-        if backend::has_session(&session.term_session).await {
-            match session_mod::rollback_handoff_claim(
-                &st.db,
-                &session.id,
-                claimed_generation,
-                &source_state,
-            )
-            .await?
-            {
-                Some(restored_generation) => {
-                    if let Err(attach_error) = crate::acp::attach(&st, &session.id).await {
-                        session_mod::fail_handoff_claim(&st.db, &session.id, restored_generation)
-                            .await
-                            .ok();
-                        return Err(AppError::new(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!(
-                                "source provider teardown failed ({kill_error}); durable state was restored but reattach failed ({attach_error}), so the session was marked error"
-                            ),
-                        ));
-                    }
-                    return Err(AppError::new(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!(
-                            "source provider teardown failed; the original provider was restored: {kill_error}"
-                        ),
-                    ));
-                }
-                None => {
-                    return Err(AppError::conflict(
-                        "session changed while failed handoff teardown was rolling back; the newer state was preserved",
-                    ));
-                }
-            }
-        }
-        session_mod::fail_handoff_claim(&st.db, &session.id, claimed_generation)
-            .await
-            .ok();
-        return Err(AppError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!(
-                "source provider teardown failed after the provider disappeared; the session was marked recoverable error: {kill_error}"
-            ),
-        ));
-    }
-    if !session_mod::clear_claimed_handoff_source(&st.db, &session.id, claimed_generation).await? {
-        crate::auth::revoke_staged_session_token(&st.db, &staged_token.id)
-            .await
-            .ok();
-        return Err(AppError::conflict(
-            "session changed after source teardown; the newer state was preserved",
-        ));
-    }
-    if let Err(error) = crate::chat::reset_usage(&st.db, &session.id).await {
-        crate::auth::revoke_staged_session_token(&st.db, &staged_token.id)
-            .await
-            .ok();
-        session_mod::fail_handoff_claim(&st.db, &session.id, claimed_generation)
-            .await
-            .ok();
-        return Err(error.into());
-    }
-
-    let boundary = json!({
-        "from": session.agent_kind,
-        "to": target,
-        "model": model,
-        "effort": effort,
-        "prompt_version": crate::chat::HANDOFF_PROMPT_VERSION,
-        "summary_status": digest.status,
-        "summary_model": digest.model,
-        "summary": digest.text,
-        "through_turn": context.through.map(|(turn, _)| turn),
-        "through_seq": context.through.map(|(_, seq)| seq),
-    });
-    if let Err(e) = crate::acp::start_handoff(&st, &session.id, launch, boundary).await {
-        st.acp.stop(&session.id);
-        backend::kill_session(&session.term_session).await.ok();
-        crate::auth::revoke_staged_session_token(&st.db, &staged_token.id)
-            .await
-            .ok();
-        let failure_committed = session_mod::prepare_handoff(
-            &st.db,
-            &session.id,
-            "error",
-            &handoff_policy,
-            claimed_generation,
-        )
+    let (session, branch) = crate::handoff::handoff_session(&st, initial_session, req)
         .await
-        .unwrap_or(false);
-        if failure_committed {
-            events::record(
-                &st.db,
-                &st.bus,
-                &branch.id,
-                "status",
-                json!({ "status": "error", "reason": "agent handoff failed" }),
-            )
-            .await
-            .ok();
-        }
-        return Err(AppError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("agent handoff failed: {e}"),
-        ));
-    }
-    if !session_mod::prepare_handoff(
-        &st.db,
-        &session.id,
-        "running",
-        &handoff_policy,
-        claimed_generation,
-    )
-    .await?
-    {
-        st.acp.stop(&session.id);
-        backend::kill_session(&session.term_session).await.ok();
-        crate::auth::revoke_staged_session_token(&st.db, &staged_token.id)
-            .await
-            .ok();
-        return Err(AppError::conflict(
-            "session changed while the replacement provider was starting; the newer state was preserved",
-        ));
-    }
-    if let Err(error) =
-        crate::auth::commit_staged_session_token(&st.db, &session.id, &staged_token.id).await
-    {
-        st.acp.stop(&session.id);
-        backend::kill_session(&session.term_session).await.ok();
-        crate::auth::revoke_staged_session_token(&st.db, &staged_token.id)
-            .await
-            .ok();
-        session_mod::fail_handoff_claim(&st.db, &session.id, claimed_generation + 1)
-            .await
-            .ok();
-        return Err(AppError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("replacement provider token could not be committed: {error}"),
-        ));
-    }
-
-    events::record(
-        &st.db,
-        &st.bus,
-        &branch.id,
-        "handoff",
-        json!({ "from": session.agent_kind, "to": target, "model": model, "effort": effort }),
-    )
-    .await
-    .ok();
-    let (session, branch) = require_session(&st.db, &session.id).await?;
+        .map_err(map_handoff_error)?;
     Ok(Json(session_view(&st.db, &session, &branch).await?))
 }
-
 /// Permission posture captured when the persisted in-flight turn started. This
 /// differs from `Session.current_mode` after a live config change: that selection
 /// applies to the next prompt.
@@ -5139,19 +4246,6 @@ mod tests {
         assert_eq!(selection.overrides.class, None);
     }
 
-    #[test]
-    fn legacy_handoff_inherits_current_mode_when_omitted_or_blank() {
-        assert_eq!(legacy_handoff_mode(&None, "acceptEdits"), "acceptEdits");
-        assert_eq!(
-            legacy_handoff_mode(&Some(" ".to_string()), "acceptEdits"),
-            "acceptEdits"
-        );
-        assert_eq!(
-            legacy_handoff_mode(&Some(" plan ".to_string()), "acceptEdits"),
-            "plan"
-        );
-    }
-
     async fn seed_user(db: &Db, username: &str) {
         sqlx::query("INSERT INTO users (username) VALUES (?)")
             .bind(username)
@@ -5353,7 +4447,7 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.status(), StatusCode::PRECONDITION_REQUIRED);
-        assert_eq!(err.message(), MISSING_GITHUB_TOKEN_MESSAGE);
+        assert_eq!(err.message(), crate::runtime::MISSING_GITHUB_TOKEN_MESSAGE);
     }
 
     #[serial_test::serial]

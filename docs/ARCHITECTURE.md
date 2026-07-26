@@ -59,6 +59,7 @@ other `weaver` subcommand.
 | `crates/loom/src/custom_mcp.rs` | operator-authored MCP definitions: grouped path identities, immutable sqlite revisions, bounded `uv` validation, and exact session-snapshot execution |
 | `crates/loom/src/profile.rs` | named launch policy, including provider-neutral `mcp_access` resolution and the restricted-profile trust boundary |
 | `crates/loom/src/launch.rs` | canonical profile-template and override resolution for previews, creates, clones, and handoffs; returns the exact private launch snapshot plus its transport-safe view |
+| `crates/loom/src/handoff.rs` | provider handoff orchestration: canonical/legacy target resolution, conversation continuity, lifecycle fencing, rollback, and replacement cleanup; depends on runtime/domain owners, never the REST adapter |
 | `crates/loom/src/session.rs` | `Session` row + sqlx queries |
 | `crates/loom/src/session_layout.rs` | durable Spaces → Groups → Sessions placement, defaults, ordering, and optimistic mutation revisions; independent of immutable provenance and launch policy |
 | `crates/loom/src/session_manager.rs` | database-backed ownership reconciliation for detached agent/debug supervisors; removes Loom-namespaced runtimes without a live session or active launch-reservation owner |
