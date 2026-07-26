@@ -18,6 +18,7 @@ const emit = defineEmits<{
   reanchor: [commentId: number];
   cancelReanchor: [];
   resolution: [commentId: number, resolved: boolean];
+  editing: [payload: { commentId: number; editing: boolean }];
 }>();
 
 const body = ref(props.comment.body);
@@ -47,6 +48,7 @@ watch(
     if (saving.value) {
       saving.value = false;
       editing.value = false;
+      emit('editing', { commentId: props.comment.id, editing: false });
       void nextTick(() => editEl.value?.focus());
     }
   },
@@ -60,6 +62,7 @@ watch(
         (editEl.value ?? resolutionEl.value ?? closeEl.value ?? cardEl.value)?.focus();
       });
     } else {
+      if (editing.value) emit('editing', { commentId: props.comment.id, editing: false });
       editing.value = false;
       saving.value = false;
     }
@@ -88,6 +91,7 @@ watch(
 
 function beginEdit() {
   editing.value = true;
+  emit('editing', { commentId: props.comment.id, editing: true });
   void nextTick(() => textareaEl.value?.focus());
 }
 
@@ -106,6 +110,7 @@ function cancelEdit() {
   body.value = props.comment.body;
   saving.value = false;
   editing.value = false;
+  emit('editing', { commentId: props.comment.id, editing: false });
   void nextTick(() => editEl.value?.focus());
 }
 </script>

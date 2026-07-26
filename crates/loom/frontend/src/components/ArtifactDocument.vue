@@ -314,6 +314,7 @@ const pending = ref<{
 let pendingRange: Range | null = null;
 const pendingBlock = ref(-1);
 const pendingDraft = ref('');
+const editingCommentId = ref<number | null>(null);
 const savingComment = ref(false);
 
 function locateCycle() {
@@ -852,6 +853,23 @@ async function onCommentEvent(
 
 async function prepareLayoutSwap(): Promise<boolean> {
   if (layoutBusy.value) return false;
+  if (pending.value) {
+    composerError.value = 'Add or cancel this pending comment before changing the layout.';
+    await nextTick();
+    containerEl.value
+      ?.querySelector<HTMLTextAreaElement>('[data-testid="review-comment-composer"] textarea')
+      ?.focus();
+    return false;
+  }
+  if (editingCommentId.value != null) {
+    commentErrors.value[editingCommentId.value] =
+      'Save or cancel this comment edit before changing the layout.';
+    await nextTick();
+    containerEl.value
+      ?.querySelector<HTMLTextAreaElement>('[data-testid="review-comment-edit"]')
+      ?.focus();
+    return false;
+  }
   const active = document.activeElement;
   layoutReturnFocus =
     active instanceof HTMLElement && containerEl.value?.contains(active) ? active : null;
@@ -939,6 +957,10 @@ function renderCard(entry: ReviewEntry): VNode {
       onEdit: editComment,
       onReanchor: beginReanchor,
       onCancelReanchor: cancelReanchor,
+      onEditing: (payload: { commentId: number; editing: boolean }) => {
+        editingCommentId.value = payload.editing ? payload.commentId : null;
+        if (!payload.editing) commentErrors.value[payload.commentId] = '';
+      },
       onResolution: (commentId: number, resolved: boolean) =>
         setResolution(entry.review, commentId, resolved),
     }),

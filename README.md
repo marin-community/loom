@@ -186,6 +186,21 @@ only an unchanged derived label, or an unchanged generated label after an
 explicit regenerate request. Renames use compare-and-swap so a stale tab cannot
 overwrite a newer label.
 
+The dashboard presents the fleet as shared **Spaces → Groups → Sessions**.
+Attention, All, and History are smart views over that placement; successful
+automation is ordinary work in Ops, while failed reservations remain typed
+Interventions. Group rows show the unqualified task label and cross-group views
+compose `Group / Task`.
+
+A session opens on Conversation (or Agent for a terminal-backed runtime), with
+one Review surface for Artifacts and Changes. Details owns launch metadata,
+associations, Scratch, lifecycle actions, profile-first handoff, and the
+advanced editor escape hatch. Review comments remain private drafts until one
+Submit review action delivers coherent feedback. The Issues pane supports
+stable multi-selection and atomic bulk triage. Destructive actions use
+focus-managed in-app confirmation with explicit scope and retryable inline
+errors; the SPA never delegates that work to browser prompts.
+
 `loom session url` prints a session's dashboard URL — the link to hand a person,
 resolved against loom's externally-visible address (the `auth.base_url` setting,
 else the address you reached it on). With no key it is the session you are
@@ -358,7 +373,7 @@ Loom serves a JSON API under `/api`; the Vue SPA is the primary consumer.
   `POST /api/sessions/{id}/handoff/resolve`,
   `POST /api/sessions/{id}/{note,archive,adopt,handoff,github}`,
   `PUT /api/sessions/{id}/tags` (atomic author-scoped replacement),
-  `GET /api/sessions/{id}/{diff,log,events}`,
+  `GET /api/sessions/{id}/{changes,log,events}`,
   `GET /api/sessions/{id}/terminal` (WebSocket: xterm.js ⇄ the tapestry PTY)
 - `GET /api/mcps`, `GET POST /api/mcps/custom`, and
   `GET PUT DELETE /api/mcps/custom/{path}` (builtin discovery and validated,
@@ -370,7 +385,12 @@ Loom serves a JSON API under `/api`; the Vue SPA is the primary consumer.
   `GET POST DELETE /api/sessions/{id}/scratch`
 - `GET /api/branches`, `GET PATCH /api/branches/{id}`,
   `GET POST /api/branches/{id}/issues` (issues claimed by the branch),
-  `GET PATCH DELETE /api/issues/{id}`
+  `GET PATCH DELETE /api/issues/{id}`, `POST /api/issues/actions`
+- `GET POST /api/sessions/{id}/reviews`,
+  `GET PATCH DELETE /api/reviews/{id}`,
+  `POST /api/reviews/{id}/comments`,
+  `PATCH DELETE /api/reviews/{id}/comments/{comment_id}`,
+  `POST /api/reviews/{id}/{submit,retry-delivery}`
 - `GET /api/repos/recent`, `GET /api/repos/branches?cwd=…`,
   `GET POST /api/repos/issues?repo_root=…` (the repo-wide board / backlog)
 - `GET POST /api/repos` (the managed repo store / clone allowlist)

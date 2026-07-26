@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router';
 import * as api from '../api';
 import { me, doLogout } from '../auth';
 import type { User, GithubConfig } from '../types';
+import { confirmAction } from '../lib/confirmation';
 
 // Account + access management: who you are, your password, the approved-user
 // allowlist, and the single GitHub App that backs loom — its OAuth client powers
@@ -79,22 +80,23 @@ async function saveMyGithubToken() {
 }
 
 async function clearMyGithubToken() {
-  if (
-    !confirm(
-      "Remove your personal GitHub token? New interactive sessions will use their profile's credential, if configured.",
-    )
-  )
-    return;
-  busy.value = true;
-  try {
-    await api.deleteMyGithubToken();
-    ghTokenStatus.value = { set: false, updated_at: null };
-    ok('GitHub token removed.');
-  } catch (e) {
-    fail(e);
-  } finally {
-    busy.value = false;
-  }
+  await confirmAction({
+    title: 'Remove your personal GitHub token?',
+    description:
+      "New interactive sessions will use their profile's credential, if configured. Existing sessions are unchanged.",
+    confirmLabel: 'Remove token',
+    danger: true,
+    action: async () => {
+      busy.value = true;
+      try {
+        await api.deleteMyGithubToken();
+        ghTokenStatus.value = { set: false, updated_at: null };
+        ok('GitHub token removed.');
+      } finally {
+        busy.value = false;
+      }
+    },
+  });
 }
 
 // -- Approved users ---------------------------------------------------------
@@ -133,17 +135,22 @@ async function addUser() {
 }
 
 async function removeUser(u: User) {
-  if (!confirm(`Remove approved user "${u.username}"? They will lose access.`)) return;
-  busy.value = true;
-  try {
-    await api.removeUser(u.username);
-    ok('User removed.');
-    await loadUsers();
-  } catch (e) {
-    fail(e);
-  } finally {
-    busy.value = false;
-  }
+  await confirmAction({
+    title: `Remove approved user "${u.username}"?`,
+    description: 'They will lose dashboard and API access immediately.',
+    confirmLabel: 'Remove user',
+    danger: true,
+    action: async () => {
+      busy.value = true;
+      try {
+        await api.removeUser(u.username);
+        ok('User removed.');
+        await loadUsers();
+      } finally {
+        busy.value = false;
+      }
+    },
+  });
 }
 
 // -- GitHub App -------------------------------------------------------------

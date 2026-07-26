@@ -67,13 +67,6 @@ const localTab = ref<LocalTab | null>(
     ? (initialTab as LocalTab)
     : null,
 );
-// Overview no longer exists. Clean up old bookmarks/row links without breaking
-// the session deep link; the protocol-appropriate work surface becomes active.
-if (initialTab === 'overview') {
-  const query = { ...route.query };
-  delete query.tab;
-  void router.replace({ query });
-}
 const effectiveLocalTab = computed<LocalTab>(() => localTab.value ?? defaultTab.value);
 
 // The artifacts surface is open whenever the path is under `…/artifacts`.

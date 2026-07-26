@@ -12,6 +12,7 @@ import {
 import { useRouter } from 'vue-router';
 import { getArtifacts, getArtifact, putArtifact, deleteArtifact } from '../api';
 import type { ArtifactMeta, ArtifactView } from '../types';
+import { confirmAction } from '../lib/confirmation';
 import ArtifactDocument from './ArtifactDocument.vue';
 import HtmlArtifactView from './HtmlArtifactView.vue';
 
@@ -269,31 +270,30 @@ async function remove() {
   if (!identity || removing.value) return;
   const name = identity.name;
   const count = identity.view.versions.length;
-  if (
-    !confirm(
-      `Delete artifact "${name}" and all ${count} revision${count === 1 ? '' : 's'}? ` +
-        `This cannot be undone.`,
-    )
-  )
-    return;
-  removing.value = true;
-  viewError.value = '';
-  try {
-    await deleteArtifact(props.id, name);
-    loaded.value = null;
-    draftContent.value = '';
-    await loadList();
-    const next = list.value[0]?.name;
-    if (next) {
-      await openArtifact(next);
-    } else {
-      router.replace(`/s/${props.id}/artifacts`);
-    }
-  } catch (e) {
-    viewError.value = (e as Error).message;
-  } finally {
-    removing.value = false;
-  }
+  await confirmAction({
+    title: `Delete artifact "${name}"?`,
+    description: `All ${count} revision${count === 1 ? '' : 's'} and their review history will be permanently removed.`,
+    confirmLabel: 'Delete artifact',
+    danger: true,
+    action: async () => {
+      removing.value = true;
+      viewError.value = '';
+      try {
+        await deleteArtifact(props.id, name);
+        loaded.value = null;
+        draftContent.value = '';
+        await loadList();
+        const next = list.value[0]?.name;
+        if (next) {
+          await openArtifact(next);
+        } else {
+          await router.replace(`/s/${props.id}/artifacts`);
+        }
+      } finally {
+        removing.value = false;
+      }
+    },
+  });
 }
 
 // --- Scope badge -----------------------------------------------------------

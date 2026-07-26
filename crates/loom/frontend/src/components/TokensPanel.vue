@@ -2,6 +2,7 @@
 import { ref, onMounted } from 'vue';
 import * as api from '../api';
 import type { Token, CreatedToken } from '../types';
+import { confirmAction } from '../lib/confirmation';
 import SettingsTableSection from './SettingsTableSection.vue';
 
 // Manage API tokens — the `LOOM_TOKEN` automation presents as a bearer. The
@@ -44,17 +45,22 @@ async function create() {
 }
 
 async function revoke(t: Token) {
-  if (!confirm(`Revoke "${t.name}"? Anything using this token will stop working.`)) return;
-  busy.value = true;
-  error.value = '';
-  try {
-    await api.revokeToken(t.id);
-    await load();
-  } catch (e) {
-    error.value = (e as Error).message;
-  } finally {
-    busy.value = false;
-  }
+  await confirmAction({
+    title: `Revoke API token "${t.name}"?`,
+    description: 'Anything using this token will immediately lose access.',
+    confirmLabel: 'Revoke token',
+    danger: true,
+    action: async () => {
+      busy.value = true;
+      error.value = '';
+      try {
+        await api.revokeToken(t.id);
+        await load();
+      } finally {
+        busy.value = false;
+      }
+    },
+  });
 }
 
 async function copy() {

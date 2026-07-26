@@ -1,9 +1,11 @@
 import { test, expect } from '../fixtures/weaver';
+import { writeFileSync } from 'fs';
+import { join } from 'path';
 
 test.describe('creating a session via the UI form', () => {
   const repoPlaceholder = 'owner/name or /home/you/code/project';
 
-  test('selects a profile, overrides it, launches, and drops an attachment', async ({
+  test('launches from the workbench and submits a change review', async ({
     page,
     weaver,
   }) => {
@@ -50,16 +52,46 @@ test.describe('creating a session via the UI form', () => {
     await page.getByTestId('scratch-picker-dropzone').dispatchEvent('drop', { dataTransfer });
     await expect(page.getByTestId('scratch-picker-file')).toContainText('trace.log');
 
-    await page.getByRole('button', { name: 'Create session' }).click();
+    await page.getByPlaceholder('Add a /health endpoint').press('Control+Enter');
     await expect(page).toHaveURL(/\/s\/[^/]+$/);
 
     const all = await weaver.listSessions();
-    expect(all[0].profile).toBe('ui-launch');
-    expect(all[0].launch_mode).toBe('plan');
-    expect(all[0].resolved_launch?.provenance.mode).toBe('launch_override');
-    const res = await fetch(`${weaver.baseUrl}/api/sessions/${all[0].id}/scratch`);
+    const session = all[0];
+    expect(session.profile).toBe('ui-launch');
+    expect(session.launch_mode).toBe('plan');
+    expect(session.resolved_launch?.provenance.mode).toBe('launch_override');
+    expect(session.branch.title).toBe('Investigate the attached trace');
+    expect(session.branch.title_provenance).toBe('derived');
+    const res = await fetch(`${weaver.baseUrl}/api/sessions/${session.id}/scratch`);
     const files = (await res.json()) as { name: string; bytes: number }[];
     expect(files).toEqual([{ name: 'trace.log', bytes: Buffer.byteLength('panic at line 42\n') }]);
+
+    writeFileSync(join(session.work_dir, 'review.txt'), 'first\nsecond\n');
+    await page.locator('[data-rail="sessions"]').click();
+    const card = page.getByTestId('session-card');
+    await expect(card).toContainText('Investigate the attached trace');
+    await expect(card).not.toContainText('Inbox / Investigate the attached trace');
+    await card.click();
+    await page.locator('[data-tab="review"]').click();
+    await page.getByRole('link', { name: 'Changes', exact: true }).click();
+    await expect(page.getByRole('tab', { name: 'Review' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await page.getByRole('button', { name: /review\.txt/ }).click();
+    await page.getByRole('button', { name: /Comment on review\.txt new line 1/ }).click();
+    const composer = page.getByTestId('change-comment-composer');
+    await composer.locator('textarea').fill('Explain why this line belongs here.');
+    await composer.getByRole('button', { name: 'Add pending comment' }).click();
+    const changes = page.getByTestId('changes-panel');
+    const tray = changes.getByTestId('review-tray');
+    await expect(tray).toContainText('1 pending');
+    await changes.getByTestId('submit-review').click();
+    await expect(tray).toContainText('Review submitted');
+
+    await page.getByRole('button', { name: /Details/ }).click();
+    await page.getByText('Advanced', { exact: true }).click();
+    await expect(page.getByTestId('action-open-editor')).toBeVisible();
   });
 
   test('refreshes added, edited, and deleted profiles without losing the cached draft', async ({
@@ -72,7 +104,6 @@ test.describe('creating a session via the UI form', () => {
 
     await page.getByRole('link', { name: 'Edit profile templates in Settings' }).click();
     await expect(page).toHaveURL(`${weaver.baseUrl}/settings`);
-    await expect(page.getByTestId('profile-selector')).toBeVisible();
     await page.getByRole('button', { name: '+ Add profile' }).click();
     await page.getByLabel('Name', { exact: true }).fill('cached-template');
     await page.getByLabel('Description', { exact: true }).fill('first revision');

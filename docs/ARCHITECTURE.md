@@ -299,6 +299,7 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `PUT /api/sessions/{id}/file?path=…` | write raw bytes to a worktree file (the editor save primitive) |
 | `GET /api/sessions/{id}/artifacts` | list the branch's [artifacts](artifacts.md) plus repo-shared ones |
 | `GET PUT /api/sessions/{id}/artifacts/{name}` | read content + projected refs (`rev=N` for a revision) / write a user edit as a new revision |
+| `GET /api/sessions/{id}/changes` | bounded typed worktree change set relative to the session base: file status/totals plus hunk lines with stable old/new line coordinates; backs the SPA and `loom session changes` |
 | `GET POST /api/sessions/{id}/reviews` | resolve the public artifact name to its immutable ID, then list submitted reviews plus the caller's private draft / create or recover a draft for that exact versioned subject |
 | `GET PATCH /api/reviews/{id}` | inspect a review by stable ID (including historical delivery after artifact deletion) / persist a draft's overall summary or advance its target revision after every older anchor has been re-anchored |
 | `POST /api/reviews/{id}/retarget-current` | guarded overall-only draft mutation that moves its target to the immutable artifact's actual latest revision |
@@ -306,7 +307,7 @@ All routes live under `/api`. The Vue SPA is the primary consumer.
 | `POST /api/reviews/{id}/comments/{comment_id}/resolve` | any authenticated operator may resolve or reopen the one mutable lifecycle bit on an otherwise immutable submitted comment |
 | `DELETE /api/reviews/{id}` / `POST /api/reviews/{id}/submit` | guarded discard / atomically check the artifact revision, freeze the exact server-rendered message, record its event, and enqueue it |
 | `POST /api/reviews/{id}/retry-delivery` | any authenticated operator may retry a failed submitted-review delivery using its stable delivery key |
-| `GET /api/sessions/{id}/{diff,log,events}` | reads + SSE stream |
+| `GET /api/sessions/{id}/{log,events}` | recent branch events + SSE stream |
 | `GET /api/sessions/{id}/conversation` | the agent conversation as a normalized iris log (live transcript, else the archive capture); 404 when there is none — backs the Conversation tab |
 | `GET /api/sessions/{id}/history` | a bounded newest-tail page of provider-neutral records in chronological display order; `before`, `limit`, and `kinds` own backward pagination/filtering |
 | `GET /api/sessions/{id}/history/search` | case-insensitive literal `q` search over the same session-scoped records and cursor/filter contract |

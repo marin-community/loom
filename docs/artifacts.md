@@ -306,19 +306,20 @@ update the issues; when issues change shape, update the doc's references.*
 
 ### Loom UI
 
-- **Session detail** gains an Artifacts surface (`ArtifactsPanel`): list +
+- **Session detail → Review → Artifacts** is the canonical document surface
+  (`ArtifactsPanel`): list +
   viewer (`ArtifactDocument` for markdown, `HtmlArtifactView` for html, a
   raw-source pane for everything else), version picker, a preview ⇄ source toggle
   with a plain-text source editor for user edits (each save = new revision,
-  `author: user`). It is a tab *within* the session page — a
+  `author: user`). It is kept alive *within* the session page — a
   kept-alive panel served from `SessionDetail` (the `/s/:id/artifacts/:name`
   deep link resolves to the same instance), so moving terminal ⇄ artifacts is an
   instant flip on the warm page, not a route swap. The panel can **pop out** into
-  a resizable rail beside the live terminal (mirroring the embedded-editor
-  panel), so the user reads an artifact and watches the agent at once.
+  a resizable rail beside the live work surface, so the user reads an artifact
+  and watches the agent at once. Changes is its sibling under Review.
 - **Session detail** keeps the branch goal/prompt as a collapsed, bounded
   disclosure in Details. Documents, including the well-known `plan`, remain on
-  the canonical Artifacts surface instead of being duplicated into an overview.
+  the canonical Artifacts surface instead of being duplicated into a summary.
 - **Projection pass** in the markdown renderer: `#123` → live status chip
   linking to the issue, `artifact:` links resolve, checked state for a
   referenced issue comes from the ledger, never the text.
@@ -338,7 +339,10 @@ update the issues; when issues change shape, update the doc's references.*
   overall-only draft can instead be moved to the current revision with one
   guarded mutation. Remaining old anchors require an explicit acknowledgement.
   The docked and popped viewers await summary and comment writes before swapping
-  layouts and preserve a rendered content sentinel through reflow.
+  layouts and preserve a rendered content sentinel through reflow. A pending
+  composer or existing-comment editor is intentionally browser-local until
+  saved; pop, dock, and route moves therefore stop with a focused “save or
+  cancel” instruction instead of discarding its text.
 
   `Submit review` freezes the draft and its comments in one transaction,
   checks the current artifact revision, records one `review_submitted` event,

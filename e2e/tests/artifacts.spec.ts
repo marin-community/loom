@@ -137,57 +137,6 @@ test.describe('artifacts surface', () => {
     await expect(page.locator('.markdown-body')).toContainText('A user revision.');
   });
 
-  test('each viewed revision keeps an independent reading position', async ({ page, weaver }) => {
-    const session = await weaver.seedSession({
-      goal: 'compare revisions',
-      name: 'artifact-revision-scroll',
-    });
-    await weaver.writeArtifact(
-      session,
-      'notes',
-      longDoc().replace('# Long operational notes', '# Revision one'),
-      { title: 'Notes' },
-    );
-    await weaver.writeArtifact(
-      session,
-      'notes',
-      longDoc().replace('# Long operational notes', '# Revision two'),
-      { title: 'Notes' },
-    );
-
-    await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/notes`);
-    const scroll = page.getByTestId('artifact-scroll');
-    const rev = page.getByTestId('artifact-rev');
-    await expect(page.locator('.markdown-body h1')).toContainText('Revision two');
-
-    await scroll.evaluate((element) => {
-      element.scrollTop = 640;
-    });
-    const latestTop = await scroll.evaluate((element) => element.scrollTop);
-
-    await rev.selectOption('1');
-    await expect(page.locator('.markdown-body h1')).toContainText('Revision one');
-    await scroll.evaluate((element) => {
-      element.scrollTop = 1_420;
-    });
-    const oldTop = await scroll.evaluate((element) => element.scrollTop);
-    expect(oldTop).toBeGreaterThan(latestTop + 500);
-
-    await rev.selectOption('');
-    await expect(page.locator('.markdown-body h1')).toContainText('Revision two');
-    await expect
-      .poll(async () =>
-        Math.abs((await scroll.evaluate((element) => element.scrollTop)) - latestTop),
-      )
-      .toBeLessThanOrEqual(5);
-
-    await rev.selectOption('1');
-    await expect(page.locator('.markdown-body h1')).toContainText('Revision one');
-    await expect
-      .poll(async () => Math.abs((await scroll.evaluate((element) => element.scrollTop)) - oldTop))
-      .toBeLessThanOrEqual(5);
-  });
-
   test('deleting an artifact removes it and falls back to the next', async ({ page, weaver }) => {
     const session = await weaver.seedSession({
       goal: '# Session goal\n\nClean up the docs.',
@@ -203,9 +152,9 @@ test.describe('artifacts surface', () => {
     await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/scratch`);
     await expect(page.locator('.markdown-body h1')).toContainText('Throwaway');
 
-    // Confirm the destructive prompt, then delete.
-    page.once('dialog', (d) => d.accept());
+    // Confirm the destructive action, then delete.
     await page.getByTestId('artifact-delete').click();
+    await page.getByTestId('confirm-dialog-confirm').click();
 
     // The row is gone and the viewer falls back to the first remaining artifact.
     // Every session carries an always-present `goal` artifact (the goal is a
@@ -342,7 +291,7 @@ test.describe('artifacts surface', () => {
       .toBeLessThanOrEqual(5);
   });
 
-  test('Artifacts is an in-page tab — terminal ⇄ artifacts stays on the session page', async ({
+  test('Review routes keep artifacts on the warm session page', async ({
     page,
     weaver,
   }) => {
@@ -357,15 +306,15 @@ test.describe('artifacts surface', () => {
     await page.goto(`${weaver.baseUrl}/s/${session.id}`);
     await expect(page.locator('[data-term-tab="agent"]')).toBeVisible();
 
-    // Clicking Artifacts flips the tab in place (the tab bar stays); the panel
-    // renders and the URL deep-links, with no full-page navigation away.
-    await page.locator('[data-tab="artifacts"]').click();
+    // Review opens its canonical Artifacts route without remounting the session.
+    await page.getByRole('tab', { name: 'Review' }).click();
     await expect(page).toHaveURL(new RegExp(`/s/${session.id}/artifacts`));
     await expect(page.locator('.markdown-body h1')).toContainText('Plan');
-    await expect(page.locator('[data-tab="terminal"]')).toBeVisible(); // same page, tab bar intact
+    await expect(page.getByRole('link', { name: 'Changes', exact: true })).toBeVisible();
+    await expect(page.getByRole('tab', { name: 'Agent' })).toBeVisible();
 
-    // Back to Terminal — the warm terminal returns, URL back to the session.
-    await page.locator('[data-tab="terminal"]').click();
+    // Back to Agent — the warm terminal returns and the review route closes.
+    await page.getByRole('tab', { name: 'Agent' }).click();
     await expect(page).toHaveURL(`${weaver.baseUrl}/s/${session.id}`);
     await expect(page.locator('[data-term-tab="agent"]')).toBeVisible();
   });

@@ -16,10 +16,9 @@ answer; the design it argues for now ships. What landed:
   `issues.plan_task` link column with `issue::list_for_plan` / `set_title`.
 - **`weaver` CLI** — `weaver plan new | ls | show | sync [--apply]`, with task
   status projected from the issue ledger.
-- **loom** — `GET /api/sessions/{id}/plan`, `POST /api/sessions/{id}/plan/sync`,
-  and the `PUT /api/sessions/{id}/file` write primitive; a `SessionPlan`
-  component renders the plan on the Overview tab (read-first, projected status,
-  dependency graph) with an Edit-in-source mode and Reconcile.
+- **loom** — plans now render as ordinary versioned artifacts under
+  **Review → Artifacts**, with live issue projection and staged feedback. The
+  issue ledger remains the writable task state.
 
 The rest is the original design argument, kept as the rationale of record.
 
@@ -294,51 +293,17 @@ reconciles → repeat. When the plan is blessed, `weaver plan sync` materializes
 the issues and the human launches the fan-out, one session per high-value task.
 The plan file then keeps living as the project's design doc and its status map.
 
-## The interaction surface (loom)
+## The current interaction surface (loom)
 
-The dashboard is where "understand and interact with the workflow" actually
-happens, and it is the payoff for storing structure-in-file / state-in-DB. The
-good news after merging #16/#17: **almost the entire renderer already ships.**
-`markdown.ts` + `MarkdownView.vue` give GFM markdown, `mermaid` diagrams
-(client-side, theme-aware), and `- [ ]`/`- [x]` task lists today; a raw-source
-view is already wired (read-only) in the file browser; the session detail already has a
-**Terminal / Overview / Issues / Files** tab bar. So the plan view is mostly
-*composition*, not new infrastructure.
+Plans are versioned artifacts under **Review → Artifacts**. `MarkdownView`
+renders GFM, Mermaid, and task references; the projection joins issue state
+from the ledger rather than trusting hand-authored checkboxes. Artifact source
+editing is an explicit secondary mode, while staged comments let the user send
+one coherent review back through Conversation.
 
-**Where it lands: the Overview tab.** A session's Overview is today read-only
-context (goal, activity, scratch). For a session whose claimed issue carries a
-`plan_task`, render *that plan* at the top of Overview via `MarkdownView` (with
-the session's own task highlighted) — the big picture, with "your part" called
-out. Sessions with no plan keep today's Overview unchanged.
-
-**Read-first, with a deliberate Edit mode.** Overview's design rule is "the
-agent authors, the human reads." The plan is the one principled exception — the
-design loop *is* the user editing it — so the affordance must be explicit, not
-ambient. Reuse the pattern the file browser already proved: a **preview ⇄ source
-toggle**. An **Edit** button swaps the rendered plan for **a plain-text source
-editor in the same panel** (editable, not the read-only viewer), with **Save** and **Cancel**; Save
-writes the file and offers *Reconcile* (the plan's task set may have changed).
-This is a mode-flip on one object, not a separate modal or destination — and it
-generalizes: the same file-write path makes the Files tab editable for free.
-
-- **Status, projected not authored.** The plan view is `MarkdownView` plus a
-  post-render pass that joins each task's `plan_task` to its issue and stamps a
-  live badge (open / claimed-by-`<branch>` / closed) — never a stale hand-typed
-  checkbox. (v1 can ship the plain render; the badge overlay is step 4.)
-- **A task-dependency graph** from `deps:`, nodes colored by status, surfacing
-  the critical path and what's unblocked *right now*.
-- **Drill-down**: task → its issue → its session → its live terminal/diff. The
-  plan becomes the single index into a sprawling fan-out — the thing that's
-  missing today when ten sessions are in flight.
-- **Actions**: *Reconcile* (`plan sync`, show the delta), *Launch* (per ready
-  task → `loom session launch --claim`).
-
-The one genuinely new backend piece is a **file-write endpoint** (today
-`/sessions/{id}/raw` and `/file` are read-only; the source view is read-only).
-Everything lands API-first — a plan read endpoint (parsed + tasks joined to
-issue status), a `sync` endpoint, and the file-write endpoint in `web.rs`,
-consumed by the SPA and the `loom` CLI alike; the agent-facing `weaver plan`
-talks straight to the file + DB. No browser-only state ([[ui-built-on-rest-api]]).
+The broader work remains navigable through spaces/groups, qualified smart-view
+labels, and the Issues bulk-triage surface. Plans do not create another session
+destination or browser-local task model.
 
 ## Scope: a plan lives on a branch
 
@@ -436,11 +401,8 @@ independently useful.
    only. The fan-out works end to end from a plan.
 3. **In-flight flagging.** The "don't clobber claimed work" rules; raise
    `attention`. This is the bit that makes the design loop *safe*.
-4. **loom plan view + Edit.** Render the plan on Overview (`MarkdownView`, the
-   status-badge overlay, dependency graph, drill-down), plus the file-write
-   endpoint and the preview ⇄ source Edit toggle, and the Reconcile/Launch
-   actions. The file-write endpoint can land earlier if Files-tab editing is
-   wanted sooner.
+4. **loom plan view.** Render the plan through the artifact pipeline with live
+   issue projection and drill-down.
 
 Each step is independently shippable and independently useful.
 
@@ -456,10 +418,8 @@ Each step is independently shippable and independently useful.
 - **`plans` DB row:** **no** — file scan for enumeration, `plan_task` on issues
   for the link/status join. The file and `issues` already own every fact a table
   would hold. ✅
-- **Dashboard editing:** read-first on the **Overview** tab with an explicit
-  **Edit** button that flips the rendered plan to **a source editor** in-place (Save +
-  Cancel, then offer Reconcile) — reusing the file browser's proven preview ⇄
-  source pattern. Needs one new backend primitive: a file-write endpoint. ✅
+- **Dashboard interaction:** read-first under **Review → Artifacts**, with
+  explicit source editing and staged review rather than a special plan page. ✅
 
 Remaining minor sub-question: `.weaver/config.toml` vs flat `.weaver.toml`
 (cosmetic), and optimistic-concurrency handling if the agent rewrites the plan

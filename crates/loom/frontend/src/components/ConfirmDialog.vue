@@ -10,11 +10,13 @@ const props = withDefaults(
     busy?: boolean;
     danger?: boolean;
     confirmDisabled?: boolean;
+    error?: string;
   }>(),
   {
     busy: false,
     danger: false,
     confirmDisabled: false,
+    error: '',
   },
 );
 
@@ -22,6 +24,7 @@ const emit = defineEmits<{ confirm: []; cancel: [] }>();
 const dialogId = useId();
 const titleId = `${dialogId}-title`;
 const descriptionId = `${dialogId}-description`;
+const errorId = `${dialogId}-error`;
 const panel = ref<HTMLElement | null>(null);
 const cancelButton = ref<HTMLButtonElement | null>(null);
 let returnFocus: HTMLElement | null = null;
@@ -97,16 +100,25 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown));
         role="dialog"
         aria-modal="true"
         :aria-labelledby="titleId"
-        :aria-describedby="descriptionId"
+        :aria-describedby="error ? `${descriptionId} ${errorId}` : descriptionId"
         tabindex="-1"
         class="w-full max-w-md rounded-md border border-line bg-surface p-4 shadow-xl"
         data-testid="confirm-dialog"
       >
         <h2 :id="titleId" class="text-base font-semibold text-fg">{{ title }}</h2>
+        <p v-if="danger" class="mt-1 text-xs font-semibold text-block">Destructive action</p>
         <p :id="descriptionId" class="mt-2 text-sm text-muted">{{ description }}</p>
         <div v-if="$slots.default" class="mt-4">
           <slot></slot>
         </div>
+        <p
+          v-if="error"
+          :id="errorId"
+          class="mt-4 rounded border border-block-line bg-block-soft px-3 py-2 text-sm text-block"
+          role="alert"
+        >
+          {{ error }}
+        </p>
         <div class="mt-5 flex justify-end gap-2">
           <button
             ref="cancelButton"

@@ -387,6 +387,33 @@ test.describe("staged artifact reviews", () => {
       .toBeGreaterThan(before.max * 0.7);
     await expect(page.getByText("Final review target")).toBeInViewport();
 
+    await selectPhrase(page, "Final review target at the end.");
+    await page.getByTestId("review-selection-button").click();
+    const pendingComposer = page.getByTestId("review-comment-composer");
+    const pendingText = pendingComposer.locator("textarea");
+    await pendingText.fill("Keep this local composer text.");
+    await page.getByTestId("artifact-pop").click();
+    await expect(page.getByTestId("artifact-pop")).toContainText("Pop out");
+    await expect(pendingComposer.getByRole("alert")).toContainText(
+      "Add or cancel this pending comment",
+    );
+    await expect(pendingText).toBeFocused();
+    await pendingComposer.getByRole("button", { name: "Cancel" }).click();
+
+    await selectPhrase(page, "Final review target at the end.");
+    await page.getByTestId("review-selection-button").click();
+    await pendingComposer.locator("textarea").fill("Saved comment body.");
+    await pendingComposer.getByRole("button", { name: "Add pending comment" }).click();
+    const commentCard = page.locator("[data-review-card]").first();
+    await commentCard.getByRole("button", { name: "Edit", exact: true }).click();
+    const commentEdit = commentCard.getByTestId("review-comment-edit");
+    await commentEdit.fill("Unsaved existing-comment edit.");
+    await page.getByTestId("artifact-pop").click();
+    await expect(page.getByTestId("artifact-pop")).toContainText("Pop out");
+    await expect(commentCard.getByRole("alert")).toContainText("Save or cancel this comment edit");
+    await expect(commentEdit).toBeFocused();
+    await commentCard.getByRole("button", { name: "Cancel" }).click();
+
     const patchStarted = deferred();
     const patchGate = deferred();
     let failPatches = true;
