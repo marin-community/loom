@@ -1,13 +1,13 @@
 ---
 name: pull-request
-description: Commit cleanly, run proportional deterministic gates, decide whether the agent lint review is warranted, open or update the PR, then monitor it and answer comments until it merges. Use when committing, pushing, or creating/updating a weaver pull request.
+description: Commit cleanly, run proportional deterministic gates, decide whether the agent lint review is warranted, open or update the PR, then drive CI green and hand off to the final reviewer. Use when committing, pushing, or creating/updating a weaver pull request.
 ---
 
 # Skill: Pull Request
 
 Clean the branch, commit, apply the lint-review policy, open or update the PR,
-then stay with it until it merges. Commit before any review run — it reads the
-committed branch diff and only reports.
+then drive CI green and hand it to the coordinator/human final reviewer. Commit
+before any review run — it reads the committed branch diff and only reports.
 
 Weaver is solo: skip team ceremony, but the deterministic gates, the
 lint-review decision, and driving CI green are not optional.
@@ -25,7 +25,7 @@ WIP checkpoint: **1, 2, 4, 5, 7**, stop. Full list before opening/updating a PR.
    record why it was skipped.
 7. Push.
 8. Open or update the PR.
-9. Monitor — drive CI green, answer every comment, in a loop.
+9. Drive CI green, address comments already present, and hand off.
 
 ## 1. Self-review
 
@@ -70,14 +70,9 @@ Hook fails → fix and commit again.
 Run the agent lint review for a substantive initial implementation or a
 follow-up that materially changes the design or risk surface. Skip it for a
 small, low-risk PR. Once a branch has already had an agent lint review, also
-skip small review/CI follow-ups.
-
-A follow-up is not small/low-risk if it introduces or materially changes a
-migration, authentication/authorization, secrets handling, concurrency or
-lifecycle behavior, destructive persistence behavior, a public REST/wire
-contract, or CI/build/release behavior. Do not use raw line count as the sole
-criterion. Documentation-only changes and narrow review cleanups are typical
-skips when they do not touch those areas.
+skip small review/CI follow-ups. Use the [canonical detailed
+criteria](../../docs/lint.md#when-to-run), including its risk exclusions and
+instruction not to decide from raw line count alone.
 
 When a review is warranted, run:
 
@@ -130,11 +125,11 @@ a branch that already has a PR.
 - ≤500 words; Markdown sections only when a large change needs them.
 - No self-credit.
 
-## 9. Monitor — in a loop
+## 9. Drive CI green and hand off
 
 Opening the PR starts this step. **Local green ≠ CI green:** CI runs more than the
-local gate (Playwright `e2e/`, CodeQL, clean-checkout SPA build). Stay until it
-merges (or the user says stop). A summary message is not an exit condition.
+local gate (Playwright `e2e/`, CodeQL, clean-checkout SPA build). Stay through
+CI, then hand off to the coordinator/human final reviewer. Do not merge.
 
 Block on CI, don't re-poll:
 
@@ -142,25 +137,19 @@ Block on CI, don't re-poll:
 gh pr checks <N> --watch --fail-fast
 ```
 
-Green → poll comments/reviews on a backoff (`ScheduleWakeup` 270s, doubling, give
-up after a few idle hours). Each pass check **both**:
+Failure → read the job log and fix it. A failure in a file you didn't touch
+isn't automatically pre-existing — confirm it fails on `main` without your
+change first. Never silently absorb a failure.
 
-1. CI — `gh pr checks <N>`. Failure → read the job log, fix it. A failure in a
-   file you didn't touch isn't automatically pre-existing — confirm it fails on
-   `main` without your change first; if your change caused it, it's your
-   regression. Never silently absorb a failure.
-2. Comments/reviews — `gh pr view <N> --json reviews,comments` and `gh api
-   repos/<owner>/<repo>/pulls/<N>/comments`. Green CI ≠ nothing to do; people and
-   bots comment after CI passes.
+Once CI is green, address any comments already present. Fix clear comments in a
+new commit and reply in-thread; if one is genuinely unclear, raise `weaver
+status attention "<question>"`. Do not poll for future reviews or wait for
+them.
 
-Answer every comment: fix the clear ones (commit as a **new** commit, reply
-in-thread prefixed 🤖, resolve). Genuinely unclear → `weaver status attention
-"<question>"`, keep monitoring while you wait.
-
-Status tracks the loop: `ok` while CI runs or you await review; `weaver
-status attention "ready for review"` only once green and every comment is
-handled. Close the tracking issue when the PR is open and the work is genuinely
-done — not before.
+Keep status `ok` while CI runs. Once CI is green and comments already present
+are handled, raise `weaver status attention "ready for review"` and hand off.
+Close the tracking issue when the PR is open and the work is genuinely done —
+not before.
 
 ## Rules
 

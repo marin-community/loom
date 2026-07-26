@@ -40,15 +40,12 @@ enforces; wire it up as a hook with `git config core.hooksPath .githooks`. Keep
 compile, type, and relevant test checks proportional to the change, but always
 run the ones that apply.
 
-Separately, the [agent lint review](docs/lint.md) — `scripts/lint-review.py` — is
-required for substantive initial implementations and follow-ups that materially
-change the design or risk surface. Skip it for small, low-risk PRs, and for
-small review/CI follow-ups after the branch has already had an agent lint
-review. A follow-up is not low-risk if it introduces or materially changes a
-migration, authentication/authorization, secrets handling, concurrency or
-lifecycle behavior, destructive persistence behavior, a public REST/wire
-contract, or CI/build/release behavior. Do not decide from line count alone.
-When skipping, put one concise reason in the PR/testing notes.
+Separately, follow the canonical [agent lint-review
+policy](docs/lint.md#when-to-run): run `scripts/lint-review.py` for substantive
+initial implementations and design/risk-changing follow-ups; skip it for small,
+low-risk PRs and small review/CI follow-ups after the branch has already had a
+review. The linked policy defines the detailed risk criteria. When skipping,
+put one concise reason in the PR/testing notes.
 
 The review is kept out of the commit hook so a slow or flaky agent never sits
 in the commit path. Build/test internals and the Playwright setup live in
@@ -78,7 +75,8 @@ WEAVER_HOME=$(mktemp -d) loom server run --addr 127.0.0.1:0
 
 ## Landing changes
 
-The full commit → lint review → PR → monitor flow is the **`pull-request` skill**
+The full commit → lint-review decision → PR → CI handoff flow is the
+**`pull-request` skill**
 ([.agents/skills/pull-request.md](.agents/skills/pull-request.md)) — invoke it
 when you're ready to land. The rules it enforces:
 
@@ -91,15 +89,10 @@ when you're ready to land. The rules it enforces:
 - **Keep the branch synced with `main`** when it falls behind or conflicts.
 - **Drive the PR to green, then hand off — local green is not CI green.** CI runs
   more than the local gate (Playwright `e2e/`, CodeQL, a clean-checkout SPA
-  build). After pushing, block on `gh pr checks <n> --watch --fail-fast`, answer
-  comments in-thread, and fix failures until green. Only **then** raise `weaver
-  status attention "ready for review"`; while CI runs you are `ok`, not done.
-- **Wait for the bot reviewers — they're slower than CI.** GitHub's Copilot/Codex
-  reviewers post inline comments minutes after the PR opens (not instantly, and
-  after the checks pass). Don't call a PR done the moment it's pushed: block for
-  their review, or check back after ~30 min — `gh pr view <n> --json reviews,comments`
-  plus `gh api repos/{owner}/{repo}/pulls/<n>/comments` for the inline threads —
-  then address or reply to each before handing off.
+  build). After pushing, block on `gh pr checks <n> --watch --fail-fast`, fix
+  failures until green, and address any comments already present. Only **then**
+  raise `weaver status attention "ready for review"` and hand off to the
+  coordinator/human final reviewer; while CI runs you are `ok`, not done.
 
 ## Conventions
 
