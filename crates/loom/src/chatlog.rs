@@ -524,6 +524,7 @@ mod tests {
             base_branch: "main".to_string(),
             goal: String::new(),
             title: String::new(),
+            title_provenance: weaver_core::branch::TitleProvenance::User,
             description: String::new(),
             created_at: String::new(),
             updated_at: String::new(),

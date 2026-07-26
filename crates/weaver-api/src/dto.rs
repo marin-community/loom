@@ -93,6 +93,10 @@ pub struct BranchView {
     /// Short label: the branch name with the optional `weaver/` prefix stripped.
     pub name: String,
     pub title: String,
+    /// Ownership of the unqualified task label: `derived`, `generated`,
+    /// `user`, or `issue`.
+    #[serde(default = "default_title_provenance")]
+    pub title_provenance: String,
     pub goal: String,
     /// The agent's current-state message, set via `weaver status`, shown even
     /// when the branch is calm. The attention *level* is the `attention` tag.
@@ -137,6 +141,7 @@ impl BranchView {
             id: branch.id.clone(),
             name,
             title: branch.title.clone(),
+            title_provenance: branch.title_provenance.as_str().to_string(),
             goal: branch.goal.clone(),
             description: branch.description.clone(),
             tags: tags.iter().map(TagView::from).collect(),
@@ -171,6 +176,9 @@ pub struct SessionView {
     pub last_activity_at: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Optional metadata-agent state for the task label.
+    #[serde(default)]
+    pub title_generation: TitleGenerationView,
     /// Branch id of the session that **launched** this one — the parent in the
     /// dashboard's session tree — or `null` for a top-level session.
     pub parent_id: Option<String>,
@@ -257,6 +265,51 @@ pub struct SessionView {
     #[serde(default)]
     pub placement: Option<SessionPlacementView>,
     pub branch: BranchView,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TitleGenerationView {
+    pub enabled: bool,
+    /// `idle`, `running`, `generated`, `protected`, `disabled`, `unavailable`,
+    /// or `failed`.
+    pub status: String,
+}
+
+impl Default for TitleGenerationView {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            status: "idle".to_string(),
+        }
+    }
+}
+
+fn default_title_provenance() -> String {
+    "user".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResumptionEvidenceView {
+    /// `conversation` or `artifact`.
+    pub kind: String,
+    pub label: String,
+    pub href: String,
+    /// Source-stable history cursor or artifact name/revision cursor.
+    pub cursor: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResumptionCueView {
+    /// `generated`, `due`, `not_due`, `disabled`, or `unavailable`.
+    pub status: String,
+    #[serde(default)]
+    pub source_cursor: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub generated_at: Option<String>,
+    #[serde(default)]
+    pub evidence: Vec<ResumptionEvidenceView>,
 }
 
 wire_enum!(SessionSearchStatus {
@@ -1826,6 +1879,11 @@ pub struct PatchSessionReq {
     pub status: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
+    /// Required with `title`: the label/provenance the caller observed.
+    #[serde(default)]
+    pub expected_title: Option<String>,
+    #[serde(default)]
+    pub expected_title_provenance: Option<String>,
     #[serde(default)]
     pub goal: Option<String>,
     /// The agent's current-state message — the prose shown beside the level.
@@ -1839,6 +1897,19 @@ pub struct PatchSessionReq {
     /// must use the revisioned session-layout move API.
     #[serde(default)]
     pub sort_order: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetTitleGenerationReq {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EnsureResumptionCueReq {
+    /// Explicit user request. False is the on-return path and respects the
+    /// configured inactivity threshold.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// Create a space and its useful empty Inbox group.

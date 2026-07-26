@@ -25,6 +25,7 @@ export interface Branch {
   /** Short label: the branch name with the optional `weaver/` prefix stripped. */
   name: string;
   title: string;
+  title_provenance: 'derived' | 'generated' | 'user' | 'issue';
   goal: string;
   /** The agent's current-state message, set together with the `attention` tag
    *  via `weaver status` (e.g. "Wired up routes; tests pass"). Shown even
@@ -85,6 +86,10 @@ export interface Session {
   last_activity_at: string;
   created_at: string;
   updated_at: string;
+  title_generation: {
+    enabled: boolean;
+    status: 'idle' | 'running' | 'generated' | 'protected' | 'disabled' | 'unavailable' | 'failed';
+  };
   /** Branch id of the session that launched this one (its parent in the session
    *  tree), or null for a top-level session. The dashboard groups the list into
    *  threads by it; a child whose parent is absent (archived, or never tracked)
@@ -146,6 +151,21 @@ export interface Session {
    *  well-known claude/codex mode set — see `AcpConversation`. */
   available_modes?: string[];
   branch: Branch;
+}
+
+export interface ResumptionEvidence {
+  kind: 'conversation' | 'artifact';
+  label: string;
+  href: string;
+  cursor: string;
+}
+
+export interface ResumptionCue {
+  status: 'generated' | 'generating' | 'due' | 'not_due' | 'disabled' | 'unavailable';
+  source_cursor: string | null;
+  text: string | null;
+  generated_at: string | null;
+  evidence: ResumptionEvidence[];
 }
 
 export interface SessionPlacement {

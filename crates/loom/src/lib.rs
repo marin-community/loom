@@ -32,6 +32,7 @@ pub mod launch_gate;
 pub mod logs;
 pub mod loom_config;
 pub mod mcp;
+pub mod metadata_assist;
 pub mod monitor;
 pub mod profile;
 pub mod repo;

@@ -5,6 +5,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use weaver_api::{BranchStatusReq, BranchView, CreateEventReq, TagReq};
+use weaver_core::branch::{TitleProvenance, TitleUpdate};
 use weaver_core::{branch as branch_mod, tags};
 
 use crate::{events, session as session_mod};
@@ -38,6 +39,8 @@ pub(super) async fn get_branch(
 #[derive(Debug, Deserialize)]
 pub(super) struct PatchBranchReq {
     title: Option<String>,
+    expected_title: Option<String>,
+    expected_title_provenance: Option<String>,
     goal: Option<String>,
     description: Option<String>,
 }
@@ -76,7 +79,40 @@ pub(super) async fn patch_branch(
         ));
     }
     if let Some(title) = &req.title {
-        branch_mod::set_title(&st.db, &branch.id, title).await?;
+        let title = branch_mod::sanitize_user_title(title)
+            .ok_or_else(|| AppError::bad_request("title must not be empty"))?;
+        let expected_title = req.expected_title.as_deref().ok_or_else(|| {
+            AppError::bad_request("expected_title is required when renaming a branch")
+        })?;
+        let expected_provenance = req
+            .expected_title_provenance
+            .as_deref()
+            .ok_or_else(|| {
+                AppError::bad_request(
+                    "expected_title_provenance is required when renaming a branch",
+                )
+            })?
+            .parse::<TitleProvenance>()
+            .map_err(AppError::bad_request)?;
+        match branch_mod::replace_title(
+            &st.db,
+            &branch.id,
+            expected_title,
+            expected_provenance,
+            &title,
+            TitleProvenance::User,
+        )
+        .await?
+        {
+            TitleUpdate::Applied(_) => {}
+            TitleUpdate::Stale(current) => {
+                return Err(AppError::conflict(
+                    "the task label changed while it was being edited; review it and retry",
+                )
+                .with_fields(json!({ "branch": super::branch_view(&st.db, &current).await? })));
+            }
+            TitleUpdate::Missing => return Err(AppError::not_found("branch")),
+        }
     }
     if let Some(goal) = &req.goal {
         branch_mod::set_goal(&st.db, &branch.id, goal, "user").await?;

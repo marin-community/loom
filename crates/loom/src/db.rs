@@ -75,6 +75,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "review-inbox",
         include_str!("../migrations/0013_review_inbox.sql"),
     ),
+    (
+        14,
+        "metadata-assistance",
+        include_str!("../migrations/0014_metadata_assistance.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -307,7 +312,10 @@ mod tests {
                 .fetch_all(&db)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+        assert_eq!(
+            versions,
+            (1..=latest_migration_version()).collect::<Vec<_>>()
+        );
 
         let profile_columns = table_columns(&db, "profiles").await.unwrap();
         assert!(profile_columns.iter().any(|column| column == "retired"));
@@ -321,6 +329,10 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(!table_columns(&db, "session_placements")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(!table_columns(&db, "session_metadata_assistance")
             .await
             .unwrap()
             .is_empty());

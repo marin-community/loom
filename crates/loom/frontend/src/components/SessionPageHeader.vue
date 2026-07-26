@@ -67,7 +67,17 @@ const actions = useSessionActions(
   () => emit('reload'),
   () => router.push(fleetHref.value),
 );
-const { busy, notice, error, rename, clearTag, setAutoArchiveDisabled, run } = actions;
+const {
+  busy,
+  notice,
+  error,
+  rename,
+  regenerateTitle,
+  setTitleGeneration,
+  clearTag,
+  setAutoArchiveDisabled,
+  run,
+} = actions;
 
 // The lifecycle verbs the ⋯ manage menu offers — the same policy the fleet
 // list's row menu renders, so the two surfaces can't drift.
@@ -117,7 +127,9 @@ function commit() {
   if (!editing.value) return;
   editing.value = false;
   const next = draft.value.trim();
-  if (next && next !== current()) rename(next);
+  if (next && next !== current()) {
+    rename(next, current(), props.ws.branch.title_provenance);
+  }
 }
 
 function cancel() {
@@ -407,6 +419,41 @@ async function submitHandoff() {
           <SessionDetailsPopover :ws="ws" :open="showDetails" @close="closeDetails">
             <template #actions>
               <div class="space-y-1">
+                <div
+                  data-testid="title-generation-state"
+                  class="rounded border border-line bg-input px-2 py-1.5"
+                >
+                  <p class="text-xs font-medium text-fg">
+                    Task label · {{ ws.branch.title_provenance }}
+                  </p>
+                  <p class="text-2xs text-faint">
+                    Metadata refresh: {{ ws.title_generation.status }}
+                  </p>
+                  <div class="mt-1 flex flex-wrap gap-2">
+                    <button
+                      v-if="
+                        ws.title_generation.enabled &&
+                        ['derived', 'generated'].includes(ws.branch.title_provenance)
+                      "
+                      type="button"
+                      data-testid="action-regenerate-title"
+                      class="text-xs text-accent hover:underline disabled:opacity-60"
+                      :disabled="!!busy"
+                      @click="regenerateTitle"
+                    >
+                      {{ busy === 'title-generate' ? 'Starting…' : 'Regenerate label' }}
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="action-title-generation"
+                      class="text-xs text-accent hover:underline disabled:opacity-60"
+                      :disabled="!!busy"
+                      @click="setTitleGeneration(!ws.title_generation.enabled)"
+                    >
+                      {{ ws.title_generation.enabled ? 'Disable refresh' : 'Enable refresh' }}
+                    </button>
+                  </div>
+                </div>
                 <button
                   v-if="ideEnabled"
                   type="button"
