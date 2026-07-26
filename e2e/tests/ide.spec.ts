@@ -16,6 +16,7 @@ test.describe('embedded editor panel', () => {
 
     await expect(page.getByTestId('ide-open')).toHaveCount(0);
     await page.getByRole('button', { name: /Details/ }).click();
+    await page.getByText('Advanced', { exact: true }).click();
     await page.getByTestId('action-open-editor').click();
 
     // The panel mounts with its header…

@@ -1472,9 +1472,23 @@ pub struct NewCommentBody {
 // generic subject/anchor shapes are shared with the future changes viewer.
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewSubjectKindDto {
+    Artifact,
+    Changes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewAnchorKindDto {
+    Text,
+    Change,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewSubjectDto {
-    pub kind: String,
+    pub kind: ReviewSubjectKindDto,
     /// Stable internal artifact envelope id.
     pub id: String,
     /// Stable public subject key: the artifact name accepted by list/create.
@@ -1496,12 +1510,47 @@ pub struct ArtifactTextAnchorDto {
     pub block_index: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeSideDto {
+    Old,
+    New,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChangeAnchorDto {
+    pub path: ChangePathDto,
+    pub side: ChangeSideDto,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub hunk_header: String,
+    #[serde(default)]
+    pub context_before: Vec<String>,
+    pub selected: Vec<String>,
+    #[serde(default)]
+    pub context_after: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ReviewAnchorDto {
+    Text(ArtifactTextAnchorDto),
+    Change(ChangeAnchorDto),
+}
+
+impl From<ArtifactTextAnchorDto> for ReviewAnchorDto {
+    fn from(value: ArtifactTextAnchorDto) -> Self {
+        Self::Text(value)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewCommentDto {
     pub id: i64,
     pub subject_version: String,
-    pub anchor_kind: String,
-    pub anchor: ArtifactTextAnchorDto,
+    pub anchor_kind: ReviewAnchorKindDto,
+    pub anchor: ReviewAnchorDto,
     pub body: String,
     pub status: String,
     pub created_at: String,
@@ -1536,7 +1585,7 @@ pub struct ReviewDto {
 /// Create or recover the caller's one draft for a session/subject.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateReviewReq {
-    pub subject_kind: String,
+    pub subject_kind: ReviewSubjectKindDto,
     /// Artifact name for `subject_kind = "artifact"`.
     pub subject_key: String,
     pub subject_version: String,
@@ -1547,8 +1596,8 @@ pub struct CreateReviewReq {
 pub struct AddReviewCommentReq {
     pub expected_revision: i64,
     pub subject_version: String,
-    pub anchor_kind: String,
-    pub anchor: ArtifactTextAnchorDto,
+    pub anchor_kind: ReviewAnchorKindDto,
+    pub anchor: ReviewAnchorDto,
     pub body: String,
 }
 
@@ -1559,9 +1608,9 @@ pub struct UpdateReviewCommentReq {
     #[serde(default)]
     pub subject_version: Option<String>,
     #[serde(default)]
-    pub anchor_kind: Option<String>,
+    pub anchor_kind: Option<ReviewAnchorKindDto>,
     #[serde(default)]
-    pub anchor: Option<ArtifactTextAnchorDto>,
+    pub anchor: Option<ReviewAnchorDto>,
     #[serde(default)]
     pub body: Option<String>,
 }
@@ -1593,6 +1642,134 @@ pub struct ExpectedReviewRevisionReq {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolveReviewCommentReq {
     pub resolved: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Changes — one bounded, typed snapshot of the session worktree relative to
+// its real branch base.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeFileStatusDto {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    TypeChanged,
+    Untracked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeSourceDto {
+    Committed,
+    Staged,
+    Unstaged,
+    Untracked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeContentDto {
+    Text,
+    Binary,
+    Oversize,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeLineKindDto {
+    Context,
+    Addition,
+    Deletion,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeLineDto {
+    pub kind: ChangeLineKindDto,
+    pub old_line: Option<u32>,
+    pub new_line: Option<u32>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeHunkDto {
+    pub header: String,
+    pub lines: Vec<ChangeLineDto>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeFileDto {
+    pub status: ChangeFileStatusDto,
+    pub path: ChangePathDto,
+    pub old_path: Option<ChangePathDto>,
+    pub sources: Vec<ChangeSourceDto>,
+    pub additions: Option<u32>,
+    pub deletions: Option<u32>,
+    pub content: ChangeContentDto,
+    pub hunks: Vec<ChangeHunkDto>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangePathDto {
+    /// URL-safe base64 of the exact repo-relative Git path bytes.
+    pub bytes: String,
+    /// Escaped, control-free display form; never used as identity.
+    pub display: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeBaseUnavailableReasonDto {
+    UnbornHead,
+    MissingBase,
+    NoMergeBase,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ChangeBaseDto {
+    Available {
+        reference: String,
+        oid: String,
+    },
+    Unavailable {
+        reference: String,
+        reason: ChangeBaseUnavailableReasonDto,
+    },
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChangeTotalsDto {
+    pub files: u32,
+    pub additions: u32,
+    pub deletions: u32,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeLimitsDto {
+    pub max_files: u32,
+    pub max_hunks_per_file: u32,
+    pub max_lines_per_file: u32,
+    pub max_total_lines: u32,
+    pub max_line_bytes: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeSetDto {
+    pub version: Option<String>,
+    pub base: ChangeBaseDto,
+    pub head_oid: Option<String>,
+    pub totals: ChangeTotalsDto,
+    pub files: Vec<ChangeFileDto>,
+    pub truncated: bool,
+    pub limits: ChangeLimitsDto,
 }
 
 /// One watch, as the API exposes it. The JSON-bearing columns

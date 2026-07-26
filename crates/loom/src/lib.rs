@@ -12,6 +12,7 @@ pub mod auth;
 pub mod automation;
 pub mod backend;
 pub mod builtins;
+pub mod changes;
 pub mod chat;
 pub mod chatlog;
 pub mod client;
