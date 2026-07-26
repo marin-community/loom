@@ -52,6 +52,115 @@ fn interactive_shell_profile(name: &str) -> serde_json::Value {
 }
 
 #[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn profile_capacity_admission_is_serialized_across_repositories() {
+    let ts = TestServer::start().await;
+    let mut profile = interactive_shell_profile("one-at-a-time");
+    profile["max_concurrent"] = json!(1);
+    ts.client.post("/api/profiles", profile).await.unwrap();
+
+    let other_repo = tempfile::tempdir().unwrap();
+    crate::fixtures::sh(other_repo.path(), "git", &["init", "-b", "main"]);
+    crate::fixtures::sh(
+        other_repo.path(),
+        "git",
+        &["config", "user.email", "t@t.test"],
+    );
+    crate::fixtures::sh(other_repo.path(), "git", &["config", "user.name", "Test"]);
+    std::fs::write(other_repo.path().join("README.md"), "other\n").unwrap();
+    crate::fixtures::sh(other_repo.path(), "git", &["add", "."]);
+    crate::fixtures::sh(other_repo.path(), "git", &["commit", "-m", "init"]);
+
+    let permit = ts.state.launch_gate.acquire_profile("one-at-a-time").await;
+    let url = format!("http://{}/api/sessions", ts.addr);
+    let first_http = reqwest::Client::new();
+    let first_url = url.clone();
+    let first_cwd = ts.cwd();
+    let first = tokio::spawn(async move {
+        first_http
+            .post(first_url)
+            .json(&json!({
+                "cwd": first_cwd,
+                "goal": "first profile admission",
+                "profile": "one-at-a-time"
+            }))
+            .send()
+            .await
+            .unwrap()
+    });
+    let second_http = reqwest::Client::new();
+    let second_cwd = other_repo.path().to_string_lossy().into_owned();
+    let second = tokio::spawn(async move {
+        second_http
+            .post(url)
+            .json(&json!({
+                "cwd": second_cwd,
+                "goal": "second profile admission",
+                "profile": "one-at-a-time"
+            }))
+            .send()
+            .await
+            .unwrap()
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !first.is_finished(),
+        "first launch waits for profile admission"
+    );
+    assert!(
+        !second.is_finished(),
+        "a different repository still waits for the same profile"
+    );
+    drop(permit);
+
+    let first = tokio::time::timeout(std::time::Duration::from_secs(10), first)
+        .await
+        .unwrap()
+        .unwrap();
+    let second = tokio::time::timeout(std::time::Duration::from_secs(10), second)
+        .await
+        .unwrap()
+        .unwrap();
+    let statuses = [first.status(), second.status()];
+    assert_eq!(
+        statuses.iter().filter(|status| status.is_success()).count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+
+    let (successful, conflict) = if first.status().is_success() {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let conflict_body: serde_json::Value = conflict.json().await.unwrap();
+    assert_eq!(conflict_body["preview"]["capacity"]["active"], 1);
+    assert_eq!(conflict_body["preview"]["capacity"]["allowed"], false);
+    assert_eq!(conflict_body["preview"]["valid"], false);
+    let session: serde_json::Value = successful.json().await.unwrap();
+    assert_eq!(
+        loom::profile::active_count(&ts.state.db, "one-at-a-time")
+            .await
+            .unwrap(),
+        1
+    );
+    ts.client
+        .delete(&format!(
+            "/api/sessions/{}",
+            session["id"].as_str().unwrap()
+        ))
+        .await
+        .unwrap();
+}
+
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn profile_and_mcp_rest_journey() {
     let ts = TestServer::start_api_only().await;
