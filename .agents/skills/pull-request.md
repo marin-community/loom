@@ -1,16 +1,16 @@
 ---
 name: pull-request
-description: Commit cleanly, run the gate, hand off to the agent lint review, open or update the PR, then monitor it and answer comments until it merges. Use when committing, pushing, or creating/updating a weaver pull request.
+description: Commit cleanly, run proportional deterministic gates, decide whether the agent lint review is warranted, open or update the PR, then drive CI green and hand off to the final reviewer. Use when committing, pushing, or creating/updating a weaver pull request.
 ---
 
 # Skill: Pull Request
 
-Clean the branch, commit, run the lint review, open or update the PR, then stay
-with it until it merges. Commit before the review — it reads the committed branch
-diff and only reports.
+Clean the branch, commit, apply the lint-review policy, open or update the PR,
+then drive CI green and hand it to the coordinator/human final reviewer. Commit
+before any review run — it reads the committed branch diff and only reports.
 
-Weaver is solo: skip team ceremony, but the gate, the lint review, and driving CI
-green are not optional.
+Weaver is solo: skip team ceremony, but the deterministic gates, the
+lint-review decision, and driving CI green are not optional.
 
 ## Checklist
 
@@ -21,10 +21,11 @@ WIP checkpoint: **1, 2, 4, 5, 7**, stop. Full list before opening/updating a PR.
 3. Tests when warranted — `cargo test --workspace`; `cd e2e && npm test` for UI.
 4. Stage the specific files.
 5. Commit. ← clean checkpoint.
-6. Lint review — `scripts/lint-review.py`; fix or answer every finding.
+6. Lint-review decision — run `scripts/lint-review.py` when warranted; otherwise
+   record why it was skipped.
 7. Push.
 8. Open or update the PR.
-9. Monitor — drive CI green, answer every comment, in a loop.
+9. Drive CI green, address comments already present, and hand off.
 
 ## 1. Self-review
 
@@ -64,7 +65,16 @@ Imperative, lower-case, ≤72 chars. The `(#NN)` suffix lands on merge, not from
 
 Hook fails → fix and commit again.
 
-## 6. Lint review
+## 6. Lint-review decision
+
+Run the agent lint review for a substantive initial implementation or a
+follow-up that materially changes the design or risk surface. Skip it for a
+small, low-risk PR. Once a branch has already had an agent lint review, also
+skip small review/CI follow-ups. Use the [canonical detailed
+criteria](../../docs/lint.md#when-to-run), including its risk exclusions and
+instruction not to decide from raw line count alone.
+
+When a review is warranted, run:
 
 ```bash
 scripts/lint-review.py         # the agent lint over the branch diff
@@ -77,6 +87,10 @@ they make the code better, not blindly.
 
 Deeper pass on a big change: `/code-review` (`ultra` = multi-agent cloud). On a
 solo PR, read its findings and fix — don't post them to your own PR.
+
+When skipping, add one concise sentence to the PR/testing notes explaining why,
+for example: `Agent lint review skipped: documentation-only workflow change
+with no runtime behavior.` Do not add a checklist or scoring framework.
 
 ## 7. Push
 
@@ -105,15 +119,17 @@ a branch that already has a PR.
 **Hard rules:**
 
 - Body is *what & why* — no "Testing"/"Validation" section, no "written by…".
+  A single unheaded testing sentence is allowed when recording why the agent
+  lint review was skipped.
 - No checkboxes, no emoji, no filler openers ("This PR…", "Summary of changes:").
 - ≤500 words; Markdown sections only when a large change needs them.
 - No self-credit.
 
-## 9. Monitor — in a loop
+## 9. Drive CI green and hand off
 
 Opening the PR starts this step. **Local green ≠ CI green:** CI runs more than the
-local gate (Playwright `e2e/`, CodeQL, clean-checkout SPA build). Stay until it
-merges (or the user says stop). A summary message is not an exit condition.
+local gate (Playwright `e2e/`, CodeQL, clean-checkout SPA build). Stay through
+CI, then hand off to the coordinator/human final reviewer. Do not merge.
 
 Block on CI, don't re-poll:
 
@@ -121,29 +137,24 @@ Block on CI, don't re-poll:
 gh pr checks <N> --watch --fail-fast
 ```
 
-Green → poll comments/reviews on a backoff (`ScheduleWakeup` 270s, doubling, give
-up after a few idle hours). Each pass check **both**:
+Failure → read the job log and fix it. A failure in a file you didn't touch
+isn't automatically pre-existing — confirm it fails on `main` without your
+change first. Never silently absorb a failure.
 
-1. CI — `gh pr checks <N>`. Failure → read the job log, fix it. A failure in a
-   file you didn't touch isn't automatically pre-existing — confirm it fails on
-   `main` without your change first; if your change caused it, it's your
-   regression. Never silently absorb a failure.
-2. Comments/reviews — `gh pr view <N> --json reviews,comments` and `gh api
-   repos/<owner>/<repo>/pulls/<N>/comments`. Green CI ≠ nothing to do; people and
-   bots comment after CI passes.
+Once CI is green, address any comments already present. Fix clear comments in a
+new commit and reply in-thread; if one is genuinely unclear, raise `weaver
+status attention "<question>"`. Do not poll for future reviews or wait for
+them.
 
-Answer every comment: fix the clear ones (commit as a **new** commit, reply
-in-thread prefixed 🤖, resolve). Genuinely unclear → `weaver status attention
-"<question>"`, keep monitoring while you wait.
-
-Status tracks the loop: `ok` while CI runs or you await review; `weaver
-status attention "ready for review"` only once green and every comment is
-handled. Close the tracking issue when the PR is open and the work is genuinely
-done — not before.
+Keep status `ok` while CI runs. Once CI is green and comments already present
+are handled, raise `weaver status attention "ready for review"` and hand off.
+Close the tracking issue when the PR is open and the work is genuinely done —
+not before.
 
 ## Rules
 
-- `./scripts/pre-commit.sh` is the gate; commit before `lint-review.py`.
+- `./scripts/pre-commit.sh` is the gate; make the lint-review decision after
+  committing.
 - Never merge or push to `main`; open a PR.
 - Force-push with `--force-with-lease`, e.g. after a rebase.
 - No self-attribution in commits or PR bodies.

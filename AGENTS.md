@@ -36,12 +36,19 @@ Test placement: pure program/module logic lives in pytest
 tests prove wiring against a live server — don't duplicate logic across them.
 
 Run `./scripts/pre-commit.sh` before committing — the fmt + clippy gate CI
-enforces; wire it up as a hook with `git config core.hooksPath .githooks`.
-Separately, as a step in the commit → PR flow (see the `pull-request` skill), run
-the [agent lint review](docs/lint.md) — `scripts/lint-review.py`, a headless
-`claude` sub-agent that errors on the slop fmt/clippy can't catch. It's kept out
-of the commit hook on purpose, so a slow or flaky agent never sits in the commit
-path. Build/test internals and the Playwright setup live in
+enforces; wire it up as a hook with `git config core.hooksPath .githooks`. Keep
+compile, type, and relevant test checks proportional to the change, but always
+run the ones that apply.
+
+Separately, follow the canonical [agent lint-review
+policy](docs/lint.md#when-to-run): run `scripts/lint-review.py` for substantive
+initial implementations and design/risk-changing follow-ups; skip it for small,
+low-risk PRs and small review/CI follow-ups after the branch has already had a
+review. The linked policy defines the detailed risk criteria. When skipping,
+put one concise reason in the PR/testing notes.
+
+The review is kept out of the commit hook so a slow or flaky agent never sits
+in the commit path. Build/test internals and the Playwright setup live in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Don't disturb the user's live loom
@@ -68,28 +75,24 @@ WEAVER_HOME=$(mktemp -d) loom server run --addr 127.0.0.1:0
 
 ## Landing changes
 
-The full commit → lint review → PR → monitor flow is the **`pull-request` skill**
+The full commit → lint-review decision → PR → CI handoff flow is the
+**`pull-request` skill**
 ([.agents/skills/pull-request.md](.agents/skills/pull-request.md)) — invoke it
 when you're ready to land. The rules it enforces:
 
-- **Open a PR; never push to or merge `main`.** Branch → `./scripts/pre-commit.sh`
-  + `cargo test --workspace` → `scripts/lint-review.py` → `gh pr create`. A weaver
-  worktree is already on its own branch; finishing means opening the PR, not
-  integrating it yourself.
+- **Open a PR; never push to or merge `main`.** Branch →
+  `./scripts/pre-commit.sh` + relevant tests → the documented lint-review
+  decision → `gh pr create`. A weaver worktree is already on its own branch;
+  finishing means opening the PR, not integrating it yourself.
 - **Write in the project's voice** — no self-attribution in commits or PRs
   ("Generated with…", "Co-Authored-By: <tool>", and the like).
 - **Keep the branch synced with `main`** when it falls behind or conflicts.
 - **Drive the PR to green, then hand off — local green is not CI green.** CI runs
   more than the local gate (Playwright `e2e/`, CodeQL, a clean-checkout SPA
-  build). After pushing, block on `gh pr checks <n> --watch --fail-fast`, answer
-  comments in-thread, and fix failures until green. Only **then** raise `weaver
-  status attention "ready for review"`; while CI runs you are `ok`, not done.
-- **Wait for the bot reviewers — they're slower than CI.** GitHub's Copilot/Codex
-  reviewers post inline comments minutes after the PR opens (not instantly, and
-  after the checks pass). Don't call a PR done the moment it's pushed: block for
-  their review, or check back after ~30 min — `gh pr view <n> --json reviews,comments`
-  plus `gh api repos/{owner}/{repo}/pulls/<n>/comments` for the inline threads —
-  then address or reply to each before handing off.
+  build). After pushing, block on `gh pr checks <n> --watch --fail-fast`, fix
+  failures until green, and address any comments already present. Only **then**
+  raise `weaver status attention "ready for review"` and hand off to the
+  coordinator/human final reviewer; while CI runs you are `ok`, not done.
 
 ## Conventions
 
