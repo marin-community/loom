@@ -106,11 +106,11 @@ watch(
 </script>
 
 <template>
-  <div class="flex min-h-0 flex-1 flex-col">
+  <div class="flex h-full min-h-0 flex-1 flex-col">
     <section
       v-if="cue?.status === 'generated' && cue.text"
       data-testid="resumption-cue"
-      class="mx-3 mt-2 flex items-start gap-2 rounded border border-line bg-subtle px-3 py-2 text-sm"
+      class="mx-3 mt-2 flex shrink-0 items-start gap-2 rounded border border-line bg-subtle px-3 py-2 text-sm"
       aria-label="Generated resumption cue"
     >
       <details
@@ -146,7 +146,7 @@ watch(
     </section>
     <div
       v-else-if="cue?.status !== 'disabled'"
-      class="mx-3 mt-1 flex items-center gap-2 text-2xs text-faint"
+      class="mx-3 mt-1 flex shrink-0 items-center gap-2 text-2xs text-faint"
       role="status"
     >
       <button
@@ -172,10 +172,11 @@ watch(
     </div>
     <AcpConversation
       v-if="isAcp"
+      class="min-h-0 flex-1"
       :session="session"
       :local-commands="localCommands"
       @command="forwardCommand"
     />
-    <TerminalConversation v-else :session="session" />
+    <TerminalConversation v-else class="min-h-0 flex-1" :session="session" />
   </div>
 </template>

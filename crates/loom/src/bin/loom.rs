@@ -527,6 +527,10 @@ enum SessionCmd {
         /// Session key: id, branch id, branch name, or `repo:branch`.
         session: String,
         /// Whether generated title refreshes are enabled.
+        #[arg(
+            value_parser = clap::value_parser!(bool),
+            action = clap::ArgAction::Set
+        )]
         enabled: bool,
     },
     /// Read the cached resumption cue, optionally ensuring one now.
@@ -5308,6 +5312,18 @@ mod tests {
     #[test]
     fn cli_is_well_formed() {
         Cli::command().debug_assert();
+        let parsed =
+            Cli::try_parse_from(["loom", "session", "title-generation", "task-1", "false"])
+                .unwrap();
+        assert!(matches!(
+            parsed.cmd,
+            Cmd::Session {
+                cmd: SessionCmd::TitleGeneration {
+                    session,
+                    enabled: false,
+                }
+            } if session == "task-1"
+        ));
     }
 
     /// The scaffold must honor the contract it documents — at minimum, be
