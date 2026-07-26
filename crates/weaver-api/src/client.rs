@@ -156,7 +156,7 @@ impl Client {
 
     // -- Sessions ---------------------------------------------------------
 
-    /// List every active session (`GET /api/sessions`).
+    /// List active non-automation sessions (`GET /api/sessions`).
     pub async fn list_sessions(&self) -> Result<Vec<SessionView>> {
         self.get_typed("/api/sessions").await
     }

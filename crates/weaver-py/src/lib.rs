@@ -152,7 +152,7 @@ impl Client {
 
     // -- Reads (observe) --------------------------------------------------
 
-    /// Every active session, as a list of dicts (`GET /api/sessions`).
+    /// Active non-automation sessions, as a list of dicts (`GET /api/sessions`).
     fn sessions(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let views = py
             .detach(|| self.rt.block_on(self.inner.list_sessions()))
