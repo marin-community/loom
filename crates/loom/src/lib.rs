@@ -26,6 +26,7 @@ pub mod github;
 pub mod github_app;
 pub mod github_manifest;
 pub mod github_trigger;
+pub(crate) mod handoff;
 pub(crate) mod history;
 pub mod ide;
 pub(crate) mod launch;
