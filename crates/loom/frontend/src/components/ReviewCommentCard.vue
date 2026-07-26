@@ -34,6 +34,16 @@ onBeforeUnmount(() => {
   if (editing.value) emit('editing', { commentId: props.comment.id, editing: false });
 });
 
+watch(
+  () => props.review.status,
+  (status) => {
+    if (status !== 'draft') {
+      saving.value = false;
+      editing.value = false;
+    }
+  },
+);
+
 const anchorLabel = computed(() => {
   if (props.comment.anchor_kind === 'change') {
     const anchor = props.comment.anchor as ChangeAnchor;

@@ -471,17 +471,21 @@ test.describe("staged artifact reviews", () => {
       id: number;
       draft_revision: number;
       status: string;
-      comments: Array<{ id: number }>;
     }>;
     const review = reviews.find((candidate) => candidate.status === "draft")!;
-    const removedComment = review.comments[0];
-    const deleteResponse = await page.request.delete(
-      `${weaver.baseUrl}/api/reviews/${review.id}/comments/${removedComment.id}`,
-      { data: { expected_revision: review.draft_revision } },
+    const submitResponse = await page.request.post(
+      `${weaver.baseUrl}/api/reviews/${review.id}/submit`,
+      {
+        data: {
+          expected_revision: review.draft_revision,
+          acknowledge_outdated: false,
+        },
+      },
     );
-    expect(deleteResponse.ok()).toBe(true);
+    expect(submitResponse.ok()).toBe(true);
     await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-    await expect(commentCard).toHaveCount(0);
+    await expect(commentEdit).toHaveCount(0);
+    await expect(commentCard.getByRole("button", { name: "Resolve" })).toBeVisible();
     await page.getByTestId("artifact-pop").click();
     await expect(page.getByTestId("artifact-pop")).toContainText("Dock");
     await page.getByTestId("artifact-pop").click();
