@@ -1,8 +1,27 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch as watchEffect, onMounted, onActivated } from 'vue';
 import { useRouter } from 'vue-router';
-import { get, post, patch, del } from '../api';
-import type { Watch, WatchRun, WatchRunResult, ProgramView, Profile } from '../types';
+import {
+  createWatch,
+  deleteWatch,
+  getWatch,
+  listProfiles,
+  listWatchPrograms,
+  listWatchRuns,
+  listWatches,
+  runWatch,
+  updateWatch,
+} from '../api';
+import type {
+  ProgramView,
+  Profile,
+  Watch,
+  WatchCreateInput,
+  WatchRun,
+  WatchScope,
+  WatchTrigger,
+  WatchUpdateInput,
+} from '../types';
 import OutcomeBadge from '../components/OutcomeBadge.vue';
 import AgentTerminal from '../components/AgentTerminal.vue';
 import ToggleSwitch from '../components/ToggleSwitch.vue';
@@ -75,7 +94,7 @@ const watchProfiles = computed(() =>
 // ── Loading ─────────────────────────────────────────────────────────────────
 async function load() {
   try {
-    watches.value = (await get('/watches')) as Watch[];
+    watches.value = await listWatches();
     error.value = '';
     // Adopt the route's id, else fall back to the first watch so the pane is
     // never pointlessly empty.
@@ -91,7 +110,7 @@ async function load() {
 
 async function loadPrograms() {
   try {
-    programs.value = (await get('/watches/programs')) as ProgramView[];
+    programs.value = await listWatchPrograms();
   } catch {
     // Supplementary: without the registry a program still shows as its ref.
   }
@@ -99,7 +118,7 @@ async function loadPrograms() {
 
 async function loadProfiles() {
   try {
-    profiles.value = (await get('/profiles')) as Profile[];
+    profiles.value = await listProfiles();
   } catch {
     // Supplementary: the stored profile name remains editable as plain data.
   }
@@ -120,7 +139,7 @@ const lastRun = ref<{ outcome: string; summary: string; dry: boolean } | null>(n
 async function loadRuns() {
   if (!selectedId.value) return;
   try {
-    runs.value = (await get(`/watches/${selectedId.value}/runs?limit=50`)) as WatchRun[];
+    runs.value = await listWatchRuns(selectedId.value);
     runsError.value = '';
   } catch (e) {
     runsError.value = (e as Error).message;
@@ -144,7 +163,7 @@ async function toggleEnabled(w: Watch) {
   busy.value = true;
   error.value = '';
   try {
-    adopt((await patch(`/watches/${w.id}`, { enabled: !w.enabled })) as Watch);
+    adopt(await updateWatch(w.id, { enabled: !w.enabled }));
   } catch (e) {
     error.value = (e as Error).message;
   } finally {
@@ -157,12 +176,10 @@ async function run(dry: boolean) {
   busy.value = true;
   error.value = '';
   try {
-    const res = (await post(`/watches/${selected.value.id}/run`, {
-      dry_run: dry,
-    })) as WatchRunResult;
+    const res = await runWatch(selected.value.id, dry);
     lastRun.value = { outcome: res.outcome, summary: res.summary, dry };
     tab.value = 'activity';
-    adopt((await get(`/watches/${selected.value.id}`)) as Watch);
+    adopt(await getWatch(selected.value.id));
     await loadRuns();
     // Surface the fresh round's log without an extra click.
     if (runs.value.length) expanded[runs.value[0].id] = true;
@@ -185,7 +202,7 @@ async function remove() {
       busy.value = true;
       error.value = '';
       try {
-        await del(`/watches/${w.id}`);
+        await deleteWatch(w.id);
         watches.value = watches.value.filter((x) => x.id !== w.id);
         selectedId.value = watches.value[0]?.id ?? '';
         await router.replace(selectedId.value ? `/watches/${selectedId.value}` : '/watches');
@@ -235,7 +252,7 @@ async function saveConfig() {
   error.value = '';
   notice.value = '';
   try {
-    const body: Record<string, unknown> = {
+    const body: WatchUpdateInput = {
       params: draft.prompt.trim() ? { prompt: draft.prompt.trim() } : {},
       capabilities: capabilitiesFrom(draft.capabilities),
       profile: draft.profile.trim() || 'watch',
@@ -243,7 +260,7 @@ async function saveConfig() {
       effort: draft.effort,
       cooldown_secs: Number(draft.cooldown) || 0,
     };
-    adopt((await patch(`/watches/${w.id}`, body)) as Watch);
+    adopt(await updateWatch(w.id, body));
     editing.value = false;
     notice.value = 'Saved.';
   } catch (e) {
@@ -324,9 +341,9 @@ async function create() {
     // `auto` omits the trigger entirely so the server reconciles it from the
     // script's manifest; the explicit kinds build the trigger here. (A repo pin
     // rides on `scope` below either way, so `auto` keeps repo scoping.)
-    let trigger: Record<string, unknown> | undefined;
+    let trigger: WatchTrigger | undefined;
     if (form.triggerKind !== 'auto') {
-      const t: Record<string, unknown> = {};
+      const t: WatchTrigger = {};
       if (form.triggerKind === 'cron' && form.cron.trim()) t.cron = form.cron.trim();
       else if (form.triggerKind === 'every' && form.every.trim()) t.every = form.every.trim();
       else if (form.triggerKind === 'on' && form.on.trim()) {
@@ -339,10 +356,10 @@ async function create() {
       // Only override the manifest when the user actually gave a firing
       // condition — a blank explicit kind would create a dead, manual-only
       // watch; fall back to `auto` (server reconciles) instead.
-      if (t.cron || t.every || (Array.isArray(t.on) && t.on.length)) trigger = t;
+      if (t.cron || t.every || t.on?.length) trigger = t;
     }
 
-    const scope: Record<string, string> = {};
+    const scope: WatchScope = {};
     if (form.scopeAttention.trim()) scope.attention = form.scopeAttention.trim();
     if (form.repo.trim()) scope.repo = form.repo.trim();
 
@@ -352,7 +369,7 @@ async function create() {
     const params: Record<string, unknown> = { ...(chosen?.defaults?.params ?? {}) };
     if (form.prompt.trim()) params.prompt = form.prompt.trim();
 
-    const body: Record<string, unknown> = {
+    const body: WatchCreateInput = {
       name: form.name.trim(),
       scope,
       program: programRef || 'builtin:status',
@@ -363,7 +380,7 @@ async function create() {
       enabled: true,
     };
     if (trigger !== undefined) body.trigger = trigger;
-    const made = (await post('/watches', body)) as Watch;
+    const made = await createWatch(body);
     creatingNew.value = false;
     await load();
     selectedId.value = made.id;

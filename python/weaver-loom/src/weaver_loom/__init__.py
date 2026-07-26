@@ -378,9 +378,9 @@ class Client:
         reply = self._request("GET", f"/sessions/{key}/preview?lines={lines}")
         return (reply or {}).get("screen", "")
 
-    def diff(self, key):
-        """The worktree file tree + change map vs the diff base."""
-        return self._request("GET", f"/sessions/{key}/tree")
+    def changes(self, key):
+        """Typed, bounded worktree changes relative to the session's local base."""
+        return self._request("GET", f"/sessions/{key}/changes")
 
     def programs(self):
         """The builtin watch program registry."""

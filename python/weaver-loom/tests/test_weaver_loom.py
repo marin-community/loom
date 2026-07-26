@@ -110,6 +110,13 @@ class StubClient(Client):
         return self.replies.get(path)
 
 
+def test_changes_uses_the_canonical_typed_changes_route():
+    client = StubClient(replies={"/sessions/s1/changes": {"files": []}})
+
+    assert client.changes("s1") == {"files": []}
+    assert client.requests == [("GET", "/sessions/s1/changes", None)]
+
+
 def test_profile_scoped_run_is_capability_gated_and_preserves_idempotency():
     session_request = {
         "repo": "marin-community/marin",

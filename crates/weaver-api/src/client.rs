@@ -602,14 +602,6 @@ impl Client {
             .to_string())
     }
 
-    /// The worktree file tree + change map vs the diff base
-    /// (`GET /api/sessions/{key}/tree`). Returned as raw JSON — the shape is a
-    /// loose `{files, changed, base}` the dashboard assembles client-side.
-    pub async fn diff(&self, key: &str) -> Result<Value> {
-        self.get(&format!("/api/sessions/{}/tree", Self::seg(key)))
-            .await
-    }
-
     /// Typed, bounded worktree changes relative to the session's local base.
     pub async fn changes(&self, key: &str) -> Result<crate::ChangeSetDto> {
         self.get_typed(&format!("/api/sessions/{}/changes", Self::seg(key)))

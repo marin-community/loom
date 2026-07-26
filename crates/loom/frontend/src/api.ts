@@ -233,6 +233,12 @@ import type {
   RepoEnvVar,
   ScratchFile,
   ScratchLimits,
+  Watch,
+  WatchCreateInput,
+  WatchRun,
+  WatchRunResult,
+  WatchUpdateInput,
+  ProgramView,
 } from './types';
 
 // --- Managed repos ---------------------------------------------------------
@@ -700,6 +706,22 @@ export const setGithubConfig = (clientId: string, clientSecret?: string) =>
     client_id: clientId,
     ...(clientSecret !== undefined ? { client_secret: clientSecret } : {}),
   }) as Promise<GithubConfig>;
+
+// --- Watches ---------------------------------------------------------------
+
+export const listWatches = () => get('/watches') as Promise<Watch[]>;
+export const getWatch = (id: string) => get(`/watches/${encodeURIComponent(id)}`) as Promise<Watch>;
+export const createWatch = (body: WatchCreateInput) => post('/watches', body) as Promise<Watch>;
+export const updateWatch = (id: string, body: WatchUpdateInput) =>
+  patch(`/watches/${encodeURIComponent(id)}`, body) as Promise<Watch>;
+export const deleteWatch = (id: string) => del(`/watches/${encodeURIComponent(id)}`);
+export const listWatchPrograms = () => get('/watches/programs') as Promise<ProgramView[]>;
+export const listWatchRuns = (id: string, limit = 50) =>
+  get(`/watches/${encodeURIComponent(id)}/runs?limit=${limit}`) as Promise<WatchRun[]>;
+export const runWatch = (id: string, dryRun = false) =>
+  post(`/watches/${encodeURIComponent(id)}/run`, {
+    dry_run: dryRun,
+  }) as Promise<WatchRunResult>;
 
 // --- Slack -------------------------------------------------------------
 
