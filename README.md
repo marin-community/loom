@@ -510,7 +510,6 @@ weaver config ls
 loom profile ls
 loom profile show default
 loom profile show github_comment
-loom config set metadata.profile watch
 loom mcp ls
 loom mcp show mcp/github/comment@v1
 loom profile add ops --agent codex --mcp github,messaging
@@ -572,9 +571,10 @@ Notable settings:
   [MCP/profile design](docs/plans/mcp-profiles.md).
 - Profile environment values are write-only: API, CLI, and Settings responses
   expose names and update times, never secret values.
-- Optional metadata assistance uses one explicitly selected, active,
-  automation-safe ACP profile. An empty `metadata.profile` disables model-backed
-  assistance. Restricted-session excerpts remain blocked unless
+- Optional metadata assistance reuses each session's ACP runtime for one
+  economy-model prompt under an internal cleared-environment, no-tools, no-MCP
+  posture; it is unavailable when that runtime advertises no economy model.
+  Restricted-session excerpts remain blocked unless
   `metadata.allow_restricted` is explicitly enabled, and failure to resolve any
   configured secret source aborts generation rather than sending unredacted
   content. Title generation is asynchronous and fenced by the exact

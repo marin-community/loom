@@ -167,7 +167,7 @@ watch(
                 : 'Generate resumption cue'
         }}
       </button>
-      <span v-else>No eligible metadata profile is available.</span>
+      <span v-else>Metadata assistance is unavailable for this session.</span>
       <span v-if="cueError" class="text-block" role="alert">{{ cueError }}</span>
     </div>
     <AcpConversation

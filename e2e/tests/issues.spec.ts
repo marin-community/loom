@@ -16,13 +16,20 @@ test.describe('issues pane', () => {
       goal: 'do the thing',
       name: 'feature',
     });
-    const issue = await weaver.seedIssue(session, 'wire up the routes');
+    const issue = await weaver.seedIssue(
+      session,
+      'wire up the routes',
+      'Expose the route status without opening the issue.',
+    );
     await weaver.tagIssue(issue.id, 'priority', 'high');
 
     await page.goto(`${weaver.baseUrl}/issues`);
     const row = page.locator(`[data-issue-id="${issue.id}"]`);
     await expect(row).toBeVisible();
     await expect(row.getByTestId('issue-title')).toContainText('wire up the routes');
+    await expect(row.getByTestId('issue-summary')).toHaveText(
+      'Expose the route status without opening the issue.',
+    );
     await expect(row.getByTestId('issue-status')).toContainText('open');
 
     // The tag renders with the expected `key: value` pill.

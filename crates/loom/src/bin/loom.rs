@@ -523,7 +523,7 @@ enum SessionCmd {
         /// The new title. Multiple words are joined, so quoting is optional.
         title: Vec<String>,
     },
-    /// Ask the configured metadata profile to refresh an eligible task label.
+    /// Ask the session's bounded metadata helper to refresh an eligible task label.
     RegenerateTitle {
         /// Session key: id, branch id, branch name, or `repo:branch`.
         session: String,
@@ -3299,24 +3299,13 @@ async fn run_config(cmd: ConfigCmd) -> Result<()> {
 /// the settings pane's `PATCH /api/settings` against a running daemon — the
 /// form a deploy's boot sequence needs, since it must seed the auth settings
 /// *before* loom starts listening.
-async fn cmd_config_set(key: String, mut value: String) -> Result<()> {
+async fn cmd_config_set(key: String, value: String) -> Result<()> {
     if let Err(why) = weaver_core::config::validate(&key, &value) {
         bail!("{key}: {why}");
     }
     let db = loom::db::connect(&weaver_core::db::default_db_path())
         .await
         .context("opening loom's database")?;
-    if key == loom::metadata_assist::METADATA_PROFILE_KEY {
-        value = value.trim().to_string();
-        if !value.is_empty() {
-            let profile = loom::profile::get(&db, &value)
-                .await?
-                .ok_or_else(|| anyhow!("unknown or retired metadata profile '{value}'"))?;
-            if !loom::metadata_assist::metadata_profile_eligible(&profile) {
-                bail!("metadata profile '{value}' must be an active automation-safe ACP profile");
-            }
-        }
-    }
     weaver_core::config::apply(&db, &[(key.clone(), Some(value))])
         .await
         .with_context(|| format!("writing setting '{key}'"))?;

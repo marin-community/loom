@@ -65,5 +65,11 @@ test.describe("status reflects hook and attention events", () => {
     await expect(page.getByTestId("status-message")).toHaveText(
       /tests failing, need help/i,
     );
+
+    await page.locator('[data-rail="sessions"]').click();
+    const row = page.locator(`[data-session-id="${s.id}"]`);
+    await expect(row.getByTestId("session-status-message")).toHaveText(
+      "tests failing, need help",
+    );
   });
 });

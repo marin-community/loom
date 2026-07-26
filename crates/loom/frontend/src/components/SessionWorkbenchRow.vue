@@ -115,7 +115,7 @@ function onKeydown(event: KeyboardEvent) {
   <li
     data-testid="session-card"
     :data-session-id="session.id"
-    class="group relative flex flex-wrap items-start gap-2 border-b border-line px-3 py-2 last:border-0 hover:bg-subtle focus-within:bg-subtle"
+    class="group relative flex flex-wrap items-start gap-2 border-b border-line px-3 py-2.5 last:border-0 hover:bg-subtle/70 focus-within:bg-subtle/70"
     :class="[
       dragging ? 'opacity-40' : '',
       dropBefore ? 'shadow-[inset_0_2px_0_var(--accent)]' : '',
@@ -157,14 +157,14 @@ function onKeydown(event: KeyboardEvent) {
       <div class="flex min-w-0 items-center gap-2">
         <router-link
           :to="`/s/${session.id}`"
-          class="stretched-link min-w-0 truncate text-sm font-semibold text-fg hover:text-accent"
+          class="stretched-link min-w-0 truncate text-sm font-medium leading-5 text-fg hover:text-accent"
           @click="emit('recordOpen', $event)"
         >
           {{ title() }}
         </router-link>
         <span
           v-if="effectiveAttention(session).level !== 'ok'"
-          class="shrink-0 text-2xs font-semibold uppercase tracking-wide"
+          class="shrink-0 rounded px-1.5 py-0.5 text-2xs font-medium"
           :class="effectiveAttention(session).level === 'blocked' ? 'text-block' : 'text-attn-line'"
         >
           {{ effectiveAttention(session).level }}
@@ -184,6 +184,13 @@ function onKeydown(event: KeyboardEvent) {
           {{ session.status }}
         </span>
       </div>
+      <p
+        v-if="messageOf(session)"
+        class="mt-0.5 truncate text-xs leading-4 text-muted"
+        data-testid="session-status-message"
+      >
+        {{ messageOf(session) }}
+      </p>
     </div>
 
     <time
@@ -238,7 +245,6 @@ function onKeydown(event: KeyboardEvent) {
         <AgentUsage v-if="session.usage" :usage="session.usage" compact />
         <span v-if="session.origin !== 'user'" class="tag-pill">origin: {{ session.origin }}</span>
       </div>
-      <p v-if="messageOf(session)" class="mt-1 text-muted">{{ messageOf(session) }}</p>
       <p v-if="session.branch.goal" class="mt-1 line-clamp-2 text-muted">
         {{ session.branch.goal }}
       </p>

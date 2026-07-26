@@ -1496,6 +1496,27 @@ pub struct HandoffSummary {
     pub status: &'static str,
 }
 
+enum OneShotPolicy<'a> {
+    Profile {
+        model: &'a str,
+        effort: &'a str,
+        profile: Option<&'a crate::profile::Profile>,
+    },
+    Metadata,
+}
+
+struct OneShotLaunchPolicy<'a> {
+    extra_env: Vec<(String, String)>,
+    env_clear: bool,
+    mode: &'a str,
+    prelude: &'a str,
+    restricted: bool,
+    allowed_tools: String,
+    mcp_access: String,
+    profile_model: &'a str,
+    profile_effort: &'a str,
+}
+
 /// Central agent-resolution and non-interactive prompt surface. Interactive
 /// launches and transient prompts both resolve the same registered runtime;
 /// provider-specific execution remains behind that runtime's ACP adapter.
@@ -1586,6 +1607,48 @@ impl<'a> AgentManager<'a> {
         profile: Option<&crate::profile::Profile>,
         timeout: Duration,
     ) -> Option<String> {
+        self.run_oneshot_with(
+            runtime,
+            prompt,
+            OneShotPolicy::Profile {
+                model,
+                effort,
+                profile,
+            },
+            timeout,
+        )
+        .await
+    }
+
+    /// Run one bounded metadata prompt through the session's own ACP runtime.
+    /// The transient launch has no ambient environment, session authority, MCP,
+    /// or tools and accepts exactly one prompt. Only an advertised economy-class
+    /// model is used; otherwise metadata assistance degrades to unavailable.
+    pub async fn run_metadata(
+        &self,
+        runtime: &str,
+        prompt: &str,
+        timeout: Duration,
+    ) -> Option<String> {
+        self.run_oneshot_with(runtime, prompt, OneShotPolicy::Metadata, timeout)
+            .await
+    }
+
+    async fn run_oneshot_with(
+        &self,
+        runtime: &str,
+        prompt: &str,
+        policy: OneShotPolicy<'_>,
+        timeout: Duration,
+    ) -> Option<String> {
+        let (model, effort, profile, economy) = match policy {
+            OneShotPolicy::Profile {
+                model,
+                effort,
+                profile,
+            } => (model, effort, profile, false),
+            OneShotPolicy::Metadata => ("", "", None, true),
+        };
         match metadata_for(self.db, runtime).await {
             Ok(Some(metadata)) if metadata.supports_acp => {}
             Ok(_) => return None,
@@ -1616,17 +1679,7 @@ impl<'a> AgentManager<'a> {
                 return None;
             }
         };
-        let (
-            extra_env,
-            env_clear,
-            mode,
-            prelude,
-            restricted,
-            allowed_tools,
-            mcp_access,
-            profile_model,
-            profile_effort,
-        ) = match profile {
+        let launch_policy = match profile {
             Some(profile) => {
                 let mut extra_env = match crate::profile::env_pairs(self.db, &profile.name).await {
                     Ok(env) => env,
@@ -1658,17 +1711,17 @@ impl<'a> AgentManager<'a> {
                         return None;
                     }
                 };
-                (
+                OneShotLaunchPolicy {
                     extra_env,
-                    profile.env_clear,
-                    profile.mode.as_str(),
-                    profile.prelude.as_str(),
-                    profile.restricted,
+                    env_clear: profile.env_clear,
+                    mode: profile.mode.as_str(),
+                    prelude: profile.prelude.as_str(),
+                    restricted: profile.restricted,
                     allowed_tools,
-                    profile.mcp_policy.clone(),
-                    profile.model.as_str(),
-                    profile.effort.as_str(),
-                )
+                    mcp_access: profile.mcp_policy.clone(),
+                    profile_model: profile.model.as_str(),
+                    profile_effort: profile.effort.as_str(),
+                }
             }
             None => {
                 let mcp_access = match serde_json::to_string(
@@ -1680,17 +1733,17 @@ impl<'a> AgentManager<'a> {
                         return None;
                     }
                 };
-                (
-                    Vec::new(),
-                    false,
-                    "plan",
-                    "none",
-                    true,
-                    "[]".to_string(),
+                OneShotLaunchPolicy {
+                    extra_env: Vec::new(),
+                    env_clear: true,
+                    mode: "plan",
+                    prelude: "none",
+                    restricted: true,
+                    allowed_tools: "[]".to_string(),
                     mcp_access,
-                    "",
-                    "",
-                )
+                    profile_model: "",
+                    profile_effort: "",
+                }
             }
         };
         let launch = match build_acp_launch(
@@ -1705,13 +1758,13 @@ impl<'a> AgentManager<'a> {
                 effort: "",
                 goal_file: None,
                 primer_file: None,
-                extra_env: &extra_env,
-                env_clear,
-                mode,
-                prelude,
-                restricted,
-                allowed_tools: &allowed_tools,
-                mcp_access: &mcp_access,
+                extra_env: &launch_policy.extra_env,
+                env_clear: launch_policy.env_clear,
+                mode: launch_policy.mode,
+                prelude: launch_policy.prelude,
+                restricted: launch_policy.restricted,
+                allowed_tools: &launch_policy.allowed_tools,
+                mcp_access: &launch_policy.mcp_access,
                 custom: custom.as_ref(),
             },
             AcpOpen::Fresh,
@@ -1725,21 +1778,26 @@ impl<'a> AgentManager<'a> {
             }
         };
         let selected_model = if model.trim().is_empty() {
-            profile_model
+            launch_policy.profile_model
         } else {
             model.trim()
         };
         let selected_effort = if effort.trim().is_empty() {
-            profile_effort
+            launch_policy.profile_effort
         } else {
             effort.trim()
         };
-        let preferred_model = if selected_model.is_empty() {
+        const ECONOMY_MODEL_HINTS: &[&str] = &["haiku", "luna", "mini", "nano"];
+        let preferred_model = if economy {
+            crate::acp::AcpPromptModel::FirstContaining(ECONOMY_MODEL_HINTS)
+        } else if selected_model.is_empty() {
             crate::acp::AcpPromptModel::Default
         } else {
             crate::acp::AcpPromptModel::Exact(selected_model)
         };
-        let preferred_effort = if selected_effort.is_empty() {
+        let preferred_effort = if economy {
+            crate::acp::AcpPromptEffort::Prefer("low")
+        } else if selected_effort.is_empty() {
             crate::acp::AcpPromptEffort::Default
         } else {
             crate::acp::AcpPromptEffort::Exact(selected_effort)

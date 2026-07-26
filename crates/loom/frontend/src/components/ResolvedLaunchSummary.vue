@@ -23,8 +23,8 @@ function sourceLabel(source: LaunchSource): string {
   >
     <div class="mb-2 flex items-center justify-between gap-3">
       <div>
-        <h3 class="text-sm font-semibold text-fg">Resolved launch</h3>
-        <p class="text-xs text-faint">The immutable snapshot the server will launch.</p>
+        <h3 class="text-sm font-semibold text-fg">Profile preview</h3>
+        <p class="text-xs text-faint">Settings and policy for the replacement agent.</p>
       </div>
       <span v-if="loading" class="text-xs text-faint">Resolving…</span>
       <span
@@ -87,7 +87,7 @@ function sourceLabel(source: LaunchSource): string {
       </ul>
     </div>
     <p v-else-if="!loading" class="text-xs text-muted">
-      Select a profile to preview its concrete runtime and policy.
+      Select a profile to review its runtime and policy.
     </p>
   </section>
 </template>
