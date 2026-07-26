@@ -211,21 +211,17 @@ for line in sys.stdin:
     expect(
       await page.getByTestId("metadata-settings").evaluate((section) => ({
         settingsVisible: [
-          "metadata.profile",
           "metadata.title_generation",
           "metadata.resumption_cues",
           "metadata.resumption_inactivity_secs",
           "metadata.allow_restricted",
         ].every((key) => section.textContent?.includes(key)),
-        selectableProfiles: Array.from(
-          section.querySelectorAll('[data-testid^="profile-option-"]'),
-        ).map((option) =>
-          option.getAttribute("data-testid")?.replace("profile-option-", ""),
-        ),
+        metadataProfileVisible:
+          section.textContent?.includes("metadata.profile"),
       })),
     ).toEqual({
       settingsVisible: true,
-      selectableProfiles: ["github_comment", "watch"],
+      metadataProfileVisible: false,
     });
   });
 });

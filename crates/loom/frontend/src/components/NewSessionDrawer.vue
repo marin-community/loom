@@ -5,7 +5,6 @@ import {
   ApiError,
   cloneProfile,
   get,
-  getMcpRegistry,
   listAgents,
   listProfiles,
   listRepos,
@@ -15,22 +14,16 @@ import {
 } from '../api';
 import type {
   AgentMetadata,
-  CloneProfileEnvironment,
   LaunchOverrides as LaunchOverrideValues,
   LaunchSelection,
   ManagedRepo,
-  McpRegistry,
   Profile,
-  ProfileInput,
   RecentRepo,
   RepoBranch,
   ResolvedLaunch,
   Session,
 } from '../types';
 import LaunchOverrides from './LaunchOverrides.vue';
-import ProfileEditor from './ProfileEditor.vue';
-import ProfileSelector from './ProfileSelector.vue';
-import ResolvedLaunchSummary from './ResolvedLaunchSummary.vue';
 import ScratchPicker from './ScratchPicker.vue';
 
 const emit = defineEmits<{
@@ -57,17 +50,13 @@ const scratchPicker = ref<InstanceType<typeof ScratchPicker> | null>(null);
 const errorElement = ref<HTMLElement | null>(null);
 const agents = ref<AgentMetadata[]>([]);
 const profiles = ref<Profile[]>([]);
-const mcpRegistry = ref<McpRegistry | null>(null);
 const profile = ref('default');
 const overrides = ref<LaunchOverrideValues>({});
 const resolved = ref<ResolvedLaunch | null>(null);
 const lastResolved = ref<ResolvedLaunch | null>(null);
 const resolving = ref(false);
 const resolveError = ref('');
-const advanced = ref(false);
-const cloneDraft = ref<ProfileInput | null>(null);
-const cloneEnvironment = ref<CloneProfileEnvironment | null>(null);
-const cloneSourceEnvironment = ref<Profile['env']>([]);
+const cloneName = ref('');
 const clonePreviewKey = ref('');
 const cloneBusy = ref(false);
 const cloneNotice = ref('');
@@ -86,6 +75,9 @@ const selection = computed<LaunchSelection>(() => ({
   profile: profile.value || 'default',
   overrides: { ...overrides.value },
 }));
+const selectedProfile = computed(() =>
+  profiles.value.find((candidate) => candidate.name === profile.value),
+);
 
 type BranchMode = 'new' | 'existing';
 const branchMode = ref<BranchMode>('new');
@@ -282,10 +274,7 @@ function resetForm() {
   scratchFiles.value = [];
   nameEdited.value = false;
   branchMode.value = 'new';
-  advanced.value = false;
-  cloneDraft.value = null;
-  cloneEnvironment.value = null;
-  cloneSourceEnvironment.value = [];
+  cloneName.value = '';
   clonePreviewKey.value = '';
   cloneNotice.value = '';
   error.value = '';
@@ -314,9 +303,7 @@ function scheduleResolution() {
   if (resolveTimer) clearTimeout(resolveTimer);
   const request = ++resolveRequest;
   resolved.value = null;
-  cloneDraft.value = null;
-  cloneEnvironment.value = null;
-  cloneSourceEnvironment.value = [];
+  cloneName.value = '';
   clonePreviewKey.value = '';
   resolving.value = true;
   resolveError.value = '';
@@ -359,19 +346,17 @@ async function refreshLaunchData() {
   resolved.value = null;
   resolving.value = false;
   try {
-    const [recent, managed, metadata, templates, registry] = await Promise.all([
+    const [recent, managed, metadata, templates] = await Promise.all([
       get('/repos/recent').catch(() => recentRepos.value) as Promise<RecentRepo[]>,
       listRepos().catch(() => managedRepos.value),
       listAgents(),
       listProfiles(),
-      getMcpRegistry(),
     ]);
     if (activation !== activationRequest) return;
     recentRepos.value = recent;
     managedRepos.value = managed;
     agents.value = metadata.agents;
     profiles.value = templates;
-    mcpRegistry.value = registry;
     if (!templates.some((item) => item.name === profile.value)) {
       profile.value = templates.some((item) => item.name === 'default')
         ? 'default'
@@ -388,6 +373,14 @@ async function refreshLaunchData() {
 
 function chooseProfile(value: string) {
   profile.value = value;
+  overrides.value = {};
+  lastResolved.value = null;
+  cloneNotice.value = '';
+}
+
+const hasLaunchChanges = computed(() => Object.keys(overrides.value).length > 0);
+
+function resetLaunchChanges() {
   overrides.value = {};
   cloneNotice.value = '';
 }
@@ -440,50 +433,16 @@ async function beginSaveAsNew() {
     cloneBusy.value = false;
   }
   if (!source) return;
-  cloneDraft.value = {
-    name: `${source.name}-copy`,
-    description: source.description
-      ? `Copy of ${source.name}: ${source.description}`
-      : `Copy of ${source.name}`,
-    agent_kind: preview.agent,
-    model: preview.model,
-    effort: preview.effort,
-    protocol: preview.protocol,
-    mode: preview.mode,
-    class: preview.class,
-    strict: source.strict,
-    env_clear: source.env_clear,
-    ambient_allowlist: [...source.ambient_allowlist],
-    idle_archive_secs: source.idle_archive_secs,
-    max_concurrent: source.max_concurrent,
-    turn_budget: source.turn_budget,
-    prelude: source.prelude,
-    restricted: source.restricted,
-    runtime_permissions: [...source.runtime_permissions],
-    mcp_access: { ...source.mcp_access, groups: [...source.mcp_access.groups] },
-  };
-  cloneEnvironment.value = {
-    inherit: false,
-    remove: [],
-    set: [],
-  };
-  cloneSourceEnvironment.value = source.env.map((entry) => ({ ...entry }));
+  cloneName.value = `${source.name}-copy`;
   clonePreviewKey.value = previewKey(preview);
   cloneNotice.value = '';
 }
 
 async function saveAsNewProfile() {
   const preview = resolved.value;
-  const target = cloneDraft.value?.name.trim() ?? '';
-  if (
-    !preview ||
-    !target ||
-    !cloneEnvironment.value ||
-    clonePreviewKey.value !== previewKey(preview)
-  ) {
-    cloneDraft.value = null;
-    cloneEnvironment.value = null;
-    cloneSourceEnvironment.value = [];
+  const target = cloneName.value.trim();
+  if (!preview || !target || clonePreviewKey.value !== previewKey(preview)) {
+    cloneName.value = '';
     clonePreviewKey.value = '';
     error.value = 'Launch settings changed. Review the fresh resolution before saving a profile.';
     return;
@@ -500,9 +459,7 @@ async function saveAsNewProfile() {
       expected_profile_revision: preview.profile_revision,
       expected_resolver_revision: preview.resolver_revision,
       overrides: { ...overrides.value },
-      template: cloneDraft.value!,
-      copy_environment: false,
-      environment: cloneEnvironment.value,
+      copy_environment: true,
     });
   } catch (cause) {
     const preview = cause instanceof ApiError ? cause.body.preview : undefined;
@@ -512,11 +469,9 @@ async function saveAsNewProfile() {
       submittedKey === previewKey(resolved.value);
     if (preview && typeof preview === 'object' && stillCurrent) {
       resolved.value = preview as ResolvedLaunch;
-      cloneDraft.value = null;
-      cloneEnvironment.value = null;
-      cloneSourceEnvironment.value = [];
+      cloneName.value = '';
       clonePreviewKey.value = '';
-      error.value = `${(cause as Error).message} Review the fresh resolution and reopen the new-profile editor.`;
+      error.value = `${(cause as Error).message} Review the fresh settings before saving again.`;
     } else if (stillCurrent) {
       error.value = (cause as Error).message;
     } else {
@@ -535,9 +490,7 @@ async function saveAsNewProfile() {
     submittedGeneration === resolveRequest &&
     resolved.value !== null &&
     submittedKey === previewKey(resolved.value);
-  cloneDraft.value = null;
-  cloneEnvironment.value = null;
-  cloneSourceEnvironment.value = [];
+  cloneName.value = '';
   clonePreviewKey.value = '';
   if (stillCurrent) {
     chooseProfile(saved.name);
@@ -696,7 +649,7 @@ onActivated(() => void refreshLaunchData());
       <p class="text-2xs font-semibold uppercase tracking-wider text-muted">Sessions / New</p>
       <h1 class="mt-1 font-serif text-2xl font-semibold text-fg">Launch a session</h1>
       <p class="mt-1 text-sm text-muted">
-        Pick a reusable profile, make one-launch changes, and review the server’s exact snapshot.
+        Choose a reusable profile, adjust its session settings if needed, and launch.
       </p>
     </div>
 
@@ -954,106 +907,123 @@ onActivated(() => void refreshLaunchData());
       <aside
         class="min-w-0 space-y-4 border-t border-line pt-4 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0"
       >
-        <section class="space-y-3">
-          <div>
-            <h3 class="text-2xs font-semibold uppercase tracking-wider text-muted">
-              Launch profile
-            </h3>
-            <p class="mt-1 text-xs text-faint">
-              Templates stay unchanged unless you explicitly save a new one.
+        <section class="space-y-3 rounded-md border border-line bg-surface p-3">
+          <div class="space-y-1.5 border-b border-line pb-3">
+            <div class="flex items-center justify-between gap-3">
+              <label class="text-xs font-medium text-fg" for="launch-profile">Profile</label>
+              <RouterLink
+                to="/settings"
+                class="text-xs text-accent hover:underline"
+                @click="creating && $event.preventDefault()"
+              >
+                Manage profiles
+              </RouterLink>
+            </div>
+            <select
+              id="launch-profile"
+              :value="profile"
+              data-testid="launch-profile-picker"
+              class="w-full rounded bg-input px-2 py-1.5 text-sm text-fg"
+              :disabled="creating"
+              @change="chooseProfile(($event.target as HTMLSelectElement).value)"
+            >
+              <option v-for="candidate in profiles" :key="candidate.name" :value="candidate.name">
+                {{ candidate.name }}
+              </option>
+            </select>
+            <p v-if="selectedProfile?.description" class="text-xs text-muted">
+              {{ selectedProfile.description }}
             </p>
+            <div v-if="selectedProfile" class="flex flex-wrap gap-1 text-2xs text-faint">
+              <span class="font-mono">r{{ selectedProfile.revision }}</span>
+              <span>· {{ selectedProfile.class }}</span>
+              <span v-if="selectedProfile.strict">· strict policy</span>
+              <span v-if="selectedProfile.restricted">· restricted</span>
+            </div>
           </div>
-
-          <ProfileSelector
-            :profiles="profiles"
-            :model-value="profile"
-            layout="list"
-            :disabled="creating"
-            @update:model-value="chooseProfile"
-          />
-          <RouterLink
-            to="/settings"
-            class="inline-flex text-xs text-accent hover:underline"
-            @click="creating && $event.preventDefault()"
-          >
-            Edit profile templates in Settings
-          </RouterLink>
-        </section>
-
-        <section class="space-y-2 rounded-md border border-line bg-surface p-3">
-          <button
-            type="button"
-            class="flex w-full items-center justify-between text-left text-xs font-medium text-fg"
-            :aria-expanded="advanced"
-            @click="advanced = !advanced"
-          >
-            One-launch overrides
-            <span class="text-faint">{{ advanced ? 'Hide' : 'Edit' }}</span>
-          </button>
-          <p v-if="resolved?.policy.strict" class="text-xs text-faint">
-            This strict profile locks every launch selector.
-          </p>
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <h3 class="text-xs font-medium text-fg">Profile settings</h3>
+              <p class="mt-0.5 text-xs text-faint">
+                {{
+                  hasLaunchChanges
+                    ? 'Changed fields apply to this session.'
+                    : 'Edit any field directly; the profile remains unchanged.'
+                }}
+              </p>
+            </div>
+            <button
+              v-if="hasLaunchChanges"
+              type="button"
+              class="shrink-0 text-xs text-accent hover:underline"
+              data-testid="reset-launch-settings"
+              @click="resetLaunchChanges"
+            >
+              Reset
+            </button>
+          </div>
           <LaunchOverrides
-            v-if="advanced"
             v-model="overrides"
             :agents="agents"
             :resolved="resolved"
             :fallback="lastResolved"
-            :disabled="resolving || Boolean(resolved?.policy.strict)"
+            :disabled="Boolean((resolved ?? lastResolved)?.policy.strict)"
           />
+          <p v-if="resolving" class="text-xs text-faint" aria-live="polite">Checking settings…</p>
+          <ul v-else-if="resolved?.errors.length" class="space-y-1 text-xs text-block">
+            <li v-for="message in resolved.errors" :key="message">• {{ message }}</li>
+          </ul>
         </section>
 
         <p v-if="resolveError" class="rounded bg-block-soft p-2 text-xs text-block" role="alert">
           {{ resolveError }}
         </p>
-        <ResolvedLaunchSummary :resolved="resolved" :loading="resolving" />
 
         <section
-          v-if="resolved"
+          v-if="hasLaunchChanges && resolved"
           class="min-w-0 space-y-2 rounded-md border border-line bg-surface p-3"
         >
-          <h3 class="text-xs font-medium text-fg">Save these settings as a new profile</h3>
+          <h3 class="text-xs font-medium text-fg">Keep these settings</h3>
           <p class="text-xs text-faint">
-            Review and edit the proposed template before the server creates it atomically.
-            <code>{{ resolved.selection.profile }}</code> is never overwritten.
+            Save the changes as a new profile. The source profile and its policy stay unchanged.
           </p>
           <button
-            v-if="!cloneDraft"
+            v-if="!cloneName"
             type="button"
             data-testid="clone-profile-open"
             class="btn-secondary px-2.5 py-1.5 text-xs"
             :disabled="cloneBusy || resolving || !cloneStaticValid"
             @click="beginSaveAsNew"
           >
-            Review new profile…
+            Save as new profile…
           </button>
           <template v-else>
-            <ProfileEditor
-              v-model="cloneDraft"
-              v-model:environment="cloneEnvironment"
-              :agents="agents"
-              :mcp-registry="mcpRegistry"
-              :source-environment="cloneSourceEnvironment"
-              :disabled="cloneBusy"
-            />
+            <label class="block text-xs text-muted">
+              Profile name
+              <input
+                v-model="cloneName"
+                type="text"
+                data-testid="clone-profile-name"
+                class="mt-1 w-full rounded bg-input px-2 py-1.5 font-mono text-xs text-fg"
+                :disabled="cloneBusy"
+              />
+            </label>
             <div class="flex flex-wrap gap-2">
               <button
                 type="button"
                 data-testid="clone-profile"
                 class="btn-secondary px-2.5 py-1.5 text-xs"
-                :disabled="cloneBusy || resolving || !cloneDraft.name.trim()"
+                :disabled="cloneBusy || resolving || !cloneName.trim()"
                 @click="saveAsNewProfile"
               >
-                {{ cloneBusy ? 'Saving…' : 'Create new profile' }}
+                {{ cloneBusy ? 'Saving…' : 'Save profile' }}
               </button>
               <button
                 type="button"
                 class="px-2.5 py-1.5 text-xs text-muted"
                 :disabled="cloneBusy"
                 @click="
-                  cloneDraft = null;
-                  cloneEnvironment = null;
-                  cloneSourceEnvironment = [];
+                  cloneName = '';
                   clonePreviewKey = '';
                 "
               >
@@ -1061,8 +1031,8 @@ onActivated(() => void refreshLaunchData());
               </button>
             </div>
           </template>
-          <p v-if="cloneNotice" class="text-xs text-ok">{{ cloneNotice }}</p>
         </section>
+        <p v-if="cloneNotice" class="text-xs text-ok">{{ cloneNotice }}</p>
       </aside>
     </fieldset>
 

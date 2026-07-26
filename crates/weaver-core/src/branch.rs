@@ -183,8 +183,21 @@ pub fn slugify(text: &str) -> String {
 // CRUD
 // ---------------------------------------------------------------------------
 
+const BRANCH_COLUMNS: &str =
+    "id, repo_root, branch, base_branch, goal, title, title_provenance, description, \
+     created_at, updated_at";
+
+fn select_branches(suffix: &str) -> String {
+    // Keep the projection stable across rolling upgrades. An older process can
+    // still be draining while a replacement adds a column; SQLite may recompile
+    // `SELECT *` after sqlx captured the old row metadata and panic while
+    // materializing the wider row.
+    format!("SELECT {BRANCH_COLUMNS} FROM branches {suffix}")
+}
+
 pub async fn get(db: &Db, id: &str) -> Result<Option<Branch>> {
-    let row = sqlx::query_as::<_, Branch>("SELECT * FROM branches WHERE id = ?")
+    let query = select_branches("WHERE id = ?");
+    let row = sqlx::query_as::<_, Branch>(&query)
         .bind(id)
         .fetch_optional(db)
         .await?;
@@ -192,19 +205,18 @@ pub async fn get(db: &Db, id: &str) -> Result<Option<Branch>> {
 }
 
 pub async fn find_by_repo_branch(db: &Db, repo_root: &str, branch: &str) -> Result<Option<Branch>> {
-    let row =
-        sqlx::query_as::<_, Branch>("SELECT * FROM branches WHERE repo_root = ? AND branch = ?")
-            .bind(repo_root)
-            .bind(branch)
-            .fetch_optional(db)
-            .await?;
+    let query = select_branches("WHERE repo_root = ? AND branch = ?");
+    let row = sqlx::query_as::<_, Branch>(&query)
+        .bind(repo_root)
+        .bind(branch)
+        .fetch_optional(db)
+        .await?;
     Ok(row)
 }
 
 pub async fn list(db: &Db) -> Result<Vec<Branch>> {
-    let rows = sqlx::query_as::<_, Branch>("SELECT * FROM branches ORDER BY created_at DESC")
-        .fetch_all(db)
-        .await?;
+    let query = select_branches("ORDER BY created_at DESC");
+    let rows = sqlx::query_as::<_, Branch>(&query).fetch_all(db).await?;
     Ok(rows)
 }
 
@@ -218,13 +230,12 @@ pub async fn resolve_key(db: &Db, key: &str) -> Result<Option<Branch>> {
             return Ok(Some(b));
         }
     }
-    let matches = sqlx::query_as::<_, Branch>(
-        "SELECT * FROM branches WHERE branch = ? OR id LIKE ? ORDER BY created_at DESC",
-    )
-    .bind(key)
-    .bind(format!("{key}%"))
-    .fetch_all(db)
-    .await?;
+    let query = select_branches("WHERE branch = ? OR id LIKE ? ORDER BY created_at DESC");
+    let matches = sqlx::query_as::<_, Branch>(&query)
+        .bind(key)
+        .bind(format!("{key}%"))
+        .fetch_all(db)
+        .await?;
     Ok(matches.into_iter().next())
 }
 

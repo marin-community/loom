@@ -57,9 +57,14 @@ const classes = computed(() =>
       <span class="mt-0.5 block truncate text-xs text-faint">
         {{ profile.description || `${profile.agent_kind} · ${profile.class}` }}
       </span>
+      <span class="mt-1 block truncate font-mono text-2xs text-muted">
+        {{ profile.agent_kind }} · {{ profile.model || 'default model' }} ·
+        {{ profile.effort || 'default effort' }}
+      </span>
       <span class="mt-1 flex flex-wrap gap-1 text-2xs">
-        <span class="rounded bg-subtle px-1.5 py-0.5">{{ profile.agent_kind }}</span>
-        <span v-if="profile.strict" class="rounded bg-subtle px-1.5 py-0.5">locked</span>
+        <span class="rounded bg-subtle px-1.5 py-0.5">{{ profile.mode }}</span>
+        <span class="rounded bg-subtle px-1.5 py-0.5">{{ profile.class }}</span>
+        <span v-if="profile.strict" class="rounded bg-subtle px-1.5 py-0.5">strict policy</span>
         <span v-if="profile.restricted" class="rounded bg-block-soft px-1.5 py-0.5 text-block">
           restricted
         </span>

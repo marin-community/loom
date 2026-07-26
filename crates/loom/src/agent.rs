@@ -1496,6 +1496,15 @@ pub struct HandoffSummary {
     pub status: &'static str,
 }
 
+enum OneShotPolicy<'a> {
+    Profile {
+        model: &'a str,
+        effort: &'a str,
+        profile: Option<&'a crate::profile::Profile>,
+    },
+    Metadata,
+}
+
 /// Central agent-resolution and non-interactive prompt surface. Interactive
 /// launches and transient prompts both resolve the same registered runtime;
 /// provider-specific execution remains behind that runtime's ACP adapter.
@@ -1586,6 +1595,48 @@ impl<'a> AgentManager<'a> {
         profile: Option<&crate::profile::Profile>,
         timeout: Duration,
     ) -> Option<String> {
+        self.run_oneshot_with(
+            runtime,
+            prompt,
+            OneShotPolicy::Profile {
+                model,
+                effort,
+                profile,
+            },
+            timeout,
+        )
+        .await
+    }
+
+    /// Run one bounded metadata prompt through the session's own ACP runtime.
+    /// The transient launch has no ambient environment, session authority, MCP,
+    /// or tools and accepts exactly one prompt. Only an advertised economy-class
+    /// model is used; otherwise metadata assistance degrades to unavailable.
+    pub async fn run_metadata(
+        &self,
+        runtime: &str,
+        prompt: &str,
+        timeout: Duration,
+    ) -> Option<String> {
+        self.run_oneshot_with(runtime, prompt, OneShotPolicy::Metadata, timeout)
+            .await
+    }
+
+    async fn run_oneshot_with(
+        &self,
+        runtime: &str,
+        prompt: &str,
+        policy: OneShotPolicy<'_>,
+        timeout: Duration,
+    ) -> Option<String> {
+        let (model, effort, profile, economy) = match policy {
+            OneShotPolicy::Profile {
+                model,
+                effort,
+                profile,
+            } => (model, effort, profile, false),
+            OneShotPolicy::Metadata => ("", "", None, true),
+        };
         match metadata_for(self.db, runtime).await {
             Ok(Some(metadata)) if metadata.supports_acp => {}
             Ok(_) => return None,
@@ -1682,7 +1733,7 @@ impl<'a> AgentManager<'a> {
                 };
                 (
                     Vec::new(),
-                    false,
+                    true,
                     "plan",
                     "none",
                     true,
@@ -1734,12 +1785,17 @@ impl<'a> AgentManager<'a> {
         } else {
             effort.trim()
         };
-        let preferred_model = if selected_model.is_empty() {
+        const ECONOMY_MODEL_HINTS: &[&str] = &["haiku", "luna", "mini", "nano"];
+        let preferred_model = if economy {
+            crate::acp::AcpPromptModel::FirstContaining(ECONOMY_MODEL_HINTS)
+        } else if selected_model.is_empty() {
             crate::acp::AcpPromptModel::Default
         } else {
             crate::acp::AcpPromptModel::Exact(selected_model)
         };
-        let preferred_effort = if selected_effort.is_empty() {
+        let preferred_effort = if economy {
+            crate::acp::AcpPromptEffort::Prefer("low")
+        } else if selected_effort.is_empty() {
             crate::acp::AcpPromptEffort::Default
         } else {
             crate::acp::AcpPromptEffort::Exact(selected_effort)

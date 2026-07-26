@@ -377,6 +377,20 @@ function refsFor(i: Issue): { session: Session; rel: string }[] {
   return out;
 }
 
+function issueSummary(i: Issue): string {
+  const workingStatus = refsFor(i)
+    .find((ref) => ref.rel === 'claimed' && ref.session.branch.description.trim())
+    ?.session.branch.description.trim();
+  if (workingStatus) return workingStatus.replace(/\s+/g, ' ');
+  return (
+    i.body
+      .split('\n')
+      .map((line) => line.trim())
+      .find(Boolean)
+      ?.replace(/\s+/g, ' ') ?? ''
+  );
+}
+
 // The branch label to show when no live session matches (the worktree may be
 // archived). Strips the `weaver/` prefix the way the rest of the UI does.
 function branchLabel(b: string): string {
@@ -1039,13 +1053,20 @@ async function removeTag(i: Issue, key: string) {
           <span class="shrink-0 font-mono text-2xs text-faint">#{{ i.id }}</span>
           <button
             type="button"
-            class="min-w-0 flex-1 truncate text-left text-sm text-fg hover:text-accent"
+            class="min-w-0 flex-1 text-left text-sm text-fg hover:text-accent"
             :class="{ 'line-through decoration-muted': i.status !== 'open' }"
             data-testid="issue-title"
             :title="editing === i.id ? 'Collapse editor' : 'Edit issue'"
             @click="startEdit(i)"
           >
-            {{ i.title }}
+            <span class="block truncate">{{ i.title }}</span>
+            <span
+              v-if="issueSummary(i)"
+              class="mt-0.5 block truncate text-xs font-normal text-faint no-underline"
+              data-testid="issue-summary"
+            >
+              {{ issueSummary(i) }}
+            </span>
           </button>
           <span v-if="multiRepo" class="pill shrink-0 font-mono" :title="i.repo_root">{{
             repoName(i.repo_root)

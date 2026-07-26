@@ -4,7 +4,6 @@ import * as api from '../api';
 import type { AgentMetadata, McpRegistry, Profile, ProfileInput } from '../types';
 import InlineConfirm from './InlineConfirm.vue';
 import ProfileEditor from './ProfileEditor.vue';
-import ProfileSelector from './ProfileSelector.vue';
 
 const profiles = ref<Profile[]>([]);
 const agents = ref<AgentMetadata[]>([]);
@@ -149,20 +148,46 @@ onMounted(load);
 </script>
 
 <template>
-  <div class="grid min-w-0 gap-4 md:grid-cols-[12rem_minmax(0,1fr)]">
-    <aside class="self-start overflow-hidden rounded-md border border-line bg-surface">
-      <ProfileSelector
-        :profiles="profiles"
-        :model-value="selected"
-        layout="list"
-        @update:model-value="choose"
-      />
-      <button class="block w-full px-3 py-2 text-left text-xs text-accent" @click="add">
-        + Add profile
-      </button>
-    </aside>
+  <section class="min-w-0 overflow-hidden rounded-md border border-line bg-surface">
+    <header class="flex flex-wrap items-end gap-2 border-b border-line px-3 py-2">
+      <div class="mr-auto min-w-0">
+        <h3 class="text-sm font-medium text-fg">Profiles</h3>
+        <p class="text-xs text-muted">Reusable agent and policy templates for session launches.</p>
+      </div>
+      <label class="min-w-48 text-2xs text-muted">
+        Profile
+        <select
+          :value="selected"
+          data-testid="profile-picker"
+          class="mt-0.5 block w-full rounded bg-input px-2 py-1.5 text-xs text-fg"
+          @change="choose(($event.target as HTMLSelectElement).value)"
+        >
+          <option v-if="creating" value="">New profile</option>
+          <option v-for="profile in profiles" :key="profile.name" :value="profile.name">
+            {{ profile.name }} · {{ profile.agent_kind }} ·
+            {{ profile.model || 'default model' }}
+          </option>
+        </select>
+      </label>
+      <button class="btn-secondary px-2.5 py-1.5 text-xs" @click="add">+ Add profile</button>
+    </header>
 
-    <div class="min-w-0 space-y-4">
+    <div
+      v-if="current && !creating"
+      class="flex flex-wrap items-center gap-1.5 border-b border-line bg-input/40 px-3 py-2 text-2xs text-muted"
+      data-testid="profile-summary"
+    >
+      <span class="font-mono text-fg">{{ current.agent_kind }}</span>
+      <span>· {{ current.model || 'default model' }}</span>
+      <span>· {{ current.effort || 'default effort' }}</span>
+      <span>· {{ current.mode }}</span>
+      <span>· {{ current.class }}</span>
+      <span v-if="current.strict" class="meta-chip">strict policy</span>
+      <span v-if="current.restricted" class="meta-chip">restricted</span>
+      <span class="ml-auto font-mono text-faint">r{{ current.revision }}</span>
+    </div>
+
+    <div class="min-w-0 space-y-4 p-3">
       <p v-if="error" class="text-sm text-block" role="alert">{{ error }}</p>
       <p v-if="notice" class="text-sm text-accent">{{ notice }}</p>
       <template v-if="draft">
@@ -229,5 +254,5 @@ onMounted(load);
         </section>
       </template>
     </div>
-  </div>
+  </section>
 </template>

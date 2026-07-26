@@ -443,20 +443,10 @@ pub const REGISTRY: &[SettingSpec] = &[
         options: &[],
     },
     SettingSpec {
-        key: "metadata.profile",
-        label: "Metadata profile",
-        description: "Automation-safe ACP profile used for optional generated task labels and \
-            resumption cues. Empty disables model-backed metadata assistance.",
-        kind: SettingKind::String,
-        default: "",
-        group: "Metadata",
-        options: &[],
-    },
-    SettingSpec {
         key: "metadata.title_generation",
         label: "Generate task labels",
-        description: "Asynchronously replace eligible deterministic task labels through the \
-            configured metadata profile. Launch never waits for this.",
+        description: "Asynchronously replace eligible deterministic task labels through a \
+            bounded economy prompt on the session's ACP runtime. Launch never waits for this.",
         kind: SettingKind::Bool,
         default: "true",
         group: "Metadata",
@@ -486,7 +476,7 @@ pub const REGISTRY: &[SettingSpec] = &[
         key: "metadata.allow_restricted",
         label: "Allow restricted metadata",
         description: "Explicitly permit bounded title/cue excerpts from restricted sessions \
-            to cross into the configured metadata profile. Off by default.",
+            to reach the session's isolated metadata prompt. Off by default.",
         kind: SettingKind::Bool,
         default: "false",
         group: "Metadata",

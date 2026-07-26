@@ -14,32 +14,22 @@ const emit = defineEmits<{
   'update:modelValue': [LaunchOverrides];
 }>();
 const uid = useId();
-const snapshot = computed(() => props.resolved ?? props.fallback ?? null);
-
+const settings = computed(() => props.resolved ?? props.fallback ?? null);
 const effectiveAgent = computed(
-  () => props.modelValue.agent ?? snapshot.value?.agent ?? props.agents[0]?.kind ?? '',
+  () => props.modelValue.agent ?? settings.value?.agent ?? props.agents[0]?.kind ?? '',
 );
 const metadata = computed(() => props.agents.find((agent) => agent.kind === effectiveAgent.value));
 
-function enabled(field: keyof LaunchOverrides): boolean {
+function value(field: keyof LaunchOverrides): string {
+  return props.modelValue[field] ?? (settings.value?.[field] as string | undefined) ?? '';
+}
+
+function changed(field: keyof LaunchOverrides): boolean {
   return Object.prototype.hasOwnProperty.call(props.modelValue, field);
 }
 
-function fallback(field: keyof LaunchOverrides): string {
-  const resolved = snapshot.value;
-  if (!resolved) return '';
-  return resolved[field] as string;
-}
-
-function toggle(field: keyof LaunchOverrides, checked: boolean) {
-  const next = { ...props.modelValue };
-  if (checked) next[field] = fallback(field);
-  else delete next[field];
-  emit('update:modelValue', next);
-}
-
-function set(field: keyof LaunchOverrides, value: string) {
-  const next = { ...props.modelValue, [field]: value };
+function set(field: keyof LaunchOverrides, nextValue: string) {
+  const next = { ...props.modelValue, [field]: nextValue };
   if (field === 'agent') {
     delete next.model;
     delete next.effort;
@@ -48,147 +38,178 @@ function set(field: keyof LaunchOverrides, value: string) {
 }
 
 function locked(field: keyof LaunchOverrides): boolean {
-  return props.disabled || Boolean(props.resolved?.locked_fields.includes(field));
+  const lockedFields = props.resolved?.locked_fields ?? props.fallback?.locked_fields ?? [];
+  return Boolean(props.disabled || lockedFields.includes(field));
 }
 </script>
 
 <template>
-  <div class="grid gap-3 sm:grid-cols-2" data-testid="launch-overrides">
-    <fieldset
-      v-for="field in ['agent', 'model', 'effort', 'protocol', 'mode', 'class'] as const"
-      :key="field"
-      class="rounded border border-line bg-input p-2 text-xs"
-    >
-      <legend class="sr-only capitalize">{{ field }} override</legend>
-      <span class="mb-1 flex items-center justify-between gap-2">
-        <span class="font-medium capitalize" aria-hidden="true">{{ field }}</span>
-        <label :for="`${uid}-${field}-enabled`" class="flex items-center gap-1 text-faint">
-          <input
-            :id="`${uid}-${field}-enabled`"
-            type="checkbox"
-            :data-testid="`override-${field}-toggle`"
-            :checked="enabled(field)"
-            :disabled="locked(field)"
-            @change="toggle(field, ($event.target as HTMLInputElement).checked)"
-          />
-          override
-        </label>
-      </span>
-
-      <select
-        v-if="field === 'agent'"
-        :id="`${uid}-${field}-value`"
-        :aria-label="`${field} override value`"
-        :value="modelValue.agent ?? snapshot?.agent ?? ''"
-        :disabled="!enabled(field) || locked(field)"
-        :data-testid="`override-${field}`"
-        class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
-        @change="set(field, ($event.target as HTMLSelectElement).value)"
-      >
-        <option v-for="agent in agents" :key="agent.kind" :value="agent.kind">
-          {{ agent.label }}
-        </option>
-      </select>
-
-      <input
-        v-else-if="field === 'model' && metadata?.accepts_raw_model"
-        :id="`${uid}-${field}-value`"
-        :aria-label="`${field} override value`"
-        :value="modelValue.model ?? snapshot?.model ?? ''"
-        :disabled="!enabled(field) || locked(field)"
-        :data-testid="`override-${field}`"
-        list="launch-model-options"
-        placeholder="Agent default"
-        class="w-full rounded bg-surface px-2 py-1.5 font-mono disabled:opacity-60"
-        @input="set(field, ($event.target as HTMLInputElement).value)"
-      />
-      <datalist v-if="field === 'model' && metadata?.accepts_raw_model" id="launch-model-options">
-        <option v-for="choice in metadata.models" :key="choice.id" :value="choice.id" />
-      </datalist>
-
-      <select
-        v-else-if="field === 'model'"
-        :id="`${uid}-${field}-value`"
-        :aria-label="`${field} override value`"
-        :value="modelValue.model ?? snapshot?.model ?? ''"
-        :disabled="!enabled(field) || locked(field)"
-        :data-testid="`override-${field}`"
-        class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
-        @change="set(field, ($event.target as HTMLSelectElement).value)"
-      >
-        <option value="">Agent default</option>
-        <option v-for="choice in metadata?.models ?? []" :key="choice.id" :value="choice.id">
-          {{ choice.label }}
-        </option>
-      </select>
-
-      <select
-        v-else-if="field === 'effort'"
-        :id="`${uid}-${field}-value`"
-        :aria-label="`${field} override value`"
-        :value="modelValue.effort ?? snapshot?.effort ?? ''"
-        :disabled="!enabled(field) || locked(field)"
-        :data-testid="`override-${field}`"
-        class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
-        @change="set(field, ($event.target as HTMLSelectElement).value)"
-      >
-        <option value="">Agent default</option>
-        <option v-for="choice in metadata?.efforts ?? []" :key="choice.id" :value="choice.id">
-          {{ choice.label }}
-        </option>
-      </select>
-
-      <select
-        v-else-if="field === 'protocol'"
-        :id="`${uid}-${field}-value`"
-        :aria-label="`${field} override value`"
-        :value="modelValue.protocol ?? snapshot?.protocol ?? ''"
-        :disabled="!enabled(field) || locked(field)"
-        :data-testid="`override-${field}`"
-        class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
-        @change="set(field, ($event.target as HTMLSelectElement).value)"
-      >
-        <option value="acp">ACP</option>
-        <option value="terminal">Terminal</option>
-      </select>
-
-      <select
-        v-else-if="field === 'mode'"
-        :id="`${uid}-${field}-value`"
-        :aria-label="`${field} override value`"
-        :value="modelValue.mode ?? snapshot?.mode ?? ''"
-        :disabled="!enabled(field) || locked(field)"
-        :data-testid="`override-${field}`"
-        class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
-        @change="set(field, ($event.target as HTMLSelectElement).value)"
-      >
-        <option
-          v-for="mode in ['auto', 'default', 'acceptEdits', 'plan', 'bypassPermissions']"
-          :key="mode"
-          :value="mode"
+  <div class="space-y-3" data-testid="launch-settings">
+    <div class="grid gap-3 sm:grid-cols-2">
+      <label class="rounded border border-line bg-input p-2 text-xs">
+        <span class="mb-1 flex items-center justify-between gap-2">
+          <span class="font-medium text-fg">Agent</span>
+          <span :class="changed('agent') ? 'text-accent' : 'text-faint'">
+            {{ changed('agent') ? 'changed' : 'from profile' }}
+          </span>
+        </span>
+        <select
+          :id="`${uid}-agent`"
+          aria-label="Agent"
+          :value="value('agent')"
+          :disabled="locked('agent')"
+          data-testid="override-agent"
+          class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
+          @change="set('agent', ($event.target as HTMLSelectElement).value)"
         >
-          {{ mode }}
-        </option>
-      </select>
+          <option v-for="agent in agents" :key="agent.kind" :value="agent.kind">
+            {{ agent.label }}
+          </option>
+        </select>
+      </label>
 
-      <select
-        v-else
-        :id="`${uid}-${field}-value`"
-        :aria-label="`${field} override value`"
-        :value="modelValue.class ?? snapshot?.class ?? ''"
-        :disabled="!enabled(field) || locked(field)"
-        :data-testid="`override-${field}`"
-        class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
-        @change="set(field, ($event.target as HTMLSelectElement).value)"
-      >
-        <option value="interactive">Interactive</option>
-        <option value="automation">Automation</option>
-      </select>
+      <label class="rounded border border-line bg-input p-2 text-xs">
+        <span class="mb-1 flex items-center justify-between gap-2">
+          <span class="font-medium text-fg">Model</span>
+          <span :class="changed('model') ? 'text-accent' : 'text-faint'">
+            {{ changed('model') ? 'changed' : 'from profile' }}
+          </span>
+        </span>
+        <input
+          v-if="metadata?.accepts_raw_model"
+          :id="`${uid}-model`"
+          aria-label="Model"
+          :value="value('model')"
+          :disabled="locked('model')"
+          data-testid="override-model"
+          list="launch-model-options"
+          placeholder="Agent default"
+          class="w-full rounded bg-surface px-2 py-1.5 font-mono disabled:opacity-60"
+          @input="set('model', ($event.target as HTMLInputElement).value)"
+        />
+        <datalist v-if="metadata?.accepts_raw_model" id="launch-model-options">
+          <option v-for="choice in metadata.models" :key="choice.id" :value="choice.id" />
+        </datalist>
+        <select
+          v-else
+          :id="`${uid}-model`"
+          aria-label="Model"
+          :value="value('model')"
+          :disabled="locked('model')"
+          data-testid="override-model"
+          class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
+          @change="set('model', ($event.target as HTMLSelectElement).value)"
+        >
+          <option value="">Agent default</option>
+          <option v-for="choice in metadata?.models ?? []" :key="choice.id" :value="choice.id">
+            {{ choice.label }}
+          </option>
+        </select>
+      </label>
 
-      <span v-if="locked(field)" class="mt-1 block text-faint">Locked by profile policy.</span>
-      <span v-else-if="!enabled(field)" class="mt-1 block truncate text-faint">
-        Inherits {{ snapshot?.[field] || 'agent default' }}
-      </span>
-    </fieldset>
+      <label class="rounded border border-line bg-input p-2 text-xs">
+        <span class="mb-1 flex items-center justify-between gap-2">
+          <span class="font-medium text-fg">Effort</span>
+          <span :class="changed('effort') ? 'text-accent' : 'text-faint'">
+            {{ changed('effort') ? 'changed' : 'from profile' }}
+          </span>
+        </span>
+        <select
+          :id="`${uid}-effort`"
+          aria-label="Effort"
+          :value="value('effort')"
+          :disabled="locked('effort')"
+          data-testid="override-effort"
+          class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
+          @change="set('effort', ($event.target as HTMLSelectElement).value)"
+        >
+          <option value="">Agent default</option>
+          <option v-for="choice in metadata?.efforts ?? []" :key="choice.id" :value="choice.id">
+            {{ choice.label }}
+          </option>
+        </select>
+      </label>
+
+      <label class="rounded border border-line bg-input p-2 text-xs">
+        <span class="mb-1 flex items-center justify-between gap-2">
+          <span class="font-medium text-fg">Permission mode</span>
+          <span :class="changed('mode') ? 'text-accent' : 'text-faint'">
+            {{ changed('mode') ? 'changed' : 'from profile' }}
+          </span>
+        </span>
+        <select
+          :id="`${uid}-mode`"
+          aria-label="Permission mode"
+          :value="value('mode')"
+          :disabled="locked('mode')"
+          data-testid="override-mode"
+          class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
+          @change="set('mode', ($event.target as HTMLSelectElement).value)"
+        >
+          <option
+            v-for="mode in ['auto', 'default', 'acceptEdits', 'plan', 'bypassPermissions']"
+            :key="mode"
+            :value="mode"
+          >
+            {{ mode }}
+          </option>
+        </select>
+      </label>
+    </div>
+
+    <details class="rounded border border-line bg-input">
+      <summary class="cursor-pointer px-2 py-1.5 text-xs text-muted">Advanced runtime</summary>
+      <div class="grid gap-3 border-t border-line p-2 sm:grid-cols-2">
+        <label class="text-xs">
+          <span class="mb-1 flex items-center justify-between gap-2">
+            <span class="font-medium text-fg">Connection</span>
+            <span :class="changed('protocol') ? 'text-accent' : 'text-faint'">
+              {{ changed('protocol') ? 'changed' : 'from profile' }}
+            </span>
+          </span>
+          <select
+            :id="`${uid}-protocol`"
+            aria-label="Connection"
+            :value="value('protocol')"
+            :disabled="locked('protocol')"
+            data-testid="override-protocol"
+            class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
+            @change="set('protocol', ($event.target as HTMLSelectElement).value)"
+          >
+            <option value="acp">ACP</option>
+            <option value="terminal">Terminal</option>
+          </select>
+        </label>
+
+        <label class="text-xs">
+          <span class="mb-1 flex items-center justify-between gap-2">
+            <span class="font-medium text-fg">Session type</span>
+            <span :class="changed('class') ? 'text-accent' : 'text-faint'">
+              {{ changed('class') ? 'changed' : 'from profile' }}
+            </span>
+          </span>
+          <select
+            :id="`${uid}-class`"
+            aria-label="Session type"
+            :value="value('class')"
+            :disabled="locked('class')"
+            data-testid="override-class"
+            class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
+            @change="set('class', ($event.target as HTMLSelectElement).value)"
+          >
+            <option value="interactive">Interactive</option>
+            <option value="automation">Automation</option>
+          </select>
+        </label>
+      </div>
+    </details>
+
+    <p
+      v-if="(resolved ?? fallback)?.locked_fields.length"
+      class="text-xs text-faint"
+      data-testid="launch-settings-policy"
+    >
+      This profile’s policy locks some session settings.
+    </p>
   </div>
 </template>

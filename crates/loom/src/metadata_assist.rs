@@ -21,7 +21,6 @@ use crate::profile::Profile;
 use crate::session::Session;
 use crate::{config, events, profile, repo_env, session, user_token, Db};
 
-pub const METADATA_PROFILE_KEY: &str = "metadata.profile";
 pub const TITLE_ENABLED_KEY: &str = "metadata.title_generation";
 pub const CUES_ENABLED_KEY: &str = "metadata.resumption_cues";
 pub const ALLOW_RESTRICTED_KEY: &str = "metadata.allow_restricted";
@@ -131,14 +130,12 @@ struct MetadataSource {
     creator_credential: (bool, Option<String>),
     repo_env_generation: Vec<(String, String)>,
     repo_config_generation: Option<(u64, u64)>,
-    metadata_profile_name: String,
-    metadata_profile: Option<ProfileIdentity>,
+    metadata_agent: String,
 }
 
 struct MetadataRead {
     session: Session,
     branch: Branch,
-    profile: Option<Profile>,
     source: MetadataSource,
 }
 
@@ -227,22 +224,6 @@ pub async fn set_title_enabled(db: &Db, session_id: &str, enabled: bool) -> Resu
     Ok(())
 }
 
-async fn configured_profile(db: &Db) -> Result<(String, Option<Profile>)> {
-    let name = config::get(db, METADATA_PROFILE_KEY)
-        .await
-        .unwrap_or_default();
-    let name = name.trim().to_string();
-    if name.is_empty() {
-        return Ok((name, None));
-    }
-    let selected = profile::get(db, &name).await?;
-    Ok((name, selected))
-}
-
-pub fn metadata_profile_eligible(profile: &Profile) -> bool {
-    !profile.retired && profile.protocol == "acp" && profile.is_automation_safe()
-}
-
 fn privacy_allows_metadata(restricted: bool, allow_restricted: bool) -> bool {
     !restricted || allow_restricted
 }
@@ -265,8 +246,6 @@ async fn metadata_source(
     session: &Session,
     branch: &Branch,
     allow_restricted: bool,
-    metadata_profile_name: String,
-    metadata_profile: Option<&Profile>,
 ) -> Result<MetadataSource> {
     let source_profile = profile::get(db, &session.profile)
         .await?
@@ -313,8 +292,7 @@ async fn metadata_source(
         creator_credential,
         repo_env_generation,
         repo_config_generation,
-        metadata_profile_name,
-        metadata_profile: metadata_profile.map(ProfileIdentity::from),
+        metadata_agent: session.agent_kind.clone(),
     })
 }
 
@@ -326,31 +304,17 @@ async fn metadata_read(db: &Db, session_id: &str, branch_id: &str) -> Result<Opt
         return Ok(None);
     };
     let allow_restricted = config::get_bool(db, ALLOW_RESTRICTED_KEY, false).await;
-    let (metadata_profile_name, profile) = configured_profile(db).await?;
-    let source = metadata_source(
-        db,
-        &session,
-        &branch,
-        allow_restricted,
-        metadata_profile_name,
-        profile.as_ref(),
-    )
-    .await?;
+    let source = metadata_source(db, &session, &branch, allow_restricted).await?;
     Ok(Some(MetadataRead {
         session,
         branch,
-        profile,
         source,
     }))
 }
 
 fn metadata_read_is_eligible(read: &MetadataRead) -> bool {
     privacy_allows_metadata(read.source.restricted, read.source.allow_restricted)
-        && read.profile.as_ref().is_some_and(metadata_profile_eligible)
-}
-
-fn generation_profile(read: &MetadataRead) -> &Profile {
-    read.profile.as_ref().expect("eligible metadata profile")
+        && read.session.protocol == "acp"
 }
 
 fn collect_secret_sources(
@@ -366,22 +330,10 @@ fn collect_secret_sources(
     Ok(values)
 }
 
-async fn known_secret_values(
-    db: &Db,
-    session: &Session,
-    branch: &Branch,
-    metadata_profile: &Profile,
-) -> Result<Vec<String>> {
+async fn known_secret_values(db: &Db, session: &Session, branch: &Branch) -> Result<Vec<String>> {
     let source_profile = profile::env_pairs(db, &session.profile)
         .await
         .map(|pairs| pairs.into_iter().map(|(_, value)| value).collect());
-    let metadata_profile = if metadata_profile.name == session.profile {
-        Ok(Vec::new())
-    } else {
-        profile::env_pairs(db, &metadata_profile.name)
-            .await
-            .map(|pairs| pairs.into_iter().map(|(_, value)| value).collect())
-    };
     let repo = repo_env::pairs(db, &branch.repo_root)
         .await
         .map(|pairs| pairs.into_iter().map(|(_, value)| value).collect());
@@ -390,13 +342,7 @@ async fn known_secret_values(
     let creator_token = launching_user_token(db, session.created_by.as_deref())
         .await
         .map(|value| value.into_iter().collect());
-    collect_secret_sources([
-        source_profile,
-        metadata_profile,
-        repo,
-        repo_file,
-        creator_token,
-    ])
+    collect_secret_sources([source_profile, repo, repo_file, creator_token])
 }
 
 fn redact_known_secrets(mut text: String, secrets: &[String]) -> String {
@@ -456,7 +402,7 @@ fn title_fence_status(fence: &TitleFence, current: &CurrentTitleState<'_>) -> Op
     if !privacy_allows_metadata(source.restricted, source.allow_restricted) {
         return Some("unavailable");
     }
-    if source.metadata_profile != fence.source.metadata_profile {
+    if source.metadata_agent != fence.source.metadata_agent {
         return Some("unavailable");
     }
     if source != &fence.source
@@ -576,12 +522,7 @@ async fn generate_title(
     };
     let secrets = tokio::time::timeout(
         PREPARATION_TIMEOUT,
-        known_secret_values(
-            db,
-            &prepared.session,
-            &prepared.branch,
-            generation_profile(&prepared),
-        ),
+        known_secret_values(db, &prepared.session, &prepared.branch),
     )
     .await
     .context("metadata title preparation timed out")??;
@@ -591,14 +532,7 @@ async fn generate_title(
         Err(status) => return Ok(status),
     };
     let output = AgentManager::new(db)
-        .run_oneshot(
-            &generation_profile(&run).agent_kind,
-            &prompt,
-            "",
-            "",
-            Some(generation_profile(&run)),
-            PROMPT_TIMEOUT,
-        )
+        .run_metadata(&run.session.agent_kind, &prompt, PROMPT_TIMEOUT)
         .await
         .and_then(|text| branch::sanitize_generated_title(&text))
         .context("metadata agent returned no usable task label")?;
@@ -788,13 +722,7 @@ async fn prepare_cue(db: &Db, snapshot: &MetadataRead) -> Result<Option<Prepared
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let secrets = known_secret_values(
-        db,
-        &snapshot.session,
-        &snapshot.branch,
-        generation_profile(snapshot),
-    )
-    .await?;
+    let secrets = known_secret_values(db, &snapshot.session, &snapshot.branch).await?;
     let prompt = redact_known_secrets(
         format!(
             "Write a compact on-return cue for this work session. Cover current intent, \
@@ -860,7 +788,7 @@ fn cue_boundary_status(
     source: &MetadataSource,
     cursor: &str,
 ) -> Option<&'static str> {
-    if source.metadata_profile != expected.source.metadata_profile {
+    if source.metadata_agent != expected.source.metadata_agent {
         Some("unavailable")
     } else if source != &expected.source || cursor != expected.cursor {
         Some("due")
@@ -1021,12 +949,9 @@ pub async fn ensure_cue(
             Err(view) => return Ok(view),
         };
     let output = AgentManager::new(db)
-        .run_oneshot(
-            &generation_profile(&run_snapshot).agent_kind,
+        .run_metadata(
+            &run_snapshot.session.agent_kind,
             &prepared.prompt,
-            "",
-            "",
-            Some(generation_profile(&run_snapshot)),
             PROMPT_TIMEOUT,
         )
         .await
@@ -1102,12 +1027,7 @@ mod tests {
             creator_credential: (true, Some("2026-07-26T00:00:00Z".into())),
             repo_env_generation: vec![("REGISTRY_TOKEN".into(), "2026-07-26T00:00:00Z".into())],
             repo_config_generation: Some((128, 1_722_000_000_000_000_000)),
-            metadata_profile_name: "watch".into(),
-            metadata_profile: Some(ProfileIdentity {
-                name: "watch".into(),
-                lifetime: 1,
-                revision: 7,
-            }),
+            metadata_agent: "codex".into(),
         }
     }
 
@@ -1262,15 +1182,7 @@ mod tests {
                 ..source.clone()
             },
             MetadataSource {
-                metadata_profile_name: String::new(),
-                metadata_profile: None,
-                ..source.clone()
-            },
-            MetadataSource {
-                metadata_profile: Some(ProfileIdentity {
-                    revision: 8,
-                    ..source.metadata_profile.clone().unwrap()
-                }),
+                metadata_agent: "claude".into(),
                 ..source.clone()
             },
         ];
@@ -1386,16 +1298,13 @@ mod tests {
             Some("stale"),
             "a changed source-session profile invalidates the prompt fence"
         );
-        let changed_profile = MetadataSource {
-            metadata_profile: Some(ProfileIdentity {
-                revision: 8,
-                ..source.metadata_profile.clone().unwrap()
-            }),
+        let changed_agent = MetadataSource {
+            metadata_agent: "claude".into(),
             ..source.clone()
         };
         assert_eq!(
             status(
-                Some(&changed_profile),
+                Some(&changed_agent),
                 "ship it",
                 TitleProvenance::Derived,
                 true,
@@ -1440,18 +1349,15 @@ mod tests {
         ] {
             assert_eq!(cue_fence_status(&fence, &changed), Some("due"));
         }
-        let changed_profile = CueFence {
+        let changed_agent = CueFence {
             source: MetadataSource {
-                metadata_profile: Some(ProfileIdentity {
-                    revision: 8,
-                    ..source.metadata_profile.unwrap()
-                }),
+                metadata_agent: "claude".into(),
                 ..source
             },
             ..fence.clone()
         };
         assert_eq!(
-            cue_fence_status(&fence, &changed_profile),
+            cue_fence_status(&fence, &changed_agent),
             Some("unavailable")
         );
         assert_eq!(
@@ -1471,7 +1377,7 @@ mod tests {
             Some("due")
         );
         assert_eq!(
-            cue_boundary_status(&fence, &changed_profile.source, &fence.cursor),
+            cue_boundary_status(&fence, &changed_agent.source, &fence.cursor),
             Some("unavailable")
         );
     }

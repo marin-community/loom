@@ -135,6 +135,24 @@ fn default_class() -> String {
     "interactive".to_string()
 }
 
+const SESSION_COLUMNS: &str = "\
+    id, branch_id, work_dir, term_session, agent_kind, model, effort, status, github_repo, \
+    last_activity_at, created_at, parent_branch_id, managed_by, created_by, park, sort_order, \
+    protocol, acp_session_id, acp_ack_seq, acp_inflight, current_mode, pending_prompt, origin, \
+    class, turn_count, tracking_issue_id, profile, launch_mode, profile_revision, \
+    profile_lifetime, policy_strict, policy_env_clear, policy_ambient_allowlist, \
+    policy_idle_archive_secs, policy_turn_budget, policy_prelude, policy_restricted, \
+    policy_allowed_tools, policy_mcp_access, launch_snapshot, creator_kind, creator_subject, \
+    parent_session_id, automation_run_id, mutation_revision";
+
+fn select_sessions(suffix: &str) -> String {
+    // The HTTP listener closes before long-lived streams finish draining during
+    // a rolling restart. Keep each process generation's row shape independent
+    // while a replacement adds columns: SQLite can recompile `SELECT *` after
+    // sqlx captured its metadata and otherwise panic on the widened row.
+    format!("SELECT {SESSION_COLUMNS} FROM sessions {suffix}")
+}
+
 /// Session **lifecycle** states — the mechanical, orchestrator-owned axis: is
 /// the agent process being set up, alive, lost, or finished. How the agent is
 /// *doing* (whether it needs the user) is the separate, agent-declared
@@ -360,7 +378,8 @@ pub(crate) async fn insert_with_layout_revision(
 }
 
 pub async fn get(db: &Db, id: &str) -> Result<Option<Session>> {
-    let row = sqlx::query_as::<_, Session>("SELECT * FROM sessions WHERE id = ?")
+    let query = select_sessions("WHERE id = ?");
+    let row = sqlx::query_as::<_, Session>(&query)
         .bind(id)
         .fetch_optional(db)
         .await?;
@@ -372,15 +391,15 @@ pub async fn get(db: &Db, id: &str) -> Result<Option<Session>> {
 /// occupies the branch slot — matching the `idx_sessions_active_branch`
 /// predicate.
 pub async fn active_for_branch(db: &Db, branch_id: &str) -> Result<Option<Session>> {
-    let row = sqlx::query_as::<_, Session>(
-        "SELECT * FROM sessions
-         WHERE branch_id = ? AND status NOT IN ('done', 'error', 'archived')
+    let query = select_sessions(
+        "WHERE branch_id = ? AND status NOT IN ('done', 'error', 'archived')
          ORDER BY created_at DESC
          LIMIT 1",
-    )
-    .bind(branch_id)
-    .fetch_optional(db)
-    .await?;
+    );
+    let row = sqlx::query_as::<_, Session>(&query)
+        .bind(branch_id)
+        .fetch_optional(db)
+        .await?;
     Ok(row)
 }
 
@@ -390,9 +409,8 @@ pub async fn active_for_branch(db: &Db, branch_id: &str) -> Result<Option<Sessio
 /// orphan detection. The fleet/dashboard listing and the survey scope use
 /// [`list_visible`] instead.
 pub async fn list(db: &Db) -> Result<Vec<Session>> {
-    let rows = sqlx::query_as::<_, Session>("SELECT * FROM sessions ORDER BY created_at DESC")
-        .fetch_all(db)
-        .await?;
+    let query = select_sessions("ORDER BY created_at DESC");
+    let rows = sqlx::query_as::<_, Session>(&query).fetch_all(db).await?;
     Ok(rows)
 }
 
@@ -400,13 +418,11 @@ pub async fn list(db: &Db) -> Result<Vec<Session>> {
 /// sessions excluded. Rows from the removed concierge experiment stay hidden so
 /// upgrading does not suddenly surface its infrastructure session as user work.
 pub async fn list_visible(db: &Db) -> Result<Vec<Session>> {
-    let rows = sqlx::query_as::<_, Session>(
-        "SELECT * FROM sessions
-         WHERE managed_by IS NULL AND agent_kind != 'concierge'
+    let query = select_sessions(
+        "WHERE managed_by IS NULL AND agent_kind != 'concierge'
          ORDER BY created_at DESC",
-    )
-    .fetch_all(db)
-    .await?;
+    );
+    let rows = sqlx::query_as::<_, Session>(&query).fetch_all(db).await?;
     Ok(rows)
 }
 
@@ -415,11 +431,8 @@ pub async fn list_visible(db: &Db) -> Result<Vec<Session>> {
 /// terminal is gone (when `watch.adopt_warm` is on) and to clean up one whose
 /// owning watch has been deleted.
 pub async fn list_managed(db: &Db) -> Result<Vec<Session>> {
-    let rows = sqlx::query_as::<_, Session>(
-        "SELECT * FROM sessions WHERE managed_by IS NOT NULL ORDER BY created_at DESC",
-    )
-    .fetch_all(db)
-    .await?;
+    let query = select_sessions("WHERE managed_by IS NOT NULL ORDER BY created_at DESC");
+    let rows = sqlx::query_as::<_, Session>(&query).fetch_all(db).await?;
     Ok(rows)
 }
 
@@ -427,15 +440,15 @@ pub async fn list_managed(db: &Db) -> Result<Vec<Session>> {
 /// terminal. Lets the engine reuse the same warm session across rounds rather
 /// than spawning a duplicate.
 pub async fn active_managed_by(db: &Db, watch_id: &str) -> Result<Option<Session>> {
-    let row = sqlx::query_as::<_, Session>(
-        "SELECT * FROM sessions
-         WHERE managed_by = ? AND status NOT IN ('done', 'error', 'archived')
+    let query = select_sessions(
+        "WHERE managed_by = ? AND status NOT IN ('done', 'error', 'archived')
          ORDER BY created_at DESC
          LIMIT 1",
-    )
-    .bind(watch_id)
-    .fetch_optional(db)
-    .await?;
+    );
+    let row = sqlx::query_as::<_, Session>(&query)
+        .bind(watch_id)
+        .fetch_optional(db)
+        .await?;
     Ok(row)
 }
 
@@ -445,16 +458,16 @@ pub async fn active_managed_by(db: &Db, watch_id: &str) -> Result<Option<Session
 /// capacity: a branch-goal edit must advance their mutation generation too, or
 /// a handoff can commit a prompt built from the superseded goal.
 pub async fn handoff_capable_for_branch(db: &Db, branch_id: &str) -> Result<Vec<Session>> {
-    Ok(sqlx::query_as::<_, Session>(
-        "SELECT * FROM sessions
-         WHERE branch_id = ?
+    let query = select_sessions(
+        "WHERE branch_id = ?
            AND protocol = 'acp'
            AND status IN ('running', 'orphaned', 'error', 'handoff')
          ORDER BY id",
-    )
-    .bind(branch_id)
-    .fetch_all(db)
-    .await?)
+    );
+    Ok(sqlx::query_as::<_, Session>(&query)
+        .bind(branch_id)
+        .fetch_all(db)
+        .await?)
 }
 
 /// `(Session, Branch)` for a session id. None if the session is missing.
@@ -701,13 +714,12 @@ pub async fn claim_handoff(
     expected_mutation_revision: i64,
 ) -> Result<Option<HandoffSourceState>> {
     let mut tx = db.begin().await?;
-    let Some(session) = sqlx::query_as::<_, Session>(
-        "SELECT * FROM sessions WHERE id = ? AND mutation_revision = ?",
-    )
-    .bind(id)
-    .bind(expected_mutation_revision)
-    .fetch_optional(&mut *tx)
-    .await?
+    let query = select_sessions("WHERE id = ? AND mutation_revision = ?");
+    let Some(session) = sqlx::query_as::<_, Session>(&query)
+        .bind(id)
+        .bind(expected_mutation_revision)
+        .fetch_optional(&mut *tx)
+        .await?
     else {
         tx.rollback().await?;
         return Ok(None);
@@ -1078,6 +1090,53 @@ mod tests {
             class: "interactive".to_string(),
             tracking_issue_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn persisted_rows_survive_a_replacement_process_widening_the_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("weaver.db");
+        let db = crate::db::connect(&path).await.unwrap();
+        let branch = branch_mod::upsert(&db, "/repo", "weaver/restart", "main")
+            .await
+            .unwrap();
+        insert(&db, &new_session("rolling", &branch.id, None))
+            .await
+            .unwrap();
+
+        // Populate this process generation's prepared-statement metadata.
+        branch_mod::get(&db, &branch.id).await.unwrap().unwrap();
+        get(&db, "rolling").await.unwrap().unwrap();
+
+        // A replacement loom migrates through its own SQLite connection while
+        // the old server is still draining long-lived HTTP streams.
+        let replacement = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite:{}", path.display()))
+            .await
+            .unwrap();
+        sqlx::query("ALTER TABLE branches ADD COLUMN replacement_branch_field TEXT")
+            .execute(&replacement)
+            .await
+            .unwrap();
+        sqlx::query("ALTER TABLE sessions ADD COLUMN replacement_session_field TEXT")
+            .execute(&replacement)
+            .await
+            .unwrap();
+        replacement.close().await;
+
+        // Explicit projections keep the old binary's row shape stable. With
+        // `SELECT *`, sqlx 0.8 captures the old metadata and then panics when
+        // SQLite recompiles the statement to expose the newly added column.
+        assert_eq!(
+            branch_mod::get(&db, &branch.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .branch,
+            "weaver/restart"
+        );
+        assert_eq!(get(&db, "rolling").await.unwrap().unwrap().id, "rolling");
     }
 
     /// `managed_by` round-trips and partitions the listings: `list` is the whole

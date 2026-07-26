@@ -1177,7 +1177,7 @@ function scrollSpaces(direction: number) {
     >
       <header
         v-if="display.group"
-        class="flex min-h-9 items-center gap-2 border-b border-line px-3 py-1.5"
+        class="flex min-h-9 items-center gap-2 border-b border-line bg-input/40 px-3 py-1.5"
       >
         <button
           type="button"
@@ -1188,7 +1188,7 @@ function scrollSpaces(direction: number) {
           @click="toggleGroup(display.group)"
         >
           <span class="text-faint" :class="display.group.collapsed ? '' : 'rotate-90'">▸</span>
-          <span class="truncate text-sm font-semibold">{{ display.group.name }}</span>
+          <span class="truncate text-sm font-medium text-fg">{{ display.group.name }}</span>
           <span class="font-mono text-2xs text-faint">{{ display.sessions.length }}</span>
         </button>
       </header>
