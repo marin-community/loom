@@ -1,10 +1,13 @@
-//! Staged artifact reviews round-tripped through the real REST server and CLI.
+//! Three process-boundary journeys for staged artifact reviews.
+//!
+//! Pure draft, identity, lease, and concurrency behavior belongs in
+//! `weaver_core::review` and `loom::review_delivery` module tests. These tests
+//! retain only the REST/CLI, ACP, and terminal wiring boundaries.
 
-use futures_util::StreamExt;
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 use serial_test::serial;
-use std::time::Duration;
+use std::{process::Output, time::Duration};
 use tokio::process::Command;
 use weaver_api::{
     AddReviewCommentReq, ArtifactTextAnchorDto, ArtifactUpsertReq, CreateReq, CreateReviewReq,
@@ -13,19 +16,34 @@ use weaver_api::{
 
 use super::fixtures::TestServer;
 
-async fn seeded_review_target(ts: &TestServer) -> weaver_api::SessionView {
-    let session = ts
-        .client
-        .create_session(&CreateReq {
-            cwd: ts.cwd(),
-            goal: Some("review an artifact".to_string()),
-            agent: Some("shell".to_string()),
-            ..Default::default()
-        })
+async fn insert_api_session(ts: &TestServer, id: &str) -> weaver_api::SessionView {
+    let branch = loom::branch::upsert(&ts.state.db, &ts.cwd(), &format!("weaver/{id}"), "main")
         .await
         .unwrap();
-    seed_artifact(ts, &session).await;
-    session
+    loom::session::insert(
+        &ts.state.db,
+        &loom::session::NewSession {
+            id: id.to_string(),
+            branch_id: branch.id,
+            work_dir: ts.cwd(),
+            term_session: format!("weaver-{id}"),
+            agent_kind: "shell".to_string(),
+            model: String::new(),
+            effort: String::new(),
+            status: "orphaned".to_string(),
+            github_repo: None,
+            parent_branch_id: None,
+            managed_by: None,
+            created_by: Some("rjpower".to_string()),
+            protocol: "terminal".to_string(),
+            origin: "user".to_string(),
+            class: "interactive".to_string(),
+            tracking_issue_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    ts.client.get_session(id).await.unwrap()
 }
 
 async fn seed_artifact(ts: &TestServer, session: &weaver_api::SessionView) {
@@ -45,19 +63,19 @@ async fn seed_artifact(ts: &TestServer, session: &weaver_api::SessionView) {
         .unwrap();
 }
 
-fn new_review(session: &weaver_api::SessionView) -> CreateReviewReq {
+fn new_review(session: &weaver_api::SessionView, version: &str) -> CreateReviewReq {
     CreateReviewReq {
         session_id: Some(session.id.clone()),
         subject_kind: "artifact".to_string(),
         subject_key: "design".to_string(),
-        subject_version: "1".to_string(),
+        subject_version: version.to_string(),
     }
 }
 
-fn comment(expected_revision: i64, body: &str) -> AddReviewCommentReq {
+fn comment(expected_revision: i64, version: &str, body: &str) -> AddReviewCommentReq {
     AddReviewCommentReq {
         expected_revision,
-        subject_version: "1".to_string(),
+        subject_version: version.to_string(),
         anchor_kind: "text".to_string(),
         anchor: ArtifactTextAnchorDto {
             quote: "beta".to_string(),
@@ -67,6 +85,22 @@ fn comment(expected_revision: i64, body: &str) -> AddReviewCommentReq {
         },
         body: body.to_string(),
     }
+}
+
+async fn draft_with_comment(
+    ts: &TestServer,
+    session: &weaver_api::SessionView,
+    body: &str,
+) -> weaver_api::ReviewDto {
+    let draft = ts
+        .client
+        .create_session_review(&session.id, &new_review(session, "1"))
+        .await
+        .unwrap();
+    ts.client
+        .add_review_comment(draft.id, &comment(draft.draft_revision, "1", body))
+        .await
+        .unwrap()
 }
 
 async fn make_delivery_due(db: &loom::db::Db, review_id: i64) {
@@ -81,47 +115,46 @@ async fn make_delivery_due(db: &loom::db::Db, review_id: i64) {
     .unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn draft_contract_is_durable_private_guarded_and_canonical() {
-    let ts = TestServer::start().await;
-    let session = seeded_review_target(&ts).await;
-    let mut branch_events = ts.state.bus.subscribe();
-    let agent_token = loom::auth::create_session_token(
-        &ts.state.db,
-        Some("rjpower"),
-        &session.id,
-        &session.branch.id,
-    )
-    .await
-    .unwrap();
-    let agent_sse = reqwest::Client::new()
-        .get(format!(
-            "http://{}/api/sessions/{}/events",
-            ts.addr, session.id
-        ))
-        .bearer_auth(&agent_token)
-        .send()
+async fn loom_review_cli(ts: &TestServer, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(args)
+        .env("WEAVER_API", format!("http://{}", ts.addr))
+        .output()
         .await
-        .unwrap();
-    assert_eq!(agent_sse.status(), StatusCode::OK);
-    let mut agent_sse = agent_sse.bytes_stream();
+        .unwrap()
+}
+
+fn assert_cli_ok(output: &Output) {
+    assert!(
+        output.status.success(),
+        "CLI failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_and_cli_share_the_private_optimistic_review_contract() {
+    let ts = TestServer::start_api_only().await;
+    let session = insert_api_session(&ts, "review-api").await;
+    seed_artifact(&ts, &session).await;
+
     let draft = ts
         .client
-        .create_session_review(&session.id, &new_review(&session))
+        .create_session_review(&session.id, &new_review(&session, "01"))
         .await
         .unwrap();
-    assert!(draft.subject.id.parse::<i64>().unwrap() > 0);
+    assert_eq!(draft.subject.version, "1");
     assert_eq!(draft.subject.key, "design");
-    assert_eq!(draft.draft_revision, 1);
-
-    let with_summary = ts
+    assert!(draft.subject.id.parse::<i64>().unwrap() > 0);
+    let summarized = ts
         .client
         .update_review(
             draft.id,
             &UpdateReviewReq {
                 expected_revision: draft.draft_revision,
-                summary: Some("Durable overall feedback".to_string()),
+                summary: Some("Review the safety argument.".to_string()),
                 subject_version: None,
             },
         )
@@ -131,167 +164,13 @@ async fn draft_contract_is_durable_private_guarded_and_canonical() {
         .client
         .add_review_comment(
             draft.id,
-            &comment(with_summary.draft_revision, "Tighten this claim."),
+            &comment(summarized.draft_revision, "01", "Explain why this is safe."),
         )
         .await
         .unwrap();
-    let comment_id = added.comments[0].id;
+    assert_eq!(added.comments[0].subject_version, "1");
     assert!(added.message.contains("\"prefix\":\"Alpha \""));
-    assert!(added.message.contains("\"suffix\":\" gamma\""));
-    assert!(added.message.contains("\"block_index\":1"));
 
-    let reloaded = ts
-        .client
-        .list_session_reviews(&session.id, "artifact", &added.subject.key)
-        .await
-        .unwrap();
-    let own = reloaded
-        .iter()
-        .find(|review| review.id == draft.id)
-        .unwrap();
-    assert_eq!(own.summary, "Durable overall feedback");
-    assert_eq!(own.comments[0].body, "Tighten this claim.");
-
-    loom::auth::add_user(&ts.state.db, "bob", None, None)
-        .await
-        .unwrap();
-    let (token, _) = loom::auth::create_token(&ts.state.db, "bob", "reviewer", None)
-        .await
-        .unwrap();
-    let bob = weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(token));
-    assert!(bob
-        .list_session_reviews(&session.id, "artifact", "design")
-        .await
-        .unwrap()
-        .iter()
-        .all(|review| review.id != draft.id));
-
-    let agent =
-        weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(agent_token));
-    assert!(agent
-        .list_session_reviews(&session.id, "artifact", "design")
-        .await
-        .unwrap()
-        .iter()
-        .all(|review| review.id != draft.id));
-
-    while let Ok(event) = branch_events.try_recv() {
-        assert_ne!(
-            event.kind, "review_draft_changed",
-            "private draft existence must not leak over branch SSE"
-        );
-    }
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
-    let mut sse_text = String::new();
-    while tokio::time::Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        match tokio::time::timeout(remaining, agent_sse.next()).await {
-            Ok(Some(Ok(bytes))) => sse_text.push_str(&String::from_utf8_lossy(&bytes)),
-            _ => break,
-        }
-    }
-    assert!(!sse_text.contains("review_draft_changed"));
-    assert!(!sse_text.contains("Durable overall feedback"));
-    assert!(!sse_text.contains(&format!("\"review_id\":{}", draft.id)));
-
-    let stale = reqwest::Client::new()
-        .patch(format!(
-            "http://{}/api/reviews/{}/comments/{}",
-            ts.addr, draft.id, comment_id
-        ))
-        .json(&UpdateReviewCommentReq {
-            expected_revision: with_summary.draft_revision,
-            body: Some("unseen overwrite".to_string()),
-            ..Default::default()
-        })
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(stale.status(), StatusCode::CONFLICT);
-    let stale: Value = stale.json().await.unwrap();
-    assert_eq!(
-        stale["details"]["review"]["draft_revision"],
-        added.draft_revision
-    );
-
-    let updated = ts
-        .client
-        .update_review_comment(
-            draft.id,
-            comment_id,
-            &UpdateReviewCommentReq {
-                expected_revision: added.draft_revision,
-                body: Some("Use a concrete bound.".to_string()),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(updated.comments[0].body, "Use a concrete bound.");
-    let emptied = ts
-        .client
-        .delete_review_comment(draft.id, comment_id, updated.draft_revision)
-        .await
-        .unwrap();
-    assert!(emptied.comments.is_empty());
-    assert_eq!(emptied.summary, "Durable overall feedback");
-
-    let invalid = reqwest::Client::new()
-        .post(format!(
-            "http://{}/api/reviews/{}/comments",
-            ts.addr, draft.id
-        ))
-        .json(&json!({
-            "expected_revision": emptied.draft_revision,
-            "subject_version": "1",
-            "anchor_kind": "anything",
-            "anchor": {},
-            "body": "invalid"
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let invalid_kind = reqwest::Client::new()
-        .post(format!(
-            "http://{}/api/reviews/{}/comments",
-            ts.addr, draft.id
-        ))
-        .json(&json!({
-            "expected_revision": emptied.draft_revision,
-            "subject_version": "1",
-            "anchor_kind": "diff-line",
-            "anchor": {
-                "quote": "beta",
-                "prefix": "Alpha ",
-                "suffix": " gamma",
-                "block_index": 1
-            },
-            "body": "invalid kind"
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(invalid_kind.status(), StatusCode::BAD_REQUEST);
-
-    ts.client
-        .discard_review(draft.id, emptied.draft_revision)
-        .await
-        .unwrap();
-    assert!(ts
-        .client
-        .list_session_reviews(&session.id, "artifact", "design")
-        .await
-        .unwrap()
-        .iter()
-        .all(|review| review.id != draft.id));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn second_operator_can_collaborate_only_after_submit() {
-    let ts = TestServer::start().await;
-    let session = seeded_review_target(&ts).await;
     loom::auth::add_user(&ts.state.db, "bob", None, None)
         .await
         .unwrap();
@@ -300,20 +179,6 @@ async fn second_operator_can_collaborate_only_after_submit() {
         .unwrap();
     let bob =
         weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(token.clone()));
-
-    let draft = ts
-        .client
-        .create_session_review(&session.id, &new_review(&session))
-        .await
-        .unwrap();
-    let draft = ts
-        .client
-        .add_review_comment(
-            draft.id,
-            &comment(draft.draft_revision, "Submitted collaboration"),
-        )
-        .await
-        .unwrap();
     assert!(bob
         .list_session_reviews(&session.id, "artifact", "design")
         .await
@@ -323,7 +188,7 @@ async fn second_operator_can_collaborate_only_after_submit() {
         .patch(format!("http://{}/api/reviews/{}", ts.addr, draft.id))
         .bearer_auth(&token)
         .json(&UpdateReviewReq {
-            expected_revision: draft.draft_revision,
+            expected_revision: added.draft_revision,
             summary: Some("not mine".to_string()),
             subject_version: None,
         })
@@ -332,23 +197,140 @@ async fn second_operator_can_collaborate_only_after_submit() {
         .unwrap();
     assert_eq!(hidden_mutation.status(), StatusCode::NOT_FOUND);
 
+    let stale_mutation = reqwest::Client::new()
+        .patch(format!(
+            "http://{}/api/reviews/{}/comments/{}",
+            ts.addr, draft.id, added.comments[0].id
+        ))
+        .json(&UpdateReviewCommentReq {
+            expected_revision: summarized.draft_revision,
+            body: Some("unseen overwrite".to_string()),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale_mutation.status(), StatusCode::CONFLICT);
+    let conflict: Value = stale_mutation.json().await.unwrap();
+    assert_eq!(
+        conflict["details"]["review"]["draft_revision"],
+        added.draft_revision
+    );
+
+    ts.client
+        .write_branch_artifact(
+            &session.branch.id,
+            "design",
+            &ArtifactUpsertReq {
+                content: "# Design\n\nAlpha beta gamma, revised.\n".to_string(),
+                title: None,
+                kind: None,
+                author: Some("agent".to_string()),
+                repo: false,
+            },
+        )
+        .await
+        .unwrap();
+    let outdated = ts
+        .client
+        .submit_review(
+            draft.id,
+            &SubmitReviewReq {
+                expected_revision: added.draft_revision,
+                acknowledge_outdated: false,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(outdated.to_string().contains("outdated"));
+
+    let reanchored = ts
+        .client
+        .update_review_comment(
+            draft.id,
+            added.comments[0].id,
+            &UpdateReviewCommentReq {
+                expected_revision: added.draft_revision,
+                subject_version: Some("02".to_string()),
+                anchor_kind: Some("text".to_string()),
+                anchor: Some(ArtifactTextAnchorDto {
+                    quote: "beta gamma, revised".to_string(),
+                    prefix: "Alpha ".to_string(),
+                    suffix: ".".to_string(),
+                    block_index: Some(1),
+                }),
+                body: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(reanchored.subject.version, "2");
+    assert_eq!(reanchored.comments[0].subject_version, "2");
+    assert!(!reanchored.outdated);
+    let preview = reanchored.message.clone();
     let submitted = ts
         .client
         .submit_review(
             draft.id,
             &SubmitReviewReq {
-                expected_revision: draft.draft_revision,
+                expected_revision: reanchored.draft_revision,
                 acknowledge_outdated: false,
             },
         )
         .await
         .unwrap();
-    assert!(bob
+    assert_eq!(submitted.message, preview);
+    assert_eq!(submitted.delivery_state, "queued");
+
+    let stale_retry = reqwest::Client::new()
+        .post(format!(
+            "http://{}/api/reviews/{}/submit",
+            ts.addr, draft.id
+        ))
+        .json(&SubmitReviewReq {
+            expected_revision: 0,
+            acknowledge_outdated: true,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale_retry.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        ts.client
+            .submit_review(
+                draft.id,
+                &SubmitReviewReq {
+                    expected_revision: reanchored.draft_revision,
+                    acknowledge_outdated: true,
+                },
+            )
+            .await
+            .unwrap()
+            .message,
+        preview
+    );
+    let (events, deliveries): (i64, i64) = (
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events
+             WHERE branch_id = ? AND kind = 'review_submitted'",
+        )
+        .bind(&session.branch.id)
+        .fetch_one(&ts.state.db)
+        .await
+        .unwrap(),
+        sqlx::query_scalar("SELECT COUNT(*) FROM review_delivery_outbox WHERE review_id = ?")
+            .bind(draft.id)
+            .fetch_one(&ts.state.db)
+            .await
+            .unwrap(),
+    );
+    assert_eq!((events, deliveries), (1, 1));
+
+    let visible = bob
         .list_session_reviews(&session.id, "artifact", "design")
         .await
-        .unwrap()
-        .iter()
-        .any(|review| review.id == submitted.id));
+        .unwrap();
+    assert!(visible.iter().any(|review| review.id == submitted.id));
     let comment_id = submitted.comments[0].id;
     assert_eq!(
         bob.resolve_review_comment(submitted.id, comment_id, true)
@@ -365,707 +347,74 @@ async fn second_operator_can_collaborate_only_after_submit() {
         "submitted"
     );
 
-    sqlx::query("UPDATE sessions SET status = 'orphaned' WHERE id = ?")
-        .bind(&session.id)
-        .execute(&ts.state.db)
-        .await
-        .unwrap();
-    sqlx::query(
-        "UPDATE review_delivery_outbox
-         SET state = 'failed', attempts = 3, lease_token = NULL
-         WHERE review_id = ?",
-    )
-    .bind(submitted.id)
-    .execute(&ts.state.db)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE reviews SET delivery_state = 'failed', delivery_error = 'transport failed'
-         WHERE id = ?",
-    )
-    .bind(submitted.id)
-    .execute(&ts.state.db)
-    .await
-    .unwrap();
-    let retried = bob.retry_review_delivery(submitted.id).await.unwrap();
-    assert_eq!(retried.delivery_state, "queued");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn immutable_subject_id_prevents_shadow_and_recreate_projection() {
-    let ts = TestServer::start().await;
-    let session = ts
-        .client
-        .create_session(&CreateReq {
-            cwd: ts.cwd(),
-            goal: Some("review stable identities".to_string()),
-            agent: Some("shell".to_string()),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    ts.client
-        .write_branch_artifact(
-            &session.branch.id,
-            "design",
-            &ArtifactUpsertReq {
-                content: "# Shared\n".to_string(),
-                title: Some("Shared".to_string()),
-                kind: Some("markdown".to_string()),
-                author: Some("agent".to_string()),
-                repo: true,
-            },
-        )
-        .await
-        .unwrap();
-    let shared = ts
-        .client
-        .create_session_review(&session.id, &new_review(&session))
-        .await
-        .unwrap();
-
-    seed_artifact(&ts, &session).await;
-    let visible = ts
-        .client
-        .list_session_reviews(&session.id, "artifact", "design")
-        .await
-        .unwrap();
-    assert!(visible.iter().all(|review| review.id != shared.id));
-    let scoped = ts
-        .client
-        .create_session_review(&session.id, &new_review(&session))
-        .await
-        .unwrap();
-    assert_ne!(scoped.id, shared.id);
-    assert_ne!(scoped.subject.id, shared.subject.id);
-
-    let shared = ts
-        .client
-        .update_review(
-            shared.id,
-            &UpdateReviewReq {
-                expected_revision: shared.draft_revision,
-                summary: Some("Review the shared artifact".to_string()),
-                subject_version: None,
-            },
-        )
-        .await
-        .unwrap();
-    let shared = ts
-        .client
-        .submit_review(
-            shared.id,
-            &SubmitReviewReq {
-                expected_revision: shared.draft_revision,
-                acknowledge_outdated: false,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        ts.client.get_review(shared.id).await.unwrap().subject.id,
-        shared.subject.id
-    );
-    assert!(ts
-        .client
-        .list_session_reviews(&session.id, "artifact", "design")
-        .await
-        .unwrap()
-        .iter()
-        .all(|review| review.id != shared.id));
-    sqlx::query(
-        "UPDATE review_delivery_outbox SET state = 'failed', attempts = 3 WHERE review_id = ?",
-    )
-    .bind(shared.id)
-    .execute(&ts.state.db)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE reviews SET delivery_state = 'failed', delivery_error = 'shadowed transport'
-         WHERE id = ?",
-    )
-    .bind(shared.id)
-    .execute(&ts.state.db)
-    .await
-    .unwrap();
-    sqlx::query("UPDATE sessions SET status = 'orphaned' WHERE id = ?")
-        .bind(&session.id)
-        .execute(&ts.state.db)
-        .await
-        .unwrap();
-    assert_eq!(
-        ts.client.retry_review_delivery(shared.id).await.unwrap().id,
-        shared.id
-    );
-    sqlx::query("UPDATE sessions SET status = 'running' WHERE id = ?")
-        .bind(&session.id)
-        .execute(&ts.state.db)
-        .await
-        .unwrap();
-
-    let scoped_id = scoped.subject.id.clone();
-    let scoped = ts
-        .client
-        .update_review(
-            scoped.id,
-            &UpdateReviewReq {
-                expected_revision: scoped.draft_revision,
-                summary: Some("Review the scoped artifact".to_string()),
-                subject_version: None,
-            },
-        )
-        .await
-        .unwrap();
-    let scoped = ts
-        .client
-        .submit_review(
-            scoped.id,
-            &SubmitReviewReq {
-                expected_revision: scoped.draft_revision,
-                acknowledge_outdated: false,
-            },
-        )
-        .await
-        .unwrap();
-    ts.client
-        .delete_branch_artifact(&session.branch.id, "design", false)
-        .await
-        .unwrap();
-    sqlx::query(
-        "UPDATE review_delivery_outbox SET state = 'failed', attempts = 3 WHERE review_id = ?",
-    )
-    .bind(scoped.id)
-    .execute(&ts.state.db)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE reviews SET delivery_state = 'failed', delivery_error = 'transport failed'
-         WHERE id = ?",
-    )
-    .bind(scoped.id)
-    .execute(&ts.state.db)
-    .await
-    .unwrap();
-    sqlx::query("UPDATE sessions SET status = 'orphaned' WHERE id = ?")
-        .bind(&session.id)
-        .execute(&ts.state.db)
-        .await
-        .unwrap();
-    let old = ts.client.get_review(scoped.id).await.unwrap();
-    assert_eq!(old.subject.id, scoped_id);
-    assert_eq!(
-        ts.client.retry_review_delivery(scoped.id).await.unwrap().id,
-        scoped.id
-    );
-
-    seed_artifact(&ts, &session).await;
-    let replacement = ts
-        .client
-        .create_session_review(&session.id, &new_review(&session))
-        .await
-        .unwrap();
-    assert_ne!(replacement.subject.id, scoped_id);
-    assert!(ts
-        .client
-        .list_session_reviews(&session.id, "artifact", "design")
-        .await
-        .unwrap()
-        .iter()
-        .all(|review| review.id != scoped.id));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn stale_reanchor_submit_event_and_preview_are_exact_and_idempotent() {
-    let ts = TestServer::start().await;
-    let session = seeded_review_target(&ts).await;
-    let draft = ts
-        .client
-        .create_branch_review(&session.branch.id, &new_review(&session))
-        .await
-        .unwrap();
-    let added = ts
-        .client
-        .add_review_comment(
-            draft.id,
-            &comment(draft.draft_revision, "Explain why this is safe."),
-        )
-        .await
-        .unwrap();
-    let comment_id = added.comments[0].id;
-
-    ts.client
-        .write_branch_artifact(
-            &session.branch.id,
-            "design",
-            &ArtifactUpsertReq {
-                content: "# Design\n\nAlpha beta gamma, revised.\n".to_string(),
-                title: None,
-                kind: None,
-                author: Some("agent".to_string()),
-                repo: false,
-            },
-        )
-        .await
-        .unwrap();
-    let stale = ts
-        .client
-        .submit_review(
-            draft.id,
-            &SubmitReviewReq {
-                expected_revision: added.draft_revision,
-                acknowledge_outdated: false,
-            },
-        )
-        .await
-        .unwrap_err();
-    assert!(stale.to_string().contains("outdated"));
-
-    let reanchored = ts
-        .client
-        .update_review_comment(
-            draft.id,
-            comment_id,
-            &UpdateReviewCommentReq {
-                expected_revision: added.draft_revision,
-                subject_version: Some("2".to_string()),
-                anchor_kind: Some("text".to_string()),
-                anchor: Some(ArtifactTextAnchorDto {
-                    quote: "beta gamma, revised".to_string(),
-                    prefix: "Alpha ".to_string(),
-                    suffix: ".".to_string(),
-                    block_index: Some(1),
-                }),
-                body: None,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(reanchored.subject.version, "2");
-    assert!(!reanchored.outdated);
-    let ready = ts
-        .client
-        .update_review(
-            draft.id,
-            &UpdateReviewReq {
-                expected_revision: reanchored.draft_revision,
-                summary: Some("Please address this before landing.".to_string()),
-                subject_version: None,
-            },
-        )
-        .await
-        .unwrap();
-    let exact_preview = ready.message.clone();
-    let submitted = ts
-        .client
-        .submit_review(
-            draft.id,
-            &SubmitReviewReq {
-                expected_revision: ready.draft_revision,
-                acknowledge_outdated: false,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(submitted.status, "submitted");
-    assert_eq!(submitted.message, exact_preview);
-
-    let stale_retry = reqwest::Client::new()
-        .post(format!(
-            "http://{}/api/reviews/{}/submit",
-            ts.addr, draft.id
-        ))
-        .json(&SubmitReviewReq {
-            expected_revision: 0,
-            acknowledge_outdated: true,
-        })
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(stale_retry.status(), StatusCode::CONFLICT);
-    let stale_retry: Value = stale_retry.json().await.unwrap();
-    assert_eq!(
-        stale_retry["details"]["review"]["draft_revision"],
-        ready.draft_revision
-    );
-
-    let retried = ts
-        .client
-        .submit_review(
-            draft.id,
-            &SubmitReviewReq {
-                expected_revision: ready.draft_revision,
-                acknowledge_outdated: true,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(retried.message, exact_preview);
-
-    let events: Vec<String> = sqlx::query_scalar(
-        "SELECT data FROM events WHERE branch_id = ? AND kind = 'review_submitted'",
-    )
-    .bind(&session.branch.id)
-    .fetch_all(&ts.state.db)
-    .await
-    .unwrap();
-    assert_eq!(events.len(), 1);
-    let event: Value = serde_json::from_str(&events[0]).unwrap();
-    assert_eq!(event["subject"]["id"], submitted.subject.id);
-    assert_eq!(event["subject"]["key"], "design");
-    assert_eq!(event["subject"]["revision"], "2");
-    assert_eq!(event["subject"]["current_revision"], "2");
-    assert_eq!(event["comments"][0]["anchor"]["prefix"], "Alpha ");
-    assert_eq!(event["comments"][0]["anchor"]["suffix"], ".");
-    assert_eq!(event["comments"][0]["anchor"]["block_index"], 1);
-    assert_eq!(event["message"], exact_preview);
-
-    let event_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM review_delivery_outbox WHERE review_id = ?")
-            .bind(draft.id)
-            .fetch_one(&ts.state.db)
-            .await
-            .unwrap();
-    assert_eq!(event_count, 1);
-
-    let immutable = reqwest::Client::new()
-        .patch(format!(
-            "http://{}/api/reviews/{}/comments/{}",
-            ts.addr, draft.id, comment_id
-        ))
-        .json(&json!({
-            "expected_revision": ready.draft_revision,
-            "body": "too late"
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(immutable.status(), StatusCode::CONFLICT);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn artifact_revision_spellings_are_canonical_at_every_write_boundary() {
-    let ts = TestServer::start().await;
-    let session = seeded_review_target(&ts).await;
-    let draft = ts
-        .client
-        .create_session_review(
+    let overall = loom_review_cli(
+        &ts,
+        &[
+            "review",
+            "overall",
             &session.id,
-            &CreateReviewReq {
-                subject_version: "01".to_string(),
-                ..new_review(&session)
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(draft.subject.version, "1");
-    assert!(!draft.outdated);
-    let added = ts
-        .client
-        .add_review_comment(
-            draft.id,
-            &AddReviewCommentReq {
-                subject_version: "01".to_string(),
-                ..comment(draft.draft_revision, "Canonical comment")
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(added.comments[0].subject_version, "1");
-    let envelope = ts
-        .client
-        .update_review(
-            draft.id,
-            &UpdateReviewReq {
-                expected_revision: added.draft_revision,
-                summary: Some("Canonical envelope".to_string()),
-                subject_version: Some("01".to_string()),
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(envelope.subject.version, "1");
-
-    ts.client
-        .write_branch_artifact(
-            &session.branch.id,
             "design",
-            &ArtifactUpsertReq {
-                content: "# Design\n\nAlpha beta gamma revised.\n".to_string(),
-                title: None,
-                kind: None,
-                author: Some("agent".to_string()),
-                repo: false,
-            },
-        )
-        .await
-        .unwrap();
-    let reanchored = ts
-        .client
-        .update_review_comment(
-            draft.id,
-            envelope.comments[0].id,
-            &UpdateReviewCommentReq {
-                expected_revision: envelope.draft_revision,
-                subject_version: Some("02".to_string()),
-                anchor_kind: Some("text".to_string()),
-                anchor: Some(ArtifactTextAnchorDto {
-                    quote: "beta".to_string(),
-                    prefix: "Alpha ".to_string(),
-                    suffix: " gamma revised".to_string(),
-                    block_index: Some(1),
-                }),
-                body: None,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(reanchored.subject.version, "2");
-    assert_eq!(reanchored.comments[0].subject_version, "2");
-    assert!(!reanchored.outdated);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn offline_terminal_delivery_waits_without_attempts_then_recovers() {
-    let ts = TestServer::start().await;
-    let session = seeded_review_target(&ts).await;
-    let original_terminal: String =
-        sqlx::query_scalar("SELECT term_session FROM sessions WHERE id = ?")
-            .bind(&session.id)
-            .fetch_one(&ts.state.db)
-            .await
-            .unwrap();
-    let draft = ts
-        .client
-        .create_session_review(&session.id, &new_review(&session))
-        .await
-        .unwrap();
-    let draft = ts
-        .client
-        .add_review_comment(
-            draft.id,
-            &comment(draft.draft_revision, "Queue while offline."),
-        )
-        .await
-        .unwrap();
-    sqlx::query(
-        "UPDATE sessions
-         SET term_session = 'missing-review-terminal', status = 'orphaned'
-         WHERE id = ?",
+            "--rev",
+            "2",
+            "CLI",
+            "overall",
+        ],
     )
-    .bind(&session.id)
-    .execute(&ts.state.db)
-    .await
-    .unwrap();
-
-    let submitted = ts
-        .client
-        .submit_review(
-            draft.id,
-            &SubmitReviewReq {
-                expected_revision: draft.draft_revision,
-                acknowledge_outdated: false,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(submitted.delivery_state, "queued");
-    let attempts: i64 =
-        sqlx::query_scalar("SELECT attempts FROM review_delivery_outbox WHERE review_id = ?")
-            .bind(draft.id)
-            .fetch_one(&ts.state.db)
-            .await
-            .unwrap();
-    assert_eq!(attempts, 0);
-    sqlx::query(
-        "UPDATE review_delivery_outbox
-         SET state = 'delivering', lease_token = 'expired-owner',
-             next_attempt_at = '1970-01-01T00:00:00.000Z'
-         WHERE review_id = ?",
-    )
-    .bind(draft.id)
-    .execute(&ts.state.db)
-    .await
-    .unwrap();
-    sqlx::query("UPDATE reviews SET delivery_state = 'delivering' WHERE id = ?")
-        .bind(draft.id)
-        .execute(&ts.state.db)
-        .await
-        .unwrap();
-    loom::review_delivery::deliver_review(&ts.state, draft.id)
-        .await
-        .unwrap();
-    let ownerless: (String, i64, Option<String>) = sqlx::query_as(
-        "SELECT state, attempts, lease_token
-         FROM review_delivery_outbox WHERE review_id = ?",
-    )
-    .bind(draft.id)
-    .fetch_one(&ts.state.db)
-    .await
-    .unwrap();
-    assert_eq!(ownerless, ("queued".to_string(), 0, None));
-
-    sqlx::query("UPDATE sessions SET term_session = ?, status = 'running' WHERE id = ?")
-        .bind(original_terminal)
-        .bind(&session.id)
-        .execute(&ts.state.db)
-        .await
-        .unwrap();
-    make_delivery_due(&ts.state.db, draft.id).await;
-    loom::review_delivery::deliver_review(&ts.state, draft.id)
-        .await
-        .unwrap();
-    let recovered = ts
+    .await;
+    assert_cli_ok(&overall);
+    let cli_draft = ts
         .client
         .list_session_reviews(&session.id, "artifact", "design")
         .await
         .unwrap()
         .into_iter()
-        .find(|review| review.id == draft.id)
+        .find(|review| review.status == "draft")
         .unwrap();
-    assert_eq!(recovered.delivery_state, "delivered");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn delivery_falls_back_to_the_newest_usable_session_on_the_branch() {
-    let ts = TestServer::start().await;
-    let target = seeded_review_target(&ts).await;
-    let fallback = ts
-        .client
-        .create_session(&CreateReq {
-            cwd: ts.cwd(),
-            goal: Some("replacement conversation".to_string()),
-            agent: Some("shell".to_string()),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    let draft = ts
-        .client
-        .create_session_review(&target.id, &new_review(&target))
-        .await
-        .unwrap();
-    let draft = ts
-        .client
-        .add_review_comment(
-            draft.id,
-            &comment(draft.draft_revision, "Route this to the live replacement."),
-        )
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM sessions WHERE id = ?")
-        .bind(&target.id)
-        .execute(&ts.state.db)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE sessions SET branch_id = ? WHERE id = ?")
-        .bind(&target.branch.id)
-        .bind(&fallback.id)
-        .execute(&ts.state.db)
-        .await
-        .unwrap();
-    let mut receiver = ts.state.bus.subscribe();
-    let submitted = ts
-        .client
-        .submit_review(
-            draft.id,
-            &SubmitReviewReq {
-                expected_revision: draft.draft_revision,
-                acknowledge_outdated: false,
+    ts.client
+        .write_branch_artifact(
+            &session.branch.id,
+            "design",
+            &ArtifactUpsertReq {
+                content: "# Design\n\nThird revision.\n".to_string(),
+                title: None,
+                kind: None,
+                author: Some("agent".to_string()),
+                repo: false,
             },
         )
         .await
         .unwrap();
-    assert_eq!(submitted.delivery_state, "delivered");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    loop {
-        let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        if event.kind == "review_delivery" {
-            assert_eq!(event.data["delivery_session_id"], fallback.id);
-            break;
-        }
-        assert!(tokio::time::Instant::now() < deadline);
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn real_incompatible_terminal_transport_retries_then_fails() {
-    let ts = TestServer::start().await;
-    super::acp::start_new(&ts, "review-transport-failure", None, None).await;
-    let session = ts
-        .client
-        .get_session("review-transport-failure")
-        .await
-        .unwrap();
-    seed_artifact(&ts, &session).await;
-    // The live Tapestry supervisor is a relay, not a PTY. Treating it as a
-    // terminal keeps the liveness preflight honest but makes the real SEND
-    // transport reject bracketed paste deterministically.
-    sqlx::query("UPDATE sessions SET protocol = 'terminal' WHERE id = ?")
-        .bind(&session.id)
-        .execute(&ts.state.db)
-        .await
-        .unwrap();
-    let draft = ts
-        .client
-        .create_session_review(&session.id, &new_review(&session))
-        .await
-        .unwrap();
-    let draft = ts
-        .client
-        .add_review_comment(
-            draft.id,
-            &comment(
-                draft.draft_revision,
-                "Exercise an actual rejected transport.",
-            ),
+    assert_cli_ok(
+        &loom_review_cli(
+            &ts,
+            &[
+                "review",
+                "retarget",
+                &cli_draft.id.to_string(),
+                "--revision",
+                &cli_draft.draft_revision.to_string(),
+            ],
         )
-        .await
-        .unwrap();
-    let submitted = ts
-        .client
-        .submit_review(
-            draft.id,
-            &SubmitReviewReq {
-                expected_revision: draft.draft_revision,
-                acknowledge_outdated: false,
-            },
+        .await,
+    );
+    let shown = loom_review_cli(&ts, &["review", "show", &cli_draft.id.to_string()]).await;
+    assert_cli_ok(&shown);
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(shown["subject"]["version"], "3");
+    assert_eq!(shown["summary"], "CLI overall");
+    assert_cli_ok(
+        &loom_review_cli(
+            &ts,
+            &[
+                "review",
+                "discard",
+                &cli_draft.id.to_string(),
+                "--revision",
+                &shown["draft_revision"].to_string(),
+            ],
         )
-        .await
-        .unwrap();
-    assert_eq!(submitted.delivery_state, "retrying");
-
-    for expected in ["retrying", "failed"] {
-        make_delivery_due(&ts.state.db, draft.id).await;
-        let error = loom::review_delivery::deliver_review(&ts.state, draft.id)
-            .await
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("pasting review feedback"),
-            "{error}"
-        );
-        let state: String = sqlx::query_scalar("SELECT delivery_state FROM reviews WHERE id = ?")
-            .bind(draft.id)
-            .fetch_one(&ts.state.db)
-            .await
-            .unwrap();
-        assert_eq!(state, expected);
-    }
-    let attempts: i64 =
-        sqlx::query_scalar("SELECT attempts FROM review_delivery_outbox WHERE review_id = ?")
-            .bind(draft.id)
-            .fetch_one(&ts.state.db)
-            .await
-            .unwrap();
-    assert_eq!(attempts, 3);
+        .await,
+    );
 }
 
 async fn poll_review_turn(ts: &TestServer, session_id: &str, payload: &str) -> Value {
@@ -1093,14 +442,13 @@ async fn poll_review_turn(ts: &TestServer, session_id: &str, payload: &str) -> V
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn acp_review_inbox_is_protected_retractable_prompt_is_separate_and_logically_deduplicated() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acp_delivery_has_one_protected_crash_boundary_and_can_rehome() {
     let ts = TestServer::start().await;
     super::acp::start_new(&ts, "acp-review", None, None).await;
     let session = ts.client.get_session("acp-review").await.unwrap();
     seed_artifact(&ts, &session).await;
-
     ts.client
         .post(
             "/api/sessions/acp-review/prompt",
@@ -1108,41 +456,18 @@ async fn acp_review_inbox_is_protected_retractable_prompt_is_separate_and_logica
         )
         .await
         .unwrap();
-    let queued = ts
-        .client
-        .post(
-            "/api/sessions/acp-review/prompt",
-            json!({ "text": "say:editable feedback" }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(queued["queued"], true);
+    assert_eq!(
+        ts.client
+            .post(
+                "/api/sessions/acp-review/prompt",
+                json!({ "text": "say:editable feedback" }),
+            )
+            .await
+            .unwrap()["queued"],
+        true
+    );
 
-    let draft = ts
-        .client
-        .create_session_review(&session.id, &new_review(&session))
-        .await
-        .unwrap();
-    let draft = ts
-        .client
-        .add_review_comment(
-            draft.id,
-            &comment(draft.draft_revision, "Protected immutable feedback."),
-        )
-        .await
-        .unwrap();
-    let draft = ts
-        .client
-        .update_review(
-            draft.id,
-            &UpdateReviewReq {
-                expected_revision: draft.draft_revision,
-                summary: Some("ACP exact delivery".to_string()),
-                subject_version: None,
-            },
-        )
-        .await
-        .unwrap();
+    let draft = draft_with_comment(&ts, &session, "Protected immutable feedback.").await;
     let payload = draft.message.clone();
     let submitted = ts
         .client
@@ -1156,22 +481,14 @@ async fn acp_review_inbox_is_protected_retractable_prompt_is_separate_and_logica
         .await
         .unwrap();
     assert_eq!(submitted.delivery_state, "delivered");
-
-    let retracted = ts
-        .client
-        .delete("/api/sessions/acp-review/prompt")
-        .await
-        .unwrap();
-    assert_eq!(retracted["text"], "say:editable feedback");
-    let inbox_payload: String =
-        sqlx::query_scalar("SELECT payload FROM review_conversation_inbox WHERE delivery_key = ?")
-            .bind(&submitted.delivery_key)
-            .fetch_one(&ts.state.db)
+    assert_eq!(
+        ts.client
+            .delete("/api/sessions/acp-review/prompt")
             .await
-            .unwrap();
-    assert_eq!(inbox_payload, payload);
-    let chat = poll_review_turn(&ts, "acp-review", &payload).await;
-    assert!(chat["pending_prompt"].is_null());
+            .unwrap()["text"],
+        "say:editable feedback"
+    );
+    let chat = poll_review_turn(&ts, &session.id, &payload).await;
     let protected = chat["blocks"]
         .as_array()
         .unwrap()
@@ -1179,13 +496,6 @@ async fn acp_review_inbox_is_protected_retractable_prompt_is_separate_and_logica
         .find(|block| block["kind"] == "user_message" && block["payload"]["text"] == payload)
         .unwrap();
     assert_eq!(protected["payload"]["delivery_key"], submitted.delivery_key);
-    let inbox_state: String =
-        sqlx::query_scalar("SELECT state FROM review_conversation_inbox WHERE delivery_key = ?")
-            .bind(&submitted.delivery_key)
-            .fetch_one(&ts.state.db)
-            .await
-            .unwrap();
-    assert_eq!(inbox_state, "consumed");
 
     sqlx::query("UPDATE reviews SET delivery_state = 'queued' WHERE id = ?")
         .bind(draft.id)
@@ -1204,7 +514,7 @@ async fn acp_review_inbox_is_protected_retractable_prompt_is_separate_and_logica
     loom::review_delivery::deliver_review(&ts.state, draft.id)
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     let chat = ts
         .client
         .get("/api/sessions/acp-review/chat")
@@ -1219,22 +529,18 @@ async fn acp_review_inbox_is_protected_retractable_prompt_is_separate_and_logica
             .count(),
         1
     );
-    let inbox_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM review_conversation_inbox WHERE delivery_key = ?")
-            .bind(&submitted.delivery_key)
-            .fetch_one(&ts.state.db)
-            .await
-            .unwrap();
-    assert_eq!(inbox_count, 1);
-}
+    let inbox: (String, i64) = sqlx::query_as(
+        "SELECT state, COUNT(*) FROM review_conversation_inbox WHERE delivery_key = ?",
+    )
+    .bind(&submitted.delivery_key)
+    .fetch_one(&ts.state.db)
+    .await
+    .unwrap();
+    assert_eq!(inbox, ("consumed".to_string(), 1));
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn queued_acp_review_rehomes_to_a_terminal_successor() {
-    let ts = TestServer::start().await;
     super::acp::start_new(&ts, "acp-review-rehome", None, None).await;
-    let acp = ts.client.get_session("acp-review-rehome").await.unwrap();
-    seed_artifact(&ts, &acp).await;
+    let original = ts.client.get_session("acp-review-rehome").await.unwrap();
+    seed_artifact(&ts, &original).await;
     ts.client
         .post(
             "/api/sessions/acp-review-rehome/prompt",
@@ -1242,44 +548,22 @@ async fn queued_acp_review_rehomes_to_a_terminal_successor() {
         )
         .await
         .unwrap();
-
-    let draft = ts
-        .client
-        .create_session_review(&acp.id, &new_review(&acp))
-        .await
-        .unwrap();
-    let draft = ts
-        .client
-        .add_review_comment(
-            draft.id,
-            &comment(draft.draft_revision, "Rehome this immutable review."),
-        )
-        .await
-        .unwrap();
-    let payload = draft.message.clone();
-    let submitted = ts
+    let rehomed = draft_with_comment(&ts, &original, "Rehome this immutable review.").await;
+    let rehome_payload = rehomed.message.clone();
+    let rehomed = ts
         .client
         .submit_review(
-            draft.id,
+            rehomed.id,
             &SubmitReviewReq {
-                expected_revision: draft.draft_revision,
+                expected_revision: rehomed.draft_revision,
                 acknowledge_outdated: false,
             },
         )
         .await
         .unwrap();
-    assert_eq!(submitted.delivery_state, "delivered");
-    let queued: String =
-        sqlx::query_scalar("SELECT state FROM review_conversation_inbox WHERE delivery_key = ?")
-            .bind(&submitted.delivery_key)
-            .fetch_one(&ts.state.db)
-            .await
-            .unwrap();
-    assert_eq!(queued, "queued");
-
-    assert!(ts.state.acp.stop(&acp.id));
+    assert!(ts.state.acp.stop(&original.id));
     sqlx::query("UPDATE sessions SET status = 'archived' WHERE id = ?")
-        .bind(&acp.id)
+        .bind(&original.id)
         .execute(&ts.state.db)
         .await
         .unwrap();
@@ -1294,246 +578,142 @@ async fn queued_acp_review_rehomes_to_a_terminal_successor() {
         .await
         .unwrap();
     sqlx::query("UPDATE sessions SET branch_id = ? WHERE id = ?")
-        .bind(&acp.branch.id)
+        .bind(&original.branch.id)
         .bind(&terminal.id)
         .execute(&ts.state.db)
         .await
         .unwrap();
-
     loom::review_delivery::drain(&ts.state).await.unwrap();
     let consumed: (String, String, String) = sqlx::query_as(
         "SELECT state, claimed_session_id, payload
          FROM review_conversation_inbox WHERE delivery_key = ?",
     )
-    .bind(&submitted.delivery_key)
+    .bind(&rehomed.delivery_key)
     .fetch_one(&ts.state.db)
     .await
     .unwrap();
-    assert_eq!(consumed.0, "consumed");
-    assert_eq!(consumed.1, terminal.id);
-    assert_eq!(consumed.2, payload);
-    let acp_chat = ts
-        .client
-        .get("/api/sessions/acp-review-rehome/chat")
-        .await
-        .unwrap();
     assert_eq!(
-        acp_chat["blocks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|block| block["payload"]["text"] == payload)
-            .count(),
-        0
+        consumed,
+        ("consumed".to_string(), terminal.id, rehome_payload)
     );
 }
 
-async fn loom_review_cli(ts: &TestServer, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_loom"))
-        .args(args)
-        .env("WEAVER_API", format!("http://{}", ts.addr))
-        .output()
-        .await
-        .unwrap()
-}
-
-fn assert_cli_ok(output: &std::process::Output) {
-    assert!(
-        output.status.success(),
-        "CLI failed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn real_loom_review_commands_cover_overall_mutations_submit_and_discard() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_delivery_queues_offline_recovers_and_reports_real_failure() {
     let ts = TestServer::start().await;
-    let session = seeded_review_target(&ts).await;
-    assert_cli_ok(
-        &loom_review_cli(
-            &ts,
-            &[
-                "review",
-                "overall",
-                &session.id,
-                "design",
-                "--rev",
-                "1",
-                "Overall",
-                "only",
-            ],
-        )
-        .await,
-    );
-    let draft = ts
+    let session = ts
         .client
-        .list_session_reviews(&session.id, "artifact", "design")
+        .create_session(&CreateReq {
+            cwd: ts.cwd(),
+            goal: Some("review an artifact".to_string()),
+            agent: Some("shell".to_string()),
+            ..Default::default()
+        })
         .await
-        .unwrap()
-        .into_iter()
-        .find(|review| review.status == "draft")
         .unwrap();
-    assert_eq!(draft.summary, "Overall only");
-
-    ts.client
-        .write_branch_artifact(
-            &session.branch.id,
-            "design",
-            &ArtifactUpsertReq {
-                content: "# Design\n\nAlpha beta gamma.\n\nCurrent revision.\n".to_string(),
-                title: None,
-                kind: None,
-                author: Some("agent".to_string()),
-                repo: false,
+    seed_artifact(&ts, &session).await;
+    let original_terminal: String =
+        sqlx::query_scalar("SELECT term_session FROM sessions WHERE id = ?")
+            .bind(&session.id)
+            .fetch_one(&ts.state.db)
+            .await
+            .unwrap();
+    let offline = draft_with_comment(&ts, &session, "Queue while offline.").await;
+    sqlx::query(
+        "UPDATE sessions
+         SET term_session = 'missing-review-terminal', status = 'orphaned'
+         WHERE id = ?",
+    )
+    .bind(&session.id)
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+    let offline = ts
+        .client
+        .submit_review(
+            offline.id,
+            &SubmitReviewReq {
+                expected_revision: offline.draft_revision,
+                acknowledge_outdated: false,
             },
         )
         .await
         .unwrap();
-    assert_cli_ok(
-        &loom_review_cli(
-            &ts,
-            &[
-                "review",
-                "retarget",
-                &draft.id.to_string(),
-                "--revision",
-                &draft.draft_revision.to_string(),
-            ],
-        )
-        .await,
-    );
-    let overall = ts.client.get_review(draft.id).await.unwrap();
-    assert_eq!(overall.subject.version, "2");
-    assert!(!overall.outdated);
-    let shown = loom_review_cli(&ts, &["review", "show", &draft.id.to_string()]).await;
-    assert_cli_ok(&shown);
-    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
-    assert_eq!(shown["summary"], "Overall only");
-    assert_eq!(shown["subject"]["version"], "2");
-    assert!(shown["message"].as_str().unwrap().contains("revision 2"));
-    assert_cli_ok(
-        &loom_review_cli(
-            &ts,
-            &[
-                "review",
-                "submit",
-                &overall.id.to_string(),
-                "--revision",
-                &overall.draft_revision.to_string(),
-            ],
-        )
-        .await,
+    let attempts: i64 =
+        sqlx::query_scalar("SELECT attempts FROM review_delivery_outbox WHERE review_id = ?")
+            .bind(offline.id)
+            .fetch_one(&ts.state.db)
+            .await
+            .unwrap();
+    assert_eq!((offline.delivery_state.as_str(), attempts), ("queued", 0));
+
+    sqlx::query("UPDATE sessions SET term_session = ?, status = 'running' WHERE id = ?")
+        .bind(original_terminal)
+        .bind(&session.id)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    make_delivery_due(&ts.state.db, offline.id).await;
+    loom::review_delivery::deliver_review(&ts.state, offline.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        ts.client
+            .get_review(offline.id)
+            .await
+            .unwrap()
+            .delivery_state,
+        "delivered"
     );
 
-    assert_cli_ok(
-        &loom_review_cli(
-            &ts,
-            &[
-                "review",
-                "add",
-                &session.id,
-                "design",
-                "--rev",
-                "2",
-                "--quote",
-                "beta",
-                "--prefix",
-                "Alpha ",
-                "--suffix",
-                " gamma",
-                "--block",
-                "1",
-                "Inline",
-                "note",
-            ],
-        )
-        .await,
-    );
-    let draft = ts
+    super::acp::start_new(&ts, "review-transport-failure", None, None).await;
+    let incompatible = ts
         .client
-        .list_session_reviews(&session.id, "artifact", "design")
+        .get_session("review-transport-failure")
         .await
-        .unwrap()
-        .into_iter()
-        .find(|review| review.status == "draft")
         .unwrap();
-    let comment_id = draft.comments[0].id.to_string();
-    assert_cli_ok(
-        &loom_review_cli(
-            &ts,
-            &[
-                "review",
-                "edit",
-                &draft.id.to_string(),
-                &comment_id,
-                "--revision",
-                &draft.draft_revision.to_string(),
-                "Edited",
-                "inline",
-                "note",
-            ],
-        )
-        .await,
-    );
-    let draft = ts
+    seed_artifact(&ts, &incompatible).await;
+    sqlx::query("UPDATE sessions SET protocol = 'terminal' WHERE id = ?")
+        .bind(&incompatible.id)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    let failing =
+        draft_with_comment(&ts, &incompatible, "Exercise an actual rejected transport.").await;
+    let failing = ts
         .client
-        .list_session_reviews(&session.id, "artifact", "design")
+        .submit_review(
+            failing.id,
+            &SubmitReviewReq {
+                expected_revision: failing.draft_revision,
+                acknowledge_outdated: false,
+            },
+        )
         .await
-        .unwrap()
-        .into_iter()
-        .find(|review| review.status == "draft")
         .unwrap();
-    assert_cli_ok(
-        &loom_review_cli(
-            &ts,
-            &[
-                "review",
-                "submit",
-                &draft.id.to_string(),
-                "--revision",
-                &draft.draft_revision.to_string(),
-            ],
-        )
-        .await,
-    );
-
-    assert_cli_ok(
-        &loom_review_cli(
-            &ts,
-            &[
-                "review",
-                "overall",
-                &session.id,
-                "design",
-                "--rev",
-                "2",
-                "Discard",
-                "me",
-            ],
-        )
-        .await,
-    );
-    let draft = ts
-        .client
-        .list_session_reviews(&session.id, "artifact", "design")
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|review| review.status == "draft")
-        .unwrap();
-    assert_cli_ok(
-        &loom_review_cli(
-            &ts,
-            &[
-                "review",
-                "discard",
-                &draft.id.to_string(),
-                "--revision",
-                &draft.draft_revision.to_string(),
-            ],
-        )
-        .await,
+    assert_eq!(failing.delivery_state, "retrying");
+    for expected in ["retrying", "failed"] {
+        make_delivery_due(&ts.state.db, failing.id).await;
+        let error = loom::review_delivery::deliver_review(&ts.state, failing.id)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("pasting review feedback"));
+        assert_eq!(
+            ts.client
+                .get_review(failing.id)
+                .await
+                .unwrap()
+                .delivery_state,
+            expected
+        );
+    }
+    assert_eq!(
+        ts.client
+            .retry_review_delivery(failing.id)
+            .await
+            .unwrap()
+            .delivery_state,
+        "failed"
     );
 }
