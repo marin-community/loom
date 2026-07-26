@@ -2,6 +2,53 @@ use std::path::Path;
 use std::process::Command;
 use std::time::SystemTime;
 
+fn command_output(command: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(command).args(args).output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn valid_revision(value: &str) -> bool {
+    (7..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Stamp the source revision into the binary. Local cargo builds discover it
+/// from git; immutable/container builders can supply `LOOM_BUILD_REVISION`
+/// when their source context intentionally omits `.git`.
+fn emit_build_identity() {
+    println!("cargo:rerun-if-env-changed=LOOM_BUILD_REVISION");
+
+    // A commit moves without changing source-file mtimes when a cached target
+    // directory is reused. Watch HEAD, its loose ref, and packed refs so the
+    // embedded identity follows that move in ordinary repositories and
+    // worktrees.
+    for path in [
+        command_output("git", &["rev-parse", "--git-path", "HEAD"]),
+        command_output("git", &["rev-parse", "--git-path", "packed-refs"]),
+        command_output("git", &["symbolic-ref", "-q", "HEAD"])
+            .and_then(|reference| command_output("git", &["rev-parse", "--git-path", &reference])),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        println!("cargo:rerun-if-changed={path}");
+    }
+
+    let revision = std::env::var("LOOM_BUILD_REVISION")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| valid_revision(value))
+        .or_else(|| command_output("git", &["rev-parse", "--verify", "HEAD"]))
+        .filter(|value| valid_revision(value))
+        .unwrap_or_else(|| "unknown".to_string());
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string());
+    println!("cargo:rustc-env=LOOM_BUILD_REVISION={revision}");
+    println!("cargo:rustc-env=LOOM_BUILD_PROFILE={profile}");
+}
+
 /// Modification time of `path`, or the epoch when it cannot be read (so a
 /// missing file always counts as "older" than anything that exists).
 fn mtime(path: &Path) -> SystemTime {
@@ -18,6 +65,8 @@ fn mtime(path: &Path) -> SystemTime {
 // Node-less, backend-only checkout), it degrades to a placeholder page instead
 // of failing the build.
 fn main() {
+    emit_build_identity();
+
     // Every file that feeds the frontend build: changing any of them reruns
     // this script (and therefore rspack). `frontend/src` covers the Vue/TS
     // sources and the HTML template; the rest are build-config inputs.

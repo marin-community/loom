@@ -33,6 +33,22 @@ async fn status_and_logs_are_shaped_and_operator_only() {
         .await
         .unwrap();
     assert!(st["version"].as_str().is_some(), "status has a version");
+    assert!(
+        st["build_revision"]
+            .as_str()
+            .is_some_and(|revision| !revision.is_empty()),
+        "status has a build revision or the explicit unknown sentinel"
+    );
+    assert!(
+        st["build_profile"]
+            .as_str()
+            .is_some_and(|profile| !profile.is_empty()),
+        "status has a cargo build profile"
+    );
+    assert!(
+        st.get("image").is_some(),
+        "status has a nullable runtime image identity"
+    );
     assert!(st["pid"].as_u64().unwrap_or(0) > 0, "status has a pid");
     assert!(
         st["started_at"].as_str().unwrap_or("").len() >= 10,
