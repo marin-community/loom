@@ -1,14 +1,18 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
-import { del, post } from '../api';
+import { computed, nextTick, ref, useId, watch } from 'vue';
+import { archiveSession, removeSession } from '../api';
 import type { AutomationRun } from '../types';
+import type { UnmatchedRunProjection } from '../lib/automationSessions';
 import { exactTime, timeAgo } from '../lib/time';
 import ConfirmDialog from './ConfirmDialog.vue';
 import StatusBadge from './StatusBadge.vue';
 
-const props = defineProps<{ run: AutomationRun; intervention: boolean; history?: boolean }>();
+const props = defineProps<{ run: AutomationRun; projection: UnmatchedRunProjection }>();
 const emit = defineEmits<{ changed: []; error: [message: string] }>();
 const open = ref(false);
+const trigger = ref<HTMLButtonElement>();
+const menu = ref<HTMLElement>();
+const menuId = `${useId()}-menu`;
 const busy = ref('');
 const pendingAction = ref<'archive' | 'remove' | ''>('');
 const canArchive = computed(
@@ -16,9 +20,9 @@ const canArchive = computed(
 );
 
 const title = computed(() => {
-  if (props.intervention) return `Launch ${props.run.status}`;
-  if (props.history) return `Run ${props.run.status}`;
-  return 'Provisioning session';
+  if (props.projection === 'intervention') return `Launch ${props.run.status}`;
+  if (props.projection === 'history') return `Run ${props.run.status}`;
+  return `Provisioning · ${props.run.status}`;
 });
 
 async function act(name: string, fn: () => Promise<void>) {
@@ -44,13 +48,26 @@ function confirmAction() {
   pendingAction.value = '';
   if (action === 'archive') {
     void act('archive', async () => {
-      await post(`/sessions/${props.run.session_id}/archive`);
+      await archiveSession(props.run.session_id);
     });
   } else if (action === 'remove') {
     void act('remove', async () => {
-      await del(`/sessions/${props.run.session_id}`);
+      await removeSession(props.run.session_id);
     });
   }
+}
+
+watch(open, async (isOpen) => {
+  if (!isOpen) return;
+  await nextTick();
+  menu.value?.querySelector<HTMLElement>('button:not([disabled])')?.focus();
+});
+
+function onKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape') return;
+  event.preventDefault();
+  open.value = false;
+  void nextTick(() => trigger.value?.focus());
 }
 </script>
 
@@ -62,7 +79,7 @@ function confirmAction() {
   >
     <span
       class="mt-1.5 h-2 w-2 shrink-0 rounded-full"
-      :class="intervention ? 'bg-block-line' : 'bg-info-line'"
+      :class="projection === 'intervention' ? 'bg-block-line' : 'bg-info-line'"
       aria-hidden="true"
     ></span>
     <div class="min-w-0 flex-1">
@@ -72,7 +89,10 @@ function confirmAction() {
         </span>
         <StatusBadge :status="run.status" />
       </div>
-      <p v-if="intervention && run.summary" class="mt-0.5 break-words font-mono text-xs text-block">
+      <p
+        v-if="projection === 'intervention' && run.summary"
+        class="mt-0.5 break-words font-mono text-xs text-block"
+      >
         {{ run.summary }}
       </p>
     </div>
@@ -89,10 +109,12 @@ function confirmAction() {
     </div>
     <div class="relative z-10 shrink-0">
       <button
+        ref="trigger"
         type="button"
         data-testid="run-actions"
         :aria-label="`Actions for launch ${run.id}`"
         :aria-expanded="open"
+        :aria-controls="menuId"
         :disabled="!!busy"
         :class="[
           'rounded px-1.5 py-0.5 text-sm leading-none text-faint transition-colors',
@@ -106,8 +128,11 @@ function confirmAction() {
       <div v-if="open" class="fixed inset-0 z-20" @click="open = false"></div>
       <div
         v-if="open"
+        :id="menuId"
+        ref="menu"
         class="absolute right-0 top-full z-30 mt-1 w-64 overflow-hidden rounded border border-line bg-surface py-1 shadow-lg"
         data-testid="run-actions-menu"
+        @keydown="onKeydown"
       >
         <button
           v-if="canArchive"

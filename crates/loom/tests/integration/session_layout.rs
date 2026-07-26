@@ -7,7 +7,8 @@ use serial_test::serial;
 use weaver_api::{
     CreateSessionGroupReq, CreateSessionSpaceReq, DeleteSessionGroupReq, DeleteSessionSpaceReq,
     MoveSessionsReq, ReorderSessionLayoutReq, RestoreSessionGroupsReq, SessionGroupOrderReq,
-    SetSessionPlacementDefaultReq, UpdateSessionGroupReq, UpdateSessionSpaceReq,
+    SessionLayoutItemKind, SessionPlacementSelectorKind, SetSessionPlacementDefaultReq,
+    UpdateSessionGroupReq, UpdateSessionSpaceReq,
 };
 
 use crate::fixtures::TestServer;
@@ -296,7 +297,7 @@ async fn layout_crud_moves_conflicts_search_events_and_cli_share_one_contract() 
     let with_default = ts
         .client
         .set_session_placement_default(&SetSessionPlacementDefaultReq {
-            selector_kind: "origin".to_string(),
+            selector_kind: SessionPlacementSelectorKind::Origin,
             selector_value: "slack".to_string(),
             group_id: review_id.clone(),
             expected_revision: added_group.revision,
@@ -305,7 +306,11 @@ async fn layout_crud_moves_conflicts_search_events_and_cli_share_one_contract() 
         .unwrap();
     let without_default = ts
         .client
-        .delete_session_placement_default("origin", "slack", with_default.revision)
+        .delete_session_placement_default(
+            SessionPlacementSelectorKind::Origin,
+            "slack",
+            with_default.revision,
+        )
         .await
         .unwrap();
     let custom_inbox = added_group
@@ -322,7 +327,7 @@ async fn layout_crud_moves_conflicts_search_events_and_cli_share_one_contract() 
     let reordered = ts
         .client
         .reorder_session_layout(&ReorderSessionLayoutReq {
-            kind: "group".to_string(),
+            kind: SessionLayoutItemKind::Group,
             id: review_id.clone(),
             before_id: Some(custom_inbox),
             destination_space_id: Some(custom_id.clone()),
@@ -548,7 +553,7 @@ async fn canonical_defaults_legacy_reads_and_cross_space_collisions_are_consiste
     let with_default = ts
         .client
         .set_session_placement_default(&SetSessionPlacementDefaultReq {
-            selector_kind: "profile".to_string(),
+            selector_kind: SessionPlacementSelectorKind::Profile,
             selector_value: "default".to_string(),
             group_id: "group-github-inbox".to_string(),
             expected_revision: initial.revision,
@@ -733,7 +738,7 @@ async fn canonical_defaults_legacy_reads_and_cross_space_collisions_are_consiste
     let crossed = ts
         .client
         .reorder_session_layout(&ReorderSessionLayoutReq {
-            kind: "group".to_string(),
+            kind: SessionLayoutItemKind::Group,
             id: user_review_id.clone(),
             before_id: None,
             destination_space_id: Some("space-github".to_string()),
@@ -893,12 +898,10 @@ async fn hidden_managed_placements_cannot_block_an_apparently_empty_group() {
         .iter()
         .flat_map(|space| &space.groups)
         .all(|group| group.id != group_id));
-    assert!(
-        loom::session_layout::placement_group(&ts.state.db, "hidden-warm")
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(loom::session_layout::placement(&ts.state.db, "hidden-warm")
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[serial]

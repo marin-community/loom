@@ -1,19 +1,24 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import type { Session, SessionGroup, SessionLayout, SessionSpace } from '../types';
+import type {
+  Session,
+  SessionGroup,
+  SessionSearchAttention,
+  SessionSearchStatus,
+  SessionSpace,
+} from '../types';
 import AutomationRunRow from '../components/AutomationRunRow.vue';
 import ConfirmDialog from '../components/ConfirmDialog.vue';
 import SessionWorkbenchRow from '../components/SessionWorkbenchRow.vue';
 import {
-  ApiError,
+  archiveSession,
+  clearSessionTag,
   createSessionGroup,
   createSessionSpace,
-  del,
   deleteSessionGroup,
   deleteSessionSpace,
   moveSessions,
-  post,
   reorderSessionLayout,
   restoreSessionGroups,
   searchSessions,
@@ -21,12 +26,9 @@ import {
   updateSessionGroup,
   updateSessionSpace,
 } from '../api';
-import {
-  isAutomationRunHistory,
-  unmatchedAutomationRuns,
-  runNeedsIntervention,
-} from '../lib/automationSessions';
+import { unmatchedAutomationRuns, unmatchedRunProjection } from '../lib/automationSessions';
 import { effectiveAttention } from '../lib/sessionState';
+import { useLayoutCommands } from '../lib/layoutCommands';
 import { useFleet } from '../lib/sessionsStore';
 import { beginSessionOpen, recordSessionListReturn } from '../lib/workbenchMetrics';
 
@@ -34,8 +36,7 @@ defineOptions({ name: 'SessionList' });
 
 const route = useRoute();
 const router = useRouter();
-const { sessions, runs, layout, refresh } = useFleet();
-onActivated(recordSessionListReturn);
+const { sessions, runs, layout, resourceErrors, refresh } = useFleet();
 
 type WorkbenchView = 'space' | 'attention' | 'all' | 'history';
 
@@ -80,13 +81,32 @@ function viewQuery(next: WorkbenchView, spaceId?: string) {
   return query;
 }
 
-const statusFilter = ref(typeof route.query.status === 'string' ? route.query.status : '');
-const attentionFilter = ref(typeof route.query.attention === 'string' ? route.query.attention : '');
+const SEARCH_STATUSES = new Set<SessionSearchStatus>([
+  'created',
+  'running',
+  'orphaned',
+  'done',
+  'error',
+  'archived',
+]);
+const SEARCH_ATTENTION = new Set<SessionSearchAttention>(['needs', 'ok', 'attention', 'blocked']);
+function statusFromQuery(value: unknown): SessionSearchStatus | '' {
+  return typeof value === 'string' && SEARCH_STATUSES.has(value as SessionSearchStatus)
+    ? (value as SessionSearchStatus)
+    : '';
+}
+function attentionFromQuery(value: unknown): SessionSearchAttention | '' {
+  return typeof value === 'string' && SEARCH_ATTENTION.has(value as SessionSearchAttention)
+    ? (value as SessionSearchAttention)
+    : '';
+}
+const statusFilter = ref<SessionSearchStatus | ''>(statusFromQuery(route.query.status));
+const attentionFilter = ref<SessionSearchAttention | ''>(attentionFromQuery(route.query.attention));
 watch(
   () => [route.query.status, route.query.attention],
   ([status, attention]) => {
-    statusFilter.value = typeof status === 'string' ? status : '';
-    attentionFilter.value = typeof attention === 'string' ? attention : '';
+    statusFilter.value = statusFromQuery(status);
+    attentionFilter.value = attentionFromQuery(attention);
   },
 );
 function updateFilters() {
@@ -103,48 +123,73 @@ const searchText = ref('');
 const includeHistory = ref(false);
 const searchResults = ref<Session[] | null>(null);
 const searching = ref(false);
+const searchError = ref('');
 let searchTimer: number | undefined;
 let searchGeneration = 0;
-let lastSearchArchivedOnly = view.value === 'history';
+let searchAbort: AbortController | undefined;
 // Search membership is server-owned. Fleet/layout snapshots are replaced after
 // polling, SSE invalidations, and mutations; while a query is open each fresh
 // snapshot reruns the same guarded search so renamed, moved, created, and
 // deleted sessions enter or leave the result set correctly.
-watch(
-  [searchText, includeHistory, () => view.value, sessions, layout],
-  () => {
-    window.clearTimeout(searchTimer);
-    const generation = ++searchGeneration;
-    const query = searchText.value.trim();
-    const archivedOnly = view.value === 'history';
-    if (archivedOnly !== lastSearchArchivedOnly) {
-      // Never render results from the opposite route scope while the fresh
-      // server-visible search is in flight.
+function queueSearch(clearResults: boolean) {
+  window.clearTimeout(searchTimer);
+  searchAbort?.abort();
+  const generation = ++searchGeneration;
+  if (route.path !== '/') {
+    searching.value = false;
+    return;
+  }
+  const query = searchText.value.trim();
+  if (clearResults) {
+    searchError.value = '';
+    if (query) {
       searchResults.value = null;
-      lastSearchArchivedOnly = archivedOnly;
     }
-    if (!query) {
-      searchResults.value = null;
-      searching.value = false;
-      return;
-    }
-    searching.value = true;
-    searchTimer = window.setTimeout(async () => {
-      try {
-        const result = await searchSessions(query, {
+  }
+  if (!query) {
+    searchResults.value = null;
+    searching.value = false;
+    return;
+  }
+  searching.value = true;
+  searchTimer = window.setTimeout(async () => {
+    const controller = new AbortController();
+    searchAbort = controller;
+    try {
+      const archivedOnly = view.value === 'history';
+      const result = await searchSessions(
+        query,
+        {
           history: archivedOnly || includeHistory.value,
           archivedOnly,
-        });
-        if (generation === searchGeneration) searchResults.value = result;
-      } catch (cause) {
-        if (generation === searchGeneration) error.value = (cause as Error).message;
-      } finally {
-        if (generation === searchGeneration) searching.value = false;
+          status: statusFilter.value || undefined,
+          attention: attentionFilter.value || undefined,
+        },
+        controller.signal,
+      );
+      if (generation === searchGeneration) {
+        searchResults.value = result;
+        searchError.value = '';
       }
-    }, 160);
-  },
+    } catch (cause) {
+      if (generation === searchGeneration && (cause as Error).name !== 'AbortError') {
+        searchError.value = (cause as Error).message;
+      }
+    } finally {
+      if (generation === searchGeneration) searching.value = false;
+    }
+  }, 160);
+}
+watch(
+  [searchText, includeHistory, statusFilter, attentionFilter, () => view.value, () => route.path],
+  () => queueSearch(true),
   { flush: 'sync' },
 );
+watch([sessions, layout], () => queueSearch(false));
+onActivated(() => {
+  recordSessionListReturn();
+  queueSearch(true);
+});
 
 function matchesFilters(session: Session): boolean {
   if (statusFilter.value && session.status !== statusFilter.value) return false;
@@ -216,20 +261,44 @@ const smartSessions = computed(() =>
     );
   }),
 );
-const failedRuns = computed(() =>
-  unmatchedAutomationRuns(runs.value, sessions.value)
-    .filter(runNeedsIntervention)
-    .sort((left, right) => right.updated_at.localeCompare(left.updated_at)),
+const displayedGroups = computed(() => {
+  if (view.value === 'space' && searchResults.value === null) {
+    return groupedSessions.value.map(({ group, sessions }) => ({
+      key: group.id,
+      group,
+      sessions,
+      qualified: false,
+    }));
+  }
+  return smartSessions.value.length
+    ? [{ key: 'smart', group: undefined, sessions: smartSessions.value, qualified: true }]
+    : [];
+});
+const unmatchedRuns = computed(() =>
+  unmatchedAutomationRuns(runs.value, sessions.value).sort((left, right) =>
+    right.updated_at.localeCompare(left.updated_at),
+  ),
+);
+const interventionRuns = computed(() =>
+  unmatchedRuns.value.filter((run) => unmatchedRunProjection(run) === 'intervention'),
+);
+const provisioningRuns = computed(() =>
+  unmatchedRuns.value.filter((run) => unmatchedRunProjection(run) === 'provisioning'),
 );
 const historicalRuns = computed(() =>
-  unmatchedAutomationRuns(runs.value, sessions.value)
-    .filter(isAutomationRunHistory)
-    .sort((left, right) => right.updated_at.localeCompare(left.updated_at)),
+  unmatchedRuns.value.filter((run) => unmatchedRunProjection(run) === 'history'),
 );
 const showInterventions = computed(
   () =>
     view.value === 'attention' ||
     (view.value === 'space' && activeSpace.value?.system_key === 'ops'),
+);
+const operationalRuns = computed(() =>
+  view.value === 'attention'
+    ? interventionRuns.value
+    : [...interventionRuns.value, ...provisioningRuns.value].sort((left, right) =>
+        right.updated_at.localeCompare(left.updated_at),
+      ),
 );
 
 const expandedRows = ref(new Set<string>());
@@ -283,6 +352,13 @@ const allGroups = computed(() =>
     })),
   ),
 );
+function selectedInLayoutOrder() {
+  const remaining = new Set(selected.value);
+  const ordered = allGroups.value.flatMap(({ group }) =>
+    group.session_ids.filter((id) => remaining.delete(id)),
+  );
+  return [...ordered, ...remaining];
+}
 const bulkDestination = ref('');
 watch(
   allGroups,
@@ -305,6 +381,7 @@ interface UndoMove {
 const undoMove = ref<UndoMove | null>(null);
 const announcement = ref('');
 const error = ref('');
+const { busy: layoutBusy, error: layoutError, run: runLayout } = useLayoutCommands(layout, refresh);
 
 function snapshotUndo(ids: string[], destinationGroupId: string): UndoMove {
   const moving = new Set(ids);
@@ -326,15 +403,6 @@ function snapshotUndo(ids: string[], destinationGroupId: string): UndoMove {
   };
 }
 
-function useConflictLayout(cause: unknown) {
-  if (!(cause instanceof ApiError) || cause.status !== 409) return false;
-  const current = cause.body.layout;
-  if (current && typeof current === 'object') layout.value = current as SessionLayout;
-  error.value =
-    'The workbench changed in another client. Review the refreshed layout and try again.';
-  return true;
-}
-
 async function performMove(
   ids: string[],
   destinationGroupId: string,
@@ -342,53 +410,48 @@ async function performMove(
   reversible = true,
 ) {
   if (!ids.length || !layout.value) return;
-  error.value = '';
-  const undo = snapshotUndo(ids, destinationGroupId);
-  try {
-    layout.value = await moveSessions({
+  const outcome: { undo?: UndoMove } = {};
+  const moved = await runLayout((current) => {
+    outcome.undo = snapshotUndo(ids, destinationGroupId);
+    return moveSessions({
       session_ids: ids,
       destination_group_id: destinationGroupId,
       before_session_id: beforeSessionId,
-      expected_revision: layout.value.revision,
+      expected_revision: current.revision,
     });
-    if (reversible) undoMove.value = undo;
-    announcement.value = undo.message;
-    clearSelection();
-    await refresh();
-    await nextTick();
-    const movedRow =
-      ids.length === 1
-        ? document.querySelector<HTMLElement>(
-            `[data-session-id="${CSS.escape(ids[0])}"] [data-testid="move-session"]`,
-          )
-        : null;
-    const focusableMovedRow =
-      movedRow && movedRow.offsetParent !== null && !movedRow.hasAttribute('disabled')
-        ? movedRow
-        : null;
-    (focusableMovedRow ?? undoButton.value)?.focus();
-  } catch (cause) {
-    if (!useConflictLayout(cause)) error.value = (cause as Error).message;
-    await refresh();
-  }
+  });
+  const undo = outcome.undo;
+  if (!moved || !undo) return;
+  moveOpenId.value = '';
+  if (reversible) undoMove.value = undo;
+  announcement.value = undo.message;
+  clearSelection();
+  await nextTick();
+  const movedRow =
+    ids.length === 1
+      ? document.querySelector<HTMLElement>(
+          `[data-session-id="${CSS.escape(ids[0])}"] [data-testid="session-details-toggle"]`,
+        )
+      : null;
+  const focusableMovedRow =
+    movedRow && movedRow.offsetParent !== null && !movedRow.hasAttribute('disabled')
+      ? movedRow
+      : null;
+  (focusableMovedRow ?? undoButton.value)?.focus();
 }
 
 async function restoreMove() {
   const undo = undoMove.value;
   if (!undo) return;
-  error.value = '';
-  try {
-    if (!layout.value) return;
-    layout.value = await restoreSessionGroups({
+  const restored = await runLayout((current) =>
+    restoreSessionGroups({
       groups: undo.groups,
-      expected_revision: layout.value.revision,
-    });
+      expected_revision: current.revision,
+    }),
+  );
+  if (restored) {
     undoMove.value = null;
     announcement.value = 'Move undone';
-    await refresh();
-  } catch (cause) {
-    if (!useConflictLayout(cause)) error.value = `Could not undo move: ${(cause as Error).message}`;
-    await refresh();
   }
 }
 
@@ -427,14 +490,8 @@ async function drop(groupId: string, beforeId: string | null = null) {
 }
 
 async function toggleGroup(group: SessionGroup) {
-  const previous = group.collapsed;
-  group.collapsed = !previous;
-  try {
-    layout.value = await setSessionGroupPreference(group.id, group.collapsed);
-  } catch (cause) {
-    group.collapsed = previous;
-    error.value = (cause as Error).message;
-  }
+  const collapsed = !group.collapsed;
+  await runLayout(() => setSessionGroupPreference(group.id, collapsed));
 }
 
 const organizeOpen = ref(false);
@@ -445,6 +502,9 @@ const spaceNames = ref<Record<string, string>>({});
 const groupNames = ref<Record<string, string>>({});
 const deleteDestinations = ref<Record<string, string>>({});
 const groupDestinationSpaces = ref<Record<string, string>>({});
+const dirtySpaceNames = new Set<string>();
+const dirtyGroupNames = new Set<string>();
+const dirtyGroupDestinations = new Set<string>();
 const pendingDelete = ref<
   { kind: 'space'; item: SessionSpace } | { kind: 'group'; item: SessionGroup } | null
 >(null);
@@ -456,10 +516,12 @@ watch(
       organizeSpaceId.value = activeSpace.value?.id ?? next.spaces[0]?.id ?? '';
     }
     for (const space of next.spaces) {
-      spaceNames.value[space.id] ??= space.name;
+      if (!dirtySpaceNames.has(space.id)) spaceNames.value[space.id] = space.name;
       for (const group of space.groups) {
-        groupNames.value[group.id] ??= group.name;
-        groupDestinationSpaces.value[group.id] ??= space.id;
+        if (!dirtyGroupNames.has(group.id)) groupNames.value[group.id] = group.name;
+        if (!dirtyGroupDestinations.has(group.id)) {
+          groupDestinationSpaces.value[group.id] = space.id;
+        }
       }
     }
   },
@@ -468,75 +530,125 @@ watch(
 const organizeSpace = computed(() =>
   layout.value?.spaces.find((space) => space.id === organizeSpaceId.value),
 );
-
-async function mutateLayout(operation: () => Promise<SessionLayout>) {
-  error.value = '';
-  try {
-    layout.value = await operation();
-    await refresh();
-  } catch (cause) {
-    if (!useConflictLayout(cause)) error.value = (cause as Error).message;
-    await refresh();
+const pendingDeleteGroups = computed(() => {
+  const pending = pendingDelete.value;
+  if (!pending || !layout.value) return [];
+  if (pending.kind === 'group') {
+    return allGroups.value
+      .filter(({ group }) => group.id === pending.item.id)
+      .map(({ group }) => group);
   }
+  return layout.value.spaces.find((space) => space.id === pending.item.id)?.groups ?? [];
+});
+const pendingDeleteRequiresDestination = computed(() => {
+  const ids = new Set(pendingDeleteGroups.value.map((group) => group.id));
+  return (
+    pendingDeleteGroups.value.some((group) => group.session_ids.length > 0) ||
+    (layout.value?.defaults ?? []).some((fallback) => ids.has(fallback.group_id))
+  );
+});
+const pendingDeleteImpossible = computed(() => {
+  const pending = pendingDelete.value;
+  if (!pending || !layout.value) return true;
+  if (pending.kind === 'space') return layout.value.spaces.length <= 1;
+  const space = layout.value.spaces.find((candidate) =>
+    candidate.groups.some((group) => group.id === pending.item.id),
+  );
+  return !space || space.groups.length <= 1;
+});
+const pendingDeleteDestination = computed(() => {
+  const pending = pendingDelete.value;
+  if (!pending) return undefined;
+  const id = deleteDestinations.value[pending.item.id];
+  const sourceIds = new Set(pendingDeleteGroups.value.map((group) => group.id));
+  return allGroups.value.find(({ group }) => group.id === id && !sourceIds.has(group.id));
+});
+const deleteConfirmationDisabled = computed(
+  () =>
+    layoutBusy.value ||
+    pendingDeleteImpossible.value ||
+    (pendingDeleteRequiresDestination.value && !pendingDeleteDestination.value),
+);
+const deleteDescription = computed(() => {
+  const pending = pendingDelete.value;
+  if (!pending) return '';
+  const label = `${pending.kind} “${pending.item.name}”`;
+  if (pendingDeleteDestination.value) {
+    return `Delete ${label} and move its sessions and placement defaults to “${pendingDeleteDestination.value.label}”.`;
+  }
+  if (pendingDeleteRequiresDestination.value) {
+    return `Select a destination before deleting ${label}; it still owns sessions or placement defaults.`;
+  }
+  return `Delete empty ${label}.`;
+});
+
+function editSpaceName(id: string, name: string) {
+  dirtySpaceNames.add(id);
+  spaceNames.value[id] = name;
+}
+function editGroupName(id: string, name: string) {
+  dirtyGroupNames.add(id);
+  groupNames.value[id] = name;
+}
+function editGroupDestination(id: string, spaceId: string) {
+  dirtyGroupDestinations.add(id);
+  groupDestinationSpaces.value[id] = spaceId;
 }
 function addSpace() {
   if (!layout.value || !newSpaceName.value.trim()) return;
-  const revision = layout.value.revision;
   const name = newSpaceName.value;
-  void mutateLayout(async () => {
-    const next = await createSessionSpace(name, revision);
-    newSpaceName.value = '';
-    return next;
+  void runLayout((current) => createSessionSpace(name, current.revision)).then((created) => {
+    if (created) newSpaceName.value = '';
   });
 }
 function renameSpace(space: SessionSpace) {
   if (!layout.value) return;
-  void mutateLayout(() =>
-    updateSessionSpace(space.id, spaceNames.value[space.id], layout.value!.revision),
-  );
+  void runLayout((current) =>
+    updateSessionSpace(space.id, spaceNames.value[space.id], current.revision),
+  ).then((renamed) => {
+    if (renamed) dirtySpaceNames.delete(space.id);
+  });
 }
 function removeSpace(space: SessionSpace) {
   if (!layout.value) return;
-  void mutateLayout(() =>
-    deleteSessionSpace(
-      space.id,
-      deleteDestinations.value[space.id] || null,
-      layout.value!.revision,
-    ),
+  void runLayout((current) =>
+    deleteSessionSpace(space.id, deleteDestinations.value[space.id] || null, current.revision),
   );
 }
 function addGroup(space: SessionSpace) {
   if (!layout.value || !newGroupName.value.trim()) return;
-  const revision = layout.value.revision;
   const name = newGroupName.value;
-  void mutateLayout(async () => {
-    const next = await createSessionGroup(space.id, name, revision);
-    newGroupName.value = '';
-    return next;
-  });
+  void runLayout((current) => createSessionGroup(space.id, name, current.revision)).then(
+    (created) => {
+      if (created) newGroupName.value = '';
+    },
+  );
 }
 function renameGroup(group: SessionGroup) {
   if (!layout.value) return;
-  void mutateLayout(() =>
-    updateSessionGroup(group.id, groupNames.value[group.id], layout.value!.revision),
-  );
+  void runLayout((current) =>
+    updateSessionGroup(group.id, groupNames.value[group.id], current.revision),
+  ).then((renamed) => {
+    if (renamed) dirtyGroupNames.delete(group.id);
+  });
 }
 function removeGroup(group: SessionGroup) {
   if (!layout.value) return;
-  void mutateLayout(() =>
-    deleteSessionGroup(
-      group.id,
-      deleteDestinations.value[group.id] || null,
-      layout.value!.revision,
-    ),
+  void runLayout((current) =>
+    deleteSessionGroup(group.id, deleteDestinations.value[group.id] || null, current.revision),
   );
 }
 function confirmLayoutDelete() {
   const pending = pendingDelete.value;
+  if (deleteConfirmationDisabled.value) return;
   pendingDelete.value = null;
   if (!pending) return;
   if (pending.kind === 'space') removeSpace(pending.item);
   else removeGroup(pending.item);
+}
+
+function groupIsLast(group: SessionGroup) {
+  return layout.value?.spaces.find((space) => space.id === group.space_id)?.groups.length === 1;
 }
 function reorderSpace(space: SessionSpace, direction: -1 | 1) {
   if (!layout.value) return;
@@ -545,12 +657,12 @@ function reorderSpace(space: SessionSpace, direction: -1 | 1) {
   const target = index + direction;
   if (target < 0 || target >= spaces.length) return;
   const beforeId = direction < 0 ? spaces[target].id : spaces[target + 1]?.id;
-  void mutateLayout(() =>
+  void runLayout((current) =>
     reorderSessionLayout({
       kind: 'space',
       id: space.id,
       before_id: beforeId ?? null,
-      expected_revision: layout.value!.revision,
+      expected_revision: current.revision,
     }),
   );
 }
@@ -561,13 +673,13 @@ function reorderGroup(group: SessionGroup, direction: -1 | 1) {
   const target = index + direction;
   if (target < 0 || target >= groups.length) return;
   const beforeId = direction < 0 ? groups[target].id : groups[target + 1]?.id;
-  void mutateLayout(() =>
+  void runLayout((current) =>
     reorderSessionLayout({
       kind: 'group',
       id: group.id,
       before_id: beforeId ?? null,
       destination_space_id: group.space_id,
-      expected_revision: layout.value!.revision,
+      expected_revision: current.revision,
     }),
   );
 }
@@ -575,15 +687,17 @@ function moveGroupToSpace(group: SessionGroup) {
   if (!layout.value) return;
   const destination = groupDestinationSpaces.value[group.id];
   if (!destination || destination === group.space_id) return;
-  void mutateLayout(() =>
+  void runLayout((current) =>
     reorderSessionLayout({
       kind: 'group',
       id: group.id,
       before_id: null,
       destination_space_id: destination,
-      expected_revision: layout.value!.revision,
+      expected_revision: current.revision,
     }),
-  );
+  ).then((moved) => {
+    if (moved) dirtyGroupDestinations.delete(group.id);
+  });
 }
 
 const pendingBulkArchive = ref(false);
@@ -592,7 +706,7 @@ async function confirmBulkArchive() {
   pendingBulkArchive.value = false;
   error.value = '';
   const ids = [...selected.value];
-  const results = await Promise.allSettled(ids.map((id) => post(`/sessions/${id}/archive`)));
+  const results = await Promise.allSettled(ids.map(archiveSession));
   const failed = ids.filter((_, index) => results[index].status === 'rejected');
   const archived = ids.length - failed.length;
   selected.value = new Set(failed);
@@ -614,7 +728,7 @@ const clearingTag = ref('');
 async function clearTag(sessionId: string, key: string) {
   clearingTag.value = `${sessionId}:${key}`;
   try {
-    await del(`/sessions/${sessionId}/tags/${encodeURIComponent(key)}`);
+    await clearSessionTag(sessionId, key);
     await refresh();
   } catch (cause) {
     error.value = (cause as Error).message;
@@ -721,7 +835,9 @@ function scrollSpaces(direction: number) {
           class="flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium"
         >
           Attention
-          <span class="font-mono text-2xs">{{ attentionSessions.length + failedRuns.length }}</span>
+          <span class="font-mono text-2xs">{{
+            attentionSessions.length + interventionRuns.length
+          }}</span>
         </router-link>
         <router-link
           v-for="space in layout?.spaces ?? []"
@@ -801,9 +917,10 @@ function scrollSpaces(direction: number) {
       <div v-if="organizeSpace" class="mt-3 space-y-2">
         <div class="flex flex-wrap items-center gap-1.5">
           <input
-            v-model="spaceNames[organizeSpace.id]"
+            :value="spaceNames[organizeSpace.id]"
             aria-label="Space name"
             class="rounded bg-input px-2 py-1 text-xs"
+            @input="editSpaceName(organizeSpaceId, ($event.target as HTMLInputElement).value)"
           />
           <button
             class="btn-secondary px-2 py-1 text-xs"
@@ -845,6 +962,7 @@ function scrollSpaces(direction: number) {
           <button
             class="rounded px-2 py-1 text-xs text-block hover:bg-block-soft"
             type="button"
+            :disabled="layout.spaces.length <= 1"
             @click="pendingDelete = { kind: 'space', item: organizeSpace }"
           >
             Delete space
@@ -871,9 +989,10 @@ function scrollSpaces(direction: number) {
             class="flex flex-wrap items-center gap-1.5 p-2"
           >
             <input
-              v-model="groupNames[group.id]"
+              :value="groupNames[group.id]"
               :aria-label="`Name for ${group.name}`"
               class="rounded bg-input px-2 py-1 text-xs"
+              @input="editGroupName(group.id, ($event.target as HTMLInputElement).value)"
             />
             <span class="font-mono text-2xs text-faint"
               >{{ group.session_ids.length }} sessions</span
@@ -902,9 +1021,10 @@ function scrollSpaces(direction: number) {
               ↓
             </button>
             <select
-              v-model="groupDestinationSpaces[group.id]"
+              :value="groupDestinationSpaces[group.id]"
               :aria-label="`Destination space for ${group.name}`"
               class="rounded bg-input px-2 py-1 text-xs"
+              @change="editGroupDestination(group.id, ($event.target as HTMLSelectElement).value)"
             >
               <option v-for="space in layout.spaces" :key="space.id" :value="space.id">
                 {{ space.name }}
@@ -935,6 +1055,7 @@ function scrollSpaces(direction: number) {
             <button
               class="rounded px-2 py-1 text-xs text-block hover:bg-block-soft"
               type="button"
+              :disabled="groupIsLast(group)"
               @click="pendingDelete = { kind: 'group', item: group }"
             >
               Delete
@@ -945,11 +1066,20 @@ function scrollSpaces(direction: number) {
     </section>
 
     <div
-      v-if="error"
+      v-if="error || layoutError || searchError"
       role="alert"
       class="mb-3 rounded border border-block-line/40 bg-block-soft px-3 py-2 text-sm text-block"
     >
-      {{ error }}
+      {{ error || layoutError || searchError }}
+    </div>
+    <div
+      v-if="Object.keys(resourceErrors).length"
+      role="alert"
+      class="mb-3 rounded border border-attn-line/40 bg-attn-soft px-3 py-2 text-sm text-attn"
+    >
+      <span v-for="(message, resource) in resourceErrors" :key="resource" class="mr-3">
+        {{ resource }}: {{ message }}
+      </span>
     </div>
     <div
       v-if="archiveResult"
@@ -983,7 +1113,8 @@ function scrollSpaces(direction: number) {
       <button
         class="btn-primary px-2 py-1 text-xs"
         type="button"
-        @click="performMove([...selected], bulkDestination)"
+        :disabled="layoutBusy"
+        @click="performMove(selectedInLayoutOrder(), bulkDestination)"
       >
         Move
       </button>
@@ -1008,137 +1139,111 @@ function scrollSpaces(direction: number) {
           Interventions
         </h2>
         <span class="rounded-full bg-block-soft px-1.5 font-mono text-2xs text-block">{{
-          failedRuns.length
+          operationalRuns.length
         }}</span>
       </div>
       <ul
-        v-if="failedRuns.length"
+        v-if="operationalRuns.length"
         data-testid="interventions"
         class="rounded border border-line bg-surface"
       >
         <AutomationRunRow
-          v-for="run in failedRuns"
+          v-for="run in operationalRuns"
           :key="run.id"
           :run="run"
-          intervention
+          :projection="unmatchedRunProjection(run)"
           @changed="refresh"
           @error="error = $event"
         />
       </ul>
       <p v-else class="rounded border border-dashed border-line px-3 py-3 text-sm text-muted">
-        No failed runs need intervention.
+        No automation runs need intervention.
       </p>
     </section>
 
-    <template v-if="view === 'space' && searchResults === null">
-      <section
-        v-for="{ group, sessions: groupSessions } in groupedSessions"
-        :key="group.id"
-        :data-group-id="group.id"
-        data-testid="session-group"
-        class="mb-3 rounded border border-line bg-surface"
-        :class="dropGroupId === group.id && !dropBeforeId ? 'ring-1 ring-accent' : ''"
-        @dragover.prevent="dragOver(group.id)"
-        @drop.prevent="drop(group.id)"
-      >
-        <header class="flex min-h-9 items-center gap-2 border-b border-line px-3 py-1.5">
-          <button
-            type="button"
-            :aria-expanded="!group.collapsed"
-            :aria-controls="`group-${group.id}`"
-            :aria-label="`${group.collapsed ? 'Expand' : 'Collapse'} ${group.name}`"
-            class="flex min-w-0 flex-1 items-center gap-2 text-left"
-            @click="toggleGroup(group)"
-          >
-            <span class="text-faint" :class="group.collapsed ? '' : 'rotate-90'">▸</span>
-            <span class="truncate text-sm font-semibold">{{ group.name }}</span>
-            <span class="font-mono text-2xs text-faint">{{ groupSessions.length }}</span>
-          </button>
-        </header>
-        <ul v-show="!group.collapsed" :id="`group-${group.id}`" data-testid="session-list">
-          <SessionWorkbenchRow
-            v-for="session in groupSessions"
-            :key="session.id"
-            :session="session"
-            :qualified="false"
-            :selected="isSelected(session.id)"
-            :expanded="rowExpanded(session.id)"
-            :move-open="moveOpenId === session.id"
-            :destination="rowDestination[session.id]"
-            :before="rowBefore[session.id]"
-            :all-groups="allGroups"
-            :all-sessions="sessions"
-            :parent-session="parentSessionOf(session)"
-            :dragging="draggingId === session.id"
-            :drop-before="dropGroupId === group.id && dropBeforeId === session.id"
-            :clearing-tag="clearingTag"
-            @toggle-select="setSelected(session.id, $event)"
-            @toggle-details="toggleRow(session.id)"
-            @open-move="openMove(session)"
-            @update-destination="rowDestination[session.id] = $event"
-            @update-before="rowBefore[session.id] = $event"
-            @move="performMove([session.id], $event.groupId, $event.beforeId || null)"
-            @drag-start="dragStart(session.id, $event)"
-            @drag-end="clearDrag"
-            @drag-over="dragOver(group.id, session.id)"
-            @drop="drop(group.id, session.id)"
-            @changed="refresh"
-            @error="error = $event"
-            @clear-tag="clearTag(session.id, $event)"
-            @record-open="recordSessionLinkOpen($event, session.id)"
-          />
-          <li
-            v-if="!groupSessions.length"
-            data-testid="empty-group"
-            class="px-3 py-5 text-center text-sm text-faint"
-          >
-            {{
-              group.session_ids.length
-                ? 'No sessions match the current view or filters.'
-                : 'Empty group — drop sessions here or use Move.'
-            }}
-          </li>
-        </ul>
-      </section>
-    </template>
-
-    <ul
-      v-else-if="smartSessions.length"
-      data-testid="session-list"
-      class="rounded border border-line bg-surface"
+    <section
+      v-for="display in displayedGroups"
+      :key="display.key"
+      :data-group-id="display.group?.id"
+      :data-testid="display.group ? 'session-group' : undefined"
+      class="mb-3 rounded border border-line bg-surface"
+      :class="
+        display.group && dropGroupId === display.group.id && !dropBeforeId
+          ? 'ring-1 ring-accent'
+          : ''
+      "
+      @dragover.prevent="display.group && dragOver(display.group.id)"
+      @drop.prevent="display.group && drop(display.group.id)"
     >
-      <SessionWorkbenchRow
-        v-for="session in smartSessions"
-        :key="session.id"
-        :session="session"
-        qualified
-        :selected="isSelected(session.id)"
-        :expanded="rowExpanded(session.id)"
-        :move-open="moveOpenId === session.id"
-        :destination="rowDestination[session.id]"
-        :before="rowBefore[session.id]"
-        :all-groups="allGroups"
-        :all-sessions="sessions"
-        :parent-session="parentSessionOf(session)"
-        :dragging="draggingId === session.id"
-        :drop-before="dropGroupId === session.placement?.group_id && dropBeforeId === session.id"
-        :clearing-tag="clearingTag"
-        @toggle-select="setSelected(session.id, $event)"
-        @toggle-details="toggleRow(session.id)"
-        @open-move="openMove(session)"
-        @update-destination="rowDestination[session.id] = $event"
-        @update-before="rowBefore[session.id] = $event"
-        @move="performMove([session.id], $event.groupId, $event.beforeId || null)"
-        @drag-start="dragStart(session.id, $event)"
-        @drag-end="clearDrag"
-        @drag-over="dragOver(session.placement?.group_id ?? '', session.id)"
-        @drop="drop(session.placement?.group_id ?? '', session.id)"
-        @changed="refresh"
-        @error="error = $event"
-        @clear-tag="clearTag(session.id, $event)"
-        @record-open="recordSessionLinkOpen($event, session.id)"
-      />
-    </ul>
+      <header
+        v-if="display.group"
+        class="flex min-h-9 items-center gap-2 border-b border-line px-3 py-1.5"
+      >
+        <button
+          type="button"
+          :aria-expanded="!display.group.collapsed"
+          :aria-controls="`group-${display.group.id}`"
+          :aria-label="`${display.group.collapsed ? 'Expand' : 'Collapse'} ${display.group.name}`"
+          class="flex min-w-0 flex-1 items-center gap-2 text-left"
+          @click="toggleGroup(display.group)"
+        >
+          <span class="text-faint" :class="display.group.collapsed ? '' : 'rotate-90'">▸</span>
+          <span class="truncate text-sm font-semibold">{{ display.group.name }}</span>
+          <span class="font-mono text-2xs text-faint">{{ display.sessions.length }}</span>
+        </button>
+      </header>
+      <ul
+        v-show="!display.group?.collapsed"
+        :id="display.group ? `group-${display.group.id}` : undefined"
+        data-testid="session-list"
+      >
+        <SessionWorkbenchRow
+          v-for="session in display.sessions"
+          :key="session.id"
+          :session="session"
+          :qualified="display.qualified"
+          :selected="isSelected(session.id)"
+          :expanded="rowExpanded(session.id)"
+          :move-open="moveOpenId === session.id"
+          :destination="rowDestination[session.id]"
+          :before="rowBefore[session.id]"
+          :all-groups="allGroups"
+          :all-sessions="sessions"
+          :parent-session="parentSessionOf(session)"
+          :dragging="draggingId === session.id"
+          :drop-before="
+            dropGroupId === (display.group?.id ?? session.placement?.group_id) &&
+            dropBeforeId === session.id
+          "
+          :clearing-tag="clearingTag"
+          @toggle-select="setSelected(session.id, $event)"
+          @toggle-details="toggleRow(session.id)"
+          @open-move="openMove(session)"
+          @update-destination="rowDestination[session.id] = $event"
+          @update-before="rowBefore[session.id] = $event"
+          @move="performMove([session.id], $event.groupId, $event.beforeId || null)"
+          @drag-start="dragStart(session.id, $event)"
+          @drag-end="clearDrag"
+          @drag-over="dragOver(display.group?.id ?? session.placement?.group_id ?? '', session.id)"
+          @drop="drop(display.group?.id ?? session.placement?.group_id ?? '', session.id)"
+          @changed="refresh"
+          @error="error = $event"
+          @clear-tag="clearTag(session.id, $event)"
+          @record-open="recordSessionLinkOpen($event, session.id)"
+        />
+        <li
+          v-if="display.group && !display.sessions.length"
+          data-testid="empty-group"
+          class="px-3 py-5 text-center text-sm text-faint"
+        >
+          {{
+            display.group.session_ids.length
+              ? 'No sessions match the current view or filters.'
+              : 'Empty group — drop sessions here or use Move.'
+          }}
+        </li>
+      </ul>
+    </section>
 
     <section v-if="view === 'history' && historicalRuns.length" class="mt-4">
       <h2 class="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">
@@ -1149,8 +1254,7 @@ function scrollSpaces(direction: number) {
           v-for="run in historicalRuns"
           :key="run.id"
           :run="run"
-          :intervention="false"
-          history
+          projection="history"
           @changed="refresh"
           @error="error = $event"
         />
@@ -1162,7 +1266,7 @@ function scrollSpaces(direction: number) {
         (view !== 'space' || searchResults !== null) &&
         !smartSessions.length &&
         !(view === 'history' && historicalRuns.length) &&
-        !(showInterventions && failedRuns.length)
+        !(showInterventions && operationalRuns.length)
       "
       class="rounded border border-dashed border-line p-6 text-center"
     >
@@ -1206,13 +1310,11 @@ function scrollSpaces(direction: number) {
     <p class="sr-only" aria-live="polite">{{ announcement }}</p>
     <ConfirmDialog
       :open="pendingDelete !== null"
-      :title="`Delete ${pendingDelete?.kind ?? 'layout item'}?`"
-      :description="
-        pendingDelete?.kind === 'space'
-          ? 'The space and its groups are removed. Any sessions or placement defaults move to the selected destination.'
-          : 'The group is removed. Any sessions or placement defaults move to the selected destination.'
-      "
+      :title="`Delete ${pendingDelete?.kind ?? 'layout item'} “${pendingDelete?.item.name ?? ''}”?`"
+      :description="deleteDescription"
       confirm-label="Delete"
+      :busy="layoutBusy"
+      :confirm-disabled="deleteConfirmationDisabled"
       danger
       @confirm="confirmLayoutDelete"
       @cancel="pendingDelete = null"

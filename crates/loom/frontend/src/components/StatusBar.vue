@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
-import { unmatchedAutomationRuns, runNeedsIntervention } from '../lib/automationSessions';
+import { unmatchedAutomationRuns, unmatchedRunProjection } from '../lib/automationSessions';
 import { effectiveAttention } from '../lib/sessionState';
 import { useFleet } from '../lib/sessionsStore';
 
@@ -20,7 +20,9 @@ const history = computed(() => sessions.value.filter((s) => s.status === 'archiv
 const needsMe = computed(
   () =>
     live.value.filter((s) => effectiveAttention(s).level !== 'ok').length +
-    unmatchedAutomationRuns(runs.value, sessions.value).filter(runNeedsIntervention).length,
+    unmatchedAutomationRuns(runs.value, sessions.value).filter(
+      (run) => unmatchedRunProjection(run) === 'intervention',
+    ).length,
 );
 
 let clockTimer: number | undefined;

@@ -19,6 +19,43 @@ use weaver_core::issue::Issue;
 use weaver_core::tags::Tag;
 use weaver_core::watch::{Watch, WatchRun};
 
+macro_rules! wire_enum {
+    ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        pub enum $name {
+            $(
+                #[serde(rename = $value)]
+                $variant,
+            )+
+        }
+
+        impl $name {
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $value,)+
+                }
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(self.as_str())
+            }
+        }
+
+        impl std::str::FromStr for $name {
+            type Err = String;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                match value {
+                    $($value => Ok(Self::$variant),)+
+                    _ => Err(format!("invalid {} '{value}'", stringify!($name))),
+                }
+            }
+        }
+    };
+}
+
 // ---------------------------------------------------------------------------
 // View payloads (responses)
 // ---------------------------------------------------------------------------
@@ -169,7 +206,9 @@ pub struct SessionView {
     /// means the session currently belongs to a system `Later` group; all
     /// other placements read as `null`.
     pub park: Option<String>,
-    /// Legacy compatibility read derived from canonical placement rank.
+    /// Legacy compatibility read: the canonical zero-based rank within the
+    /// current group. It is normalized after every move and has no meaning
+    /// across groups.
     pub sort_order: Option<f64>,
     /// Execution backend: `"terminal"` (a PTY + interactive TUI) or `"acp"` (a
     /// headless adapter driven over the Agent Client Protocol). Terminal-backend
@@ -220,6 +259,37 @@ pub struct SessionView {
     pub branch: BranchView,
 }
 
+wire_enum!(SessionSearchStatus {
+    Created => "created",
+    Running => "running",
+    Orphaned => "orphaned",
+    Done => "done",
+    Error => "error",
+    Archived => "archived",
+});
+
+wire_enum!(SessionSearchAttention {
+    Needs => "needs",
+    Ok => "ok",
+    Attention => "attention",
+    Blocked => "blocked",
+});
+
+/// Typed filters for `GET /api/sessions/search`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SearchSessionsOptions {
+    #[serde(default, rename = "q")]
+    pub query: String,
+    #[serde(default)]
+    pub history: bool,
+    #[serde(default)]
+    pub archived_only: bool,
+    #[serde(default)]
+    pub status: Option<SessionSearchStatus>,
+    #[serde(default)]
+    pub attention: Option<SessionSearchAttention>,
+}
+
 /// One session's canonical position in the shared Spaces → Groups layout.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionPlacementView {
@@ -260,7 +330,7 @@ pub struct SessionSpaceView {
 /// One configurable default-placement selector.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionPlacementDefaultView {
-    pub selector_kind: String,
+    pub selector_kind: SessionPlacementSelectorKind,
     pub selector_value: String,
     pub group_id: String,
 }
@@ -1683,11 +1753,15 @@ pub struct DeleteSessionGroupReq {
     pub expected_revision: i64,
 }
 
-/// Reorder one space, or one group (optionally into another space).
+// Reorder one space, or one group (optionally into another space).
+wire_enum!(SessionLayoutItemKind {
+    Space => "space",
+    Group => "group",
+});
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReorderSessionLayoutReq {
-    /// `"space"` or `"group"`.
-    pub kind: String,
+    pub kind: SessionLayoutItemKind,
     pub id: String,
     #[serde(default)]
     pub before_id: Option<String>,
@@ -1729,9 +1803,14 @@ pub struct SessionGroupPreferenceReq {
     pub collapsed: bool,
 }
 
+wire_enum!(SessionPlacementSelectorKind {
+    Origin => "origin",
+    Profile => "profile",
+});
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetSessionPlacementDefaultReq {
-    pub selector_kind: String,
+    pub selector_kind: SessionPlacementSelectorKind,
     pub selector_value: String,
     pub group_id: String,
     pub expected_revision: i64,

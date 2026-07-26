@@ -27,7 +27,8 @@ use crate::{
 };
 use weaver_api::{
     CreateReq, HandoffReq, HistoryPageView, LaunchOverrides, LaunchSelection, PatchSessionReq,
-    SendReq, SessionView, SetTagsReq, TagReq,
+    SearchSessionsOptions, SendReq, SessionSearchAttention, SessionSearchStatus, SessionView,
+    SetTagsReq, TagReq,
 };
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::Branch;
@@ -58,28 +59,17 @@ async fn insert_session_row(
     session: &NewSession,
     policy: &session_mod::SessionLaunchPolicy,
 ) -> Result<Session, AppError> {
-    let session = session_mod::insert_with_policy(&st.db, session, policy).await?;
-    if session.managed_by.is_none() {
-        super::session_layout::publish_invalidation(st).await;
+    let (session, layout_revision) =
+        session_mod::insert_with_layout_revision(&st.db, session, policy).await?;
+    if let Some(revision) = layout_revision {
+        super::session_layout::publish_invalidation(st, revision).await;
     }
     Ok(session)
 }
 
 async fn delete_session_row(st: &AppState, session_id: &str) -> Result<(), AppError> {
-    let had_visible_placement: bool = sqlx::query_scalar(
-        "SELECT EXISTS(
-             SELECT 1
-             FROM session_placements placement
-             JOIN sessions session ON session.id = placement.session_id
-             WHERE placement.session_id = ? AND session.managed_by IS NULL
-         )",
-    )
-    .bind(session_id)
-    .fetch_one(&st.db)
-    .await?;
-    session_mod::delete(&st.db, session_id).await?;
-    if had_visible_placement {
-        super::session_layout::publish_invalidation(st).await;
+    if let Some(revision) = session_mod::delete(&st.db, session_id).await? {
+        super::session_layout::publish_invalidation(st, revision).await;
     }
     Ok(())
 }
@@ -111,9 +101,8 @@ pub(super) struct ListSessionsQuery {
     /// History as disjoint views.
     #[serde(default)]
     archived: bool,
-    /// Compatibility filter for automation-class sessions. Successful
-    /// automation sessions are normal fleet work now, so omission includes
-    /// them; an explicit `automation=false` retains the old filtered read.
+    /// Compatibility filter for automation-class sessions. Omission retains
+    /// the historical interactive-only inventory; fleet workbenches opt in.
     #[serde(default)]
     automation: Option<bool>,
     /// Include engine-managed warm sessions. This is an operator inventory
@@ -143,7 +132,7 @@ pub(super) async fn list_sessions(
         SessionCollectionFilter {
             archived: q.archived,
             archived_only: false,
-            automation: q.automation.unwrap_or(true),
+            automation: q.automation.unwrap_or(false),
             managed: q.managed,
             search: q.q.as_deref(),
             status: None,
@@ -157,23 +146,9 @@ pub(super) async fn list_sessions(
 /// Search is an explicit fleet read so non-browser clients can find the same
 /// qualified sessions as the workbench. `history=true` widens the actionable
 /// result set; `archived_only=true` is the disjoint History projection.
-#[derive(Debug, Default, Deserialize)]
-pub(super) struct SearchSessionsQuery {
-    #[serde(default)]
-    q: String,
-    #[serde(default)]
-    history: bool,
-    #[serde(default)]
-    archived_only: bool,
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    attention: Option<String>,
-}
-
 pub(super) async fn search_sessions(
     State(st): State<AppState>,
-    Query(q): Query<SearchSessionsQuery>,
+    Query(q): Query<SearchSessionsOptions>,
 ) -> ApiResult<Json<Vec<SessionView>>> {
     collect_sessions(
         &st,
@@ -182,9 +157,9 @@ pub(super) async fn search_sessions(
             archived_only: q.archived_only,
             automation: true,
             managed: false,
-            search: Some(&q.q),
-            status: q.status.as_deref(),
-            attention: q.attention.as_deref(),
+            search: Some(&q.query),
+            status: q.status,
+            attention: q.attention,
         },
     )
     .await
@@ -205,38 +180,68 @@ fn view_attention(view: &SessionView) -> &str {
     }
 }
 
-fn append_search_values(value: &Value, haystack: &mut String) {
-    match value {
-        Value::Null => {}
-        Value::Bool(value) => {
-            haystack.push(' ');
-            haystack.push_str(if *value { "true" } else { "false" });
-        }
-        Value::Number(value) => {
-            haystack.push(' ');
-            haystack.push_str(&value.to_string());
-        }
-        Value::String(value) => {
-            haystack.push(' ');
-            haystack.push_str(value);
-        }
-        Value::Array(values) => {
-            for value in values {
-                append_search_values(value, haystack);
-            }
-        }
-        Value::Object(values) => {
-            for value in values.values() {
-                append_search_values(value, haystack);
-            }
-        }
-    }
+fn append_search_field(haystack: &mut String, value: &str) {
+    haystack.push(' ');
+    haystack.push_str(value);
 }
 
 fn search_haystack(view: &SessionView) -> String {
     let mut haystack = String::new();
-    if let Ok(value) = serde_json::to_value(view) {
-        append_search_values(&value, &mut haystack);
+    if let Some(placement) = &view.placement {
+        append_search_field(
+            &mut haystack,
+            &format!("{} / {}", placement.group_name, view.branch.title.trim()),
+        );
+        append_search_field(&mut haystack, &placement.group_name);
+    }
+    for field in [
+        view.branch.title.as_str(),
+        view.branch.goal.as_str(),
+        view.branch.description.as_str(),
+        view.github_repo.as_deref().unwrap_or_default(),
+        view.branch.repo_root.as_str(),
+        view.branch.branch.as_str(),
+        view.branch.name.as_str(),
+        view.status.as_str(),
+        view.profile.as_str(),
+        view.origin.as_str(),
+        view.class.as_str(),
+        view.created_by.as_deref().unwrap_or_default(),
+        view.parent_session_id.as_deref().unwrap_or_default(),
+        view.parent_id.as_deref().unwrap_or_default(),
+    ] {
+        append_search_field(&mut haystack, field);
+    }
+    if let Some(issue) = &view.github_issue {
+        append_search_field(&mut haystack, &format!("{}#{}", issue.repo, issue.number));
+        append_search_field(&mut haystack, &format!("#{}", issue.number));
+    }
+    if let Some(issue) = view.tracking_issue {
+        append_search_field(&mut haystack, &format!("#{issue}"));
+    }
+    if let Some(pr) = &view.branch.github {
+        append_search_field(&mut haystack, &format!("#{}", pr.pr_number));
+        for field in [
+            pr.pr_url.as_str(),
+            pr.pr_title.as_str(),
+            pr.pr_state.as_str(),
+            pr.review_decision.as_deref().unwrap_or_default(),
+            pr.checks.as_deref().unwrap_or_default(),
+        ] {
+            append_search_field(&mut haystack, field);
+        }
+    } else if let Some(pr) = view.branch.github_pr {
+        append_search_field(&mut haystack, &format!("#{pr}"));
+    }
+    for tag in &view.branch.tags {
+        for field in [
+            tag.key.as_str(),
+            tag.value.as_str(),
+            tag.note.as_str(),
+            tag.set_by.as_str(),
+        ] {
+            append_search_field(&mut haystack, field);
+        }
     }
     haystack.to_lowercase()
 }
@@ -247,8 +252,8 @@ struct SessionCollectionFilter<'a> {
     automation: bool,
     managed: bool,
     search: Option<&'a str>,
-    status: Option<&'a str>,
-    attention: Option<&'a str>,
+    status: Option<SessionSearchStatus>,
+    attention: Option<SessionSearchAttention>,
 }
 
 async fn collect_sessions(
@@ -296,13 +301,17 @@ async fn collect_sessions(
         }
         if let Some(branch) = branch_mod::get(&st.db, &s.branch_id).await? {
             let view = session_view(&st.db, &s, &branch).await?;
-            if filter.status.is_some_and(|status| view.status != status) {
+            if filter
+                .status
+                .is_some_and(|status| view.status != status.as_str())
+            {
                 continue;
             }
             if filter.attention.is_some_and(|attention| match attention {
-                "needs" => view_attention(&view) == "ok",
-                "ok" => view_attention(&view) != "ok",
-                exact => view_attention(&view) != exact,
+                SessionSearchAttention::Needs => view_attention(&view) == "ok",
+                SessionSearchAttention::Ok => view_attention(&view) != "ok",
+                SessionSearchAttention::Attention => view_attention(&view) != "attention",
+                SessionSearchAttention::Blocked => view_attention(&view) != "blocked",
             }) {
                 continue;
             }

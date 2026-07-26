@@ -275,6 +275,14 @@ pub async fn insert_with_policy(
     s: &NewSession,
     policy: &SessionLaunchPolicy,
 ) -> Result<Session> {
+    Ok(insert_with_layout_revision(db, s, policy).await?.0)
+}
+
+pub(crate) async fn insert_with_layout_revision(
+    db: &Db,
+    s: &NewSession,
+    policy: &SessionLaunchPolicy,
+) -> Result<(Session, Option<i64>)> {
     let mut tx = weaver_core::db::begin_immediate(db).await?;
     let now = now_iso();
     let protocol = if s.protocol.trim().is_empty() {
@@ -333,7 +341,8 @@ pub async fn insert_with_policy(
     .bind(&policy.automation_run_id)
     .execute(&mut *tx)
     .await?;
-    crate::session_layout::insert_default_placement_tx(&mut tx, s, policy).await?;
+    let layout_revision =
+        crate::session_layout::insert_default_placement_tx(&mut tx, s, policy).await?;
     tx.commit().await?;
     tracing::info!(
         session = %s.id,
@@ -344,9 +353,10 @@ pub async fn insert_with_policy(
         parent_branch = s.parent_branch_id.as_deref().unwrap_or("-"),
         "session created"
     );
-    get(db, &s.id)
+    let session = get(db, &s.id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("session vanished after insert"))
+        .ok_or_else(|| anyhow::anyhow!("session vanished after insert"))?;
+    Ok((session, layout_revision))
 }
 
 pub async fn get(db: &Db, id: &str) -> Result<Option<Session>> {
@@ -1006,7 +1016,7 @@ pub async fn consume_pending_prompt(db: &Db, id: &str, promoted: &str) -> Result
     Ok(())
 }
 
-pub async fn delete(db: &Db, id: &str) -> Result<()> {
+pub async fn delete(db: &Db, id: &str) -> Result<Option<i64>> {
     let mut tx = weaver_core::db::begin_immediate(db).await?;
     let had_placement: bool = sqlx::query_scalar(
         "SELECT EXISTS(
@@ -1023,12 +1033,19 @@ pub async fn delete(db: &Db, id: &str) -> Result<()> {
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    if had_placement {
+    let layout_revision = if had_placement {
         crate::session_layout::bump_revision_tx(&mut tx).await?;
-    }
+        Some(
+            sqlx::query_scalar("SELECT revision FROM session_layout_state WHERE id = 1")
+                .fetch_one(&mut *tx)
+                .await?,
+        )
+    } else {
+        None
+    };
     tx.commit().await?;
     tracing::info!(session = %id, "session row deleted");
-    Ok(())
+    Ok(layout_revision)
 }
 
 #[cfg(test)]

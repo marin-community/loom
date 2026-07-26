@@ -44,10 +44,20 @@ export function unmatchedAutomationRuns(
   return runs.filter((run) => !sessionIds.has(run.session_id));
 }
 
-export function runNeedsIntervention(run: AutomationRun): boolean {
-  return run.status === 'failed';
-}
+export type UnmatchedRunProjection = 'provisioning' | 'intervention' | 'history';
 
-export function isAutomationRunHistory(run: AutomationRun): boolean {
-  return run.status === 'cancelled' || run.status === 'completed';
+/** Every unmatched reservation has one visible projection. */
+export function unmatchedRunProjection(run: AutomationRun): UnmatchedRunProjection {
+  switch (run.status) {
+    case 'creating':
+    case 'delivering':
+      return 'provisioning';
+    case 'waiting':
+    case 'running':
+    case 'failed':
+      return 'intervention';
+    case 'cancelled':
+    case 'completed':
+      return 'history';
+  }
 }

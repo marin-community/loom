@@ -85,10 +85,8 @@ export const getScratchLimits = () => get('/scratch/limits') as Promise<ScratchL
 
 // --- Sessions ----------------------------------------------------------------
 
-/** The fleet: successful interactive and automation sessions together.
- * `archived` includes torn-down sessions; explicit `automation=false` is the
- * compatibility filter; admin-only `managed` includes watch-owned warm
- * infrastructure. */
+/** Session inventory. The compatibility default excludes automation; fleet
+ * workbenches opt in. `managed` is the admin-only warm-session escape hatch. */
 export const listSessions = (
   opts: { archived?: boolean; automation?: boolean; managed?: boolean } = {},
 ) => {
@@ -105,24 +103,24 @@ export const listSessions = (
  * `archivedOnly` keeps the History route a disjoint archived projection. */
 export const searchSessions = (
   query: string,
-  opts: {
-    history?: boolean;
-    archivedOnly?: boolean;
-    status?: string;
-    attention?: string;
-  } = {},
+  opts: SessionSearchOptions = {},
+  signal?: AbortSignal,
 ) => {
   const params = new URLSearchParams({ q: query });
   if (opts.history) params.set('history', 'true');
   if (opts.archivedOnly) params.set('archived_only', 'true');
   if (opts.status) params.set('status', opts.status);
   if (opts.attention) params.set('attention', opts.attention);
-  return get(`/sessions/search?${params}`) as Promise<Session[]>;
+  return request(`/sessions/search?${params}`, { signal }) as Promise<Session[]>;
 };
 
 /** Durable automation launch reservations, including failures that never
  *  produced a usable session (`GET /api/runs`). */
 export const listRuns = () => get('/runs') as Promise<AutomationRun[]>;
+export const archiveSession = (id: string) => post(`/sessions/${encodeURIComponent(id)}/archive`);
+export const removeSession = (id: string) => del(`/sessions/${encodeURIComponent(id)}`);
+export const clearSessionTag = (id: string, key: string) =>
+  del(`/sessions/${encodeURIComponent(id)}/tags/${encodeURIComponent(key)}`);
 
 // --- Session layout ---------------------------------------------------------
 
@@ -167,7 +165,7 @@ export const deleteSessionGroup = (
     expected_revision: expectedRevision,
   }) as Promise<SessionLayout>;
 export const reorderSessionLayout = (body: {
-  kind: 'space' | 'group';
+  kind: SessionLayoutItemKind;
   id: string;
   before_id?: string | null;
   destination_space_id?: string | null;
@@ -198,7 +196,9 @@ import type {
   Session,
   AutomationRun,
   SessionGroupOrder,
+  SessionLayoutItemKind,
   SessionLayout,
+  SessionSearchOptions,
   ArtifactMeta,
   ArtifactView,
   ArtifactWriteBody,

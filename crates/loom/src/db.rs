@@ -395,6 +395,10 @@ mod tests {
             "child",
             "parked-child",
             "warm",
+            "newest",
+            "manual",
+            "oldest",
+            "parked-recent",
         ] {
             insert_branch(&db, id).await;
         }
@@ -426,6 +430,33 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions
+             (id, branch_id, work_dir, term_session, status, origin, class, park,
+              last_activity_at, sort_order, created_at)
+             VALUES
+             ('newest', 'newest', '/newest', 't-newest', 'running', 'user',
+              'interactive', NULL, '2026-01-01T00:00:10.000Z', NULL,
+              '2026-01-01T00:00:10.000Z'),
+             ('manual', 'manual', '/manual', 't-manual', 'running', 'user',
+              'interactive', NULL, '2026-01-01T00:00:05.000Z',
+              (
+                -CAST((julianday('2026-01-01T00:00:10.000Z') - 2440587.5)
+                  * 86400000 AS INTEGER)
+                + -CAST((julianday('2026-01-01T00:00:00.000Z') - 2440587.5)
+                  * 86400000 AS INTEGER)
+              ) / 2.0,
+              '2026-01-01T00:00:05.000Z'),
+             ('oldest', 'oldest', '/oldest', 't-oldest', 'running', 'user',
+              'interactive', NULL, '2026-01-01T00:00:00.000Z', NULL,
+              '2026-01-01T00:00:00.000Z'),
+             ('parked-recent', 'parked-recent', '/parked-recent',
+              't-parked-recent', 'running', 'user', 'interactive', 'parked',
+              '2026-01-02T00:00:00.000Z', NULL, '2025-12-01T00:00:00.000Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
 
         for statement in split_statements(LOOM_MIGRATIONS[9].2) {
             sqlx::query(&statement).execute(&db).await.unwrap();
@@ -451,9 +482,25 @@ mod tests {
             .fetch_one(&db)
             .await
             .unwrap();
-        assert_eq!(placed, 6);
+        assert_eq!(placed, 10);
+        let inbox_order: Vec<String> = sqlx::query_scalar(
+            "SELECT session_id FROM session_placements
+             WHERE group_id = 'group-user-inbox' ORDER BY rank",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(inbox_order, ["newest", "manual", "oldest"]);
+        let later_order: Vec<String> = sqlx::query_scalar(
+            "SELECT session_id FROM session_placements
+             WHERE group_id = 'group-user-later' ORDER BY rank",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(later_order, ["parked-recent", "user"]);
         assert!(
-            crate::session_layout::placement_group(&db, "warm")
+            crate::session_layout::placement(&db, "warm")
                 .await
                 .unwrap()
                 .is_none(),

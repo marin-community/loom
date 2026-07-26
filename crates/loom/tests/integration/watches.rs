@@ -1736,7 +1736,7 @@ async fn ensure_warm_session_reuses_the_same_session() {
         "starting warm infrastructure does not change visible layout"
     );
     assert!(
-        loom::session_layout::placement_group(&state.db, &first)
+        loom::session_layout::placement(&state.db, &first)
             .await
             .unwrap()
             .is_none(),

@@ -107,7 +107,9 @@ JOIN sessions ON sessions.id = effective_space.session_id
 WHERE sessions.park = 'parked'
 GROUP BY space_id;
 
-WITH RECURSIVE planned(session_id, group_id, created_at, sort_order) AS (
+WITH RECURSIVE planned(
+    session_id, group_id, created_at, last_activity_at, park, sort_order
+) AS (
     SELECT
         s.id,
         CASE
@@ -133,6 +135,8 @@ WITH RECURSIVE planned(session_id, group_id, created_at, sort_order) AS (
                 END
         END,
         s.created_at,
+        s.last_activity_at,
+        s.park,
         s.sort_order
     FROM sessions s
     WHERE s.managed_by IS NULL
@@ -153,6 +157,8 @@ WITH RECURSIVE planned(session_id, group_id, created_at, sort_order) AS (
             ELSE parent.group_id
         END,
         child.created_at,
+        child.last_activity_at,
+        child.park,
         child.sort_order
     FROM sessions child
     JOIN planned parent ON parent.session_id = child.parent_session_id
@@ -165,7 +171,25 @@ ranked AS (
         group_id,
         ROW_NUMBER() OVER (
             PARTITION BY group_id
-            ORDER BY COALESCE(sort_order, 1.0e30), created_at, session_id
+            ORDER BY
+                CASE
+                    -- The old Later shelf ignored manual drag keys and showed
+                    -- the most recently active parked work first.
+                    WHEN park = 'parked' THEN
+                        -CAST((
+                            julianday(COALESCE(NULLIF(last_activity_at, ''), created_at))
+                            - 2440587.5
+                        ) * 86400000 AS INTEGER)
+                    -- Old manual keys shared the browser's negative Unix-ms
+                    -- axis with untouched rows, which were newest-first.
+                    ELSE COALESCE(
+                        sort_order,
+                        -CAST((
+                            julianday(created_at) - 2440587.5
+                        ) * 86400000 AS INTEGER)
+                    )
+                END,
+                session_id
         ) - 1 AS rank
     FROM planned
     WHERE group_id IS NOT NULL
@@ -200,7 +224,10 @@ WITH missing AS (
         s.id AS session_id,
         CASE WHEN s.park = 'parked' THEN 'group-user-later' ELSE 'group-user-inbox' END
             AS group_id,
-        s.created_at
+        s.created_at,
+        s.last_activity_at,
+        s.park,
+        s.sort_order
     FROM sessions s
     WHERE s.managed_by IS NULL
       AND NOT EXISTS (
@@ -217,7 +244,22 @@ ranked_missing AS (
             WHERE existing.group_id = missing.group_id
         ), 0)
         + ROW_NUMBER() OVER (
-            PARTITION BY group_id ORDER BY created_at, session_id
+            PARTITION BY group_id
+            ORDER BY
+                CASE
+                    WHEN park = 'parked' THEN
+                        -CAST((
+                            julianday(COALESCE(NULLIF(last_activity_at, ''), created_at))
+                            - 2440587.5
+                        ) * 86400000 AS INTEGER)
+                    ELSE COALESCE(
+                        sort_order,
+                        -CAST((
+                            julianday(created_at) - 2440587.5
+                        ) * 86400000 AS INTEGER)
+                    )
+                END,
+                session_id
         ) - 1 AS rank
     FROM missing
 )

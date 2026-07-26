@@ -1,25 +1,16 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, nextTick, ref, useId, watch } from 'vue';
 import type { Session } from '../types';
 import { autoArchiveDisabled, lifecycleActions } from '../lib/sessionState';
 import { useSessionActions } from '../lib/sessionActions';
 
-// A fleet-list row's ⋯ menu: every lifecycle verb that applies to the session
-// (its remedy, Archive, Remove). Before this the fleet list — the one place you
-// actually survey and tidy a fleet — could not act on it at all: adopting or
-// archiving meant opening the session and hunting through the header's popover.
-//
-// Quiet until wanted: the ⋯ appears on row hover or keyboard focus, so a calm
-// fleet stays calm. A stuck session also carries its remedy as a plain button up
-// beside its status badge (SessionRemedyButton) — this menu is the full set.
-//
-// Which verbs apply is `lifecycleActions(s)`, shared with the detail header so
-// the two surfaces can't drift; the writes are `useSessionActions`. This
-// component is only the chrome.
 const props = defineProps<{ ws: Session }>();
 const emit = defineEmits<{ changed: []; error: [string] }>();
 
 const open = ref(false);
+const trigger = ref<HTMLButtonElement>();
+const menu = ref<HTMLElement>();
+const menuId = `${useId()}-menu`;
 const actions = computed(() => lifecycleActions(props.ws));
 const keepsSession = computed(() => autoArchiveDisabled(props.ws));
 
@@ -39,6 +30,19 @@ async function toggleAutoArchive() {
   open.value = false;
   if (error.value) emit('error', error.value);
 }
+
+watch(open, async (isOpen) => {
+  if (!isOpen) return;
+  await nextTick();
+  menu.value?.querySelector<HTMLElement>('button:not([disabled])')?.focus();
+});
+
+function onKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape') return;
+  event.preventDefault();
+  open.value = false;
+  void nextTick(() => trigger.value?.focus());
+}
 </script>
 
 <template>
@@ -46,10 +50,12 @@ async function toggleAutoArchive() {
        so clicking ⋯ opens the menu instead of opening the session. -->
   <div class="relative z-10 shrink-0">
     <button
+      ref="trigger"
       type="button"
       data-testid="row-actions"
       :aria-label="`Actions for ${ws.branch.title || ws.branch.name}`"
       :aria-expanded="open"
+      :aria-controls="menuId"
       :class="[
         'rounded px-1.5 py-0.5 text-sm leading-none text-faint transition-colors',
         'hover:bg-subtle hover:text-fg focus-visible:opacity-100',
@@ -65,8 +71,11 @@ async function toggleAutoArchive() {
     <div v-if="open" class="fixed inset-0 z-20" @click="open = false"></div>
     <div
       v-if="open"
+      :id="menuId"
+      ref="menu"
       data-testid="row-actions-menu"
       class="absolute right-0 top-full z-30 mt-1 w-64 overflow-hidden rounded border border-line bg-surface py-1 shadow-lg"
+      @keydown="onKeydown"
     >
       <button
         v-if="ws.status !== 'archived'"

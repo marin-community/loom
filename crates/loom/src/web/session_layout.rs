@@ -13,7 +13,8 @@ use tokio_stream::{Stream, StreamExt};
 use weaver_api::{
     CreateSessionGroupReq, CreateSessionSpaceReq, DeleteSessionGroupReq, DeleteSessionSpaceReq,
     MoveSessionsReq, ReorderSessionLayoutReq, RestoreSessionGroupsReq, SessionGroupPreferenceReq,
-    SessionLayoutView, SetSessionPlacementDefaultReq, UpdateSessionGroupReq, UpdateSessionSpaceReq,
+    SessionLayoutView, SessionPlacementSelectorKind, SetSessionPlacementDefaultReq,
+    UpdateSessionGroupReq, UpdateSessionSpaceReq,
 };
 
 use crate::auth::Principal;
@@ -33,21 +34,15 @@ fn require_admin(principal: &Principal) -> ApiResult<()> {
     }
 }
 
-pub(crate) async fn publish_invalidation(st: &AppState) {
-    let revision =
-        sqlx::query_scalar::<_, i64>("SELECT revision FROM session_layout_state WHERE id = 1")
-            .fetch_one(&st.db)
-            .await;
-    if let Ok(revision) = revision {
-        events::record_system(
-            &st.db,
-            &st.bus,
-            "session_layout",
-            json!({ "revision": revision }),
-        )
-        .await
-        .ok();
-    }
+pub(crate) async fn publish_invalidation(st: &AppState, revision: i64) {
+    events::record_system(
+        &st.db,
+        &st.bus,
+        "session_layout",
+        json!({ "revision": revision }),
+    )
+    .await
+    .ok();
 }
 
 async fn mutation_response(
@@ -212,14 +207,14 @@ pub(super) struct DeleteDefaultQuery {
 pub(super) async fn delete_session_placement_default(
     State(st): State<AppState>,
     Extension(principal): Extension<Principal>,
-    Path((kind, value)): Path<(String, String)>,
+    Path((kind, value)): Path<(SessionPlacementSelectorKind, String)>,
     Query(query): Query<DeleteDefaultQuery>,
 ) -> ApiResult<Json<SessionLayoutView>> {
     require_admin(&principal)?;
     let result = session_layout::delete_default(
         &st.db,
         &principal.username,
-        &kind,
+        kind,
         &value,
         query.expected_revision,
     )

@@ -167,7 +167,8 @@ the visible layout revision. Watch programs launch visible automation through
 the accepted Ops/Actions producer origins, whose ordinary origin defaults route
 to Ops / Inbox unless reconfigured.
 The legacy `park`/`sort_order` fields remain readable for compatibility only,
-derived from the canonical system-`Later` placement and integer rank. PATCH
+derived from the canonical system-`Later` placement and normalized zero-based
+rank within the current group. `sort_order` has no cross-group meaning. PATCH
 writes to either field return 400 before any other requested session edit is
 applied; clients move sessions through the revisioned layout API. The migration
 maps explicit Parked rows into a normal `Later` group.

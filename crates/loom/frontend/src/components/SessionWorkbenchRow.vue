@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, type PropType } from 'vue';
+import { computed, nextTick, ref, type PropType, useId, watch } from 'vue';
 import type { Session, SessionGroup, SessionSpace } from '../types';
 import AgentUsage from './AgentUsage.vue';
 import GithubStatus from './GithubStatus.vue';
@@ -55,6 +55,14 @@ const emit = defineEmits<{
   clearTag: [key: string];
   recordOpen: [event: MouseEvent];
 }>();
+const disclosureId = useId();
+const detailsButtonId = `${disclosureId}-details-button`;
+const detailsId = `${disclosureId}-details`;
+const moveId = `${disclosureId}-move`;
+const detailsButton = ref<HTMLButtonElement>();
+const detailsPanel = ref<HTMLElement>();
+const moveButton = ref<HTMLButtonElement>();
+const destinationSelect = ref<HTMLSelectElement>();
 
 function title() {
   const task = props.session.branch.title || props.session.branch.name;
@@ -73,6 +81,34 @@ const positionOptions = computed(() => {
       label: byId.get(id)?.branch.title || byId.get(id)?.branch.name || id,
     }));
 });
+
+watch(
+  () => props.expanded,
+  async (open, wasOpen) => {
+    await nextTick();
+    if (open) detailsPanel.value?.focus();
+    else if (wasOpen) detailsButton.value?.focus();
+  },
+);
+watch(
+  () => props.moveOpen,
+  async (open, wasOpen) => {
+    await nextTick();
+    if (open) destinationSelect.value?.focus();
+    else if (wasOpen) moveButton.value?.focus();
+  },
+);
+
+function onKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape') return;
+  if (props.moveOpen) {
+    event.preventDefault();
+    emit('openMove');
+  } else if (props.expanded) {
+    event.preventDefault();
+    emit('toggleDetails');
+  }
+}
 </script>
 
 <template>
@@ -86,6 +122,7 @@ const positionOptions = computed(() => {
     ]"
     @dragover.stop.prevent="emit('dragOver')"
     @drop.stop.prevent="emit('drop')"
+    @keydown="onKeydown"
   >
     <span
       v-if="session.status !== 'archived'"
@@ -159,19 +196,13 @@ const positionOptions = computed(() => {
 
     <SessionRemedyButton :ws="session" @changed="emit('changed')" @error="emit('error', $event)" />
     <button
-      type="button"
-      data-testid="move-session"
-      class="relative z-10 rounded px-1.5 py-0.5 text-2xs text-muted hover:bg-input hover:text-fg"
-      :aria-expanded="moveOpen"
-      @click.stop="emit('openMove')"
-    >
-      Move…
-    </button>
-    <button
+      ref="detailsButton"
+      :id="detailsButtonId"
       type="button"
       data-testid="session-details-toggle"
       class="relative z-10 rounded px-1.5 py-0.5 text-2xs text-muted hover:bg-input hover:text-fg"
       :aria-expanded="expanded"
+      :aria-controls="detailsId"
       @click.stop="emit('toggleDetails')"
     >
       Details
@@ -179,52 +210,14 @@ const positionOptions = computed(() => {
     <SessionRowActions :ws="session" @changed="emit('changed')" @error="emit('error', $event)" />
 
     <div
-      v-if="moveOpen"
-      data-testid="move-session-panel"
-      class="relative z-10 ml-8 flex basis-full flex-wrap items-center gap-2 rounded border border-line bg-input px-2 py-2"
-    >
-      <label class="text-xs text-muted">
-        Move to
-        <select
-          :value="destination"
-          class="ml-1 rounded border border-line bg-surface px-2 py-1 text-xs"
-          @change="
-            emit('updateDestination', ($event.target as HTMLSelectElement).value);
-            emit('updateBefore', '');
-          "
-        >
-          <option v-for="entry in allGroups" :key="entry.group.id" :value="entry.group.id">
-            {{ entry.label }}
-          </option>
-        </select>
-      </label>
-      <label class="text-xs text-muted">
-        Position
-        <select
-          :value="before"
-          class="ml-1 max-w-64 rounded border border-line bg-surface px-2 py-1 text-xs"
-          @change="emit('updateBefore', ($event.target as HTMLSelectElement).value)"
-        >
-          <option value="">At end</option>
-          <option v-for="option in positionOptions" :key="option.id" :value="option.id">
-            Before {{ option.label }}
-          </option>
-        </select>
-      </label>
-      <button
-        type="button"
-        class="btn-primary px-2 py-1 text-xs"
-        :disabled="!destination"
-        @click="emit('move', { groupId: destination, beforeId: before })"
-      >
-        Move
-      </button>
-    </div>
-
-    <div
+      v-show="expanded"
+      :id="detailsId"
+      ref="detailsPanel"
       data-testid="session-preview"
-      class="relative z-10 ml-8 basis-full rounded border border-line bg-canvas px-3 py-2 text-xs"
-      :class="expanded ? 'block' : 'hidden group-hover:block group-focus-within:block'"
+      role="region"
+      :aria-labelledby="detailsButtonId"
+      tabindex="-1"
+      class="relative z-10 ml-8 basis-full rounded border border-line bg-canvas px-3 py-2 text-xs outline-none"
     >
       <div class="flex flex-wrap items-center gap-2">
         <StatusBadge v-if="session.status !== 'running'" :status="session.status" />
@@ -262,6 +255,64 @@ const positionOptions = computed(() => {
         </router-link>
       </div>
       <GithubStatus v-if="session.branch.github" :gh="session.branch.github" compact class="mt-1" />
+
+      <div v-if="session.status !== 'archived'" class="mt-2 border-t border-line pt-2">
+        <button
+          ref="moveButton"
+          type="button"
+          data-testid="move-session"
+          class="rounded px-1.5 py-0.5 text-2xs text-muted hover:bg-input hover:text-fg"
+          :aria-expanded="moveOpen"
+          :aria-controls="moveId"
+          @click.stop="emit('openMove')"
+        >
+          Move…
+        </button>
+        <div
+          v-if="moveOpen"
+          :id="moveId"
+          data-testid="move-session-panel"
+          class="mt-2 flex flex-wrap items-center gap-2 rounded border border-line bg-input px-2 py-2"
+        >
+          <label class="text-xs text-muted">
+            Move to
+            <select
+              ref="destinationSelect"
+              :value="destination"
+              class="ml-1 rounded border border-line bg-surface px-2 py-1 text-xs"
+              @change="
+                emit('updateDestination', ($event.target as HTMLSelectElement).value);
+                emit('updateBefore', '');
+              "
+            >
+              <option v-for="entry in allGroups" :key="entry.group.id" :value="entry.group.id">
+                {{ entry.label }}
+              </option>
+            </select>
+          </label>
+          <label class="text-xs text-muted">
+            Position
+            <select
+              :value="before"
+              class="ml-1 max-w-64 rounded border border-line bg-surface px-2 py-1 text-xs"
+              @change="emit('updateBefore', ($event.target as HTMLSelectElement).value)"
+            >
+              <option value="">At end</option>
+              <option v-for="option in positionOptions" :key="option.id" :value="option.id">
+                Before {{ option.label }}
+              </option>
+            </select>
+          </label>
+          <button
+            type="button"
+            class="btn-primary px-2 py-1 text-xs"
+            :disabled="!destination"
+            @click="emit('move', { groupId: destination, beforeId: before })"
+          >
+            Move
+          </button>
+        </div>
+      </div>
     </div>
   </li>
 </template>

@@ -177,8 +177,11 @@ export interface SessionSpace {
   groups: SessionGroup[];
 }
 
+export type SessionPlacementSelectorKind = 'origin' | 'profile';
+export type SessionLayoutItemKind = 'space' | 'group';
+
 export interface SessionPlacementDefault {
-  selector_kind: 'origin' | 'profile';
+  selector_kind: SessionPlacementSelectorKind;
   selector_value: string;
   group_id: string;
 }
@@ -194,6 +197,19 @@ export interface SessionGroupOrder {
   session_ids: string[];
 }
 
+export type SessionSearchStatus =
+  'created' | 'running' | 'orphaned' | 'done' | 'error' | 'archived';
+export type SessionSearchAttention = 'needs' | 'ok' | 'attention' | 'blocked';
+export interface SessionSearchOptions {
+  history?: boolean;
+  archivedOnly?: boolean;
+  status?: SessionSearchStatus;
+  attention?: SessionSearchAttention;
+}
+
+export type AutomationRunStatus =
+  'creating' | 'waiting' | 'delivering' | 'running' | 'failed' | 'cancelled' | 'completed';
+
 /** Durable automation launch reservation (`GET /api/runs`). A run normally
  *  points at an automation-class Session, but a launch can fail before that
  *  session becomes usable; unmatched failures become typed interventions. */
@@ -206,7 +222,7 @@ export interface AutomationRun {
   idempotency_key: string;
   channel: string | null;
   session_id: string;
-  status: string;
+  status: AutomationRunStatus;
   outcome: string | null;
   summary: string;
   created_at: string;

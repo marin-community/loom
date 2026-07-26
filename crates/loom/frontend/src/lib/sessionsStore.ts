@@ -16,6 +16,7 @@ import type { AutomationRun, Session, SessionLayout } from '../types';
 const sessions = ref<Session[]>([]);
 const runs = ref<AutomationRun[]>([]);
 const layout = ref<SessionLayout | null>(null);
+const resourceErrors = ref<Partial<Record<'sessions' | 'runs' | 'layout', string>>>({});
 // Last fetch reached the server? Drives the status bar's online dot; the cached
 // counts dim rather than vanish while the server is briefly unreachable.
 const online = ref(true);
@@ -33,20 +34,27 @@ async function refresh(): Promise<void> {
   inflight = (async () => {
     while (refreshRequested) {
       refreshRequested = false;
-      try {
-        const [nextSessions, nextRuns, nextLayout] = await Promise.all([
-          listSessions({ archived: true }),
-          listRuns(),
-          getSessionLayout(),
-        ]);
-        sessions.value = nextSessions;
-        runs.value = nextRuns;
-        layout.value = nextLayout;
-        online.value = true;
-      } catch {
-        // Keep the last good snapshot; the status bar's offline dot says why.
-        online.value = false;
-      }
+      const results = await Promise.allSettled([
+        listSessions({ archived: true, automation: true }),
+        listRuns(),
+        getSessionLayout(),
+      ]);
+      const resources = ['sessions', 'runs', 'layout'] as const;
+      const nextErrors = { ...resourceErrors.value };
+      results.forEach((result, index) => {
+        const resource = resources[index];
+        if (result.status === 'rejected') {
+          nextErrors[resource] = (result.reason as Error).message;
+          return;
+        }
+        delete nextErrors[resource];
+        if (resource === 'sessions') sessions.value = result.value as Session[];
+        if (resource === 'runs') runs.value = result.value as AutomationRun[];
+        if (resource === 'layout') layout.value = result.value as SessionLayout;
+      });
+      resourceErrors.value = nextErrors;
+      // One auxiliary projection can fail without declaring the server offline.
+      online.value = results.some((result) => result.status === 'fulfilled');
     }
   })().finally(() => {
     inflight = null;
@@ -85,5 +93,15 @@ function stopFleetPoll(): void {
 }
 
 export function useFleet() {
-  return { sessions, runs, layout, online, refresh, sessionById, startFleetPoll, stopFleetPoll };
+  return {
+    sessions,
+    runs,
+    layout,
+    resourceErrors,
+    online,
+    refresh,
+    sessionById,
+    startFleetPoll,
+    stopFleetPoll,
+  };
 }

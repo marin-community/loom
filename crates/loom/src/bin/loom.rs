@@ -12,8 +12,10 @@ use serde_json::{json, Value};
 use weaver_api::{
     CreateSessionGroupReq, CreateSessionSpaceReq, DeleteSessionGroupReq, DeleteSessionSpaceReq,
     IssueAction, IssueActionsReq, MoveSessionsReq, ReorderSessionLayoutReq,
-    RestoreSessionGroupsReq, SessionGroupPreferenceReq, SessionLayoutView,
-    SetSessionPlacementDefaultReq, UpdateSessionGroupReq, UpdateSessionSpaceReq,
+    RestoreSessionGroupsReq, SearchSessionsOptions, SessionGroupPreferenceReq,
+    SessionLayoutItemKind, SessionLayoutView, SessionPlacementSelectorKind, SessionSearchAttention,
+    SessionSearchStatus, SetSessionPlacementDefaultReq, UpdateSessionGroupReq,
+    UpdateSessionSpaceReq,
 };
 
 use loom::client::{self, Client};
@@ -387,6 +389,12 @@ enum SessionCmd {
         /// Case-insensitive substring filter over title / branch / goal.
         #[arg(long)]
         search: Option<String>,
+        /// Filter the typed lifecycle state.
+        #[arg(long)]
+        status: Option<SessionSearchStatus>,
+        /// Filter the resolved attention state.
+        #[arg(long)]
+        attention: Option<SessionSearchAttention>,
     },
     /// Read or edit the durable Spaces → Groups → Sessions workbench layout.
     Layout {
@@ -494,8 +502,7 @@ enum SessionLayoutCmd {
     },
     /// Move one space or group before an anchor (omit `--before` for the end).
     Reorder {
-        #[arg(value_parser = ["space", "group"])]
-        kind: String,
+        kind: SessionLayoutItemKind,
         id: String,
         #[arg(long)]
         before: Option<String>,
@@ -528,8 +535,7 @@ enum SessionLayoutCmd {
     Expand { group: String },
     /// Set a configurable origin/profile placement default.
     DefaultSet {
-        #[arg(value_parser = ["origin", "profile"])]
-        kind: String,
+        kind: SessionPlacementSelectorKind,
         value: String,
         #[arg(long)]
         to: String,
@@ -538,8 +544,7 @@ enum SessionLayoutCmd {
     },
     /// Remove a configurable placement default.
     DefaultDelete {
-        #[arg(value_parser = ["origin", "profile"])]
-        kind: String,
+        kind: SessionPlacementSelectorKind,
         value: String,
         #[arg(long)]
         revision: Option<i64>,
@@ -1151,7 +1156,7 @@ async fn run() -> Result<()> {
         Cmd::Setup { cmd } => run_setup(cmd).await,
         Cmd::Config { cmd } => run_config(cmd).await,
         Cmd::Launch(opts) => cmd_launch(opts.into()).await,
-        Cmd::Ps => cmd_ps(false, false, false, None).await,
+        Cmd::Ps => cmd_ps(false, false, false, None, None, None).await,
         Cmd::Attach { branch } => cmd_attach(branch).await,
         Cmd::Open => cmd_open().await,
         Cmd::Completions { shell } => {
@@ -1232,7 +1237,9 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
             automation,
             managed,
             search,
-        } => cmd_ps(archived, automation, managed, search).await,
+            status,
+            attention,
+        } => cmd_ps(archived, automation, managed, search, status, attention).await,
         SessionCmd::Layout { cmd } => run_session_layout(cmd).await,
         SessionCmd::Rename { session, title } => cmd_session_rename(session, title.join(" ")).await,
         SessionCmd::Show { branch } => cmd_show(branch).await,
@@ -1453,7 +1460,7 @@ async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
         } => {
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .delete_session_placement_default(&kind, &value, expected_revision)
+                .delete_session_placement_default(kind, &value, expected_revision)
                 .await?
         }
     };
@@ -3666,40 +3673,49 @@ async fn cmd_session_preview(key: String, lines: usize) -> Result<()> {
 
 async fn cmd_ps(
     archived: bool,
-    automation: bool,
+    _automation: bool,
     managed: bool,
     search: Option<String>,
+    status: Option<SessionSearchStatus>,
+    attention: Option<SessionSearchAttention>,
 ) -> Result<()> {
     let client = client::default()?;
-    // Hide archived sessions by default; `--search` narrows by substring. Both
-    // ride the same query the dashboard uses, so the CLI and UI stay one surface.
+    // The compatibility GET omits automation by default; this fleet inventory
+    // explicitly opts into successful automation work.
     let mut query = Vec::new();
     if archived {
         query.push("archived=true".to_string());
     }
-    if automation || managed {
-        query.push("automation=true".to_string());
-    }
+    query.push("automation=true".to_string());
     if managed {
         query.push("managed=true".to_string());
     }
     let search = search.as_deref().map(str::trim).filter(|s| !s.is_empty());
     if managed {
+        if status.is_some() || attention.is_some() {
+            bail!("--status and --attention cannot be combined with --managed");
+        }
         if let Some(search) = search {
             query.push(format!("q={}", encode_query(search)));
         }
     }
-    let path = if let Some(search) = search.filter(|_| !managed) {
-        format!(
-            "/api/sessions/search?q={}&history={archived}",
-            encode_query(search)
-        )
-    } else if query.is_empty() {
-        "/api/sessions".to_string()
+    let list = if !managed && (search.is_some() || status.is_some() || attention.is_some()) {
+        serde_json::to_value(
+            client
+                .search_sessions(&SearchSessionsOptions {
+                    query: search.unwrap_or_default().to_string(),
+                    history: archived,
+                    archived_only: false,
+                    status,
+                    attention,
+                })
+                .await?,
+        )?
     } else {
-        format!("/api/sessions?{}", query.join("&"))
+        client
+            .get(&format!("/api/sessions?{}", query.join("&")))
+            .await?
     };
-    let list = client.get(&path).await?;
     let rows = list.as_array().cloned().unwrap_or_default();
     if rows.is_empty() {
         let hint = match search {

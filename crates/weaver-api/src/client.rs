@@ -21,9 +21,10 @@ use crate::dto::{
     NewCommentBody, NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq, ProfileProbeView,
     ProfileReq, ProfileView, PutProfileEnvReq, ReadinessView, ReorderSessionLayoutReq,
     ResolveLaunchReq, ResolvedLaunchView, RestoreSessionGroupsReq, RunReq, RunView, RunWatchReq,
-    ScratchLimitsView, SendReq, SessionGroupPreferenceReq, SessionLayoutView, SessionView,
-    SetSessionPlacementDefaultReq, SetTagsReq, SettingsEnvelope, TagReq, ThreadDto, TokenView,
-    UpdateSessionGroupReq, UpdateSessionSpaceReq, WatchView,
+    ScratchLimitsView, SearchSessionsOptions, SendReq, SessionGroupPreferenceReq,
+    SessionLayoutView, SessionPlacementSelectorKind, SessionView, SetSessionPlacementDefaultReq,
+    SetTagsReq, SettingsEnvelope, TagReq, ThreadDto, TokenView, UpdateSessionGroupReq,
+    UpdateSessionSpaceReq, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -157,13 +158,23 @@ impl Client {
         self.get_typed("/api/sessions").await
     }
 
-    /// Search active sessions across title/goal, qualified placement, repo,
-    /// branch, issue/PR, tags, status, and provenance. `history` widens the
-    /// result set to archived sessions.
-    pub async fn search_sessions(&self, query: &str, history: bool) -> Result<Vec<SessionView>> {
-        let query =
-            percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC);
-        self.get_typed(&format!("/api/sessions/search?q={query}&history={history}"))
+    /// Search the documented fleet facets with typed route scope and filters.
+    pub async fn search_sessions(
+        &self,
+        options: &SearchSessionsOptions,
+    ) -> Result<Vec<SessionView>> {
+        let mut query = vec![
+            format!("q={}", Self::seg(&options.query)),
+            format!("history={}", options.history),
+            format!("archived_only={}", options.archived_only),
+        ];
+        if let Some(status) = options.status {
+            query.push(format!("status={status}"));
+        }
+        if let Some(attention) = options.attention {
+            query.push(format!("attention={attention}"));
+        }
+        self.get_typed(&format!("/api/sessions/search?{}", query.join("&")))
             .await
     }
 
@@ -285,7 +296,7 @@ impl Client {
 
     pub async fn delete_session_placement_default(
         &self,
-        kind: &str,
+        kind: SessionPlacementSelectorKind,
         value: &str,
         expected_revision: i64,
     ) -> Result<SessionLayoutView> {
@@ -293,7 +304,7 @@ impl Client {
             Method::DELETE,
             &format!(
                 "/api/session-layout/defaults/{}/{}?expected_revision={expected_revision}",
-                Self::seg(kind),
+                kind,
                 Self::seg(value)
             ),
             None,

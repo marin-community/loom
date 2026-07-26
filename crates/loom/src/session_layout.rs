@@ -5,13 +5,14 @@
 //! all moves and integer-rank renumbering in one immediate transaction, then
 //! advances the revision exactly once.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use sqlx::{FromRow, Row, SqliteConnection};
 use std::collections::HashSet;
 use weaver_api::{
     CreateSessionGroupReq, CreateSessionSpaceReq, DeleteSessionGroupReq, DeleteSessionSpaceReq,
     MoveSessionsReq, ReorderSessionLayoutReq, RestoreSessionGroupsReq, SessionGroupView,
-    SessionLayoutView, SessionPlacementDefaultView, SessionPlacementView, SessionSpaceView,
+    SessionLayoutItemKind, SessionLayoutView, SessionPlacementDefaultView,
+    SessionPlacementSelectorKind, SessionPlacementView, SessionSpaceView,
     SetSessionPlacementDefaultReq, UpdateSessionGroupReq, UpdateSessionSpaceReq,
 };
 
@@ -78,13 +79,6 @@ async fn current_revision_tx(tx: &mut SqliteConnection) -> sqlx::Result<i64> {
         .await
 }
 
-async fn check_revision(tx: &mut SqliteConnection, expected_revision: i64) -> MutationResult<()> {
-    if current_revision_tx(tx).await? != expected_revision {
-        return Err(MutationError::Conflict);
-    }
-    Ok(())
-}
-
 pub(crate) async fn bump_revision_tx(tx: &mut SqliteConnection) -> sqlx::Result<()> {
     sqlx::query("UPDATE session_layout_state SET revision = revision + 1 WHERE id = 1")
         .execute(tx)
@@ -92,13 +86,26 @@ pub(crate) async fn bump_revision_tx(tx: &mut SqliteConnection) -> sqlx::Result<
     Ok(())
 }
 
-async fn finish(
-    db: &Db,
+struct LayoutCommand<'a> {
+    db: &'a Db,
+    username: &'a str,
     tx: weaver_core::db::DbTransaction<'static>,
-    username: &str,
-) -> MutationResult<SessionLayoutView> {
-    tx.commit().await?;
-    Ok(get_layout(db, username).await?)
+}
+
+impl<'a> LayoutCommand<'a> {
+    async fn begin(db: &'a Db, username: &'a str, expected_revision: i64) -> MutationResult<Self> {
+        let mut tx = weaver_core::db::begin_immediate(db).await?;
+        if current_revision_tx(&mut tx).await? != expected_revision {
+            return Err(MutationError::Conflict);
+        }
+        Ok(Self { db, username, tx })
+    }
+
+    async fn commit(mut self) -> MutationResult<SessionLayoutView> {
+        bump_revision_tx(&mut self.tx).await?;
+        self.tx.commit().await?;
+        Ok(get_layout(self.db, self.username).await?)
+    }
 }
 
 pub async fn get_layout(db: &Db, username: &str) -> Result<SessionLayoutView> {
@@ -170,7 +177,10 @@ pub async fn get_layout(db: &Db, username: &str) -> Result<SessionLayoutView> {
     .await?
     .into_iter()
     .map(|row| SessionPlacementDefaultView {
-        selector_kind: row.get("selector_kind"),
+        selector_kind: row
+            .get::<String, _>("selector_kind")
+            .parse()
+            .expect("migration only seeds supported placement selectors"),
         selector_value: row.get("selector_value"),
         group_id: row.get("group_id"),
     })
@@ -215,12 +225,12 @@ pub(crate) async fn insert_default_placement_tx(
     tx: &mut SqliteConnection,
     session: &NewSession,
     policy: &SessionLaunchPolicy,
-) -> Result<()> {
+) -> Result<Option<i64>> {
     // Warm watch sessions are engine infrastructure, not fleet membership.
     // Keeping them out of canonical placement also keeps their lifecycle from
     // advancing an otherwise unchanged visible layout revision.
     if session.managed_by.is_some() {
-        return Ok(());
+        return Ok(None);
     }
     let inherited = if session.origin == "agent" {
         if let Some(parent_id) = policy.parent_session_id.as_deref() {
@@ -275,7 +285,7 @@ pub(crate) async fn insert_default_placement_tx(
     .execute(&mut *tx)
     .await?;
     bump_revision_tx(tx).await?;
-    Ok(())
+    Ok(Some(current_revision_tx(tx).await?))
 }
 
 pub async fn create_space(
@@ -284,8 +294,8 @@ pub async fn create_space(
     req: &CreateSessionSpaceReq,
 ) -> MutationResult<SessionLayoutView> {
     let name = clean_name(&req.name, "space")?;
-    let mut tx = weaver_core::db::begin_immediate(db).await?;
-    check_revision(&mut tx, req.expected_revision).await?;
+    let mut command = LayoutCommand::begin(db, username, req.expected_revision).await?;
+    let tx = &mut *command.tx;
     let duplicate: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM session_spaces WHERE name = ? COLLATE NOCASE)",
     )
@@ -325,8 +335,7 @@ pub async fn create_space(
     .bind(&now)
     .execute(&mut *tx)
     .await?;
-    bump_revision_tx(&mut tx).await?;
-    finish(db, tx, username).await
+    command.commit().await
 }
 
 pub async fn update_space(
@@ -336,8 +345,8 @@ pub async fn update_space(
     req: &UpdateSessionSpaceReq,
 ) -> MutationResult<SessionLayoutView> {
     let name = clean_name(&req.name, "space")?;
-    let mut tx = weaver_core::db::begin_immediate(db).await?;
-    check_revision(&mut tx, req.expected_revision).await?;
+    let mut command = LayoutCommand::begin(db, username, req.expected_revision).await?;
+    let tx = &mut *command.tx;
     let result = sqlx::query(
         "UPDATE session_spaces SET name = ?, updated_at = ?
          WHERE id = ? AND NOT EXISTS (
@@ -364,8 +373,7 @@ pub async fn update_space(
             "space not found".to_string()
         }));
     }
-    bump_revision_tx(&mut tx).await?;
-    finish(db, tx, username).await
+    command.commit().await
 }
 
 async fn ordered_sessions(tx: &mut SqliteConnection, group_id: &str) -> sqlx::Result<Vec<String>> {
@@ -409,19 +417,6 @@ async fn move_container_contents(
     destination_group_id: Option<&str>,
     container_name: &str,
 ) -> MutationResult<()> {
-    // Repair any pre-release layout that placed warm infrastructure. Hidden
-    // rows must never make an apparently empty container require a destination
-    // or get moved by an organizer mutation.
-    sqlx::query(
-        "DELETE FROM session_placements
-         WHERE group_id IN (SELECT value FROM json_each(?))
-           AND session_id IN (
-               SELECT id FROM sessions WHERE managed_by IS NOT NULL
-           )",
-    )
-    .bind(serde_json::to_string(source_group_ids).expect("string ids serialize"))
-    .execute(&mut *tx)
-    .await?;
     let placement_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM session_placements
          WHERE group_id IN (SELECT value FROM json_each(?))",
@@ -481,8 +476,8 @@ pub async fn delete_space(
     id: &str,
     req: &DeleteSessionSpaceReq,
 ) -> MutationResult<SessionLayoutView> {
-    let mut tx = weaver_core::db::begin_immediate(db).await?;
-    check_revision(&mut tx, req.expected_revision).await?;
+    let mut command = LayoutCommand::begin(db, username, req.expected_revision).await?;
+    let tx = &mut *command.tx;
     let space_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_spaces")
         .fetch_one(&mut *tx)
         .await?;
@@ -500,20 +495,13 @@ pub async fn delete_space(
     if groups.is_empty() {
         return Err(MutationError::Invalid("space not found".to_string()));
     }
-    move_container_contents(
-        &mut tx,
-        &groups,
-        req.destination_group_id.as_deref(),
-        "space",
-    )
-    .await?;
+    move_container_contents(tx, &groups, req.destination_group_id.as_deref(), "space").await?;
     sqlx::query("DELETE FROM session_spaces WHERE id = ?")
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    renumber_spaces(&mut tx).await?;
-    bump_revision_tx(&mut tx).await?;
-    finish(db, tx, username).await
+    renumber_spaces(tx).await?;
+    command.commit().await
 }
 
 pub async fn create_group(
@@ -522,8 +510,8 @@ pub async fn create_group(
     req: &CreateSessionGroupReq,
 ) -> MutationResult<SessionLayoutView> {
     let name = clean_name(&req.name, "group")?;
-    let mut tx = weaver_core::db::begin_immediate(db).await?;
-    check_revision(&mut tx, req.expected_revision).await?;
+    let mut command = LayoutCommand::begin(db, username, req.expected_revision).await?;
+    let tx = &mut *command.tx;
     let space_exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM session_spaces WHERE id = ?)")
             .bind(&req.space_id)
@@ -567,8 +555,7 @@ pub async fn create_group(
     .bind(&now)
     .execute(&mut *tx)
     .await?;
-    bump_revision_tx(&mut tx).await?;
-    finish(db, tx, username).await
+    command.commit().await
 }
 
 pub async fn update_group(
@@ -578,8 +565,8 @@ pub async fn update_group(
     req: &UpdateSessionGroupReq,
 ) -> MutationResult<SessionLayoutView> {
     let name = clean_name(&req.name, "group")?;
-    let mut tx = weaver_core::db::begin_immediate(db).await?;
-    check_revision(&mut tx, req.expected_revision).await?;
+    let mut command = LayoutCommand::begin(db, username, req.expected_revision).await?;
+    let tx = &mut *command.tx;
     let result = sqlx::query(
         "UPDATE session_groups SET name = ?, updated_at = ?
          WHERE id = ? AND NOT EXISTS (
@@ -611,8 +598,7 @@ pub async fn update_group(
             "group not found".to_string()
         }));
     }
-    bump_revision_tx(&mut tx).await?;
-    finish(db, tx, username).await
+    command.commit().await
 }
 
 pub async fn delete_group(
@@ -621,8 +607,8 @@ pub async fn delete_group(
     id: &str,
     req: &DeleteSessionGroupReq,
 ) -> MutationResult<SessionLayoutView> {
-    let mut tx = weaver_core::db::begin_immediate(db).await?;
-    check_revision(&mut tx, req.expected_revision).await?;
+    let mut command = LayoutCommand::begin(db, username, req.expected_revision).await?;
+    let tx = &mut *command.tx;
     let space_id: Option<String> =
         sqlx::query_scalar("SELECT space_id FROM session_groups WHERE id = ?")
             .bind(id)
@@ -642,7 +628,7 @@ pub async fn delete_group(
         ));
     }
     move_container_contents(
-        &mut tx,
+        tx,
         &[id.to_string()],
         req.destination_group_id.as_deref(),
         "group",
@@ -652,9 +638,8 @@ pub async fn delete_group(
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    renumber_groups(&mut tx, &space_id).await?;
-    bump_revision_tx(&mut tx).await?;
-    finish(db, tx, username).await
+    renumber_groups(tx, &space_id).await?;
+    command.commit().await
 }
 
 async fn renumber_spaces(tx: &mut SqliteConnection) -> sqlx::Result<()> {
@@ -711,10 +696,10 @@ pub async fn reorder(
     username: &str,
     req: &ReorderSessionLayoutReq,
 ) -> MutationResult<SessionLayoutView> {
-    let mut tx = weaver_core::db::begin_immediate(db).await?;
-    check_revision(&mut tx, req.expected_revision).await?;
-    match req.kind.as_str() {
-        "space" => {
+    let mut command = LayoutCommand::begin(db, username, req.expected_revision).await?;
+    let tx = &mut *command.tx;
+    match req.kind {
+        SessionLayoutItemKind::Space => {
             let mut ids =
                 sqlx::query_scalar::<_, String>("SELECT id FROM session_spaces ORDER BY rank, id")
                     .fetch_all(&mut *tx)
@@ -729,7 +714,7 @@ pub async fn reorder(
                     .await?;
             }
         }
-        "group" => {
+        SessionLayoutItemKind::Group => {
             let group =
                 sqlx::query("SELECT space_id, name, system_key FROM session_groups WHERE id = ?")
                     .bind(&req.id)
@@ -810,7 +795,7 @@ pub async fn reorder(
                 .bind(&req.id)
                 .execute(&mut *tx)
                 .await?;
-                renumber_groups(&mut tx, &source_space).await?;
+                renumber_groups(tx, &source_space).await?;
             }
             let mut ids = sqlx::query_scalar::<_, String>(
                 "SELECT id FROM session_groups WHERE space_id = ? ORDER BY rank, id",
@@ -828,14 +813,8 @@ pub async fn reorder(
                     .await?;
             }
         }
-        _ => {
-            return Err(MutationError::Invalid(
-                "reorder kind must be 'space' or 'group'".to_string(),
-            ));
-        }
     }
-    bump_revision_tx(&mut tx).await?;
-    finish(db, tx, username).await
+    command.commit().await
 }
 
 pub async fn move_sessions(
@@ -863,8 +842,8 @@ pub async fn move_sessions(
             "the insertion anchor cannot also be moved".to_string(),
         ));
     }
-    let mut tx = weaver_core::db::begin_immediate(db).await?;
-    check_revision(&mut tx, req.expected_revision).await?;
+    let mut command = LayoutCommand::begin(db, username, req.expected_revision).await?;
+    let tx = &mut *command.tx;
     let destination_exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM session_groups WHERE id = ?)")
             .bind(&req.destination_group_id)
@@ -899,7 +878,7 @@ pub async fn move_sessions(
     }
     let source_groups: HashSet<String> =
         source_rows.iter().map(|row| row.get("group_id")).collect();
-    let mut destination_order = ordered_sessions(&mut tx, &req.destination_group_id).await?;
+    let mut destination_order = ordered_sessions(tx, &req.destination_group_id).await?;
     destination_order.retain(|id| !unique.contains(id.as_str()));
     let insert_at = if let Some(anchor) = req.before_session_id.as_deref() {
         destination_order
@@ -914,16 +893,15 @@ pub async fn move_sessions(
         destination_order.len()
     };
     destination_order.splice(insert_at..insert_at, req.session_ids.iter().cloned());
-    write_session_order(&mut tx, &req.destination_group_id, &destination_order).await?;
+    write_session_order(tx, &req.destination_group_id, &destination_order).await?;
     for source in source_groups {
         if source == req.destination_group_id {
             continue;
         }
-        let order = ordered_sessions(&mut tx, &source).await?;
-        write_session_order(&mut tx, &source, &order).await?;
+        let order = ordered_sessions(tx, &source).await?;
+        write_session_order(tx, &source, &order).await?;
     }
-    bump_revision_tx(&mut tx).await?;
-    finish(db, tx, username).await
+    command.commit().await
 }
 
 pub async fn restore_groups(
@@ -958,8 +936,8 @@ pub async fn restore_groups(
         ));
     }
 
-    let mut tx = weaver_core::db::begin_immediate(db).await?;
-    check_revision(&mut tx, req.expected_revision).await?;
+    let mut command = LayoutCommand::begin(db, username, req.expected_revision).await?;
+    let tx = &mut *command.tx;
     for group_id in &group_ids {
         let exists: bool =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM session_groups WHERE id = ?)")
@@ -1006,8 +984,7 @@ pub async fn restore_groups(
             .await?;
         }
     }
-    bump_revision_tx(&mut tx).await?;
-    finish(db, tx, username).await
+    command.commit().await
 }
 
 pub async fn set_preference(
@@ -1042,19 +1019,14 @@ pub async fn set_default(
     username: &str,
     req: &SetSessionPlacementDefaultReq,
 ) -> MutationResult<SessionLayoutView> {
-    if !matches!(req.selector_kind.as_str(), "origin" | "profile") {
-        return Err(MutationError::Invalid(
-            "selector kind must be 'origin' or 'profile'".to_string(),
-        ));
-    }
     let value = req.selector_value.trim();
     if value.is_empty() {
         return Err(MutationError::Invalid(
             "selector value is required".to_string(),
         ));
     }
-    let mut tx = weaver_core::db::begin_immediate(db).await?;
-    check_revision(&mut tx, req.expected_revision).await?;
+    let mut command = LayoutCommand::begin(db, username, req.expected_revision).await?;
+    let tx = &mut *command.tx;
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM session_groups WHERE id = ?)")
             .bind(&req.group_id)
@@ -1069,34 +1041,33 @@ pub async fn set_default(
          ON CONFLICT(selector_kind, selector_value)
          DO UPDATE SET group_id = excluded.group_id",
     )
-    .bind(&req.selector_kind)
+    .bind(req.selector_kind.as_str())
     .bind(value)
     .bind(&req.group_id)
     .execute(&mut *tx)
     .await?;
-    bump_revision_tx(&mut tx).await?;
-    finish(db, tx, username).await
+    command.commit().await
 }
 
 pub async fn delete_default(
     db: &Db,
     username: &str,
-    selector_kind: &str,
+    selector_kind: SessionPlacementSelectorKind,
     selector_value: &str,
     expected_revision: i64,
 ) -> MutationResult<SessionLayoutView> {
-    if selector_kind == "origin" && selector_value == "*" {
+    if selector_kind == SessionPlacementSelectorKind::Origin && selector_value == "*" {
         return Err(MutationError::Invalid(
             "the fallback origin default cannot be removed".to_string(),
         ));
     }
-    let mut tx = weaver_core::db::begin_immediate(db).await?;
-    check_revision(&mut tx, expected_revision).await?;
+    let mut command = LayoutCommand::begin(db, username, expected_revision).await?;
+    let tx = &mut *command.tx;
     let result = sqlx::query(
         "DELETE FROM session_placement_defaults
          WHERE selector_kind = ? AND selector_value = ?",
     )
-    .bind(selector_kind)
+    .bind(selector_kind.as_str())
     .bind(selector_value)
     .execute(&mut *tx)
     .await?;
@@ -1105,15 +1076,5 @@ pub async fn delete_default(
             "placement default not found".to_string(),
         ));
     }
-    bump_revision_tx(&mut tx).await?;
-    finish(db, tx, username).await
-}
-
-/// Directly used by migration-focused tests to verify one canonical placement.
-pub async fn placement_group(db: &Db, session_id: &str) -> Result<Option<String>> {
-    sqlx::query_scalar("SELECT group_id FROM session_placements WHERE session_id = ?")
-        .bind(session_id)
-        .fetch_optional(db)
-        .await
-        .context("reading session placement")
+    command.commit().await
 }
