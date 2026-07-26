@@ -616,6 +616,13 @@ mod relay {
         task: tokio::task::JoinHandle<()>,
     }
 
+    /// The one valid destination after placing a subscriber at a spool cursor.
+    enum Placement {
+        Replaying(Replay),
+        Live(u64, mpsc::Sender<Out>),
+        Finished,
+    }
+
     /// Control messages to the relay core (the single owner of the spool +
     /// subscriber). Spooled frames travel on their own bounded channel (so the
     /// reader thread can park under back-pressure), not through here.
@@ -835,15 +842,16 @@ mod relay {
                             }
                             let id = next_sub_id;
                             next_sub_id += 1;
-                            (replaying, subscriber) = place_subscriber(
+                            let placement = place_subscriber(
                                 id,
                                 cursor,
                                 &spool,
                                 out_tx,
                                 cmd_tx.clone(),
-                                finished,
-                                exited,
-                            ).await;
+                                if finished { exited } else { None },
+                            )
+                            .await;
+                            apply_placement(&mut replaying, &mut subscriber, placement);
                             // Registration completes immediately. Replay owns
                             // its own task, so ACK/WRITE/PING remain responsive
                             // even when the durable backlog is much larger than
@@ -858,15 +866,16 @@ mod relay {
                             if !delivered {
                                 continue;
                             }
-                            (replaying, subscriber) = place_subscriber(
+                            let placement = place_subscriber(
                                 id,
                                 through,
                                 &spool,
                                 out_tx,
                                 cmd_tx.clone(),
-                                finished,
-                                exited,
-                            ).await;
+                                if finished { exited } else { None },
+                            )
+                            .await;
+                            apply_placement(&mut replaying, &mut subscriber, placement);
                         }
                         Cmd::Unsubscribe(id) => {
                             if matches!(&subscriber, Some((cur, _)) if *cur == id) {
@@ -965,9 +974,8 @@ mod relay {
         spool: &Spool,
         out_tx: mpsc::Sender<Out>,
         cmd_tx: mpsc::UnboundedSender<Cmd>,
-        finished: bool,
-        exited: Option<i32>,
-    ) -> (Option<Replay>, Option<(u64, mpsc::Sender<Out>)>) {
+        terminal_status: Option<i32>,
+    ) -> Placement {
         let through = spool.spooled();
         if cursor < through {
             let task = spawn_replay(
@@ -978,15 +986,34 @@ mod relay {
                 out_tx.clone(),
                 cmd_tx,
             );
-            return (Some(Replay { id, out_tx, task }), None);
+            return Placement::Replaying(Replay { id, out_tx, task });
         }
-        if finished {
-            if let Some(code) = exited {
-                let _ = deliver(&out_tx, Out::Exit { code }).await;
+        if let Some(code) = terminal_status {
+            let _ = deliver(&out_tx, Out::Exit { code }).await;
+            return Placement::Finished;
+        }
+        Placement::Live(id, out_tx)
+    }
+
+    fn apply_placement(
+        replaying: &mut Option<Replay>,
+        subscriber: &mut Option<(u64, mpsc::Sender<Out>)>,
+        placement: Placement,
+    ) {
+        match placement {
+            Placement::Replaying(replay) => {
+                *replaying = Some(replay);
+                *subscriber = None;
             }
-            return (None, None);
+            Placement::Live(id, out_tx) => {
+                *replaying = None;
+                *subscriber = Some((id, out_tx));
+            }
+            Placement::Finished => {
+                *replaying = None;
+                *subscriber = None;
+            }
         }
-        (None, Some((id, out_tx)))
     }
 
     /// Replay a stable spool snapshot without blocking the relay core. A slow
