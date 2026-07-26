@@ -6,6 +6,7 @@ import type {
   SessionGroup,
   SessionSearchAttention,
   SessionSearchStatus,
+  SessionSummary,
   SessionSpace,
 } from '../types';
 import AutomationRunRow from '../components/AutomationRunRow.vue';
@@ -18,10 +19,11 @@ import {
   createSessionSpace,
   deleteSessionGroup,
   deleteSessionSpace,
+  getSession,
+  listSessionSummaries,
   moveSessions,
   reorderSessionLayout,
   restoreSessionGroups,
-  searchSessions,
   setSessionGroupPreference,
   updateSessionGroup,
   updateSessionSpace,
@@ -36,7 +38,7 @@ defineOptions({ name: 'SessionList' });
 
 const route = useRoute();
 const router = useRouter();
-const { sessions, runs, layout, resourceErrors, refresh } = useFleet();
+const { sessions, runs, layout, resourceErrors, refresh, loadHistory } = useFleet();
 
 type WorkbenchView = 'space' | 'attention' | 'all' | 'history';
 
@@ -56,6 +58,13 @@ const view = computed<WorkbenchView>(() => {
   if (route.query.view === 'all') return 'all';
   return 'space';
 });
+watch(
+  view,
+  (next) => {
+    if (next === 'history') void loadHistory();
+  },
+  { immediate: true },
+);
 
 const activeSpace = computed<SessionSpace | undefined>(() => {
   const spaces = layout.value?.spaces ?? [];
@@ -121,7 +130,7 @@ function updateFilters() {
 
 const searchText = ref('');
 const includeHistory = ref(false);
-const searchResults = ref<Session[] | null>(null);
+const searchResults = ref<SessionSummary[] | null>(null);
 const searching = ref(false);
 const searchError = ref('');
 let searchTimer: number | undefined;
@@ -157,11 +166,12 @@ function queueSearch(clearResults: boolean) {
     searchAbort = controller;
     try {
       const archivedOnly = view.value === 'history';
-      const result = await searchSessions(
-        query,
+      const result = await listSessionSummaries(
         {
-          history: archivedOnly || includeHistory.value,
+          query,
+          archived: archivedOnly || includeHistory.value,
           archivedOnly,
+          automation: true,
           status: statusFilter.value || undefined,
           attention: attentionFilter.value || undefined,
         },
@@ -188,10 +198,11 @@ watch(
 watch([sessions, layout], () => queueSearch(false));
 onActivated(() => {
   recordSessionListReturn();
+  if (view.value === 'history') void loadHistory();
   queueSearch(true);
 });
 
-function matchesFilters(session: Session): boolean {
+function matchesFilters(session: SessionSummary): boolean {
   if (statusFilter.value && session.status !== statusFilter.value) return false;
   const attention = effectiveAttention(session).level;
   if (attentionFilter.value === 'needs' && attention === 'ok') return false;
@@ -204,9 +215,7 @@ function matchesFilters(session: Session): boolean {
 const baseSessions = computed(() => {
   if (searchResults.value) {
     const current = new Map(sessions.value.map((session) => [session.id, session]));
-    return searchResults.value
-      .map((result) => current.get(result.id))
-      .filter((session): session is Session => !!session);
+    return searchResults.value.map((result) => current.get(result.id) ?? result);
   }
   if (view.value === 'history') return historySessions.value;
   if (view.value === 'attention') return attentionSessions.value;
@@ -224,12 +233,12 @@ const sessionsByBranch = computed(() =>
     candidates.push(session);
     byBranch.set(session.branch.id, candidates);
     return byBranch;
-  }, new Map<string, Session[]>()),
+  }, new Map<string, SessionSummary[]>()),
 );
 const sessionsById = computed(
   () => new Map(sessions.value.map((session) => [session.id, session])),
 );
-function parentSessionOf(session: Session) {
+function parentSessionOf(session: SessionSummary) {
   if (session.parent_session_id) {
     return sessionsById.value.get(session.parent_session_id);
   }
@@ -242,7 +251,7 @@ const groupedSessions = computed(() =>
     group,
     sessions: group.session_ids
       .map((id) => visibleById.value.get(id))
-      .filter((session): session is Session => !!session),
+      .filter((session): session is SessionSummary => !!session),
   })),
 );
 const smartSessions = computed(() =>
@@ -302,13 +311,36 @@ const operationalRuns = computed(() =>
 );
 
 const expandedRows = ref(new Set<string>());
+const rowDetails = ref<Record<string, Session>>({});
+const rowDetailLoading = ref(new Set<string>());
+const rowDetailErrors = ref<Record<string, string>>({});
 function rowExpanded(id: string) {
   return expandedRows.value.has(id);
 }
+
+async function loadRowDetail(id: string) {
+  rowDetailLoading.value = new Set(rowDetailLoading.value).add(id);
+  const errors = { ...rowDetailErrors.value };
+  delete errors[id];
+  rowDetailErrors.value = errors;
+  try {
+    rowDetails.value = { ...rowDetails.value, [id]: await getSession(id) };
+  } catch (cause) {
+    rowDetailErrors.value = { ...rowDetailErrors.value, [id]: (cause as Error).message };
+  } finally {
+    const loading = new Set(rowDetailLoading.value);
+    loading.delete(id);
+    rowDetailLoading.value = loading;
+  }
+}
+
 function toggleRow(id: string) {
   const next = new Set(expandedRows.value);
   if (next.has(id)) next.delete(id);
-  else next.add(id);
+  else {
+    next.add(id);
+    void loadRowDetail(id);
+  }
   expandedRows.value = next;
 }
 
@@ -458,7 +490,7 @@ async function restoreMove() {
 const moveOpenId = ref('');
 const rowDestination = ref<Record<string, string>>({});
 const rowBefore = ref<Record<string, string>>({});
-function openMove(session: Session) {
+function openMove(session: SessionSummary) {
   moveOpenId.value = moveOpenId.value === session.id ? '' : session.id;
   rowDestination.value[session.id] =
     rowDestination.value[session.id] || session.placement?.group_id || allGroups.value[0]?.group.id;
@@ -1201,6 +1233,9 @@ function scrollSpaces(direction: number) {
           v-for="session in display.sessions"
           :key="session.id"
           :session="session"
+          :detail="rowDetails[session.id]"
+          :detail-loading="rowDetailLoading.has(session.id)"
+          :detail-error="rowDetailErrors[session.id]"
           :qualified="display.qualified"
           :selected="isSelected(session.id)"
           :expanded="rowExpanded(session.id)"

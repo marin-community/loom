@@ -25,7 +25,7 @@ const props = withDefaults(
     modelKey: '',
     effortKey: '',
     rawModelId: '',
-    rawModelAutocomplete: '',
+    rawModelAutocomplete: 'off',
   },
 );
 

@@ -157,6 +157,70 @@ impl BranchView {
     }
 }
 
+/// Compact branch projection embedded in [`SessionSummaryView`]. It carries
+/// only the identity, status, search, and GitHub fields fleet surfaces render;
+/// large goal text and detail-only metadata remain on [`BranchView`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchSummaryView {
+    pub id: String,
+    pub name: String,
+    pub title: String,
+    pub description: String,
+    pub tags: Vec<TagView>,
+    pub repo_root: String,
+    pub branch: String,
+    pub github: Option<GithubStatus>,
+    pub github_pr: Option<i64>,
+}
+
+impl From<&BranchView> for BranchSummaryView {
+    fn from(branch: &BranchView) -> Self {
+        Self {
+            id: branch.id.clone(),
+            name: branch.name.clone(),
+            title: branch.title.clone(),
+            description: branch.description.clone(),
+            tags: branch.tags.clone(),
+            repo_root: branch.repo_root.clone(),
+            branch: branch.branch.clone(),
+            github: branch.github.clone(),
+            github_pr: branch.github_pr,
+        }
+    }
+}
+
+/// Compact session projection returned by `GET /api/sessions/summary`.
+///
+/// This is the polling/search contract for fleet indexes. A client follows with
+/// `GET /api/sessions/{id}` only when it opens a session or discloses the row's
+/// complete context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummaryView {
+    pub id: String,
+    pub status: String,
+    pub github_repo: Option<String>,
+    #[serde(default)]
+    pub github_issue: Option<GithubIssueRef>,
+    pub last_activity_at: String,
+    pub created_at: String,
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
+    pub created_by: Option<String>,
+    #[serde(default = "default_origin")]
+    pub origin: String,
+    #[serde(default = "default_class")]
+    pub class: String,
+    pub tracking_issue: Option<i64>,
+    #[serde(default = "default_profile")]
+    pub profile: String,
+    #[serde(default)]
+    pub usage: Option<AcpUsage>,
+    #[serde(default)]
+    pub placement: Option<SessionPlacementView>,
+    pub branch: BranchSummaryView,
+}
+
 /// Session-scoped view returned by the `/api/sessions[/...]` endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionView {

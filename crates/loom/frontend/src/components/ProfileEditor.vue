@@ -153,6 +153,7 @@ watch(
         data-testid="profile-model"
         :list="`${uid}-model-options`"
         :disabled="disabled"
+        autocomplete="off"
         placeholder="Agent default"
         class="min-w-0 rounded bg-input px-2 py-1.5"
       />

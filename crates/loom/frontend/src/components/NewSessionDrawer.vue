@@ -633,10 +633,10 @@ onActivated(() => void refreshLaunchData());
 
 <template>
   <!--
-    Autofill suppression: Chrome's address/payment classifier deliberately
-    ignores autocomplete="off". Unrecognized per-field tokens keep this workflow
-    out of contact/payment autofill while preserving the form's normal keyboard
-    behavior.
+    Loom owns repository/branch suggestions, while task fields should start
+    clean. Keep browser history completion off at both form and field level:
+    product-specific autocomplete tokens create Chrome history buckets instead
+    of suppressing them.
   -->
   <form
     class="mx-auto flex min-h-full w-full max-w-7xl flex-1 flex-col bg-canvas"
@@ -681,7 +681,7 @@ onActivated(() => void refreshLaunchData());
                 repoActiveOption >= 0 ? `launch-repository-option-${repoActiveOption}` : undefined
               "
               placeholder="owner/name or /home/you/code/project"
-              autocomplete="loom-repo"
+              autocomplete="off"
               spellcheck="false"
               class="w-full rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent"
             />
@@ -750,7 +750,7 @@ onActivated(() => void refreshLaunchData());
               id="launch-title"
               v-model="title"
               placeholder="Health endpoint"
-              autocomplete="loom-title"
+              autocomplete="off"
               class="w-full rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent"
             />
           </div>
@@ -763,7 +763,7 @@ onActivated(() => void refreshLaunchData());
               v-model="goal"
               rows="4"
               placeholder="Add a /health endpoint that returns 200"
-              autocomplete="loom-goal"
+              autocomplete="off"
               class="w-full rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent resize-y"
             ></textarea>
           </div>
@@ -813,7 +813,7 @@ onActivated(() => void refreshLaunchData());
                   v-model="name"
                   @input="nameEdited = true"
                   placeholder="health-endpoint"
-                  autocomplete="loom-branch-name"
+                  autocomplete="off"
                   spellcheck="false"
                   class="w-full rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent font-mono"
                 />
@@ -826,7 +826,7 @@ onActivated(() => void refreshLaunchData());
                   id="launch-base-branch"
                   v-model="base"
                   placeholder="origin/main (freshly fetched)"
-                  autocomplete="loom-base-branch"
+                  autocomplete="off"
                   spellcheck="false"
                   class="w-full rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent font-mono"
                 />
@@ -855,7 +855,7 @@ onActivated(() => void refreshLaunchData());
                   branchActiveOption >= 0 ? `launch-branch-option-${branchActiveOption}` : undefined
                 "
                 placeholder="feature/foo"
-                autocomplete="loom-existing-branch"
+                autocomplete="off"
                 spellcheck="false"
                 class="w-full rounded bg-input px-2 py-1.5 text-sm outline-none focus:ring-1 ring-accent font-mono"
               />

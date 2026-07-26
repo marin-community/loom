@@ -694,6 +694,7 @@ test.describe('acp conversation', () => {
       name: 'acp-file-resource',
     });
     const input = page.getByTestId('acp-composer-input');
+    await expect(input).toHaveAttribute('autocomplete', 'off');
     await input.fill('resources|@READ');
     const menu = page.getByTestId('acp-file-menu');
     await expect(menu.getByText('@README.md', { exact: true })).toBeVisible();

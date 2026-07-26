@@ -318,6 +318,32 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
     let beta_row = all.iter().find(|s| s["id"] == beta_id.as_str()).unwrap();
     assert_eq!(beta_row["status"], "archived");
 
+    // The SPA's polling contract carries only row-level fields. Large launch
+    // and goal context stays behind the per-session detail route.
+    let summaries = client
+        .get("/api/sessions/summary?archived=true")
+        .await
+        .unwrap();
+    let summaries = summaries.as_array().unwrap();
+    assert_eq!(summaries.len(), 2);
+    let alpha_summary = summaries
+        .iter()
+        .find(|session| session["id"] == alpha_id.as_str())
+        .unwrap();
+    assert_eq!(alpha_summary["branch"]["title"], "alpha search target");
+    assert!(
+        alpha_summary["branch"].get("goal").is_none(),
+        "fleet summaries must omit goal text"
+    );
+    assert!(
+        alpha_summary.get("resolved_launch").is_none(),
+        "fleet summaries must omit launch snapshots"
+    );
+    assert!(
+        alpha_summary.get("mcp_policy").is_none(),
+        "fleet summaries must omit MCP policy"
+    );
+
     // Search over title / branch / goal, on the live set.
     let hit = client.get("/api/sessions?q=alpha").await.unwrap();
     assert_eq!(
@@ -327,6 +353,16 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
     );
     let miss = client.get("/api/sessions?q=nope-nothing").await.unwrap();
     assert!(miss.as_array().unwrap().is_empty(), "no match ⇒ empty");
+    let compact_hit = client
+        .get("/api/sessions/summary?q=alpha%20search%20target")
+        .await
+        .unwrap();
+    assert_eq!(
+        compact_hit.as_array().unwrap().len(),
+        1,
+        "compact search matches server-side goal text without returning it"
+    );
+    assert!(compact_hit[0]["branch"].get("goal").is_none());
 
     // An archived session is excluded from a default search, included when asked.
     let beta_hidden = client.get("/api/sessions?q=beta").await.unwrap();

@@ -157,6 +157,41 @@ export interface Session {
   branch: Branch;
 }
 
+/** Compact branch projection used by the fleet polling/search endpoint. Large
+ * goal text and detail-only metadata remain on `Branch`. */
+export interface BranchSummary {
+  id: string;
+  name: string;
+  title: string;
+  description: string;
+  tags: Tag[];
+  repo_root: string;
+  branch: string;
+  github: GithubStatus | null;
+  github_pr: number | null;
+}
+
+/** Compact session projection returned by `GET /sessions/summary`. Opening a
+ * row or session follows with the full `Session` resource on demand. */
+export interface SessionSummary {
+  id: string;
+  status: string;
+  github_repo: string | null;
+  github_issue: { repo: string; number: number } | null;
+  last_activity_at: string;
+  created_at: string;
+  parent_id: string | null;
+  parent_session_id: string | null;
+  created_by: string | null;
+  origin: string;
+  class: string;
+  tracking_issue: number | null;
+  profile: string;
+  usage: AcpUsage | null;
+  placement: SessionPlacement | null;
+  branch: BranchSummary;
+}
+
 export interface ResumptionEvidence {
   kind: 'conversation' | 'artifact';
   label: string;

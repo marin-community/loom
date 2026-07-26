@@ -273,6 +273,7 @@ route truth, including internal proxy and compatibility paths.
 | `GET /api/diagnostics` | admin-only redacted counts, profile capacity, automation failures/staleness, orphan/error inventory, migration state, and non-secret federation metadata; backs Settings → Diagnostics |
 | `POST /api/session-launches/resolve` | resolve a canonical profile selection plus one-launch overrides into concrete selectors, provenance, policy, capacity, validation, and profile/resolver revisions without provisioning |
 | `GET /api/sessions` / `POST /api/sessions` | list / create sessions (list takes `archived` — default `false` — `automation` — default `false` — and admin-only `managed` — default `false`; canonical create requires both revisions from resolve and returns 409 plus a fresh preview on drift/admission change; flattened selectors remain compatible; valid Scratch input is decoded before provisioning; visible creates atomically assign configured origin/profile placement while managed warm infrastructure has no placement or layout revision effect; create stamps `resolved_launch`, opens a tracking issue, and returns its id as `tracking_issue`) |
+| `GET /api/sessions/summary` | compact fleet row projection for polling and search; accepts `archived`, `archived_only`, `automation`, `q`, `status`, and `attention`, searches goal text server-side without returning goals, and omits launch/MCP/title-generation/runtime detail retained by `GET /api/sessions/{id}` |
 | `GET /api/sessions/search` | case-insensitive fleet search across qualified placement, title/prompt, repo/branch, issue/PR, tags, status, profile, and provenance; optional widening `history`, archived-only `archived_only`, `status`, and `attention` filters |
 | `GET /api/session-layout`; `GET /api/session-layout/events` | admin-only read of the ordered Spaces → Groups → Sessions model plus defaults/revision; SSE is invalidation-only and every membership/layout change emits one so clients reload canonical state |
 | `POST PATCH DELETE /api/session-layout/{spaces,groups}[/{id}]` | create/rename/delete spaces and groups; non-empty deletion requires a destination and moves sessions/defaults atomically |
@@ -692,7 +693,7 @@ number, URL, state (`OPEN`/`CLOSED`/`MERGED`), draft
 flag, `reviewDecision`, a rolled-up `checks` verdict (`passing`/`failing`/
 `pending`), and mergeability — is written to the loom-owned `branch_github`
 table (one row per branch, keyed `branch_id`) and served as `BranchView.github`.
-The dashboard renders it on the session list and compact session Details; `POST
+The dashboard renders it on the session list and session header; `POST
 /api/sessions/{id}/github` forces an immediate re-poll.
 
 The loop self-gates and degrades quietly: it is always spawned but does nothing
@@ -702,10 +703,12 @@ is logged at debug and skipped). So it is a no-op on non-GitHub repos rather
 than a failure.
 
 The session header always renders PR and issue association pills, including an
-empty state. The PR editor can pin an explicit number or return to live-branch
-discovery through `PUT` / `DELETE /api/sessions/{id}/github`; the issue editor
-patches the GitHub link on the session's weaver tracking issue, which remains
-the source of truth for that association.
+empty state. Existing associations are direct GitHub links; adjacent edit
+controls keep reassociation secondary. The PR editor can pin an explicit number
+or return to live-branch discovery through `PUT` / `DELETE
+/api/sessions/{id}/github`; the issue editor patches the GitHub link on the
+session's weaver tracking issue, which remains the source of truth for that
+association.
 
 **Archive on merge.** When a poll finds a branch's PR has merged and
 `github.archive_on_merge` is on (the default), loom archives the session

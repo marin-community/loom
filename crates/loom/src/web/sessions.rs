@@ -25,15 +25,17 @@ use crate::{agent, backend, config, custom_agents, db, events, git, github, repo
 use weaver_api::{
     CreateReq, EnsureResumptionCueReq, HandoffReq, HistoryPageView, LaunchOverrides,
     LaunchSelection, PatchSessionReq, ResumptionCueView, SearchSessionsOptions, SendReq,
-    SessionSearchAttention, SessionSearchStatus, SessionView, SetTagsReq, SetTitleGenerationReq,
-    TagReq,
+    SessionSearchAttention, SessionSearchStatus, SessionSummaryView, SessionView, SetTagsReq,
+    SetTitleGenerationReq, TagReq,
 };
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::{Branch, TitleProvenance, TitleUpdate};
 use weaver_core::tags;
 use weaver_core::watch::{self as watch_store, Watch};
 
-use super::{author_or_manual, require_branch, require_session, session_view};
+use super::{
+    author_or_manual, require_branch, require_session, session_summary_view, session_view,
+};
 use super::{ApiResult, AppError, AppState};
 use crate::runtime::{layer_launch_environment, repo_cfg_or_default, set_env};
 
@@ -113,6 +115,49 @@ pub(super) async fn list_sessions(
     .map(Json)
 }
 
+/// Compact fleet/search query for `GET /api/sessions/summary`.
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct ListSessionSummariesQuery {
+    /// Include archived rows alongside active work.
+    #[serde(default)]
+    archived: bool,
+    /// Return only archived rows. Implies `archived=true`.
+    #[serde(default)]
+    archived_only: bool,
+    /// Include automation-class sessions.
+    #[serde(default)]
+    automation: bool,
+    /// Case-insensitive search over the same documented facets as fleet search.
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    status: Option<SessionSearchStatus>,
+    #[serde(default)]
+    attention: Option<SessionSearchAttention>,
+}
+
+/// Compact polling/search contract for indexes. Full session context remains on
+/// `GET /api/sessions/{id}` and is fetched only when a row or page discloses it.
+pub(super) async fn list_session_summaries(
+    State(st): State<AppState>,
+    Query(q): Query<ListSessionSummariesQuery>,
+) -> ApiResult<Json<Vec<SessionSummaryView>>> {
+    collect_session_summaries(
+        &st,
+        SessionCollectionFilter {
+            archived: q.archived || q.archived_only,
+            archived_only: q.archived_only,
+            automation: q.automation,
+            managed: false,
+            search: q.q.as_deref(),
+            status: q.status,
+            attention: q.attention,
+        },
+    )
+    .await
+    .map(Json)
+}
+
 /// Search is an explicit fleet read so non-browser clients can find the same
 /// qualified sessions as the workbench. `history=true` widens the actionable
 /// result set; `archived_only=true` is the disjoint History projection.
@@ -150,6 +195,20 @@ fn view_attention(view: &SessionView) -> &str {
     }
 }
 
+fn summary_attention(view: &SessionSummaryView) -> &str {
+    if view.status == "archived" {
+        "ok"
+    } else if view.branch.tags.iter().any(|tag| tag.value == "blocked") {
+        "blocked"
+    } else if matches!(view.status.as_str(), "error" | "orphaned")
+        || view.branch.tags.iter().any(|tag| tag.value == "attention")
+    {
+        "attention"
+    } else {
+        "ok"
+    }
+}
+
 fn append_search_field(haystack: &mut String, value: &str) {
     haystack.push(' ');
     haystack.push_str(value);
@@ -172,6 +231,68 @@ fn search_haystack(view: &SessionView) -> String {
         view.branch.repo_root.as_str(),
         view.branch.branch.as_str(),
         view.branch.name.as_str(),
+        view.status.as_str(),
+        view.profile.as_str(),
+        view.origin.as_str(),
+        view.class.as_str(),
+        view.created_by.as_deref().unwrap_or_default(),
+        view.parent_session_id.as_deref().unwrap_or_default(),
+        view.parent_id.as_deref().unwrap_or_default(),
+    ] {
+        append_search_field(&mut haystack, field);
+    }
+    if let Some(issue) = &view.github_issue {
+        append_search_field(&mut haystack, &format!("{}#{}", issue.repo, issue.number));
+        append_search_field(&mut haystack, &format!("#{}", issue.number));
+    }
+    if let Some(issue) = view.tracking_issue {
+        append_search_field(&mut haystack, &format!("#{issue}"));
+    }
+    if let Some(pr) = &view.branch.github {
+        append_search_field(&mut haystack, &format!("#{}", pr.pr_number));
+        for field in [
+            pr.pr_url.as_str(),
+            pr.pr_title.as_str(),
+            pr.pr_state.as_str(),
+            pr.review_decision.as_deref().unwrap_or_default(),
+            pr.checks.as_deref().unwrap_or_default(),
+        ] {
+            append_search_field(&mut haystack, field);
+        }
+    } else if let Some(pr) = view.branch.github_pr {
+        append_search_field(&mut haystack, &format!("#{pr}"));
+    }
+    for tag in &view.branch.tags {
+        for field in [
+            tag.key.as_str(),
+            tag.value.as_str(),
+            tag.note.as_str(),
+            tag.set_by.as_str(),
+        ] {
+            append_search_field(&mut haystack, field);
+        }
+    }
+    haystack.to_lowercase()
+}
+
+fn summary_search_haystack(view: &SessionSummaryView, branch: &Branch) -> String {
+    let mut haystack = String::new();
+    if let Some(placement) = &view.placement {
+        append_search_field(
+            &mut haystack,
+            &format!("{} / {}", placement.group_name, view.branch.title.trim()),
+        );
+        append_search_field(&mut haystack, &placement.group_name);
+    }
+    for field in [
+        view.branch.title.as_str(),
+        branch.goal.as_str(),
+        view.branch.description.as_str(),
+        view.branch.repo_root.as_str(),
+        view.branch.branch.as_str(),
+        view.branch.name.as_str(),
+        branch.base_branch.as_str(),
+        view.github_repo.as_deref().unwrap_or_default(),
         view.status.as_str(),
         view.profile.as_str(),
         view.origin.as_str(),
@@ -297,6 +418,64 @@ async fn collect_sessions(
             }
             views.push(view);
         }
+    }
+    Ok(views)
+}
+
+async fn collect_session_summaries(
+    st: &AppState,
+    filter: SessionCollectionFilter<'_>,
+) -> ApiResult<Vec<SessionSummaryView>> {
+    let warm: HashSet<String> = watch_store::list(&st.db)
+        .await?
+        .into_iter()
+        .filter_map(|watch| watch.warm_session_id)
+        .collect();
+    let needle = filter
+        .search
+        .map(str::trim)
+        .filter(|search| !search.is_empty())
+        .map(str::to_lowercase);
+    let sessions = session_mod::list_visible(&st.db).await?;
+    let mut views = Vec::with_capacity(sessions.len());
+    for session in sessions {
+        if warm.contains(&session.id) {
+            continue;
+        }
+        if !filter.archived && session.status == "archived" {
+            continue;
+        }
+        if filter.archived_only && session.status != "archived" {
+            continue;
+        }
+        if !filter.automation && session.class == "automation" {
+            continue;
+        }
+        let Some(branch) = branch_mod::get(&st.db, &session.branch_id).await? else {
+            continue;
+        };
+        let view = session_summary_view(&st.db, &session, &branch).await?;
+        if filter
+            .status
+            .is_some_and(|status| view.status != status.as_str())
+        {
+            continue;
+        }
+        if filter.attention.is_some_and(|attention| match attention {
+            SessionSearchAttention::Needs => summary_attention(&view) == "ok",
+            SessionSearchAttention::Ok => summary_attention(&view) != "ok",
+            SessionSearchAttention::Attention => summary_attention(&view) != "attention",
+            SessionSearchAttention::Blocked => summary_attention(&view) != "blocked",
+        }) {
+            continue;
+        }
+        if let Some(needle) = &needle {
+            let haystack = summary_search_haystack(&view, &branch);
+            if !haystack.contains(needle) {
+                continue;
+            }
+        }
+        views.push(view);
     }
     Ok(views)
 }

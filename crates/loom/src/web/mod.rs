@@ -144,7 +144,10 @@ use crate::db::Db;
 use crate::github;
 use crate::session::{self as session_mod, Session};
 use crate::AppState;
-use weaver_api::{BranchView, McpPolicySnapshot, SessionMcpPolicyView, SessionView};
+use weaver_api::{
+    BranchSummaryView, BranchView, McpPolicySnapshot, SessionMcpPolicyView, SessionSummaryView,
+    SessionView,
+};
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::Branch;
 use weaver_core::tags;
@@ -423,6 +426,60 @@ pub(crate) async fn session_view(
     })
 }
 
+/// Build the compact fleet/search projection for a session + branch.
+///
+/// Unlike [`session_view`], this deliberately does not deserialize launch
+/// snapshots, MCP policy, or title-generation state. Large goal text remains
+/// available to server-side search through the source `Branch`, but crosses the
+/// wire only when a client follows with the session detail endpoint.
+pub(crate) async fn session_summary_view(
+    db: &Db,
+    session: &Session,
+    branch: &Branch,
+) -> ApiResult<SessionSummaryView> {
+    let branch = branch_view(db, branch).await?;
+    let github_issue = if let Some(id) = session.tracking_issue_id {
+        weaver_core::issue::get(db, id).await?.and_then(|issue| {
+            match (issue.github_repo, issue.github_issue) {
+                (Some(repo), Some(number)) => Some(weaver_api::GithubIssueRef { repo, number }),
+                _ => None,
+            }
+        })
+    } else {
+        None
+    };
+    let usage = if session.protocol == "acp" {
+        crate::chat::latest_usage(db, &session.id)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    let placement = crate::session_layout::placement(db, &session.id).await?;
+    Ok(SessionSummaryView {
+        id: session.id.clone(),
+        status: session.status.clone(),
+        github_repo: session.github_repo.clone(),
+        github_issue,
+        last_activity_at: session
+            .last_activity_at
+            .clone()
+            .unwrap_or_else(|| branch.updated_at.clone()),
+        created_at: session.created_at.clone(),
+        parent_id: session.parent_branch_id.clone(),
+        parent_session_id: session.parent_session_id.clone(),
+        created_by: session.created_by.clone(),
+        origin: session.origin.clone(),
+        class: session.class.clone(),
+        tracking_issue: session.tracking_issue_id,
+        profile: session.profile.clone(),
+        usage,
+        placement,
+        branch: BranchSummaryView::from(&branch),
+    })
+}
+
 /// Resolve a session key (session id, branch id, branch name, or `repo:branch`)
 /// to `(Session, Branch)`. The session must exist and be active; clients hitting
 /// a branch with no live session get a 404.
@@ -681,6 +738,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/session-launches/resolve", post(resolve_session_launch))
         .route("/scratch/limits", get(scratch_limits))
+        .route("/sessions/summary", get(list_session_summaries))
         .route("/sessions/search", get(search_sessions))
         .route(
             "/sessions/{id}",

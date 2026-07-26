@@ -1,4 +1,4 @@
-import type { Session, Tag } from '../types';
+import type { SessionSummary, Tag } from '../types';
 
 export type Attention = 'ok' | 'attention' | 'blocked';
 
@@ -19,7 +19,7 @@ export const AUTO_ARCHIVE_KEY = 'auto-archive';
 export const AUTO_ARCHIVE_DISABLED_VALUE = 'disabled';
 
 /** Whether this session carries the exact user-controlled retention opt-out. */
-export function autoArchiveDisabled(s: Session): boolean {
+export function autoArchiveDisabled(s: SessionSummary): boolean {
   return (s.branch.tags ?? []).some(
     (t) => t.key === AUTO_ARCHIVE_KEY && t.value === AUTO_ARCHIVE_DISABLED_VALUE,
   );
@@ -51,7 +51,7 @@ function isAgentTag(tag: Tag): boolean {
 
 // The current-state message (Branch.description). Suppressed for archived
 // sessions so torn-down workstreams don't show stale chatter.
-export function messageOf(s: Session): string {
+export function messageOf(s: SessionSummary): string {
   if (s.status === 'archived') return '';
   return s.branch.description ?? '';
 }
@@ -66,7 +66,7 @@ export function tagStale(tag: Tag | undefined, lastActivityAt: string): boolean 
 }
 
 // The loud tags on a session (value on the ladder), archived shown none.
-function loudTags(s: Session): Tag[] {
+function loudTags(s: SessionSummary): Tag[] {
   if (s.status === 'archived') return [];
   return (s.branch.tags ?? []).filter((t) => severityOf(t.value) > 0);
 }
@@ -102,7 +102,7 @@ function louder(a: Tag, b: Tag): number {
 // (by/raisedBy) and reason (note, with the agent's message as fallback).
 // effectiveAttention and signalChips both build on this so the rules stay in one
 // place; they differ only in how each treats staleness.
-function markOf(s: Session, tag: Tag): Omit<SignalChip, 'stale'> {
+function markOf(s: SessionSummary, tag: Tag): Omit<SignalChip, 'stale'> {
   const agent = isAgentTag(tag);
   return {
     key: tag.key,
@@ -117,7 +117,7 @@ function markOf(s: Session, tag: Tag): Omit<SignalChip, 'stale'> {
 // session's loud tags. A *non-stale* mark always beats a stale one (the session
 // has moved on past a stale mark); a stale mark surfaces, faded, only when it is
 // the lone signal — so an hour-old "looks stuck" fades rather than lies.
-export function effectiveAttention(s: Session): EffectiveAttention {
+export function effectiveAttention(s: SessionSummary): EffectiveAttention {
   const calm: EffectiveAttention = {
     level: 'ok',
     raisedBy: 'none',
@@ -177,7 +177,7 @@ export interface SignalChip {
 // order. Each loud tag renders as its own chip so any one can be cleared on its
 // own — which is the whole point: a stale mark is no longer a thing you "can't
 // resolve", it's just a chip with an × . Archived sessions show none.
-export function signalChips(s: Session): SignalChip[] {
+export function signalChips(s: SessionSummary): SignalChip[] {
   return loudTags(s)
     .slice()
     .sort(louder)
@@ -188,7 +188,7 @@ export function signalChips(s: Session): SignalChip[] {
 // These are free-form, deletable annotations (priority, needs-rebase, …). The
 // soothing `idle` mark is excluded — it is a lifecycle signal surfaced calmly by
 // idleTag/conversationState, not a free-form pill. Archived sessions show none.
-export function quietTags(s: Session): Tag[] {
+export function quietTags(s: SessionSummary): Tag[] {
   if (s.status === 'archived') return [];
   return (s.branch.tags ?? []).filter(
     (t) => severityOf(t.value) === 0 && t.key !== IDLE_KEY && !BOOKKEEPING_KEYS.includes(t.key),
@@ -219,11 +219,11 @@ const LIVE_STATUSES = new Set(['running']);
 // is gone (orphaned / done / error / archived), so the composer only shows while
 // the agent is running. Reuses LIVE_STATUSES: the same "the agent is here" notion
 // as the idle mark.
-export function canSend(s: Session): boolean {
+export function canSend(s: SessionSummary): boolean {
   return LIVE_STATUSES.has(s.status);
 }
 
-export function idleTag(s: Session): Tag | null {
+export function idleTag(s: SessionSummary): Tag | null {
   if (!LIVE_STATUSES.has(s.status)) return null;
   if (loudTags(s).length > 0) return null;
   return (s.branch.tags ?? []).find((t) => t.key === IDLE_KEY) ?? null;
@@ -240,7 +240,7 @@ export interface ConvState {
   tone: 'block' | 'attn' | 'ok' | 'info' | 'muted'; // which token family colors it
 }
 
-export function conversationState(s: Session): ConvState {
+export function conversationState(s: SessionSummary): ConvState {
   // Lifecycle first for the unambiguous mechanical states.
   if (s.status === 'archived') return { glyph: '◦', label: 'Archived', tone: 'muted' };
   if (s.status === 'orphaned') return { glyph: '●', label: 'Orphaned — detached', tone: 'attn' };
@@ -281,7 +281,7 @@ export const TONE_TEXT: Record<ConvState['tone'], string> = {
 // live, calm agent is green; anything terminal/detached (done, orphaned, error,
 // archived) recedes to faint. The dot is a quiet hairline tone, never the loud
 // chip fill, so it adds rhythm without competing with a real raised signal.
-export function lifecycleDot(s: Session): string {
+export function lifecycleDot(s: SessionSummary): string {
   const level = effectiveAttention(s).level;
   if (level === 'blocked') return 'bg-block-line';
   if (level === 'attention') return 'bg-attn-line';
@@ -339,7 +339,7 @@ const REMOVE: LifecycleAction = {
 // down, branch kept) is recovered. Surfaced next to the status badge that
 // announces the state, so the cure sits with the diagnosis rather than behind a
 // menu. Null for every healthy session — there is nothing to fix.
-export function remedyAction(s: Session): LifecycleAction | null {
+export function remedyAction(s: SessionSummary): LifecycleAction | null {
   if (s.status === 'orphaned') return ADOPT;
   if (s.status === 'archived') return RECOVER;
   return null;
@@ -347,7 +347,7 @@ export function remedyAction(s: Session): LifecycleAction | null {
 
 // Every lifecycle action available on a session, in menu order: its remedy (if
 // stuck), then archive (unless it already is), then the destructive remove.
-export function lifecycleActions(s: Session): LifecycleAction[] {
+export function lifecycleActions(s: SessionSummary): LifecycleAction[] {
   const actions: LifecycleAction[] = [];
   const remedy = remedyAction(s);
   if (remedy) actions.push(remedy);

@@ -164,11 +164,33 @@ test.describe('session detail view', () => {
         json: { ...s, branch: { ...s.branch, github_pr: 37 } },
       });
     });
+    await page.route(`**/api/sessions/${s.id}`, async (route) => {
+      if (!requestBody) return route.fallback();
+      const response = await route.fetch();
+      const current = (await response.json()) as typeof s;
+      await route.fulfill({
+        response,
+        json: {
+          ...current,
+          github_repo: current.github_repo ?? 'acme/widgets',
+          branch: {
+            ...current.branch,
+            github_pr: 37,
+            github: {
+              pr_number: 37,
+              pr_url: 'https://github.com/acme/widgets/pull/37',
+              pr_state: 'OPEN',
+              checks: 'passing',
+            },
+          },
+        },
+      });
+    });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
-    await page.getByRole('button', { name: /Details/ }).click();
     const prPill = page.getByTestId('pr-association-pill');
     const issuePill = page.getByTestId('issue-association-pill');
+    await expect(page.getByTestId('github-associations')).toBeVisible();
     await expect(prPill).toHaveText('PR —');
     await expect(issuePill).toHaveText('Issue —');
 
@@ -179,6 +201,17 @@ test.describe('session detail view', () => {
 
     await expect.poll(() => requestBody).toEqual({ pr_number: 37 });
     await expect(form).toBeHidden();
+    await expect(prPill).toHaveAttribute('href', 'https://github.com/acme/widgets/pull/37');
+    await expect(prPill).toHaveAttribute('target', '_blank');
+
+    // Reassociation is secondary, but its popover follows the same Escape /
+    // focus-return contract as Details.
+    const prEdit = page.getByTestId('pr-association-edit');
+    await prEdit.click();
+    await expect(page.getByTestId('pr-mapping-popover')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('pr-mapping-popover')).toHaveCount(0);
+    await expect(prEdit).toBeFocused();
 
     await issuePill.click();
     const issueForm = page.getByTestId('issue-mapping-form');
@@ -192,8 +225,9 @@ test.describe('session detail view', () => {
         repo: 'acme/widgets',
         number: 73,
       });
+    await expect(issuePill).toHaveAttribute('href', 'https://github.com/acme/widgets/issues/73');
 
-    await issuePill.click();
+    await page.getByTestId('issue-association-edit').click();
     await page.getByTestId('issue-mapping-form').getByRole('button', { name: 'Clear' }).click();
     await expect(issuePill).toHaveText('Issue —');
   });
