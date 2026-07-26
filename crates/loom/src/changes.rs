@@ -34,9 +34,10 @@ const MAX_INVENTORY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PATCH_BYTES: usize = 2 * 1024 * 1024;
 const MAX_UNTRACKED_RENDER_BYTES: u64 = 512 * 1024;
 const MAX_IDENTITY_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_CONFIG_BYTES: usize = 256 * 1024;
+const MAX_EXCLUDE_BYTES: u64 = 256 * 1024;
 const MAX_INDEX_BYTES: u64 = 16 * 1024 * 1024;
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const GIT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 struct Capture {
@@ -50,6 +51,7 @@ struct RawFile {
     status: ChangeFileStatusDto,
     path: Vec<u8>,
     old_path: Option<Vec<u8>>,
+    gitlink: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -58,12 +60,71 @@ struct NumStat {
     deletions: Option<u32>,
 }
 
-#[derive(Debug, Default)]
-struct GitReadPolicy {
-    filter_drivers: Vec<String>,
+struct GitBoundary {
+    common_dir: tempfile::TempDir,
+    work_tree: PathBuf,
+    git_dir: PathBuf,
+    object_dir: PathBuf,
+    index_path: PathBuf,
 }
 
-fn hardened_git(work_dir: &Path, policy: &GitReadPolicy) -> Command {
+struct GitProcessGroup {
+    child: Option<tokio::process::Child>,
+    pgid: Option<i32>,
+}
+
+impl GitProcessGroup {
+    fn new(child: tokio::process::Child) -> Self {
+        let pgid = child.id().and_then(|pid| i32::try_from(pid).ok());
+        Self {
+            child: Some(child),
+            pgid,
+        }
+    }
+
+    fn child(&mut self) -> &mut tokio::process::Child {
+        self.child.as_mut().expect("Git child is present")
+    }
+
+    fn kill(&self) {
+        if let Some(pgid) = self.pgid {
+            // SAFETY: Git was spawned with process_group(0), so its pid is the
+            // pgid and a negative target kills Git plus any helper descendants.
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+    }
+
+    async fn kill_and_reap(&mut self) {
+        self.kill();
+        if let Some(child) = self.child.as_mut() {
+            let _ = tokio::time::timeout(GIT_CLEANUP_TIMEOUT, child.wait()).await;
+        }
+        self.disarm();
+    }
+
+    fn disarm(&mut self) {
+        self.pgid = None;
+        self.child = None;
+    }
+}
+
+impl Drop for GitProcessGroup {
+    fn drop(&mut self) {
+        self.kill();
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = tokio::time::timeout(GIT_CLEANUP_TIMEOUT, child.wait()).await;
+            });
+        }
+    }
+}
+
+fn hardened_git(work_dir: &Path) -> Command {
     let mut command = Command::new("git");
     command
         .arg("-C")
@@ -77,49 +138,71 @@ fn hardened_git(work_dir: &Path, policy: &GitReadPolicy) -> Command {
             "core.fsmonitor=false",
             "-c",
             "submodule.recurse=false",
+            "-c",
+            "diff.submodule=short",
         ])
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
         .env("GIT_CONFIG_COUNT", "0")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_ATTR_NOSYSTEM", "1")
+        .env("GIT_PROTOCOL_FROM_USER", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env_remove("GIT_CONFIG")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_REPLACE_REF_BASE")
+        .env_remove("GIT_NAMESPACE")
+        .env_remove("GIT_SHALLOW_FILE")
+        .env_remove("GIT_GRAFT_FILE")
+        .env_remove("GIT_CEILING_DIRECTORIES")
         .env_remove("GIT_EXTERNAL_DIFF")
         .env_remove("GIT_DIFF_OPTS")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .kill_on_drop(true);
-    for driver in &policy.filter_drivers {
-        command
-            .arg("-c")
-            .arg(format!("filter.{driver}.clean="))
-            .arg("-c")
-            .arg(format!("filter.{driver}.process="))
-            .arg("-c")
-            .arg(format!("filter.{driver}.smudge="))
-            .arg("-c")
-            .arg(format!("filter.{driver}.required=false"));
-    }
+        .kill_on_drop(true)
+        .process_group(0);
     command
 }
 
+impl GitBoundary {
+    fn command(&self) -> Command {
+        let mut command = hardened_git(&self.work_tree);
+        command
+            .env("GIT_DIR", &self.git_dir)
+            .env("GIT_COMMON_DIR", self.common_dir.path())
+            .env("GIT_WORK_TREE", &self.work_tree)
+            .env("GIT_OBJECT_DIRECTORY", &self.object_dir)
+            .env("GIT_INDEX_FILE", &self.index_path);
+        command
+    }
+}
+
 async fn capture_git_status(
-    work_dir: &Path,
-    policy: &GitReadPolicy,
+    mut command: Command,
     args: &[&str],
     retain: usize,
 ) -> Result<(Capture, bool)> {
-    let mut child = hardened_git(work_dir, policy)
+    let mut child = command
         .args(args)
         .stdout(Stdio::piped())
         .spawn()
         .with_context(|| format!("spawning git {}", args.join(" ")))?;
     let stdout = child.stdout.take().context("capturing git stdout")?;
+    let mut group = GitProcessGroup::new(child);
     let mut reader = BufReader::new(stdout);
     let mut bytes = Vec::with_capacity(retain.min(64 * 1024));
     let mut chunk = vec![0_u8; 32 * 1024];
     let deadline = Instant::now() + GIT_COMMAND_TIMEOUT;
     let result = tokio::time::timeout_at(deadline, async {
-        let mut truncated = false;
         loop {
             let read = reader.read(&mut chunk).await?;
             if read == 0 {
@@ -128,78 +211,67 @@ async fn capture_git_status(
             let room = retain.saturating_sub(bytes.len());
             bytes.extend_from_slice(&chunk[..read.min(room)]);
             if read > room {
-                truncated = true;
-                child.start_kill().context("stopping bounded git capture")?;
-                break;
+                return Ok::<_, anyhow::Error>(None);
             }
         }
-        let status = child.wait().await?;
-        Ok::<_, anyhow::Error>((status.success(), truncated))
+        let status = group.child().wait().await?;
+        Ok::<_, anyhow::Error>(Some(status.success()))
     })
     .await;
+    let timed_out = result.is_err();
     match result {
-        Ok(result) => {
-            let (success, truncated) = result?;
+        Ok(Ok(Some(success))) => {
+            group.disarm();
             Ok((
                 Capture {
                     bytes,
-                    truncated,
+                    truncated: false,
                     timed_out: false,
                 },
                 success,
             ))
         }
-        Err(_) => {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+        Ok(Ok(None)) | Err(_) => {
+            group.kill_and_reap().await;
             Ok((
                 Capture {
                     bytes,
                     truncated: true,
-                    timed_out: true,
+                    timed_out,
                 },
                 false,
             ))
         }
+        Ok(Err(error)) => {
+            group.kill_and_reap().await;
+            Err(error)
+        }
     }
 }
 
-async fn capture_git(
-    work_dir: &Path,
-    policy: &GitReadPolicy,
-    args: &[&str],
-    retain: usize,
-) -> Result<Capture> {
-    let (capture, success) = capture_git_status(work_dir, policy, args, retain).await?;
+async fn capture_git(boundary: &GitBoundary, args: &[&str], retain: usize) -> Result<Capture> {
+    let (capture, success) = capture_git_status(boundary.command(), args, retain).await?;
     if !success && !capture.truncated {
         bail!("git {} failed", args.join(" "));
     }
     Ok(capture)
 }
 
-async fn capture_diff(
-    work_dir: &Path,
-    policy: &GitReadPolicy,
-    args: &[&str],
-    retain: usize,
-) -> Result<Capture> {
+async fn capture_diff(boundary: &GitBoundary, args: &[&str], retain: usize) -> Result<Capture> {
     let mut full = vec![
         "diff",
         "--no-ext-diff",
         "--no-textconv",
         "--no-color",
-        "--ignore-submodules=all",
+        "--ignore-submodules=dirty",
+        "--submodule=short",
     ];
     full.extend_from_slice(args);
-    capture_git(work_dir, policy, &full, retain).await
+    capture_git(boundary, &full, retain).await
 }
 
-async fn git_text(
-    work_dir: &Path,
-    policy: &GitReadPolicy,
-    args: &[&str],
-) -> Result<Option<String>> {
-    let (capture, success) = capture_git_status(work_dir, policy, args, 4 * 1024).await?;
+async fn bootstrap_text(work_dir: &Path, args: &[&str]) -> Result<Option<String>> {
+    let (capture, success) = capture_git_status(hardened_git(work_dir), args, 4 * 1024).await?;
     if capture.timed_out {
         bail!("git {} exceeded its deadline", args.join(" "));
     }
@@ -214,35 +286,101 @@ async fn git_text(
     Ok((!value.is_empty()).then_some(value))
 }
 
-impl GitReadPolicy {
+fn absolute_git_path(work_tree: &Path, path: String) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        work_tree.join(path)
+    }
+}
+
+impl GitBoundary {
     async fn load(work_dir: &Path) -> Result<Self> {
-        let empty = Self::default();
-        let capture = capture_git(
-            work_dir,
-            &empty,
-            &["config", "--includes", "--null", "--name-only", "--list"],
-            MAX_CONFIG_BYTES,
-        )
-        .await?;
-        if capture.truncated {
-            bail!("git configuration exceeded its safe read bound");
-        }
-        let mut filter_drivers = Vec::new();
-        for raw in nul_records(&capture.bytes) {
-            let key = std::str::from_utf8(raw).context("git configuration key was not UTF-8")?;
-            let Some((driver, setting)) =
-                key.strip_prefix("filter.").and_then(|v| v.rsplit_once('.'))
-            else {
-                continue;
-            };
-            if !driver.is_empty() && matches!(setting, "clean" | "process" | "required" | "smudge")
-            {
-                filter_drivers.push(driver.to_string());
+        let work_tree = std::fs::canonicalize(work_dir).context("resolving Git worktree")?;
+        let git_dir = bootstrap_text(&work_tree, &["rev-parse", "--absolute-git-dir"])
+            .await?
+            .map(PathBuf::from)
+            .context("Git directory is unavailable")?;
+        let git_dir = std::fs::canonicalize(git_dir).context("resolving Git directory")?;
+        let real_common = bootstrap_text(&work_tree, &["rev-parse", "--git-common-dir"])
+            .await?
+            .map(|path| absolute_git_path(&work_tree, path))
+            .context("Git common directory is unavailable")?;
+        let real_common =
+            std::fs::canonicalize(real_common).context("resolving Git common directory")?;
+        let object_dir = bootstrap_text(&work_tree, &["rev-parse", "--git-path", "objects"])
+            .await?
+            .map(|path| absolute_git_path(&work_tree, path))
+            .context("Git object directory is unavailable")?;
+        let object_dir =
+            std::fs::canonicalize(object_dir).context("resolving Git object directory")?;
+        let index_path = bootstrap_text(&work_tree, &["rev-parse", "--git-path", "index"])
+            .await?
+            .map(|path| absolute_git_path(&work_tree, path))
+            .context("Git index path is unavailable")?;
+        let index_path = match std::fs::canonicalize(&index_path) {
+            Ok(path) => path,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                let parent = index_path.parent().context("Git index has no parent")?;
+                std::fs::canonicalize(parent)
+                    .context("resolving Git index parent")?
+                    .join(
+                        index_path
+                            .file_name()
+                            .context("Git index has no file name")?,
+                    )
             }
+            Err(error) => return Err(error).context("resolving Git index"),
+        };
+        let object_format =
+            bootstrap_text(&work_tree, &["rev-parse", "--show-object-format=storage"])
+                .await?
+                .context("Git object format is unavailable")?;
+        let config = match object_format.as_str() {
+            "sha1" => "[core]\nrepositoryformatversion = 0\nbare = false\n",
+            "sha256" => {
+                "[core]\nrepositoryformatversion = 1\nbare = false\n\
+                         [extensions]\nobjectFormat = sha256\n"
+            }
+            format => bail!("unsupported Git object format {format}"),
+        };
+        let common_dir = tempfile::tempdir().context("creating bounded Git common directory")?;
+        let info_dir = common_dir.path().join("info");
+        std::fs::create_dir(&info_dir).context("creating bounded Git info directory")?;
+        std::fs::write(common_dir.path().join("config"), config)
+            .context("writing bounded Git configuration")?;
+        std::fs::write(info_dir.join("attributes"), b"* !filter !diff\n")
+            .context("writing bounded Git attributes")?;
+        match safe_file(&real_common, b"info/exclude")? {
+            Some((file, initial)) => {
+                if initial.len() > MAX_EXCLUDE_BYTES {
+                    bail!("Git info/exclude exceeded its safe read bound");
+                }
+                let mut file = tokio::fs::File::from_std(file);
+                let mut bytes = vec![0_u8; initial.len() as usize];
+                file.read_exact(&mut bytes).await?;
+                let mut extra = [0_u8; 1];
+                if file.read(&mut extra).await? != 0
+                    || !same_metadata(&initial, &file.metadata().await?)
+                {
+                    bail!("Git info/exclude changed while being read");
+                }
+                std::fs::write(info_dir.join("exclude"), bytes)
+                    .context("copying bounded Git excludes")?;
+            }
+            None if real_common.join("info/exclude").try_exists()? => {
+                bail!("Git info/exclude is not a safe regular file");
+            }
+            None => {}
         }
-        filter_drivers.sort();
-        filter_drivers.dedup();
-        Ok(Self { filter_drivers })
+        Ok(Self {
+            common_dir,
+            work_tree,
+            git_dir,
+            object_dir,
+            index_path,
+        })
     }
 }
 
@@ -391,10 +529,15 @@ fn parse_raw_files(bytes: &[u8]) -> Vec<RawFile> {
             b'T' => ChangeFileStatusDto::TypeChanged,
             _ => ChangeFileStatusDto::Modified,
         };
+        let gitlink = header
+            .split(|byte| *byte == b' ')
+            .nth(1)
+            .is_some_and(|mode| mode == b"160000");
         files.push(RawFile {
             status,
             path,
             old_path,
+            gitlink,
         });
     }
     files
@@ -759,16 +902,14 @@ struct StateCapture {
 }
 
 async fn capture_state(
-    work_dir: &Path,
-    policy: &GitReadPolicy,
+    boundary: &GitBoundary,
     base_reference: &str,
     base_oid: &str,
     head_oid: &str,
-    index_path: &Path,
 ) -> Result<StateCapture> {
     macro_rules! diff {
         ($args:expr) => {
-            async { capture_diff(work_dir, policy, $args, MAX_INVENTORY_BYTES).await }
+            async { capture_diff(boundary, $args, MAX_INVENTORY_BYTES).await }
         };
     }
     let (final_raw, numstat, committed, staged, unstaged, untracked) = tokio::try_join!(
@@ -799,8 +940,7 @@ async fn capture_state(
         ]),
         diff!(&["--name-only", "--find-renames", "-z", "--"]),
         capture_git(
-            work_dir,
-            policy,
+            boundary,
             &["ls-files", "--others", "--exclude-standard", "-z", "--"],
             MAX_INVENTORY_BYTES,
         ),
@@ -831,20 +971,20 @@ async fn capture_state(
         ] {
             hash_record(&mut hasher, tag, &capture.bytes);
         }
-        let mut complete = hash_index(index_path, &mut hasher).await?;
+        let mut complete = hash_index(&boundary.index_path, &mut hasher).await?;
         let mut remaining = MAX_IDENTITY_BYTES;
         let raw_files = parse_raw_files(&final_raw.bytes);
         for file in raw_files
             .iter()
-            .filter(|file| file.status != ChangeFileStatusDto::Deleted)
+            .filter(|file| file.status != ChangeFileStatusDto::Deleted && !file.gitlink)
         {
-            match hash_path(work_dir, &file.path, &mut hasher, &mut remaining).await? {
+            match hash_path(&boundary.work_tree, &file.path, &mut hasher, &mut remaining).await? {
                 HashPathResult::Complete(_) => {}
                 HashPathResult::Incomplete => complete = false,
             }
         }
         for path in &untracked_paths {
-            match hash_path(work_dir, path, &mut hasher, &mut remaining).await? {
+            match hash_path(&boundary.work_tree, path, &mut hasher, &mut remaining).await? {
                 HashPathResult::Complete(Some(lines)) => {
                     untracked_additions += lines;
                 }
@@ -897,13 +1037,9 @@ fn unavailable(
     }
 }
 
-async fn load_once(
-    work_dir: &Path,
-    policy: &GitReadPolicy,
-    base_reference: &str,
-) -> Result<(ChangeSetDto, bool)> {
-    let Some(head_oid) = git_text(work_dir, policy, &["rev-parse", "--verify", "HEAD"]).await?
-    else {
+async fn load_once(boundary: &GitBoundary, base_reference: &str) -> Result<(ChangeSetDto, bool)> {
+    let work_dir = &boundary.work_tree;
+    let Some(head_oid) = bootstrap_text(work_dir, &["rev-parse", "--verify", "HEAD"]).await? else {
         return Ok((
             unavailable(
                 base_reference,
@@ -919,7 +1055,7 @@ async fn load_once(
         format!("refs/heads/{base_reference}")
     };
     let base_spec = format!("{local_base}^{{commit}}");
-    let Some(base_tip) = git_text(work_dir, policy, &["rev-parse", "--verify", &base_spec]).await?
+    let Some(base_tip) = bootstrap_text(work_dir, &["rev-parse", "--verify", &base_spec]).await?
     else {
         return Ok((
             unavailable(
@@ -930,7 +1066,7 @@ async fn load_once(
             true,
         ));
     };
-    let Some(base_oid) = git_text(work_dir, policy, &["merge-base", &head_oid, &base_tip]).await?
+    let Some(base_oid) = bootstrap_text(work_dir, &["merge-base", &head_oid, &base_tip]).await?
     else {
         return Ok((
             unavailable(
@@ -941,29 +1077,11 @@ async fn load_once(
             true,
         ));
     };
-    let index_path = git_text(work_dir, policy, &["rev-parse", "--git-path", "index"])
-        .await?
-        .map(PathBuf::from)
-        .context("git index path is unavailable")?;
-    let index_path = if index_path.is_absolute() {
-        index_path
-    } else {
-        work_dir.join(index_path)
-    };
-    let state = capture_state(
-        work_dir,
-        policy,
-        base_reference,
-        &base_oid,
-        &head_oid,
-        &index_path,
-    )
-    .await?;
+    let state = capture_state(boundary, base_reference, &base_oid, &head_oid).await?;
     let mut raw_files = parse_raw_files(&state.final_raw.bytes);
 
     let patch = capture_diff(
-        work_dir,
-        policy,
+        boundary,
         &["--patch", "--find-renames", "--unified=3", &base_oid, "--"],
         MAX_PATCH_BYTES,
     )
@@ -981,6 +1099,7 @@ async fn load_once(
                 status: ChangeFileStatusDto::Untracked,
                 path: path.clone(),
                 old_path: None,
+                gitlink: false,
             });
         }
     }
@@ -1049,17 +1168,9 @@ async fn load_once(
         return Ok((changes, true));
     };
 
-    let post = capture_state(
-        work_dir,
-        policy,
-        base_reference,
-        &base_oid,
-        &head_oid,
-        &index_path,
-    )
-    .await?;
-    let head_after = git_text(work_dir, policy, &["rev-parse", "--verify", "HEAD"]).await?;
-    let base_after = git_text(work_dir, policy, &["rev-parse", "--verify", &base_spec]).await?;
+    let post = capture_state(boundary, base_reference, &base_oid, &head_oid).await?;
+    let head_after = bootstrap_text(work_dir, &["rev-parse", "--verify", "HEAD"]).await?;
+    let base_after = bootstrap_text(work_dir, &["rev-parse", "--verify", &base_spec]).await?;
     let stable = post.identity == Some(identity)
         && head_after.as_deref() == Some(head_oid.as_str())
         && base_after.as_deref() == Some(base_tip.as_str());
@@ -1079,9 +1190,9 @@ async fn load_once(
 
 /// Read one session worktree without fetching or changing Git state.
 pub async fn load(work_dir: &Path, base_reference: &str) -> Result<ChangeSetDto> {
-    let policy = GitReadPolicy::load(work_dir).await?;
+    let boundary = GitBoundary::load(work_dir).await?;
     for attempt in 0..2 {
-        let (mut changes, stable) = load_once(work_dir, &policy, base_reference).await?;
+        let (mut changes, stable) = load_once(&boundary, base_reference).await?;
         if stable {
             return Ok(changes);
         }
