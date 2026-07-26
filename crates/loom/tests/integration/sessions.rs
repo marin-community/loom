@@ -517,6 +517,7 @@ async fn session_records_its_launcher_as_tree_parent() {
         .await
         .unwrap();
     let parent_branch_id = parent["branch"]["id"].as_str().unwrap().to_string();
+    let parent_session_id = parent["id"].as_str().unwrap().to_string();
     assert!(
         parent["parent_id"].is_null(),
         "a top-level launch has no tree parent"
@@ -542,6 +543,11 @@ async fn session_records_its_launcher_as_tree_parent() {
         Some(parent_branch_id.as_str()),
         "the child's tree parent is the launching branch"
     );
+    assert_eq!(
+        child["parent_session_id"].as_str(),
+        Some(parent_session_id.as_str()),
+        "the exact launching session is retained separately from branch ancestry"
+    );
 
     // Stored, not recomputed: the link is still there on a plain list.
     let list = client.get("/api/sessions").await.unwrap();
@@ -552,14 +558,80 @@ async fn session_records_its_launcher_as_tree_parent() {
         .find(|s| s["id"] == child_id.as_str())
         .expect("child session in list");
     assert_eq!(row["parent_id"].as_str(), Some(parent_branch_id.as_str()));
+    assert_eq!(
+        row["parent_session_id"].as_str(),
+        Some(parent_session_id.as_str())
+    );
+
+    client
+        .post(
+            &format!("/api/sessions/{parent_session_id}/archive"),
+            json!({}),
+        )
+        .await
+        .unwrap();
+    let replacement = client
+        .post(
+            "/api/sessions",
+            json!({
+                "goal": "replacement parent generation",
+                "cwd": cwd,
+                "agent": "shell",
+                "existing_branch": parent["branch"]["branch"]
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replacement["branch"]["id"], parent["branch"]["id"]);
+    let replacement_id = replacement["id"].as_str().unwrap().to_string();
+    let second_child = client
+        .post(
+            "/api/sessions",
+            json!({
+                "goal": "child of replacement generation",
+                "cwd": cwd,
+                "agent": "shell",
+                "name": "second-child",
+                "parent_branch": parent_branch_id,
+            }),
+        )
+        .await
+        .unwrap();
+    let second_child_id = second_child["id"].as_str().unwrap().to_string();
+    assert_eq!(second_child["parent_id"], parent["branch"]["id"]);
+    assert_eq!(second_child["parent_session_id"], replacement["id"]);
+
+    client
+        .delete(&format!("/api/sessions/{replacement_id}"))
+        .await
+        .unwrap();
+    let after_parent_delete = client
+        .get(&format!("/api/sessions/{second_child_id}"))
+        .await
+        .unwrap();
+    assert_eq!(
+        after_parent_delete["parent_session_id"], replacement["id"],
+        "exact provenance remains immutable after parent removal"
+    );
+
+    sqlx::query("UPDATE sessions SET parent_session_id = NULL WHERE id = ?")
+        .bind(&second_child_id)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    let legacy = client
+        .get(&format!("/api/sessions/{second_child_id}"))
+        .await
+        .unwrap();
+    assert!(legacy["parent_session_id"].is_null());
+    assert_eq!(legacy["parent_id"], parent["branch"]["id"]);
 
     client
         .delete(&format!("/api/sessions/{child_id}"))
         .await
         .unwrap();
-    let parent_id = parent["id"].as_str().unwrap();
     client
-        .delete(&format!("/api/sessions/{parent_id}"))
+        .delete(&format!("/api/sessions/{second_child_id}"))
         .await
         .unwrap();
 }
@@ -703,11 +775,11 @@ async fn session_records_origin_class_and_tracking_issue() {
     client.delete(&format!("/api/sessions/{id}")).await.unwrap();
 }
 
-/// Successful automation work is a normal session in the default fleet. The
-/// explicit false query remains as a compatibility read for old consumers.
+/// An automation-class session is machinery: absent from the default fleet
+/// listing, present with `?automation=true` — symmetric with `archived`.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn automation_class_surfaces_in_the_default_listing() {
+async fn automation_class_hidden_from_the_default_listing() {
     let ts = TestServer::start().await;
     let client = &ts.client;
 
@@ -734,18 +806,18 @@ async fn automation_class_surfaces_in_the_default_listing() {
         list.as_array()
             .unwrap()
             .iter()
-            .any(|s| s["id"] == auto_id.as_str()),
-        "successful automation sessions are normal fleet rows: {list}"
+            .all(|s| s["id"] != auto_id.as_str()),
+        "automation-class sessions are hidden by default: {list}"
     );
 
-    let shown = client.get("/api/sessions?automation=false").await.unwrap();
+    let shown = client.get("/api/sessions?automation=true").await.unwrap();
     assert!(
         shown
             .as_array()
             .unwrap()
             .iter()
-            .all(|s| s["id"] != auto_id.as_str()),
-        "explicit automation=false preserves the compatibility filter: {shown}"
+            .any(|s| s["id"] == auto_id.as_str()),
+        "?automation=true includes the automation session: {shown}"
     );
 
     client

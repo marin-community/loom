@@ -344,7 +344,7 @@ pub(crate) async fn session_view(
                         format!("invalid session launch snapshot: {error}"),
                     )
                 })?
-            .view,
+                .view,
         )
     };
     let placement = crate::session_layout::placement(db, &session.id).await?;

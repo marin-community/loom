@@ -291,53 +291,6 @@ async function deleteAllSessions(baseUrl: string) {
   }
 }
 
-/** Restore the seeded User/GitHub/Ops layout between tests. Layout is durable
- *  by design, so session cleanup alone would otherwise leak custom/collapsed
- *  groups between tests that share a worker. */
-function resetSessionLayout(dbPath: string) {
-  try {
-    execFileSync(
-      "sqlite3",
-      [
-        dbPath,
-        `PRAGMA busy_timeout=5000;
-         PRAGMA foreign_keys=ON;
-         BEGIN IMMEDIATE;
-         DELETE FROM session_placement_defaults;
-         DELETE FROM user_session_group_state;
-         DELETE FROM session_groups;
-         DELETE FROM session_spaces;
-         INSERT INTO session_spaces (id, name, rank, system_key, created_at, updated_at)
-         VALUES
-           ('space-user', 'User', 0, 'user', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-           ('space-github', 'GitHub', 1, 'github', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-           ('space-ops', 'Ops', 2, 'ops', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'));
-         INSERT INTO session_groups
-           (id, space_id, name, rank, system_key, created_at, updated_at)
-         VALUES
-           ('group-user-inbox', 'space-user', 'Inbox', 0, 'inbox', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-           ('group-github-inbox', 'space-github', 'Inbox', 0, 'inbox', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-           ('group-ops-inbox', 'space-ops', 'Inbox', 0, 'inbox', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'));
-         INSERT INTO session_placement_defaults (selector_kind, selector_value, group_id)
-         VALUES
-           ('origin', '*', 'group-user-inbox'),
-           ('origin', 'user', 'group-user-inbox'),
-           ('origin', 'github', 'group-github-inbox'),
-           ('origin', 'watch', 'group-ops-inbox'),
-           ('origin', 'actions', 'group-ops-inbox'),
-           ('origin', 'ops', 'group-ops-inbox'),
-           ('origin', 'grafana', 'group-ops-inbox'),
-           ('origin', 'automation', 'group-ops-inbox');
-         UPDATE session_layout_state SET revision = revision + 1 WHERE id = 1;
-         COMMIT;`,
-      ],
-      { stdio: "pipe" },
-    );
-  } catch {
-    // Best effort: a test failure should remain the primary diagnostic.
-  }
-}
-
 /** Automation launch reservations are durable and intentionally have no
  *  product delete endpoint. Test workers own a private sqlite database, so
  *  clear that audit table directly between tests to keep run-only failures
@@ -751,7 +704,6 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
 
     // Reset for the next test in this worker.
     await deleteAllSessions(baseUrl);
-    resetSessionLayout(childEnv.WEAVER_DB!);
     deleteAllAutomationRuns(childEnv.WEAVER_DB!);
     await deleteAllWatches(baseUrl);
     await deleteAllIssues(baseUrl);

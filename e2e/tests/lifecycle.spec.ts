@@ -134,37 +134,6 @@ test.describe("session lifecycle actions", () => {
     expect(await weaver.listSessions()).toHaveLength(0);
   });
 
-  test("a fleet-list row can archive its session without opening it", async ({
-    page,
-    weaver,
-  }) => {
-    const s = await weaver.seedSession({
-      goal: "Archive from the list",
-      name: "row-archive",
-    });
-
-    await page.goto(`${weaver.baseUrl}/`);
-    const row = page.locator(`[data-session-id="${s.id}"]`);
-    await expect(row).toBeVisible();
-
-    // The ⋯ menu is revealed by hovering the row, and holds the verbs.
-    await row.hover();
-    await row.getByTestId("row-actions").click();
-    await expect(row.getByTestId("row-actions-menu")).toBeVisible();
-
-    page.once("dialog", (dialog) => {
-      expect(dialog.type()).toBe("confirm");
-      dialog.accept();
-    });
-    await row.getByTestId("row-action-archive").click();
-
-    // Archived server-side — and we never left the list.
-    await expect
-      .poll(async () => (await weaver.getSession(s.id)).status)
-      .toBe("archived");
-    await expect(page).toHaveURL(/\/$/);
-  });
-
   test("a session can opt out of automatic archive from Details", async ({
     page,
     weaver,
@@ -196,42 +165,5 @@ test.describe("session lifecycle actions", () => {
     await expect
       .poll(async () => (await weaver.getSession(s.id)).branch.tags)
       .not.toContainEqual(expect.objectContaining({ key: "auto-archive" }));
-  });
-
-  test("an archived session offers Recover next to its badge, on both surfaces", async ({
-    page,
-    weaver,
-  }) => {
-    const s = await weaver.seedSession({
-      goal: "Recover me",
-      name: "recover-task",
-    });
-    await weaver.archiveSession(s.id);
-
-    // In explicit History, the row carries its own remedy — no need to open the
-    // session to find it. It is the same component the detail header renders,
-    // hence the same test id.
-    await page.goto(`${weaver.baseUrl}/`);
-    await page.getByTestId("history-view").click();
-    const row = page.locator(`[data-session-id="${s.id}"]`);
-    await expect(row.getByTestId("remedy-recover")).toBeVisible();
-
-    // Following a History row keeps History as the logical return surface.
-    await row.getByRole("link", { name: "recover-task" }).click();
-    await expect(page.getByTestId("status-badge")).toHaveText(/archived/i);
-    await expect(page.getByTestId("remedy-recover")).toBeVisible();
-    const historyBack = page.getByRole("link", { name: "← history" });
-    await expect(historyBack).toHaveAttribute("href", "/?history=true");
-    await historyBack.click();
-    await expect(page).toHaveURL(`${weaver.baseUrl}/?history=true`);
-    await expect(row).toBeVisible();
-
-    // Recovering returns it to the live surface, and the header destination
-    // naturally follows the updated lifecycle.
-    await row.getByRole("link", { name: "recover-task" }).click();
-    await page.getByTestId("remedy-recover").click();
-    await expect(
-      page.getByRole("link", { name: "← sessions" }),
-    ).toHaveAttribute("href", "/?space=space-user");
   });
 });

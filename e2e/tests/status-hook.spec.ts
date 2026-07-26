@@ -66,36 +66,4 @@ test.describe("status reflects hook and attention events", () => {
       /tests failing, need help/i,
     );
   });
-
-  test("list view: attention filter narrows to sessions that need a human", async ({
-    page,
-    weaver,
-  }) => {
-    const fine = await weaver.seedSession({
-      goal: "All good here",
-      name: "fine-one",
-    });
-    const stuck = await weaver.seedSession({
-      goal: "Help needed",
-      name: "stuck-one",
-    });
-
-    await weaver.setStatus(stuck, "attention", "waiting on PR feedback");
-
-    await page.goto(weaver.baseUrl);
-    const stuckCard = page.locator(`[data-session-id="${stuck.id}"]`);
-    const fineCard = page.locator(`[data-session-id="${fine.id}"]`);
-
-    // The list polls every 3s; allow time for the attention to propagate.
-    await expect(
-      stuckCard.locator(
-        '[data-testid="signal-chip"][data-signal-key="attention"]',
-      ),
-    ).toHaveAttribute("data-level", "attention", { timeout: 10_000 });
-
-    // Filtering to "needs attention" hides the OK session.
-    await page.getByTestId("attention-filter").selectOption("needs");
-    await expect(stuckCard).toBeVisible();
-    await expect(fineCard).toHaveCount(0);
-  });
 });

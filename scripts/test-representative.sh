@@ -8,7 +8,7 @@ set -euo pipefail
 
 root="$(git rev-parse --show-toplevel)"
 cd "$root"
-export CARGO_TARGET_DIR="$root/target"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}"
 
 # `--lib --bins` is load-bearing: a package-level filter without it also builds
 # and links Loom's giant integration target.
@@ -29,6 +29,7 @@ journeys=(
   "recover::respawn_accepts_same_profile_lifetime_and_rejects_recreate"
   "custom_agents::canonical_launch_executes_the_reviewed_custom_agent_snapshot"
   "auth::session_token_can_delegate_through_the_cli_resolve_then_create_path"
+  "session_layout::layout_http_session_view_conflict_and_cli_share_one_contract"
 )
 
 for journey in "${journeys[@]}"; do
@@ -42,5 +43,5 @@ done
 
 (
   cd e2e
-  npx playwright test tests/create.spec.ts --workers=1
+  npx playwright test tests/create.spec.ts tests/session-layout.spec.ts --workers=1
 )

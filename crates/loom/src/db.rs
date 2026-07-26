@@ -68,7 +68,7 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         12,
         "session-layout",
-        include_str!("../migrations/0010_session_layout.sql"),
+        include_str!("../migrations/0012_session_layout.sql"),
     ),
 ];
 
@@ -152,6 +152,7 @@ async fn adopt_unversioned_schema(pool: &Db) -> Result<()> {
     for (column, declaration) in [
         ("model", "TEXT NOT NULL DEFAULT ''"),
         ("effort", "TEXT NOT NULL DEFAULT ''"),
+        ("last_activity_at", "TEXT"),
         ("parent_branch_id", "TEXT"),
         ("managed_by", "TEXT"),
         ("created_by", "TEXT"),
@@ -325,8 +326,8 @@ mod tests {
         let revision: i64 =
             sqlx::query_scalar("SELECT revision FROM session_layout_state WHERE id = 1")
                 .fetch_one(&db)
-            .await
-            .unwrap();
+                .await
+                .unwrap();
         assert_eq!(spaces, 3);
         assert_eq!(revision, 1);
 
@@ -380,13 +381,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn layout_migration_maps_parked_and_delegated_sessions_deterministically() {
+    async fn v11_database_upgrades_to_layout_v12_deterministically_and_idempotently() {
         let db = core_connect_in_memory().await.unwrap();
-        for (_, _, migration) in LOOM_MIGRATIONS.iter().take(9) {
+        LOOM_STREAM.ensure_indicator(&db).await.unwrap();
+        for (version, name, migration) in LOOM_MIGRATIONS.iter().take(11) {
             for statement in split_statements(migration) {
                 sqlx::query(&statement).execute(&db).await.unwrap();
             }
+            LOOM_STREAM.stamp(&db, *version, name).await.unwrap();
         }
+        let recorded: Vec<(i64, String)> =
+            sqlx::query_as("SELECT version, name FROM loom_schema_migrations ORDER BY version")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            &recorded[9..],
+            &[
+                (10, "launch-snapshot".to_string()),
+                (11, "profile-lifetimes".to_string()),
+            ]
+        );
         for id in [
             "user",
             "github",
@@ -458,9 +473,8 @@ mod tests {
         .await
         .unwrap();
 
-        for statement in split_statements(LOOM_MIGRATIONS[9].2) {
-            sqlx::query(&statement).execute(&db).await.unwrap();
-        }
+        LOOM_STREAM.apply_pending(&db).await.unwrap();
+        LOOM_STREAM.apply_pending(&db).await.unwrap();
 
         for (session, expected) in [
             ("user", "group-user-later"),
@@ -499,6 +513,23 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(later_order, ["parked-recent", "user"]);
+        let defaults: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_placement_defaults")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(defaults, 8);
+        let revision: i64 =
+            sqlx::query_scalar("SELECT revision FROM session_layout_state WHERE id = 1")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(revision, 1);
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM loom_schema_migrations ORDER BY version")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
         assert!(
             crate::session_layout::placement(&db, "warm")
                 .await

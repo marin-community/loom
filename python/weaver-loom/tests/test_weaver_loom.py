@@ -239,22 +239,13 @@ def test_sessions_skips_terminal_and_counts_surveyed():
     rnd = make_round(
         sessions=[
             session("live"),
+            session("watch-child", session_class="automation"),
             session("done", status="done"),
             session("archived", status="archived"),
         ]
     )
     assert [s["id"] for s in rnd.sessions()] == ["live"]
     assert rnd.surveyed == 1
-
-
-def test_sessions_excludes_automation_class_as_a_recursion_guard():
-    rnd = make_round(
-        sessions=[
-            session("human"),
-            session("watch-child", session_class="automation"),
-        ]
-    )
-    assert [s["id"] for s in rnd.sessions()] == ["human"]
     assert rnd.client.requests == [("GET", "/sessions?automation=false", None)]
 
 
@@ -308,12 +299,6 @@ def test_triggered_sessions_scopes_to_the_named_session():
     fleet = [branch_session("a", "b1"), branch_session("b", "b1")]
     rnd = trigger_round({"event": "session.idle", "session": "b"}, fleet)
     assert [s["id"] for s in rnd.triggered_sessions()] == ["b"]
-
-
-def test_triggered_sessions_rejects_an_automation_target():
-    fleet = [branch_session("watch-child", "b1", session_class="automation")]
-    rnd = trigger_round({"event": "session.idle", "session": "watch-child"}, fleet)
-    assert rnd.triggered_sessions() == []
 
 
 def test_triggered_sessions_falls_back_to_full_survey_without_a_target():

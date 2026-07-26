@@ -1078,3 +1078,231 @@ pub async fn delete_default(
     }
     command.commit().await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use weaver_api::SessionGroupOrderReq;
+
+    async fn seed_placement(db: &Db, session_id: &str, group_id: &str, rank: i64) {
+        sqlx::query(
+            "INSERT INTO branches (id, repo_root, branch, created_at, updated_at)
+             VALUES (?, '/repo', ?, '2026-01-01T00:00:00.000Z',
+                     '2026-01-01T00:00:00.000Z')",
+        )
+        .bind(session_id)
+        .bind(session_id)
+        .execute(db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions
+             (id, branch_id, work_dir, term_session, status)
+             VALUES (?, ?, ?, ?, 'done')",
+        )
+        .bind(session_id)
+        .bind(session_id)
+        .bind(format!("/{session_id}"))
+        .bind(format!("term-{session_id}"))
+        .execute(db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO session_placements (session_id, group_id, rank, updated_at)
+             VALUES (?, ?, ?, '2026-01-01T00:00:00.000Z')",
+        )
+        .bind(session_id)
+        .bind(group_id)
+        .bind(rank)
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    fn order(layout: &SessionLayoutView, group_id: &str) -> Vec<String> {
+        layout
+            .spaces
+            .iter()
+            .flat_map(|space| &space.groups)
+            .find(|group| group.id == group_id)
+            .unwrap()
+            .session_ids
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn moves_preserve_order_fence_stale_revisions_and_restore_atomically() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        seed_placement(&db, "a", "group-user-inbox", 0).await;
+        seed_placement(&db, "b", "group-user-inbox", 1).await;
+        seed_placement(&db, "c", "group-github-inbox", 0).await;
+
+        let moved = move_sessions(
+            &db,
+            "operator",
+            &MoveSessionsReq {
+                session_ids: vec!["b".to_string(), "a".to_string()],
+                destination_group_id: "group-github-inbox".to_string(),
+                before_session_id: Some("c".to_string()),
+                expected_revision: 1,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(moved.revision, 2);
+        assert_eq!(order(&moved, "group-github-inbox"), ["b", "a", "c"]);
+        assert!(matches!(
+            move_sessions(
+                &db,
+                "operator",
+                &MoveSessionsReq {
+                    session_ids: vec!["a".to_string()],
+                    destination_group_id: "group-user-inbox".to_string(),
+                    before_session_id: None,
+                    expected_revision: 1,
+                },
+            )
+            .await,
+            Err(MutationError::Conflict)
+        ));
+
+        sqlx::query(
+            "CREATE TRIGGER fail_second_restore
+             BEFORE UPDATE OF group_id ON session_placements
+             WHEN NEW.session_id = 'b'
+             BEGIN SELECT RAISE(FAIL, 'injected restore failure'); END",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let restore = RestoreSessionGroupsReq {
+            groups: vec![
+                SessionGroupOrderReq {
+                    group_id: "group-user-inbox".to_string(),
+                    session_ids: vec!["a".to_string(), "b".to_string()],
+                },
+                SessionGroupOrderReq {
+                    group_id: "group-github-inbox".to_string(),
+                    session_ids: vec!["c".to_string()],
+                },
+            ],
+            expected_revision: 2,
+        };
+        assert!(matches!(
+            restore_groups(&db, "operator", &restore).await,
+            Err(MutationError::Internal(_))
+        ));
+        let unchanged = get_layout(&db, "operator").await.unwrap();
+        assert_eq!(unchanged.revision, 2);
+        assert_eq!(order(&unchanged, "group-github-inbox"), ["b", "a", "c"]);
+
+        sqlx::query("DROP TRIGGER fail_second_restore")
+            .execute(&db)
+            .await
+            .unwrap();
+        let restored = restore_groups(&db, "operator", &restore).await.unwrap();
+        assert_eq!(restored.revision, 3);
+        assert_eq!(order(&restored, "group-user-inbox"), ["a", "b"]);
+        assert_eq!(order(&restored, "group-github-inbox"), ["c"]);
+    }
+
+    #[tokio::test]
+    async fn cross_space_group_moves_preflight_both_collision_kinds() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let user_review = create_group(
+            &db,
+            "operator",
+            &CreateSessionGroupReq {
+                space_id: "space-user".to_string(),
+                name: "Review".to_string(),
+                expected_revision: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let review_id = user_review
+            .spaces
+            .iter()
+            .flat_map(|space| &space.groups)
+            .find(|group| group.space_id == "space-user" && group.name == "Review")
+            .unwrap()
+            .id
+            .clone();
+        let ops_review = create_group(
+            &db,
+            "operator",
+            &CreateSessionGroupReq {
+                space_id: "space-ops".to_string(),
+                name: "Review".to_string(),
+                expected_revision: user_review.revision,
+            },
+        )
+        .await
+        .unwrap();
+        let move_group = |id: &str, destination: &str, revision| ReorderSessionLayoutReq {
+            kind: SessionLayoutItemKind::Group,
+            id: id.to_string(),
+            before_id: None,
+            destination_space_id: Some(destination.to_string()),
+            expected_revision: revision,
+        };
+        assert!(matches!(
+            reorder(
+                &db,
+                "operator",
+                &move_group(&review_id, "space-ops", ops_review.revision),
+            )
+            .await,
+            Err(MutationError::Invalid(message)) if message.contains("named 'Review'")
+        ));
+        assert!(matches!(
+            reorder(
+                &db,
+                "operator",
+                &move_group(
+                    "group-user-inbox",
+                    "space-github",
+                    ops_review.revision,
+                ),
+            )
+            .await,
+            Err(MutationError::Invalid(message)) if message.contains("system key 'inbox'")
+        ));
+
+        let unique = create_group(
+            &db,
+            "operator",
+            &CreateSessionGroupReq {
+                space_id: "space-user".to_string(),
+                name: "Unique".to_string(),
+                expected_revision: ops_review.revision,
+            },
+        )
+        .await
+        .unwrap();
+        let unique_id = unique
+            .spaces
+            .iter()
+            .flat_map(|space| &space.groups)
+            .find(|group| group.space_id == "space-user" && group.name == "Unique")
+            .unwrap()
+            .id
+            .clone();
+        let crossed = reorder(
+            &db,
+            "operator",
+            &move_group(&unique_id, "space-ops", unique.revision),
+        )
+        .await
+        .unwrap();
+        assert_eq!(crossed.revision, unique.revision + 1);
+        assert!(crossed
+            .spaces
+            .iter()
+            .find(|space| space.id == "space-ops")
+            .unwrap()
+            .groups
+            .iter()
+            .any(|group| group.id == unique_id));
+    }
+}

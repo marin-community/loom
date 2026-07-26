@@ -1294,6 +1294,7 @@ function scrollSpaces(direction: number) {
         ref="undoButton"
         type="button"
         class="font-semibold text-accent hover:underline"
+        :disabled="layoutBusy"
         @click="restoreMove"
       >
         Undo
