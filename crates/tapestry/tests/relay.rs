@@ -82,13 +82,15 @@ impl Relay {
 
     /// Block until the spool has assigned at least `n` sequence numbers.
     async fn wait_spooled(&self, n: u64) {
-        for _ in 0..400 {
-            if self.ping().await.spooled >= n {
+        let mut last = 0;
+        for _ in 0..800 {
+            last = self.ping().await.spooled;
+            if last >= n {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        panic!("spool never reached seq {n}");
+        panic!("spool never reached seq {n} (stopped at {last})");
     }
 
     async fn kill(&self) {
@@ -211,6 +213,39 @@ async fn replay_survives_client_death_and_respects_the_cursor() {
     r.wait_spooled(3).await;
     let mut sub = r.subscribe(2).await;
     assert_eq!(next_frame(&mut sub).await, (3, b"got:c".to_vec()));
+
+    r.kill().await;
+}
+
+/// A large durable replay may fill every bounded client/socket buffer while its
+/// consumer catches up. Control traffic must remain responsive during that
+/// back-pressure so Loom can ACK, prompt, inspect, or replace the subscriber
+/// instead of having the supervisor misclassify recovery as a wedged client.
+#[tokio::test]
+#[serial]
+async fn large_slow_replay_does_not_block_relay_control() {
+    let script = r#"python3 -c 'import sys, time
+for _ in range(1000):
+ print("x" * 1024)
+sys.stdout.flush()
+time.sleep(30)'"#;
+    let r = Relay::start("slow-replay", script, None).await;
+    r.wait_spooled(1000).await;
+
+    let mut sub = r.subscribe(0).await;
+    assert_eq!(next_frame(&mut sub).await.0, 1);
+
+    let pong = tokio::time::timeout(Duration::from_secs(2), async {
+        Client::connect(&r.name)
+            .await
+            .unwrap()
+            .ping()
+            .await
+            .unwrap()
+    })
+    .await
+    .expect("relay control blocked behind durable replay");
+    assert_eq!(pong.spooled, 1000);
 
     r.kill().await;
 }

@@ -487,9 +487,17 @@ Details → Advanced, not as the primary file or work surface.
   at any time. Terminal *and* relay supervisors and worktrees survive (the
   supervisor is a detached process, independent of `loom server run`); "orphaned"
   is a first-class status, recovered via `loom session adopt` (or the Adopt button
-  in the UI). On startup loom re-attaches every live-relay ACP session so its
-  journal keeps flowing; adopt re-attaches when the relay outlived a crashed task,
-  or respawns the adapter and reopens the conversation via `session/load` (falling
+  in the UI). On startup and periodically afterward, the active loom generation
+  re-attaches every live-relay ACP session missing its in-process driver so its
+  journal keeps flowing; a `loom.json` ownership fence prevents an older draining
+  server from competing for Tapestry's single relay subscription. ACP cursors
+  flush periodically rather than once per streaming frame, and a failed durable
+  journal write yields the task so the repair pass replays from the last ACK
+  instead of accumulating an unbounded backlog. Tapestry drains durable replay
+  in a separate back-pressured task, keeping ACK, write, ping, and replacement
+  subscriber control responsive even when the replay exceeds every bounded
+  stream buffer. Adopt re-attaches when the relay outlived a crashed task, or
+  respawns the adapter and reopens the conversation via `session/load` (falling
   back to a fresh session re-oriented from the goal) when the relay is gone too.
 - **No unowned session runtimes:** the database is the ownership authority for
   detached supervisors. Startup and periodic reconciliation remove
