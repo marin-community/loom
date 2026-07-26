@@ -777,6 +777,24 @@ impl FakeMonitor {
 
 For an agent running this catalog against a diff.
 
+### When to run
+
+Run `scripts/lint-review.py` for a substantive initial implementation or a
+follow-up that materially changes the design or risk surface. Skip it for a
+small, low-risk PR. Once a branch has already had an agent lint review, also
+skip small review/CI follow-ups.
+
+A follow-up is not small/low-risk if it introduces or materially changes a
+migration, authentication/authorization, secrets handling, concurrency or
+lifecycle behavior, destructive persistence behavior, a public REST/wire
+contract, or CI/build/release behavior. Do not use raw line count as the sole
+criterion. Documentation-only changes and narrow review cleanups are typical
+skips when they do not touch those areas.
+
+When skipping, record one concise sentence in the PR/testing notes explaining
+why. Do not add a checklist, scoring framework, or automation for this
+decision.
+
 ### Inputs
 
 Pick the diff that applies, typically the current branch versus its merge-base

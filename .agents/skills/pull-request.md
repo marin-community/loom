@@ -1,16 +1,16 @@
 ---
 name: pull-request
-description: Commit cleanly, run the gate, hand off to the agent lint review, open or update the PR, then monitor it and answer comments until it merges. Use when committing, pushing, or creating/updating a weaver pull request.
+description: Commit cleanly, run proportional deterministic gates, decide whether the agent lint review is warranted, open or update the PR, then monitor it and answer comments until it merges. Use when committing, pushing, or creating/updating a weaver pull request.
 ---
 
 # Skill: Pull Request
 
-Clean the branch, commit, run the lint review, open or update the PR, then stay
-with it until it merges. Commit before the review — it reads the committed branch
-diff and only reports.
+Clean the branch, commit, apply the lint-review policy, open or update the PR,
+then stay with it until it merges. Commit before any review run — it reads the
+committed branch diff and only reports.
 
-Weaver is solo: skip team ceremony, but the gate, the lint review, and driving CI
-green are not optional.
+Weaver is solo: skip team ceremony, but the deterministic gates, the
+lint-review decision, and driving CI green are not optional.
 
 ## Checklist
 
@@ -21,7 +21,8 @@ WIP checkpoint: **1, 2, 4, 5, 7**, stop. Full list before opening/updating a PR.
 3. Tests when warranted — `cargo test --workspace`; `cd e2e && npm test` for UI.
 4. Stage the specific files.
 5. Commit. ← clean checkpoint.
-6. Lint review — `scripts/lint-review.py`; fix or answer every finding.
+6. Lint-review decision — run `scripts/lint-review.py` when warranted; otherwise
+   record why it was skipped.
 7. Push.
 8. Open or update the PR.
 9. Monitor — drive CI green, answer every comment, in a loop.
@@ -64,7 +65,21 @@ Imperative, lower-case, ≤72 chars. The `(#NN)` suffix lands on merge, not from
 
 Hook fails → fix and commit again.
 
-## 6. Lint review
+## 6. Lint-review decision
+
+Run the agent lint review for a substantive initial implementation or a
+follow-up that materially changes the design or risk surface. Skip it for a
+small, low-risk PR. Once a branch has already had an agent lint review, also
+skip small review/CI follow-ups.
+
+A follow-up is not small/low-risk if it introduces or materially changes a
+migration, authentication/authorization, secrets handling, concurrency or
+lifecycle behavior, destructive persistence behavior, a public REST/wire
+contract, or CI/build/release behavior. Do not use raw line count as the sole
+criterion. Documentation-only changes and narrow review cleanups are typical
+skips when they do not touch those areas.
+
+When a review is warranted, run:
 
 ```bash
 scripts/lint-review.py         # the agent lint over the branch diff
@@ -77,6 +92,10 @@ they make the code better, not blindly.
 
 Deeper pass on a big change: `/code-review` (`ultra` = multi-agent cloud). On a
 solo PR, read its findings and fix — don't post them to your own PR.
+
+When skipping, add one concise sentence to the PR/testing notes explaining why,
+for example: `Agent lint review skipped: documentation-only workflow change
+with no runtime behavior.` Do not add a checklist or scoring framework.
 
 ## 7. Push
 
@@ -105,6 +124,8 @@ a branch that already has a PR.
 **Hard rules:**
 
 - Body is *what & why* — no "Testing"/"Validation" section, no "written by…".
+  A single unheaded testing sentence is allowed when recording why the agent
+  lint review was skipped.
 - No checkboxes, no emoji, no filler openers ("This PR…", "Summary of changes:").
 - ≤500 words; Markdown sections only when a large change needs them.
 - No self-credit.
@@ -143,7 +164,8 @@ done — not before.
 
 ## Rules
 
-- `./scripts/pre-commit.sh` is the gate; commit before `lint-review.py`.
+- `./scripts/pre-commit.sh` is the gate; make the lint-review decision after
+  committing.
 - Never merge or push to `main`; open a PR.
 - Force-push with `--force-with-lease`, e.g. after a rebase.
 - No self-attribution in commits or PR bodies.

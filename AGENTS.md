@@ -36,12 +36,22 @@ Test placement: pure program/module logic lives in pytest
 tests prove wiring against a live server — don't duplicate logic across them.
 
 Run `./scripts/pre-commit.sh` before committing — the fmt + clippy gate CI
-enforces; wire it up as a hook with `git config core.hooksPath .githooks`.
-Separately, as a step in the commit → PR flow (see the `pull-request` skill), run
-the [agent lint review](docs/lint.md) — `scripts/lint-review.py`, a headless
-`claude` sub-agent that errors on the slop fmt/clippy can't catch. It's kept out
-of the commit hook on purpose, so a slow or flaky agent never sits in the commit
-path. Build/test internals and the Playwright setup live in
+enforces; wire it up as a hook with `git config core.hooksPath .githooks`. Keep
+compile, type, and relevant test checks proportional to the change, but always
+run the ones that apply.
+
+Separately, the [agent lint review](docs/lint.md) — `scripts/lint-review.py` — is
+required for substantive initial implementations and follow-ups that materially
+change the design or risk surface. Skip it for small, low-risk PRs, and for
+small review/CI follow-ups after the branch has already had an agent lint
+review. A follow-up is not low-risk if it introduces or materially changes a
+migration, authentication/authorization, secrets handling, concurrency or
+lifecycle behavior, destructive persistence behavior, a public REST/wire
+contract, or CI/build/release behavior. Do not decide from line count alone.
+When skipping, put one concise reason in the PR/testing notes.
+
+The review is kept out of the commit hook so a slow or flaky agent never sits
+in the commit path. Build/test internals and the Playwright setup live in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Don't disturb the user's live loom
@@ -72,10 +82,10 @@ The full commit → lint review → PR → monitor flow is the **`pull-request` 
 ([.agents/skills/pull-request.md](.agents/skills/pull-request.md)) — invoke it
 when you're ready to land. The rules it enforces:
 
-- **Open a PR; never push to or merge `main`.** Branch → `./scripts/pre-commit.sh`
-  + `cargo test --workspace` → `scripts/lint-review.py` → `gh pr create`. A weaver
-  worktree is already on its own branch; finishing means opening the PR, not
-  integrating it yourself.
+- **Open a PR; never push to or merge `main`.** Branch →
+  `./scripts/pre-commit.sh` + relevant tests → the documented lint-review
+  decision → `gh pr create`. A weaver worktree is already on its own branch;
+  finishing means opening the PR, not integrating it yourself.
 - **Write in the project's voice** — no self-attribution in commits or PRs
   ("Generated with…", "Co-Authored-By: <tool>", and the like).
 - **Keep the branch synced with `main`** when it falls behind or conflicts.

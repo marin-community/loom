@@ -103,10 +103,12 @@ print as advisory.
 
 It is **not** wired into the pre-commit hook. `scripts/pre-commit.sh` stays a
 fast fmt + clippy gate identical to CI; the lint review is a separate, explicit
-step in the commit → PR flow — agents run it via the `pull-request` skill after
+decision in the commit → PR flow. Agents apply the proportional
+[run/skip policy](lint.md#when-to-run) via the `pull-request` skill after
 committing and before opening the PR. Keeping the agent out of the commit path
-means a slow or flaky review never wedges a commit. Run `scripts/lint-review.py`
-to review the whole branch against its merge-base with `main`.
+means a slow or flaky review never wedges a commit. When warranted,
+`scripts/lint-review.py` reviews the whole branch against its merge-base with
+`main`.
 
 It **self-skips** (exit 0) when `claude` isn't on PATH, when there are no
 Rust/TS/Vue changes, or when the agent times out or errors — so a flaky or
