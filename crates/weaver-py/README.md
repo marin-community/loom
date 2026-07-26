@@ -45,7 +45,7 @@ for s in c.sessions():
 
 s = c.session("abc123")            # by id, branch id, branch name, or repo:branch
 screen = c.preview("abc123", 200)  # terminal as text, 200 lines of scrollback
-tree = c.diff("abc123")            # worktree file tree + change map
+changes = c.changes("abc123")      # typed, bounded worktree changes
 
 c.set_tag("abc123", "triage", "attention", note="stuck on tests")  # needs "mark"
 c.clear_tag("abc123", "triage")                          # back to calm; needs "mark"

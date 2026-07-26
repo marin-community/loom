@@ -177,11 +177,11 @@ impl Client {
             .map_err(api_err)
     }
 
-    /// The worktree file tree + change map vs the diff base, as a dict
-    /// (`GET /api/sessions/{key}/tree`).
-    fn diff(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+    /// Typed, bounded worktree changes relative to the session's local base
+    /// (`GET /api/sessions/{key}/changes`).
+    fn changes(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let value = py
-            .detach(|| self.rt.block_on(self.inner.diff(key)))
+            .detach(|| self.rt.block_on(self.inner.changes(key)))
             .map_err(api_err)?;
         to_py(py, &value)
     }

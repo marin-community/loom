@@ -983,6 +983,24 @@ export interface Watch {
   updated_at: string;
 }
 
+/** Create payload for `POST /api/watches`. */
+export interface WatchCreateInput {
+  name: string;
+  trigger?: WatchTrigger;
+  scope?: WatchScope;
+  program?: string;
+  params?: Record<string, unknown>;
+  capabilities?: string[];
+  profile?: string;
+  model?: string;
+  effort?: string;
+  cooldown_secs?: number;
+  enabled?: boolean;
+}
+
+/** Mutable fields accepted by `PATCH /api/watches/{id}`. */
+export type WatchUpdateInput = Partial<Omit<WatchCreateInput, 'name'>>;
+
 /** One action a round recorded — a mark, nudge, interrupt, or a stubbed
  *  "would do X" from a dry-run. The shape is loose (the engine writes free-form
  *  JSON); these are the fields the panel renders when present. */
