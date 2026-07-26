@@ -2,12 +2,16 @@ import { test as base, expect } from "@playwright/test";
 import { type ChildProcess, execFileSync, spawn } from "child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { join, resolve } from "path";
 
 // Repo layout: this file lives at <weaver>/e2e/fixtures/weaver.ts
 const WEAVER_ROOT = join(__dirname, "..", "..");
-const LOOM_BINARY = join(WEAVER_ROOT, "target", "debug", "loom");
-const WEAVER_BINARY = join(WEAVER_ROOT, "target", "debug", "weaver");
+const CARGO_TARGET_DIR = resolve(
+  WEAVER_ROOT,
+  process.env.CARGO_TARGET_DIR ?? "target",
+);
+const LOOM_BINARY = join(CARGO_TARGET_DIR, "debug", "loom");
+const WEAVER_BINARY = join(CARGO_TARGET_DIR, "debug", "weaver");
 const FRONTEND_DIR = join(WEAVER_ROOT, "crates", "loom", "frontend");
 const DIST_INDEX = join(
   WEAVER_ROOT,
@@ -375,7 +379,7 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
         ...process.env,
         WEAVER_HOME: weaverHome,
         WEAVER_DB: dbPath,
-        WEAVER_TAPESTRY_BIN: join(WEAVER_ROOT, "target", "debug", "tapestry"),
+        WEAVER_TAPESTRY_BIN: join(CARGO_TARGET_DIR, "debug", "tapestry"),
         RUST_LOG: "loom=warn,weaver_core=warn",
         // Seed an operator: loom refuses to boot with no owner configured, and
         // loopback trust authenticates every test request as this primary user
