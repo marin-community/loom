@@ -46,6 +46,17 @@ const composerInput = ref<HTMLTextAreaElement | null>(null);
 
 const draft = computed(() => reviews.value.find((review) => review.status === 'draft') ?? null);
 
+const baseProblem = computed(() => {
+  const base = changes.value?.base;
+  if (base?.state !== 'unavailable') return '';
+  const reasons: Record<typeof base.reason, string> = {
+    unborn_head: 'this worktree has no commits yet',
+    missing_base: `no local or remote-tracking ref resolves the base ${base.reference}`,
+    no_merge_base: `this branch shares no history with ${base.reference}`,
+  };
+  return `Changes unavailable: ${reasons[base.reason]}.`;
+});
+
 function replaceReview(next: Review) {
   const index = reviews.value.findIndex((review) => review.id === next.id);
   if (index < 0) reviews.value = [next, ...reviews.value];
@@ -434,9 +445,7 @@ onMounted(load);
       v-else-if="changes?.base.state === 'unavailable'"
       class="m-3 rounded border border-line p-3 text-sm text-muted"
     >
-      Changes unavailable: {{ changes.base.reason.replaceAll('_', ' ') }} for local
-      <code>{{ changes.base.reference }}</code
-      >.
+      {{ baseProblem }}
     </p>
     <div v-else class="min-h-0 flex-1 overflow-auto">
       <p v-if="loading && !changes" class="p-3 text-sm text-muted">Loading changes…</p>

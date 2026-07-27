@@ -1,5 +1,7 @@
-//! Bounded, typed worktree changes relative to a session's local branch base.
+//! Bounded, typed worktree changes relative to a session's branch base.
 //!
+//! The base is a stored name (`main`, `origin/main`) resolved here to the fork
+//! point nearest `HEAD` across the local and remote-tracking refs it can name.
 //! Git supplies inventories and a no-driver patch. Parsing, bounds, path
 //! display, and anchor validation are deterministic and side-effect free.
 
@@ -1082,6 +1084,111 @@ fn limits() -> ChangeLimitsDto {
     }
 }
 
+/// Full ref paths a stored base name can legitimately name, most likely first.
+///
+/// A session's `base_branch` is stored the way a person names it — `origin/main`
+/// whenever the launch base resolved against a remote (the common case for a
+/// cloned repo), plain `main` for a local-only checkout — so resolving it as a
+/// local head alone leaves every remote-tracking base unresolvable. A name that
+/// is already fully qualified is taken as-is.
+fn base_ref_candidates(base_reference: &str) -> Vec<String> {
+    if base_reference.starts_with("refs/") {
+        return vec![base_reference.to_string()];
+    }
+    let mut candidates = vec![
+        // The base as a local branch, and as an already remote-qualified name.
+        format!("refs/heads/{base_reference}"),
+        format!("refs/remotes/{base_reference}"),
+    ];
+    if !base_reference.starts_with("origin/") {
+        // Plus origin's counterpart of a branch name — the ref a branch that has
+        // been rebased since it forked usually really sits on.
+        candidates.push(format!("refs/remotes/origin/{base_reference}"));
+    }
+    candidates
+}
+
+/// Strip the ref namespace for display: `refs/remotes/origin/main` → `origin/main`.
+fn short_ref(reference: &str) -> String {
+    ["refs/heads/", "refs/remotes/"]
+        .iter()
+        .find_map(|prefix| reference.strip_prefix(prefix))
+        .unwrap_or(reference)
+        .to_string()
+}
+
+/// The fork point a change set is taken from, plus the ref state it was derived
+/// from so a concurrent ref move is caught by the stability re-read.
+#[derive(Debug, PartialEq, Eq)]
+struct ResolvedBase {
+    /// Display form of the ref the merge-base came from.
+    reference: String,
+    /// Every candidate ref that resolved, with its tip.
+    tips: Vec<(String, String)>,
+    /// Merge-base of `HEAD` with the chosen ref.
+    oid: String,
+}
+
+/// Does `ancestor` reach `descendant`? (`--is-ancestor` answers by exit status.)
+async fn is_ancestor(work_dir: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    let (capture, success) = capture_git_status(
+        hardened_git(work_dir),
+        &["merge-base", "--is-ancestor", ancestor, descendant],
+        4 * 1024,
+    )
+    .await?;
+    if capture.timed_out {
+        bail!("git merge-base --is-ancestor exceeded its deadline");
+    }
+    Ok(success)
+}
+
+/// Resolve the base name to a fork point without fetching or moving Git state.
+///
+/// Every candidate ref that exists is merge-based against `HEAD`, and the fork
+/// point *nearest* `HEAD` wins. A weaver branch forks from the local base but is
+/// then usually rebased onto the remote one, so the local ref goes stale as soon
+/// as nobody checks it out to pull; diffing from the stale ref would replay every
+/// intervening upstream commit as this branch's own work.
+async fn resolve_base(
+    work_dir: &Path,
+    base_reference: &str,
+    head_oid: &str,
+) -> Result<std::result::Result<ResolvedBase, ChangeBaseUnavailableReasonDto>> {
+    let mut tips = Vec::new();
+    for candidate in base_ref_candidates(base_reference) {
+        let spec = format!("{candidate}^{{commit}}");
+        if let Some(tip) = bootstrap_text(work_dir, &["rev-parse", "--verify", &spec]).await? {
+            tips.push((candidate, tip));
+        }
+    }
+    if tips.is_empty() {
+        return Ok(Err(ChangeBaseUnavailableReasonDto::MissingBase));
+    }
+    let mut best: Option<(String, String)> = None;
+    for (candidate, tip) in &tips {
+        let Some(merge_base) = bootstrap_text(work_dir, &["merge-base", head_oid, tip]).await?
+        else {
+            continue; // Unrelated history on this candidate; another may still reach HEAD.
+        };
+        let nearer = match &best {
+            None => true,
+            Some((_, previous)) => is_ancestor(work_dir, previous, &merge_base).await?,
+        };
+        if nearer {
+            best = Some((short_ref(candidate), merge_base));
+        }
+    }
+    let Some((reference, oid)) = best else {
+        return Ok(Err(ChangeBaseUnavailableReasonDto::NoMergeBase));
+    };
+    Ok(Ok(ResolvedBase {
+        reference,
+        tips,
+        oid,
+    }))
+}
+
 fn unavailable(
     reference: &str,
     reason: ChangeBaseUnavailableReasonDto,
@@ -1113,35 +1220,14 @@ async fn load_once(boundary: &GitBoundary, base_reference: &str) -> Result<(Chan
             true,
         ));
     };
-    let local_base = if base_reference.starts_with("refs/heads/") {
-        base_reference.to_string()
-    } else {
-        format!("refs/heads/{base_reference}")
+    let base = match resolve_base(work_dir, base_reference, &head_oid).await? {
+        Ok(base) => base,
+        Err(reason) => {
+            return Ok((unavailable(base_reference, reason, Some(head_oid)), true));
+        }
     };
-    let base_spec = format!("{local_base}^{{commit}}");
-    let Some(base_tip) = bootstrap_text(work_dir, &["rev-parse", "--verify", &base_spec]).await?
-    else {
-        return Ok((
-            unavailable(
-                base_reference,
-                ChangeBaseUnavailableReasonDto::MissingBase,
-                Some(head_oid),
-            ),
-            true,
-        ));
-    };
-    let Some(base_oid) = bootstrap_text(work_dir, &["merge-base", &head_oid, &base_tip]).await?
-    else {
-        return Ok((
-            unavailable(
-                base_reference,
-                ChangeBaseUnavailableReasonDto::NoMergeBase,
-                Some(head_oid),
-            ),
-            true,
-        ));
-    };
-    let state = capture_state(boundary, base_reference, &base_oid, &head_oid).await?;
+    let base_oid = base.oid.clone();
+    let state = capture_state(boundary, &base.reference, &base_oid, &head_oid).await?;
     let mut raw_files = parse_raw_files(&state.final_raw.bytes);
 
     let patch = capture_diff(
@@ -1216,7 +1302,7 @@ async fn load_once(boundary: &GitBoundary, base_reference: &str) -> Result<(Chan
     let mut changes = ChangeSetDto {
         version: None,
         base: ChangeBaseDto::Available {
-            reference: base_reference.to_string(),
+            reference: base.reference.clone(),
             oid: base_oid.clone(),
         },
         head_oid: Some(head_oid.clone()),
@@ -1232,12 +1318,12 @@ async fn load_once(boundary: &GitBoundary, base_reference: &str) -> Result<(Chan
         return Ok((changes, true));
     };
 
-    let post = capture_state(boundary, base_reference, &base_oid, &head_oid).await?;
+    let post = capture_state(boundary, &base.reference, &base_oid, &head_oid).await?;
     let head_after = bootstrap_text(work_dir, &["rev-parse", "--verify", "HEAD"]).await?;
-    let base_after = bootstrap_text(work_dir, &["rev-parse", "--verify", &base_spec]).await?;
+    let base_after = resolve_base(work_dir, base_reference, &head_oid).await?;
     let stable = post.identity == Some(identity)
         && head_after.as_deref() == Some(head_oid.as_str())
-        && base_after.as_deref() == Some(base_tip.as_str());
+        && base_after.as_ref().ok() == Some(&base);
     if !stable {
         changes.truncated = true;
         changes.totals.truncated = true;
@@ -1420,6 +1506,109 @@ mod tests {
         assert!(hunks[0].truncated);
         assert!(hunks[0].lines[0].text.ends_with('…'));
         assert_eq!(hunks[0].lines.len(), 1);
+    }
+
+    fn git_setup(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn commit(dir: &Path, name: &str) -> String {
+        std::fs::write(dir.join(name), format!("{name}\n")).unwrap();
+        git_setup(dir, &["add", "-A"]);
+        git_setup(dir, &["commit", "-q", "-m", name]);
+        git_setup(dir, &["rev-parse", "HEAD"])
+    }
+
+    fn repo(tmp: &tempfile::TempDir) -> &Path {
+        let dir = tmp.path();
+        git_setup(dir, &["init", "-q", "-b", "main"]);
+        git_setup(dir, &["config", "user.email", "t@t.t"]);
+        git_setup(dir, &["config", "user.name", "t"]);
+        dir
+    }
+
+    fn base_view(changes: &ChangeSetDto) -> (&str, Option<&str>) {
+        match &changes.base {
+            ChangeBaseDto::Available { reference, oid } => (reference, Some(oid.as_str())),
+            ChangeBaseDto::Unavailable { reference, .. } => (reference, None),
+        }
+    }
+
+    fn paths(changes: &ChangeSetDto) -> Vec<String> {
+        changes
+            .files
+            .iter()
+            .map(|file| file.path.display.clone())
+            .collect()
+    }
+
+    /// Sessions store their base the way it was resolved at launch —
+    /// `origin/main` for any repo with a remote — so the change set has to reach
+    /// remote-tracking refs, not just local heads.
+    #[tokio::test]
+    async fn remote_tracking_base_resolves_to_its_fork_point() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = repo(&tmp);
+        let upstream = commit(dir, "base.txt");
+        git_setup(dir, &["update-ref", "refs/remotes/origin/main", &upstream]);
+        git_setup(dir, &["checkout", "-q", "-b", "weaver/work"]);
+        commit(dir, "mine.txt");
+        std::fs::write(dir.join("dirty.txt"), "dirty\n").unwrap();
+
+        let changes = load(dir, "origin/main").await.unwrap();
+        assert_eq!(
+            base_view(&changes),
+            ("origin/main", Some(upstream.as_str()))
+        );
+        assert_eq!(paths(&changes), vec!["mine.txt", "dirty.txt"]);
+    }
+
+    /// A local base left behind by an upstream rebase must not drag the commits
+    /// the branch was rebased onto into its diff: the fork point nearest `HEAD`
+    /// wins, here the remote-tracking ref.
+    #[tokio::test]
+    async fn stale_local_base_yields_to_the_fresher_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = repo(&tmp);
+        let fork = commit(dir, "base.txt");
+        let upstream = commit(dir, "upstream.txt");
+        git_setup(dir, &["update-ref", "refs/remotes/origin/main", &upstream]);
+        git_setup(dir, &["checkout", "-q", "-b", "weaver/work"]);
+        commit(dir, "mine.txt");
+        // Local `main` is stale at the pre-rebase fork point.
+        git_setup(dir, &["update-ref", "refs/heads/main", &fork]);
+
+        let changes = load(dir, "main").await.unwrap();
+        assert_eq!(
+            base_view(&changes),
+            ("origin/main", Some(upstream.as_str()))
+        );
+        assert_eq!(paths(&changes), vec!["mine.txt"]);
+    }
+
+    /// A base naming no ref at all stays honestly unavailable.
+    #[tokio::test]
+    async fn unresolvable_base_reports_missing_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = repo(&tmp);
+        commit(dir, "base.txt");
+
+        let changes = load(dir, "origin/nope").await.unwrap();
+        assert!(matches!(
+            changes.base,
+            ChangeBaseDto::Unavailable {
+                reason: ChangeBaseUnavailableReasonDto::MissingBase,
+                ..
+            }
+        ));
+        assert_eq!(base_view(&changes), ("origin/nope", None));
     }
 
     #[test]
