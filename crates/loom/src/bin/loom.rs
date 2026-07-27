@@ -479,7 +479,7 @@ enum SessionCmd {
         #[arg(long, default_value = "0")]
         lines: usize,
     },
-    /// Print the typed, bounded worktree changes relative to the local base.
+    /// Print the typed, bounded worktree changes relative to the branch base.
     Changes {
         /// Session key: id, branch id, branch name, or `repo:branch`.
         session: String,
