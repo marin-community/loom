@@ -127,6 +127,7 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 use axum::{
+    body::HttpBody as _,
     extract::{DefaultBodyLimit, Request},
     http::{header, StatusCode},
     middleware::Next,
@@ -551,6 +552,10 @@ fn is_ide_proxy_path(path: &str) -> bool {
 ///
 /// Skips non-200 responses, SSE streams, WebSocket upgrades, and the
 /// embedded-editor proxy so they pass through untouched.
+/// Largest response body buffered to compute an ETag. Anything bigger is served
+/// unhashed rather than buffered — see [`api_etag_middleware`].
+const ETAG_MAX_BODY_BYTES: u64 = 16 * 1024 * 1024;
+
 async fn api_etag_middleware(request: Request<axum::body::Body>, next: Next) -> Response {
     // The embedded-editor reverse proxy streams arbitrary code-server traffic
     // (assets, its own API, WebSockets). Buffering it to hash an ETag is both
@@ -575,9 +580,30 @@ async fn api_etag_middleware(request: Request<axum::body::Body>, next: Next) -> 
     }
 
     let (mut parts, body) = response.into_parts();
-    let bytes = match axum::body::to_bytes(body, 16 * 1024 * 1024).await {
+    // An ETag is an optimization; buffering to compute one must never be able to
+    // damage the response. A body whose known length is over the cap streams
+    // straight through unhashed — a long agent transcript is exactly the payload
+    // that outgrows this, and silently serving it as an empty 200 renders as a
+    // blank conversation with no error anywhere.
+    if body
+        .size_hint()
+        .exact()
+        .is_some_and(|len| len > ETAG_MAX_BODY_BYTES)
+    {
+        return Response::from_parts(parts, body);
+    }
+    let bytes = match axum::body::to_bytes(body, ETAG_MAX_BODY_BYTES as usize).await {
         Ok(b) => b,
-        Err(_) => return Response::from_parts(parts, axum::body::Body::empty()),
+        // Unknown-length body that outgrew the cap. `to_bytes` has already
+        // consumed it, so it cannot be forwarded — fail loudly instead of
+        // handing the client a truncated success.
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "response too large to serve" })),
+            )
+                .into_response()
+        }
     };
 
     let mut hasher = DefaultHasher::new();
@@ -817,6 +843,10 @@ pub fn router(state: AppState) -> Router {
         // Compatibility alias for the branch-owned history endpoint below.
         .route("/sessions/{id}/log", get(branch_events))
         .route("/sessions/{id}/conversation", get(conversation_session))
+        .route(
+            "/sessions/{id}/conversation/blocks/{message}/{block}",
+            get(conversation_block),
+        )
         .route("/sessions/{id}/history", get(session_history))
         .route("/sessions/{id}/history/search", get(search_session_history))
         .route("/sessions/{id}/files", get(list_session_files))

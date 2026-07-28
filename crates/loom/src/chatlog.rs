@@ -194,6 +194,69 @@ pub async fn captured_json_path(db: &Db, branch: &Branch) -> Option<PathBuf> {
     )
 }
 
+/// Bytes of an oversized tool payload kept inline by [`elide_tool_payloads`].
+pub const TOOL_PREVIEW_BYTES: usize = 256;
+
+/// Truncate `s` to at most `max` bytes without splitting a UTF-8 character.
+fn clip(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Replace oversized tool payloads with a short preview plus a pointer to the
+/// block's own URL.
+///
+/// Tool I/O is effectively all of a long transcript — on one real session,
+/// `tool_call` blocks were 99.3% of 27.5 MB, the worst single one a 4.5 MB
+/// lockfile dump — and the whole log is served in a single response, so a busy
+/// session grows an unbounded payload (94 MB was observed). Prose and thinking
+/// are left alone: they are the conversation, and they are tiny by comparison.
+///
+/// Indices address a block because they are the one handle both backings share:
+/// an ACP session's blocks are `chat_blocks` rows, a terminal session's are
+/// parsed out of a transcript file with no id of their own. Logs only ever grow
+/// at the end, so a given `(message, block)` pair keeps pointing at the same
+/// content.
+pub fn elide_tool_payloads(log: &mut Log, session_id: &str) {
+    for (m, message) in log.messages.iter_mut().enumerate() {
+        for (b, block) in message.blocks.iter_mut().enumerate() {
+            let full = format!("/api/sessions/{session_id}/conversation/blocks/{m}/{b}");
+            match block {
+                Block::ToolUse { input, .. } => {
+                    let rendered = input.to_string();
+                    if rendered.len() <= TOOL_PREVIEW_BYTES {
+                        continue;
+                    }
+                    *input = json!({
+                        "elided": {
+                            "preview": clip(&rendered, TOOL_PREVIEW_BYTES),
+                            "bytes": rendered.len(),
+                            "full": full,
+                        }
+                    });
+                }
+                Block::ToolResult { output, .. } => {
+                    if output.len() <= TOOL_PREVIEW_BYTES {
+                        continue;
+                    }
+                    let bytes = output.len();
+                    *output = format!(
+                        "{}\n[elided {bytes} bytes; GET {full} for the full output]",
+                        clip(output, TOOL_PREVIEW_BYTES)
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// The session's conversation as an iris [`Log`](transcript::Log), for the
 /// dashboard viewer. For an ACP session the source of truth is loom's own chat
 /// journal, mapped to iris ([`journal_to_log`]) — served live so the existing
@@ -515,6 +578,78 @@ async fn write_log(dest: &Path, log: &transcript::Log) -> std::io::Result<PathBu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn elides_only_oversized_tool_payloads() {
+        let big = "x".repeat(TOOL_PREVIEW_BYTES * 4);
+        let mut log = Log {
+            source: "claude".to_string(),
+            messages: vec![Message::new(
+                Role::Assistant,
+                None,
+                vec![
+                    Block::text(big.clone()),
+                    Block::tool_result("short output", false),
+                    Block::tool_result(big.clone(), false),
+                    Block::ToolUse {
+                        name: "run".to_string(),
+                        input: json!({ "cmd": "ls" }),
+                    },
+                    Block::ToolUse {
+                        name: "run".to_string(),
+                        input: json!({ "cmd": big }),
+                    },
+                ],
+            )],
+            ..Default::default()
+        };
+        elide_tool_payloads(&mut log, "sess1234");
+        let blocks = &log.messages[0].blocks;
+
+        // Prose is the conversation — never touched, however long.
+        match &blocks[0] {
+            Block::Text { text } => assert_eq!(text.len(), TOOL_PREVIEW_BYTES * 4),
+            other => panic!("expected text, got {other:?}"),
+        }
+        // Small payloads pass through byte-for-byte.
+        match &blocks[1] {
+            Block::ToolResult { output, .. } => assert_eq!(output, "short output"),
+            other => panic!("expected tool result, got {other:?}"),
+        }
+        match &blocks[3] {
+            Block::ToolUse { input, .. } => assert_eq!(input["cmd"], "ls"),
+            other => panic!("expected tool use, got {other:?}"),
+        }
+        // Oversized ones keep a preview and point at their own block URL.
+        match &blocks[2] {
+            Block::ToolResult { output, .. } => {
+                assert!(output.starts_with(&"x".repeat(TOOL_PREVIEW_BYTES)));
+                assert!(output.contains("elided 1024 bytes"));
+                assert!(output.contains("/api/sessions/sess1234/conversation/blocks/0/2"));
+            }
+            other => panic!("expected tool result, got {other:?}"),
+        }
+        match &blocks[4] {
+            Block::ToolUse { input, .. } => {
+                // 1024 x's plus the `{"cmd":"…"}` envelope.
+                assert_eq!(input["elided"]["bytes"], 1034);
+                assert_eq!(
+                    input["elided"]["full"],
+                    "/api/sessions/sess1234/conversation/blocks/0/4"
+                );
+            }
+            other => panic!("expected tool use, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clip_never_splits_a_utf8_character() {
+        // A 4-byte emoji straddling the cut must be dropped whole, not halved.
+        let s = format!("{}🎉tail", "a".repeat(TOOL_PREVIEW_BYTES - 2));
+        let out = clip(&s, TOOL_PREVIEW_BYTES);
+        assert_eq!(out.len(), TOOL_PREVIEW_BYTES - 2);
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
 
     fn branch(name: &str) -> Branch {
         Branch {

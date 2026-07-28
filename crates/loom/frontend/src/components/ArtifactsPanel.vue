@@ -13,6 +13,7 @@ import { useRouter } from 'vue-router';
 import { getArtifacts, getArtifact, putArtifact, deleteArtifact } from '../api';
 import type { ArtifactMeta, ArtifactView } from '../types';
 import { confirmAction } from '../lib/confirmation';
+import { openSessionEvents, type SessionEventsHandle } from '../lib/sessionEvents';
 import ArtifactDocument from './ArtifactDocument.vue';
 import HtmlArtifactView from './HtmlArtifactView.vue';
 
@@ -329,16 +330,16 @@ function scopeBadge(a: ArtifactMeta): { label: string; title: string } {
 
 // --- SSE-driven refresh ----------------------------------------------------
 
-let source: EventSource | null = null;
+let source: SessionEventsHandle | null = null;
 function closeStream() {
   source?.close();
   source = null;
 }
 function openStream() {
   closeStream();
-  source = new EventSource(`/api/sessions/${props.id}/events`);
-  source.addEventListener('artifact_written', (e) => {
-    const d = JSON.parse((e as MessageEvent).data).data as { name?: string; rev?: number };
+  source = openSessionEvents(props.id);
+  source.on('artifact_written', (e) => {
+    const d = JSON.parse(e.data).data as { name?: string; rev?: number };
     loadList().catch(() => {});
     // If the artifact that just changed is the one we're viewing (and we're not
     // mid-edit), refresh the viewer to its new latest — but only while visible;
@@ -354,8 +355,8 @@ function openStream() {
       else pendingRefresh.value = true;
     }
   });
-  source.addEventListener('artifact_deleted', (e) => {
-    const d = JSON.parse((e as MessageEvent).data).data as { name?: string };
+  source.on('artifact_deleted', (e) => {
+    const d = JSON.parse(e.data).data as { name?: string };
     loadList().catch(() => {});
     // The open artifact was removed elsewhere (CLI, or another tab) — clear the
     // viewer back to the empty state. Our own delete already advanced the view.
@@ -364,19 +365,18 @@ function openStream() {
       draftContent.value = '';
     }
   });
-  // Inline comments: forward to ArtifactDocument rather than opening a second
-  // EventSource (the browser caps how many an origin can hold open).
-  source.addEventListener('comment_added', (e) => {
-    const d = JSON.parse((e as MessageEvent).data).data as { artifact?: string; thread?: number };
+  // Inline comments: forward to ArtifactDocument rather than subscribing twice.
+  source.on('comment_added', (e) => {
+    const d = JSON.parse(e.data).data as { artifact?: string; thread?: number };
     commentsRef.value?.onCommentEvent('comment_added', d);
   });
-  source.addEventListener('comment_resolved', (e) => {
-    const d = JSON.parse((e as MessageEvent).data).data as { artifact?: string; thread?: number };
+  source.on('comment_resolved', (e) => {
+    const d = JSON.parse(e.data).data as { artifact?: string; thread?: number };
     commentsRef.value?.onCommentEvent('comment_resolved', d);
   });
   for (const kind of ['review_submitted', 'review_delivery', 'review_comment_resolved']) {
-    source.addEventListener(kind, (e) => {
-      const d = JSON.parse((e as MessageEvent).data).data as {
+    source.on(kind, (e) => {
+      const d = JSON.parse(e.data).data as {
         subject_key?: string;
         session_id?: string;
       };

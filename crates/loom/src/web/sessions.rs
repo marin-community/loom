@@ -2447,13 +2447,42 @@ pub(super) async fn conversation_session(
     Path(key): Path<String>,
 ) -> ApiResult<Response> {
     let (session, branch) = require_session(&st.db, &key).await?;
-    let log = crate::chatlog::conversation(&st.db, &session, &branch)
+    let mut log = crate::chatlog::conversation(&st.db, &session, &branch)
         .await
         .ok_or_else(|| AppError::not_found("conversation"))?;
+    // Oversized tool payloads are served as previews pointing at their own URL
+    // (see `elide_tool_payloads`), so this response stays bounded by the number
+    // of blocks rather than by how much output the agent's tools happened to
+    // produce. `conversation_block` serves any one of them in full.
+    let session_id = session.id.clone();
     // A terminal transcript can be many megabytes. JSON serialization is CPU
     // work too, so keep it beside discovery/parsing on the blocking pool rather
     // than letting a large response stall unrelated async routes.
-    let body = tokio::task::spawn_blocking(move || serde_json::to_vec(&log)).await??;
+    let body = tokio::task::spawn_blocking(move || {
+        crate::chatlog::elide_tool_payloads(&mut log, &session_id);
+        serde_json::to_vec(&log)
+    })
+    .await??;
+    Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
+}
+
+/// One conversation block, untruncated — the target of the `full` pointer that
+/// [`conversation_session`] leaves in place of an oversized tool payload.
+/// Addressed by position in the log; see `elide_tool_payloads` for why.
+pub(super) async fn conversation_block(
+    State(st): State<AppState>,
+    Path((key, message, block)): Path<(String, usize, usize)>,
+) -> ApiResult<Response> {
+    let (session, branch) = require_session(&st.db, &key).await?;
+    let log = crate::chatlog::conversation(&st.db, &session, &branch)
+        .await
+        .ok_or_else(|| AppError::not_found("conversation"))?;
+    let found = log
+        .messages
+        .get(message)
+        .and_then(|m| m.blocks.get(block))
+        .ok_or_else(|| AppError::not_found("conversation block"))?;
+    let body = serde_json::to_vec(found)?;
     Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
 }
 
