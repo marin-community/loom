@@ -22,6 +22,7 @@ import SessionConversation from '../components/SessionConversation.vue';
 import ArtifactsPanel from '../components/ArtifactsPanel.vue';
 import ChangesPanel from '../components/ChangesPanel.vue';
 import { cancelSessionBacktrack, completeSessionOpen } from '../lib/workbenchMetrics';
+import { openSessionEvents, type SessionEventsHandle } from '../lib/sessionEvents';
 
 // Named + keyed-by-id in App.vue's <keep-alive> so the page (and its live
 // terminal) stays warm: every `/s/:id…` path (the work tabs and the Artifacts
@@ -230,7 +231,7 @@ function startDrag(which: Rail, e: MouseEvent) {
 const ideEnabled = ref(false);
 const ideOpen = ref(false);
 
-let source: EventSource | null = null;
+let source: SessionEventsHandle | null = null;
 
 async function loadSession() {
   ws.value = await getSession(props.id);
@@ -253,13 +254,13 @@ function closeStream() {
 
 function openStream() {
   closeStream();
-  source = new EventSource(`/api/sessions/${props.id}/events`);
+  source = openSessionEvents(props.id);
   // `tag` covers every status axis (the agent's attention, a watch's
   // triage, any free-form key); a tag write re-fetches the session so the
   // resolved badge and the pill row refresh.
   for (const kind of ['status', 'tag', 'github', 'handoff', 'metadata']) {
-    source.addEventListener(kind, (e) => {
-      const ev = JSON.parse((e as MessageEvent).data) as WeaverEvent;
+    source.on(kind, (e) => {
+      const ev = JSON.parse(e.data) as WeaverEvent;
       events.value.push(ev);
       loadSession().catch(() => {});
     });
@@ -268,7 +269,7 @@ function openStream() {
   // session projection when the ledger changes without restoring the deleted
   // issue/overview pane or duplicating issue state in this view.
   for (const kind of ['issue_added', 'issue_closed', 'issue_reopened']) {
-    source.addEventListener(kind, () => loadSession().catch(() => {}));
+    source.on(kind, () => loadSession().catch(() => {}));
   }
 }
 
@@ -488,5 +489,9 @@ onUnmounted(() => {
       </template>
     </template>
   </div>
+  <!-- The session never loaded (missing id, or the fetch failed). `error` is the
+       only signal we have — without this branch the page sits on "Loading…"
+       forever, because the in-page error line lives inside the `ws` subtree. -->
+  <p v-else-if="error" class="px-5 py-3 text-sm text-block">{{ error }}</p>
   <p v-else class="px-5 py-3 text-sm text-muted">Loading…</p>
 </template>

@@ -14,6 +14,7 @@ import { get, sendMessage } from '../api';
 import type { IrisLog, IrisBlock, Session } from '../types';
 import { canSend, conversationState, effectiveAttention, TONE_TEXT } from '../lib/sessionState';
 import { useFollowFoot } from '../lib/followFoot';
+import { openSessionEvents, type SessionEventsHandle } from '../lib/sessionEvents';
 import MarkdownView from './MarkdownView.vue';
 
 // The Conversation tab for a *terminal-backend* session (`protocol='terminal'`):
@@ -126,7 +127,7 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
 // hook, i.e. at each turn boundary — so the view tracks the agent without a
 // manual reload. Same per-session SSE stream the rest of the detail page rides;
 // coalesced through a short debounce so a burst of edges is a single fetch.
-let source: EventSource | null = null;
+let source: SessionEventsHandle | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 function scheduleRefresh() {
   if (refreshTimer) return;
@@ -141,8 +142,8 @@ function scheduleRefresh() {
   }, 400);
 }
 function openStream() {
-  source = new EventSource(`/api/sessions/${id.value}/events`);
-  for (const kind of ['status', 'tag']) source.addEventListener(kind, scheduleRefresh);
+  source = openSessionEvents(id.value);
+  for (const kind of ['status', 'tag']) source.on(kind, scheduleRefresh);
 }
 function closeStream() {
   source?.close();
