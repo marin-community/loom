@@ -23,6 +23,7 @@ import ArtifactsPanel from '../components/ArtifactsPanel.vue';
 import ChangesPanel from '../components/ChangesPanel.vue';
 import { cancelSessionBacktrack, completeSessionOpen } from '../lib/workbenchMetrics';
 import { openSessionEvents, type SessionEventsHandle } from '../lib/sessionEvents';
+import { useCommandScope, type Command } from '../lib/commands';
 
 // Named + keyed-by-id in App.vue's <keep-alive> so the page (and its live
 // terminal) stays warm: every `/s/:id…` path (the work tabs and the Artifacts
@@ -158,6 +159,55 @@ async function selectTab(t: WorkTab) {
     });
   }
 }
+
+const workTabs = computed<{ key: WorkTab; label: string }[]>(() =>
+  isAcp.value
+    ? [
+        { key: 'conversation', label: 'Conversation' },
+        { key: 'shells', label: 'Shells' },
+        { key: 'review', label: 'Review' },
+      ]
+    : [
+        { key: 'terminal', label: 'Agent' },
+        { key: 'conversation', label: 'Conversation' },
+        { key: 'review', label: 'Review' },
+      ],
+);
+async function moveWorkTab(direction: -1 | 1) {
+  const tabs = workTabs.value;
+  const current = tabs.findIndex((tab) => tab.key === workTab.value);
+  const next = (Math.max(current, 0) + direction + tabs.length) % tabs.length;
+  await selectTab(tabs[next].key);
+}
+const sessionCommands = computed<Command[]>(() => [
+  {
+    id: 'session.back',
+    label: 'Back to sessions',
+    keys: ['b', 'Escape'],
+    hint: true,
+    run: () => void router.push('/'),
+  },
+  ...workTabs.value.map((tab, index) => ({
+    id: `session.tab.${tab.key}`,
+    label: `Open ${tab.label}`,
+    keys: [String(index + 1)],
+    run: () => selectTab(tab.key),
+  })),
+  {
+    id: 'session.tab.previous',
+    label: 'Previous work surface',
+    keys: ['['],
+    run: () => moveWorkTab(-1),
+  },
+  {
+    id: 'session.tab.next',
+    label: 'Next work surface',
+    keys: [']'],
+    hint: true,
+    run: () => moveWorkTab(1),
+  },
+]);
+useCommandScope(`session:${props.id}`, 'Session', sessionCommands, 10);
 
 // Pop the artifact out beside the terminal / dock it back into the tab.
 async function togglePop() {

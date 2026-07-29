@@ -1,6 +1,73 @@
 import { test, expect } from '../fixtures/weaver';
 
 test.describe('session detail view', () => {
+  test('session exit commands are discoverable without stealing text input', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({
+      goal: 'Leave the session from the keyboard',
+      name: 'keyboard-exit',
+    });
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+
+    const hints = page.getByTestId('command-hints');
+    await expect(hints).toContainText('back to sessions');
+    await page.keyboard.press('Shift+/');
+    const help = page.getByTestId('shortcut-help');
+    await expect(help.locator('[data-command-id="session.back"]')).toBeVisible();
+    await expect(help.locator('[data-command-id="session.tab.terminal"] + dd')).toContainText(
+      'Open Agent',
+    );
+    await expect(help.locator('[data-command-id="session.tab.conversation"] + dd')).toContainText(
+      'Open Conversation',
+    );
+    await expect(help.locator('[data-command-id="session.tab.review"] + dd')).toContainText(
+      'Open Review',
+    );
+    await page.keyboard.press('Escape');
+    await expect(help).toHaveCount(0);
+    await expect(page).toHaveURL(`${weaver.baseUrl}/s/${s.id}`);
+
+    const renameButton = page.getByRole('button', { name: 'Rename' });
+    await renameButton.focus();
+    await page.keyboard.press('2');
+    await expect(page.locator('[data-tab="conversation"]')).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await page.keyboard.press('3');
+    await expect(page.locator('[data-tab="review"]')).toHaveAttribute('aria-selected', 'true');
+    await expect(page).toHaveURL(new RegExp(`/s/${s.id}/artifacts(?:/|$)`));
+    await page.keyboard.press('[');
+    await expect(page.locator('[data-tab="conversation"]')).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await page.keyboard.press(']');
+    await expect(page.locator('[data-tab="review"]')).toHaveAttribute('aria-selected', 'true');
+    await page.keyboard.press('1');
+    await expect(page.locator('[data-tab="terminal"]')).toHaveAttribute('aria-selected', 'true');
+    await expect(page).toHaveURL(`${weaver.baseUrl}/s/${s.id}`);
+
+    await renameButton.click();
+    const titleInput = page.locator('header input').first();
+    await titleInput.press('End');
+    await titleInput.press('b');
+    await expect(titleInput).toHaveValue('keyboard-exitb');
+    await expect(page).toHaveURL(`${weaver.baseUrl}/s/${s.id}`);
+    await titleInput.press('Escape');
+    await expect(page).toHaveURL(`${weaver.baseUrl}/s/${s.id}`);
+
+    await page.keyboard.press('b');
+    await expect(page).toHaveURL(weaver.baseUrl + '/');
+
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await page.getByTestId('status-bar').click();
+    await page.keyboard.press('Escape');
+    await expect(page).toHaveURL(weaver.baseUrl + '/');
+  });
+
   test('renders goal, status and identity metadata', async ({ page, weaver }) => {
     const goal = Array.from(
       { length: 40 },

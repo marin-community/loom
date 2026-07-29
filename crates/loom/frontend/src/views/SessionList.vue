@@ -40,7 +40,7 @@ defineOptions({ name: 'SessionList' });
 
 const route = useRoute();
 const router = useRouter();
-const { sessions, runs, layout, resourceErrors, refresh, loadHistory } = useFleet();
+const { sessions, runs, layout, resourceErrors, refresh, loadHistory, focusSession } = useFleet();
 
 type WorkbenchView = 'space' | 'attention' | 'all' | 'history';
 
@@ -305,6 +305,7 @@ watch(
   },
   { immediate: true },
 );
+watch(cursorSessionId, focusSession, { immediate: true });
 const unmatchedRuns = computed(() =>
   unmatchedAutomationRuns(runs.value, sessions.value).sort((left, right) =>
     right.updated_at.localeCompare(left.updated_at),
@@ -899,7 +900,6 @@ const sessionCommands = computed<Command[]>(() => [
     id: 'sessions.details',
     label: 'Toggle row details',
     keys: ['o'],
-    hint: true,
     enabled: () => !!cursorSessionId.value,
     run: toggleCursorDetails,
   },
