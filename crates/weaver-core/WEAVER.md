@@ -129,6 +129,32 @@ moved on since it was set.
   terminal TUI. State the question as text, set `weaver status attention
   "<the question>"`, and continue on your best safe assumption when possible.
 
+## Your environment
+
+Shared deploys run your session inside loom's own container image, which is
+built for this work. Before you engineer around a missing tool, check whether
+it is already there or one command away:
+
+- **System packages are yours to install**: `sudo apt-get install -y <pkg>`.
+  The apt index ships in the image, so no `update` step first. Don't
+  hand-extract `.deb` files or patch `LD_LIBRARY_PATH` — if `sudo -n apt-get`
+  is refused you are not in that image, and the fix is to say so, not to
+  improvise a private prefix.
+- **Screenshots work.** Chromium's shared libraries and fonts are installed, but
+  not a browser. Fetch it with the same package you script with — `uv run --with
+  playwright playwright install chromium`, or `npx playwright install chromium` —
+  because each playwright version pins its own browser build, and the node CLI's
+  build is not the one your Python package will accept. The download lands in a
+  cache every session shares, so it costs a minute once per version. Firefox and
+  WebKit are not covered: `playwright install-deps --dry-run <browser>` lists
+  their (much larger) dependency set for `sudo apt-get install -y …`.
+- **Language toolchains**: `uv` for Python (`uv run --with <pkg>`, `uv tool
+  install`), `npm i -g` for node CLIs. Both write to your persisted `$HOME`.
+- An `apt-get` install lasts for **your session only** — it is not shared with
+  other sessions and not durable. If a package is one every session here would
+  want, say so in your PR or file an issue against loom's `Dockerfile` instead
+  of assuming the next session inherits it.
+
 ## Working a GitHub issue
 
 A session often comes from a GitHub thread — an `@loom` mention on an issue or
