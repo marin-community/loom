@@ -21,6 +21,10 @@ const resourceErrors = ref<Partial<Record<'sessions' | 'history' | 'runs' | 'lay
 // Last fetch reached the server? Drives the status bar's online dot; the cached
 // counts dim rather than vanish while the server is briefly unreachable.
 const online = ref(true);
+// The mailbox cursor is view state, but the persistent status line also needs
+// to describe the row under that cursor. Session detail routes use their own
+// route id; this value is consulted only while the Sessions route is active.
+const focusedSessionId = ref('');
 
 let inflight: Promise<void> | null = null;
 let refreshRequested = false;
@@ -107,6 +111,10 @@ function sessionById(id: string): SessionSummary | undefined {
   return sessions.value.find((s) => s.id === id);
 }
 
+function focusSession(id: string): void {
+  focusedSessionId.value = id;
+}
+
 // One fleet poll for the whole app, started from the shell (App.vue) once the
 // caller is authenticated and stopped on sign-out. Guarded so a double-call
 // (HMR, a re-mount) can't leave two intervals running.
@@ -137,6 +145,8 @@ export function useFleet() {
     layout,
     resourceErrors,
     online,
+    focusedSessionId,
+    focusSession,
     refresh,
     loadHistory,
     sessionById,

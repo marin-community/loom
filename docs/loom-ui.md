@@ -120,6 +120,14 @@ status bar shows a short context-sensitive key legend. Sessions behaves like a
 mailbox: `j`/`k` move a stable row cursor, `Enter` opens it, `/` focuses search,
 `x` or `Space` changes bulk selection, and `o` toggles disclosure.
 
+Inside a session, `b` or `Escape` returns to the preserved Sessions mailbox.
+Editable controls, dialogs, menus, and the live terminal own their keystrokes,
+so typing `b` or sending terminal Escape never triggers navigation. The bottom
+line advertises `b back to sessions` and `?` remains the complete contextual
+help. Number keys `1`/`2`/`3` jump directly to the visible work surfaces
+(`Agent`/`Conversation`/`Review` for terminal sessions and
+`Conversation`/`Shells`/`Review` for ACP); `[` and `]` move between them.
+
 The application owns one prioritized command registry rather than view-local
 window listeners. Kept-alive routes register commands only while active, and
 transient surfaces get first refusal. Character commands never capture typing
@@ -141,6 +149,11 @@ readable prose faces. Near-black planes, ruled rows, cursor gutters, borders,
 and spacing establish hierarchy before cards or shadows do. Phosphor green is
 reserved for commands, live focus, and healthy state; amber and red retain
 attention and blocked meaning.
+
+The bottom status line also follows the active session—the mailbox cursor on
+Sessions or the route on session detail—and exposes its linked GitHub PR and
+issue. PR review, CI, and conflict signals reuse the same semantic colors as the
+full GitHub panel and the same fleet snapshot, without another request.
 
 Terminal density and split-pane structure are attached to the existing
 components through shared tokens and a small inspector component. Light mode

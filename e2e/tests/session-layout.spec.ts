@@ -122,17 +122,62 @@ test.describe("durable session workbench", () => {
     page,
     weaver,
   }) => {
-    await weaver.seedSession({
+    const firstSession = await weaver.seedSession({
       goal: "First keyboard-operated task",
       name: "keyboard-mailbox-one",
     });
-    await weaver.seedSession({
+    const secondSession = await weaver.seedSession({
       goal: "Second keyboard-operated task",
       name: "keyboard-mailbox-two",
     });
     await weaver.seedSession({
       goal: "Third keyboard-operated task",
       name: "keyboard-mailbox-three",
+    });
+    await page.route("**/api/sessions/summary**", async (route) => {
+      const response = await route.fetch();
+      const summaries = (await response.json()) as Array<{
+        id: string;
+        github_repo: string | null;
+        github_issue: { repo: string; number: number } | null;
+        branch: Record<string, unknown>;
+      }>;
+      await route.fulfill({
+        response,
+        json: summaries.map((summary) => {
+          const number =
+            summary.id === firstSession.id
+              ? 238
+              : summary.id === secondSession.id
+                ? 239
+                : null;
+          if (!number) return summary;
+          const needsAction = number === 239;
+          return {
+            ...summary,
+            github_repo: "marin-community/loom",
+            github_issue: {
+              repo: "marin-community/loom",
+              number: number === 238 ? 670 : 671,
+            },
+            branch: {
+              ...summary.branch,
+              github: {
+                pr_number: number,
+                pr_url: `https://github.com/marin-community/loom/pull/${number}`,
+                pr_state: "OPEN",
+                pr_title: `Mailbox PR ${number}`,
+                is_draft: false,
+                review_decision: needsAction ? "CHANGES_REQUESTED" : "APPROVED",
+                checks: needsAction ? "failing" : "passing",
+                mergeable: needsAction ? "CONFLICTING" : "MERGEABLE",
+                merged_at: null,
+                fetched_at: new Date().toISOString(),
+              },
+            },
+          };
+        }),
+      });
     });
 
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -145,6 +190,12 @@ test.describe("durable session workbench", () => {
     await expect(preview).toBeVisible();
     await expect(preview).toContainText("keyboard-mailbox-one");
     await expect(preview).toContainText("First keyboard-operated task");
+    const githubStatus = page.getByTestId("status-bar-github");
+    await expect(githubStatus).toContainText("PR #238");
+    await expect(githubStatus).toContainText("Issue #670");
+    await expect(githubStatus.getByTestId("status-bar-pr-signal")).toHaveCount(
+      0,
+    );
 
     // Leave any browser-restored form focus before exercising application
     // commands; character shortcuts deliberately never steal input.
@@ -175,6 +226,11 @@ test.describe("durable session workbench", () => {
     ).toBeFocused();
     await expect(preview).toContainText("keyboard-mailbox-two");
     await expect(preview).toContainText("Second keyboard-operated task");
+    await expect(githubStatus).toContainText("PR #239");
+    await expect(githubStatus).toContainText("Issue #671");
+    await expect(githubStatus).toContainText("changes");
+    await expect(githubStatus).toContainText("CI fail");
+    await expect(githubStatus).toContainText("conflict");
 
     await page.keyboard.press("x");
     await expect(
