@@ -306,6 +306,7 @@ route truth, including internal proxy and compatibility paths.
 | `GET /api/sessions/{id}/shells`; `DELETE /api/sessions/{id}/shell/{idx}`; `GET /api/sessions/{id}/shell/{idx}/terminal` | list, close, or open per-session debug shells through WebSocket |
 | `GET /api/sessions/{id}/artifacts` | list the branch's [artifacts](artifacts.md) plus repo-shared ones |
 | `GET PUT /api/sessions/{id}/artifacts/{name}` | read content + projected refs (`rev=N` for a revision) / write a user edit as a new revision |
+| `GET /api/sessions/{id}/artifacts/{name}/raw` | serve a stored image artifact's bytes for Markdown embedding (`rev=N` optionally pins a revision) |
 | `GET /api/sessions/{id}/changes` | bounded typed worktree change set relative to the session base: file status/totals plus hunk lines with stable old/new line coordinates; backs the SPA and `loom session changes` |
 | `GET POST /api/sessions/{id}/reviews` | list submitted reviews plus the caller's private draft / create or recover a draft for an exact artifact revision or Changes version |
 | `GET PATCH /api/reviews/{id}` | inspect a review by stable ID (including history after artifact deletion) / persist a draft's overall summary or guarded target version |

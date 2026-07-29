@@ -22,8 +22,8 @@ import HtmlArtifactView from './HtmlArtifactView.vue';
 // the right with a version picker and a preview/source edit toggle — saving an
 // edit appends a new revision (`author: user`). Markdown
 // renders through `ArtifactDocument` (GFM + mermaid + smartdoc chips + the inline
-// comment layer); an
-// `html` artifact renders as a live document in a sandboxed iframe.
+// comment layer); an `html` artifact renders as a live document in a sandboxed
+// iframe, and an `image` artifact renders through its raw stored-bytes endpoint.
 //
 // The host (SessionDetail) places this either as a full-width work-area tab or,
 // when popped out, in a resizable rail beside the live terminal — `compact`
@@ -90,9 +90,10 @@ let openingName = '';
 const kind = computed(() => view.value?.meta.kind ?? 'markdown');
 const isMarkdown = computed(() => kind.value === 'markdown');
 const isHtml = computed(() => kind.value === 'html');
-// Markdown and HTML both have a rendered Preview ⇄ Source toggle; every other
-// kind is shown as read-only source only.
-const isRenderable = computed(() => isMarkdown.value || isHtml.value);
+const isImage = computed(() => kind.value === 'image');
+// Markdown, HTML, and images have a rendered Preview ⇄ Source toggle; every
+// other kind is shown as read-only source only.
+const isRenderable = computed(() => isMarkdown.value || isHtml.value || isImage.value);
 // The pseudo-path drives the markdown image base. The artifact name carries no
 // extension, so stamp one on from the kind.
 const pseudoPath = computed(() => {
@@ -100,6 +101,12 @@ const pseudoPath = computed(() => {
   if (isMarkdown.value) return `${name}.md`;
   if (isHtml.value) return `${name}.html`;
   return name;
+});
+const artifactImageUrl = computed(() => {
+  if (!view.value || !isImage.value) return '';
+  const base = `/api/sessions/${encodeURIComponent(props.id)}/artifacts/${encodeURIComponent(selected.value)}/raw`;
+  const rev = viewRev.value ?? view.value.meta.rev;
+  return `${base}?rev=${rev}`;
 });
 
 type ViewMode = 'preview' | 'source';
@@ -194,7 +201,11 @@ async function openArtifact(name: string, rev?: number, opts?: { keepMode?: bool
     draftContent.value = nextView.content;
     if (!opts?.keepMode) {
       viewMode.value =
-        nextView.meta.kind === 'markdown' || nextView.meta.kind === 'html' ? 'preview' : 'source';
+        nextView.meta.kind === 'markdown' ||
+        nextView.meta.kind === 'html' ||
+        nextView.meta.kind === 'image'
+          ? 'preview'
+          : 'source';
     }
   } catch (e) {
     if (epoch !== openEpoch) return;
@@ -633,6 +644,18 @@ onUnmounted(() => {
             :content="view.content"
             class="h-full w-full"
           />
+
+          <div
+            v-if="view && isImage && viewMode === 'preview' && !editing"
+            class="flex h-full w-full items-center justify-center overflow-auto bg-surface p-4"
+          >
+            <img
+              :src="artifactImageUrl"
+              :alt="view.meta.title || view.meta.name"
+              class="max-h-full max-w-full object-contain"
+              data-testid="artifact-image"
+            />
+          </div>
 
           <div
             v-if="!view && !loading"

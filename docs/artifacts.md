@@ -22,23 +22,26 @@ instead of overwriting a revision. Removing an artifact removes all of its
 revisions; individual revisions are not pruned.
 
 Markdown is the primary format. The renderer supports GFM and Mermaid and
-projects two live reference forms:
+projects these live reference forms:
 
 - `#41` resolves an issue and renders its current ledger status.
 - `artifact:design` links another artifact.
+- `![Run output](artifact:screenshot)` embeds an image artifact in Markdown.
 
 References inside code spans or blocks remain literal. Smartdoc projection is a
 read-time join: the document references issues, while the issue ledger owns task
-state. A plan is simply an artifact convention; there is no plan parser or sync
-engine.
+state. An embedded image resolves the latest artifact visible to that session,
+using the same branch-scoped-before-repo-shared lookup as an artifact read. A
+plan is simply an artifact convention; there is no plan parser or sync engine.
 
 Pass a local image path directly to `weaver artifact write` (for example,
 `weaver artifact write screenshot /tmp/result.png`). The CLI reads and snapshots
-the image immediately, wrapping it as a bounded data-URI Markdown document, so
-the stored artifact does not depend on that filesystem path and remains
-available when the dashboard or execution is remote. Local paths embedded
-inside arbitrary Markdown are deliberately not a storage contract; write the
-image itself rather than hand-building base64.
+the image immediately into a bounded `image` artifact, so the stored artifact
+does not depend on that filesystem path and remains available when the dashboard
+or execution is remote. Another Markdown artifact can embed it with
+`![Result](artifact:screenshot)`. Local paths embedded inside arbitrary Markdown
+are deliberately not a storage contract; write the image itself rather than
+hand-building base64.
 
 ### The goal artifact
 

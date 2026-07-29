@@ -2,9 +2,11 @@ use std::collections::HashMap;
 
 use axum::{
     extract::{Path, Query, State},
-    http::header,
+    http::{header, HeaderValue},
+    response::{IntoResponse, Response},
     Json,
 };
+use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use weaver_api::{
@@ -30,6 +32,54 @@ use super::{ApiResult, AppError, AppState};
 #[derive(Debug, Deserialize)]
 pub(super) struct RevQuery {
     rev: Option<i64>,
+}
+
+const MAX_ARTIFACT_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+/// Pull a standalone image data URI out of artifact content. New writes store
+/// the URI directly under the explicit `image` kind; the markdown case
+/// preserves artifacts written before that kind existed. Content detection
+/// also keeps historical revisions readable if an artifact's envelope kind
+/// changes later (kind is current metadata, not versioned metadata).
+fn artifact_image_uri(content: &str) -> Option<&str> {
+    let content = content.trim();
+    if content.starts_with("data:image/") {
+        return Some(content);
+    }
+    if !content.starts_with("![") || !content.ends_with(')') {
+        return None;
+    }
+    let start = content.rfind("](data:image/")? + 2;
+    Some(&content[start..content.len() - 1])
+}
+
+/// Decode the bounded image data-URI formats accepted by `weaver artifact
+/// write`. The MIME whitelist prevents a caller from using an artifact as an
+/// arbitrary same-origin response.
+fn decode_artifact_image(content: &str) -> Option<(&'static str, Vec<u8>)> {
+    let uri = artifact_image_uri(content)?;
+    let (metadata, payload) = uri.strip_prefix("data:")?.split_once(',')?;
+    let mime = metadata.strip_suffix(";base64")?;
+    let mime = match mime {
+        "image/png" => "image/png",
+        "image/jpeg" => "image/jpeg",
+        "image/gif" => "image/gif",
+        "image/webp" => "image/webp",
+        "image/svg+xml" => "image/svg+xml",
+        "image/avif" => "image/avif",
+        "image/bmp" => "image/bmp",
+        "image/x-icon" => "image/x-icon",
+        _ => return None,
+    };
+    // Refuse an oversized encoded payload before allocating its decoded form.
+    let max_encoded = MAX_ARTIFACT_IMAGE_BYTES.div_ceil(3) * 4;
+    if payload.len() > max_encoded {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .ok()?;
+    (bytes.len() <= MAX_ARTIFACT_IMAGE_BYTES).then_some((mime, bytes))
 }
 
 /// The wire metadata for an artifact envelope.
@@ -148,6 +198,42 @@ pub(super) async fn get_artifact(
     Ok(Json(
         artifact_view(&st.db, &branch.repo_root, &a, q.rev).await?,
     ))
+}
+
+/// Raw bytes for a standalone image artifact. Markdown documents can use
+/// `![alt](artifact:<name>)`; the renderer maps that source to this route, so
+/// the browser depends only on loom's artifact store (never an agent-local
+/// path). `?rev=N` pins an older image revision; omitted means latest.
+pub(super) async fn raw_artifact_image(
+    State(st): State<AppState>,
+    Path((key, name)): Path<(String, String)>,
+    Query(q): Query<RevQuery>,
+) -> ApiResult<Response> {
+    let (_, branch) = require_session(&st.db, &key).await?;
+    let a = artifact::get(&st.db, &branch.repo_root, &branch.id, &name)
+        .await?
+        .ok_or_else(|| AppError::not_found("artifact"))?;
+    let version = match q.rev {
+        Some(rev) => artifact::version(&st.db, a.id, rev).await?,
+        None => artifact::latest_version(&st.db, a.id).await?,
+    }
+    .ok_or_else(|| AppError::not_found("artifact revision"))?;
+    let (mime, bytes) = decode_artifact_image(&version.content)
+        .ok_or_else(|| AppError::bad_request("artifact is not a valid image"))?;
+
+    let mut response = bytes.into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("inline"),
+    );
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok(response)
 }
 
 /// Write a new revision of an artifact (a user edit, `author: user`), returning
@@ -436,6 +522,30 @@ mod tests {
             acp: crate::acp::AcpRegistry::new(),
             launch_gate: crate::launch_gate::RepoLaunchGate::default(),
         }
+    }
+
+    #[test]
+    fn decodes_typed_and_legacy_image_artifacts() {
+        let png = "data:image/png;base64,aGVsbG8=";
+        let (mime, bytes) = decode_artifact_image(png).expect("typed image");
+        assert_eq!(mime, "image/png");
+        assert_eq!(bytes, b"hello");
+
+        let legacy = format!("![Screenshot]({png})\n");
+        let (mime, bytes) = decode_artifact_image(&legacy).expect("legacy image wrapper");
+        assert_eq!(mime, "image/png");
+        assert_eq!(bytes, b"hello");
+    }
+
+    #[test]
+    fn rejects_non_image_and_non_standalone_artifacts() {
+        assert!(decode_artifact_image("# Notes\n\nNot an image.").is_none());
+        assert!(
+            decode_artifact_image("Before\n\n![Screenshot](data:image/png;base64,aGVsbG8=)")
+                .is_none()
+        );
+        assert!(decode_artifact_image("data:text/html;base64,aGVsbG8=").is_none());
+        assert!(decode_artifact_image("data:image/png;base64,not!base64").is_none());
     }
 
     #[tokio::test]
