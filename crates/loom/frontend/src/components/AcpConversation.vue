@@ -33,7 +33,6 @@ import type {
   AgentMessagePayload,
   ThoughtPayload,
   ToolCallPayload,
-  ToolContent,
   PlanEntry,
   PlanPayload,
   PermissionPayload,
@@ -51,6 +50,7 @@ import { useFollowFoot } from '../lib/followFoot';
 import { formatTokens } from '../lib/usage';
 import MarkdownView from './MarkdownView.vue';
 import AgentUsage from './AgentUsage.vue';
+import ToolContentPreview from './ToolContentPreview.vue';
 
 // The Conversation surface for an *ACP* session (`protocol='acp'`): typeset
 // dialogue, not chat bubbles. Serif prose for the humans and the agent; the
@@ -1159,29 +1159,20 @@ function activitySummary(row: Extract<Row, { type: 'activity' }>): string {
   }
   return parts.join(' · ');
 }
-// Whether a call carries anything worth expanding (a diff or non-empty text).
+// Whether a call carries anything worth expanding.
 function hasDetail(t: ToolCallPayload): boolean {
-  return (t.content ?? []).some((c) => c.type === 'diff' || (c.type === 'text' && !!c.text));
+  return (t.content ?? []).some(
+    (content) =>
+      content.type === 'diff' ||
+      content.type === 'image' ||
+      (content.type === 'text' && !!content.text),
+  );
 }
 // Execute titles are the command line itself. Keep long commands compact in the
 // activity list, but always let the operator disclose the complete command even
 // when the call produced no output to use as a detail panel.
 function canExpandTool(t: ToolCallPayload): boolean {
   return t.tool_kind === 'execute' || hasDetail(t);
-}
-interface DiffLine {
-  sign: '-' | '+';
-  text: string;
-}
-// A diff content block rendered as ±diff lines.
-function diffLines(c: Extract<ToolContent, { type: 'diff' }>): DiffLine[] {
-  const lines: DiffLine[] = [];
-  const push = (sign: '-' | '+', body: string) => {
-    for (const l of body.replace(/\n$/, '').split('\n')) lines.push({ sign, text: l });
-  };
-  if (c.old) push('-', c.old);
-  push('+', c.new);
-  return lines;
 }
 function planGlyph(status: string): string {
   return status === 'completed' ? '✓' : status === 'in_progress' ? '▸' : '○';
@@ -1214,6 +1205,22 @@ function activityItemOpen(item: ActivityItem): boolean {
 }
 function toggleActivityItem(item: ActivityItem) {
   toggleFold(`tool-${item.tool.tool_call_id}`, item.failed);
+}
+function isSoloToolActivity(row: Extract<Row, { type: 'activity' }>): boolean {
+  return row.entries.length === 1 && row.items.length === 1;
+}
+function activityRowOpen(row: Extract<Row, { type: 'activity' }>): boolean {
+  if (isSoloToolActivity(row) && canExpandTool(row.items[0].tool)) {
+    return activityItemOpen(row.items[0]);
+  }
+  return foldOpen(row.key, row.failures > 0);
+}
+function toggleActivityRow(row: Extract<Row, { type: 'activity' }>) {
+  if (isSoloToolActivity(row) && canExpandTool(row.items[0].tool)) {
+    toggleActivityItem(row.items[0]);
+  } else {
+    toggleFold(row.key, row.failures > 0);
+  }
 }
 
 // ── Working timer (elapsed + time since observable progress) ─────────────────
@@ -1405,17 +1412,30 @@ function goTo(anchor: string) {
                   type="button"
                   class="acp-fold-head"
                   data-testid="acp-activity-head"
-                  @click="toggleFold(row.key, row.failures > 0)"
+                  :disabled="isSoloToolActivity(row) && !canExpandTool(row.items[0].tool)"
+                  :aria-expanded="
+                    isSoloToolActivity(row) && canExpandTool(row.items[0].tool)
+                      ? activityRowOpen(row)
+                      : undefined
+                  "
+                  @click="toggleActivityRow(row)"
                 >
-                  <span class="chev" :class="{ open: foldOpen(row.key, row.failures > 0) }">▸</span>
                   <span
-                    v-if="row.entries.length === 1 && row.items.length === 1"
-                    class="acp-activity-solo"
+                    v-if="!isSoloToolActivity(row) || canExpandTool(row.items[0].tool)"
+                    class="chev"
+                    :class="{ open: activityRowOpen(row) }"
+                    >▸</span
                   >
+                  <span v-if="isSoloToolActivity(row)" class="acp-activity-solo">
                     <span class="acp-tool-glyph">{{ toolGlyph(row.items[0].tool.tool_kind) }}</span>
-                    <span class="truncate">{{
-                      row.items[0].tool.title || row.items[0].tool.tool_kind
-                    }}</span>
+                    <span
+                      :class="{
+                        truncate: !activityRowOpen(row),
+                        'acp-activity-title-open': activityRowOpen(row),
+                      }"
+                      data-testid="acp-activity-title"
+                      >{{ row.items[0].tool.title || row.items[0].tool.tool_kind }}</span
+                    >
                   </span>
                   <span v-else>{{ activitySummary(row) }}</span>
                   <span
@@ -1425,7 +1445,26 @@ function goTo(anchor: string) {
                     >{{ row.failures }} failed</span
                   >
                 </button>
-                <ul v-if="foldOpen(row.key, row.failures > 0)" class="acp-activity-list">
+                <div
+                  v-if="
+                    isSoloToolActivity(row) &&
+                    hasDetail(row.items[0].tool) &&
+                    activityItemOpen(row.items[0])
+                  "
+                  class="acp-detail acp-detail-solo"
+                  data-testid="acp-detail"
+                >
+                  <ToolContentPreview
+                    v-for="(content, index) in row.items[0].tool.content"
+                    :key="index"
+                    :content="content"
+                    :title="row.items[0].tool.title || row.items[0].tool.tool_kind"
+                  />
+                </div>
+                <ul
+                  v-else-if="!isSoloToolActivity(row) && foldOpen(row.key, row.failures > 0)"
+                  class="acp-activity-list"
+                >
                   <li
                     v-for="entry in row.entries"
                     :key="
@@ -1477,24 +1516,12 @@ function goTo(anchor: string) {
                         class="acp-detail"
                         data-testid="acp-detail"
                       >
-                        <template v-for="(c, ci) in entry.item.tool.content" :key="ci">
-                          <!-- A diff renders as real ±diff lines. -->
-                          <pre
-                            v-if="c.type === 'diff'"
-                            class="acp-diff"
-                            data-testid="acp-diff"
-                          ><code
-                          v-for="(l, li) in diffLines(c)"
-                          :key="li"
-                          class="acp-diff-line"
-                          :class="l.sign === '-' ? 'acp-diff-del' : 'acp-diff-add'"
-                        >{{ l.sign }} {{ l.text }}
-  </code></pre>
-                          <!-- Text / command output on the recessed panel tone. -->
-                          <pre v-else-if="c.type === 'text' && c.text" class="acp-payload">{{
-                            c.text
-                          }}</pre>
-                        </template>
+                        <ToolContentPreview
+                          v-for="(content, index) in entry.item.tool.content"
+                          :key="index"
+                          :content="content"
+                          :title="entry.item.tool.title || entry.item.tool.tool_kind"
+                        />
                       </div>
                     </template>
                   </li>
@@ -2019,6 +2046,9 @@ function goTo(anchor: string) {
 .acp-fold-head:hover {
   color: var(--muted);
 }
+.acp-fold-head:disabled {
+  cursor: default;
+}
 .chev {
   display: inline-block;
   flex: none;
@@ -2105,6 +2135,11 @@ function goTo(anchor: string) {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.acp-activity-title-open {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .acp-activity-status {
   margin-left: auto;
   flex: none;
@@ -2122,45 +2157,12 @@ function goTo(anchor: string) {
   border-radius: 0.25rem;
   overflow: hidden;
 }
-.acp-payload {
-  margin: 0;
-  padding: 0.55rem 0.65rem;
-  background: var(--code);
-  color: var(--code-fg);
-  font-family: var(--font-mono);
-  font-size: 0.75rem;
-  line-height: 1.2rem;
-  white-space: pre-wrap;
-  overflow: auto;
-  max-height: 16rem;
+.acp-detail-solo {
+  max-width: 46rem;
+  margin-left: 1.15rem;
 }
 .acp-detail > * + * {
   border-top: 1px solid var(--line);
-}
-
-/* Diff — ±lines on the recessed tone. */
-.acp-diff {
-  margin: 0;
-  padding: 0.4rem 0;
-  background: var(--code);
-  overflow: auto;
-  max-height: 16rem;
-  font-family: var(--font-mono);
-  font-size: 0.75rem;
-  line-height: 1.2rem;
-}
-.acp-diff-line {
-  display: block;
-  padding: 0 0.65rem;
-  white-space: pre;
-}
-.acp-diff-del {
-  background: var(--block-soft);
-  color: var(--block);
-}
-.acp-diff-add {
-  background: var(--ok-soft);
-  color: var(--ok);
 }
 
 /* Permission card — ochre rule + attention wash; the interface asking (sans). */

@@ -33,8 +33,9 @@ weaver replays it for you automatically.
 - `weaver artifact write <name> [<file>]` — write a versioned document (a
   design, report, diagram, plan) for the user to read; prints a dashboard URL
   to hand them. Reads stdin with `-`; `--repo` shares it repo-wide; an image
-  file is embedded so it renders inline. `weaver artifact ls` / `show <name>
-  [--rev N]` / `rm <name>` round it out.
+  path can be passed directly — the CLI snapshots and embeds its bytes, so do
+  not hand-roll base64 and the dashboard never depends on that local path.
+  `weaver artifact ls` / `show <name> [--rev N]` / `rm <name>` round it out.
 - `weaver tag set|rm|ls` — free-form quiet tags on the branch; `weaver log` —
   the event trail; `weaver readme` — this guide, back on demand.
 

@@ -209,13 +209,24 @@ pub struct ThreadStatus {
     pub kind: String,
 }
 
-/// A content block. Only text is consumed; other types degrade to
-/// [`ContentBlock::Other`] (mapped to empty text by [`ContentBlock::text`]).
+/// A displayable ACP content block.
+///
+/// Agent prose consumes only [`ContentBlock::Text`], while tool calls also
+/// preserve images for the durable chat journal and Conversation preview.
+/// Other protocol content (audio/resources and future variants) degrades to
+/// [`ContentBlock::Other`] until loom has a truthful renderer for it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text {
         text: String,
+    },
+    Image {
+        data: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+        #[serde(default)]
+        uri: Option<String>,
     },
     #[serde(other)]
     Other,
@@ -226,7 +237,7 @@ impl ContentBlock {
     pub fn text(&self) -> Option<&str> {
         match self {
             ContentBlock::Text { text } => Some(text),
-            ContentBlock::Other => None,
+            ContentBlock::Image { .. } | ContentBlock::Other => None,
         }
     }
 }
@@ -563,11 +574,51 @@ mod tests {
     fn deserializes_thought_chunk_and_unknown_content_degrades() {
         let u: SessionUpdate = serde_json::from_value(json!({
             "sessionUpdate": "agent_thought_chunk",
-            "content": { "type": "image", "data": "…", "mimeType": "image/png" },
+            "content": { "type": "audio", "data": "…", "mimeType": "audio/wav" },
         }))
         .unwrap();
         match u {
             SessionUpdate::AgentThoughtChunk { content, .. } => assert_eq!(content.text(), None),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_tool_call_with_image_content() {
+        let u: SessionUpdate = serde_json::from_value(json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call_image",
+            "title": "Read screenshot.png",
+            "kind": "read",
+            "status": "completed",
+            "content": [{
+                "type": "content",
+                "content": {
+                    "type": "image",
+                    "data": "aW1hZ2U=",
+                    "mimeType": "image/png",
+                    "uri": "file:///tmp/screenshot.png"
+                }
+            }]
+        }))
+        .unwrap();
+
+        match u {
+            SessionUpdate::ToolCall(tc) => match &tc.content.unwrap()[0] {
+                ToolCallContent::Content {
+                    content:
+                        ContentBlock::Image {
+                            data,
+                            mime_type,
+                            uri,
+                        },
+                } => {
+                    assert_eq!(data, "aW1hZ2U=");
+                    assert_eq!(mime_type, "image/png");
+                    assert_eq!(uri.as_deref(), Some("file:///tmp/screenshot.png"));
+                }
+                other => panic!("wrong image content: {other:?}"),
+            },
             other => panic!("wrong variant: {other:?}"),
         }
     }
