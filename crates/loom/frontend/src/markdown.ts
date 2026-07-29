@@ -56,6 +56,12 @@ export function resolvePath(dir: string, rel: string): string {
   return stack.join('/');
 }
 
+/** Raw endpoint for an image artifact, optionally pinned to one revision. */
+export function artifactImageUrl(sessionId: string, name: string, rev?: number): string {
+  const base = `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(name)}/raw`;
+  return rev == null ? base : `${base}?rev=${rev}`;
+}
+
 /** Map a markdown image source to a viewable URL. `artifact:<name>` resolves
  *  against loom's artifact store; other relative paths point at the worktree's
  *  raw-bytes endpoint, while external links pass through unchanged. */
@@ -63,7 +69,7 @@ export function resolveUrl(ctx: RenderContext, url: string): string {
   if (url.startsWith('artifact:')) {
     const name = url.slice('artifact:'.length);
     if (name !== '.' && name !== '..' && /^[A-Za-z0-9._-]+$/.test(name)) {
-      return `/api/sessions/${encodeURIComponent(ctx.sessionId)}/artifacts/${encodeURIComponent(name)}/raw`;
+      return artifactImageUrl(ctx.sessionId, name);
     }
   }
   if (!url || isExternal(url)) return url;

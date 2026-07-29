@@ -14,6 +14,7 @@ import { getArtifacts, getArtifact, putArtifact, deleteArtifact } from '../api';
 import type { ArtifactMeta, ArtifactView } from '../types';
 import { confirmAction } from '../lib/confirmation';
 import { openSessionEvents, type SessionEventsHandle } from '../lib/sessionEvents';
+import { artifactImageUrl as rawArtifactImageUrl } from '../markdown';
 import ArtifactDocument from './ArtifactDocument.vue';
 import HtmlArtifactView from './HtmlArtifactView.vue';
 
@@ -91,9 +92,12 @@ const kind = computed(() => view.value?.meta.kind ?? 'markdown');
 const isMarkdown = computed(() => kind.value === 'markdown');
 const isHtml = computed(() => kind.value === 'html');
 const isImage = computed(() => kind.value === 'image');
+function isRenderableKind(value: string): boolean {
+  return value === 'markdown' || value === 'html' || value === 'image';
+}
 // Markdown, HTML, and images have a rendered Preview ⇄ Source toggle; every
 // other kind is shown as read-only source only.
-const isRenderable = computed(() => isMarkdown.value || isHtml.value || isImage.value);
+const isRenderable = computed(() => isRenderableKind(kind.value));
 // The pseudo-path drives the markdown image base. The artifact name carries no
 // extension, so stamp one on from the kind.
 const pseudoPath = computed(() => {
@@ -104,9 +108,8 @@ const pseudoPath = computed(() => {
 });
 const artifactImageUrl = computed(() => {
   if (!view.value || !isImage.value) return '';
-  const base = `/api/sessions/${encodeURIComponent(props.id)}/artifacts/${encodeURIComponent(selected.value)}/raw`;
   const rev = viewRev.value ?? view.value.meta.rev;
-  return `${base}?rev=${rev}`;
+  return rawArtifactImageUrl(props.id, selected.value, rev);
 });
 
 type ViewMode = 'preview' | 'source';
@@ -200,12 +203,7 @@ async function openArtifact(name: string, rev?: number, opts?: { keepMode?: bool
     };
     draftContent.value = nextView.content;
     if (!opts?.keepMode) {
-      viewMode.value =
-        nextView.meta.kind === 'markdown' ||
-        nextView.meta.kind === 'html' ||
-        nextView.meta.kind === 'image'
-          ? 'preview'
-          : 'source';
+      viewMode.value = isRenderableKind(nextView.meta.kind) ? 'preview' : 'source';
     }
   } catch (e) {
     if (epoch !== openEpoch) return;
