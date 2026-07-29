@@ -40,6 +40,40 @@ test.describe('watch panel', () => {
     await expect(detail).toContainText('attention ≠ ok');
   });
 
+  test('uses the mailbox command grammar for selection, tabs, and creation', async ({
+    page,
+    weaver,
+  }) => {
+    await weaver.seedWatch({ name: 'alpha' });
+    await weaver.seedWatch({ name: 'bravo' });
+    await weaver.seedWatch({ name: 'charlie' });
+    await page.goto(`${weaver.baseUrl}/watches`);
+
+    const rows = page.getByTestId('watch-row');
+    await expect(rows).toHaveCount(3);
+    await rows.first().focus();
+    await page.keyboard.press('Shift+/');
+    const help = page.getByTestId('shortcut-help');
+    await expect(help.locator('[data-command-id="watches.cursor-down"]')).toBeVisible();
+    await expect(help.locator('[data-command-id="watches.tab.script"]')).toBeVisible();
+    await page.keyboard.press('Escape');
+
+    const secondId = await rows.nth(1).getAttribute('data-watch-id');
+    await page.keyboard.press('j');
+    await expect(rows.nth(1)).toHaveAttribute('data-selected', 'true');
+    await expect(rows.nth(1)).toBeFocused();
+    await expect(page).toHaveURL(new RegExp(`/watches/${secondId}$`));
+
+    await page.keyboard.press('2');
+    await expect(page.getByTestId('watch-tab-script')).toHaveAttribute('aria-selected', 'true');
+    await page.keyboard.press('3');
+    await expect(page.getByTestId('watch-tab-config')).toHaveAttribute('aria-selected', 'true');
+
+    await page.keyboard.press('n');
+    await expect(page.getByTestId('watch-form')).toBeVisible();
+    await expect(page.getByTestId('watch-name')).toBeFocused();
+  });
+
   test('shows the builtin script source under the Script tab', async ({ page, weaver }) => {
     await weaver.seedWatch({ name: 'sourced' });
     await page.goto(`${weaver.baseUrl}/watches`);
@@ -118,6 +152,24 @@ test.describe('watch panel', () => {
     const stdout = page.getByTestId('watch-run-stdout').first();
     await expect(stdout).toBeVisible();
     await expect(stdout).toContainText(/noop|surveyed 0/i);
+  });
+
+  test('keeps routine history behind a signal-first digest', async ({ page, weaver }) => {
+    const watch = await weaver.seedWatch({ name: 'digest-me' });
+    for (let index = 0; index < 3; index += 1) {
+      const response = await page.request.post(`${weaver.baseUrl}/api/watches/${watch.id}/run`, {
+        data: { dry_run: true },
+      });
+      expect(response.ok()).toBe(true);
+    }
+
+    await page.goto(`${weaver.baseUrl}/watches/${watch.id}`);
+    await expect(page.getByTestId('watch-run-row')).toHaveCount(1);
+    await expect(page.getByTestId('watch-run-digest')).toContainText('2 routine rounds hidden');
+
+    await page.getByTestId('watch-runs-toggle').click();
+    await expect(page.getByTestId('watch-run-row')).toHaveCount(3);
+    await expect(page.getByTestId('watch-run-digest')).toContainText('showing full round history');
   });
 
   test('edits the prompt and capabilities under the Config tab', async ({ page, weaver }) => {

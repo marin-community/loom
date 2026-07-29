@@ -28,6 +28,14 @@ const title = computed(
 );
 const attention = computed(() => (props.session ? effectiveAttention(props.session) : null));
 const statusMessage = computed(() => (props.session ? messageOf(props.session) : ''));
+const taskSummary = computed(() => {
+  const first = props.detail?.branch.goal
+    ?.split('\n')
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (!first) return '';
+  return first.length > 140 ? `${first.slice(0, 137)}…` : first;
+});
 const repoName = computed(() => {
   const path = props.session?.branch.repo_root ?? '';
   return path.split('/').filter(Boolean).at(-1) ?? path;
@@ -41,7 +49,7 @@ const repoName = computed(() => {
     aria-label="Current session preview"
   >
     <header class="terminal-pane-heading">
-      <span>SESSION://INSPECT</span>
+      <span>SESSION://NOW</span>
       <span v-if="total"
         >{{ String(position).padStart(2, '0') }}/{{ String(total).padStart(2, '0') }}</span
       >
@@ -86,37 +94,6 @@ const repoName = computed(() => {
           </p>
         </section>
 
-        <section class="terminal-preview-section">
-          <h3>TASK BUFFER</h3>
-          <p
-            v-if="detail?.branch.goal"
-            class="whitespace-pre-wrap font-sans text-sm leading-5 text-fg"
-          >
-            {{ detail.branch.goal }}
-          </p>
-          <p v-else-if="loading" class="terminal-loading">fetching session context<span>_</span></p>
-          <p v-else-if="error" class="text-xs text-block">{{ error }}</p>
-          <p v-else class="text-xs text-faint">No task context available.</p>
-        </section>
-
-        <section class="terminal-preview-section">
-          <h3>PROCESS</h3>
-          <dl class="terminal-kv">
-            <dt>repo</dt>
-            <dd :title="session.branch.repo_root">{{ repoName }}</dd>
-            <dt>branch</dt>
-            <dd :title="session.branch.branch">{{ session.branch.branch }}</dd>
-            <dt>space</dt>
-            <dd>{{ session.placement?.space_name ?? 'unplaced' }}</dd>
-            <dt>group</dt>
-            <dd>{{ session.placement?.group_name ?? 'unplaced' }}</dd>
-            <dt>profile</dt>
-            <dd>{{ session.profile || 'default' }}</dd>
-            <dt>origin</dt>
-            <dd>{{ session.origin }}</dd>
-          </dl>
-        </section>
-
         <section
           v-if="signalChips(session).length || quietTags(session).length"
           class="terminal-preview-section"
@@ -145,6 +122,49 @@ const repoName = computed(() => {
         <section v-if="session.branch.github" class="terminal-preview-section">
           <h3>UPSTREAM</h3>
           <GithubStatus :gh="session.branch.github" />
+        </section>
+
+        <section class="terminal-preview-section">
+          <h3>TASK</h3>
+          <details data-testid="session-mailbox-task">
+            <summary
+              class="cursor-pointer list-none rounded border border-line bg-rail/50 px-2.5 py-2 text-xs text-muted hover:border-accent hover:text-fg"
+            >
+              <span v-if="taskSummary" class="block font-sans leading-4 text-fg">{{
+                taskSummary
+              }}</span>
+              <span class="mt-1 block font-mono text-2xs text-faint">open full task buffer</span>
+            </summary>
+            <p
+              v-if="detail?.branch.goal"
+              class="mt-2 whitespace-pre-wrap font-sans text-sm leading-5 text-fg"
+            >
+              {{ detail.branch.goal }}
+            </p>
+            <p v-else-if="loading" class="terminal-loading">
+              fetching session context<span>_</span>
+            </p>
+            <p v-else-if="error" class="mt-2 text-xs text-block">{{ error }}</p>
+            <p v-else class="mt-2 text-xs text-faint">No task context available.</p>
+          </details>
+        </section>
+
+        <section class="terminal-preview-section">
+          <h3>PROCESS</h3>
+          <dl class="terminal-kv">
+            <dt>repo</dt>
+            <dd :title="session.branch.repo_root">{{ repoName }}</dd>
+            <dt>branch</dt>
+            <dd :title="session.branch.branch">{{ session.branch.branch }}</dd>
+            <dt>space</dt>
+            <dd>{{ session.placement?.space_name ?? 'unplaced' }}</dd>
+            <dt>group</dt>
+            <dd>{{ session.placement?.group_name ?? 'unplaced' }}</dd>
+            <dt>profile</dt>
+            <dd>{{ session.profile || 'default' }}</dd>
+            <dt>origin</dt>
+            <dd>{{ session.origin }}</dd>
+          </dl>
         </section>
       </div>
 

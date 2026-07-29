@@ -114,6 +114,19 @@ async function openAcp(
 }
 
 test.describe('acp conversation', () => {
+  test('opens the first worktree shell from the keyboard', async ({ page, weaver }) => {
+    await openAcp(page, weaver, {
+      goal: 'say:Ready for shell work.',
+      name: 'acp-shell-keyboard',
+    });
+
+    await page.keyboard.press('2');
+    await expect(page.getByTestId('acp-open-shell')).toBeVisible();
+    await page.keyboard.press('n');
+    await expect(page.getByRole('button', { name: 'Shell 1' })).toBeVisible();
+    await expect(page.locator('.xterm')).toBeVisible();
+  });
+
   // A chat opens at its newest exchange: the transcript scrolls to its foot on
   // load and stays there while the async markdown paint grows the content.
   test('opens scrolled to the foot of a long transcript', async ({ page, weaver }) => {

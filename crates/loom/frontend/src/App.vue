@@ -137,6 +137,9 @@ function cacheKey(route: { path: string; params: Record<string, string | string[
   // artifacts and back is a tab flip on the warm page, never a remount.
   const id = route.params.id;
   if (typeof id === 'string' && route.path.startsWith(`/s/${id}`)) return `s:${id}`;
+  // A watch id selects the right pane of one master/detail workbench. Keep the
+  // list instance stable while its route-backed cursor moves.
+  if (route.path === '/watches' || route.path.startsWith('/watches/')) return '/watches';
   return route.path;
 }
 </script>
