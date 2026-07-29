@@ -33,6 +33,7 @@ import { effectiveAttention } from '../lib/sessionState';
 import { useLayoutCommands } from '../lib/layoutCommands';
 import { useFleet } from '../lib/sessionsStore';
 import { beginSessionOpen, recordSessionListReturn } from '../lib/workbenchMetrics';
+import { useCommandScope, type Command } from '../lib/commands';
 
 defineOptions({ name: 'SessionList' });
 
@@ -129,6 +130,7 @@ function updateFilters() {
 }
 
 const searchText = ref('');
+const searchInput = ref<HTMLInputElement>();
 const includeHistory = ref(false);
 const searchResults = ref<SessionSummary[] | null>(null);
 const searching = ref(false);
@@ -283,6 +285,19 @@ const displayedGroups = computed(() => {
     ? [{ key: 'smart', group: undefined, sessions: smartSessions.value, qualified: true }]
     : [];
 });
+const cursorSessionIds = computed(() =>
+  displayedGroups.value.flatMap((display) =>
+    display.group?.collapsed ? [] : display.sessions.map((session) => session.id),
+  ),
+);
+const cursorSessionId = ref('');
+watch(
+  cursorSessionIds,
+  (ids) => {
+    if (!ids.includes(cursorSessionId.value)) cursorSessionId.value = ids[0] ?? '';
+  },
+  { immediate: true },
+);
 const unmatchedRuns = computed(() =>
   unmatchedAutomationRuns(runs.value, sessions.value).sort((left, right) =>
     right.updated_at.localeCompare(left.updated_at),
@@ -756,6 +771,124 @@ function openForm() {
   router.push('/sessions/new');
 }
 
+function focusCursor() {
+  if (!cursorSessionId.value) cursorSessionId.value = cursorSessionIds.value[0] ?? '';
+  const id = cursorSessionId.value;
+  if (!id) return;
+  void nextTick(() => {
+    document
+      .querySelector<HTMLElement>(`[data-session-id="${CSS.escape(id)}"] [data-session-primary]`)
+      ?.focus({ preventScroll: true });
+    document
+      .querySelector<HTMLElement>(`[data-session-id="${CSS.escape(id)}"]`)
+      ?.scrollIntoView({ block: 'nearest' });
+  });
+}
+
+function moveCursor(direction: -1 | 1) {
+  const ids = cursorSessionIds.value;
+  if (!ids.length) return;
+  const current = ids.indexOf(cursorSessionId.value);
+  const fallback = direction > 0 ? 0 : ids.length - 1;
+  const next = current < 0 ? fallback : Math.min(Math.max(current + direction, 0), ids.length - 1);
+  cursorSessionId.value = ids[next];
+  focusCursor();
+}
+
+function moveCursorTo(edge: 'first' | 'last') {
+  const ids = cursorSessionIds.value;
+  cursorSessionId.value = edge === 'first' ? (ids[0] ?? '') : (ids.at(-1) ?? '');
+  focusCursor();
+}
+
+function activateCursor() {
+  if (!cursorSessionId.value) return;
+  document
+    .querySelector<HTMLAnchorElement>(
+      `[data-session-id="${CSS.escape(cursorSessionId.value)}"] [data-session-primary]`,
+    )
+    ?.click();
+}
+
+function toggleCursorSelection() {
+  const id = cursorSessionId.value;
+  const session = sessionsById.value.get(id);
+  if (!id || !session || session.status === 'archived') return;
+  setSelected(id, !isSelected(id));
+}
+
+function toggleCursorDetails() {
+  if (cursorSessionId.value) toggleRow(cursorSessionId.value);
+}
+
+const sessionCommands = computed<Command[]>(() => [
+  {
+    id: 'sessions.cursor-down',
+    label: 'Move row cursor down',
+    keys: ['j'],
+    hint: true,
+    run: () => moveCursor(1),
+  },
+  {
+    id: 'sessions.cursor-up',
+    label: 'Move row cursor up',
+    keys: ['k'],
+    run: () => moveCursor(-1),
+  },
+  {
+    id: 'sessions.first',
+    label: 'Go to first row',
+    keys: ['g g'],
+    run: () => moveCursorTo('first'),
+  },
+  {
+    id: 'sessions.last',
+    label: 'Go to last row',
+    keys: ['G'],
+    run: () => moveCursorTo('last'),
+  },
+  {
+    id: 'sessions.open',
+    label: 'Open current session',
+    keys: ['Enter'],
+    hint: true,
+    enabled: () => !!cursorSessionId.value,
+    run: activateCursor,
+  },
+  {
+    id: 'sessions.search',
+    label: 'Search sessions',
+    keys: ['/'],
+    hint: true,
+    run: () => searchInput.value?.focus(),
+  },
+  {
+    id: 'sessions.details',
+    label: 'Toggle row details',
+    keys: ['o'],
+    hint: true,
+    enabled: () => !!cursorSessionId.value,
+    run: toggleCursorDetails,
+  },
+  {
+    id: 'sessions.select',
+    label: 'Toggle row selection',
+    keys: ['Space', 'x'],
+    enabled: () => {
+      const session = sessionsById.value.get(cursorSessionId.value);
+      return !!session && session.status !== 'archived';
+    },
+    run: toggleCursorSelection,
+  },
+  {
+    id: 'sessions.refresh',
+    label: 'Refresh sessions',
+    keys: ['r'],
+    run: refresh,
+  },
+]);
+useCommandScope('sessions', 'Sessions', sessionCommands, 100);
+
 const clearingTag = ref('');
 async function clearTag(sessionId: string, key: string) {
   clearingTag.value = `${sessionId}:${key}`;
@@ -782,18 +915,19 @@ function scrollSpaces(direction: number) {
 </script>
 
 <template>
-  <div class="px-5 py-3">
+  <div class="session-mailbox px-3 py-2">
     <h1 class="sr-only">Sessions</h1>
 
     <div class="mb-3 flex flex-wrap items-center gap-2">
       <label class="relative min-w-52 flex-1 sm:max-w-md">
         <span class="sr-only">Search sessions</span>
         <input
+          ref="searchInput"
           v-model="searchText"
           type="search"
           data-testid="fleet-search"
           placeholder="Search sessions, prompts, repos, issues…"
-          class="w-full rounded border border-line bg-input px-3 py-1.5 text-sm outline-none focus:ring-1 focus:ring-accent"
+          class="w-full border border-line bg-input px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-accent"
         />
         <span v-if="searching" class="absolute right-2 top-2 text-2xs text-faint">searching…</span>
       </label>
@@ -846,7 +980,7 @@ function scrollSpaces(direction: number) {
       </button>
     </div>
 
-    <div class="mb-3 flex min-w-0 items-stretch gap-1">
+    <div class="mb-2 flex min-w-0 items-stretch gap-1">
       <button
         class="btn-secondary px-2 text-xs"
         aria-label="Scroll spaces left"
@@ -857,14 +991,14 @@ function scrollSpaces(direction: number) {
       <nav
         data-testid="space-tabs-scroll"
         aria-label="Session workbench views"
-        class="flex min-w-0 flex-1 gap-1 overflow-x-auto rounded border border-line bg-surface p-1"
+        class="flex min-w-0 flex-1 gap-0.5 overflow-x-auto border border-line bg-surface p-0.5"
       >
         <router-link
           :to="{ path: '/', query: viewQuery('attention') }"
           data-testid="attention-view"
           :aria-current="view === 'attention' ? 'page' : undefined"
           :class="view === 'attention' ? 'bg-attn-soft text-attn' : 'text-muted hover:bg-subtle'"
-          class="flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium"
+          class="flex shrink-0 items-center gap-1.5 px-2 py-1 text-xs font-medium"
         >
           Attention
           <span class="font-mono text-2xs">{{
@@ -882,7 +1016,7 @@ function scrollSpaces(direction: number) {
               ? 'bg-accent text-accent-fg'
               : 'text-muted hover:bg-subtle'
           "
-          class="flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium"
+          class="flex shrink-0 items-center gap-1.5 px-2 py-1 text-xs font-medium"
         >
           {{ space.name }}
           <span class="font-mono text-2xs">
@@ -894,7 +1028,7 @@ function scrollSpaces(direction: number) {
           data-testid="all-view"
           :aria-current="view === 'all' ? 'page' : undefined"
           :class="view === 'all' ? 'bg-accent text-accent-fg' : 'text-muted hover:bg-subtle'"
-          class="flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium"
+          class="flex shrink-0 items-center gap-1.5 px-2 py-1 text-xs font-medium"
         >
           All <span class="font-mono text-2xs">{{ liveSessions.length }}</span>
         </router-link>
@@ -903,7 +1037,7 @@ function scrollSpaces(direction: number) {
           data-testid="history-view"
           :aria-current="view === 'history' ? 'page' : undefined"
           :class="view === 'history' ? 'bg-accent text-accent-fg' : 'text-muted hover:bg-subtle'"
-          class="flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium"
+          class="flex shrink-0 items-center gap-1.5 px-2 py-1 text-xs font-medium"
         >
           History
           <span class="font-mono text-2xs">{{
@@ -1198,7 +1332,7 @@ function scrollSpaces(direction: number) {
       :key="display.key"
       :data-group-id="display.group?.id"
       :data-testid="display.group ? 'session-group' : undefined"
-      class="mb-3 rounded border border-line bg-surface"
+      class="session-mailbox-group mb-2 border border-line bg-surface"
       :class="
         display.group && dropGroupId === display.group.id && !dropBeforeId
           ? 'ring-1 ring-accent'
@@ -1209,7 +1343,7 @@ function scrollSpaces(direction: number) {
     >
       <header
         v-if="display.group"
-        class="flex min-h-9 items-center gap-2 border-b border-line bg-input/40 px-3 py-1.5"
+        class="flex min-h-7 items-center gap-2 border-b border-line bg-input/40 px-2 py-1 font-mono"
       >
         <button
           type="button"
@@ -1251,6 +1385,8 @@ function scrollSpaces(direction: number) {
             dropBeforeId === session.id
           "
           :clearing-tag="clearingTag"
+          :cursor="cursorSessionId === session.id"
+          @activate="cursorSessionId = session.id"
           @toggle-select="setSelected(session.id, $event)"
           @toggle-details="toggleRow(session.id)"
           @open-move="openMove(session)"

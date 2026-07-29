@@ -111,10 +111,30 @@ well as color. Controls have visible focus and accessible names. Narrow layouts
 retain the same routes and actions; panels may stack, but lifecycle, review, and
 confirmation semantics do not change.
 
+## Keyboard command model
+
+Loom's operator chrome is keyboard-first. Global navigation uses discoverable
+`g …` chords, `?` opens the commands available in the current view, and the
+status bar shows a short context-sensitive key legend. Sessions behaves like a
+mailbox: `j`/`k` move a stable row cursor, `Enter` opens it, `/` focuses search,
+`x` or `Space` changes bulk selection, and `o` toggles disclosure.
+
+The application owns one prioritized command registry rather than view-local
+window listeners. Kept-alive routes register commands only while active, and
+transient surfaces get first refusal. Character commands never capture typing
+from form controls, contenteditable regions, dialogs, menus, or xterm. The row
+cursor uses stable session identity and roving focus; it is deliberately
+separate from checkbox selection.
+
 ## Visual system
 
-The palette is neutral and low-contrast, reserving saturated color for status,
-selection, destructive actions, and focus. Typography favors compact labels and
-readable working text; monospace is for terminal output, paths, identifiers, and
-structured data. Borders and spacing establish hierarchy before shadows do, and
-loading, empty, error, and disabled states keep the resolved layout stable.
+The default presentation is a dense terminal workbench, not a separate themed
+component tree. Operator chrome, command hints, mailbox rows, paths, identifiers,
+timestamps, and structured data use monospace; human conversation and documents
+retain readable prose faces. Ruled rows, cursor gutters, borders, and spacing
+establish hierarchy before cards or shadows do.
+
+The palette stays neutral and low-contrast, reserving saturated color for
+status, selection, destructive actions, and focus. Light/dark palette values
+are independent of terminal density. Loading, empty, error, and disabled states
+keep the resolved layout stable.

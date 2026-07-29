@@ -133,6 +133,42 @@
   --agent-line: #9880a8; /* plum dot / hairline */
 }
 
+/* Terminal-first application chrome. This is a presentation layer over the
+   same routes and components, not a parallel UI. Human prose keeps its own
+   serif/sans voice; operator chrome and mailbox rows use the mono instrument
+   face. */
+[data-ui='terminal'] {
+  --ui-row-height: 1.75rem;
+  --ui-radius: 0;
+  --ui-cursor-bg: var(--subtle);
+  --ui-cursor-fg: var(--fg);
+  letter-spacing: -0.005em;
+}
+
+.session-mailbox {
+  font-family: var(--font-mono);
+}
+
+.session-mailbox-group {
+  border-radius: var(--ui-radius);
+  box-shadow: none;
+}
+
+.session-mailbox-row {
+  min-height: var(--ui-row-height);
+  border-left: 2px solid transparent;
+}
+
+.session-mailbox-row--cursor {
+  border-left-color: var(--accent);
+  background: var(--ui-cursor-bg);
+  color: var(--ui-cursor-fg);
+}
+
+.session-mailbox-row--cursor .session-mailbox-primary {
+  color: var(--accent);
+}
+
 /* Dark palette — "the reading room, by lamplight". Warm charcoal, not a neutral
    void: the canvas carries a faint brown-black warmth (aged paper under a desk
    lamp) and the text is a warm paper-white, so a long night reads as a lit study

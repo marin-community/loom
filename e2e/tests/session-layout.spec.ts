@@ -118,6 +118,92 @@ async function createFailedRun(baseUrl: string) {
 }
 
 test.describe("durable session workbench", () => {
+  test("terminal mailbox commands navigate rows without stealing text input", async ({
+    page,
+    weaver,
+  }) => {
+    await weaver.seedSession({
+      goal: "First keyboard-operated task",
+      name: "keyboard-mailbox-one",
+    });
+    await weaver.seedSession({
+      goal: "Second keyboard-operated task",
+      name: "keyboard-mailbox-two",
+    });
+    await weaver.seedSession({
+      goal: "Third keyboard-operated task",
+      name: "keyboard-mailbox-three",
+    });
+
+    await page.goto(weaver.baseUrl);
+    const rows = page.locator('[data-testid="session-card"]');
+    await expect(rows).toHaveCount(3);
+    await expect(page.locator('[data-ui="terminal"]')).toBeVisible();
+    await expect(page.locator('[data-cursor="true"]')).toHaveCount(1);
+
+    // Leave any browser-restored form focus before exercising application
+    // commands; character shortcuts deliberately never steal input.
+    await rows.nth(0).locator("[data-session-primary]").focus();
+    await page.keyboard.press("Shift+/");
+    const help = page.getByTestId("shortcut-help");
+    await expect(help).toBeVisible();
+    await expect(
+      help.locator('[data-command-id="sessions.cursor-down"]'),
+    ).toBeVisible();
+    await expect(
+      help.locator('[data-command-id="global.sessions"]'),
+    ).toBeVisible();
+    await page.keyboard.press("Tab");
+    await expect(help.getByRole("button", { name: "Close" })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(help).toHaveCount(0);
+
+    const firstId = await rows.nth(0).getAttribute("data-session-id");
+    const secondId = await rows.nth(1).getAttribute("data-session-id");
+    await page.keyboard.press("j");
+    await expect(page.locator('[data-cursor="true"]')).toHaveAttribute(
+      "data-session-id",
+      secondId!,
+    );
+    await expect(
+      page.locator(`[data-session-id="${secondId}"] [data-session-primary]`),
+    ).toBeFocused();
+
+    await page.keyboard.press("x");
+    await expect(
+      page.locator(`[data-session-id="${secondId}"]`).getByRole("checkbox"),
+    ).toBeChecked();
+    await page.keyboard.press("o");
+    await expect(
+      page
+        .locator(`[data-session-id="${secondId}"]`)
+        .getByTestId("session-preview"),
+    ).toBeVisible();
+
+    await page.keyboard.press("g");
+    await expect(page.getByTestId("command-chord")).toContainText("g");
+    await page.keyboard.press("g");
+    await expect(page.locator('[data-cursor="true"]')).toHaveAttribute(
+      "data-session-id",
+      firstId!,
+    );
+
+    await page.keyboard.press("/");
+    const search = page.getByTestId("fleet-search");
+    await expect(search).toBeFocused();
+    await page.keyboard.type("j");
+    await expect(search).toHaveValue("j");
+
+    await search.fill("");
+    await page.getByTestId("status-bar").click();
+    await page.keyboard.press("g");
+    await page.keyboard.press("i");
+    await expect(page).toHaveURL(`${weaver.baseUrl}/issues`);
+    await page.keyboard.press("g");
+    await page.keyboard.press("s");
+    await expect(page).toHaveURL(weaver.baseUrl + "/");
+  });
+
   test("fleet polling stays compact and row details load on demand", async ({
     page,
     weaver,

@@ -1,10 +1,17 @@
 <script setup lang="ts">
 import { computed, watch } from 'vue';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import AppRail from './components/AppRail.vue';
 import ConfirmDialog from './components/ConfirmDialog.vue';
+import ShortcutHelp from './components/ShortcutHelp.vue';
 import StatusBar from './components/StatusBar.vue';
 import { me } from './auth';
+import {
+  useCommandRegistry,
+  useCommandDispatcher,
+  useCommandScope,
+  type Command,
+} from './lib/commands';
 import { acceptConfirmation, cancelConfirmation, confirmation } from './lib/confirmation';
 import { useFleet } from './lib/sessionsStore';
 
@@ -36,6 +43,55 @@ watch(authed, (ok) => (ok ? startFleetPoll() : stopFleetPoll()), { immediate: tr
 // next poll and a deep link shows the base title only until that row arrives (no
 // wrong-name flash, just a late refine).
 const route = useRoute();
+const router = useRouter();
+const commands = useCommandRegistry();
+const globalCommands = computed<Command[]>(() => [
+  {
+    id: 'global.help',
+    label: 'Show keyboard shortcuts',
+    keys: ['?'],
+    hint: true,
+    run: commands.toggleHelp,
+  },
+  {
+    id: 'global.sessions',
+    label: 'Go to Sessions',
+    keys: ['g s'],
+    run: () => void router.push('/'),
+  },
+  {
+    id: 'global.issues',
+    label: 'Go to Issues',
+    keys: ['g i'],
+    run: () => void router.push('/issues'),
+  },
+  {
+    id: 'global.watches',
+    label: 'Go to Watches',
+    keys: ['g w'],
+    run: () => void router.push('/watches'),
+  },
+  {
+    id: 'global.shell',
+    label: 'Go to Shell',
+    keys: ['g h'],
+    run: () => void router.push('/shell'),
+  },
+  {
+    id: 'global.settings',
+    label: 'Go to Settings',
+    keys: ['g ,'],
+    run: () => void router.push('/settings'),
+  },
+  {
+    id: 'global.new-session',
+    label: 'New session',
+    keys: ['n'],
+    run: () => void router.push('/sessions/new'),
+  },
+]);
+useCommandScope('global', 'Global', globalCommands, -100);
+useCommandDispatcher();
 const BASE_TITLE = 'Weaver';
 function withSection(section?: string | null): string {
   return section ? `${BASE_TITLE} - ${section}` : BASE_TITLE;
@@ -87,7 +143,7 @@ function cacheKey(route: { path: string; params: Record<string, string | string[
 
 <template>
   <router-view v-if="!authed" />
-  <div v-else class="flex h-screen overflow-hidden bg-canvas font-sans text-fg">
+  <div v-else data-ui="terminal" class="flex h-screen overflow-hidden bg-canvas font-sans text-fg">
     <AppRail />
     <div class="flex min-w-0 flex-1 flex-col">
       <main class="flex min-h-0 flex-1 flex-col overflow-auto">
@@ -111,4 +167,5 @@ function cacheKey(route: { path: string; params: Record<string, string | string[
     @confirm="acceptConfirmation"
     @cancel="cancelConfirmation"
   />
+  <ShortcutHelp />
 </template>
