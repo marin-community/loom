@@ -32,8 +32,13 @@ read-time join: the document references issues, while the issue ledger owns task
 state. A plan is simply an artifact convention; there is no plan parser or sync
 engine.
 
-Image input to `weaver artifact write` is wrapped as a bounded data-URI Markdown
-document so it renders through the same surface without adding a blob API.
+Pass a local image path directly to `weaver artifact write` (for example,
+`weaver artifact write screenshot /tmp/result.png`). The CLI reads and snapshots
+the image immediately, wrapping it as a bounded data-URI Markdown document, so
+the stored artifact does not depend on that filesystem path and remains
+available when the dashboard or execution is remote. Local paths embedded
+inside arbitrary Markdown are deliberately not a storage contract; write the
+image itself rather than hand-building base64.
 
 ### The goal artifact
 

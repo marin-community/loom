@@ -128,11 +128,29 @@ const branchMatches = computed(() => {
 function pickRepo(path: string) {
   repo.value = path;
   repoFocused.value = false;
+  repoActiveOption.value = -1;
+}
+
+function nextOption(current: number, count: number, delta: -1 | 1): number {
+  if (current < 0) return delta > 0 ? 0 : count - 1;
+  return (current + delta + count) % count;
+}
+
+function revealOption(prefix: string, index: number) {
+  void nextTick(() => {
+    document.getElementById(`${prefix}-${index}`)?.scrollIntoView({ block: 'nearest' });
+  });
+}
+
+function onRepoInput() {
+  repoFocused.value = true;
+  repoActiveOption.value = -1;
 }
 
 function onRepoKeydown(event: KeyboardEvent) {
   const count = repoMatches.value.length + (cloneCandidate.value ? 1 : 0);
   if (event.key === 'Escape') {
+    event.stopPropagation();
     repoFocused.value = false;
     repoActiveOption.value = -1;
     return;
@@ -140,13 +158,16 @@ function onRepoKeydown(event: KeyboardEvent) {
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
     if (!count) return;
     event.preventDefault();
+    event.stopPropagation();
     repoFocused.value = true;
     const delta = event.key === 'ArrowDown' ? 1 : -1;
-    repoActiveOption.value = (repoActiveOption.value + delta + count) % count;
+    repoActiveOption.value = nextOption(repoActiveOption.value, count, delta);
+    revealOption('launch-repository-option', repoActiveOption.value);
     return;
   }
   if (event.key !== 'Enter' || repoActiveOption.value < 0) return;
   event.preventDefault();
+  event.stopPropagation();
   if (cloneCandidate.value && repoActiveOption.value === 0) void addAndCloneRepo();
   else {
     const index = repoActiveOption.value - (cloneCandidate.value ? 1 : 0);
@@ -214,11 +235,18 @@ watch(repo, () => {
 function pickBranch(b: RepoBranch) {
   existingBranch.value = b.name;
   branchFocused.value = false;
+  branchActiveOption.value = -1;
+}
+
+function onBranchInput() {
+  branchFocused.value = true;
+  branchActiveOption.value = -1;
 }
 
 function onBranchKeydown(event: KeyboardEvent) {
   const count = branchMatches.value.length;
   if (event.key === 'Escape') {
+    event.stopPropagation();
     branchFocused.value = false;
     branchActiveOption.value = -1;
     return;
@@ -226,13 +254,16 @@ function onBranchKeydown(event: KeyboardEvent) {
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
     if (!count) return;
     event.preventDefault();
+    event.stopPropagation();
     branchFocused.value = true;
     const delta = event.key === 'ArrowDown' ? 1 : -1;
-    branchActiveOption.value = (branchActiveOption.value + delta + count) % count;
+    branchActiveOption.value = nextOption(branchActiveOption.value, count, delta);
+    revealOption('launch-branch-option', branchActiveOption.value);
     return;
   }
   if (event.key === 'Enter' && branchActiveOption.value >= 0) {
     event.preventDefault();
+    event.stopPropagation();
     const match = branchMatches.value[branchActiveOption.value];
     if (match) pickBranch(match);
   }
@@ -670,7 +701,7 @@ onActivated(() => void refreshLaunchData());
               id="launch-repository"
               v-model="repo"
               @focus="repoFocused = true"
-              @input="repoFocused = true"
+              @input="onRepoInput"
               @blur="repoFocused = false"
               @keydown="onRepoKeydown"
               role="combobox"
@@ -701,6 +732,7 @@ onActivated(() => void refreshLaunchData());
                   data-testid="clone-repo"
                   :disabled="cloningRepo"
                   class="flex w-full items-center gap-2 px-2 py-1.5 text-left text-accent hover:bg-subtle disabled:opacity-60"
+                  :class="{ 'bg-subtle': repoActiveOption === 0 }"
                   @mousedown.prevent="addAndCloneRepo"
                 >
                   <span class="shrink-0 text-sm">+ Clone new repo</span>
@@ -721,6 +753,9 @@ onActivated(() => void refreshLaunchData());
                   data-testid="recent-repo"
                   @mousedown.prevent="pickRepo(r.repo_root)"
                   class="flex w-full items-center justify-between gap-3 px-2 py-1.5 text-left hover:bg-subtle"
+                  :class="{
+                    'bg-subtle text-fg': repoActiveOption === index + (cloneCandidate ? 1 : 0),
+                  }"
                 >
                   <span class="min-w-0">
                     <span class="block truncate text-sm">{{ repoName(r.repo_root) }}</span>
@@ -844,7 +879,7 @@ onActivated(() => void refreshLaunchData());
                 id="launch-existing-branch"
                 v-model="existingBranch"
                 @focus="branchFocused = true"
-                @input="branchFocused = true"
+                @input="onBranchInput"
                 @blur="branchFocused = false"
                 @keydown="onBranchKeydown"
                 role="combobox"
@@ -876,6 +911,7 @@ onActivated(() => void refreshLaunchData());
                     data-testid="branch-option"
                     @mousedown.prevent="pickBranch(b)"
                     class="flex w-full items-center justify-between gap-3 px-2 py-1.5 text-left hover:bg-subtle"
+                    :class="{ 'bg-subtle text-fg': branchActiveOption === index }"
                   >
                     <span class="min-w-0">
                       <span class="block truncate text-sm font-mono">

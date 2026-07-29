@@ -3,6 +3,28 @@ import { test, expect } from '../fixtures/weaver';
 test.describe('creating a session via the UI form', () => {
   const repoPlaceholder = 'owner/name or /home/you/code/project';
 
+  test('keeps arrow navigation inside the repository picker', async ({ page, weaver }) => {
+    await weaver.seedSession({
+      goal: 'make this repository recent',
+      name: 'recent-repository',
+    });
+    await page.goto(`${weaver.baseUrl}/sessions/new`);
+
+    const repo = page.getByPlaceholder(repoPlaceholder);
+    await repo.focus();
+    const option = page.getByTestId('recent-repo').filter({ hasText: weaver.repoPath });
+    await expect(option).toBeVisible();
+
+    await repo.press('ArrowDown');
+    await expect(option).toHaveAttribute('aria-selected', 'true');
+    await expect(option).toHaveClass(/bg-subtle/);
+    await expect(page).toHaveURL(`${weaver.baseUrl}/sessions/new`);
+
+    await repo.press('Enter');
+    await expect(repo).toHaveValue(weaver.repoPath);
+    await expect(page.getByTestId('recent-repos')).toBeHidden();
+  });
+
   test('launches from the workbench with canonical profile and title', async ({ page, weaver }) => {
     await fetch(`${weaver.baseUrl}/api/profiles`, {
       method: 'POST',

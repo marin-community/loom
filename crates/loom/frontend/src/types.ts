@@ -405,7 +405,13 @@ export interface ToolDiffContent {
   old: string | null;
   new: string;
 }
-export type ToolContent = ToolTextContent | ToolDiffContent;
+export interface ToolImageContent {
+  type: 'image';
+  data: string;
+  mime_type: string;
+  uri: string | null;
+}
+export type ToolContent = ToolTextContent | ToolDiffContent | ToolImageContent;
 export interface ToolLocation {
   path: string;
   line: number | null;

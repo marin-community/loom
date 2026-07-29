@@ -15,6 +15,7 @@ import { join } from 'path';
 //   say:TEXT             two agent_message_chunks that consolidate to TEXT
 //   think:TEXT           an agent_thought_chunk
 //   tool:KIND[:TITLE]    a tool_call (in_progress → completed); `edit` carries a diff
+//   image[:TITLE]        a read tool that carries an ACP image content block
 //   plan                 a plan update
 //   usage:USED:SIZE      a usage_update
 //   wait:MS              sleep (keeps the turn live — for queue/interrupt tests)
@@ -170,16 +171,51 @@ test.describe('acp conversation', () => {
         exact: true,
       }),
     ).toBeVisible();
-    // The edit folds into an activity line, closed by default — no output visible.
+    // A lone edit is one disclosure: opening it reveals the inline diff preview.
     const head = page.getByTestId('acp-activity-head').filter({ hasText: 'Edit web.rs' });
     await expect(head).toBeVisible();
     await expect(page.getByTestId('acp-diff')).toBeHidden();
-    // Opening the group lists the call; opening the call reveals its diff as ±lines.
     await head.click();
-    const item = page.getByTestId('acp-activity-item').filter({ hasText: 'Edit web.rs' });
-    await expect(item).toBeVisible();
-    await item.getByRole('button').click();
     await expect(page.getByTestId('acp-diff')).toContainText('new line');
+
+    // The bounded preview can expand into a full-screen code viewer and closes
+    // with Escape, returning focus to the expansion control.
+    const expand = page.getByTestId('tool-content-expand');
+    await expand.click();
+    const viewer = page.getByTestId('tool-detail-dialog');
+    await expect(viewer).toContainText('Edit web.rs');
+    await expect(viewer).toContainText('new line');
+    await page.keyboard.press('Escape');
+    await expect(viewer).toBeHidden();
+    await expect(expand).toBeFocused();
+  });
+
+  test('previews ACP image tool results and opens the full-size image', async ({
+    page,
+    weaver,
+  }) => {
+    await openAcp(page, weaver, {
+      goal: 'image:Read /tmp/screenshot.png|say:image inspected',
+    });
+    await expect(page.getByText('image inspected', { exact: true })).toBeVisible();
+
+    const head = page
+      .getByTestId('acp-activity-head')
+      .filter({ hasText: 'Read /tmp/screenshot.png' });
+    await head.click();
+    const preview = page.getByTestId('tool-image-preview');
+    await expect(preview.locator('img')).toHaveAttribute('src', /^data:image\/png;base64,/);
+    await preview.click();
+
+    const viewer = page.getByTestId('tool-detail-dialog');
+    await expect(viewer).toContainText('Read /tmp/screenshot.png');
+    await expect(page.getByTestId('tool-detail-image')).toHaveAttribute(
+      'src',
+      /^data:image\/png;base64,/,
+    );
+    await page.getByTestId('tool-detail-close').click();
+    await expect(viewer).toBeHidden();
+    await expect(preview).toBeFocused();
   });
 
   test('adapter user echoes do not duplicate the visible history', async ({ page, weaver }) => {
@@ -326,18 +362,17 @@ test.describe('acp conversation', () => {
     await openAcp(page, weaver, { goal: `tool:execute:${command}|say:done` });
     await expect(page.getByText('done', { exact: true })).toBeVisible();
 
-    await page.getByTestId('acp-activity-head').click();
-    const item = page.getByTestId('acp-activity-item');
+    const item = page.getByTestId('acp-activity-head');
     const title = item.getByTestId('acp-activity-title');
     await expect(title).toHaveClass(/truncate/);
-    await expect(item.getByRole('button')).toHaveAttribute('aria-expanded', 'false');
+    await expect(item).toHaveAttribute('aria-expanded', 'false');
     await expect.poll(() => title.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
     const collapsedHeight = await title.evaluate((el) => el.clientHeight);
 
-    await item.getByRole('button').click();
+    await item.click();
     await expect(title).not.toHaveClass(/truncate/);
     await expect(title).toHaveText(command);
-    await expect(item.getByRole('button')).toHaveAttribute('aria-expanded', 'true');
+    await expect(item).toHaveAttribute('aria-expanded', 'true');
     await expect
       .poll(() => title.evaluate((el) => el.clientHeight))
       .toBeGreaterThan(collapsedHeight);

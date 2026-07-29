@@ -1223,10 +1223,23 @@ impl LiveTool {
         let mut out = Vec::new();
         for c in &self.content {
             match c {
-                ToolCallContent::Content { content } => out.push(json!({
-                    "type": "text",
-                    "text": content.text().unwrap_or("").to_string(),
-                })),
+                ToolCallContent::Content { content } => match content {
+                    wire::ContentBlock::Text { text } => out.push(json!({
+                        "type": "text",
+                        "text": text,
+                    })),
+                    wire::ContentBlock::Image {
+                        data,
+                        mime_type,
+                        uri,
+                    } => out.push(json!({
+                        "type": "image",
+                        "data": data,
+                        "mime_type": mime_type,
+                        "uri": uri,
+                    })),
+                    wire::ContentBlock::Other => {}
+                },
                 ToolCallContent::Diff {
                     path,
                     old_text,
@@ -3659,8 +3672,9 @@ fn queued_prompt_text(text: &str, resources: &[Value]) -> String {
 mod tests {
     use super::{
         auto_choice, deny_choice, preferred_config_value, preferred_mode, queued_prompt_text,
-        PermissionOption,
+        LiveTool, PermissionOption,
     };
+    use crate::acp::wire::{ContentBlock, ToolCallContent};
     use serde_json::json;
 
     #[test]
@@ -3673,6 +3687,28 @@ mod tests {
         assert_eq!(
             queued_prompt_text("review", &resources),
             "review\n\nReferenced files:\n- src/main.rs\n- https://example.test/context\n"
+        );
+    }
+
+    #[test]
+    fn live_tool_preserves_image_content_for_the_journal() {
+        let mut tool = LiveTool::new("call-image", 1);
+        tool.content = vec![ToolCallContent::Content {
+            content: ContentBlock::Image {
+                data: "aW1hZ2U=".to_string(),
+                mime_type: "image/png".to_string(),
+                uri: Some("file:///tmp/screenshot.png".to_string()),
+            },
+        }];
+
+        assert_eq!(
+            tool.content_json(),
+            vec![json!({
+                "type": "image",
+                "data": "aW1hZ2U=",
+                "mime_type": "image/png",
+                "uri": "file:///tmp/screenshot.png",
+            })]
         );
     }
 
