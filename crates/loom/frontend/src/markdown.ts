@@ -12,8 +12,9 @@ import type MarkdownIt from 'markdown-it';
 import type Token from 'markdown-it/lib/token.mjs';
 import type { IssueRefStatus } from './types';
 
-/** Where to resolve a relative `![](…)` image to: the session's raw-bytes
- *  endpoint, with the path resolved against the markdown file's directory. */
+/** Where to resolve image sources: relative paths use the session's raw
+ *  worktree endpoint; `artifact:<name>` uses the stored artifact's raw image
+ *  endpoint. */
 export interface RenderContext {
   /** Session id, for building `/api/sessions/{id}/raw?path=…` URLs. */
   sessionId: string;
@@ -55,10 +56,22 @@ export function resolvePath(dir: string, rel: string): string {
   return stack.join('/');
 }
 
-/** Map a markdown `src`/`href` to a viewable URL. Relative paths point at the
- *  raw-bytes endpoint so images in the worktree render inline; external links
- *  pass through unchanged. */
+/** Raw endpoint for an image artifact, optionally pinned to one revision. */
+export function artifactImageUrl(sessionId: string, name: string, rev?: number): string {
+  const base = `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(name)}/raw`;
+  return rev == null ? base : `${base}?rev=${rev}`;
+}
+
+/** Map a markdown image source to a viewable URL. `artifact:<name>` resolves
+ *  against loom's artifact store; other relative paths point at the worktree's
+ *  raw-bytes endpoint, while external links pass through unchanged. */
 export function resolveUrl(ctx: RenderContext, url: string): string {
+  if (url.startsWith('artifact:')) {
+    const name = url.slice('artifact:'.length);
+    if (name !== '.' && name !== '..' && /^[A-Za-z0-9._-]+$/.test(name)) {
+      return artifactImageUrl(ctx.sessionId, name);
+    }
+  }
   if (!url || isExternal(url)) return url;
   const dir = ctx.filePath.includes('/')
     ? ctx.filePath.slice(0, ctx.filePath.lastIndexOf('/'))
@@ -124,8 +137,8 @@ async function getMarkdownIt(): Promise<MarkdownIt> {
       }),
     });
 
-    // Relative image sources point at the worktree's raw-bytes endpoint so
-    // images committed alongside the doc render inline.
+    // Artifact-backed image sources point at loom's raw artifact endpoint;
+    // other relative sources point at the worktree's raw-bytes endpoint.
     const defaultImage =
       md.renderer.rules.image ??
       ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));

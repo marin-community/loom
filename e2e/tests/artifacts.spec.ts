@@ -319,7 +319,7 @@ test.describe('artifacts surface', () => {
     await expect(page.locator('[data-term-tab="agent"]')).toBeVisible();
   });
 
-  test('an image file is embedded as a base64 data-URI and renders inline', async ({
+  test('an image artifact renders directly and embeds into another artifact', async ({
     page,
     weaver,
   }) => {
@@ -327,19 +327,49 @@ test.describe('artifacts surface', () => {
       goal: 'shots',
       name: 'artifacts-image',
     });
-    // A 1×1 transparent PNG, piped as raw bytes (no extension): the CLI sniffs
-    // it from its magic bytes and wraps it as a base64 data-URI markdown doc.
+    // A 1×1 transparent PNG, piped as raw bytes (no source extension): the CLI
+    // sniffs it from its magic bytes and stores a self-contained image artifact.
     const png = Buffer.from(
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
       'base64',
     );
-    await weaver.writeArtifact(session, 'shot', png, { title: 'Screenshot' });
+    await weaver.writeArtifact(session, 'A.png', png, { title: 'Screenshot' });
+    await weaver.writeArtifact(
+      session,
+      'B.md',
+      '# Results\n\n![Linked screenshot](artifact:A.png)\n',
+      { title: 'Results' },
+    );
 
-    await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/shot`);
+    await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/A.png`);
 
-    // Preview renders the embedded image inline (alt = the title), src a data URI.
-    const img = page.locator('.markdown-body img');
-    await expect(img).toHaveAttribute('src', /^data:image\/png;base64,/);
-    await expect(img).toHaveAttribute('alt', 'Screenshot');
+    // Standalone image artifacts use the authenticated raw-bytes route.
+    const standalone = page.getByTestId('artifact-image');
+    await expect(standalone).toHaveAttribute(
+      'src',
+      new RegExp(`/api/sessions/${session.id}/artifacts/A\\.png/raw\\?rev=1$`),
+    );
+    await expect(standalone).toHaveAttribute('alt', 'Screenshot');
+    await expect
+      .poll(() => standalone.evaluate((img: HTMLImageElement) => img.naturalWidth))
+      .toBe(1);
+
+    const raw = await page.request.get(
+      `${weaver.baseUrl}/api/sessions/${session.id}/artifacts/A.png/raw`,
+    );
+    expect(raw.ok()).toBe(true);
+    expect(raw.headers()['content-type']).toBe('image/png');
+    expect(await raw.body()).toEqual(png);
+
+    // Markdown can reuse the stored image by artifact name. The reference is
+    // resolved at read time, so no base64 or agent-local path is copied into B.
+    await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/B.md`);
+    const linked = page.locator('.markdown-body img');
+    await expect(linked).toHaveAttribute(
+      'src',
+      new RegExp(`/api/sessions/${session.id}/artifacts/A\\.png/raw$`),
+    );
+    await expect(linked).toHaveAttribute('alt', 'Linked screenshot');
+    await expect.poll(() => linked.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(1);
   });
 });

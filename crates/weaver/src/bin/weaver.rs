@@ -222,10 +222,10 @@ enum ArtifactCmd {
     /// `<file>`, or stdin when `<file>` is `-` or omitted.
     ///
     /// An image file (`.png`, `.jpg`, `.gif`, `.webp`, `.svg`, …; raster formats
-    /// are also recognised from stdin by their magic bytes) is embedded as a
-    /// base64 data-URI in a markdown wrapper, so it renders inline in loom — no
-    /// need to hand-roll the data URI. A `.html`/`.htm` file is stored as the
-    /// `html` kind, which loom renders in a sandboxed iframe.
+    /// are also recognised from stdin by their magic bytes) is stored as an
+    /// `image` artifact backed by a base64 data URI, so it renders inline in
+    /// loom — no need to hand-roll the data URI. A `.html`/`.htm` file is stored
+    /// as the `html` kind, which loom renders in a sandboxed iframe.
     Write {
         /// The artifact name (its identity within the scope), e.g. `plan`.
         name: String,
@@ -236,8 +236,8 @@ enum ArtifactCmd {
         title: String,
         /// The content kind: `markdown` (the default; GFM + mermaid) or `html`
         /// (rendered in a sandboxed iframe). A `.html`/`.htm` file picks `html`
-        /// on its own. Ignored for image files, which are always wrapped as
-        /// markdown; any other value is stored verbatim and shown as source.
+        /// on its own. Ignored for image files, which use the `image` kind; any
+        /// other value is stored verbatim and shown as source.
         #[arg(long, default_value = "markdown")]
         kind: String,
         /// Publish repo-shared (visible to every branch) instead of scoping it
@@ -498,10 +498,9 @@ fn image_mime_from_magic(bytes: &[u8]) -> Option<&'static str> {
 }
 
 /// If `bytes` is a recognised image (by `filename` extension, else raster magic
-/// bytes), wrap it as a markdown document embedding it as a base64 data URI, so
-/// it renders inline in loom with no binary storage. `None` means "not an image
-/// — treat as text". `alt` is the image's alt text (the artifact title or name).
-fn embed_image_markdown(alt: &str, filename: Option<&str>, bytes: &[u8]) -> Result<Option<String>> {
+/// bytes), encode it as a data URI for an `image` artifact. `None` means "not an
+/// image — treat as text".
+fn encode_image_data_uri(filename: Option<&str>, bytes: &[u8]) -> Result<Option<String>> {
     use base64::Engine;
     let mime = filename
         .and_then(image_mime_from_ext)
@@ -515,8 +514,7 @@ fn embed_image_markdown(alt: &str, filename: Option<&str>, bytes: &[u8]) -> Resu
         );
     }
     let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-    let alt = if alt.is_empty() { "image" } else { alt };
-    Ok(Some(format!("![{alt}](data:{mime};base64,{b64})\n")))
+    Ok(Some(format!("data:{mime};base64,{b64}")))
 }
 
 /// How many outstanding tasks `weaver summary` lists before collapsing the rest.
@@ -1372,19 +1370,14 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
             repo,
         } => {
             let raw = read_bytes_or_stdin(file.as_deref())?;
-            let alt = if title.trim().is_empty() {
-                name.trim()
-            } else {
-                title.trim()
-            };
-            // An image is auto-wrapped as a base64 data-URI markdown doc (kind
-            // forced to markdown so loom renders it inline); everything else is
-            // stored as text under the requested kind. A `.html`/`.htm` file
-            // promotes the default `markdown` to `html` (loom sandboxes it in an
-            // iframe); an explicit `--kind` always wins.
+            // An image becomes an `image` artifact backed by a base64 data URI;
+            // everything else is stored as text under the requested kind. A
+            // `.html`/`.htm` file promotes the default `markdown` to `html`
+            // (loom sandboxes it in an iframe); an explicit `--kind` always
+            // wins.
             let (kind, content): (String, String) =
-                match embed_image_markdown(alt, file.as_deref(), &raw)? {
-                    Some(md) => ("markdown".to_string(), md),
+                match encode_image_data_uri(file.as_deref(), &raw)? {
+                    Some(uri) => ("image".to_string(), uri),
                     None => {
                         let text = String::from_utf8(raw).map_err(|_| {
                             anyhow!(
@@ -1860,33 +1853,32 @@ mod tests {
     }
 
     #[test]
-    fn embed_wraps_an_image_and_passes_text_through() {
-        // A PNG by extension → a markdown image with a base64 data URI + alt text.
+    fn image_encoding_produces_a_data_uri_and_passes_text_through() {
+        // A PNG by extension → a base64 data URI.
         let png = b"\x89PNG\r\n\x1a\nzzzz";
-        let md = embed_image_markdown("My shot", Some("shot.png"), png)
+        let uri = encode_image_data_uri(Some("shot.png"), png)
             .unwrap()
             .expect("png embeds");
-        assert!(md.starts_with("![My shot](data:image/png;base64,"));
-        assert!(md.trim_end().ends_with(')'));
+        assert!(uri.starts_with("data:image/png;base64,"));
 
-        // Extension-less stdin still embeds via magic bytes; empty alt → "image".
-        let md = embed_image_markdown("", None, png)
+        // Extension-less stdin still embeds via magic bytes.
+        let uri = encode_image_data_uri(None, png)
             .unwrap()
             .expect("magic embeds");
-        assert!(md.starts_with("![image](data:image/png;base64,"));
+        assert!(uri.starts_with("data:image/png;base64,"));
 
         // SVG (text) embeds by extension so it renders as an image, not source.
         let svg = b"<svg xmlns='http://www.w3.org/2000/svg'></svg>";
-        let md = embed_image_markdown("d", Some("d.svg"), svg)
+        let uri = encode_image_data_uri(Some("d.svg"), svg)
             .unwrap()
             .expect("svg embeds");
-        assert!(md.starts_with("![d](data:image/svg+xml;base64,"));
+        assert!(uri.starts_with("data:image/svg+xml;base64,"));
 
         // Non-image content is left for the text path.
-        assert!(embed_image_markdown("notes", Some("notes.md"), b"# Hi")
+        assert!(encode_image_data_uri(Some("notes.md"), b"# Hi")
             .unwrap()
             .is_none());
-        assert!(embed_image_markdown("notes", None, b"plain text")
+        assert!(encode_image_data_uri(None, b"plain text")
             .unwrap()
             .is_none());
     }
@@ -1895,6 +1887,6 @@ mod tests {
     fn embed_rejects_an_oversized_image() {
         let mut big = b"\x89PNG\r\n\x1a\n".to_vec();
         big.resize(MAX_IMAGE_BYTES + 1, 0);
-        assert!(embed_image_markdown("x", Some("x.png"), &big).is_err());
+        assert!(encode_image_data_uri(Some("x.png"), &big).is_err());
     }
 }

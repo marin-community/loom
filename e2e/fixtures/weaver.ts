@@ -154,7 +154,7 @@ export interface WeaverFixture {
    *  appends an immutable revision after. Content is piped on stdin; `--repo`
    *  publishes it repo-shared instead of scoping it to the branch. A `Buffer`
    *  exercises the binary path — an image is sniffed from its magic bytes and
-   *  embedded as a base64 data-URI markdown doc. */
+   *  stored as an `image` artifact backed by a base64 data URI. */
   writeArtifact(
     session: Session,
     name: string,

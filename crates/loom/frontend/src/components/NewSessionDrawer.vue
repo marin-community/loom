@@ -136,9 +136,16 @@ function nextOption(current: number, count: number, delta: -1 | 1): number {
   return (current + delta + count) % count;
 }
 
+const REPOSITORY_OPTION_PREFIX = 'launch-repository-option';
+const BRANCH_OPTION_PREFIX = 'launch-branch-option';
+
+function optionId(prefix: string, index: number): string {
+  return `${prefix}-${index}`;
+}
+
 function revealOption(prefix: string, index: number) {
   void nextTick(() => {
-    document.getElementById(`${prefix}-${index}`)?.scrollIntoView({ block: 'nearest' });
+    document.getElementById(optionId(prefix, index))?.scrollIntoView({ block: 'nearest' });
   });
 }
 
@@ -162,7 +169,7 @@ function onRepoKeydown(event: KeyboardEvent) {
     repoFocused.value = true;
     const delta = event.key === 'ArrowDown' ? 1 : -1;
     repoActiveOption.value = nextOption(repoActiveOption.value, count, delta);
-    revealOption('launch-repository-option', repoActiveOption.value);
+    revealOption(REPOSITORY_OPTION_PREFIX, repoActiveOption.value);
     return;
   }
   if (event.key !== 'Enter' || repoActiveOption.value < 0) return;
@@ -258,7 +265,7 @@ function onBranchKeydown(event: KeyboardEvent) {
     branchFocused.value = true;
     const delta = event.key === 'ArrowDown' ? 1 : -1;
     branchActiveOption.value = nextOption(branchActiveOption.value, count, delta);
-    revealOption('launch-branch-option', branchActiveOption.value);
+    revealOption(BRANCH_OPTION_PREFIX, branchActiveOption.value);
     return;
   }
   if (event.key === 'Enter' && branchActiveOption.value >= 0) {
@@ -709,7 +716,9 @@ onActivated(() => void refreshLaunchData());
               :aria-expanded="repoFocused && Boolean(repoMatches.length || cloneCandidate)"
               aria-controls="launch-repository-options"
               :aria-activedescendant="
-                repoActiveOption >= 0 ? `launch-repository-option-${repoActiveOption}` : undefined
+                repoActiveOption >= 0
+                  ? optionId(REPOSITORY_OPTION_PREFIX, repoActiveOption)
+                  : undefined
               "
               placeholder="owner/name or /home/you/code/project"
               autocomplete="off"
@@ -725,7 +734,7 @@ onActivated(() => void refreshLaunchData());
             >
               <li v-if="cloneCandidate">
                 <button
-                  id="launch-repository-option-0"
+                  :id="optionId(REPOSITORY_OPTION_PREFIX, 0)"
                   type="button"
                   role="option"
                   :aria-selected="repoActiveOption === 0"
@@ -746,7 +755,7 @@ onActivated(() => void refreshLaunchData());
               </li>
               <li v-for="(r, index) in repoMatches" :key="r.repo_root">
                 <button
-                  :id="`launch-repository-option-${index + (cloneCandidate ? 1 : 0)}`"
+                  :id="optionId(REPOSITORY_OPTION_PREFIX, index + (cloneCandidate ? 1 : 0))"
                   type="button"
                   role="option"
                   :aria-selected="repoActiveOption === index + (cloneCandidate ? 1 : 0)"
@@ -887,7 +896,9 @@ onActivated(() => void refreshLaunchData());
                 :aria-expanded="branchFocused && Boolean(branchMatches.length)"
                 aria-controls="launch-branch-options"
                 :aria-activedescendant="
-                  branchActiveOption >= 0 ? `launch-branch-option-${branchActiveOption}` : undefined
+                  branchActiveOption >= 0
+                    ? optionId(BRANCH_OPTION_PREFIX, branchActiveOption)
+                    : undefined
                 "
                 placeholder="feature/foo"
                 autocomplete="off"
@@ -904,7 +915,7 @@ onActivated(() => void refreshLaunchData());
               >
                 <li v-for="(b, index) in branchMatches" :key="b.name">
                   <button
-                    :id="`launch-branch-option-${index}`"
+                    :id="optionId(BRANCH_OPTION_PREFIX, index)"
                     type="button"
                     role="option"
                     :aria-selected="branchActiveOption === index"

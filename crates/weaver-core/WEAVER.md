@@ -35,6 +35,7 @@ weaver replays it for you automatically.
   to hand them. Reads stdin with `-`; `--repo` shares it repo-wide; an image
   path can be passed directly — the CLI snapshots and embeds its bytes, so do
   not hand-roll base64 and the dashboard never depends on that local path.
+  Markdown can reuse it as `![Result](artifact:<image-name>)`.
   `weaver artifact ls` / `show <name> [--rev N]` / `rm <name>` round it out.
 - `weaver tag set|rm|ls` — free-form quiet tags on the branch; `weaver log` —
   the event trail; `weaver readme` — this guide, back on demand.

@@ -823,6 +823,10 @@ pub fn router(state: AppState) -> Router {
                 .delete(delete_artifact),
         )
         .route(
+            "/sessions/{id}/artifacts/{name}/raw",
+            get(raw_artifact_image),
+        )
+        .route(
             "/sessions/{id}/artifacts/{name}/threads",
             get(list_threads).post(create_thread),
         )
