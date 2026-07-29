@@ -88,17 +88,19 @@ export function createCommandRegistry(): CommandRegistry {
       .filter((scope) => scope.commands.length > 0);
   });
 
-  const hints = computed(() => {
-    const visible: Command[] = [];
+  const activeCommands = computed(() => {
+    const seen = new Set<string>();
+    const commands: Command[] = [];
     for (const scope of activeScopes.value) {
       for (const command of scope.commands) {
-        if (command.hint && !visible.some((candidate) => candidate.id === command.id)) {
-          visible.push(command);
-        }
+        if (seen.has(command.id)) continue;
+        seen.add(command.id);
+        commands.push(command);
       }
     }
-    return visible.slice(0, 5);
+    return commands;
   });
+  const hints = computed(() => activeCommands.value.filter((command) => command.hint).slice(0, 5));
 
   function activate(scope: CommandScope) {
     if (scopes.get(scope.id) === scope) return;
@@ -119,19 +121,6 @@ export function createCommandRegistry(): CommandRegistry {
     clearChord();
     chord.value = next;
     chordTimer = window.setTimeout(clearChord, 1200);
-  }
-
-  function commandsInPriorityOrder(): Command[] {
-    const seen = new Set<string>();
-    const result: Command[] = [];
-    for (const scope of activeScopes.value) {
-      for (const command of scope.commands) {
-        if (seen.has(command.id)) continue;
-        seen.add(command.id);
-        result.push(command);
-      }
-    }
-    return result;
   }
 
   function dispatch(event: KeyboardEvent): boolean {
@@ -155,7 +144,7 @@ export function createCommandRegistry(): CommandRegistry {
       return true;
     }
 
-    const commands = commandsInPriorityOrder();
+    const commands = activeCommands.value;
     const sequence = chord.value ? `${chord.value} ${key}` : key;
     const exact = commands.find((command) => command.keys.includes(sequence));
     if (exact) {
