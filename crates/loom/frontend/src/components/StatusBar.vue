@@ -17,7 +17,9 @@ import KeyHint from './KeyHint.vue';
 // docs/loom-ui.md). Read-only API state from the one shared fleet snapshot the
 // whole app polls (lib/sessionsStore) — no second poll of its own. Left:
 // session + attention counts (the attention segment goes amber and links to the
-// filtered list; "all calm" reads a reassuring green). Right: connection dot +
+// filtered list; the calm copy says there is no NEW attention, without implying
+// that every durable health signal (for example a PR conflict) has disappeared).
+// Right: connection dot +
 // a ticking clock — the "is this thing live?" glance.
 const { sessions, runs, online, focusedSessionId, sessionById } = useFleet();
 const { chord: commandChord, hints: commandHints } = useCommandRegistry();
@@ -124,7 +126,7 @@ onUnmounted(() => clearInterval(clockTimer));
       </router-link>
       <span v-else class="flex items-center gap-1.5 text-ok" data-testid="status-bar-attention">
         <span class="h-1.5 w-1.5 rounded-full bg-ok-line" aria-hidden="true"></span>
-        all calm
+        no new attention
       </span>
     </span>
 

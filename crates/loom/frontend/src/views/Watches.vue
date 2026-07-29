@@ -1,5 +1,13 @@
 <script setup lang="ts">
-import { ref, reactive, computed, watch as watchEffect, onMounted, onActivated } from 'vue';
+import {
+  ref,
+  reactive,
+  computed,
+  nextTick,
+  watch as watchEffect,
+  onMounted,
+  onActivated,
+} from 'vue';
 import { useRouter } from 'vue-router';
 import {
   createWatch,
@@ -35,6 +43,7 @@ import {
   capabilitiesFrom,
   GRANTABLE_CAPABILITIES,
 } from '../lib/watch';
+import { useCommandScope, type Command } from '../lib/commands';
 
 // Named so App.vue's <keep-alive :include> keeps this view warm across nav.
 defineOptions({ name: 'Watches' });
@@ -63,10 +72,44 @@ const selected = computed(() => watches.value.find((w) => w.id === selectedId.va
 // The right pane's mode: a selected watch, or the create form.
 const creatingNew = ref(false);
 
-function select(w: Watch) {
+async function select(w: Watch) {
   creatingNew.value = false;
-  if (w.id !== selectedId.value) router.push(`/watches/${w.id}`);
+  const changed = w.id !== selectedId.value;
   selectedId.value = w.id;
+  if (changed) await router.push(`/watches/${w.id}`);
+}
+
+async function focusSelected() {
+  if (!selectedId.value) return;
+  await nextTick();
+  // Route-backed selection updates the kept-alive view in a second render
+  // turn. Focus after that paint so the browser does not restore it to the row
+  // that initiated the navigation.
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => resolve());
+  });
+  const row = document.querySelector<HTMLElement>(
+    `[data-watch-id="${CSS.escape(selectedId.value)}"]`,
+  );
+  row?.focus({ preventScroll: true });
+  row?.scrollIntoView({ block: 'nearest' });
+}
+
+async function moveSelection(direction: -1 | 1) {
+  if (!watches.value.length) return;
+  const current = watches.value.findIndex((watch) => watch.id === selectedId.value);
+  const fallback = direction > 0 ? 0 : watches.value.length - 1;
+  const next =
+    current < 0 ? fallback : Math.min(Math.max(current + direction, 0), watches.value.length - 1);
+  await select(watches.value[next]);
+  await focusSelected();
+}
+
+async function moveSelectionTo(edge: 'first' | 'last') {
+  const watch = edge === 'first' ? watches.value[0] : watches.value.at(-1);
+  if (!watch) return;
+  await select(watch);
+  await focusSelected();
 }
 
 // A builtin watch is the daemon-seeded row for a stock program (its name is
@@ -127,6 +170,11 @@ async function loadProfiles() {
 // ── Right pane: tabs ────────────────────────────────────────────────────────
 type Tab = 'activity' | 'script' | 'config';
 const tab = ref<Tab>('activity');
+const tabs: { key: Tab; label: string }[] = [
+  { key: 'activity', label: 'Activity' },
+  { key: 'script', label: 'Script' },
+  { key: 'config', label: 'Config' },
+];
 
 // ── Activity: the round history + execution log ────────────────────────────
 const runs = ref<WatchRun[]>([]);
@@ -135,6 +183,26 @@ const runsError = ref('');
 const expanded = reactive<Record<number, boolean>>({});
 // The last Run now / Dry-run result, shown inline above the history.
 const lastRun = ref<{ outcome: string; summary: string; dry: boolean } | null>(null);
+const showRoutineRuns = ref(false);
+
+function isSignalRun(run: WatchRun): boolean {
+  return (
+    Boolean(run.actions?.length) ||
+    Boolean(run.stderr) ||
+    (run.exit_code != null && run.exit_code !== 0) ||
+    !['ok', 'noop'].includes(run.outcome)
+  );
+}
+
+// The newest round always stays visible so "did it just run?" has an answer.
+// Older successful/no-op rounds without actions are routine history; keep them
+// one click away instead of letting them bury the last intervention or failure.
+const visibleRuns = computed(() =>
+  showRoutineRuns.value
+    ? runs.value
+    : runs.value.filter((run, index) => index === 0 || isSignalRun(run)),
+);
+const hiddenRoutineRuns = computed(() => runs.value.length - visibleRuns.value.length);
 
 async function loadRuns() {
   if (!selectedId.value) return;
@@ -275,6 +343,7 @@ async function saveConfig() {
 // so this is for custom programs — or a second instance of a stock program
 // with its own name, prompt, and scope.
 const creating = ref(false);
+const watchNameInput = ref<HTMLInputElement | null>(null);
 type TriggerKind = 'auto' | 'cron' | 'every' | 'on';
 const form = reactive({
   name: '',
@@ -312,10 +381,57 @@ function resetForm() {
   form.capabilities = { mark: true, escalate: true, nudge: false, interrupt: false, launch: false };
 }
 
-function openCreate() {
+async function openCreate() {
   resetForm();
   creatingNew.value = true;
+  await nextTick();
+  watchNameInput.value?.focus();
 }
+
+const watchCommands = computed<Command[]>(() => [
+  {
+    id: 'watches.cursor-down',
+    label: 'Move watch cursor down',
+    keys: ['j'],
+    hint: true,
+    run: () => moveSelection(1),
+  },
+  {
+    id: 'watches.cursor-up',
+    label: 'Move watch cursor up',
+    keys: ['k'],
+    run: () => moveSelection(-1),
+  },
+  {
+    id: 'watches.first',
+    label: 'Go to first watch',
+    keys: ['g g'],
+    run: () => moveSelectionTo('first'),
+  },
+  {
+    id: 'watches.last',
+    label: 'Go to last watch',
+    keys: ['G'],
+    run: () => moveSelectionTo('last'),
+  },
+  ...tabs.map((candidate, index) => ({
+    id: `watches.tab.${candidate.key}`,
+    label: `Open ${candidate.label}`,
+    keys: [String(index + 1)],
+    enabled: () => Boolean(selected.value && !creatingNew.value),
+    run: () => {
+      tab.value = candidate.key;
+    },
+  })),
+  {
+    id: 'watches.new',
+    label: 'New watch',
+    keys: ['n'],
+    enabled: () => !creatingNew.value,
+    run: openCreate,
+  },
+]);
+useCommandScope('watches', 'Watches', watchCommands, 100);
 
 // Prefill from a builtin's suggested defaults when the program changes. The
 // script declares its own subscriptions, so default to honouring them (auto).
@@ -408,6 +524,7 @@ watchEffect(
 
 watchEffect(selectedId, () => {
   lastRun.value = null;
+  showRoutineRuns.value = false;
   runsError.value = '';
   runs.value = [];
   editing.value = false;
@@ -531,6 +648,7 @@ onActivated(() => {
           <div>
             <label class="mb-1 block text-xs text-muted">Name — unique, used as its handle</label>
             <input
+              ref="watchNameInput"
               v-model="form.name"
               data-testid="watch-name"
               placeholder="status-strict"
@@ -842,9 +960,28 @@ onActivated(() => {
               </p>
             </div>
 
-            <ul v-else data-testid="watch-runs" class="space-y-2">
+            <div
+              v-if="runs.length > 1"
+              class="mb-3 flex items-center gap-2 font-mono text-2xs text-faint"
+              data-testid="watch-run-digest"
+            >
+              <span v-if="hiddenRoutineRuns">
+                {{ hiddenRoutineRuns }} routine round{{ hiddenRoutineRuns === 1 ? '' : 's' }} hidden
+              </span>
+              <span v-else>showing full round history</span>
+              <button
+                type="button"
+                class="text-accent hover:underline"
+                data-testid="watch-runs-toggle"
+                @click="showRoutineRuns = !showRoutineRuns"
+              >
+                {{ showRoutineRuns ? 'Show signals' : 'Show all' }}
+              </button>
+            </div>
+
+            <ul v-if="runs.length" data-testid="watch-runs" class="space-y-2">
               <li
-                v-for="r in runs"
+                v-for="r in visibleRuns"
                 :key="r.id"
                 data-testid="watch-run-row"
                 class="rounded border border-line bg-surface"

@@ -190,6 +190,13 @@ test.describe("durable session workbench", () => {
     await expect(preview).toBeVisible();
     await expect(preview).toContainText("keyboard-mailbox-one");
     await expect(preview).toContainText("First keyboard-operated task");
+    await expect(
+      preview.getByTestId("session-mailbox-task"),
+    ).not.toHaveAttribute("open");
+    await preview.getByTestId("session-mailbox-task").click();
+    await expect(preview.getByTestId("session-mailbox-task")).toHaveAttribute(
+      "open",
+    );
     const githubStatus = page.getByTestId("status-bar-github");
     await expect(githubStatus).toContainText("PR #238");
     await expect(githubStatus).toContainText("Issue #670");

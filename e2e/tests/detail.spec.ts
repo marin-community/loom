@@ -39,6 +39,10 @@ test.describe('session detail view', () => {
     await page.keyboard.press('3');
     await expect(page.locator('[data-tab="review"]')).toHaveAttribute('aria-selected', 'true');
     await expect(page).toHaveURL(new RegExp(`/s/${s.id}/artifacts(?:/|$)`));
+    await page.keyboard.press('c');
+    await expect(page).toHaveURL(`${weaver.baseUrl}/s/${s.id}/changes`);
+    await page.keyboard.press('a');
+    await expect(page).toHaveURL(new RegExp(`/s/${s.id}/artifacts(?:/|$)`));
     await page.keyboard.press('[');
     await expect(page.locator('[data-tab="conversation"]')).toHaveAttribute(
       'aria-selected',
@@ -299,29 +303,48 @@ test.describe('session detail view', () => {
     await expect(issuePill).toHaveText('Issue —');
   });
 
-  test('clearing the attention chip marks the agent’s attention calm', async ({ page, weaver }) => {
+  test('viewing a session acknowledges current attention and later signals can return', async ({
+    page,
+    weaver,
+  }) => {
     const s = await weaver.seedSession({
       goal: 'Acknowledge me',
       name: 'ack-task',
     });
-    // The agent raises its attention; the human's only write here is to clear it.
+    // Agent and watch signals are both current when the user enters.
     await weaver.setStatus(s, 'attention', 'waiting on review');
+    await weaver.mark(s, 'blocked', {
+      note: 'external assessment',
+      by: 'status-watch',
+    });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
 
-    // Attention shows as a deletable signal chip — there is no separate "Mark OK"
-    // control; the chip's × is the calm gesture.
+    // Opening is the acknowledgement gesture: current loud tags disappear
+    // server-side, while the durable status message remains as recent context.
+    await expect
+      .poll(async () =>
+        (await weaver.getSession(s.id)).branch.tags.filter((tag) =>
+          ['attention', 'blocked'].includes(tag.value),
+        ),
+      )
+      .toEqual([]);
+    await expect(page.getByText('waiting on review', { exact: true })).toBeVisible();
+    await expect(page.getByTestId('status-bar-attention')).toContainText('no new attention');
+
+    // A signal raised after the page was opened is not continuously erased.
+    await weaver.setStatus(s, 'attention', 'new decision needed');
     const chip = page.locator('[data-testid="signal-chip"][data-signal-key="attention"]');
     await expect(chip).toHaveAttribute('data-level', 'attention');
 
-    await chip.getByTestId('signal-chip-clear').click();
-
-    // The chip goes away…
-    await expect(chip).toHaveCount(0);
-    // …and it's cleared server-side: the × DELETEs the `attention` tag, so the
-    // calm state is its absence (there is no stored `ok`).
-    const updated = await weaver.getSession(s.id);
-    expect(updated.branch.tags.find((t) => t.key === 'attention')).toBeUndefined();
+    // Leaving and returning is a new acknowledgement.
+    await page.goto(weaver.baseUrl);
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await expect
+      .poll(async () =>
+        (await weaver.getSession(s.id)).branch.tags.some((tag) => tag.key === 'attention'),
+      )
+      .toBe(false);
   });
 
   test('scratch attachments share one bounded browse and drop target', async ({ page, weaver }) => {

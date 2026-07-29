@@ -11,7 +11,7 @@ import {
   nextTick,
 } from 'vue';
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router';
-import { get, getSession, ideInfo } from '../api';
+import { clearSessionTag, get, getSession, ideInfo } from '../api';
 import type { Session, WeaverEvent } from '../types';
 import SessionTerminals from '../components/SessionTerminals.vue';
 import IdeFrame from '../components/IdeFrame.vue';
@@ -24,6 +24,7 @@ import ChangesPanel from '../components/ChangesPanel.vue';
 import { cancelSessionBacktrack, completeSessionOpen } from '../lib/workbenchMetrics';
 import { openSessionEvents, type SessionEventsHandle } from '../lib/sessionEvents';
 import { useCommandScope, type Command } from '../lib/commands';
+import { signalChips } from '../lib/sessionState';
 
 // Named + keyed-by-id in App.vue's <keep-alive> so the page (and its live
 // terminal) stays warm: every `/s/:id…` path (the work tabs and the Artifacts
@@ -81,6 +82,7 @@ const reviewDocked = computed(() => artifactsDocked.value || changesActive.value
 const railOpen = computed(() => artifactsActive.value && poppedOut.value);
 const dockedArtifactsRef = ref<InstanceType<typeof ArtifactsPanel> | null>(null);
 const railArtifactsRef = ref<InstanceType<typeof ArtifactsPanel> | null>(null);
+const acpShellsRef = ref<InstanceType<typeof SessionTerminals> | null>(null);
 let layoutNavigationAuthorized = false;
 
 function activeArtifactsPanel(): InstanceType<typeof ArtifactsPanel> | null {
@@ -206,6 +208,41 @@ const sessionCommands = computed<Command[]>(() => [
     hint: true,
     run: () => moveWorkTab(1),
   },
+  ...(reviewActive.value
+    ? [
+        {
+          id: 'session.review.artifacts',
+          label: 'Open Artifacts',
+          keys: ['a'],
+          run: async () => {
+            await guardedArtifactLayout(async () => {
+              await router.push(`/s/${props.id}/artifacts`);
+            });
+          },
+        },
+        {
+          id: 'session.review.changes',
+          label: 'Open Changes',
+          keys: ['c'],
+          run: async () => {
+            await guardedArtifactLayout(async () => {
+              await router.push(`/s/${props.id}/changes`);
+            });
+          },
+        },
+      ]
+    : []),
+  ...(isAcp.value && workTab.value === 'shells'
+    ? [
+        {
+          id: 'session.shell.new',
+          label: 'Open a worktree shell',
+          keys: ['n'],
+          hint: true,
+          run: () => acpShellsRef.value?.addShell(),
+        },
+      ]
+    : []),
 ]);
 useCommandScope(`session:${props.id}`, 'Session', sessionCommands, 10);
 
@@ -287,14 +324,47 @@ async function loadSession() {
   ws.value = await getSession(props.id);
 }
 
-async function loadAll() {
+async function acknowledgeSessionAttention(): Promise<string> {
+  let session = await getSession(props.id);
+  // Attention is a wake-up signal, not a permanent task state. Entering (or
+  // returning to) a session acknowledges every loud tag visible in the
+  // snapshot the user opened. Lifecycle failures remain visible because they
+  // are derived state rather than dismissible tags; a later tag write raises
+  // attention again through the normal event stream.
+  const keys = [...new Set(signalChips(session).map((chip) => chip.key))];
+  if (!keys.length) {
+    ws.value = session;
+    return '';
+  }
+  const results = await Promise.allSettled(keys.map((key) => clearSessionTag(props.id, key)));
+  // Re-read even after a partial failure: successful acknowledgements should
+  // disappear, while any failed tag remains available for the existing manual
+  // clear gesture.
+  session = await getSession(props.id);
+  ws.value = session;
+  const failed = results.filter((result) => result.status === 'rejected').length;
+  return failed ? `Couldn't acknowledge ${failed} attention signal${failed === 1 ? '' : 's'}.` : '';
+}
+
+async function loadAllWith(sessionLoad: () => Promise<string>) {
   try {
-    await loadSession();
+    const acknowledgementError = await sessionLoad();
     events.value = (await get(`/sessions/${props.id}/log`)) as WeaverEvent[];
-    error.value = '';
+    error.value = acknowledgementError;
   } catch (e) {
     error.value = (e as Error).message;
   }
+}
+
+async function loadAll() {
+  return loadAllWith(async () => {
+    await loadSession();
+    return '';
+  });
+}
+
+async function acknowledgeAndLoadAll() {
+  return loadAllWith(acknowledgeSessionAttention);
 }
 
 function closeStream() {
@@ -325,7 +395,7 @@ function openStream() {
 
 onMounted(() => {
   requestAnimationFrame(() => completeSessionOpen(props.id));
-  loadAll();
+  acknowledgeAndLoadAll();
   openStream();
   // Gate the editor affordance on the server setting (cheap; the panel itself
   // re-checks availability when opened).
@@ -344,7 +414,7 @@ onMounted(() => {
 onActivated(() => {
   if (source) return; // initial mount already loaded + opened the stream
   requestAnimationFrame(() => completeSessionOpen(props.id));
-  loadAll();
+  acknowledgeAndLoadAll();
   openStream();
 });
 
@@ -437,7 +507,7 @@ onUnmounted(() => {
              area with the Agent inner tab dropped. Lazily mounted on first open,
              then kept (v-show) so re-selecting is instant. -->
         <div v-if="isAcp && mounted.shells" v-show="workTab === 'shells'" class="h-full">
-          <SessionTerminals :id="props.id" shells-only />
+          <SessionTerminals ref="acpShellsRef" :id="props.id" shells-only />
         </div>
 
         <!-- Conversation — the agent's chat with the model. Lazily mounted, then

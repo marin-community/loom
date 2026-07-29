@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue';
 import AgentTerminal from './AgentTerminal.vue';
+import KeyHint from './KeyHint.vue';
 import { get, del } from '../api';
 
 // The session's terminal area: an inner tab strip over the always-mounted agent
@@ -34,8 +35,11 @@ const noShells = computed(() => props.shellsOnly && shells.value.length === 0);
 async function loadShells() {
   try {
     const idxs = (await get(`/sessions/${props.id}/shells`)) as number[];
-    shells.value = [...idxs].sort((a, b) => a - b);
-    nextIdx = shells.value.length ? Math.max(...shells.value) + 1 : 0;
+    // A keyboard command can add the first shell while this mount probe is in
+    // flight. Merge rediscovered supervisors with those local tabs so a late
+    // empty response never erases the shell the user just opened.
+    shells.value = [...new Set([...shells.value, ...idxs])].sort((a, b) => a - b);
+    nextIdx = shells.value.length ? Math.max(nextIdx, Math.max(...shells.value) + 1) : nextIdx;
     // Land the shells-only view on the first rediscovered shell.
     if (props.shellsOnly && active.value === -1 && shells.value.length) {
       active.value = shells.value[0];
@@ -50,6 +54,8 @@ function addShell() {
   shells.value.push(idx);
   active.value = idx;
 }
+
+defineExpose({ addShell });
 
 async function closeShell(idx: number) {
   shells.value = shells.value.filter((n) => n !== idx);
@@ -140,6 +146,7 @@ onMounted(loadShells);
           data-testid="acp-open-shell"
           @click="addShell"
         >
+          <KeyHint keys="n" />
           Open a shell in the worktree
         </button>
       </div>
