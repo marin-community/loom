@@ -320,13 +320,12 @@ const ideOpen = ref(false);
 
 let source: SessionEventsHandle | null = null;
 
-async function loadSession(acknowledge = false): Promise<string> {
-  let session = await getSession(props.id);
-  if (!acknowledge) {
-    ws.value = session;
-    return '';
-  }
+async function loadSession() {
+  ws.value = await getSession(props.id);
+}
 
+async function acknowledgeSessionAttention(): Promise<string> {
+  let session = await getSession(props.id);
   // Attention is a wake-up signal, not a permanent task state. Entering (or
   // returning to) a session acknowledges every loud tag visible in the
   // snapshot the user opened. Lifecycle failures remain visible because they
@@ -347,14 +346,25 @@ async function loadSession(acknowledge = false): Promise<string> {
   return failed ? `Couldn't acknowledge ${failed} attention signal${failed === 1 ? '' : 's'}.` : '';
 }
 
-async function loadAll(acknowledge = false) {
+async function loadAllWith(sessionLoad: () => Promise<string>) {
   try {
-    const acknowledgementError = await loadSession(acknowledge);
+    const acknowledgementError = await sessionLoad();
     events.value = (await get(`/sessions/${props.id}/log`)) as WeaverEvent[];
     error.value = acknowledgementError;
   } catch (e) {
     error.value = (e as Error).message;
   }
+}
+
+async function loadAll() {
+  return loadAllWith(async () => {
+    await loadSession();
+    return '';
+  });
+}
+
+async function acknowledgeAndLoadAll() {
+  return loadAllWith(acknowledgeSessionAttention);
 }
 
 function closeStream() {
@@ -385,7 +395,7 @@ function openStream() {
 
 onMounted(() => {
   requestAnimationFrame(() => completeSessionOpen(props.id));
-  loadAll(true);
+  acknowledgeAndLoadAll();
   openStream();
   // Gate the editor affordance on the server setting (cheap; the panel itself
   // re-checks availability when opened).
@@ -404,7 +414,7 @@ onMounted(() => {
 onActivated(() => {
   if (source) return; // initial mount already loaded + opened the stream
   requestAnimationFrame(() => completeSessionOpen(props.id));
-  loadAll(true);
+  acknowledgeAndLoadAll();
   openStream();
 });
 
