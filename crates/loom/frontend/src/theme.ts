@@ -7,7 +7,9 @@ const STORAGE_KEY = 'loom-theme';
 function preferred(): Theme {
   const stored = localStorage.getItem(STORAGE_KEY);
   if (stored === 'light' || stored === 'dark') return stored;
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  // Loom is an operator console: fresh installs lead with the terminal palette.
+  // The explicit light choice remains sticky once selected.
+  return 'dark';
 }
 
 function apply(t: Theme) {

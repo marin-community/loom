@@ -135,11 +135,16 @@ test.describe("durable session workbench", () => {
       name: "keyboard-mailbox-three",
     });
 
+    await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(weaver.baseUrl);
     const rows = page.locator('[data-testid="session-card"]');
     await expect(rows).toHaveCount(3);
-    await expect(page.locator('[data-ui="terminal"]')).toBeVisible();
+    await expect(page.locator("html")).toHaveClass(/dark/);
     await expect(page.locator('[data-cursor="true"]')).toHaveCount(1);
+    const preview = page.getByTestId("session-mailbox-preview");
+    await expect(preview).toBeVisible();
+    await expect(preview).toContainText("keyboard-mailbox-one");
+    await expect(preview).toContainText("First keyboard-operated task");
 
     // Leave any browser-restored form focus before exercising application
     // commands; character shortcuts deliberately never steal input.
@@ -168,6 +173,8 @@ test.describe("durable session workbench", () => {
     await expect(
       page.locator(`[data-session-id="${secondId}"] [data-session-primary]`),
     ).toBeFocused();
+    await expect(preview).toContainText("keyboard-mailbox-two");
+    await expect(preview).toContainText("Second keyboard-operated task");
 
     await page.keyboard.press("x");
     await expect(
@@ -204,7 +211,7 @@ test.describe("durable session workbench", () => {
     await expect(page).toHaveURL(weaver.baseUrl + "/");
   });
 
-  test("fleet polling stays compact and row details load on demand", async ({
+  test("fleet polling stays compact and the cursor preview loads one detail", async ({
     page,
     weaver,
   }) => {
@@ -245,12 +252,15 @@ test.describe("durable session workbench", () => {
 
     const row = page.locator(`[data-session-id="${session.id}"]`);
     await expect(row).toBeVisible();
-    expect(detailRequests).toEqual([]);
-
-    await row.getByTestId("session-details-toggle").click();
     await expect
       .poll(() => detailRequests)
       .toEqual([`/api/sessions/${session.id}`]);
+    await expect(page.getByTestId("session-mailbox-preview")).toContainText(
+      goal,
+    );
+
+    await row.getByTestId("session-details-toggle").click();
+    expect(detailRequests).toEqual([`/api/sessions/${session.id}`]);
     await expect(row.getByTestId("session-preview")).toContainText(goal);
   });
 

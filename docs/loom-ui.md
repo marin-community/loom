@@ -26,9 +26,10 @@ group, and returning to the workbench restores the current view.
 
 The shell polls a compact summary of active sessions. It fetches archived
 summaries only when History opens, and fetches full goal, launch, policy, and
-runtime context only when a session page or row disclosure needs it. Search
-still matches goal text on the server, so this transport hierarchy does not
-weaken discovery.
+runtime context only for the current desktop mailbox cursor, a row disclosure,
+or a session page. Cursor changes are debounced and each fetched detail is
+reused by row disclosure. Search still matches goal text on the server, so this
+transport hierarchy does not weaken discovery.
 
 ## Launch
 
@@ -128,13 +129,21 @@ separate from checkbox selection.
 
 ## Visual system
 
-The default presentation is a dense terminal workbench, not a separate themed
-component tree. Operator chrome, command hints, mailbox rows, paths, identifiers,
-timestamps, and structured data use monospace; human conversation and documents
-retain readable prose faces. Ruled rows, cursor gutters, borders, and spacing
-establish hierarchy before cards or shadows do.
+The default presentation is a dense dark terminal workbench, not a separate
+themed component tree. On desktop, Sessions is a mailbox split: the compact
+fleet remains on the left while a sticky inspector follows the keyboard cursor
+on the right. Narrow layouts omit that inspector and keep the same rows,
+disclosure, and routes.
 
-The palette stays neutral and low-contrast, reserving saturated color for
-status, selection, destructive actions, and focus. Light/dark palette values
-are independent of terminal density. Loading, empty, error, and disabled states
-keep the resolved layout stable.
+Operator chrome, command hints, mailbox rows, paths, identifiers, timestamps,
+and structured data use monospace; human conversation and documents retain
+readable prose faces. Near-black planes, ruled rows, cursor gutters, borders,
+and spacing establish hierarchy before cards or shadows do. Phosphor green is
+reserved for commands, live focus, and healthy state; amber and red retain
+attention and blocked meaning.
+
+Terminal density and split-pane structure are attached to the existing
+components through shared tokens and a small inspector component. Light mode
+overrides the same semantic tokens, so it remains an explicit preference rather
+than a second implementation. Loading, empty, error, and disabled states keep
+the resolved layout stable.
