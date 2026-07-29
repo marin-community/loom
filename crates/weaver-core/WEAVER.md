@@ -140,11 +140,14 @@ it is already there or one command away:
   hand-extract `.deb` files or patch `LD_LIBRARY_PATH` — if `sudo -n apt-get`
   is refused you are not in that image, and the fix is to say so, not to
   improvise a private prefix.
-- **Screenshots work.** Chromium's shared libraries and fonts are installed;
-  `playwright install chromium` fetches the browser itself into a cache shared
-  by every session. Firefox and WebKit are not covered — their (much larger)
-  dependency set is what `playwright install-deps --dry-run <browser>` lists,
-  and you install it with `sudo apt-get install -y …`.
+- **Screenshots work.** Chromium's shared libraries and fonts are installed, but
+  not a browser. Fetch it with the same package you script with — `uv run --with
+  playwright playwright install chromium`, or `npx playwright install chromium` —
+  because each playwright version pins its own browser build, and the node CLI's
+  build is not the one your Python package will accept. The download lands in a
+  cache every session shares, so it costs a minute once per version. Firefox and
+  WebKit are not covered: `playwright install-deps --dry-run <browser>` lists
+  their (much larger) dependency set for `sudo apt-get install -y …`.
 - **Language toolchains**: `uv` for Python (`uv run --with <pkg>`, `uv tool
   install`), `npm i -g` for node CLIs. Both write to your persisted `$HOME`.
 - An `apt-get` install lasts for **your session only** — it is not shared with

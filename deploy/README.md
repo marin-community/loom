@@ -446,9 +446,13 @@ The agent tooling the image ships splits by how it updates:
 - **Browsers and screenshots.** The image ships Chromium's shared libraries and
   fonts (Playwright's own `debian12` dependency list, i.e. what `playwright
   install-deps` would install) but not a browser. An agent downloads the browser
-  it wants — `playwright install chromium`, or the npm/Python package's own
-  installer — into `~/.cache/ms-playwright` on the `loom_home` volume, so the
+  it wants into `~/.cache/ms-playwright` on the `loom_home` volume, so the
   download happens once per deploy and every later session finds it cached.
+  Deliberately not baked in: each playwright release pins its own browser build
+  (`chromium-1187` for 1.55, `chromium-1228` for current), so an image-resident
+  copy would serve one version and go stale, and a system-owned
+  `PLAYWRIGHT_BROWSERS_PATH` would leave a mismatched session unable to install
+  the build it needs. The shared cache under `$HOME` has neither problem.
   Firefox and WebKit need a much larger dependency set that is *not* installed
   (63 more packages for Firefox). `playwright install-deps --dry-run <browser>`
   lists them and `sudo apt-get install -y …` installs them; note that `sudo
