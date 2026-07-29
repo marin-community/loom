@@ -26,9 +26,10 @@ group, and returning to the workbench restores the current view.
 
 The shell polls a compact summary of active sessions. It fetches archived
 summaries only when History opens, and fetches full goal, launch, policy, and
-runtime context only when a session page or row disclosure needs it. Search
-still matches goal text on the server, so this transport hierarchy does not
-weaken discovery.
+runtime context only for the current desktop mailbox cursor, a row disclosure,
+or a session page. Cursor changes are debounced and each fetched detail is
+reused by row disclosure. Search still matches goal text on the server, so this
+transport hierarchy does not weaken discovery.
 
 ## Launch
 
@@ -111,10 +112,38 @@ well as color. Controls have visible focus and accessible names. Narrow layouts
 retain the same routes and actions; panels may stack, but lifecycle, review, and
 confirmation semantics do not change.
 
+## Keyboard command model
+
+Loom's operator chrome is keyboard-first. Global navigation uses discoverable
+`g …` chords, `?` opens the commands available in the current view, and the
+status bar shows a short context-sensitive key legend. Sessions behaves like a
+mailbox: `j`/`k` move a stable row cursor, `Enter` opens it, `/` focuses search,
+`x` or `Space` changes bulk selection, and `o` toggles disclosure.
+
+The application owns one prioritized command registry rather than view-local
+window listeners. Kept-alive routes register commands only while active, and
+transient surfaces get first refusal. Character commands never capture typing
+from form controls, contenteditable regions, dialogs, menus, or xterm. The row
+cursor uses stable session identity and roving focus; it is deliberately
+separate from checkbox selection.
+
 ## Visual system
 
-The palette is neutral and low-contrast, reserving saturated color for status,
-selection, destructive actions, and focus. Typography favors compact labels and
-readable working text; monospace is for terminal output, paths, identifiers, and
-structured data. Borders and spacing establish hierarchy before shadows do, and
-loading, empty, error, and disabled states keep the resolved layout stable.
+The default presentation is a dense dark terminal workbench, not a separate
+themed component tree. On desktop, Sessions is a mailbox split: the compact
+fleet remains on the left while a sticky inspector follows the keyboard cursor
+on the right. Narrow layouts omit that inspector and keep the same rows,
+disclosure, and routes.
+
+Operator chrome, command hints, mailbox rows, paths, identifiers, timestamps,
+and structured data use monospace; human conversation and documents retain
+readable prose faces. Near-black planes, ruled rows, cursor gutters, borders,
+and spacing establish hierarchy before cards or shadows do. Phosphor green is
+reserved for commands, live focus, and healthy state; amber and red retain
+attention and blocked meaning.
+
+Terminal density and split-pane structure are attached to the existing
+components through shared tokens and a small inspector component. Light mode
+overrides the same semantic tokens, so it remains an explicit preference rather
+than a second implementation. Loading, empty, error, and disabled states keep
+the resolved layout stable.

@@ -3,6 +3,8 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { unmatchedAutomationRuns, unmatchedRunProjection } from '../lib/automationSessions';
 import { effectiveAttention } from '../lib/sessionState';
 import { useFleet } from '../lib/sessionsStore';
+import { useCommandRegistry } from '../lib/commands';
+import KeyHint from './KeyHint.vue';
 
 // The workbench status bar — live fleet vitals in one 24px mono strip (see
 // docs/loom-ui.md). Read-only API state from the one shared fleet snapshot the
@@ -11,6 +13,7 @@ import { useFleet } from '../lib/sessionsStore';
 // filtered list; "all calm" reads a reassuring green). Right: connection dot +
 // a ticking clock — the "is this thing live?" glance.
 const { sessions, runs, online } = useFleet();
+const { chord: commandChord, hints: commandHints } = useCommandRegistry();
 const clock = ref('');
 
 // Automation sessions are ordinary fleet sessions now. Only failed launch
@@ -79,9 +82,29 @@ onUnmounted(() => clearInterval(clockTimer));
     </span>
 
     <span
-      class="ml-auto flex items-center gap-1.5"
-      :title="online ? 'Connected' : 'Server unreachable'"
+      v-if="commandChord"
+      data-testid="command-chord"
+      class="ml-auto flex items-center gap-1.5 whitespace-nowrap text-accent"
     >
+      <KeyHint :keys="commandChord" />
+      …
+    </span>
+    <span
+      v-else
+      data-testid="command-hints"
+      class="ml-auto hidden min-w-0 items-center gap-2 overflow-hidden lg:flex"
+    >
+      <span
+        v-for="command in commandHints"
+        :key="command.id"
+        class="flex shrink-0 items-center gap-1 text-faint"
+      >
+        <KeyHint :keys="command.keys[0]" />
+        {{ command.label.toLowerCase() }}
+      </span>
+    </span>
+
+    <span class="flex items-center gap-1.5" :title="online ? 'Connected' : 'Server unreachable'">
       <span
         class="h-1.5 w-1.5 rounded-full"
         :class="online ? 'bg-accent' : 'bg-block-line'"

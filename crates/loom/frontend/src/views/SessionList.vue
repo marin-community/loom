@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onActivated, ref, watch } from 'vue';
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import type {
   Session,
@@ -11,6 +11,7 @@ import type {
 } from '../types';
 import AutomationRunRow from '../components/AutomationRunRow.vue';
 import ConfirmDialog from '../components/ConfirmDialog.vue';
+import SessionMailboxPreview from '../components/SessionMailboxPreview.vue';
 import SessionWorkbenchRow from '../components/SessionWorkbenchRow.vue';
 import {
   archiveSession,
@@ -33,6 +34,7 @@ import { effectiveAttention } from '../lib/sessionState';
 import { useLayoutCommands } from '../lib/layoutCommands';
 import { useFleet } from '../lib/sessionsStore';
 import { beginSessionOpen, recordSessionListReturn } from '../lib/workbenchMetrics';
+import { useCommandScope, type Command } from '../lib/commands';
 
 defineOptions({ name: 'SessionList' });
 
@@ -129,6 +131,7 @@ function updateFilters() {
 }
 
 const searchText = ref('');
+const searchInput = ref<HTMLInputElement>();
 const includeHistory = ref(false);
 const searchResults = ref<SessionSummary[] | null>(null);
 const searching = ref(false);
@@ -283,6 +286,25 @@ const displayedGroups = computed(() => {
     ? [{ key: 'smart', group: undefined, sessions: smartSessions.value, qualified: true }]
     : [];
 });
+const cursorSessionIds = computed(() =>
+  displayedGroups.value.flatMap((display) =>
+    display.group?.collapsed ? [] : display.sessions.map((session) => session.id),
+  ),
+);
+const cursorSessionId = ref('');
+const cursorSession = computed(() =>
+  displayedGroups.value
+    .flatMap((display) => display.sessions)
+    .find((session) => session.id === cursorSessionId.value),
+);
+const cursorPosition = computed(() => cursorSessionIds.value.indexOf(cursorSessionId.value) + 1);
+watch(
+  cursorSessionIds,
+  (ids) => {
+    if (!ids.includes(cursorSessionId.value)) cursorSessionId.value = ids[0] ?? '';
+  },
+  { immediate: true },
+);
 const unmatchedRuns = computed(() =>
   unmatchedAutomationRuns(runs.value, sessions.value).sort((left, right) =>
     right.updated_at.localeCompare(left.updated_at),
@@ -319,6 +341,7 @@ function rowExpanded(id: string) {
 }
 
 async function loadRowDetail(id: string) {
+  if (rowDetails.value[id] || rowDetailLoading.value.has(id)) return;
   rowDetailLoading.value = new Set(rowDetailLoading.value).add(id);
   const errors = { ...rowDetailErrors.value };
   delete errors[id];
@@ -333,6 +356,31 @@ async function loadRowDetail(id: string) {
     rowDetailLoading.value = loading;
   }
 }
+
+const mailboxPreviewVisible = ref(false);
+let previewMedia: MediaQueryList | undefined;
+let previewTimer: number | undefined;
+function syncMailboxPreview() {
+  mailboxPreviewVisible.value = previewMedia?.matches ?? false;
+}
+onMounted(() => {
+  previewMedia = window.matchMedia('(min-width: 64rem)');
+  syncMailboxPreview();
+  previewMedia.addEventListener('change', syncMailboxPreview);
+});
+watch(
+  [cursorSessionId, mailboxPreviewVisible],
+  ([id, visible]) => {
+    window.clearTimeout(previewTimer);
+    if (!visible || !id || rowDetails.value[id] || rowDetailLoading.value.has(id)) return;
+    previewTimer = window.setTimeout(() => void loadRowDetail(id), 120);
+  },
+  { immediate: true },
+);
+onBeforeUnmount(() => {
+  window.clearTimeout(previewTimer);
+  previewMedia?.removeEventListener('change', syncMailboxPreview);
+});
 
 function toggleRow(id: string) {
   const next = new Set(expandedRows.value);
@@ -756,6 +804,124 @@ function openForm() {
   router.push('/sessions/new');
 }
 
+function focusCursor() {
+  if (!cursorSessionId.value) cursorSessionId.value = cursorSessionIds.value[0] ?? '';
+  const id = cursorSessionId.value;
+  if (!id) return;
+  void nextTick(() => {
+    document
+      .querySelector<HTMLElement>(`[data-session-id="${CSS.escape(id)}"] [data-session-primary]`)
+      ?.focus({ preventScroll: true });
+    document
+      .querySelector<HTMLElement>(`[data-session-id="${CSS.escape(id)}"]`)
+      ?.scrollIntoView({ block: 'nearest' });
+  });
+}
+
+function moveCursor(direction: -1 | 1) {
+  const ids = cursorSessionIds.value;
+  if (!ids.length) return;
+  const current = ids.indexOf(cursorSessionId.value);
+  const fallback = direction > 0 ? 0 : ids.length - 1;
+  const next = current < 0 ? fallback : Math.min(Math.max(current + direction, 0), ids.length - 1);
+  cursorSessionId.value = ids[next];
+  focusCursor();
+}
+
+function moveCursorTo(edge: 'first' | 'last') {
+  const ids = cursorSessionIds.value;
+  cursorSessionId.value = edge === 'first' ? (ids[0] ?? '') : (ids.at(-1) ?? '');
+  focusCursor();
+}
+
+function activateCursor() {
+  if (!cursorSessionId.value) return;
+  document
+    .querySelector<HTMLAnchorElement>(
+      `[data-session-id="${CSS.escape(cursorSessionId.value)}"] [data-session-primary]`,
+    )
+    ?.click();
+}
+
+function toggleCursorSelection() {
+  const id = cursorSessionId.value;
+  const session = sessionsById.value.get(id);
+  if (!id || !session || session.status === 'archived') return;
+  setSelected(id, !isSelected(id));
+}
+
+function toggleCursorDetails() {
+  if (cursorSessionId.value) toggleRow(cursorSessionId.value);
+}
+
+const sessionCommands = computed<Command[]>(() => [
+  {
+    id: 'sessions.cursor-down',
+    label: 'Move row cursor down',
+    keys: ['j'],
+    hint: true,
+    run: () => moveCursor(1),
+  },
+  {
+    id: 'sessions.cursor-up',
+    label: 'Move row cursor up',
+    keys: ['k'],
+    run: () => moveCursor(-1),
+  },
+  {
+    id: 'sessions.first',
+    label: 'Go to first row',
+    keys: ['g g'],
+    run: () => moveCursorTo('first'),
+  },
+  {
+    id: 'sessions.last',
+    label: 'Go to last row',
+    keys: ['G'],
+    run: () => moveCursorTo('last'),
+  },
+  {
+    id: 'sessions.open',
+    label: 'Open current session',
+    keys: ['Enter'],
+    hint: true,
+    enabled: () => !!cursorSessionId.value,
+    run: activateCursor,
+  },
+  {
+    id: 'sessions.search',
+    label: 'Search sessions',
+    keys: ['/'],
+    hint: true,
+    run: () => searchInput.value?.focus(),
+  },
+  {
+    id: 'sessions.details',
+    label: 'Toggle row details',
+    keys: ['o'],
+    hint: true,
+    enabled: () => !!cursorSessionId.value,
+    run: toggleCursorDetails,
+  },
+  {
+    id: 'sessions.select',
+    label: 'Toggle row selection',
+    keys: ['Space', 'x'],
+    enabled: () => {
+      const session = sessionsById.value.get(cursorSessionId.value);
+      return !!session && session.status !== 'archived';
+    },
+    run: toggleCursorSelection,
+  },
+  {
+    id: 'sessions.refresh',
+    label: 'Refresh sessions',
+    keys: ['r'],
+    run: refresh,
+  },
+]);
+useCommandScope('sessions', 'Sessions', sessionCommands, 100);
+
 const clearingTag = ref('');
 async function clearTag(sessionId: string, key: string) {
   clearingTag.value = `${sessionId}:${key}`;
@@ -782,18 +948,19 @@ function scrollSpaces(direction: number) {
 </script>
 
 <template>
-  <div class="px-5 py-3">
+  <div class="session-mailbox px-3 py-2">
     <h1 class="sr-only">Sessions</h1>
 
     <div class="mb-3 flex flex-wrap items-center gap-2">
       <label class="relative min-w-52 flex-1 sm:max-w-md">
         <span class="sr-only">Search sessions</span>
         <input
+          ref="searchInput"
           v-model="searchText"
           type="search"
           data-testid="fleet-search"
           placeholder="Search sessions, prompts, repos, issues…"
-          class="w-full rounded border border-line bg-input px-3 py-1.5 text-sm outline-none focus:ring-1 focus:ring-accent"
+          class="w-full border border-line bg-input px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-accent"
         />
         <span v-if="searching" class="absolute right-2 top-2 text-2xs text-faint">searching…</span>
       </label>
@@ -846,7 +1013,7 @@ function scrollSpaces(direction: number) {
       </button>
     </div>
 
-    <div class="mb-3 flex min-w-0 items-stretch gap-1">
+    <div class="mb-2 flex min-w-0 items-stretch gap-1">
       <button
         class="btn-secondary px-2 text-xs"
         aria-label="Scroll spaces left"
@@ -857,14 +1024,14 @@ function scrollSpaces(direction: number) {
       <nav
         data-testid="space-tabs-scroll"
         aria-label="Session workbench views"
-        class="flex min-w-0 flex-1 gap-1 overflow-x-auto rounded border border-line bg-surface p-1"
+        class="flex min-w-0 flex-1 gap-0.5 overflow-x-auto border border-line bg-surface p-0.5"
       >
         <router-link
           :to="{ path: '/', query: viewQuery('attention') }"
           data-testid="attention-view"
           :aria-current="view === 'attention' ? 'page' : undefined"
           :class="view === 'attention' ? 'bg-attn-soft text-attn' : 'text-muted hover:bg-subtle'"
-          class="flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium"
+          class="flex shrink-0 items-center gap-1.5 px-2 py-1 text-xs font-medium"
         >
           Attention
           <span class="font-mono text-2xs">{{
@@ -882,7 +1049,7 @@ function scrollSpaces(direction: number) {
               ? 'bg-accent text-accent-fg'
               : 'text-muted hover:bg-subtle'
           "
-          class="flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium"
+          class="flex shrink-0 items-center gap-1.5 px-2 py-1 text-xs font-medium"
         >
           {{ space.name }}
           <span class="font-mono text-2xs">
@@ -894,7 +1061,7 @@ function scrollSpaces(direction: number) {
           data-testid="all-view"
           :aria-current="view === 'all' ? 'page' : undefined"
           :class="view === 'all' ? 'bg-accent text-accent-fg' : 'text-muted hover:bg-subtle'"
-          class="flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium"
+          class="flex shrink-0 items-center gap-1.5 px-2 py-1 text-xs font-medium"
         >
           All <span class="font-mono text-2xs">{{ liveSessions.length }}</span>
         </router-link>
@@ -903,7 +1070,7 @@ function scrollSpaces(direction: number) {
           data-testid="history-view"
           :aria-current="view === 'history' ? 'page' : undefined"
           :class="view === 'history' ? 'bg-accent text-accent-fg' : 'text-muted hover:bg-subtle'"
-          class="flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium"
+          class="flex shrink-0 items-center gap-1.5 px-2 py-1 text-xs font-medium"
         >
           History
           <span class="font-mono text-2xs">{{
@@ -1122,200 +1289,222 @@ function scrollSpaces(direction: number) {
       {{ archiveResult }}
     </div>
 
-    <div
-      v-if="selected.size"
-      data-testid="selection-toolbar"
-      class="sticky top-2 z-20 mb-3 flex flex-wrap items-center gap-2 rounded border border-accent bg-surface px-3 py-2 shadow"
-    >
-      <strong class="text-xs">
-        {{ selected.size }} selected
-        <span v-if="hiddenSelectedCount" class="font-normal text-muted">
-          · {{ hiddenSelectedCount }} hidden by this view
-        </span>
-      </strong>
-      <select
-        v-model="bulkDestination"
-        aria-label="Move selected to group"
-        class="rounded bg-input px-2 py-1 text-xs"
-      >
-        <option v-for="entry in allGroups" :key="entry.group.id" :value="entry.group.id">
-          {{ entry.label }}
-        </option>
-      </select>
-      <button
-        class="btn-primary px-2 py-1 text-xs"
-        type="button"
-        :disabled="layoutBusy"
-        @click="performMove(selectedInLayoutOrder(), bulkDestination)"
-      >
-        Move
-      </button>
-      <button
-        class="btn-secondary px-2 py-1 text-xs"
-        type="button"
-        @click="pendingBulkArchive = true"
-      >
-        Archive
-      </button>
-      <button class="btn-secondary px-2 py-1 text-xs" type="button" @click="clearSelection">
-        Clear
-      </button>
-    </div>
-
-    <section v-if="showInterventions" class="mb-4" aria-labelledby="interventions-heading">
-      <div class="mb-1.5 flex items-center gap-2">
-        <h2
-          id="interventions-heading"
-          class="text-2xs font-semibold uppercase tracking-wider text-muted"
+    <div class="session-workbench-grid">
+      <div class="min-w-0">
+        <div
+          v-if="selected.size"
+          data-testid="selection-toolbar"
+          class="sticky top-2 z-20 mb-3 flex flex-wrap items-center gap-2 border border-accent bg-surface px-3 py-2"
         >
-          Interventions
-        </h2>
-        <span class="rounded-full bg-block-soft px-1.5 font-mono text-2xs text-block">{{
-          operationalRuns.length
-        }}</span>
-      </div>
-      <ul
-        v-if="operationalRuns.length"
-        data-testid="interventions"
-        class="rounded border border-line bg-surface"
-      >
-        <AutomationRunRow
-          v-for="run in operationalRuns"
-          :key="run.id"
-          :run="run"
-          :projection="unmatchedRunProjection(run)"
-          @changed="refresh"
-          @error="error = $event"
-        />
-      </ul>
-      <p v-else class="rounded border border-dashed border-line px-3 py-3 text-sm text-muted">
-        No automation runs need intervention.
-      </p>
-    </section>
+          <strong class="text-xs">
+            {{ selected.size }} selected
+            <span v-if="hiddenSelectedCount" class="font-normal text-muted">
+              · {{ hiddenSelectedCount }} hidden by this view
+            </span>
+          </strong>
+          <select
+            v-model="bulkDestination"
+            aria-label="Move selected to group"
+            class="rounded bg-input px-2 py-1 text-xs"
+          >
+            <option v-for="entry in allGroups" :key="entry.group.id" :value="entry.group.id">
+              {{ entry.label }}
+            </option>
+          </select>
+          <button
+            class="btn-primary px-2 py-1 text-xs"
+            type="button"
+            :disabled="layoutBusy"
+            @click="performMove(selectedInLayoutOrder(), bulkDestination)"
+          >
+            Move
+          </button>
+          <button
+            class="btn-secondary px-2 py-1 text-xs"
+            type="button"
+            @click="pendingBulkArchive = true"
+          >
+            Archive
+          </button>
+          <button class="btn-secondary px-2 py-1 text-xs" type="button" @click="clearSelection">
+            Clear
+          </button>
+        </div>
 
-    <section
-      v-for="display in displayedGroups"
-      :key="display.key"
-      :data-group-id="display.group?.id"
-      :data-testid="display.group ? 'session-group' : undefined"
-      class="mb-3 rounded border border-line bg-surface"
-      :class="
-        display.group && dropGroupId === display.group.id && !dropBeforeId
-          ? 'ring-1 ring-accent'
-          : ''
-      "
-      @dragover.prevent="display.group && dragOver(display.group.id)"
-      @drop.prevent="display.group && drop(display.group.id)"
-    >
-      <header
-        v-if="display.group"
-        class="flex min-h-9 items-center gap-2 border-b border-line bg-input/40 px-3 py-1.5"
-      >
-        <button
-          type="button"
-          :aria-expanded="!display.group.collapsed"
-          :aria-controls="`group-${display.group.id}`"
-          :aria-label="`${display.group.collapsed ? 'Expand' : 'Collapse'} ${display.group.name}`"
-          class="flex min-w-0 flex-1 items-center gap-2 text-left"
-          @click="toggleGroup(display.group)"
-        >
-          <span class="text-faint" :class="display.group.collapsed ? '' : 'rotate-90'">▸</span>
-          <span class="truncate text-sm font-medium text-fg">{{ display.group.name }}</span>
-          <span class="font-mono text-2xs text-faint">{{ display.sessions.length }}</span>
-        </button>
-      </header>
-      <ul
-        v-show="!display.group?.collapsed"
-        :id="display.group ? `group-${display.group.id}` : undefined"
-        data-testid="session-list"
-      >
-        <SessionWorkbenchRow
-          v-for="session in display.sessions"
-          :key="session.id"
-          :session="session"
-          :detail="rowDetails[session.id]"
-          :detail-loading="rowDetailLoading.has(session.id)"
-          :detail-error="rowDetailErrors[session.id]"
-          :qualified="display.qualified"
-          :selected="isSelected(session.id)"
-          :expanded="rowExpanded(session.id)"
-          :move-open="moveOpenId === session.id"
-          :destination="rowDestination[session.id]"
-          :before="rowBefore[session.id]"
-          :all-groups="allGroups"
-          :all-sessions="sessions"
-          :parent-session="parentSessionOf(session)"
-          :dragging="draggingId === session.id"
-          :drop-before="
-            dropGroupId === (display.group?.id ?? session.placement?.group_id) &&
-            dropBeforeId === session.id
+        <section v-if="showInterventions" class="mb-4" aria-labelledby="interventions-heading">
+          <div class="mb-1.5 flex items-center gap-2">
+            <h2
+              id="interventions-heading"
+              class="text-2xs font-semibold uppercase tracking-wider text-muted"
+            >
+              Interventions
+            </h2>
+            <span class="rounded-full bg-block-soft px-1.5 font-mono text-2xs text-block">{{
+              operationalRuns.length
+            }}</span>
+          </div>
+          <ul
+            v-if="operationalRuns.length"
+            data-testid="interventions"
+            class="rounded border border-line bg-surface"
+          >
+            <AutomationRunRow
+              v-for="run in operationalRuns"
+              :key="run.id"
+              :run="run"
+              :projection="unmatchedRunProjection(run)"
+              @changed="refresh"
+              @error="error = $event"
+            />
+          </ul>
+          <p v-else class="rounded border border-dashed border-line px-3 py-3 text-sm text-muted">
+            No automation runs need intervention.
+          </p>
+        </section>
+
+        <section
+          v-for="display in displayedGroups"
+          :key="display.key"
+          :data-group-id="display.group?.id"
+          :data-testid="display.group ? 'session-group' : undefined"
+          class="session-mailbox-group mb-2 border border-line bg-surface"
+          :class="
+            display.group && dropGroupId === display.group.id && !dropBeforeId
+              ? 'ring-1 ring-accent'
+              : ''
           "
-          :clearing-tag="clearingTag"
-          @toggle-select="setSelected(session.id, $event)"
-          @toggle-details="toggleRow(session.id)"
-          @open-move="openMove(session)"
-          @update-destination="rowDestination[session.id] = $event"
-          @update-before="rowBefore[session.id] = $event"
-          @move="performMove([session.id], $event.groupId, $event.beforeId || null)"
-          @drag-start="dragStart(session.id, $event)"
-          @drag-end="clearDrag"
-          @drag-over="dragOver(display.group?.id ?? session.placement?.group_id ?? '', session.id)"
-          @drop="drop(display.group?.id ?? session.placement?.group_id ?? '', session.id)"
-          @changed="refresh"
-          @error="error = $event"
-          @clear-tag="clearTag(session.id, $event)"
-          @record-open="recordSessionLinkOpen($event, session.id)"
-        />
-        <li
-          v-if="display.group && !display.sessions.length"
-          data-testid="empty-group"
-          class="px-3 py-5 text-center text-sm text-faint"
+          @dragover.prevent="display.group && dragOver(display.group.id)"
+          @drop.prevent="display.group && drop(display.group.id)"
         >
-          {{
-            display.group.session_ids.length
-              ? 'No sessions match the current view or filters.'
-              : 'Empty group — drop sessions here or use Move.'
-          }}
-        </li>
-      </ul>
-    </section>
+          <header
+            v-if="display.group"
+            class="flex min-h-7 items-center gap-2 border-b border-line bg-input/40 px-2 py-1 font-mono"
+          >
+            <button
+              type="button"
+              :aria-expanded="!display.group.collapsed"
+              :aria-controls="`group-${display.group.id}`"
+              :aria-label="`${display.group.collapsed ? 'Expand' : 'Collapse'} ${display.group.name}`"
+              class="flex min-w-0 flex-1 items-center gap-2 text-left"
+              @click="toggleGroup(display.group)"
+            >
+              <span class="text-faint" :class="display.group.collapsed ? '' : 'rotate-90'">▸</span>
+              <span class="truncate text-sm font-medium text-fg">{{ display.group.name }}</span>
+              <span class="font-mono text-2xs text-faint">{{ display.sessions.length }}</span>
+            </button>
+          </header>
+          <ul
+            v-show="!display.group?.collapsed"
+            :id="display.group ? `group-${display.group.id}` : undefined"
+            data-testid="session-list"
+          >
+            <SessionWorkbenchRow
+              v-for="session in display.sessions"
+              :key="session.id"
+              :session="session"
+              :detail="rowDetails[session.id]"
+              :detail-loading="rowDetailLoading.has(session.id)"
+              :detail-error="rowDetailErrors[session.id]"
+              :qualified="display.qualified"
+              :selected="isSelected(session.id)"
+              :expanded="rowExpanded(session.id)"
+              :move-open="moveOpenId === session.id"
+              :destination="rowDestination[session.id]"
+              :before="rowBefore[session.id]"
+              :all-groups="allGroups"
+              :all-sessions="sessions"
+              :parent-session="parentSessionOf(session)"
+              :dragging="draggingId === session.id"
+              :drop-before="
+                dropGroupId === (display.group?.id ?? session.placement?.group_id) &&
+                dropBeforeId === session.id
+              "
+              :clearing-tag="clearingTag"
+              :cursor="cursorSessionId === session.id"
+              @activate="cursorSessionId = session.id"
+              @toggle-select="setSelected(session.id, $event)"
+              @toggle-details="toggleRow(session.id)"
+              @open-move="openMove(session)"
+              @update-destination="rowDestination[session.id] = $event"
+              @update-before="rowBefore[session.id] = $event"
+              @move="performMove([session.id], $event.groupId, $event.beforeId || null)"
+              @drag-start="dragStart(session.id, $event)"
+              @drag-end="clearDrag"
+              @drag-over="
+                dragOver(display.group?.id ?? session.placement?.group_id ?? '', session.id)
+              "
+              @drop="drop(display.group?.id ?? session.placement?.group_id ?? '', session.id)"
+              @changed="refresh"
+              @error="error = $event"
+              @clear-tag="clearTag(session.id, $event)"
+              @record-open="recordSessionLinkOpen($event, session.id)"
+            />
+            <li
+              v-if="display.group && !display.sessions.length"
+              data-testid="empty-group"
+              class="px-3 py-5 text-center text-sm text-faint"
+            >
+              {{
+                display.group.session_ids.length
+                  ? 'No sessions match the current view or filters.'
+                  : 'Empty group — drop sessions here or use Move.'
+              }}
+            </li>
+          </ul>
+        </section>
 
-    <section v-if="view === 'history' && historicalRuns.length" class="mt-4">
-      <h2 class="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">
-        Automation run history
-      </h2>
-      <ul data-testid="automation-run-history" class="rounded border border-line bg-surface">
-        <AutomationRunRow
-          v-for="run in historicalRuns"
-          :key="run.id"
-          :run="run"
-          projection="history"
-          @changed="refresh"
-          @error="error = $event"
-        />
-      </ul>
-    </section>
+        <section v-if="view === 'history' && historicalRuns.length" class="mt-4">
+          <h2 class="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">
+            Automation run history
+          </h2>
+          <ul data-testid="automation-run-history" class="rounded border border-line bg-surface">
+            <AutomationRunRow
+              v-for="run in historicalRuns"
+              :key="run.id"
+              :run="run"
+              projection="history"
+              @changed="refresh"
+              @error="error = $event"
+            />
+          </ul>
+        </section>
 
-    <div
-      v-if="
-        (view !== 'space' || searchResults !== null) &&
-        !smartSessions.length &&
-        !(view === 'history' && historicalRuns.length) &&
-        !(showInterventions && operationalRuns.length)
-      "
-      class="rounded border border-dashed border-line p-6 text-center"
-    >
-      <p class="text-sm text-muted">
-        {{
-          view === 'history'
-            ? historySessions.length
-              ? 'No archived sessions match this search or the current filters.'
-              : 'No archived sessions yet.'
-            : searchText
-              ? 'No sessions match this search.'
-              : 'No actionable sessions here.'
-        }}
-      </p>
+        <div
+          v-if="
+            (view !== 'space' || searchResults !== null) &&
+            !smartSessions.length &&
+            !(view === 'history' && historicalRuns.length) &&
+            !(showInterventions && operationalRuns.length)
+          "
+          class="rounded border border-dashed border-line p-6 text-center"
+        >
+          <p class="text-sm text-muted">
+            {{
+              view === 'history'
+                ? historySessions.length
+                  ? 'No archived sessions match this search or the current filters.'
+                  : 'No archived sessions yet.'
+                : searchText
+                  ? 'No sessions match this search.'
+                  : 'No actionable sessions here.'
+            }}
+          </p>
+        </div>
+      </div>
+
+      <SessionMailboxPreview
+        :session="cursorSession"
+        :detail="cursorSession ? rowDetails[cursorSession.id] : undefined"
+        :loading="cursorSession ? rowDetailLoading.has(cursorSession.id) : false"
+        :error="cursorSession ? rowDetailErrors[cursorSession.id] : ''"
+        :position="cursorPosition"
+        :total="cursorSessionIds.length"
+        :selected="cursorSession ? isSelected(cursorSession.id) : false"
+        :expanded="cursorSession ? rowExpanded(cursorSession.id) : false"
+        @open="cursorSession && recordSessionLinkOpen($event, cursorSession.id)"
+        @toggle-select="toggleCursorSelection"
+        @toggle-details="toggleCursorDetails"
+      />
     </div>
 
     <div

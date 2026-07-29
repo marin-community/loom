@@ -28,6 +28,7 @@ import Shell from './views/Shell.vue';
 import Login from './views/Login.vue';
 import { me, loadMe } from './auth';
 import { setUnauthorizedHandler } from './api';
+import { commandRegistryKey, createCommandRegistry } from './lib/commands';
 import './styles.css';
 
 const router = createRouter({
@@ -80,5 +81,5 @@ setUnauthorizedHandler(() => {
 // Resolve identity once up front so the first paint picks the right chrome
 // (full shell vs. bare login), then mount.
 loadMe().finally(() => {
-  createApp(App).use(router).mount('#app');
+  createApp(App).use(router).provide(commandRegistryKey, createCommandRegistry()).mount('#app');
 });

@@ -40,6 +40,7 @@ const props = defineProps({
   dragging: { type: Boolean, default: false },
   dropBefore: { type: Boolean, default: false },
   clearingTag: { type: String, default: '' },
+  cursor: { type: Boolean, default: false },
 });
 
 const emit = defineEmits<{
@@ -57,6 +58,7 @@ const emit = defineEmits<{
   error: [message: string];
   clearTag: [key: string];
   recordOpen: [event: MouseEvent];
+  activate: [];
 }>();
 const disclosureId = useId();
 const detailsButtonId = `${disclosureId}-details-button`;
@@ -118,14 +120,18 @@ function onKeydown(event: KeyboardEvent) {
   <li
     data-testid="session-card"
     :data-session-id="session.id"
-    class="group relative flex flex-wrap items-start gap-2 border-b border-line px-3 py-2.5 last:border-0 hover:bg-subtle/70 focus-within:bg-subtle/70"
+    class="session-mailbox-row group relative flex flex-wrap items-start gap-1.5 border-b border-line px-2 py-1.5 last:border-0 hover:bg-subtle/70 focus-within:bg-subtle/70"
     :class="[
       dragging ? 'opacity-40' : '',
       dropBefore ? 'shadow-[inset_0_2px_0_var(--accent)]' : '',
+      cursor ? 'session-mailbox-row--cursor' : '',
     ]"
+    :data-cursor="cursor ? 'true' : undefined"
     @dragover.stop.prevent="emit('dragOver')"
     @drop.stop.prevent="emit('drop')"
     @keydown="onKeydown"
+    @focusin="emit('activate')"
+    @mousedown="emit('activate')"
   >
     <span
       v-if="session.status !== 'archived'"
@@ -160,7 +166,9 @@ function onKeydown(event: KeyboardEvent) {
       <div class="flex min-w-0 items-center gap-2">
         <router-link
           :to="`/s/${session.id}`"
-          class="stretched-link min-w-0 truncate text-sm font-medium leading-5 text-fg hover:text-accent"
+          data-session-primary
+          :tabindex="cursor ? 0 : -1"
+          class="session-mailbox-primary stretched-link min-w-0 truncate font-mono text-xs font-medium leading-4 text-fg hover:text-accent"
           @click="emit('recordOpen', $event)"
         >
           {{ title() }}
