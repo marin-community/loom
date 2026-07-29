@@ -186,6 +186,18 @@ Codex and Claude use for command sandboxing. Remove the first two and loom
 still runs with sessions unlimited; remove the seccomp exception and their
 command sandboxes cannot start.
 
+The `app` user may also run `apt-get`, `apt` and `dpkg` under `sudo`, so an agent
+can install a system package it turns out to need (see
+[Agent runtime](#agent-runtime--client-packages)) instead of improvising around
+the missing one. `dpkg` maintainer scripts run arbitrary code, so this is
+effectively container root — but it is granted only to containers that already
+mount the root-equivalent Docker socket above, so it adds no reach. It is scoped
+to those three commands rather than a blanket `ALL`, and restricted profiles
+([docs/restricted-sessions.md](../docs/restricted-sessions.md)) get no shell at
+all. Drop `/etc/sudoers.d/loom-packages` from the
+[`Dockerfile`](../Dockerfile) to remove it; agents then need a rebuild for every
+missing package.
+
 Background on these knobs is in the repo
 [README "Authentication"](../README.md#authentication) and
 [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md). To change one after the fact:
@@ -416,9 +428,32 @@ The agent tooling the image ships splits by how it updates:
   docker compose exec loom uv tool install <tool>  # python CLIs → ~/.local/bin
   ```
 
-  Only OS/system packages (`apt-get`) still need an image rebuild — the system
-  dirs are read-only to the non-root user. Add those to the
-  [`Dockerfile`](../Dockerfile) and rerun `docker compose up -d --build`.
+  System packages work too, without a rebuild: the app user may run `apt-get`,
+  `apt` and `dpkg` under `sudo` (nothing else — see
+  [Security posture](#security-posture)), and the image keeps its apt index so an
+  install works on the first try with no `update` step:
+
+  ```sh
+  docker compose exec loom sudo apt-get install -y ffmpeg
+  ```
+
+  That install lands in the *container's* writable layer, so it lasts as long as
+  that container and is invisible to other sessions — it is the escape hatch for
+  a one-off, not a fleet dependency. Anything agents reach for repeatedly belongs
+  in the [`Dockerfile`](../Dockerfile), applied with
+  `docker compose up -d --build`.
+
+- **Browsers and screenshots.** The image ships Chromium's shared libraries and
+  fonts (Playwright's own `debian12` dependency list, i.e. what `playwright
+  install-deps` would install) but not a browser. An agent downloads the browser
+  it wants — `playwright install chromium`, or the npm/Python package's own
+  installer — into `~/.cache/ms-playwright` on the `loom_home` volume, so the
+  download happens once per deploy and every later session finds it cached.
+  Firefox and WebKit need a much larger dependency set that is *not* installed
+  (63 more packages for Firefox). `playwright install-deps --dry-run <browser>`
+  lists them and `sudo apt-get install -y …` installs them; note that `sudo
+  playwright install-deps` itself is refused, since the grant covers only the
+  package tools. Put them in the Dockerfile if you want them fleet-wide.
 
 - **`docker build` in sessions.** The image ships the Docker CLI (client only,
   plus the buildx/compose plugins), and the `loom` container bind-mounts the

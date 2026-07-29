@@ -72,6 +72,14 @@ RUN set -eux; \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
       > /etc/apt/sources.list.d/docker.list; \
     apt-get update; \
+    # The index is deliberately kept in the image — no closing `rm -rf
+    # /var/lib/apt/lists/*`. It costs ~20 MB here, and it is the difference
+    # between an agent's `sudo apt-get install -y <pkg>` (the sudoers grant
+    # further down) working on the first try and failing with "Unable to locate
+    # package" until the agent works out that it has to refresh an index it cannot
+    # see. A stale index only bites once a bookworm point release moves a version,
+    # and `sudo apt-get update` fixes that.
+    #
     # Base runtime + the repo tools loom's agents shell out to. gh/gcloud/docker
     # come from the signed repos configured above; the rest are stock bookworm.
     # The last groups are the everyday dev CLIs an agent reaches for in a checkout —
@@ -93,19 +101,68 @@ RUN set -eux; \
     # diffutils (applying diffs when a native edit won't fit), procps (ps/pkill
     # to manage servers an agent spawns), rsync, file, gettext-base (envsubst in
     # CI/templating), and shellcheck (agents lint the shell they write).
+    #
+    # git-lfs is needed to clone the Hugging Face repos and other LFS-backed
+    # checkouts agents work in; without it the pointer files check out instead of
+    # the payload. cmake + ninja-build + python3-dev + the -dev libraries are what
+    # a source build of a Python C extension asks for when no wheel matches.
+    # iproute2 (ss), lsof, netcat-openbsd, dnsutils and strace answer "is the
+    # server I just started actually listening, and on what" — the loop an agent
+    # runs constantly and cannot run with ps alone. tmux keeps a dev server alive
+    # across commands. graphviz renders dot; poppler-utils (pdftotext) reads the
+    # PDFs agents are pointed at. (ImageMagick already ships in the rust base.)
     apt-get install -y --no-install-recommends \
-      nodejs git ca-certificates gh google-cloud-cli tini \
+      nodejs git git-lfs ca-certificates gh google-cloud-cli tini \
       docker-ce-cli docker-buildx-plugin docker-compose-plugin sudo \
-      jq ripgrep fd-find build-essential pkg-config \
-      python3 python3-pip python3-venv \
+      jq ripgrep fd-find build-essential pkg-config cmake ninja-build \
+      python3 python3-pip python3-venv python3-dev \
+      libssl-dev libffi-dev zlib1g-dev \
       unzip zip less wget vim tree \
       bubblewrap socat \
       sqlite3 openssh-client patch diffutils procps rsync file \
-      gettext-base shellcheck sccache; \
-    rm -rf /var/lib/apt/lists/*; \
+      gettext-base shellcheck sccache \
+      iproute2 lsof netcat-openbsd dnsutils strace tmux \
+      graphviz poppler-utils; \
+    # Chromium's shared-library and font dependencies, so a Playwright browser
+    # downloaded at runtime (`playwright install chromium`, cached under the
+    # persisted $HOME) actually launches — screenshotting a UI is routine agent
+    # work and it should not need a root install per session. These are exactly
+    # Playwright's own debian12 `chromium` + `tools` lists, i.e. what `playwright
+    # install-deps` would apt-get; keep them in sync with upstream's nativeDeps
+    # table rather than pruning to whatever the current Chromium build happens to
+    # dlopen. The fonts are the same list's, and are what keeps a screenshot from
+    # rendering CJK/emoji text as tofu. Firefox and WebKit are not covered: they
+    # need a much larger (GTK/GStreamer) set, and agents here drive Chromium.
+    apt-get install -y --no-install-recommends \
+      libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcairo2 \
+      libcups2 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0 libnspr4 libnss3 \
+      libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 \
+      libxfixes3 libxkbcommon0 libxrandr2 \
+      xvfb libfontconfig1 libfreetype6 xfonts-scalable \
+      fonts-liberation fonts-freefont-ttf fonts-noto-color-emoji fonts-unifont \
+      fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf; \
     # Debian ships fd as `fdfind` to avoid a name clash; expose the conventional
     # `fd` name agents (and fd-aware tools) expect.
-    ln -s "$(command -v fdfind)" /usr/local/bin/fd
+    ln -s "$(command -v fdfind)" /usr/local/bin/fd; \
+    # Runtime system packages for the agent user: a session that turns out to need
+    # a package installs it itself (`sudo apt-get install -y <pkg>`; the retained
+    # index above means no `update` step) instead of improvising around the missing
+    # one. dpkg maintainer scripts run arbitrary code, so this grant is effectively
+    # container root — but it is only ever handed to containers that already mount
+    # the root-equivalent host Docker socket (docker-compose.yml, crate::runner),
+    # so it adds no reach; see deploy/README.md "Security posture". It names the
+    # three package tools rather than a blanket ALL, and restricted profiles
+    # (docs/restricted-sessions.md) get no shell at all. Same single-line sudoers
+    # idiom as loom-cgroup-init further down; `app` is created later in the build,
+    # which sudo resolves at runtime.
+    #
+    # Such an install lands in the container's own writable layer: it lasts as long
+    # as that session container and is invisible to other sessions. It is the
+    # escape hatch for a one-off — anything agents reach for repeatedly belongs in
+    # the package lists above.
+    echo 'app ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg' \
+      > /etc/sudoers.d/loom-packages; \
+    chmod 440 /etc/sudoers.d/loom-packages
 
 # The agent runtimes loom's sessions launch — Claude Code (`claude`) and the
 # OpenAI Codex CLI (`codex`) — are deliberately NOT baked into the image. The
@@ -207,7 +264,8 @@ EOF
 # service runs with SYS_ADMIN + apparmor=unconfined (docker-compose.yml); where
 # that grant is absent this script fails and the entrypoint just warns — loom
 # runs fine, sessions are simply unlimited. The app user may run exactly this
-# script as root (sudoers line below), nothing else.
+# script as root (sudoers line below) — that and the package tools above are its
+# only privileged commands.
 RUN <<'EOF'
 cat > /usr/local/bin/loom-cgroup-init <<'SH'
 #!/bin/sh
