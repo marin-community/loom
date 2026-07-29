@@ -1209,14 +1209,17 @@ function toggleActivityItem(item: ActivityItem) {
 function isSoloToolActivity(row: Extract<Row, { type: 'activity' }>): boolean {
   return row.entries.length === 1 && row.items.length === 1;
 }
+function isSoloExpandableActivity(row: Extract<Row, { type: 'activity' }>): boolean {
+  return isSoloToolActivity(row) && canExpandTool(row.items[0].tool);
+}
 function activityRowOpen(row: Extract<Row, { type: 'activity' }>): boolean {
-  if (isSoloToolActivity(row) && canExpandTool(row.items[0].tool)) {
+  if (isSoloExpandableActivity(row)) {
     return activityItemOpen(row.items[0]);
   }
   return foldOpen(row.key, row.failures > 0);
 }
 function toggleActivityRow(row: Extract<Row, { type: 'activity' }>) {
-  if (isSoloToolActivity(row) && canExpandTool(row.items[0].tool)) {
+  if (isSoloExpandableActivity(row)) {
     toggleActivityItem(row.items[0]);
   } else {
     toggleFold(row.key, row.failures > 0);
@@ -1413,15 +1416,11 @@ function goTo(anchor: string) {
                   class="acp-fold-head"
                   data-testid="acp-activity-head"
                   :disabled="isSoloToolActivity(row) && !canExpandTool(row.items[0].tool)"
-                  :aria-expanded="
-                    isSoloToolActivity(row) && canExpandTool(row.items[0].tool)
-                      ? activityRowOpen(row)
-                      : undefined
-                  "
+                  :aria-expanded="isSoloExpandableActivity(row) ? activityRowOpen(row) : undefined"
                   @click="toggleActivityRow(row)"
                 >
                   <span
-                    v-if="!isSoloToolActivity(row) || canExpandTool(row.items[0].tool)"
+                    v-if="!isSoloToolActivity(row) || isSoloExpandableActivity(row)"
                     class="chev"
                     :class="{ open: activityRowOpen(row) }"
                     >▸</span
@@ -2130,11 +2129,7 @@ function goTo(anchor: string) {
   background: color-mix(in srgb, var(--subtle) 55%, transparent);
   color: var(--fg);
 }
-.acp-activity-title.open {
-  min-width: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
+.acp-activity-title.open,
 .acp-activity-title-open {
   min-width: 0;
   white-space: pre-wrap;
