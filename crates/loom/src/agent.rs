@@ -2531,14 +2531,14 @@ mod tests {
     }
 
     #[test]
-    fn codex_acp_non_agent_modes_do_not_enable_auto_review() {
+    fn codex_acp_only_agent_mode_sets_a_default_reviewer() {
         for mode in ["read-only", "agent-full-access"] {
             let mut env = Vec::new();
             configure_codex_acp(&mut env, "", "", mode).unwrap();
             let config: Value = serde_json::from_str(&env[0].1).unwrap();
             assert!(
                 config.get("approvals_reviewer").is_none(),
-                "{mode} must not enable auto-review"
+                "{mode} must not set a default reviewer"
             );
         }
     }
