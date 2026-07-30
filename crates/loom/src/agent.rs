@@ -829,8 +829,9 @@ fn weaver_bin_path() -> String {
 /// actions as an interactive permission card (surfaced in the conversation with a
 /// loud `attention` tag, answerable from the dashboard). An explicit request
 /// `mode` / `--mode` still overrides — e.g. `bypassPermissions` for a fully
-/// unattended run. (For a codex session this maps to codex's `agent` mode; see
-/// [`codex_acp_mode`].)
+/// unattended run. For a codex session Loom combines codex-acp's workspace-write
+/// `agent` mode with Codex's native automatic approval reviewer; see
+/// [`codex_acp_mode`] and [`configure_codex_acp`].
 pub const DEFAULT_ACP_MODE: &str = weaver_core::config::DEFAULT_AGENT_MODE;
 
 /// Resolve the execution backend for a launch: the agent's declared `protocol`
@@ -932,10 +933,11 @@ pub struct AcpLaunchSpec<'a> {
 /// are redundant under ACP), and maps model/primer/mode into `_meta.claudeCode.
 /// options`. For the builtin codex it resolves the `codex-acp` adapter and maps
 /// the same inputs onto its env contract (`CODEX_CONFIG`, `INITIAL_AGENT_MODE`,
-/// `DEFAULT_AUTH_REQUEST`) — codex is hookless, so the primer rides the opening
-/// prompt exactly as it does on the terminal path. For a custom acp agent it
-/// runs the agent's `launch` command verbatim (its setup stage first) as the
-/// adapter, with no `_meta`.
+/// `DEFAULT_AUTH_REQUEST`). `auto` also enables Codex's native automatic
+/// approval reviewer through `CODEX_CONFIG`. Codex is hookless, so the primer
+/// rides the opening prompt exactly as it does on the terminal path. For a
+/// custom acp agent it runs the agent's `launch` command verbatim (its setup
+/// stage first) as the adapter, with no `_meta`.
 pub async fn build_acp_launch(
     db: &Db,
     spec: &AcpLaunchSpec<'_>,
@@ -1007,7 +1009,7 @@ pub async fn build_acp_launch(
             "DEFAULT_AUTH_REQUEST",
             r#"{"methodId":"api-key"}"#,
         );
-        force_codex_apps_disabled(&mut env, spec.model, spec.effort)?;
+        configure_codex_acp(&mut env, spec.model, spec.effort, spec.mode)?;
         push_env_default(&mut env, "INITIAL_AGENT_MODE", &codex_acp_mode(spec.mode));
     }
 
@@ -1143,12 +1145,18 @@ async fn codex_acp_cmd(db: &Db) -> String {
     npm_adapter_cmd("codex-acp", "@agentclientprotocol/codex-acp")
 }
 
-/// Force Codex's account-level app connectors off while preserving the shared
-/// provider login and any operator-supplied adapter configuration.
-fn force_codex_apps_disabled(
+/// Apply Loom's Codex policy while preserving the shared provider login and
+/// operator-supplied adapter configuration.
+///
+/// codex-acp's `agent` mode supplies the workspace-write sandbox and on-request
+/// approval policy. Loom's provider-neutral `auto` mode additionally routes
+/// those approval requests to Codex's native automatic reviewer. An explicit
+/// reviewer in `CODEX_CONFIG` wins over that default.
+fn configure_codex_acp(
     env: &mut Vec<(String, String)>,
     model: &str,
     effort: &str,
+    mode: &str,
 ) -> Result<()> {
     let mut config = match env
         .iter()
@@ -1161,6 +1169,11 @@ fn force_codex_apps_disabled(
     let config = config
         .as_object_mut()
         .ok_or_else(|| anyhow!("CODEX_CONFIG must be a JSON object"))?;
+    if mode.trim() == "auto" {
+        config
+            .entry("approvals_reviewer".to_string())
+            .or_insert_with(|| json!("auto_review"));
+    }
     let features = config
         .entry("features".to_string())
         .or_insert_with(|| json!({}));
@@ -1195,8 +1208,8 @@ fn codex_acp_config(model: &str, effort: &str) -> Map<String, Value> {
 fn codex_acp_mode(mode: &str) -> String {
     match mode.trim() {
         "bypassPermissions" => "agent-full-access".to_string(),
-        // `auto` (claude's background-classifier posture) has no codex equivalent;
-        // the closest is `agent` — workspace-write that escalates on risk.
+        // codex-acp has no distinct auto-review mode. `agent` supplies the
+        // workspace sandbox; configure_codex_acp supplies the reviewer.
         "acceptEdits" | "default" | "auto" | "" => "agent".to_string(),
         "plan" => "read-only".to_string(),
         other => other.to_string(),
@@ -2480,13 +2493,13 @@ mod tests {
     }
 
     #[test]
-    fn codex_acp_disables_apps_without_discarding_operator_config() {
+    fn codex_acp_auto_mode_enables_native_reviewer() {
         let mut env = vec![(
             "CODEX_CONFIG".to_string(),
             r#"{"model":"operator","features":{"shell_snapshot":true,"apps":true}}"#.to_string(),
         )];
 
-        force_codex_apps_disabled(&mut env, "ignored", "high").unwrap();
+        configure_codex_acp(&mut env, "ignored", "high", "auto").unwrap();
 
         let config: Value = serde_json::from_str(
             env.iter()
@@ -2495,15 +2508,35 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config["model"], "operator");
+        assert_eq!(config["approvals_reviewer"], "auto_review");
         assert_eq!(config["features"]["shell_snapshot"], true);
         assert_eq!(config["features"]["apps"], false);
     }
 
     #[test]
+    fn codex_acp_configuration_preserves_explicit_reviewer() {
+        let mut explicit_reviewer = vec![(
+            "CODEX_CONFIG".to_string(),
+            r#"{"approvals_reviewer":"user"}"#.to_string(),
+        )];
+        configure_codex_acp(&mut explicit_reviewer, "", "", "auto").unwrap();
+        let config: Value = serde_json::from_str(&explicit_reviewer[0].1).unwrap();
+        assert_eq!(config["approvals_reviewer"], "user");
+    }
+
+    #[test]
+    fn codex_acp_manual_mode_does_not_enable_auto_review() {
+        let mut manual = Vec::new();
+        configure_codex_acp(&mut manual, "", "", "default").unwrap();
+        let config: Value = serde_json::from_str(&manual[0].1).unwrap();
+        assert!(config.get("approvals_reviewer").is_none());
+    }
+
+    #[test]
     fn sessions_boot_in_auto_by_default() {
-        // Every ACP session boots in Claude Code's background-classifier `auto`
-        // posture unless overridden;
-        // for a codex session that maps to codex's workspace-write `agent` mode.
+        // Every ACP session boots in the provider-neutral `auto` posture unless
+        // overridden. Codex uses its workspace-write `agent` sandbox mode while
+        // configure_codex_acp enables the native automatic reviewer.
         assert_eq!(DEFAULT_ACP_MODE, "auto");
         assert_eq!(codex_acp_mode(DEFAULT_ACP_MODE), "agent");
     }
@@ -2513,7 +2546,7 @@ mod tests {
         assert_eq!(codex_acp_mode("bypassPermissions"), "agent-full-access");
         assert_eq!(codex_acp_mode("acceptEdits"), "agent");
         assert_eq!(codex_acp_mode("default"), "agent");
-        // `auto` has no codex analogue → the workspace-write `agent` mode.
+        // Auto-review is configured separately; the sandbox remains `agent`.
         assert_eq!(codex_acp_mode("auto"), "agent");
         assert_eq!(codex_acp_mode(""), "agent");
         assert_eq!(codex_acp_mode("plan"), "read-only");
