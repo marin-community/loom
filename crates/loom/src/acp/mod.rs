@@ -50,7 +50,7 @@ mod wire;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use rand::RngCore;
@@ -74,6 +74,11 @@ use wire::{
 /// into thousands of SQLite writes. A short periodic flush keeps the possible
 /// duplicate replay bounded while allowing catch-up to run at spool speed.
 const ACK_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How often a live ACP session restamps `last_activity_at`. Frames arrive far
+/// faster than idleness is measured, so the stamp is throttled to keep a chatty
+/// adapter from turning every delta into a write.
+const ACTIVITY_TOUCH_INTERVAL: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -1391,6 +1396,8 @@ struct Task {
     /// Latched when a journal write fails: the ack watermark freezes (so the
     /// un-journaled frames replay after a restart) and the failure is logged.
     journal_failed: bool,
+    /// When this task last stamped `last_activity_at`. See [`Task::touch_activity`].
+    last_activity_touch: Option<Instant>,
 }
 
 impl Task {
@@ -1455,6 +1462,7 @@ impl Task {
             highest_seq: 0,
             acked: 0,
             journal_failed: false,
+            last_activity_touch: None,
         })
     }
 
@@ -1543,6 +1551,7 @@ impl Task {
             highest_seq: session.acp_ack_seq.max(0) as u64,
             acked: session.acp_ack_seq.max(0) as u64,
             journal_failed: false,
+            last_activity_touch: None,
         })
     }
 
@@ -1930,6 +1939,7 @@ impl Task {
                 ev = self.stream.recv() => match ev {
                     Some(RelayEvent::Frame { seq, payload }) => {
                         self.highest_seq = seq;
+                        self.touch_activity().await;
                         match serde_json::from_slice::<Incoming>(&payload) {
                             Ok(inc) => self.dispatch_frame(seq, inc).await,
                             Err(e) => tracing::warn!(session = %self.session_id, error = %e, "unparseable acp frame"),
@@ -1998,6 +2008,35 @@ impl Task {
     }
 
     /// Route one inbound frame (notification / agent request / response).
+    /// Record that the adapter is producing output.
+    ///
+    /// `last_activity_at` is what the staleness monitor and the metadata
+    /// assistant read. Turn boundaries alone are far too coarse a signal for an
+    /// ACP session: a single turn runs for hours, so a session streaming tool
+    /// calls the whole time would otherwise be indistinguishable from one that
+    /// stopped at the prompt. A turn that genuinely wedges still goes stale —
+    /// this stamps output, not liveness.
+    ///
+    /// A `session/load` replay is deliberately excluded: re-streamed history is
+    /// not new activity, and stamping it would date a recovered session to its
+    /// restart.
+    async fn touch_activity(&mut self) {
+        if self.suppress_journal {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .last_activity_touch
+            .is_some_and(|last| now.duration_since(last) < ACTIVITY_TOUCH_INTERVAL)
+        {
+            return;
+        }
+        self.last_activity_touch = Some(now);
+        if let Err(e) = session::touch(&self.db, &self.session_id).await {
+            tracing::warn!(session = %self.session_id, error = %e, "could not stamp session activity");
+        }
+    }
+
     async fn dispatch_frame(&mut self, seq: u64, inc: Incoming) {
         match inc.kind() {
             IncomingKind::Notification => {

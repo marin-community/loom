@@ -80,6 +80,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "metadata-assistance",
         include_str!("../migrations/0014_metadata_assistance.sql"),
     ),
+    (
+        15,
+        "chat-block-ref-id",
+        include_str!("../migrations/0015_chat_block_ref_id.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
