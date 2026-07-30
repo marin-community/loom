@@ -3287,7 +3287,7 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
             .collect::<Vec<_>>()
     };
     let addr = ts.addr.to_string();
-    let spec = |goal_file, extra_env| loom::agent::AcpLaunchSpec {
+    let spec = |goal_file, extra_env, mode| loom::agent::AcpLaunchSpec {
         session_id: "s-codex",
         branch_id: "b-codex",
         runtime: "codex",
@@ -3299,7 +3299,7 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
         primer_file: Some(primer.as_path()),
         extra_env,
         env_clear: false,
-        mode: "bypassPermissions",
+        mode,
         prelude: "weaver",
         restricted: false,
         allowed_tools: "[]",
@@ -3309,7 +3309,7 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
 
     let launch = loom::agent::build_acp_launch(
         &ts.state.db,
-        &spec(Some(goal.as_path()), &[]),
+        &spec(Some(goal.as_path()), &[], "bypassPermissions"),
         loom::agent::AcpOpen::Fresh,
     )
     .await
@@ -3344,27 +3344,47 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
         NewOrLoad::Load { .. } => panic!("a fresh launch opens session/new"),
     }
 
+    // The provider-neutral launch default and codex-acp's reported/restored mode
+    // resolve to the same Agent posture with automatic approval review.
+    for mode in ["auto", "agent"] {
+        let agent_launch = loom::agent::build_acp_launch(
+            &ts.state.db,
+            &spec(None, &[], mode),
+            loom::agent::AcpOpen::Fresh,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            env_of(&agent_launch, "INITIAL_AGENT_MODE"),
+            vec!["agent"],
+            "{mode}"
+        );
+        let cfg: Value = serde_json::from_str(&env_of(&agent_launch, "CODEX_CONFIG")[0]).unwrap();
+        assert_eq!(cfg["approvals_reviewer"], "auto_review", "{mode}");
+    }
+
     // Operator config is preserved, except that account-level apps remain
     // disabled; a goalless launch seeds the primer.
     let operator = [(
         "CODEX_CONFIG".to_string(),
-        r#"{"model":"mine"}"#.to_string(),
+        r#"{"model":"mine","approvals_reviewer":"user"}"#.to_string(),
     )];
     let launch = loom::agent::build_acp_launch(
         &ts.state.db,
-        &spec(None, &operator),
+        &spec(None, &operator, "agent"),
         loom::agent::AcpOpen::Fresh,
     )
     .await
     .unwrap();
     let cfg: Value = serde_json::from_str(&env_of(&launch, "CODEX_CONFIG")[0]).unwrap();
     assert_eq!(cfg["model"], "mine");
+    assert_eq!(cfg["approvals_reviewer"], "user");
     assert_eq!(cfg["features"]["apps"], false);
     assert_eq!(launch.goal.as_deref(), Some("orient first"));
 
     let loaded = loom::agent::build_acp_launch(
         &ts.state.db,
-        &spec(None, &[]),
+        &spec(None, &[], "bypassPermissions"),
         loom::agent::AcpOpen::Load("existing-acp-session".to_string()),
     )
     .await
