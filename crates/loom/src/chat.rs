@@ -325,6 +325,20 @@ pub struct ChatBlockView {
     pub created_at: String,
 }
 
+/// The upstream id a block of `kind` is addressed by, mirrored into the indexed
+/// `ref_id` column at insert time. Replay idempotency asks about a block by this
+/// id rather than by `(turn, seq)`: a tool call's position is not stable across a
+/// restart but its adapter-assigned id is, and a permission is answered by
+/// request id. Every other kind has no such id and stores `''`.
+fn ref_id<'a>(kind: &str, payload: &'a Value) -> &'a str {
+    let key = match kind {
+        self::kind::TOOL_CALL => "tool_call_id",
+        self::kind::PERMISSION_REQUEST => "request_id",
+        _ => return "",
+    };
+    payload.get(key).and_then(Value::as_str).unwrap_or_default()
+}
+
 /// Insert a block idempotently. Returns `true` when the row was newly written,
 /// `false` when `(session_id, turn, seq)` already existed (a replay). `payload`
 /// is serialized to a JSON string for storage.
@@ -337,8 +351,8 @@ pub async fn insert(
     payload: &Value,
 ) -> Result<bool> {
     let res = sqlx::query(
-        "INSERT INTO chat_blocks (session_id, turn, seq, kind, payload, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+        "INSERT INTO chat_blocks (session_id, turn, seq, kind, payload, ref_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT DO NOTHING",
     )
     .bind(session_id)
@@ -346,6 +360,7 @@ pub async fn insert(
     .bind(seq)
     .bind(kind)
     .bind(payload.to_string())
+    .bind(ref_id(kind, payload))
     .bind(now_iso())
     .execute(db)
     .await?;
@@ -353,6 +368,11 @@ pub async fn insert(
 }
 
 /// Every block for a session, in `(turn, seq)` order.
+///
+/// This reads a whole journal into memory, which for a long-running session is
+/// tens of megabytes. It is for the one-shot whole-conversation consumers —
+/// archive capture and handoff. Anything serving a request wants
+/// [`list_page`], whose cost is set by the page rather than by the session's age.
 pub async fn list(db: &Db, session_id: &str) -> Result<Vec<ChatBlockView>> {
     let rows = sqlx::query_as::<_, ChatBlockRow>(
         "SELECT turn, seq, kind, payload, created_at FROM chat_blocks
@@ -435,6 +455,22 @@ impl From<ChatBlockRow> for ChatBlockView {
     }
 }
 
+/// Whether `(turn, seq)` names a journaled block. Lets a paged reader tell a
+/// cursor this session never issued from one that has simply run off the end.
+pub async fn block_exists(db: &Db, session_id: &str, turn: i64, seq: i64) -> Result<bool> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM chat_blocks WHERE session_id = ? AND turn = ? AND seq = ?
+         )",
+    )
+    .bind(session_id)
+    .bind(turn)
+    .bind(seq)
+    .fetch_one(db)
+    .await?;
+    Ok(exists)
+}
+
 /// The highest `(turn, seq)` present for a session, or `None` when the journal is
 /// empty. Used on task (re)start to resume the block cursor without double-writing.
 pub async fn max_turn_seq(db: &Db, session_id: &str) -> Result<Option<(i64, i64)>> {
@@ -491,28 +527,39 @@ pub async fn permission_outcome(
     session_id: &str,
     request_id: &str,
 ) -> Result<PermissionOutcome> {
-    let rows = sqlx::query("SELECT payload FROM chat_blocks WHERE session_id = ? AND kind = ?")
-        .bind(session_id)
-        .bind(kind::PERMISSION_REQUEST)
-        .fetch_all(db)
-        .await?;
-    for r in rows {
-        let payload: Value =
-            serde_json::from_str(&r.get::<String, _>("payload")).unwrap_or(Value::Null);
-        if payload.get("request_id").and_then(Value::as_str) == Some(request_id) {
-            return Ok(match payload.get("outcome") {
-                Some(Value::Null) | None => PermissionOutcome::Open,
-                Some(o) if o.get("cancelled").and_then(Value::as_bool) == Some(true) => {
-                    PermissionOutcome::Cancelled
-                }
-                Some(o) => match o.get("option_id").and_then(Value::as_str) {
-                    Some(id) => PermissionOutcome::Resolved(id.to_string()),
-                    None => PermissionOutcome::Open,
-                },
-            });
+    let Some(block) = permission_block(db, session_id, request_id).await? else {
+        return Ok(PermissionOutcome::Unknown);
+    };
+    Ok(match block.payload.get("outcome") {
+        Some(Value::Null) | None => PermissionOutcome::Open,
+        Some(o) if o.get("cancelled").and_then(Value::as_bool) == Some(true) => {
+            PermissionOutcome::Cancelled
         }
-    }
-    Ok(PermissionOutcome::Unknown)
+        Some(o) => match o.get("option_id").and_then(Value::as_str) {
+            Some(id) => PermissionOutcome::Resolved(id.to_string()),
+            None => PermissionOutcome::Open,
+        },
+    })
+}
+
+/// The journaled `permission_request` block carrying `request_id`, found through
+/// the indexed `ref_id` rather than by reading every permission block's payload.
+async fn permission_block(
+    db: &Db,
+    session_id: &str,
+    request_id: &str,
+) -> Result<Option<ChatBlockView>> {
+    let row = sqlx::query_as::<_, ChatBlockRow>(
+        "SELECT turn, seq, kind, payload, created_at FROM chat_blocks
+         WHERE session_id = ? AND kind = ? AND ref_id = ?
+         ORDER BY turn ASC, seq ASC LIMIT 1",
+    )
+    .bind(session_id)
+    .bind(kind::PERMISSION_REQUEST)
+    .bind(request_id)
+    .fetch_optional(db)
+    .await?;
+    Ok(row.map(ChatBlockView::from))
 }
 
 /// Resolve an open `permission_request` in place: set its `outcome` to the chosen
@@ -559,43 +606,30 @@ async fn set_permission_outcome(
     request_id: &str,
     outcome: Value,
 ) -> Result<Option<ChatBlockView>> {
-    let rows = sqlx::query_as::<_, ChatBlockRow>(
-        "SELECT turn, seq, kind, payload, created_at FROM chat_blocks
-         WHERE session_id = ? AND kind = ?",
-    )
-    .bind(session_id)
-    .bind(kind::PERMISSION_REQUEST)
-    .fetch_all(db)
-    .await?;
-    for row in rows {
-        let mut view = ChatBlockView::from(row);
-        if view.payload.get("request_id").and_then(Value::as_str) != Some(request_id) {
-            continue;
-        }
-        // Only an open block is resolvable; a resolved one is left untouched.
-        if !view
-            .payload
-            .get("outcome")
-            .map(Value::is_null)
-            .unwrap_or(true)
-        {
-            return Ok(None);
-        }
-        if let Value::Object(map) = &mut view.payload {
-            map.insert("outcome".to_string(), outcome);
-        }
-        sqlx::query(
-            "UPDATE chat_blocks SET payload = ? WHERE session_id = ? AND turn = ? AND seq = ?",
-        )
+    let Some(mut view) = permission_block(db, session_id, request_id).await? else {
+        return Ok(None);
+    };
+    // Only an open block is resolvable; a resolved one is left untouched.
+    if !view
+        .payload
+        .get("outcome")
+        .map(Value::is_null)
+        .unwrap_or(true)
+    {
+        return Ok(None);
+    }
+    if let Value::Object(map) = &mut view.payload {
+        map.insert("outcome".to_string(), outcome);
+    }
+    // `ref_id` is the request id and does not move with the outcome.
+    sqlx::query("UPDATE chat_blocks SET payload = ? WHERE session_id = ? AND turn = ? AND seq = ?")
         .bind(view.payload.to_string())
         .bind(session_id)
         .bind(view.turn)
         .bind(view.seq)
         .execute(db)
         .await?;
-        return Ok(Some(view));
-    }
-    Ok(None)
+    Ok(Some(view))
 }
 
 /// Whether a `tool_call` block for `tool_call_id` is already journaled — the
@@ -603,22 +637,18 @@ async fn set_permission_outcome(
 /// re-journaling the block at a fresh seq (tool calls have no `(turn, seq)`
 /// stability across a restart, but their upstream id is stable).
 pub async fn tool_call_exists(db: &Db, session_id: &str, tool_call_id: &str) -> Result<bool> {
-    let rows = sqlx::query("SELECT payload FROM chat_blocks WHERE session_id = ? AND kind = ?")
-        .bind(session_id)
-        .bind(kind::TOOL_CALL)
-        .fetch_all(db)
-        .await?;
-    Ok(rows.into_iter().any(|r| {
-        serde_json::from_str::<Value>(&r.get::<String, _>("payload"))
-            .ok()
-            .and_then(|p| {
-                p.get("tool_call_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-            .as_deref()
-            == Some(tool_call_id)
-    }))
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM chat_blocks
+              WHERE session_id = ? AND kind = ? AND ref_id = ?
+         )",
+    )
+    .bind(session_id)
+    .bind(kind::TOOL_CALL)
+    .bind(tool_call_id)
+    .fetch_one(db)
+    .await?;
+    Ok(exists)
 }
 
 /// Whether a `turn_end` block is already journaled for `turn` — the idempotency

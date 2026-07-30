@@ -91,26 +91,84 @@ pub async fn page(
         )));
     }
 
-    let (source, records) = load(db, session, branch).await?;
+    if session.protocol == "acp" {
+        return acp_page(db, session, &options, limit, &kinds, query.as_deref()).await;
+    }
+
+    let (source, records) = load_terminal(db, session, branch).await?;
     let end = match options.before.as_deref() {
         Some(before) => records
             .iter()
             .position(|record| record.cursor == before)
-            .ok_or_else(|| {
-                PageError::bad_request("before is not a cursor from this session history")
-            })?,
+            .ok_or_else(unknown_cursor)?,
         None => records.len(),
     };
-    let mut matching = records[..end]
+    let matching = records[..end]
         .iter()
-        .filter(|record| kinds.is_empty() || kinds.contains(record.kind.as_str()))
-        .filter(|record| {
-            query
-                .as_deref()
-                .is_none_or(|needle| searchable_text(record).to_lowercase().contains(needle))
-        })
+        .filter(|record| matches(record, &kinds, query.as_deref()))
         .cloned()
         .collect::<Vec<_>>();
+    Ok(tail_page(source, matching, limit))
+}
+
+/// The newest-tail page of an ACP session's journal.
+///
+/// The journal is read backwards a chunk at a time and stops as soon as the page
+/// is provably full, so an ordinary page costs one bounded query no matter how
+/// long the session has been running. Only a search that matches little has to
+/// walk the whole journal, and even then it holds one chunk at a time.
+async fn acp_page(
+    db: &Db,
+    session: &Session,
+    options: &PageOptions,
+    limit: usize,
+    kinds: &HashSet<&str>,
+    query: Option<&str>,
+) -> Result<HistoryPageView, PageError> {
+    let mut before = match options.before.as_deref() {
+        Some(cursor) => {
+            let (turn, seq) = parse_acp_cursor(cursor)?;
+            if !crate::chat::block_exists(db, &session.id, turn, seq).await? {
+                return Err(unknown_cursor());
+            }
+            Some((turn, seq))
+        }
+        None => None,
+    };
+    let chunk = limit.saturating_add(1).max(SCAN_CHUNK);
+    let mut matching: Vec<HistoryRecordView> = Vec::new();
+    loop {
+        let (blocks, has_older) = crate::chat::list_page(db, &session.id, before, chunk).await?;
+        let Some(oldest) = blocks.first() else { break };
+        before = Some((oldest.turn, oldest.seq));
+        let mut older: Vec<HistoryRecordView> = blocks
+            .iter()
+            .map(acp_record)
+            .filter(|record| matches(record, kinds, query))
+            .collect();
+        older.append(&mut matching);
+        matching = older;
+        // One record beyond the page is all it takes to know more remain.
+        if matching.len() > limit || !has_older {
+            break;
+        }
+    }
+    Ok(tail_page("acp".to_string(), matching, limit))
+}
+
+/// Blocks read per backwards step of [`acp_page`]. Large enough that an unfiltered
+/// page is a single query, small enough that a whole-journal search stays bounded
+/// in memory.
+const SCAN_CHUNK: usize = 512;
+
+/// Cut the newest `limit` records out of a chronological run of matching records,
+/// plus the cursor the caller pages further back with. `matching` holding more
+/// than `limit` is what proves older records remain.
+fn tail_page(
+    source: String,
+    mut matching: Vec<HistoryRecordView>,
+    limit: usize,
+) -> HistoryPageView {
     let has_more = matching.len() > limit;
     if has_more {
         matching.drain(..matching.len() - limit);
@@ -122,11 +180,32 @@ pub async fn page(
             .cursor
             .clone()
     });
-    Ok(HistoryPageView {
+    HistoryPageView {
         source,
         records: matching,
         older_cursor,
-    })
+    }
+}
+
+fn matches(record: &HistoryRecordView, kinds: &HashSet<&str>, query: Option<&str>) -> bool {
+    (kinds.is_empty() || kinds.contains(record.kind.as_str()))
+        && query.is_none_or(|needle| searchable_text(record).to_lowercase().contains(needle))
+}
+
+/// The `(turn, seq)` an `acp:<turn>:<seq>` cursor addresses. A cursor this
+/// session never issued is a bad request, not an empty page.
+fn parse_acp_cursor(cursor: &str) -> Result<(i64, i64), PageError> {
+    let (turn, seq) = cursor
+        .strip_prefix("acp:")
+        .and_then(|rest| rest.split_once(':'))
+        .ok_or_else(unknown_cursor)?;
+    let turn = turn.parse().map_err(|_| unknown_cursor())?;
+    let seq = seq.parse().map_err(|_| unknown_cursor())?;
+    Ok((turn, seq))
+}
+
+fn unknown_cursor() -> PageError {
+    PageError::bad_request("before is not a cursor from this session history")
 }
 
 fn validate_kinds(kinds: &[String]) -> Result<HashSet<&str>, PageError> {
@@ -147,18 +226,14 @@ fn validate_kinds(kinds: &[String]) -> Result<HashSet<&str>, PageError> {
     Ok(out)
 }
 
-async fn load(
+/// A terminal provider's transcript, normalized. Unlike the ACP journal this has
+/// no queryable form — it is a file the Iris normalizer reads whole — so paging
+/// happens after the load rather than inside it.
+async fn load_terminal(
     db: &Db,
     session: &Session,
     branch: &Branch,
 ) -> Result<(String, Vec<HistoryRecordView>), anyhow::Error> {
-    if session.protocol == "acp" {
-        let blocks = crate::chat::list(db, &session.id).await?;
-        return Ok((
-            "acp".to_string(),
-            blocks.iter().map(acp_record).collect::<Vec<_>>(),
-        ));
-    }
     Ok(
         match crate::chatlog::conversation(db, session, branch).await {
             Some(log) => {
@@ -349,6 +424,131 @@ mod tests {
     use super::*;
     use serde_json::json;
     use weaver_core::transcript::iris::{Message, Role};
+
+    /// An ACP session with `blocks` agent messages, the `n`th reading `m<n>`.
+    async fn seed_acp_session(db: &Db, blocks: usize) -> (Session, Branch) {
+        let branch = weaver_core::branch::upsert(db, "/repo", "weaver/history", "main")
+            .await
+            .unwrap();
+        crate::session::insert(
+            db,
+            &crate::session::NewSession {
+                id: "histsess".to_string(),
+                branch_id: branch.id.clone(),
+                work_dir: "/w".to_string(),
+                term_session: "weaver-histsess".to_string(),
+                agent_kind: "claude".to_string(),
+                model: String::new(),
+                effort: String::new(),
+                status: "running".to_string(),
+                github_repo: None,
+                parent_branch_id: None,
+                managed_by: None,
+                created_by: None,
+                protocol: "acp".to_string(),
+                origin: "user".to_string(),
+                class: "interactive".to_string(),
+                tracking_issue_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        for seq in 0..blocks {
+            crate::chat::insert(
+                db,
+                "histsess",
+                0,
+                seq as i64,
+                kind::AGENT_MESSAGE,
+                &json!({ "text": format!("m{seq}") }),
+            )
+            .await
+            .unwrap();
+        }
+        let session = crate::session::get(db, "histsess").await.unwrap().unwrap();
+        (session, branch)
+    }
+
+    /// The journal is read backwards in bounded steps, so a page has to be
+    /// assembled correctly whether it falls inside the first step or beyond it.
+    #[tokio::test]
+    async fn acp_paging_walks_back_past_one_scan_step() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let total = SCAN_CHUNK + 40;
+        let (session, branch) = seed_acp_session(&db, total).await;
+
+        let newest = page(
+            &db,
+            &session,
+            &branch,
+            PageOptions {
+                limit: Some(2),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let content = |page: &HistoryPageView, at: usize| page.records[at].content.clone().unwrap();
+        assert_eq!(newest.records.len(), 2);
+        assert_eq!(content(&newest, 0), format!("m{}", total - 2));
+        assert_eq!(content(&newest, 1), format!("m{}", total - 1));
+        assert_eq!(
+            newest.older_cursor.as_deref(),
+            Some(format!("acp:0:{}", total - 2).as_str()),
+            "the oldest record of the page is where the next one resumes"
+        );
+
+        // The only hit sits older than the first backwards step: the scan has to
+        // keep going rather than report an empty page.
+        let found = page(
+            &db,
+            &session,
+            &branch,
+            PageOptions {
+                query: Some("m0".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(found.records.len(), 1);
+        assert_eq!(content(&found, 0), "m0");
+        assert!(found.older_cursor.is_none(), "nothing older matches");
+
+        let older = page(
+            &db,
+            &session,
+            &branch,
+            PageOptions {
+                before: newest.older_cursor.clone(),
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(content(&older, 0), format!("m{}", total - 3));
+    }
+
+    #[tokio::test]
+    async fn acp_rejects_a_cursor_this_session_never_issued() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let (session, branch) = seed_acp_session(&db, 3).await;
+        for cursor in ["iris:0:0", "acp:nope", "acp:0:99"] {
+            let error = page(
+                &db,
+                &session,
+                &branch,
+                PageOptions {
+                    before: Some(cursor.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("an unknown cursor is a bad request");
+            assert!(matches!(error, PageError::BadRequest(_)), "{cursor}");
+        }
+    }
 
     #[test]
     fn iris_tool_input_is_optional_but_preserved_when_present() {
