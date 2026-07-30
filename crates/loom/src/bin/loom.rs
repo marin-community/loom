@@ -4341,14 +4341,31 @@ async fn cmd_session_title_generation(key: String, enabled: bool) -> Result<()> 
     Ok(())
 }
 
+/// How long `session cue --ensure` follows a generation it started. Covers the
+/// server's own 45s prompt timeout with room for the runtime to spawn first.
+const CUE_POLL_ATTEMPTS: usize = 40;
+const CUE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
 async fn cmd_session_cue(key: String, ensure: bool, force: bool) -> Result<()> {
     let client = client::default()?;
     let path = format!("/api/sessions/{}/resumption-cue", enc_key(&key));
-    let cue = if ensure {
+    let mut cue = if ensure {
         client.post(&path, json!({ "force": force })).await?
     } else {
         client.get(&path).await?
     };
+    // An ensure only *starts* generation — the model call runs detached so it
+    // cannot hold a connection open. Wait it out here so the command still
+    // prints a cue rather than the status of a request that just left.
+    if ensure {
+        for _ in 0..CUE_POLL_ATTEMPTS {
+            if str_field(&cue, "status") != "generating" {
+                break;
+            }
+            tokio::time::sleep(CUE_POLL_INTERVAL).await;
+            cue = client.get(&path).await?;
+        }
+    }
     println!("status: {}", str_field(&cue, "status"));
     if let Some(text) = cue.get("text").and_then(Value::as_str) {
         println!("{text}");

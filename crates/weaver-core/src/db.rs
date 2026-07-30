@@ -19,6 +19,17 @@ const SHARED_POOL_CONNECTIONS: u32 = 32;
 /// longer than a normal transaction; exhausting it indicates a genuinely
 /// abnormal external/schema lock, which callers may then recover from.
 const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// High-water mark above which a checkpoint truncates the WAL rather than
+/// rewinding it in place.
+///
+/// Autocheckpoint keeps the WAL's *live* frames bounded, but SQLite's default
+/// (`journal_size_limit = -1`) never shrinks the file: after a checkpoint it
+/// rewinds to frame zero and reuses the space. One bulk migration over a large
+/// table therefore leaves the WAL permanently sized for its biggest-ever
+/// transaction — a whole-table `UPDATE` over the chat journal grew it past
+/// 500 MB, where it stayed. Truncating past this mark trades an occasional file
+/// truncate for a WAL that reflects steady-state traffic, not the worst burst.
+const SQLITE_JOURNAL_SIZE_LIMIT: i64 = 64 * 1024 * 1024;
 
 /// An on-disk database whose core schema is migrated, but whose shared pool has
 /// not opened yet.
@@ -206,7 +217,11 @@ pub async fn begin_bootstrap(path: &Path) -> Result<DatabaseBootstrap> {
         // A writer that loses the lock race waits its turn instead of failing
         // with SQLITE_BUSY "database is locked". Only effective for writes that
         // take the lock up front — see [`begin_immediate`].
-        .busy_timeout(SQLITE_BUSY_TIMEOUT);
+        .busy_timeout(SQLITE_BUSY_TIMEOUT)
+        // Set on every connection: the limit is applied by whichever connection
+        // happens to run the checkpoint, so it only bounds the file if they all
+        // agree. See [`SQLITE_JOURNAL_SIZE_LIMIT`].
+        .pragma("journal_size_limit", SQLITE_JOURNAL_SIZE_LIMIT.to_string());
 
     // Keep the migration connection alive after the core stream completes so
     // higher-level schema owners can migrate through it too. Only `finish`
@@ -361,6 +376,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(busy_timeout_ms, SQLITE_BUSY_TIMEOUT.as_millis() as i64);
+        // Without this the WAL keeps whatever size its largest-ever transaction
+        // needed, forever. Asserted on a pooled connection because the limit
+        // only bounds the file if every checkpointer agrees on it.
+        let journal_size_limit = sqlx::query_scalar::<_, i64>("PRAGMA journal_size_limit")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(journal_size_limit, SQLITE_JOURNAL_SIZE_LIMIT);
     }
 
     #[tokio::test]
