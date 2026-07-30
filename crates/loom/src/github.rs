@@ -359,7 +359,7 @@ async fn sync_status_comment_once(state: &AppState, branch_id: &str) -> bool {
         _ => Vec::new(),
     };
     let body = render_status_card(
-        &crate::web::session_url(&base, &session.id),
+        &crate::links::session_url(&base, &session.id),
         &artifacts,
         &events,
     );
@@ -918,7 +918,7 @@ pub(crate) async fn apply_snapshot(
         let claimed = claimed_issues(state, branch).await;
         // The merge is already on the record as a `github` event (above) and the
         // archive records a `status` event, so no extra log line is needed.
-        match crate::web::auto_archive(state, session, branch).await {
+        match crate::lifecycle::auto_archive(state, session, branch).await {
             Ok(Some(_)) => {
                 close_claimed_issues(state, branch, snap.pr_number, &claimed).await;
                 tracing::info!(
@@ -934,7 +934,7 @@ pub(crate) async fn apply_snapshot(
             ),
             Err(e) => tracing::warn!(
                 branch = %branch.branch,
-                error = %e.message(),
+                error = %e,
                 "archive-on-merge failed"
             ),
         }
@@ -987,7 +987,7 @@ async fn maybe_post_backlink(
     }
     let body = format!(
         "Working on this in loom: {}",
-        crate::web::session_url(&base, &session.id)
+        crate::links::session_url(&base, &session.id)
     );
     if let Err(e) = state
         .trigger

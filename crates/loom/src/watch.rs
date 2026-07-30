@@ -1244,7 +1244,7 @@ pub async fn fire_now(
 /// across-round memory.
 ///
 /// On first need it forks a dedicated worktree and brings up a real terminal session
-/// (via [`crate::web::create_warm_session`], the same launch machinery ordinary
+/// (via [`crate::lifecycle::create_warm_session`], the same launch machinery ordinary
 /// sessions use), stamps it `managed_by = o.id` so the fleet hides it, and
 /// records its id on the watch.
 ///
@@ -1286,9 +1286,9 @@ pub async fn ensure_warm_session(state: &AppState, o: &Watch) -> anyhow::Result<
         }
     };
 
-    let session = crate::web::create_warm_session(state, o, &repo_root)
+    let session = crate::lifecycle::create_warm_session(state, o, &repo_root)
         .await
-        .map_err(|e| anyhow::anyhow!("creating warm session: {}", e.message()))?;
+        .map_err(|e| anyhow::anyhow!("creating warm session: {e}"))?;
     watch_store::set_warm_session(&state.db, &o.id, Some(&session.id)).await?;
     tracing::info!(watch = %o.id, session = %session.id, "watch warm session created");
     Ok(Some(session.id))

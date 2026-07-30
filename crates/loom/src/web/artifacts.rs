@@ -473,7 +473,7 @@ pub(super) async fn branch_artifact_url_route(
     require_branch(&st.db, &key).await?;
     let base = super::auth::public_base(&st, &headers).await;
     Ok(Json(
-        json!({ "url": super::artifact_url(&base, &key, &name) }),
+        json!({ "url": crate::links::artifact_url(&base, &key, &name) }),
     ))
 }
 

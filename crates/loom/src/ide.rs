@@ -39,7 +39,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, OnceCell};
 
 use crate::db::Db;
-use crate::web::require_session;
+use crate::session;
 use crate::AppState;
 use weaver_core::config;
 
@@ -111,8 +111,8 @@ impl IdeManager {
 
     /// Resolve (spawning if needed) the loopback port serving `id`'s editor.
     /// On the hot path (an already-running instance) this is a lock + map read,
-    /// no DB. A cold start resolves the worktree via [`require_session`] and
-    /// spawns; concurrent first-hits share the one spawn via the `OnceCell`.
+    /// no DB. A cold start resolves the worktree via [`session::resolve_key`]
+    /// and spawns; concurrent first-hits share the one spawn via the `OnceCell`.
     /// Errors are returned as a ready [`Response`] so the proxy can relay them.
     async fn ensure(&self, st: &AppState, id: &str) -> Result<u16, Response> {
         let cell = {
@@ -126,9 +126,18 @@ impl IdeManager {
             return Ok(inst.port);
         }
         // Cold start: resolve the worktree and the launch command, then spawn.
-        let (session, _) = require_session(&st.db, id)
-            .await
-            .map_err(IntoResponse::into_response)?;
+        let session = match session::resolve_key(&st.db, id).await {
+            Ok(Some((session, _))) => session,
+            Ok(None) => {
+                return Err((StatusCode::NOT_FOUND, "no such session").into_response());
+            }
+            Err(e) => {
+                tracing::error!(session = %id, error = %e, "could not resolve session for editor");
+                return Err(
+                    (StatusCode::INTERNAL_SERVER_ERROR, "session lookup failed").into_response()
+                );
+            }
+        };
         let command = ide_command(&st.db).await;
         let home = self.home.join(id);
         let work_dir = session.work_dir.clone();

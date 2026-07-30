@@ -1331,12 +1331,12 @@ enum TurnEndSource {
 }
 
 impl TurnEndSource {
-    fn review_claim_settlement(self) -> crate::review_delivery::ReviewClaimSettlement {
+    fn review_claim_settlement(self) -> crate::review_inbox::ReviewClaimSettlement {
         match self {
             Self::MatchingPromptResponse => {
-                crate::review_delivery::ReviewClaimSettlement::MatchingPromptResponse
+                crate::review_inbox::ReviewClaimSettlement::MatchingPromptResponse
             }
-            Self::Synthetic => crate::review_delivery::ReviewClaimSettlement::Abandoned,
+            Self::Synthetic => crate::review_inbox::ReviewClaimSettlement::Abandoned,
         }
     }
 }
@@ -1344,7 +1344,7 @@ impl TurnEndSource {
 struct Task {
     db: Db,
     /// The loom event bus — used to drive the turn-boundary status/idle lifecycle
-    /// through [`crate::monitor::record_acp_lifecycle`] (working at turn start,
+    /// through [`crate::status::record_acp_lifecycle`] (working at turn start,
     /// idle at turn end), the sole reason the acp task holds it.
     bus: crate::events::EventBus,
     registry: AcpRegistry,
@@ -2320,13 +2320,13 @@ impl Task {
 
     async fn settle_inflight_review(
         &mut self,
-        settlement: crate::review_delivery::ReviewClaimSettlement,
+        settlement: crate::review_inbox::ReviewClaimSettlement,
         reason: &'static str,
     ) {
         let Some(inflight) = self.inflight_review.take() else {
             return;
         };
-        let settled = crate::review_delivery::settle_review_inbox_claim(
+        let settled = crate::review_inbox::settle_review_inbox_claim(
             &self.db,
             &inflight.delivery_key,
             &inflight.claim_token,
@@ -2371,7 +2371,7 @@ impl Task {
         // Release before making the task idle so the immutable prompt can retry
         // or rehome, and never let synthetic settlement consume the claim.
         let settlement = source.review_claim_settlement();
-        if settlement == crate::review_delivery::ReviewClaimSettlement::Abandoned {
+        if settlement == crate::review_inbox::ReviewClaimSettlement::Abandoned {
             self.settle_inflight_review(settlement, "synthetic turn settlement")
                 .await;
         }
@@ -2405,7 +2405,7 @@ impl Task {
             self.journal_block(kind::TURN_END, json!({ "stop_reason": stop }))
                 .await;
         }
-        if settlement == crate::review_delivery::ReviewClaimSettlement::MatchingPromptResponse {
+        if settlement == crate::review_inbox::ReviewClaimSettlement::MatchingPromptResponse {
             self.settle_inflight_review(settlement, "matching ACP prompt response")
                 .await;
         }
@@ -2426,7 +2426,7 @@ impl Task {
 
         // Turn end ⇒ the `idle` lifecycle edge: stamp the quiet `idle` mark (the
         // "resting, no one needed" state). Mirrors the terminal path's `Stop` hook.
-        crate::monitor::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "idle").await;
+        crate::status::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "idle").await;
 
         // Stop is a user-owned boundary. In particular, do not immediately
         // turn feedback they have not seen acknowledged into another running
@@ -2463,7 +2463,7 @@ impl Task {
         else {
             return false;
         };
-        let item = match crate::review_delivery::claim_review_inbox(
+        let item = match crate::review_inbox::claim_review_inbox(
             &self.db,
             &self.branch_id,
             &self.session_id,
@@ -2487,7 +2487,7 @@ impl Task {
         };
         match self.start_review_turn(&item, active_claim).await {
             Ok(outcome) if outcome.blocks_followup_dispatch() => {
-                if let crate::review_delivery::ReviewTurnStartOutcome::TransportWrittenUnpersisted {
+                if let crate::review_inbox::ReviewTurnStartOutcome::TransportWrittenUnpersisted {
                     error,
                 } = outcome
                 {
@@ -2500,7 +2500,7 @@ impl Task {
                 }
                 true
             }
-            Ok(crate::review_delivery::ReviewTurnStartOutcome::ClaimLostBeforeWrite) => {
+            Ok(crate::review_inbox::ReviewTurnStartOutcome::ClaimLostBeforeWrite) => {
                 tracing::warn!(
                     session = %self.session_id,
                     delivery_key = %item.delivery_key,
@@ -2508,9 +2508,9 @@ impl Task {
                 );
                 false
             }
-            Ok(crate::review_delivery::ReviewTurnStartOutcome::TransportNotWritten { error })
+            Ok(crate::review_inbox::ReviewTurnStartOutcome::TransportNotWritten { error })
             | Err(error) => {
-                let released = crate::review_delivery::release_review_inbox(
+                let released = crate::review_inbox::release_review_inbox(
                     &self.db,
                     &item.delivery_key,
                     &item.claim_token,
@@ -2534,8 +2534,8 @@ impl Task {
                 // releasing the protected claim is safe.
                 false
             }
-            Ok(crate::review_delivery::ReviewTurnStartOutcome::Persisted)
-            | Ok(crate::review_delivery::ReviewTurnStartOutcome::TransportWrittenUnpersisted {
+            Ok(crate::review_inbox::ReviewTurnStartOutcome::Persisted)
+            | Ok(crate::review_inbox::ReviewTurnStartOutcome::TransportWrittenUnpersisted {
                 ..
             }) => unreachable!("held review outcomes matched the dispatch gate"),
         }
@@ -2828,8 +2828,7 @@ impl Task {
             }),
         )
         .await;
-        crate::monitor::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "working")
-            .await;
+        crate::status::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "working").await;
         if let Some(reply) = pending.reply {
             let _ = reply.send(Ok(PromptAck {
                 queued: false,
@@ -2857,9 +2856,9 @@ impl Task {
 
     async fn start_review_turn(
         &mut self,
-        item: &crate::review_delivery::ReviewInboxItem,
+        item: &crate::review_inbox::ReviewInboxItem,
         active_claim: ActiveReviewClaim,
-    ) -> Result<crate::review_delivery::ReviewTurnStartOutcome> {
+    ) -> Result<crate::review_inbox::ReviewTurnStartOutcome> {
         self.refuse_if_turn_capped().await?;
         let turn = if self.turns_dispatched > 0 {
             self.current_turn + 1
@@ -2887,11 +2886,11 @@ impl Task {
             "resources": [],
             "delivery_key": item.delivery_key,
         });
-        let outcome = crate::review_delivery::start_review_inbox_turn(
+        let outcome = crate::review_inbox::start_review_inbox_turn(
             &self.db,
             item,
             &self.session_id,
-            crate::review_delivery::ReviewTurnBoundary {
+            crate::review_inbox::ReviewTurnBoundary {
                 turn,
                 seq,
                 opening_payload: &opening_payload,
@@ -2941,8 +2940,7 @@ impl Task {
             claim_token: item.claim_token.clone(),
             active_claim: Some(active_claim),
         });
-        crate::monitor::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "working")
-            .await;
+        crate::status::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "working").await;
         Ok(outcome)
     }
 
@@ -3061,8 +3059,7 @@ impl Task {
         // Turn start ⇒ the `working` lifecycle edge: status `running`, the calm
         // `idle` mark and the agent's `attention` tag cleared. Mirrors what the
         // terminal path's `UserPromptSubmit` hook does (see `crate::monitor`).
-        crate::monitor::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "working")
-            .await;
+        crate::status::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "working").await;
         Ok(())
     }
 
@@ -3534,7 +3531,7 @@ impl Task {
     async fn on_exit(&mut self, status: Option<i32>) {
         tracing::warn!(session = %self.session_id, ?status, "acp agent exited");
         self.settle_inflight_review(
-            crate::review_delivery::ReviewClaimSettlement::Abandoned,
+            crate::review_inbox::ReviewClaimSettlement::Abandoned,
             "ACP process exit",
         )
         .await;

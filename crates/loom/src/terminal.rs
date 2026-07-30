@@ -27,7 +27,7 @@ use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 
 use crate::backend;
-use crate::web::require_session;
+use crate::session;
 use crate::AppState;
 
 /// Cap on a single inbound WebSocket frame. Keystrokes and resizes are tiny and
@@ -69,9 +69,9 @@ pub async fn terminal_ws(
         );
         return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
     }
-    let session = match require_session(&st.db, &key).await {
-        Ok((s, _)) => s,
-        Err(_) => return (StatusCode::NOT_FOUND, "no such session").into_response(),
+    let session = match session::resolve_key(&st.db, &key).await {
+        Ok(Some((s, _))) => s,
+        _ => return (StatusCode::NOT_FOUND, "no such session").into_response(),
     };
     // No live supervisor means nothing to attach to — the caller should adopt first.
     if !backend::has_session(&session.term_session).await {
@@ -144,9 +144,9 @@ pub async fn session_shell_ws(
         );
         return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
     }
-    let (session, branch) = match require_session(&st.db, &key).await {
-        Ok(pair) => pair,
-        Err(_) => return (StatusCode::NOT_FOUND, "no such session").into_response(),
+    let (session, branch) = match session::resolve_key(&st.db, &key).await {
+        Ok(Some(pair)) => pair,
+        _ => return (StatusCode::NOT_FOUND, "no such session").into_response(),
     };
     let target = match crate::shell::ensure_debug(&st, &session, &branch, idx).await {
         Ok(name) => name,

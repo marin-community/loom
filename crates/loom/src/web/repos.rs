@@ -18,8 +18,8 @@ use crate::session::{self as session_mod, Session};
 use weaver_core::branch as branch_mod;
 
 use super::auth::public_base;
-use super::sessions::auto_archive;
 use super::{ApiResult, AppError, AppState};
+use crate::lifecycle::auto_archive;
 
 // ---------------------------------------------------------------------------
 // Recent repositories
@@ -380,7 +380,7 @@ async fn handle_trigger(
                         let base = public_base(&st, &headers).await;
                         let reply = format!(
                             "Passed your note to the session already on this thread — {}",
-                            super::session_url(&base, &sess.id)
+                            crate::links::session_url(&base, &sess.id)
                         );
                         if let Err(e) = st
                             .trigger
@@ -490,7 +490,10 @@ async fn handle_trigger(
     //     session's **status card**: its comment id is recorded so later status
     //     writes edit it in place into the live trail.
     let base = public_base(&st, &headers).await;
-    let reply = format!("On it — {}", super::session_url(&base, &created.session.id));
+    let reply = format!(
+        "On it — {}",
+        crate::links::session_url(&base, &created.session.id)
+    );
     match st
         .trigger
         .gh()

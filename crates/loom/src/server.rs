@@ -261,13 +261,9 @@ async fn reconcile_sessions(state: &AppState) {
         let Ok(Some(branch)) = branch_mod::get(&state.db, &session.branch_id).await else {
             continue;
         };
-        match web::adopt(state, &session, &branch).await {
+        match crate::lifecycle::adopt(state, &session, &branch).await {
             Ok(()) => tracing::info!("auto-adopt: adopted session {}", session.id),
-            Err(e) => tracing::warn!(
-                "auto-adopt: could not adopt session {}: {}",
-                session.id,
-                e.message()
-            ),
+            Err(e) => tracing::warn!("auto-adopt: could not adopt session {}: {}", session.id, e),
         }
     }
 }
@@ -319,7 +315,7 @@ pub async fn reconcile_managed_sessions(state: &AppState) {
             if session_mod::is_terminal(&session.status) {
                 continue;
             }
-            match web::auto_archive(state, &session, &branch).await {
+            match crate::lifecycle::auto_archive(state, &session, &branch).await {
                 Ok(Some(_)) => tracing::info!(
                     "warm-adopt: archived orphaned managed session {} (owner gone)",
                     session.id
@@ -331,7 +327,7 @@ pub async fn reconcile_managed_sessions(state: &AppState) {
                 Err(e) => tracing::warn!(
                     "warm-adopt: could not archive managed session {}: {}",
                     session.id,
-                    e.message()
+                    e
                 ),
             }
             continue;
@@ -345,12 +341,12 @@ pub async fn reconcile_managed_sessions(state: &AppState) {
         if backend::has_session(&session.term_session).await {
             continue;
         }
-        match web::adopt(state, &session, &branch).await {
+        match crate::lifecycle::adopt(state, &session, &branch).await {
             Ok(()) => tracing::info!("warm-adopt: adopted managed session {}", session.id),
             Err(e) => tracing::warn!(
                 "warm-adopt: could not adopt managed session {}: {}",
                 session.id,
-                e.message()
+                e
             ),
         }
     }

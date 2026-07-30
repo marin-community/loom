@@ -482,6 +482,25 @@ pub async fn with_branch(db: &Db, id: &str) -> Result<Option<(Session, Branch)>>
     Ok(Some((session, branch)))
 }
 
+/// Resolve a session key — a session id, a branch id, a branch name, or
+/// `repo:branch` — to the live session behind it and its branch.
+///
+/// `None` when nothing active answers to `key`: either the key names nothing at
+/// all, or it names a branch whose session has already reached a terminal state.
+/// Callers that need to distinguish "no such thing" from "nothing running" can
+/// fall back to [`weaver_core::branch::resolve_key`] themselves.
+pub async fn resolve_key(db: &Db, key: &str) -> Result<Option<(Session, Branch)>> {
+    if let Some(pair) = with_branch(db, key).await? {
+        return Ok(Some(pair));
+    }
+    let Some(branch) = branch_mod::resolve_key(db, key).await? else {
+        return Ok(None);
+    };
+    Ok(active_for_branch(db, &branch.id)
+        .await?
+        .map(|session| (session, branch)))
+}
+
 pub async fn set_status(db: &Db, id: &str, status: &str) -> Result<()> {
     let old: Option<String> = sqlx::query_scalar("SELECT status FROM sessions WHERE id = ?")
         .bind(id)

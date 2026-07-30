@@ -637,7 +637,7 @@ async fn sync_status_message_once(state: &AppState, branch_id: &str) -> bool {
         _ => Vec::new(),
     };
     let body = render_status(
-        &crate::web::session_url(&base, &session.id),
+        &crate::links::session_url(&base, &session.id),
         &artifacts,
         &events,
     );
@@ -912,7 +912,7 @@ async fn launch(
     } else {
         format!(
             "On it — <{}>",
-            crate::web::session_url(&base, &created.session.id)
+            crate::links::session_url(&base, &created.session.id)
         )
     };
     let ts = match card_ts {
