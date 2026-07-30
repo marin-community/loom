@@ -933,11 +933,11 @@ pub struct AcpLaunchSpec<'a> {
 /// are redundant under ACP), and maps model/primer/mode into `_meta.claudeCode.
 /// options`. For the builtin codex it resolves the `codex-acp` adapter and maps
 /// the same inputs onto its env contract (`CODEX_CONFIG`, `INITIAL_AGENT_MODE`,
-/// `DEFAULT_AUTH_REQUEST`). `auto` also enables Codex's native automatic
-/// approval reviewer through `CODEX_CONFIG`. Codex is hookless, so the primer
-/// rides the opening prompt exactly as it does on the terminal path. For a
-/// custom acp agent it runs the agent's `launch` command verbatim (its setup
-/// stage first) as the adapter, with no `_meta`.
+/// `DEFAULT_AUTH_REQUEST`). Codex's `agent` mode also enables its native
+/// automatic approval reviewer through `CODEX_CONFIG`. Codex is hookless, so
+/// the primer rides the opening prompt exactly as it does on the terminal path.
+/// For a custom acp agent it runs the agent's `launch` command verbatim (its
+/// setup stage first) as the adapter, with no `_meta`.
 pub async fn build_acp_launch(
     db: &Db,
     spec: &AcpLaunchSpec<'_>,
@@ -1009,8 +1009,9 @@ pub async fn build_acp_launch(
             "DEFAULT_AUTH_REQUEST",
             r#"{"methodId":"api-key"}"#,
         );
-        configure_codex_acp(&mut env, spec.model, spec.effort, spec.mode)?;
-        push_env_default(&mut env, "INITIAL_AGENT_MODE", &codex_acp_mode(spec.mode));
+        let codex_mode = codex_acp_mode(spec.mode);
+        configure_codex_acp(&mut env, spec.model, spec.effort, &codex_mode)?;
+        push_env_default(&mut env, "INITIAL_AGENT_MODE", &codex_mode);
     }
 
     let (new_or_load, goal) = match open {
@@ -1149,14 +1150,14 @@ async fn codex_acp_cmd(db: &Db) -> String {
 /// operator-supplied adapter configuration.
 ///
 /// codex-acp's `agent` mode supplies the workspace-write sandbox and on-request
-/// approval policy. Loom's provider-neutral `auto` mode additionally routes
-/// those approval requests to Codex's native automatic reviewer. An explicit
-/// reviewer in `CODEX_CONFIG` wins over that default.
+/// approval policy. Loom routes those approval requests to Codex's native
+/// automatic reviewer by default. An explicit reviewer in `CODEX_CONFIG` wins
+/// over that default.
 fn configure_codex_acp(
     env: &mut Vec<(String, String)>,
     model: &str,
     effort: &str,
-    mode: &str,
+    codex_mode: &str,
 ) -> Result<()> {
     let mut config = match env
         .iter()
@@ -1169,7 +1170,7 @@ fn configure_codex_acp(
     let config = config
         .as_object_mut()
         .ok_or_else(|| anyhow!("CODEX_CONFIG must be a JSON object"))?;
-    if mode.trim() == "auto" {
+    if codex_mode.trim() == "agent" {
         config
             .entry("approvals_reviewer".to_string())
             .or_insert_with(|| json!("auto_review"));
@@ -2493,13 +2494,13 @@ mod tests {
     }
 
     #[test]
-    fn codex_acp_auto_mode_enables_native_reviewer() {
+    fn codex_acp_agent_mode_enables_native_reviewer() {
         let mut env = vec![(
             "CODEX_CONFIG".to_string(),
             r#"{"model":"operator","features":{"shell_snapshot":true,"apps":true}}"#.to_string(),
         )];
 
-        configure_codex_acp(&mut env, "ignored", "high", "auto").unwrap();
+        configure_codex_acp(&mut env, "ignored", "high", "agent").unwrap();
 
         let config: Value = serde_json::from_str(
             env.iter()
@@ -2519,17 +2520,22 @@ mod tests {
             "CODEX_CONFIG".to_string(),
             r#"{"approvals_reviewer":"user"}"#.to_string(),
         )];
-        configure_codex_acp(&mut explicit_reviewer, "", "", "auto").unwrap();
+        configure_codex_acp(&mut explicit_reviewer, "", "", "agent").unwrap();
         let config: Value = serde_json::from_str(&explicit_reviewer[0].1).unwrap();
         assert_eq!(config["approvals_reviewer"], "user");
     }
 
     #[test]
-    fn codex_acp_manual_mode_does_not_enable_auto_review() {
-        let mut manual = Vec::new();
-        configure_codex_acp(&mut manual, "", "", "default").unwrap();
-        let config: Value = serde_json::from_str(&manual[0].1).unwrap();
-        assert!(config.get("approvals_reviewer").is_none());
+    fn codex_acp_non_agent_modes_do_not_enable_auto_review() {
+        for mode in ["read-only", "agent-full-access"] {
+            let mut env = Vec::new();
+            configure_codex_acp(&mut env, "", "", mode).unwrap();
+            let config: Value = serde_json::from_str(&env[0].1).unwrap();
+            assert!(
+                config.get("approvals_reviewer").is_none(),
+                "{mode} must not enable auto-review"
+            );
+        }
     }
 
     #[test]

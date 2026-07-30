@@ -3344,16 +3344,24 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
         NewOrLoad::Load { .. } => panic!("a fresh launch opens session/new"),
     }
 
-    let auto_launch = loom::agent::build_acp_launch(
-        &ts.state.db,
-        &spec(None, &[], "auto"),
-        loom::agent::AcpOpen::Fresh,
-    )
-    .await
-    .unwrap();
-    assert_eq!(env_of(&auto_launch, "INITIAL_AGENT_MODE"), vec!["agent"]);
-    let cfg: Value = serde_json::from_str(&env_of(&auto_launch, "CODEX_CONFIG")[0]).unwrap();
-    assert_eq!(cfg["approvals_reviewer"], "auto_review");
+    // The provider-neutral launch default and codex-acp's reported/restored mode
+    // resolve to the same Agent posture with automatic approval review.
+    for mode in ["auto", "agent"] {
+        let agent_launch = loom::agent::build_acp_launch(
+            &ts.state.db,
+            &spec(None, &[], mode),
+            loom::agent::AcpOpen::Fresh,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            env_of(&agent_launch, "INITIAL_AGENT_MODE"),
+            vec!["agent"],
+            "{mode}"
+        );
+        let cfg: Value = serde_json::from_str(&env_of(&agent_launch, "CODEX_CONFIG")[0]).unwrap();
+        assert_eq!(cfg["approvals_reviewer"], "auto_review", "{mode}");
+    }
 
     // Operator config is preserved, except that account-level apps remain
     // disabled; a goalless launch seeds the primer.
@@ -3363,7 +3371,7 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
     )];
     let launch = loom::agent::build_acp_launch(
         &ts.state.db,
-        &spec(None, &operator, "auto"),
+        &spec(None, &operator, "agent"),
         loom::agent::AcpOpen::Fresh,
     )
     .await
