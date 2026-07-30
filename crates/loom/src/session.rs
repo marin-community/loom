@@ -90,8 +90,8 @@ pub struct Session {
     /// via [`increment_turn_count`].
     #[serde(default)]
     pub turn_count: i64,
-    /// The weaver issue opened (or claimed) as this session's tracker at
-    /// launch, or `None` when the launch tracked nothing.
+    /// An explicitly claimed/imported compatibility work item, or `None` for
+    /// an ordinary launch whose coordination lives in its default channel.
     pub tracking_issue_id: Option<i64>,
     /// Named launch profile and its resolved non-secret policy snapshot.
     pub profile: String,
@@ -198,8 +198,8 @@ pub struct NewSession {
     pub origin: String,
     /// `"interactive"` or `"automation"`. See [`Session::class`].
     pub class: String,
-    /// The tracking issue opened/claimed for this session's task at launch, or
-    /// `None` when there is nothing to track. See [`Session::tracking_issue_id`].
+    /// An explicitly claimed/imported compatibility work item, or `None` for
+    /// an ordinary channel-coordinated launch. See [`Session::tracking_issue_id`].
     pub tracking_issue_id: Option<i64>,
 }
 
@@ -361,6 +361,7 @@ pub(crate) async fn insert_with_layout_revision(
     .await?;
     let layout_revision =
         crate::session_layout::insert_default_placement_tx(&mut tx, s, policy).await?;
+    crate::channels::insert_session_channel_tx(&mut tx, s, policy).await?;
     tx.commit().await?;
     tracing::info!(
         session = %s.id,

@@ -3892,10 +3892,11 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
         println!("  effort: {}", ws.effort);
     }
     println!("  dir:    {}", ws.work_dir);
+    println!("  channel: {id}  (weaver channel read --channel {id} | wait --channel {id})");
     if let Some(n) = ws.tracking_issue {
-        // The handle the caller uses to follow this sub-tree: poll it with
-        // `weaver issue show <n>`, or block on it with `weaver issue wait <n>`.
-        println!("  track:  weaver issue #{n}  (weaver issue show {n} | wait {n})");
+        // Explicit claimed/imported work items remain attached while ordinary
+        // coordination uses the session channel above.
+        println!("  work:   weaver issue #{n}  (explicit backlog/external mapping)");
     }
     println!("  attach: loom attach {id}");
     Ok(())
@@ -3980,6 +3981,7 @@ async fn cmd_session_poll(key: String) -> Result<()> {
     );
     println!("  status:    {}", str_field(&ws, "status"));
     println!("  attention: {}", attention_summary(&ws));
+    println!("  channel:   {}", str_field(&ws, "id"));
     if let Some(n) = ws.get("tracking_issue").and_then(Value::as_i64) {
         println!("  track:     weaver issue #{n}");
     }

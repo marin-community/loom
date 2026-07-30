@@ -72,6 +72,7 @@ mod auth;
 mod automation;
 mod branches;
 mod changes;
+mod channels;
 mod deployment;
 mod diagnostics;
 mod discussion;
@@ -97,6 +98,7 @@ use auth::*;
 use automation::*;
 use branches::*;
 use changes::*;
+use channels::*;
 use deployment::*;
 use diagnostics::*;
 use discussion::*;
@@ -895,7 +897,22 @@ pub fn router(state: AppState) -> Router {
             axum::routing::put(set_session_tag).delete(clear_session_tag),
         )
         .route("/sessions/{id}/tags", axum::routing::put(set_session_tags))
-        // Branches & issues
+        // Durable user/agent communication contexts.
+        .route("/channels", get(list_channels).post(create_channel))
+        .route("/channels/{id}", get(get_channel).delete(archive_channel))
+        .route(
+            "/channels/{id}/messages",
+            get(list_channel_messages).post(create_channel_message),
+        )
+        .route(
+            "/channels/{id}/subscription",
+            axum::routing::put(set_channel_subscription),
+        )
+        .route(
+            "/channels/{id}/read-marker",
+            axum::routing::put(set_channel_read_marker),
+        )
+        // Branches & legacy work items
         .route("/branches", get(list_branches))
         .route("/branches/{id}", get(get_branch).patch(patch_branch))
         // Command routes: each is a multi-write + event sequence the `weaver`

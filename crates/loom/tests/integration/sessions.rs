@@ -69,11 +69,18 @@ async fn create_lists_and_tears_down() {
         ws["branch"]["title"], "integration test goal",
         "title derived from goal"
     );
-    // The launch hands back a tracking issue id — the caller's handle on it.
     assert!(
-        ws["tracking_issue"].as_i64().is_some(),
-        "launch returns a tracking issue id, got {ws}"
+        ws["tracking_issue"].is_null(),
+        "ordinary launch uses its default channel, got {ws}"
     );
+    let channel = client.get(&format!("/api/channels/{id}")).await.unwrap();
+    assert_eq!(channel["session_id"], id);
+    let messages = client
+        .get(&format!("/api/channels/{id}/messages"))
+        .await
+        .unwrap();
+    assert_eq!(messages[0]["kind"], "goal");
+    assert_eq!(messages[0]["body"], "integration test goal");
     assert!(
         backend::has_session(&session).await,
         "terminal session missing"
@@ -804,12 +811,11 @@ async fn session_url_resolves_by_key_and_honours_the_public_base() {
     client.delete(&format!("/api/sessions/{id}")).await.unwrap();
 }
 
-/// A hand-launched session is stamped `origin: user` / `class: interactive`, and
-/// its tracking issue lives on the session row — so a plain get-by-id carries
-/// it, not just the create response.
+/// A hand-launched session is stamped `origin: user` / `class: interactive`
+/// and ordinary launches remain free of compatibility work items.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn session_records_origin_class_and_tracking_issue() {
+async fn session_records_origin_class_without_an_automatic_issue() {
     let ts = TestServer::start().await;
     let client = &ts.client;
 
@@ -823,19 +829,13 @@ async fn session_records_origin_class_and_tracking_issue() {
     let id = ws["id"].as_str().unwrap().to_string();
     assert_eq!(ws["origin"], "user", "a plain HTTP launch is origin 'user'");
     assert_eq!(ws["class"], "interactive");
-    let issue = ws["tracking_issue"]
-        .as_i64()
-        .expect("launch returns a tracking issue id");
+    assert!(ws["tracking_issue"].is_null());
 
     // Stored, not recomputed: the same identity comes back on a get-by-id.
     let got = client.get(&format!("/api/sessions/{id}")).await.unwrap();
     assert_eq!(got["origin"], "user");
     assert_eq!(got["class"], "interactive");
-    assert_eq!(
-        got["tracking_issue"].as_i64(),
-        Some(issue),
-        "the tracking issue persists past the create response"
-    );
+    assert!(got["tracking_issue"].is_null());
 
     client.delete(&format!("/api/sessions/{id}")).await.unwrap();
 }
@@ -955,6 +955,16 @@ async fn archive_frees_the_branch_for_a_new_session() {
 async fn issue_hiding_follows_the_branch_current_claim_holder() {
     let ts = TestServer::start().await;
     let client = &ts.client;
+    let work_item = weaver_core::issue::add(
+        &ts.state.db,
+        &weaver_core::issue::NewIssue {
+            repo_root: ts.cwd(),
+            title: "background run".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
 
     let auto = client
         .post(
@@ -965,6 +975,7 @@ async fn issue_hiding_follows_the_branch_current_claim_holder() {
                 "agent": "shell",
                 "name": "relet",
                 "class": "automation",
+                "claim_issue": work_item.id,
             }),
         )
         .await

@@ -13,6 +13,7 @@ pub mod automation;
 pub mod backend;
 pub mod builtins;
 pub(crate) mod changes;
+pub(crate) mod channels;
 pub mod chat;
 pub(crate) mod chatlog;
 pub mod client;

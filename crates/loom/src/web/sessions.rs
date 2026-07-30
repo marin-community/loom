@@ -866,7 +866,9 @@ pub(super) async fn patch_session(
         )
         .await?
         {
-            TitleUpdate::Applied(_) => {}
+            TitleUpdate::Applied(_) => {
+                crate::channels::update_branch_channel_names(&st.db, &branch.id, &title).await?;
+            }
             TitleUpdate::Stale(current) => {
                 return Err(AppError::conflict(
                     "the task label changed while it was being edited; review it and retry",
@@ -879,6 +881,7 @@ pub(super) async fn patch_session(
     if let Some(goal) = &req.goal {
         branch_mod::set_goal(&st.db, &branch.id, goal, "user").await?;
         session_mod::bump_mutation_revision(&st.db, &session.id).await?;
+        crate::channels::update_session_goal(&st.db, &session.id, goal).await?;
         tokio::fs::write(db::run_dir(&session.id).join("goal.txt"), goal)
             .await
             .ok();
@@ -1186,6 +1189,7 @@ async fn archive_locked(
         }
     }
     session_mod::set_status(&st.db, &session.id, "archived").await?;
+    crate::channels::archive_session_channel(&st.db, &session.id).await?;
     // A torn-down session cannot keep owning work. Return every issue it held
     // to the repo backlog while preserving source-branch provenance and issue
     // status, just as full session deletion does.
@@ -2301,6 +2305,8 @@ async fn recover(st: &AppState, session: &Session, _branch: &Branch) -> Result<(
         session_mod::set_status(&st.db, &session.id, "archived").await?;
         return Err(error);
     }
+
+    crate::channels::reopen_session_channel(&st.db, &session.id).await?;
 
     // Stamp the durable opt-out from immediate merge re-archive only after the
     // live side committed. A bookkeeping failure must not roll back a healthy

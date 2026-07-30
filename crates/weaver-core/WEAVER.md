@@ -6,8 +6,9 @@ This document describes how to work *with weaver*. It is distinct from any
 `AGENTS.md` in the repo, which describes the project itself — read that too.
 
 Two CLIs share the loom server, split by subject. **`weaver` manages your
-current state and the work ledger** — status, tags, artifacts, issues, the
-event log — every command implicitly scoped to this branch or its repo.
+current state and communication** — channels, status, tags, artifacts,
+intentional backlog issues, and the event log — every command implicitly
+scoped to this session, branch, or repo.
 **`loom` manages sessions as objects** — launching, inspecting, and driving
 detached sessions, yours or a sub-tree's (see "Launching and tracking
 sub-sessions"). Report yourself with `weaver`; drive sessions with `loom`.
@@ -25,11 +26,13 @@ weaver replays it for you automatically.
   with `weaver artifact write goal <file|->` as your understanding evolves.
 - `weaver status <level> "<message>"` — your single status channel; see
   "Signalling your status".
-- `weaver issue add "<title>"` — add a task claimed by this branch (`--repo`
-  files it in the shared repo backlog instead). `weaver issue ls` — this
-  branch's tasks plus the unclaimed backlog (`--mine`, `--repo` to rescope).
-  `weaver issue show N` / `close N` / `wait N` — inspect, finish, or block on
-  one (see "Launching and tracking sub-sessions").
+- `weaver channel read` — read this session's durable goal, messages, and
+  status/result history. `weaver channel send "<message>" --channel <id>`
+  talks to another visible session; `wait --channel <id>` blocks for its next
+  response. `ls`, `ack`, and `subscribe` round out the mailbox.
+- `weaver issue add "<title>"` — deliberately create a backlog/work item.
+  Issues are for durable work that can outlive a session or map to GitHub, not
+  the ordinary way sessions communicate. `--repo` leaves one unclaimed.
 - `weaver artifact write <name> [<file>]` — write a versioned document (a
   design, report, diagram, plan) for the user to read; prints a dashboard URL
   to hand them. Reads stdin with `-`; `--repo` shares it repo-wide; an image
@@ -40,38 +43,49 @@ weaver replays it for you automatically.
 - `weaver tag set|rm|ls` — free-form quiet tags on the branch; `weaver log` —
   the event trail; `weaver readme` — this guide, back on demand.
 
-Division of labor: **the `goal` artifact is the charter; issues are the only
-task ledger; artifacts are documents for the user.** A "plan" is just an
-artifact named `plan` following smartdoc conventions: prose, a mermaid diagram,
-and a task list that **references issues** (`- #41 Index layer`) instead of
-declaring them — the dashboard projects live issue state at render time. There
-is no sync engine: **you are the reconciler.** See the smartdoc skill
-(`.agents/skills/smartdoc.md`).
+Division of labor: **the branch goal is the launch charter; the session channel
+is the conversation and progress stream; issues are an intentional backlog or
+external mapping; artifacts are documents for the user.** A plan can live in
+an artifact without manufacturing one issue per session. Reference explicit
+issues only when the work genuinely belongs in the backlog.
 
-## Your tracking issue
+## Your session channel
 
-This branch has a **tracking issue** — the weaver issue for the task you were
-launched with (`weaver issue ls --mine`). It is how whoever launched you
-watches your progress without reading this terminal:
+Every session has one durable channel with the same id as the session. Its
+opening `goal` message records the launch charter for provenance; it is not a
+second runtime prompt. Whoever launched you can follow this stream without
+reading your terminal:
 
-- Keep `weaver status` honest — that is the live signal they poll.
-- When the task is genuinely complete (the PR is open, the work is done),
-  `weaver issue close <id>`. Closing is the unambiguous "finished" signal; do
-  not close early.
+- Keep `weaver status` honest — each update is appended as a typed channel
+  message as well as driving the dashboard's attention signal.
+- Use `weaver channel send` for an explicit reply or question. A message sent
+  into your session channel is durably stored before loom delivers it to your
+  live agent runtime.
+- When the delegated outcome is complete, append a concise typed result with
+  `weaver channel send --kind result "<outcome / PR>"`; a parent waiting on
+  `weaver channel wait --channel <id> --kind result` wakes without an
+  issue-close protocol.
+- Viewing the session or channel advances that viewer's read marker. Delivery
+  receipts are separate: "read" never pretends the runtime accepted a prompt.
+- If this launch explicitly claimed a Weaver/GitHub issue, that legacy work
+  item still appears in your opening message and keeps its own close contract.
 
 ## Launching and tracking sub-sessions
 
 Fan work out into its own detached session — a parallel sub-tree on its own
-branch and worktree — and track it the way someone tracks you. The session
-itself is `loom`'s to manage; the ledger that tracks it stays in `weaver`:
+branch and worktree — and follow its default channel:
 
 - `loom session launch "<task>"` — spawn a sub-session; prints its branch and
-  **tracking issue number**, your handle on the sub-tree. Forks from a
-  freshly-fetched `origin/<default branch>` unless `--base <branch>`.
-- `weaver issue show <id>` — the sub-tree's tracking issue plus the sub-agent's
-  live status. `weaver issue wait <id>` blocks until it closes or the sub-agent
-  raises `attention`/`blocked` (`--timeout <secs>`; prints why it woke).
-  `weaver issue ls` lists your delegations under "Delegated by this branch".
+  **channel id** (the same as its session id), your durable handle on the
+  sub-tree. Forks from a freshly-fetched `origin/<default branch>` unless
+  `--base <branch>`.
+- `weaver channel read --channel <id>` shows the child's goal and progress.
+  `weaver channel wait --channel <id>` blocks for its next message; `send`
+  nudges it through the same durable stream.
+- For a conversation that should outlive any one child, create a custom channel
+  with `weaver channel open "<name>"`, then invite a child with `weaver channel
+  subscribe --channel <channel> --session <child> --mode deliver`. The child can
+  then read, reply, or change its own subscription.
 - Drive the child directly when you need to nudge it:
   `loom session poll|wait|send|interrupt|preview <session>` (one-shot status /
   block on the session itself / deliver immediate control input / interrupt the
@@ -109,8 +123,9 @@ in separate notes — the dashboard's activity feed renders the trail, and on a
 session wired to GitHub it is mirrored publicly (see "Working a GitHub
 issue").
 
-Under the hood, status is a **tag** on your branch — a single `(key, value)`
-annotation with a note, an author, and a timestamp:
+Under the hood, status appends a typed message to your channel and retains a
+compatibility **tag** on your branch — a single `(key, value)` annotation with
+a note, an author, and a timestamp:
 
 - `attention` — your self-report, `attention` or `blocked`. `ok` clears it:
   absence is the calm state; your prose `description` still shows.
@@ -222,8 +237,9 @@ yours to drive.
   or wait for future reviews. Local green is not CI green; keep status honest
   while you wait (`weaver status ok "waiting on CI"`).
 - Once CI is green and present comments are addressed: `weaver status
-  attention "ready for review"` (the message doubles as your summary), and file
-  follow-ups with `weaver issue add`.
+  attention "ready for review"` (the message doubles as your summary), append
+  `weaver channel send --kind result "<PR and outcome>"`, and file only durable
+  backlog follow-ups with `weaver issue add`.
 
 When a session is finished with, the user may **archive** it from the
 dashboard: the terminal and worktree go, the branch and weaver history stay.

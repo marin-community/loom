@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use sqlx::Row;
 use weaver_api::{
     AddUserReq, AuthMethods, CreateTokenReq, CreatedTokenView, GithubConfigView, LoginReq, MeView,
     SetGithubConfigReq, SetPasswordReq, TokenView, UserView,
@@ -46,7 +47,7 @@ fn unauthorized(message: &str) -> AppError {
     AppError::new(StatusCode::UNAUTHORIZED, message)
 }
 
-async fn is_session_descendant(st: &AppState, ancestor: &str, candidate: &str) -> bool {
+pub(super) async fn is_session_descendant(st: &AppState, ancestor: &str, candidate: &str) -> bool {
     sqlx::query_scalar::<_, bool>(
         "WITH RECURSIVE tree(id) AS (
            SELECT id FROM sessions WHERE id = ?
@@ -95,6 +96,33 @@ async fn issue_belongs_to_session(st: &AppState, branch_id: &str, issue_id: &str
     .fetch_one(&st.db)
     .await
     .unwrap_or(false)
+}
+
+async fn channel_belongs_to_session_tree(st: &AppState, ancestor: &str, channel_id: &str) -> bool {
+    let row = sqlx::query(
+        "SELECT c.session_id,
+                EXISTS(
+                  SELECT 1 FROM channel_subscriptions sub
+                  WHERE sub.channel_id = c.id
+                    AND sub.subject_kind = 'session'
+                    AND sub.subject_id = ?
+                ) AS subscribed
+         FROM channels c WHERE c.id = ?",
+    )
+    .bind(ancestor)
+    .bind(channel_id)
+    .fetch_optional(&st.db)
+    .await;
+    let Ok(Some(row)) = row else {
+        return false;
+    };
+    if row.get::<bool, _>("subscribed") {
+        return true;
+    }
+    match row.get::<Option<String>, _>("session_id") {
+        Some(session_id) => is_session_descendant(st, ancestor, &session_id).await,
+        None => false,
+    }
 }
 
 async fn automation_owns_session(st: &AppState, subject: &str, session_id: &str) -> bool {
@@ -146,6 +174,12 @@ async fn grant_allows(
             // template snapshot does not grant another read or write surface.
             if *method == axum::http::Method::POST && path == "/session-launches/resolve" {
                 return true;
+            }
+            if path == "/channels" {
+                return matches!(*method, axum::http::Method::GET | axum::http::Method::POST);
+            }
+            if segments.first() == Some(&"channels") && segments.len() >= 2 {
+                return channel_belongs_to_session_tree(st, session_id, segments[1]).await;
             }
             if segments.first() == Some(&"sessions") && segments.len() >= 2 {
                 return is_session_descendant(st, session_id, segments[1]).await;

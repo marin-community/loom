@@ -3,7 +3,7 @@ import { test, expect } from '../fixtures/weaver';
 test.describe('issues pane', () => {
   test('shows an empty state when there are no issues', async ({ page, weaver }) => {
     await page.goto(`${weaver.baseUrl}/issues`);
-    await expect(page.getByRole('heading', { name: 'Issues' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Backlog' })).toBeVisible();
     await expect(page.getByTestId('issues-empty')).toBeVisible();
     await expect(page.getByTestId('issue-row')).toHaveCount(0);
   });
@@ -49,9 +49,7 @@ test.describe('issues pane', () => {
     const row = page.locator(`[data-issue-id="${issue.id}"]`);
     await row.getByTestId('issue-close').click();
 
-    // With "show closed" off, the closed issue drops out of the list. (A
-    // seeded session also opens a tracking issue, so the global open count is
-    // not asserted here — only that this issue left the open view.)
+    // With "show closed" off, the closed issue drops out of the list.
     await expect(row).toHaveCount(0);
 
     // Toggling closed back in surfaces it with a Reopen control, and the close
@@ -100,10 +98,10 @@ test.describe('issues pane', () => {
     await page.getByTestId('issues-select-matching').click();
     await expect(page.getByTestId('issues-selected-count')).toHaveText('27 selected');
 
-    // Client-side navigation keeps Issues alive; activation performs a fresh
+    // Client-side navigation keeps Backlog alive; activation performs a fresh
     // API load without discarding the ID-based selection.
     await page.getByRole('link', { name: 'loom home' }).click();
-    await page.getByRole('link', { name: 'Issues' }).click();
+    await page.getByRole('link', { name: 'Backlog' }).click();
     await expect(page.getByTestId('issues-selected-count')).toHaveText('27 selected');
     expect(issues).toHaveLength(27);
   });
@@ -235,7 +233,7 @@ test.describe('issues pane', () => {
 
     await page.goto(`${weaver.baseUrl}/issues?${query}`);
     await expect(page.getByTestId('issues-active-scope')).toContainText('scope-one');
-    await expect(page.getByTestId('issues-open-count')).toHaveText('2 open');
+    await expect(page.getByTestId('issues-open-count')).toHaveText('1 open');
     await expect(page.locator(`[data-issue-id="${first.id}"]`)).toBeVisible();
     await expect(page.locator(`[data-issue-id="${second.id}"]`)).toHaveCount(0);
 
@@ -390,13 +388,6 @@ test.describe('issues pane', () => {
 
     await page.goto(`${weaver.baseUrl}/issues`);
 
-    // The session's own tracking issue is already claimed, so it offers no
-    // Launch button — only the unclaimed backlog item does.
-    const claimed = (await weaver.listIssues()).find((i) => i.claimed_branch);
-    await expect(
-      page.locator(`[data-issue-id="${claimed!.id}"]`).getByTestId('issue-launch'),
-    ).toHaveCount(0);
-
     const row = page.locator(`[data-issue-id="${backlog.id}"]`);
     await expect(row.getByTestId('issue-launch')).toBeVisible();
     await row.getByTestId('issue-launch').click();
@@ -422,8 +413,7 @@ test.describe('issues pane', () => {
     await form.getByTestId('issue-create-submit').click();
 
     await expect(form.getByTestId('issue-create-error')).toContainText('title is required');
-    // No backlog issue was filed (the seeded session's tracking issue carries a
-    // claimed branch, so a backlog item would be the only unclaimed one).
+    // The ordinary seeded session creates no issue; the invalid form added none.
     const issues = await weaver.listIssues(true);
     expect(issues.some((i) => i.claimed_branch === null)).toBe(false);
   });

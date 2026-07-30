@@ -232,9 +232,9 @@ pub struct SessionView {
     pub model: String,
     pub effort: String,
     pub github_repo: Option<String>,
-    /// GitHub issue linked to this session's tracking issue, if any. This is
+    /// GitHub issue linked to this session's explicit work item, if any. This is
     /// separate from `branch.github`, which is the pull request created by the
-    /// work. The tracking issue remains the source of truth for edits.
+    /// work. The compatibility work item remains the source of truth for edits.
     #[serde(default)]
     pub github_issue: Option<GithubIssueRef>,
     pub last_activity_at: String,
@@ -269,10 +269,8 @@ pub struct SessionView {
     /// Completed agent turns on this session.
     #[serde(default)]
     pub turn_count: i64,
-    /// The tracking issue opened (or claimed) for this session's task at launch
-    /// — the handle handed back to whoever launched it — or `null` when the
-    /// launch tracked nothing. Stored on the session row, so every read path
-    /// carries it.
+    /// An explicit claimed/imported compatibility work item. Ordinary sessions
+    /// coordinate through their same-id channel and leave this `null`.
     pub tracking_issue: Option<i64>,
     /// Legacy compatibility read derived from canonical placement. `"parked"`
     /// means the session currently belongs to a system `Later` group; all
@@ -529,7 +527,7 @@ pub struct AcpUsage {
     pub cost: Option<AcpCost>,
 }
 
-/// A GitHub issue association carried by a session's tracking issue.
+/// A GitHub issue association carried by a session's explicit work item.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GithubIssueRef {
     pub repo: String,
@@ -1983,6 +1981,135 @@ pub struct ProgramView {
 }
 
 // ---------------------------------------------------------------------------
+// Channels
+// ---------------------------------------------------------------------------
+
+pub const CHANNEL_DEFAULT_MESSAGE_KIND: &str = "message";
+pub const CHANNEL_DEFAULT_URGENCY: &str = "normal";
+pub const CHANNEL_DEFAULT_SUBSCRIPTION_MODE: &str = "observe";
+
+/// One durable communication context. A session channel uses its owning
+/// session id as `id`; custom channels have an independent id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelView {
+    pub id: String,
+    pub kind: String,
+    pub repo_root: String,
+    pub branch_id: Option<String>,
+    pub session_id: Option<String>,
+    pub name: String,
+    pub topic: String,
+    pub state: String,
+    pub created_by_kind: String,
+    pub created_by: String,
+    pub created_at: String,
+    pub archived_at: Option<String>,
+    #[serde(default)]
+    pub unread_count: i64,
+    #[serde(default)]
+    pub unread_urgent_count: i64,
+    #[serde(default)]
+    pub last_message: Option<ChannelMessageView>,
+}
+
+/// One append-only item in a channel's monotonically sequenced history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelMessageView {
+    pub id: String,
+    pub channel_id: String,
+    pub seq: i64,
+    pub kind: String,
+    pub urgency: String,
+    pub author_kind: String,
+    pub author_id: String,
+    pub body: String,
+    pub payload: Value,
+    pub reply_to: Option<String>,
+    pub created_at: String,
+    #[serde(default)]
+    pub deliveries: Vec<ChannelDeliveryView>,
+}
+
+/// Runtime acceptance state for delivery of one channel message to a session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelDeliveryView {
+    pub target_session_id: String,
+    pub state: String,
+    pub attempts: i64,
+    pub last_error: Option<String>,
+    pub updated_at: String,
+}
+
+/// The authenticated caller's subscription to a channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelSubscriptionView {
+    pub channel_id: String,
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub mode: String,
+    pub read_seq: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreateChannelReq {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub topic: String,
+    /// Required for an admin-created repo channel; ignored for a session
+    /// principal, whose repository and branch are derived from its grant.
+    #[serde(default)]
+    pub repo_root: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreateChannelMessageReq {
+    #[serde(default = "default_channel_message_kind")]
+    pub kind: String,
+    #[serde(default = "default_channel_urgency")]
+    pub urgency: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub payload: Value,
+    #[serde(default)]
+    pub reply_to: Option<String>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+}
+
+fn default_channel_message_kind() -> String {
+    CHANNEL_DEFAULT_MESSAGE_KIND.to_string()
+}
+
+fn default_channel_urgency() -> String {
+    CHANNEL_DEFAULT_URGENCY.to_string()
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetChannelSubscriptionReq {
+    #[serde(default = "default_channel_subscription_mode")]
+    pub mode: String,
+    /// Optional descendant session to subscribe. Omission updates the caller's
+    /// own subscription; admin callers may name any session.
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+fn default_channel_subscription_mode() -> String {
+    CHANNEL_DEFAULT_SUBSCRIPTION_MODE.to_string()
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetChannelReadMarkerReq {
+    /// Omission advances through the latest message in the response snapshot.
+    #[serde(default)]
+    pub seq: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
 // Request payloads
 // ---------------------------------------------------------------------------
 
@@ -2023,20 +2150,22 @@ pub struct CreateReq {
     pub issue: Option<i64>,
     /// A GitHub issue number the caller already holds the content of (the
     /// `@loom` trigger, whose webhook payload carries the thread): recorded on
-    /// the tracking issue as its GitHub link, with none of `issue`'s
+    /// the compatibility work item as its GitHub link, with none of `issue`'s
     /// fetch-and-seed. Ignored when `issue` is set.
     #[serde(default)]
     pub github_issue: Option<i64>,
-    /// A pre-existing weaver issue id to claim for this session (fan-out
-    /// pickup). Seeds title/goal/description and stamps `claimed_branch`.
+    /// A pre-existing weaver backlog item to claim for this session. Seeds
+    /// title/goal/description and stamps `claimed_branch`; ordinary launches
+    /// do not create a work item.
     #[serde(default)]
     pub claim_issue: Option<i64>,
     #[serde(default)]
     pub existing_branch: Option<String>,
     /// The branch (id or name) of the agent launching this session, when it is
-    /// itself a weaver session delegating work. Recorded as the tracking
-    /// issue's `source_branch`. The `loom` CLI fills this from `$WEAVER_BRANCH`;
-    /// a human/dashboard launch leaves it unset.
+    /// itself a weaver session delegating work. It defines the session-tree
+    /// parent and, for an explicitly claimed/imported work item, that item's
+    /// `source_branch`. The `loom` CLI fills this from `$WEAVER_BRANCH`; a
+    /// human/dashboard launch leaves it unset.
     #[serde(default)]
     pub parent_branch: Option<String>,
     /// Model selector accepted by the selected agent type; blank/absent uses

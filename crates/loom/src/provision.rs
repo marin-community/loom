@@ -434,7 +434,7 @@ pub(crate) async fn create(st: AppState, req: CreateReq, actor: Actor) -> Result
     );
     // Attachment input is untrusted launch input, not a provisioning step.
     // Decode and validate the entire batch before touching a repository,
-    // worktree, branch, tracking issue, claim, or session row.
+    // worktree, branch, work-item claim, or session row.
     let prepared_scratch = prepare_initial_scratch(&req.scratch)?;
     let selection = create_selection(&req)?;
     let selected_profile_name = match selection.profile.trim() {
@@ -711,7 +711,7 @@ pub(crate) async fn create(st: AppState, req: CreateReq, actor: Actor) -> Result
         tracing::debug!(issue = number, github_repo = ?github_repo, "seeded session fields from github issue");
     } else if let Some(number) = req.github_issue {
         // The caller already holds the thread (the `@loom` trigger): record the
-        // GitHub link on the tracking issue without the fetch-and-seed above.
+        // GitHub link on the compatibility work item without fetch-and-seed.
         github_issue = Some(number);
         github_repo = managed_slug.as_ref().map(|repo| repo.slug());
     }
@@ -864,7 +864,7 @@ pub(crate) async fn create(st: AppState, req: CreateReq, actor: Actor) -> Result
     // A replacement launch may reuse a worktree whose previous session left
     // Scratch files behind. Validate and write the merged set while holding the
     // same path-scoped permit as live upload/delete routes, before creating any
-    // branch row, tracking issue, claim, or session.
+    // branch row, work-item claim, or session.
     let _scratch_permit = st.launch_gate.acquire_scratch(&work_dir).await;
     let scratch_names = write_prepared_initial_scratch(&work_dir, &prepared_scratch).await?;
 
@@ -895,8 +895,8 @@ pub(crate) async fn create(st: AppState, req: CreateReq, actor: Actor) -> Result
         .ok_or_else(|| ProvisionError::internal("branch vanished"))?;
     tracing::debug!(branch = %branch.id, title = %title, "stamped branch title/goal/description");
 
-    // Resolve the launching parent once: it names the tracking issue's
-    // `source_branch` *and* the session's tree parent (`parent_branch_id`).
+    // Resolve the launching parent once: it names an explicitly claimed work
+    // item's `source_branch` and the session's tree parent (`parent_branch_id`).
     // Only attribute to a parent in *this* repo, and never to the branch itself
     // — `resolve_key` searches globally, so a stray `$WEAVER_BRANCH` from a
     // checkout elsewhere must not misattribute the link to an unrelated branch.
@@ -944,23 +944,22 @@ pub(crate) async fn create(st: AppState, req: CreateReq, actor: Actor) -> Result
         automation_run_id: actor.automation_run_id().map(str::to_string),
     };
 
-    // Open this session's tracking issue before the launch prompt is written,
-    // so the agent can be told its issue number. When an agent delegated this
-    // work (`parent_branch`), the parent becomes the issue's `source_branch`.
-    tracing::debug!(branch = %branch.id, "opening tracking issue for session");
-    let tracking_issue = create_tracking_issue(
+    // Keep an explicit claimed/imported work item attached for compatibility.
+    // Ordinary and delegated launches use their default channel instead of
+    // manufacturing a second task object.
+    tracing::debug!(branch = %branch.id, "resolving explicit work item for session");
+    let tracking_issue = resolve_explicit_work_item(
         &st,
         &branch,
         parent_branch_name.as_deref(),
         &title,
-        &goal,
         &description,
         github_repo.as_deref(),
         github_issue,
         claimed_issue_id,
     )
     .await?;
-    tracing::debug!(branch = %branch.id, tracking_issue = ?tracking_issue, "tracking issue resolved");
+    tracing::debug!(branch = %branch.id, tracking_issue = ?tracking_issue, "explicit work item resolved");
 
     // Automation reserves its session id durably before provisioning. Reusing
     // it here makes retries converge on one runtime identity instead of
@@ -1333,7 +1332,9 @@ pub(crate) async fn create(st: AppState, req: CreateReq, actor: Actor) -> Result
 fn entrance_note(tracking_issue: Option<i64>) -> String {
     let mut note = "You are working in a Weaver session. Use `weaver summary` \
                     to recover context if needed and `weaver readme` for the \
-                    complete workflow guide."
+                    complete workflow guide. This session has a durable channel \
+                    for user/agent messages and status history; append a typed \
+                    `result` there when delegated work is complete."
         .to_string();
     if let Some(id) = tracking_issue {
         note.push_str(&format!(
@@ -1364,29 +1365,25 @@ fn build_launch_prompt(goal: &str, prelude: &str, entrance: &str, scratch: Optio
     parts.join("\n\n")
 }
 
-/// Open (or adopt) the tracking issue for a freshly-launched session: the one
-/// issue, claimed by the new branch, that represents its task. Whoever launched
-/// the session follows progress through it.
+/// Adopt the explicit work item attached to a launch, if any.
 ///
-/// `--claim <id>` and `--issue <n>` (GitHub) reuse the issue they already
-/// imply, so a launch never opens a duplicate; a plain launch opens a fresh one
-/// from the task. An empty worktree with no task at all is untracked (`None`).
-/// `source_branch` records provenance — the parent branch when an agent
-/// delegated this work, else the new branch itself.
+/// `--claim <id>` and a GitHub-triggered launch keep the legacy issue
+/// association because external work needs a stable mapping. Plain session
+/// goals and delegated tasks live in their session channel and return `None`.
+/// `source_branch` retains provenance for the explicit compatibility cases.
 #[allow(clippy::too_many_arguments)]
-async fn create_tracking_issue(
+async fn resolve_explicit_work_item(
     st: &AppState,
     branch: &Branch,
     parent_branch: Option<&str>,
     title: &str,
-    goal: &str,
     description: &str,
     github_repo: Option<&str>,
     github_issue: Option<i64>,
     claim_issue: Option<i64>,
 ) -> Result<Option<i64>> {
     let source = parent_branch.unwrap_or(&branch.branch).to_string();
-    tracing::debug!(branch = %branch.id, source = %source, "resolving tracking issue for session");
+    tracing::debug!(branch = %branch.id, source = %source, "resolving explicit work item for session");
 
     // Claiming an existing weaver issue: that issue *is* the tracker, so the
     // claim must actually land — otherwise we'd hand back a tracking id for an
@@ -1432,38 +1429,7 @@ async fn create_tracking_issue(
         return Ok(Some(issue.id));
     }
 
-    // No task to track (e.g. an empty `--agent shell` worktree).
-    if goal.trim().is_empty() {
-        return Ok(None);
-    }
-
-    let body = if description.trim().is_empty() {
-        goal
-    } else {
-        description
-    };
-    let issue = weaver_core::issue::add(
-        &st.db,
-        &weaver_core::issue::NewIssue {
-            repo_root: branch.repo_root.clone(),
-            source_branch: Some(source),
-            claimed_branch: Some(branch.branch.clone()),
-            title: title.to_string(),
-            body: body.to_string(),
-            ..Default::default()
-        },
-    )
-    .await?;
-    events::record(
-        &st.db,
-        &st.bus,
-        &branch.id,
-        "issue_added",
-        json!({ "id": issue.id, "title": issue.title }),
-    )
-    .await
-    .ok();
-    Ok(Some(issue.id))
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -1504,7 +1470,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_tracking_issue_sources_parent_and_reuses_claims() {
+    async fn explicit_work_items_keep_provenance_without_plain_launch_issues() {
         let db = crate::db::connect_in_memory().await.unwrap();
         let st = AppState {
             db: db.clone(),
@@ -1519,43 +1485,50 @@ mod tests {
             .await
             .unwrap();
 
-        // A delegated launch names the parent as the issue's source.
-        let id = create_tracking_issue(
+        // Ordinary delegated work lives in the child's channel, not a shadow
+        // issue whose lifecycle can drift from the session.
+        let plain = resolve_explicit_work_item(
             &st,
             &child,
             Some("weaver/parent"),
             "do it",
-            "do it in detail",
             "",
             None,
             None,
             None,
         )
         .await
-        .unwrap()
-        .expect("a fresh tracking issue");
-        let issue = weaver_core::issue::get(&db, id).await.unwrap().unwrap();
-        assert_eq!(issue.claimed_branch.as_deref(), Some("weaver/child"));
-        assert_eq!(
-            issue.source_branch.as_deref(),
-            Some("weaver/parent"),
-            "a delegated launch is sourced from the parent"
-        );
+        .unwrap();
+        assert!(plain.is_none());
 
-        // A non-delegated launch is self-sourced (matches a hand-authored issue).
-        let id2 =
-            create_tracking_issue(&st, &child, None, "solo", "solo task", "", None, None, None)
+        // A plain top-level goal uses the same no-issue rule.
+        let plain_top_level =
+            resolve_explicit_work_item(&st, &child, None, "solo", "", None, None, None)
                 .await
-                .unwrap()
                 .unwrap();
-        let issue2 = weaver_core::issue::get(&db, id2).await.unwrap().unwrap();
-        assert_eq!(issue2.source_branch.as_deref(), Some("weaver/child"));
+        assert!(plain_top_level.is_none());
 
-        // No task at all → nothing to track.
-        let none = create_tracking_issue(&st, &child, None, "", "", "", None, None, None)
+        // Imported GitHub work remains an explicit compatibility work item and
+        // retains delegation provenance.
+        let imported = resolve_explicit_work_item(
+            &st,
+            &child,
+            Some("weaver/parent"),
+            "external task",
+            "from GitHub",
+            Some("octo/repo"),
+            Some(19),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let imported = weaver_core::issue::get(&db, imported)
             .await
+            .unwrap()
             .unwrap();
-        assert!(none.is_none(), "an empty task opens no tracking issue");
+        assert_eq!(imported.source_branch.as_deref(), Some("weaver/parent"));
+        assert_eq!(imported.github_issue, Some(19));
 
         // Claiming an existing issue reuses it rather than opening a duplicate.
         let existing = weaver_core::issue::add(
@@ -1568,19 +1541,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let claimed = create_tracking_issue(
-            &st,
-            &child,
-            None,
-            "x",
-            "x",
-            "",
-            None,
-            None,
-            Some(existing.id),
-        )
-        .await
-        .unwrap();
+        let claimed =
+            resolve_explicit_work_item(&st, &child, None, "x", "", None, None, Some(existing.id))
+                .await
+                .unwrap();
         assert_eq!(claimed, Some(existing.id), "a claim reuses the issue id");
         let reclaimed = weaver_core::issue::get(&db, existing.id)
             .await

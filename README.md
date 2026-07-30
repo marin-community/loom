@@ -1,14 +1,14 @@
 # weaver
 
-A lightweight per-branch task tracker and orchestrator for coding agents.
+A lightweight session orchestrator and communication surface for coding agents.
 
 weaver ships two binaries:
 
 - **`weaver`** — the **agent-facing CLI**. It is a thin HTTP client of loom's
   REST API (via the `weaver-api` crate) — every command needs a reachable
   `loom server run`. The agent inside a worktree uses it to read and update
-  the branch's **goal**, **description**, and the repo's
-  **issues** (each claimed by a branch or sitting in the shared backlog).
+  the branch's **goal** and **description**, the session's durable
+  **channel**, and intentional repo **backlog items**.
   Without a running loom, `weaver` fails fast with a plain-text error.
 - **`loom`** — the **orchestrator**. It runs the REST + SSE server, hosts a
   Vue dashboard, creates worktrees, launches agents under managed runtime
@@ -134,7 +134,7 @@ A session opens on Conversation (or Agent for a terminal-backed runtime), with
 one Review surface for Artifacts and Changes. Details owns launch metadata,
 associations, Scratch, lifecycle actions, profile-first handoff, and the
 advanced editor escape hatch. Review comments remain private drafts until one
-Submit review action delivers coherent feedback. The Issues pane supports
+Submit review action delivers coherent feedback. The Backlog pane supports
 stable multi-selection and atomic bulk triage. Destructive actions use
 focus-managed in-app confirmation with explicit scope and retryable inline
 errors; the SPA never delegates that work to browser prompts.
@@ -151,7 +151,14 @@ resolved against loom's externally-visible address (the `auth.base_url` setting,
 else the address you reached it on). With no key it is the session you are
 running inside, which is how an agent links a PR back to the work behind it.
 
-Issues belong to a repository. `source_branch` records provenance;
+Channels are the default coordination surface. Every session is created with a
+same-id channel whose opening goal records its charter. Messages are append-only,
+read markers are per participant, and runtime delivery is recorded separately.
+The dashboard's Channels pane is a dense split mailbox; `weaver channel
+read|send|wait|ack` exposes the same REST model to agents.
+
+Issues remain intentional repository backlog or external mappings.
+`source_branch` records provenance;
 `claimed_branch` records the branch currently working the issue. The agent CLI
 defaults to this branch's claims plus the unclaimed backlog, while the Loom board
 shows the repository. Batch commands use the same atomic API as the Issues pane:
@@ -160,25 +167,20 @@ shows the repository. Batch commands use the same atomic API as the Issues pane:
 `loom issue untag --key area 7 9`, and `loom issue delete 7 9`.
 If any ID or precondition is invalid, none of the requested issues changes.
 
-Every launch opens a **tracking issue** claimed by the new branch — the task as
-a weaver issue — and the launch prints its number. That number is the handle
-for following the session: `weaver issue show <n>` reports the issue plus the
-live `status` of the branch working it, and `weaver issue wait <n>` blocks
-until the issue closes or that branch raises its attention. The launched agent
-is told to keep its status current and close the issue when the work is done.
-When an agent already inside a weaver session runs `loom session launch`, the
-tracking issue is attributed to it (`source_branch`), so its sub-trees show up
-under "Delegated by this branch" in `weaver issue ls` — agents can fan work out
-into parallel sub-sessions and poll or block on them the same way a human does.
+An ordinary launch does not manufacture an issue. `loom session launch` prints
+the new session/channel id; a parent follows it with `weaver channel read
+--channel <id>` or blocks with `weaver channel wait --channel <id>`. Explicit
+`--claim` and GitHub-triggered launches retain a compatibility issue association
+because that work item already exists outside the session.
 
 Inside a worktree, the compact agent loop is:
 
 ```sh
 weaver summary
 weaver status ok "implementing the API"
-weaver issue add "Backfill old rows"
+weaver channel read
 weaver artifact write design design.md
-weaver issue close <id>
+weaver channel send "ready for review"
 ```
 
 `weaver readme` prints the complete in-workspace workflow. Each command requires

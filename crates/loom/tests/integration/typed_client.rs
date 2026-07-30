@@ -43,12 +43,25 @@ async fn typed_create_list_get_and_mark() {
         .unwrap();
     assert_eq!(created.branch.name, "typed-client-round-trip");
     assert_eq!(created.branch.title, "typed client round-trip");
-    // The create path is the one that fills the tracking-issue handle.
     assert!(
-        created.tracking_issue.is_some(),
-        "create returns a tracking issue id"
+        created.tracking_issue.is_none(),
+        "ordinary sessions coordinate through channels, not automatic issues"
     );
     let id = created.id.clone();
+
+    // Session creation atomically creates its same-id default channel and
+    // immutable opening goal message.
+    let channels = client.list_channels(false).await.unwrap();
+    let channel = channels
+        .iter()
+        .find(|channel| channel.id == id)
+        .expect("created session has a default channel");
+    assert_eq!(channel.session_id.as_deref(), Some(id.as_str()));
+    assert_eq!(channel.topic, "typed client round-trip");
+    let opening = client.channel_messages(&id, 0).await.unwrap();
+    assert_eq!(opening.len(), 1);
+    assert_eq!(opening[0].kind, "goal");
+    assert_eq!(opening[0].body, "typed client round-trip");
 
     // Typed list: the new session is the only one.
     let sessions = client.list_sessions().await.unwrap();
@@ -87,6 +100,18 @@ async fn typed_create_list_get_and_mark() {
         tag_value(&marked.branch, "attention").is_none(),
         "the mark never touches the agent's own attention"
     );
+
+    // Agent status is also a typed channel item while the compatibility tag
+    // continues to drive the existing dashboard and mirrors.
+    client
+        .set_branch_status(&created.branch.id, "attention", "review the boundary")
+        .await
+        .unwrap();
+    let status = client.channel_messages(&id, 1).await.unwrap();
+    assert_eq!(status.len(), 1);
+    assert_eq!(status[0].kind, "status");
+    assert_eq!(status[0].urgency, "attention");
+    assert_eq!(status[0].body, "review the boundary");
 
     client.delete(&format!("/api/sessions/{id}")).await.unwrap();
 }
