@@ -2718,8 +2718,10 @@ pub(super) async fn preview_session(
     // blocks rendered as plain text (CLI convenience). `lines` is the block count,
     // defaulting to a reasonable tail when unset.
     if session.protocol == "acp" {
-        let blocks = crate::chat::list(&st.db, &session.id).await?;
         let n = if q.lines == 0 { 40 } else { q.lines };
+        // Only the tail is rendered, so only the tail is read — a session that has
+        // been running for days has a journal far larger than any preview.
+        let (blocks, _) = crate::chat::list_page(&st.db, &session.id, None, n).await?;
         let screen = crate::chat::preview_text(&blocks, n);
         return Ok(Json(json!({ "screen": screen })));
     }

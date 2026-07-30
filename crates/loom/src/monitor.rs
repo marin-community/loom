@@ -165,8 +165,9 @@ pub async fn run(state: AppState) {
                 continue;
             }
 
-            // An ACP (relay) session has no vt100 screen to hash — its activity is
-            // the turn boundary, bumped by `record_acp_lifecycle`. Skip the capture.
+            // An ACP (relay) session has no vt100 screen to hash — the acp task
+            // stamps its own activity from the adapter's frame stream. Skip the
+            // capture.
             if session.protocol == "acp" {
                 continue;
             }

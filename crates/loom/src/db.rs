@@ -82,8 +82,13 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
     ),
     (
         15,
+        "chat-block-ref-id",
+        include_str!("../migrations/0015_chat_block_ref_id.sql"),
+    ),
+    (
+        16,
         "channels",
-        include_str!("../migrations/0015_channels.sql"),
+        include_str!("../migrations/0016_channels.sql"),
     ),
 ];
 

@@ -9,7 +9,11 @@ use tokio::sync::{Mutex, MutexGuard};
 pub type Db = SqlitePool;
 
 const MIGRATION_POOL_CONNECTIONS: u32 = 1;
-const SHARED_POOL_CONNECTIONS: u32 = 5;
+/// WAL readers do not block each other, so pool size sets how many requests can
+/// be in the database at once. Sized for the dashboard's fan-out — several list
+/// views, each session's detail panes, and the CLI — so that one slow read cannot
+/// queue every unrelated request behind it.
+const SHARED_POOL_CONNECTIONS: u32 = 32;
 /// Ordinary WAL writer contention should queue rather than leak SQLITE_BUSY
 /// into user-facing reads or durable ACP journal writes. This is intentionally
 /// longer than a normal transaction; exhausting it indicates a genuinely
