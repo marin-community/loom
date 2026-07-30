@@ -832,7 +832,7 @@ fn weaver_bin_path() -> String {
 /// loud `attention` tag, answerable from the dashboard). An explicit request
 /// `mode` / `--mode` still overrides — e.g. `bypassPermissions` for a fully
 /// unattended run. For a codex session Loom combines codex-acp's workspace-write
-/// `agent` mode with Codex's native automatic approval reviewer; see
+/// `agent` mode with Loom-owned one-shot approval; see
 /// [`codex_acp_mode`] and [`configure_codex_acp`].
 pub const DEFAULT_ACP_MODE: &str = weaver_core::config::DEFAULT_AGENT_MODE;
 
@@ -935,11 +935,12 @@ pub struct AcpLaunchSpec<'a> {
 /// are redundant under ACP), and maps model/primer/mode into `_meta.claudeCode.
 /// options`. For the builtin codex it resolves the `codex-acp` adapter and maps
 /// the same inputs onto its env contract (`CODEX_CONFIG`, `INITIAL_AGENT_MODE`,
-/// `DEFAULT_AUTH_REQUEST`). Codex's `agent` mode also enables its native
-/// automatic approval reviewer through `CODEX_CONFIG`. Codex is hookless, so
-/// the primer rides the opening prompt exactly as it does on the terminal path.
-/// For a custom acp agent it runs the agent's `launch` command verbatim (its
-/// setup stage first) as the adapter, with no `_meta`.
+/// `DEFAULT_AUTH_REQUEST`). Codex's `agent` mode routes approval requests to
+/// Loom, which answers one-shot grants by policy rather than relying on Codex's
+/// model reviewer. Codex is hookless, so the primer rides the opening prompt
+/// exactly as it does on the terminal path. For a custom acp agent it runs the
+/// agent's `launch` command verbatim (its setup stage first) as the adapter, with
+/// no `_meta`.
 pub async fn build_acp_launch(
     db: &Db,
     spec: &AcpLaunchSpec<'_>,
@@ -1152,9 +1153,10 @@ async fn codex_acp_cmd(db: &Db) -> String {
 /// operator-supplied adapter configuration.
 ///
 /// codex-acp's `agent` mode supplies the workspace-write sandbox and on-request
-/// approval policy. Loom routes those approval requests to Codex's native
-/// automatic reviewer by default. An explicit reviewer in `CODEX_CONFIG` wins
-/// over that default.
+/// approval policy. Loom must receive those requests in order to apply its
+/// deterministic one-shot approval policy, so the default reviewer is `user`
+/// (the ACP client) rather than Codex's model reviewer. An explicit reviewer in
+/// `CODEX_CONFIG` wins over that default.
 fn configure_codex_acp(
     env: &mut Vec<(String, String)>,
     model: &str,
@@ -1175,7 +1177,7 @@ fn configure_codex_acp(
     if codex_mode.trim() == CODEX_AGENT_MODE {
         config
             .entry("approvals_reviewer".to_string())
-            .or_insert_with(|| json!("auto_review"));
+            .or_insert_with(|| json!("user"));
     }
     let features = config
         .entry("features".to_string())
@@ -1211,26 +1213,27 @@ fn codex_acp_config(model: &str, effort: &str) -> Map<String, Value> {
 fn codex_acp_mode(mode: &str) -> String {
     match mode.trim() {
         "bypassPermissions" => "agent-full-access".to_string(),
-        // codex-acp has no distinct auto-review mode. `agent` supplies the
-        // workspace sandbox; configure_codex_acp supplies the reviewer.
+        // codex-acp has no distinct auto-approve mode. `agent` supplies the
+        // workspace sandbox; Loom answers its one-shot approval requests.
         "acceptEdits" | "default" | "auto" | "" => CODEX_AGENT_MODE.to_string(),
         "plan" => "read-only".to_string(),
         other => other.to_string(),
     }
 }
 
-/// Whether an ACP mode id is a "full access" posture — the user asked not to be
-/// prompted, so loom may auto-answer a one-shot permission request from a turn
-/// that started in this mode.
-/// Each provider vocabulary spells it differently: claude's `bypassPermissions`
-/// and codex's `agent-full-access` (the id [`codex_acp_mode`] maps the former to,
-/// and the id a codex session reports as its `current_mode`). This is the single
-/// source of truth for the turn-scoped auto-approve gate in [`crate::acp`]; adding
-/// a mode id here is how "full access" starts silencing one-shot prompts for a
-/// new provider. No other posture (`auto`, `acceptEdits`, `default`, `plan`)
-/// auto-approves.
-pub fn is_full_access_mode(mode: &str) -> bool {
-    matches!(mode.trim(), "bypassPermissions" | "agent-full-access")
+/// Whether an ACP mode asks Loom to auto-answer one-shot permission requests.
+///
+/// Claude's `bypassPermissions` and Codex's `agent-full-access` are explicit
+/// no-prompt postures. Codex's ordinary `agent` mode is also included because
+/// Loom configures its reviewer as the ACP client and owns automatic approval
+/// instead of delegating it to Codex's non-deterministic model reviewer. This is
+/// the single source of truth for the turn-scoped gate in [`crate::acp`].
+/// Restricted profiles are denied before this gate is consulted.
+pub fn auto_approves_permissions(mode: &str) -> bool {
+    matches!(
+        mode.trim(),
+        "bypassPermissions" | "agent-full-access" | CODEX_AGENT_MODE
+    )
 }
 
 /// The `_meta.claudeCode.options` object for the claude adapter — only the fields
@@ -2496,7 +2499,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_acp_agent_mode_enables_native_reviewer() {
+    fn codex_acp_agent_mode_routes_approvals_to_loom() {
         let mut env = vec![(
             "CODEX_CONFIG".to_string(),
             r#"{"model":"operator","features":{"shell_snapshot":true,"apps":true}}"#.to_string(),
@@ -2511,7 +2514,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config["model"], "operator");
-        assert_eq!(config["approvals_reviewer"], "auto_review");
+        assert_eq!(config["approvals_reviewer"], "user");
         assert_eq!(config["features"]["shell_snapshot"], true);
         assert_eq!(config["features"]["apps"], false);
     }
@@ -2520,22 +2523,22 @@ mod tests {
     fn codex_acp_configuration_preserves_explicit_reviewer() {
         let mut explicit_reviewer = vec![(
             "CODEX_CONFIG".to_string(),
-            r#"{"approvals_reviewer":"user"}"#.to_string(),
+            r#"{"approvals_reviewer":"auto_review"}"#.to_string(),
         )];
         configure_codex_acp(&mut explicit_reviewer, "", "", "agent").unwrap();
         let config: Value = serde_json::from_str(&explicit_reviewer[0].1).unwrap();
-        assert_eq!(config["approvals_reviewer"], "user");
+        assert_eq!(config["approvals_reviewer"], "auto_review");
     }
 
     #[test]
-    fn codex_acp_non_agent_modes_do_not_enable_auto_review() {
+    fn codex_acp_only_agent_mode_sets_a_default_reviewer() {
         for mode in ["read-only", "agent-full-access"] {
             let mut env = Vec::new();
             configure_codex_acp(&mut env, "", "", mode).unwrap();
             let config: Value = serde_json::from_str(&env[0].1).unwrap();
             assert!(
                 config.get("approvals_reviewer").is_none(),
-                "{mode} must not enable auto-review"
+                "{mode} must not set a default reviewer"
             );
         }
     }
@@ -2544,7 +2547,7 @@ mod tests {
     fn sessions_boot_in_auto_by_default() {
         // Every ACP session boots in the provider-neutral `auto` posture unless
         // overridden. Codex uses its workspace-write `agent` sandbox mode while
-        // configure_codex_acp enables the native automatic reviewer.
+        // Loom owns its one-shot approval decisions.
         assert_eq!(DEFAULT_ACP_MODE, "auto");
         assert_eq!(codex_acp_mode(DEFAULT_ACP_MODE), "agent");
     }
@@ -2554,7 +2557,8 @@ mod tests {
         assert_eq!(codex_acp_mode("bypassPermissions"), "agent-full-access");
         assert_eq!(codex_acp_mode("acceptEdits"), "agent");
         assert_eq!(codex_acp_mode("default"), "agent");
-        // Auto-review is configured separately; the sandbox remains `agent`.
+        // Loom-owned auto-approval is configured separately; the sandbox remains
+        // `agent`.
         assert_eq!(codex_acp_mode("auto"), "agent");
         assert_eq!(codex_acp_mode(""), "agent");
         assert_eq!(codex_acp_mode("plan"), "read-only");
@@ -2564,27 +2568,24 @@ mod tests {
     }
 
     #[test]
-    fn full_access_mode_covers_both_provider_spellings() {
-        // The two "never prompt me" postures — claude's and the id a codex
-        // full-access session reports as its current mode. Both must gate the
-        // auto-approve path, or "full access" silently keeps prompting.
-        assert!(is_full_access_mode("bypassPermissions"));
-        assert!(is_full_access_mode("agent-full-access"));
-        assert!(is_full_access_mode("  agent-full-access  "));
+    fn auto_approve_modes_cover_full_access_and_codex_agent() {
+        // The two explicit "never prompt me" postures and Codex's Loom-reviewed
+        // Agent mode all take the deterministic one-shot approval path.
+        assert!(auto_approves_permissions("bypassPermissions"));
+        assert!(auto_approves_permissions("agent-full-access"));
+        assert!(auto_approves_permissions("  agent-full-access  "));
+        assert!(auto_approves_permissions("agent"));
         // codex full access round-trips through the launch mapping into the id
         // the gate recognizes.
-        assert!(is_full_access_mode(&codex_acp_mode("bypassPermissions")));
+        assert!(auto_approves_permissions(&codex_acp_mode(
+            "bypassPermissions"
+        )));
         // Everything else must still prompt.
-        for mode in [
-            "auto",
-            "acceptEdits",
-            "default",
-            "plan",
-            "agent",
-            "read-only",
-            "",
-        ] {
-            assert!(!is_full_access_mode(mode), "{mode} must not auto-approve");
+        for mode in ["auto", "acceptEdits", "default", "plan", "read-only", ""] {
+            assert!(
+                !auto_approves_permissions(mode),
+                "{mode} must not auto-approve"
+            );
         }
     }
 

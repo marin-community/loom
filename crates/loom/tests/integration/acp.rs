@@ -799,55 +799,64 @@ async fn tool_call_live_then_journaled() {
     );
 }
 
-/// 3a. Permission auto-answer: under `bypassPermissions` the request is answered
-///     by policy and the turn completes without a REST call.
+/// 3a. Permission auto-answer: under an explicit full-access mode or Codex's
+///     Loom-reviewed `agent` mode, the request is answered by policy and the
+///     turn completes without a REST call.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn permission_auto_answered_under_bypass() {
+async fn permission_auto_answered_under_no_prompt_modes() {
     let ts = TestServer::start().await;
-    start_new(&ts, "acp-auto", Some("bypassPermissions"), None).await;
-    let mut rx = ts.state.acp.get("acp-auto").unwrap().subscribe();
+    for (id, mode) in [
+        ("acp-auto-full", "bypassPermissions"),
+        ("acp-auto-agent", "agent"),
+    ] {
+        start_new(&ts, id, Some(mode), None).await;
+        let mut rx = ts.state.acp.get(id).unwrap().subscribe();
 
-    ts.client
-        .post(
-            "/api/sessions/acp-auto/prompt",
-            json!({ "text": "permission:secret|say:done" }),
-        )
-        .await
-        .unwrap();
+        ts.client
+            .post(
+                &format!("/api/sessions/{id}/prompt"),
+                json!({ "text": "permission:secret|say:done" }),
+            )
+            .await
+            .unwrap();
 
-    let events = drain_events(&mut rx, Duration::from_secs(10), |e| {
-        e.event == "turn" && e.data["state"] == "ended"
-    })
-    .await;
-    assert!(
-        events.iter().any(|e| e.event == "turn"
-            && e.data["state"] == "ended"
-            && e.data["stop_reason"] == "end_turn"),
-        "the turn completed after the auto-answer"
-    );
+        let events = drain_events(&mut rx, Duration::from_secs(10), |e| {
+            e.event == "turn" && e.data["state"] == "ended"
+        })
+        .await;
+        assert!(
+            events.iter().any(|e| e.event == "turn"
+                && e.data["state"] == "ended"
+                && e.data["stop_reason"] == "end_turn"),
+            "{mode} turn completed after the auto-answer"
+        );
 
-    let chat = ts.client.get("/api/sessions/acp-auto/chat").await.unwrap();
-    let blocks = chat["blocks"].as_array().unwrap();
-    let perm = blocks
-        .iter()
-        .find(|b| b["kind"] == "permission_request")
-        .expect("a permission_request block");
-    assert_eq!(
-        perm["payload"]["outcome"]["option_id"], "allow-once",
-        "first allow chosen"
-    );
-    assert_eq!(
-        perm["payload"]["outcome"]["by"], "policy",
-        "answered by policy"
-    );
-    // The turn still reached `say:done`.
-    assert!(
-        blocks
+        let chat = ts
+            .client
+            .get(&format!("/api/sessions/{id}/chat"))
+            .await
+            .unwrap();
+        let blocks = chat["blocks"].as_array().unwrap();
+        let perm = blocks
             .iter()
-            .any(|b| b["kind"] == "agent_message" && b["payload"]["text"] == "done"),
-        "the turn continued past the permission"
-    );
+            .find(|b| b["kind"] == "permission_request")
+            .expect("a permission_request block");
+        assert_eq!(
+            perm["payload"]["outcome"]["option_id"], "allow-once",
+            "{mode} selected the one-shot grant"
+        );
+        assert_eq!(
+            perm["payload"]["outcome"]["by"], "policy",
+            "{mode} was answered by policy"
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b["kind"] == "agent_message" && b["payload"]["text"] == "done"),
+            "{mode} continued past the permission"
+        );
+    }
 }
 
 /// A restricted session never leaves an unmatched tool approval open for a
@@ -3345,7 +3354,7 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
     }
 
     // The provider-neutral launch default and codex-acp's reported/restored mode
-    // resolve to the same Agent posture with automatic approval review.
+    // resolve to the same Agent posture with Loom-owned automatic approval.
     for mode in ["auto", "agent"] {
         let agent_launch = loom::agent::build_acp_launch(
             &ts.state.db,
@@ -3360,14 +3369,14 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
             "{mode}"
         );
         let cfg: Value = serde_json::from_str(&env_of(&agent_launch, "CODEX_CONFIG")[0]).unwrap();
-        assert_eq!(cfg["approvals_reviewer"], "auto_review", "{mode}");
+        assert_eq!(cfg["approvals_reviewer"], "user", "{mode}");
     }
 
     // Operator config is preserved, except that account-level apps remain
     // disabled; a goalless launch seeds the primer.
     let operator = [(
         "CODEX_CONFIG".to_string(),
-        r#"{"model":"mine","approvals_reviewer":"user"}"#.to_string(),
+        r#"{"model":"mine","approvals_reviewer":"auto_review"}"#.to_string(),
     )];
     let launch = loom::agent::build_acp_launch(
         &ts.state.db,
@@ -3378,7 +3387,7 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
     .unwrap();
     let cfg: Value = serde_json::from_str(&env_of(&launch, "CODEX_CONFIG")[0]).unwrap();
     assert_eq!(cfg["model"], "mine");
-    assert_eq!(cfg["approvals_reviewer"], "user");
+    assert_eq!(cfg["approvals_reviewer"], "auto_review");
     assert_eq!(cfg["features"]["apps"], false);
     assert_eq!(launch.goal.as_deref(), Some("orient first"));
 

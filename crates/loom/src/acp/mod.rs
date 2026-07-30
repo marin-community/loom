@@ -3161,11 +3161,11 @@ impl Task {
             }
             return Ok(());
         }
-        let bypass = self
+        let auto_approve = self
             .effective_mode
             .as_deref()
-            .is_some_and(crate::agent::is_full_access_mode);
-        if bypass {
+            .is_some_and(crate::agent::auto_approves_permissions);
+        if auto_approve {
             if let Some(opt) = auto_choice(&params.options) {
                 let _ = self.answer_permission(&req_key, &opt, "policy").await;
             }
