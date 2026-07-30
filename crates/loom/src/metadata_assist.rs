@@ -918,16 +918,48 @@ pub async fn ensure_cue(
     {
         return Ok(current);
     }
+    let generating = view(
+        "generating",
+        current.source_cursor,
+        None,
+        None,
+        current.evidence,
+    );
     let claim_key = cue_claim_key(&session.id);
-    let Some(_claim) = PromptClaim::acquire(claim_key) else {
-        return Ok(view(
-            "generating",
-            current.source_cursor,
-            None,
-            None,
-            current.evidence,
-        ));
+    let Some(claim) = PromptClaim::acquire(claim_key) else {
+        return Ok(generating);
     };
+    // Answer before the work starts. Generation waits on a model call — up to
+    // `PROMPT_TIMEOUT`, longer when the runtime has to be spawned first — and a
+    // request parked that long costs far more than its own latency: a browser
+    // allows ~6 connections per origin *across all its tabs*, and loom already
+    // spends most of them on event streams. One blocking cue request is enough
+    // to leave the dashboard with nothing to fetch on, which reads as the whole
+    // UI hanging on whichever session was opened. `current_cue` reports
+    // `generating` for as long as the claim is held, which is what clients poll.
+    let db = db.clone();
+    let session = session.clone();
+    let branch = branch.clone();
+    tokio::spawn(async move {
+        let _claim = claim;
+        if let Err(error) = generate_cue(&db, &session, &branch, force).await {
+            tracing::warn!(session = %session.id, %error, "resumption cue generation failed");
+        }
+    });
+    Ok(generating)
+}
+
+/// Generate a cue and store it, reporting the view it settled on.
+///
+/// Runs detached from the request that asked for it, under a [`PromptClaim`]
+/// held by the caller for the whole call — so a second request observes
+/// `generating` rather than starting a duplicate model call.
+async fn generate_cue(
+    db: &Db,
+    session: &Session,
+    branch: &Branch,
+    force: bool,
+) -> Result<ResumptionCueView> {
     let _permit = PROMPT_SLOTS.acquire().await?;
     if !config::get_bool(db, CUES_ENABLED_KEY, true).await {
         return Ok(view("disabled", None, None, None, Vec::new()));
