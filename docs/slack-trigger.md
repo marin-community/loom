@@ -201,5 +201,5 @@ Two things are easy to miss after any of the above:
   session fails to read history (the reply notes it couldn't read the
   conversation and to invite the bot).
 
-See [`crates/loom/src/slack.rs`](../crates/loom/src/slack.rs) for the
+See [`crates/loom-ops/src/slack.rs`](../crates/loom-ops/src/slack.rs) for the
 implementation this document describes.

@@ -139,7 +139,7 @@ curl -X POST {base}/api/auth/users -H 'Authorization: Bearer $LOOM_TOKEN' \
 > authorization step ([`github_trigger::authorize`]), evaluated against the
 > GitHub API; it is not implemented yet.
 
-[`github_trigger::authorize`]: ../crates/loom/src/github_trigger.rs
+[`github_trigger::authorize`]: ../crates/loom-ops/src/github_trigger.rs
 
 ## Configure the webhook
 
