@@ -120,6 +120,8 @@ const CODEX_MODEL_CHOICES: &[(&str, &str)] = &[
     ("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
 ];
 
+const CODEX_AGENT_MODE: &str = "agent";
+
 const EFFORT_CHOICES: &[(&str, &str)] = &[
     ("low", "Low"),
     ("medium", "Medium"),
@@ -1170,7 +1172,7 @@ fn configure_codex_acp(
     let config = config
         .as_object_mut()
         .ok_or_else(|| anyhow!("CODEX_CONFIG must be a JSON object"))?;
-    if codex_mode.trim() == "agent" {
+    if codex_mode.trim() == CODEX_AGENT_MODE {
         config
             .entry("approvals_reviewer".to_string())
             .or_insert_with(|| json!("auto_review"));
@@ -1211,7 +1213,7 @@ fn codex_acp_mode(mode: &str) -> String {
         "bypassPermissions" => "agent-full-access".to_string(),
         // codex-acp has no distinct auto-review mode. `agent` supplies the
         // workspace sandbox; configure_codex_acp supplies the reviewer.
-        "acceptEdits" | "default" | "auto" | "" => "agent".to_string(),
+        "acceptEdits" | "default" | "auto" | "" => CODEX_AGENT_MODE.to_string(),
         "plan" => "read-only".to_string(),
         other => other.to_string(),
     }
