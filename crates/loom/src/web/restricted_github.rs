@@ -278,9 +278,11 @@ mod tests {
             .unwrap();
         let app = Arc::new(crate::github_app::tests::configured_test_app(db.clone()).await);
         let state = super::AppState {
-            db,
-            bus: crate::events::EventBus::new(),
-            addr: "127.0.0.1:0".to_string(),
+            ctx: crate::Ctx {
+                db,
+                bus: crate::events::EventBus::new(),
+                addr: "127.0.0.1:0".to_string(),
+            },
             ide: Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
             trigger: crate::github_trigger::GithubTrigger::with_app(app),
             acp: crate::acp::AcpRegistry::new(),

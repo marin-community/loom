@@ -416,7 +416,7 @@ pub(crate) async fn create_warm_session(
         )
         .await
         {
-            Ok(launch) => crate::acp::start(st, &session.id, launch).await,
+            Ok(launch) => crate::acp::start(&st.acp_ctx(), &session.id, launch).await,
             Err(error) => Err(error),
         }
     } else {
@@ -706,7 +706,7 @@ pub(crate) async fn adopt_terminal_into_acp(
     )
     .await
     .map_err(|e| anyhow!(e.to_string()))?;
-    crate::acp::start(st, &session.id, launch)
+    crate::acp::start(&st.acp_ctx(), &session.id, launch)
         .await
         .map_err(|e| anyhow!(e.to_string()))?;
     session_mod::set_status(&st.db, &session.id, "running").await?;
@@ -749,7 +749,7 @@ pub(crate) async fn adopt_acp(
     if backend::has_session(&session.term_session).await {
         // The relay outlived a crashed task — re-attach from the persisted cursor.
         tracing::info!(session = %session.id, "acp relay alive; re-attaching");
-        crate::acp::attach(st, &session.id)
+        crate::acp::attach(&st.acp_ctx(), &session.id)
             .await
             .map_err(|e| anyhow!(e.to_string()))?;
     } else {
@@ -802,7 +802,7 @@ pub(crate) async fn adopt_acp(
         )
         .await
         .map_err(|e| anyhow!(e.to_string()))?;
-        crate::acp::start(st, &session.id, launch)
+        crate::acp::start(&st.acp_ctx(), &session.id, launch)
             .await
             .map_err(|e| anyhow!(e.to_string()))?;
     }

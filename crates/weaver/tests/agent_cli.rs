@@ -57,9 +57,11 @@ impl Env {
 
         let trigger = loom::github_trigger::GithubTrigger::production(pool.clone());
         let state = AppState {
-            db: pool.clone(),
-            bus: EventBus::new(),
-            addr: addr.to_string(),
+            ctx: loom::Ctx {
+                db: pool.clone(),
+                bus: EventBus::new(),
+                addr: addr.to_string(),
+            },
             ide: std::sync::Arc::new(loom::ide::IdeManager::new(loom::ide::ide_home())),
             trigger,
             acp: loom::acp::AcpRegistry::new(),

@@ -627,9 +627,11 @@ mod tests {
 
     fn test_state(db: Db) -> AppState {
         AppState {
-            db: db.clone(),
-            bus: crate::events::EventBus::new(),
-            addr: "127.0.0.1:0".to_string(),
+            ctx: crate::Ctx {
+                db: db.clone(),
+                bus: crate::events::EventBus::new(),
+                addr: "127.0.0.1:0".to_string(),
+            },
             ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
             trigger: crate::github_trigger::GithubTrigger::production(db),
             acp: crate::acp::AcpRegistry::new(),

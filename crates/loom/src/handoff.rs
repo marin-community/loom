@@ -631,7 +631,7 @@ pub(crate) async fn handoff_session(
                 .await
                 .ok();
             if source_task_quiesced {
-                crate::acp::attach(st, &session.id).await.ok();
+                crate::acp::attach(&st.acp_ctx(), &session.id).await.ok();
             }
             return Err(HandoffError::internal(error.to_string()));
         }
@@ -665,7 +665,7 @@ pub(crate) async fn handoff_session(
                 .as_ref()
                 .is_some_and(|current| !session_mod::is_terminal(&current.status))
             {
-                crate::acp::attach(st, &session.id).await.map_err(|error| {
+                crate::acp::attach(&st.acp_ctx(), &session.id).await.map_err(|error| {
                     HandoffError::internal(format!(
                         "session changed before provider replacement, and its source task could not be restored: {error}",
                     ))
@@ -690,7 +690,8 @@ pub(crate) async fn handoff_session(
             .await?
             {
                 Some(restored_generation) => {
-                    if let Err(attach_error) = crate::acp::attach(st, &session.id).await {
+                    if let Err(attach_error) = crate::acp::attach(&st.acp_ctx(), &session.id).await
+                    {
                         session_mod::fail_handoff_claim(&st.db, &session.id, restored_generation)
                             .await
                             .ok();
@@ -746,7 +747,9 @@ pub(crate) async fn handoff_session(
         "through_turn": context.through.map(|(turn, _)| turn),
         "through_seq": context.through.map(|(_, seq)| seq),
     });
-    if let Err(error) = crate::acp::start_handoff(st, &session.id, launch, boundary).await {
+    if let Err(error) =
+        crate::acp::start_handoff(&st.acp_ctx(), &session.id, launch, boundary).await
+    {
         st.acp.stop(&session.id);
         backend::kill_session(&session.term_session).await.ok();
         crate::auth::revoke_staged_session_token(&st.db, &staged_token.id)

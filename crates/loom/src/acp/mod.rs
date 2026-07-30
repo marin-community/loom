@@ -62,7 +62,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use crate::chat::{self, kind, ChatBlockView};
 use crate::db::{now_iso, Db};
 use crate::session;
-use crate::AppState;
+use crate::Ctx;
 use weaver_api::{AcpCost, AcpUsage};
 use weaver_core::tags;
 use wire::{
@@ -732,7 +732,25 @@ impl AcpHandle {
     }
 }
 
-/// The registry of live ACP session tasks, held on [`AppState`]. Clone-cheap
+/// What an ACP session task needs to run: loom's durable state plus the
+/// registry the task lives in. This is the whole of [`crate::AppState`] that
+/// `acp` ever reads, so taking one keeps the protocol layer independent of the
+/// live editor/GitHub/admission registries beside it. Derefs to [`Ctx`], so
+/// `st.db` and `st.bus` read the same as they would off an `AppState`.
+#[derive(Clone)]
+pub struct AcpCtx {
+    pub ctx: Ctx,
+    pub acp: AcpRegistry,
+}
+
+impl std::ops::Deref for AcpCtx {
+    type Target = Ctx;
+    fn deref(&self) -> &Ctx {
+        &self.ctx
+    }
+}
+
+/// The registry of live ACP session tasks, held on [`crate::AppState`]. Clone-cheap
 /// (an `Arc`ed map); handlers look a session up to drive it or tail its stream.
 /// Each registration carries a generation so a task that exits after it has been
 /// superseded (stopped then re-attached) removes only its own slot.
@@ -955,7 +973,7 @@ impl AcpRegistry {
 /// Spawn a fresh ACP session: create the relay running `launch.adapter_cmd`,
 /// `initialize`, open (or load) the ACP session, store its id on the session row,
 /// send the goal as the first prompt when present, then run the session task.
-pub async fn start(state: &AppState, session_id: &str, launch: AcpLaunch) -> Result<()> {
+pub async fn start(state: &AcpCtx, session_id: &str, launch: AcpLaunch) -> Result<()> {
     start_inner(state, session_id, launch, None).await
 }
 
@@ -963,7 +981,7 @@ pub async fn start(state: &AppState, session_id: &str, launch: AcpLaunch) -> Res
 /// carries the provider-neutral history to the adapter, while `handoff` is the
 /// compact block journaled in its place.
 pub async fn start_handoff(
-    state: &AppState,
+    state: &AcpCtx,
     session_id: &str,
     launch: AcpLaunch,
     handoff: Value,
@@ -972,7 +990,7 @@ pub async fn start_handoff(
 }
 
 async fn start_inner(
-    state: &AppState,
+    state: &AcpCtx,
     session_id: &str,
     launch: AcpLaunch,
     handoff: Option<Value>,
@@ -1055,7 +1073,7 @@ async fn start_inner(
 /// the persisted ack cursor, re-adopt the in-flight request state and the block
 /// cursor from the journal, and run the session task. Un-acked frames replay and
 /// re-ingest idempotently.
-pub async fn attach(state: &AppState, session_id: &str) -> Result<()> {
+pub async fn attach(state: &AcpCtx, session_id: &str) -> Result<()> {
     let session = session::get(&state.db, session_id)
         .await?
         .ok_or_else(|| anyhow!("session {session_id} not found"))?;
@@ -1428,7 +1446,7 @@ impl Task {
     }
 
     async fn fresh(
-        state: &AppState,
+        state: &AcpCtx,
         session: &session::Session,
         relay_name: String,
         stream: tapestry::RelayStream,
@@ -1480,7 +1498,7 @@ impl Task {
     }
 
     async fn recover(
-        state: &AppState,
+        state: &AcpCtx,
         session: &session::Session,
         acp_session_id: String,
         relay_name: String,

@@ -18,6 +18,7 @@ pub mod chat;
 pub(crate) mod chatlog;
 pub mod client;
 pub mod client_context;
+pub mod ctx;
 pub mod custom_agents;
 pub mod custom_mcp;
 pub mod db;
@@ -64,12 +65,14 @@ pub mod watch;
 pub mod web;
 
 /// Shared process state consumed by Loom's runtime services and REST adapter.
+///
+/// The [`Ctx`] inside is what most of loom actually needs; the fields beside it
+/// are live, process-local registries that only the orchestration and HTTP
+/// layers touch. `AppState` derefs to its `Ctx`, so `st.db` and `st.bus` read
+/// the same whichever one a function was handed.
 #[derive(Clone)]
 pub struct AppState {
-    pub db: db::Db,
-    pub bus: weaver_core::events::EventBus,
-    /// host:port the server is bound to, used to build child-process env.
-    pub addr: String,
+    pub ctx: Ctx,
     /// Per-session embedded code-server lifecycle + reverse-proxy registry.
     pub ide: std::sync::Arc<ide::IdeManager>,
     /// The inbound GitHub trigger: its GitHub gateway (the `gh`-backed default)
@@ -83,6 +86,27 @@ pub struct AppState {
     /// per-session Scratch mutation locks.
     pub launch_gate: launch_gate::RepoLaunchGate,
 }
+
+impl AppState {
+    /// The slice of process state an ACP session task needs — durable state
+    /// plus the task registry, without the editor/GitHub/admission registries
+    /// it never reads.
+    pub fn acp_ctx(&self) -> acp::AcpCtx {
+        acp::AcpCtx {
+            ctx: self.ctx.clone(),
+            acp: self.acp.clone(),
+        }
+    }
+}
+
+impl std::ops::Deref for AppState {
+    type Target = Ctx;
+    fn deref(&self) -> &Ctx {
+        &self.ctx
+    }
+}
+
+pub use ctx::Ctx;
 
 // Crate-local aliases keep Loom implementation imports short without exposing
 // weaver-core's storage and domain modules as part of Loom's public API.

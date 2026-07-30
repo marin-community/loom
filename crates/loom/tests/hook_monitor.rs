@@ -10,6 +10,7 @@ use std::time::Duration;
 use loom::client;
 use loom::session as session_mod;
 use loom::AppState;
+use loom::Ctx;
 use loom::{db, server};
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -106,9 +107,11 @@ async fn hook_event_drives_session_status() {
     .await
     .unwrap();
     let state = AppState {
-        db: pool.clone(),
-        bus: EventBus::new(),
-        addr: addr.to_string(),
+        ctx: Ctx {
+            db: pool.clone(),
+            bus: EventBus::new(),
+            addr: addr.to_string(),
+        },
         ide: std::sync::Arc::new(loom::ide::IdeManager::new(loom::ide::ide_home())),
         trigger: loom::github_trigger::GithubTrigger::production(pool.clone()),
         acp: loom::acp::AcpRegistry::new(),

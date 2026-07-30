@@ -11,6 +11,7 @@ use tokio::net::TcpListener;
 use crate::events::EventBus;
 use crate::session as session_mod;
 use crate::AppState;
+use crate::Ctx;
 use crate::{backend, config, db, github, monitor, runner, session_manager, watch, web};
 use weaver_core::branch as branch_mod;
 use weaver_core::watch as watch_store;
@@ -99,9 +100,11 @@ pub async fn run(addr: &str) -> Result<()> {
     runner::validate().await?;
     let trigger = crate::github_trigger::GithubTrigger::production(db.clone());
     let state = AppState {
-        db,
-        bus: EventBus::new(),
-        addr: actual.to_string(),
+        ctx: Ctx {
+            db,
+            bus: EventBus::new(),
+            addr: actual.to_string(),
+        },
         ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
         trigger,
         acp: crate::acp::AcpRegistry::new(),
@@ -203,7 +206,7 @@ pub async fn repair_acp_sessions(state: &AppState) {
         if !backend::has_session(&session.term_session).await {
             continue; // dead relay — the monitor will mark it orphaned.
         }
-        match crate::acp::attach(state, &session.id).await {
+        match crate::acp::attach(&state.acp_ctx(), &session.id).await {
             Ok(()) => tracing::info!("acp repair: re-attached session {}", session.id),
             Err(e) => tracing::warn!(
                 "acp repair: could not re-attach session {}: {e}",

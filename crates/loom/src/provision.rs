@@ -1192,7 +1192,7 @@ pub(crate) async fn create(st: AppState, req: CreateReq, actor: Actor) -> Result
         )
         .await
         .map_err(|e| ProvisionError::internal(e.to_string()))?;
-        if let Err(e) = crate::acp::start(&st, &session.id, launch).await {
+        if let Err(e) = crate::acp::start(&st.acp_ctx(), &session.id, launch).await {
             crate::auth::revoke_session_tokens(&st.db, &session.id)
                 .await
                 .ok();
@@ -1473,9 +1473,11 @@ mod tests {
     async fn explicit_work_items_keep_provenance_without_plain_launch_issues() {
         let db = crate::db::connect_in_memory().await.unwrap();
         let st = AppState {
-            db: db.clone(),
-            bus: crate::events::EventBus::new(),
-            addr: "127.0.0.1:0".to_string(),
+            ctx: crate::Ctx {
+                db: db.clone(),
+                bus: crate::events::EventBus::new(),
+                addr: "127.0.0.1:0".to_string(),
+            },
             ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
             trigger: crate::github_trigger::GithubTrigger::production(db.clone()),
             acp: crate::acp::AcpRegistry::new(),

@@ -32,7 +32,7 @@ use weaver_core::branch::Branch;
 use crate::agent;
 use crate::backend;
 use crate::session::Session;
-use crate::{agent_env, AppState};
+use crate::{agent_env, Ctx};
 
 /// The fixed supervisor name for the operator scratch shell. Distinct from any
 /// agent session's `term_session` (those are random ids), so it never collides.
@@ -57,7 +57,7 @@ fn shell_cwd() -> PathBuf {
 /// out of band by [`backend::new_session`], not `export`-ed into the script, so
 /// secrets stay off argv. This is a plain shell, not an agent, so it does not go
 /// through the agent launch path.
-async fn shell_script(st: &AppState, branch_id: Option<&str>) -> (String, Vec<(String, String)>) {
+async fn shell_script(st: &Ctx, branch_id: Option<&str>) -> (String, Vec<(String, String)>) {
     let api_url = format!("http://{}", st.addr);
     let local_token = agent::read_local_token();
     let extra = agent_env::pairs(&st.db).await.unwrap_or_default();
@@ -87,7 +87,7 @@ fn env_refs(env: &[(String, String)]) -> Vec<(&str, &str)> {
 /// Ensure the scratch-shell supervisor is up, spawning it if not. Idempotent: a
 /// live shell is left untouched (so reconnecting/refreshing the UI reattaches to
 /// the same session rather than starting a new one).
-pub async fn ensure(st: &AppState) -> Result<()> {
+pub async fn ensure(st: &Ctx) -> Result<()> {
     if backend::has_session(SHELL_SESSION).await {
         return Ok(());
     }
@@ -108,7 +108,7 @@ pub async fn ensure(st: &AppState) -> Result<()> {
 /// Reset the scratch shell: kill the current supervisor (best-effort) and bring
 /// a fresh one up. Used by `POST /api/shell/restart` — e.g. to pick up newly
 /// edited operator env vars, or to clear a wedged session.
-pub async fn restart(st: &AppState) -> Result<()> {
+pub async fn restart(st: &Ctx) -> Result<()> {
     tracing::info!(session = SHELL_SESSION, "restarting operator scratch shell");
     backend::kill_session(SHELL_SESSION).await.ok();
     // The supervisor removes its socket as it exits; wait briefly for liveness to
@@ -144,7 +144,7 @@ pub fn debug_session(session_id: &str, idx: u32) -> String {
 /// `WEAVER_BRANCH`, so its in-worktree `weaver`/`loom` resolve to this branch.
 /// Returns the supervisor name to bridge to.
 pub async fn ensure_debug(
-    st: &AppState,
+    st: &Ctx,
     session: &Session,
     branch: &Branch,
     idx: u32,

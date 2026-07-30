@@ -36,9 +36,11 @@ async fn engine_state(ts: &TestServer) -> AppState {
     let pool = db::connect(&db::default_db_path()).await.unwrap();
     AppState {
         trigger: loom::github_trigger::GithubTrigger::production(pool.clone()),
-        db: pool,
-        bus: EventBus::new(),
-        addr: ts.addr.to_string(),
+        ctx: loom::Ctx {
+            db: pool,
+            bus: EventBus::new(),
+            addr: ts.addr.to_string(),
+        },
         ide: std::sync::Arc::new(loom::ide::IdeManager::new(loom::ide::ide_home())),
         acp: loom::acp::AcpRegistry::new(),
         launch_gate: loom::launch_gate::RepoLaunchGate::default(),

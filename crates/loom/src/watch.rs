@@ -1514,10 +1514,12 @@ mod tests {
     async fn script_fixture(program: &str) -> (AppState, Watch) {
         let db = crate::db::connect_in_memory().await.unwrap();
         let state = AppState {
+            ctx: crate::Ctx {
+                db: db.clone(),
+                bus: events::EventBus::new(),
+                addr: "127.0.0.1:0".to_string(),
+            },
             trigger: crate::github_trigger::GithubTrigger::production(db.clone()),
-            db,
-            bus: events::EventBus::new(),
-            addr: "127.0.0.1:0".to_string(),
             ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
             acp: crate::acp::AcpRegistry::new(),
             launch_gate: crate::launch_gate::RepoLaunchGate::default(),
@@ -1810,10 +1812,12 @@ rnd.finish("counted to %d" % n)
     async fn timer_fires_a_due_wake_once_and_clears_it() {
         let db = crate::db::connect_in_memory().await.unwrap();
         let state = AppState {
+            ctx: crate::Ctx {
+                db: db.clone(),
+                bus: events::EventBus::new(),
+                addr: "127.0.0.1:0".to_string(),
+            },
             trigger: crate::github_trigger::GithubTrigger::production(db.clone()),
-            db,
-            bus: events::EventBus::new(),
-            addr: "127.0.0.1:0".to_string(),
             ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
             acp: crate::acp::AcpRegistry::new(),
             launch_gate: crate::launch_gate::RepoLaunchGate::default(),

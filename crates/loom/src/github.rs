@@ -1354,9 +1354,11 @@ mod tests {
         .unwrap();
         let trigger = crate::github_trigger::GithubTrigger::production(db.clone());
         let state = AppState {
-            db,
-            bus: events::EventBus::new(),
-            addr: "127.0.0.1:0".to_string(),
+            ctx: crate::Ctx {
+                db,
+                bus: events::EventBus::new(),
+                addr: "127.0.0.1:0".to_string(),
+            },
             ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
             trigger,
             acp: crate::acp::AcpRegistry::new(),

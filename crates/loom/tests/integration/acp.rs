@@ -105,7 +105,7 @@ async fn start_new_with_env(
         goal: goal.map(str::to_string),
         setup_timeout: Duration::from_secs(5),
     };
-    acp::start(&ts.state, id, launch)
+    acp::start(&ts.state.acp_ctx(), id, launch)
         .await
         .expect("acp session starts");
 }
@@ -152,7 +152,7 @@ async fn silent_setup_stage_times_out_and_cleans_provider_state() {
         setup_timeout: Duration::from_millis(150),
     };
 
-    let error = acp::start(&ts.state, "acp-setup-timeout", launch)
+    let error = acp::start(&ts.state.acp_ctx(), "acp-setup-timeout", launch)
         .await
         .expect_err("silent session/new times out");
     assert!(error.to_string().contains("session/new"), "{error}");
@@ -518,7 +518,7 @@ async fn composer_metadata_survives_live_task_loss() {
     // A Loom restart re-attaches to the surviving relay without another ACP
     // handshake. The new live handle must start with the durable snapshot
     // instead of masking it with an empty in-memory value.
-    acp::attach(&ts.state, "acp-durable-metadata")
+    acp::attach(&ts.state.acp_ctx(), "acp-durable-metadata")
         .await
         .expect("relay re-attaches");
     let attached = ts
@@ -557,7 +557,7 @@ async fn launch_model_and_effort_replace_adapter_config_defaults() {
         goal: None,
         setup_timeout: Duration::from_secs(5),
     };
-    acp::start(&ts.state, "acp-launch-config", launch)
+    acp::start(&ts.state.acp_ctx(), "acp-launch-config", launch)
         .await
         .expect("acp session starts");
 
@@ -595,7 +595,7 @@ async fn load_preserves_adapter_restored_model_and_effort() {
         goal: None,
         setup_timeout: Duration::from_secs(5),
     };
-    acp::start(&ts.state, "acp-load-config", launch)
+    acp::start(&ts.state.acp_ctx(), "acp-load-config", launch)
         .await
         .expect("acp session loads");
 
@@ -1685,7 +1685,7 @@ async fn crash_recovery_replays_without_duplicates() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Re-attach: replay from the persisted cursor.
-    acp::attach(&ts.state, "acp-crash")
+    acp::attach(&ts.state.acp_ctx(), "acp-crash")
         .await
         .expect("re-attach succeeds");
 
