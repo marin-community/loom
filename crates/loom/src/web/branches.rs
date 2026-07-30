@@ -104,7 +104,9 @@ pub(super) async fn patch_branch(
         )
         .await?
         {
-            TitleUpdate::Applied(_) => {}
+            TitleUpdate::Applied(_) => {
+                crate::channels::update_branch_channel_names(&st.db, &branch.id, &title).await?;
+            }
             TitleUpdate::Stale(current) => {
                 return Err(AppError::conflict(
                     "the task label changed while it was being edited; review it and retry",
@@ -118,6 +120,7 @@ pub(super) async fn patch_branch(
         branch_mod::set_goal(&st.db, &branch.id, goal, "user").await?;
         for session in &current_goal_sessions {
             session_mod::bump_mutation_revision(&st.db, &session.id).await?;
+            crate::channels::update_session_goal(&st.db, &session.id, goal).await?;
         }
     }
     if let Some(description) = &req.description {
@@ -197,6 +200,29 @@ pub(super) async fn set_branch_status(
         }),
     )
     .await?;
+    // Preserve tags and external mirrors during the migration, while also
+    // making status a typed item in the session's durable communication log.
+    if let Some(channel_id) =
+        crate::channels::session_channel_for_branch(&st.db, &branch.id).await?
+    {
+        let urgency = crate::channels::Urgency::from_status_level(&level);
+        let author =
+            crate::channels::Subject::new(crate::channels::SubjectKind::Session, &channel_id);
+        crate::channels::append(
+            &st.db,
+            &channel_id,
+            crate::channels::NewMessage {
+                kind: crate::channels::MessageKind::Status,
+                urgency,
+                author: &author,
+                body: message.unwrap_or(&level),
+                payload: &json!({ "level": level }),
+                reply_to: None,
+                idempotency_key: None,
+            },
+        )
+        .await?;
+    }
     // Mirror the trail onto every origin thread the branch is wired to — the
     // GitHub comment and/or the Slack message (each a no-op when its wiring tag
     // is absent) — detached, so an integration hiccup never slows or fails the

@@ -14,8 +14,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::{json, Value};
 
 use weaver_api::{
-    ArtifactUpsertReq, BranchView, Client, CreateIssueReq, CreateRepoIssueReq, IssueView,
-    PatchIssueReq, ThreadDto,
+    ArtifactUpsertReq, BranchView, Client, CreateChannelMessageReq, CreateChannelReq,
+    CreateIssueReq, CreateRepoIssueReq, IssueView, PatchIssueReq, ThreadDto,
 };
 use weaver_core::tags;
 
@@ -23,7 +23,7 @@ use weaver_core::tags;
 #[command(
     name = "weaver",
     version,
-    about = "Agent-facing helpers for branches and issues"
+    about = "Agent-facing helpers for sessions, channels, and branches"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -63,9 +63,8 @@ enum Cmd {
     /// Print a quick orientation for the current branch.
     ///
     /// A one-shot catch-up for an agent picking up (or resuming) a branch: the
-    /// goal, the current status, the outstanding tasks (this branch's open
-    /// issues and any open sub-trees it delegated), and a line or two of hints
-    /// for what to do next.
+    /// goal, current status, channel inbox, intentional backlog items, and a
+    /// line or two of hints for what to do next.
     Summary,
     /// Print the full weaver workflow guide (the WEAVER.md for this branch).
     ///
@@ -75,6 +74,11 @@ enum Cmd {
     /// catch-up was replayed). Uses the repo's own `WEAVER.md` when it ships
     /// one, else the builtin.
     Readme,
+    /// Read and write durable user/agent channels.
+    Channel {
+        #[command(subcommand)]
+        cmd: ChannelCmd,
+    },
     /// Manage the current branch's issue list.
     Issue {
         #[command(subcommand)]
@@ -125,6 +129,85 @@ enum Cmd {
     },
     /// Generate shell completions.
     Completions { shell: clap_complete::Shell },
+}
+
+#[derive(Subcommand)]
+enum ChannelCmd {
+    /// List visible open channels and their unread state.
+    Ls {
+        /// Include archived channels.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Open a custom channel alongside the current session channel.
+    Open {
+        name: Vec<String>,
+        #[arg(long, default_value = "")]
+        topic: String,
+    },
+    /// Read channel history and advance its read marker.
+    Read {
+        /// Channel id; defaults to this session's channel.
+        #[arg(long)]
+        channel: Option<String>,
+        /// Only print messages after this sequence number.
+        #[arg(long, default_value = "0")]
+        after: i64,
+        /// Do not advance the read marker.
+        #[arg(long)]
+        peek: bool,
+    },
+    /// Send a message; on a session channel this also delivers it to the agent.
+    Send {
+        text: Vec<String>,
+        /// Channel id; defaults to this session's channel.
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value = weaver_api::CHANNEL_DEFAULT_MESSAGE_KIND)]
+        kind: String,
+        #[arg(long, default_value = weaver_api::CHANNEL_DEFAULT_URGENCY)]
+        urgency: String,
+    },
+    /// Set how this session follows a channel.
+    Subscribe {
+        /// Channel id; defaults to this session's channel.
+        #[arg(long)]
+        channel: Option<String>,
+        /// observe or deliver.
+        #[arg(long, default_value = weaver_api::CHANNEL_DEFAULT_SUBSCRIPTION_MODE)]
+        mode: String,
+        /// Subscribe this descendant session instead of the caller.
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Mark a channel read through its latest message.
+    Ack {
+        /// Channel id; defaults to this session's channel.
+        #[arg(long)]
+        channel: Option<String>,
+        /// Mark read through this sequence instead of the latest.
+        #[arg(long)]
+        seq: Option<i64>,
+    },
+    /// Wait for the next channel message.
+    Wait {
+        /// Channel id; defaults to this session's channel.
+        #[arg(long)]
+        channel: Option<String>,
+        /// Begin after this sequence; omission begins after the current latest.
+        #[arg(long)]
+        after: Option<i64>,
+        /// Wake only for this message kind (for example `result`).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Wake only for attention/blocked urgency.
+        #[arg(long)]
+        urgent: bool,
+        #[arg(long, default_value = "1800")]
+        timeout: u64,
+        #[arg(long, default_value = "2")]
+        interval: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -379,6 +462,7 @@ async fn run() -> Result<()> {
         Cmd::Tag { cmd } => cmd_tag(cmd).await,
         Cmd::Summary => cmd_summary().await,
         Cmd::Readme => cmd_readme().await,
+        Cmd::Channel { cmd } => cmd_channel(cmd).await,
         Cmd::Issue { cmd } => cmd_issue(cmd).await,
         Cmd::Artifact { cmd } => cmd_artifact(cmd).await,
         Cmd::Where => cmd_where().await,
@@ -417,6 +501,21 @@ fn branch_key() -> Result<String> {
             "not running inside a loom session ($WEAVER_BRANCH is not set) — \
              weaver only works inside a session loom launched"
         );
+    }
+    Ok(key.to_string())
+}
+
+fn channel_key(explicit: Option<String>) -> Result<String> {
+    if let Some(value) = explicit {
+        let value = value.trim();
+        if !value.is_empty() {
+            return Ok(value.to_string());
+        }
+    }
+    let key = std::env::var("LOOM_SESSION_ID").unwrap_or_default();
+    let key = key.trim();
+    if key.is_empty() {
+        bail!("no channel selected and $LOOM_SESSION_ID is not set — pass --channel <id>");
     }
     Ok(key.to_string())
 }
@@ -517,11 +616,11 @@ fn encode_image_data_uri(filename: Option<&str>, bytes: &[u8]) -> Result<Option<
     Ok(Some(format!("data:{mime};base64,{b64}")))
 }
 
-/// How many outstanding tasks `weaver summary` lists before collapsing the rest.
+/// How many backlog items `weaver summary` lists before collapsing the rest.
 const SUMMARY_TASK_CAP: usize = 10;
 
 /// Print a quick orientation for the current branch: the goal, the current
-/// status, the outstanding tasks, and a hint or two for what to do next.
+/// status, channel inbox, intentional backlog, and a hint or two for what to do next.
 ///
 /// This is the catch-up an agent reads when it picks up a branch. It overlaps
 /// `weaver status` (read), but where that shows an open-issue *count*, summary
@@ -564,6 +663,51 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
             out,
             "GitHub:  status messages mirror publicly to {wiring}  (weaver tag rm github stops it)"
         );
+    }
+
+    // The session channel is the durable inbox and delegation context. Reading
+    // summary counts as reading this agent's inbox, so advance its own marker;
+    // browser/user markers remain independent.
+    if let Ok(channel_id) = channel_key(None) {
+        if let Ok(channel) = client.get_channel(&channel_id).await {
+            let urgent = if channel.unread_urgent_count > 0 {
+                format!(", {} urgent", channel.unread_urgent_count)
+            } else {
+                String::new()
+            };
+            let _ = writeln!(
+                out,
+                "Channel: {} — {} unread{}  (weaver channel read)",
+                channel.id, channel.unread_count, urgent
+            );
+            if channel.unread_count > 0 {
+                if let Ok(messages) = client.channel_messages(&channel_id, 0).await {
+                    for message in messages
+                        .iter()
+                        .filter(|message| message.kind != "goal")
+                        .rev()
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                    {
+                        let _ = writeln!(
+                            out,
+                            "  {}:{} [{}] {}",
+                            message.author_kind,
+                            message.author_id,
+                            message.kind,
+                            truncate(&message.body, 100)
+                        );
+                    }
+                    if let Some(last) = messages.last() {
+                        // A catch-up remains useful if acknowledgement races a
+                        // channel lifecycle change; the next summary retries.
+                        let _ = client.mark_channel_read(&channel_id, Some(last.seq)).await;
+                    }
+                }
+            }
+        }
     }
 
     // Artifacts visible from this branch (its own + repo-shared) — the documents
@@ -627,9 +771,8 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
         }
     }
 
-    // Outstanding work: this branch's own open issues, then any open sub-trees
-    // it delegated (each carrying its sub-agent's live status). One repo-wide
-    // fetch, partitioned client-side — the same data `issue ls` partitions.
+    // Intentional work items only: ordinary session delegation is represented
+    // by child channels and never appears here.
     let issues = client
         .list_repo_issues(&b.repo_root, "repo", false)
         .await
@@ -648,10 +791,10 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
         .collect();
     out.push('\n');
     if open.is_empty() && delegated.is_empty() {
-        let _ = writeln!(out, "Outstanding: none  (weaver issue ls)");
+        let _ = writeln!(out, "Backlog: none  (weaver issue ls)");
     } else {
         let total = open.len() + delegated.len();
-        let _ = writeln!(out, "Outstanding ({total}):  (weaver issue ls)");
+        let _ = writeln!(out, "Backlog ({total}):  (weaver issue ls)");
         // Cap the whole list (own issues first, then delegated sub-trees) so a
         // branch that delegated many sub-trees can't blow the summary up; the
         // overflow collapses into one trailing line.
@@ -715,7 +858,7 @@ fn next_action_hint(open: &[&IssueView], delegated: &[&IssueView]) -> String {
             delegated.len()
         )
     } else {
-        "no open tasks — wrap up and open a PR (`gh pr create`), or `weaver issue add` to track more"
+        "no explicit backlog items — continue the goal, or wrap up and open a PR (`gh pr create`)"
             .to_string()
     }
 }
@@ -1006,6 +1149,197 @@ async fn cmd_tag(cmd: TagCmd) -> Result<()> {
 
 /// How many backlog items to print before collapsing the rest into a hint.
 const BACKLOG_CAP: usize = 10;
+
+async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
+    let client = client();
+    match cmd {
+        ChannelCmd::Ls { all } => {
+            let channels = client.list_channels(all).await?;
+            if channels.is_empty() {
+                println!("(no channels)");
+            }
+            for channel in channels {
+                let urgent = if channel.unread_urgent_count > 0 {
+                    format!(" !{}", channel.unread_urgent_count)
+                } else {
+                    String::new()
+                };
+                let unread = if channel.unread_count > 0 {
+                    format!(" +{}", channel.unread_count)
+                } else {
+                    String::new()
+                };
+                println!(
+                    "{}  {:<8} {}{}{}",
+                    channel.id, channel.kind, channel.name, unread, urgent
+                );
+                if !channel.topic.is_empty() {
+                    println!("  {}", truncate(&channel.topic, 100));
+                }
+            }
+        }
+        ChannelCmd::Open { name, topic } => {
+            let name = name.join(" ");
+            if name.trim().is_empty() {
+                bail!("channel name is required");
+            }
+            let repo_root = match branch_key() {
+                Ok(key) => Some(client.get_branch(&key).await?.repo_root),
+                Err(_) => None,
+            };
+            let channel = client
+                .create_channel(&CreateChannelReq {
+                    name,
+                    topic,
+                    repo_root,
+                })
+                .await?;
+            println!("{}  {}", channel.id, channel.name);
+        }
+        ChannelCmd::Read {
+            channel,
+            after,
+            peek,
+        } => {
+            let id = channel_key(channel)?;
+            let messages = client.channel_messages(&id, after).await?;
+            print_channel_messages(&messages);
+            if !peek {
+                if let Some(last) = messages.last() {
+                    client.mark_channel_read(&id, Some(last.seq)).await?;
+                }
+            }
+        }
+        ChannelCmd::Send {
+            text,
+            channel,
+            kind,
+            urgency,
+        } => {
+            let id = channel_key(channel)?;
+            let body = text.join(" ");
+            if body.trim().is_empty() {
+                bail!("message text is required");
+            }
+            let message = client
+                .send_channel_message(
+                    &id,
+                    &CreateChannelMessageReq {
+                        kind,
+                        urgency,
+                        body,
+                        payload: json!({}),
+                        reply_to: None,
+                        idempotency_key: None,
+                    },
+                )
+                .await?;
+            print_channel_messages(&[message]);
+        }
+        ChannelCmd::Subscribe {
+            channel,
+            mode,
+            session,
+        } => {
+            let id = channel_key(channel)?;
+            let subscription = client
+                .set_channel_subscription(&id, &mode, session.as_deref())
+                .await?;
+            println!(
+                "{}  {}:{}  {} through {}",
+                subscription.channel_id,
+                subscription.subject_kind,
+                subscription.subject_id,
+                subscription.mode,
+                subscription.read_seq
+            );
+        }
+        ChannelCmd::Ack { channel, seq } => {
+            let id = channel_key(channel)?;
+            let subscription = client.mark_channel_read(&id, seq).await?;
+            println!("{} read through {}", id, subscription.read_seq);
+        }
+        ChannelCmd::Wait {
+            channel,
+            after,
+            kind,
+            urgent,
+            timeout,
+            interval,
+        } => {
+            let id = channel_key(channel)?;
+            let mut cursor = match after {
+                Some(seq) => seq.max(0),
+                None => client
+                    .get_channel(&id)
+                    .await?
+                    .last_message
+                    .map(|message| message.seq)
+                    .unwrap_or(0),
+            };
+            let deadline = (timeout > 0)
+                .then(|| std::time::Instant::now() + std::time::Duration::from_secs(timeout));
+            loop {
+                let messages = client.channel_messages(&id, cursor).await?;
+                if let Some(last) = messages.last() {
+                    cursor = last.seq;
+                    client.mark_channel_read(&id, Some(cursor)).await?;
+                    let matching = messages
+                        .iter()
+                        .filter(|message| {
+                            kind.as_deref().is_none_or(|kind| message.kind == kind)
+                                && (!urgent
+                                    || matches!(message.urgency.as_str(), "attention" | "blocked"))
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if !matching.is_empty() {
+                        print_channel_messages(&matching);
+                        return Ok(());
+                    }
+                }
+                if deadline.is_some_and(|end| std::time::Instant::now() >= end) {
+                    bail!("timed out waiting for channel {id}");
+                }
+                let nap = std::time::Duration::from_secs(interval.max(1));
+                tokio::time::sleep(match deadline {
+                    Some(end) => nap.min(end.saturating_duration_since(std::time::Instant::now())),
+                    None => nap,
+                })
+                .await;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_channel_messages(messages: &[weaver_api::ChannelMessageView]) {
+    if messages.is_empty() {
+        println!("(no messages)");
+    }
+    for message in messages {
+        let marker = match message.urgency.as_str() {
+            "blocked" => "!!",
+            "attention" => " !",
+            _ => "  ",
+        };
+        println!(
+            "{:>4}{} {:<7} {}:{}  {}",
+            message.seq, marker, message.kind, message.author_kind, message.author_id, message.body
+        );
+        for delivery in &message.deliveries {
+            let error = delivery
+                .last_error
+                .as_deref()
+                .map(|error| format!(" — {error}"))
+                .unwrap_or_default();
+            println!(
+                "       delivery {} → {}{}",
+                delivery.target_session_id, delivery.state, error
+            );
+        }
+    }
+}
 
 async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
     let client = client();

@@ -16,6 +16,57 @@ export interface Tag {
   set_at: string;
 }
 
+export interface ChannelDelivery {
+  target_session_id: string;
+  state: 'queued' | 'delivered' | 'failed';
+  attempts: number;
+  last_error: string | null;
+  updated_at: string;
+}
+
+export interface ChannelMessage {
+  id: string;
+  channel_id: string;
+  seq: number;
+  kind: 'goal' | 'message' | 'status' | 'result' | 'system';
+  urgency: 'normal' | 'attention' | 'blocked';
+  author_kind: string;
+  author_id: string;
+  body: string;
+  payload: unknown;
+  reply_to: string | null;
+  created_at: string;
+  deliveries: ChannelDelivery[];
+}
+
+export interface Channel {
+  id: string;
+  kind: 'session' | 'custom';
+  repo_root: string;
+  branch_id: string | null;
+  session_id: string | null;
+  name: string;
+  topic: string;
+  state: 'open' | 'archived';
+  created_by_kind: string;
+  created_by: string;
+  created_at: string;
+  archived_at: string | null;
+  unread_count: number;
+  unread_urgent_count: number;
+  last_message: ChannelMessage | null;
+}
+
+export interface ChannelSubscription {
+  channel_id: string;
+  subject_kind: string;
+  subject_id: string;
+  mode: 'observe' | 'deliver';
+  read_seq: number;
+  created_at: string;
+  updated_at: string;
+}
+
 /** A branch is the engine's view of "what the agent is working on": one
  *  `(repo_root, branch)` pair with a goal, a title, and a free-form
  *  description. Branches are owned by `weaver-core` and exist whether or not
@@ -81,7 +132,7 @@ export interface Session {
   /** Reasoning effort interpreted by the selected agent protocol. */
   effort: string;
   github_repo: string | null;
-  /** GitHub issue linked to this session's weaver tracking issue. */
+  /** GitHub issue linked through this session's explicit work item. */
   github_issue: { repo: string; number: number } | null;
   last_activity_at: string;
   created_at: string;
@@ -111,8 +162,8 @@ export interface Session {
    *  predating the column. A tracking/UX field, not
    *  a security boundary: the fleet stays co-owned by everyone authenticated. */
   created_by: string | null;
-  /** The tracking issue opened for this session's task at launch (the handle
-   *  the launcher follows). Populated on every read. */
+  /** Explicit claimed/imported compatibility work item. Ordinary sessions use
+   *  their same-id channel and leave this null. */
   tracking_issue: number | null;
   /** Who/what launched this session: `user` (the New Session drawer or the CLI)
    *  or an automation surface — `agent`, `github`, `slack`, `watch`, `actions`,

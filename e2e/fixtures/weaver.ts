@@ -186,7 +186,8 @@ export interface WeaverFixture {
   hook(session: Session, event: "working" | "waiting" | "idle"): Promise<void>;
   /** Declare the agent's status (level + message) via `weaver status`. It
    *  writes the branch's `attention` tag (clearing it on `ok`) and the
-   *  current-state message, recording a `tag` event the monitor re-broadcasts. */
+   *  current-state message, appends a typed channel item, and records a `tag`
+   *  event the monitor re-broadcasts. */
   setStatus(
     session: Session,
     level: "ok" | "attention" | "blocked",
@@ -322,10 +323,9 @@ async function deleteAllWatches(baseUrl: string) {
   }
 }
 
-/** Delete every issue on a server, best-effort. Issues are repo-owned and
- *  survive session teardown (claims are released to the backlog), and a launch
- *  opens a tracking issue — so the per-test wipe clears them explicitly to keep
- *  count-based assertions ("0 issues") order-independent. */
+/** Delete every issue on a server, best-effort. Explicit issues are repo-owned
+ *  and survive session teardown (claims are released to the backlog), so the
+ *  per-test wipe keeps count-based assertions order-independent. */
 async function deleteAllIssues(baseUrl: string) {
   try {
     const all = (await fetchJson(`${baseUrl}/api/issues?all=true`)) as {
@@ -664,8 +664,8 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
 
       async setStatus(session, level, message) {
         // `weaver status <level> [message]` writes the branch's `attention`
-        // tag (clearing it on `ok`) and the current-state message, recording a
-        // `tag` event the monitor re-broadcasts.
+        // tag (clearing it on `ok`) and current-state message, appending a typed
+        // channel item and recording a `tag` event.
         const args = ["status", level, ...(message ? [message] : [])];
         execFileSync(WEAVER_BINARY, args, {
           env: { ...childEnv, WEAVER_BRANCH: session.branch.id },

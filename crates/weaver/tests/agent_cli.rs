@@ -249,6 +249,77 @@ async fn issue_lifecycle() {
     assert!(!out.contains("fix the thing"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn channel_cli_reads_and_appends_typed_history() {
+    let env = Env::start().await;
+    weaver_core::branch::set_title(
+        &env.db,
+        &env.branch_id,
+        "CLI channel",
+        weaver_core::branch::TitleProvenance::User,
+    )
+    .await
+    .unwrap();
+    weaver_core::branch::set_goal(&env.db, &env.branch_id, "coordinate durably", "user")
+        .await
+        .unwrap();
+    loom::session::insert(
+        &env.db,
+        &loom::session::NewSession {
+            id: "cli-session".to_string(),
+            branch_id: env.branch_id.clone(),
+            work_dir: "/repo/.worktrees/cli-session".to_string(),
+            term_session: "weaver-cli-session".to_string(),
+            agent_kind: "shell".to_string(),
+            model: String::new(),
+            effort: String::new(),
+            status: "running".to_string(),
+            github_repo: None,
+            parent_branch_id: None,
+            managed_by: None,
+            created_by: Some("rjpower".to_string()),
+            protocol: "terminal".to_string(),
+            origin: "user".to_string(),
+            class: "interactive".to_string(),
+            tracking_issue_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let listed = env.run(&["channel", "ls"]);
+    assert!(listed.contains("cli-session"), "channel list: {listed}");
+    assert!(listed.contains("CLI channel"), "channel list: {listed}");
+
+    let opening = env.run(&["channel", "read", "--channel", "cli-session"]);
+    assert!(opening.contains("goal"), "channel history: {opening}");
+    assert!(
+        opening.contains("coordinate durably"),
+        "channel history: {opening}"
+    );
+
+    let sent = env.run(&[
+        "channel",
+        "send",
+        "--channel",
+        "cli-session",
+        "--kind",
+        "result",
+        "ready",
+        "for",
+        "review",
+    ]);
+    assert!(sent.contains("result"), "channel send: {sent}");
+    assert!(sent.contains("ready for review"), "channel send: {sent}");
+
+    let history = env.run(&["channel", "read", "--channel", "cli-session"]);
+    assert!(
+        history.contains("ready for review"),
+        "channel history: {history}"
+    );
+}
+
 /// `issue tag set` sets a free-form label, `issue show` surfaces it, and
 /// `issue tag rm` clears it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -415,7 +486,7 @@ async fn seed_delegated_issue(env: &Env, child: &str, attention: &str, descripti
 }
 
 /// `summary` is the agent catch-up: it surfaces the goal, the current status,
-/// the actual list of outstanding tasks, and a generated next-step hint.
+/// the explicit backlog, and a generated next-step hint.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn summary_orients_an_agent_on_the_branch() {
@@ -429,8 +500,8 @@ async fn summary_orients_an_agent_on_the_branch() {
     assert!(out.contains("ship the feature"), "summary: {out}");
     // The current status (level + message) is the where-you-left-off signal.
     assert!(out.contains("ok — routes wired"), "summary: {out}");
-    // Outstanding lists the tasks themselves, not just a count.
-    assert!(out.contains("Outstanding (2):"), "summary: {out}");
+    // Backlog lists intentional work items themselves, not just a count.
+    assert!(out.contains("Backlog (2):"), "summary: {out}");
     assert!(out.contains("#1    wire up routes"), "summary: {out}");
     assert!(out.contains("#2    add tests"), "summary: {out}");
     // The next-action hint points at the first open task.
@@ -447,7 +518,7 @@ async fn summary_orients_an_agent_on_the_branch() {
     }
 }
 
-/// The outstanding list is capped (across own issues *and* delegated sub-trees)
+/// The backlog list is capped (across own issues *and* legacy delegated items)
 /// so a branch with lots of work can't blow up the summary; the overflow
 /// collapses into a single "(+N more)" line.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -459,7 +530,7 @@ async fn summary_caps_a_long_outstanding_list() {
         env.run(&["issue", "add", title.as_str()]);
     }
     let out = env.run(&["summary"]);
-    assert!(out.contains("Outstanding (13):"), "summary: {out}");
+    assert!(out.contains("Backlog (13):"), "summary: {out}");
     // Cap is 10 → the last 3 collapse into one line, not three rows.
     assert!(
         out.contains("(+3 more"),
@@ -478,8 +549,8 @@ async fn summary_with_no_open_tasks_suggests_wrapping_up() {
     let env = Env::start().await;
     env.run_with_stdin(&["artifact", "write", "goal"], "tidy up\n");
     let out = env.run(&["summary"]);
-    assert!(out.contains("Outstanding: none"), "summary: {out}");
-    assert!(out.contains("no open tasks"), "summary: {out}");
+    assert!(out.contains("Backlog: none"), "summary: {out}");
+    assert!(out.contains("no explicit backlog items"), "summary: {out}");
     assert!(out.contains("open a PR"), "summary: {out}");
 }
 

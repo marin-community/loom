@@ -60,8 +60,14 @@ const globalCommands = computed<Command[]>(() => [
     run: () => void router.push('/'),
   },
   {
+    id: 'global.channels',
+    label: 'Go to Channels',
+    keys: ['g c'],
+    run: () => void router.push('/channels'),
+  },
+  {
     id: 'global.issues',
-    label: 'Go to Issues',
+    label: 'Go to backlog',
     keys: ['g i'],
     run: () => void router.push('/issues'),
   },
@@ -113,7 +119,14 @@ watch(
 // refetch flash, no entrance-animation replay. The list views return exactly as
 // left (scroll, filter, the open create form); the session detail page returns
 // to its warm terminal (scrollback intact, no reconnect).
-const CACHED_VIEWS = ['SessionList', 'Issues', 'Watches', 'SessionDetail', 'SessionLaunch'];
+const CACHED_VIEWS = [
+  'SessionList',
+  'Channels',
+  'Issues',
+  'Watches',
+  'SessionDetail',
+  'SessionLaunch',
+];
 
 // Cache key per cached instance. List views are singletons (keyed by their
 // stable path); the session detail is keyed per session id so each session gets
@@ -140,6 +153,7 @@ function cacheKey(route: { path: string; params: Record<string, string | string[
   // A watch id selects the right pane of one master/detail workbench. Keep the
   // list instance stable while its route-backed cursor moves.
   if (route.path === '/watches' || route.path.startsWith('/watches/')) return '/watches';
+  if (route.path === '/channels' || route.path.startsWith('/channels/')) return '/channels';
   return route.path;
 }
 </script>

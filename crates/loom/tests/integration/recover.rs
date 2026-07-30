@@ -49,6 +49,8 @@ async fn recover_rebuilds_worktree_and_resumes() {
     );
     let view = client.get(&format!("/api/sessions/{id}")).await.unwrap();
     assert_eq!(view["status"], "archived");
+    let channel = client.get(&format!("/api/channels/{id}")).await.unwrap();
+    assert_eq!(channel["state"], "archived");
 
     // Recover rebuilds the worktree and resumes the agent at the same path.
     let rec = client
@@ -60,6 +62,20 @@ async fn recover_rebuilds_worktree_and_resumes() {
     assert_eq!(rec["status"], "running");
     assert_eq!(rec["work_dir"], work_dir);
     assert_eq!(rec["term_session"], term_session);
+    let channel = client.get(&format!("/api/channels/{id}")).await.unwrap();
+    assert_eq!(channel["state"], "open");
+    let messages = client
+        .get(&format!("/api/channels/{id}/messages"))
+        .await
+        .unwrap();
+    assert!(
+        messages
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["kind"] == "system" && message["body"] == "session recovered"),
+        "recovery appends a channel lifecycle message"
+    );
     let tags = rec["branch"]["tags"].as_array().unwrap();
     assert!(
         tags.iter()

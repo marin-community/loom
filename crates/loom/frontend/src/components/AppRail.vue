@@ -20,6 +20,7 @@ interface RailItem {
   match: (path: string) => boolean;
   /** Inline SVG path data (lucide outlines, 24px grid, stroked). */
   paths: string[];
+  data?: string;
 }
 
 const MAIN: RailItem[] = [
@@ -35,8 +36,19 @@ const MAIN: RailItem[] = [
     ],
   },
   {
+    to: '/channels',
+    label: 'Channels',
+    title: 'Channels — durable user and agent messages',
+    data: 'channels',
+    match: (p) => p.startsWith('/channels'),
+    // inbox — a compact, durable communication stream.
+    paths: ['M4 4h16v16H4z', 'M4 14h4l2 3h4l2-3h4', 'M8 8h8', 'M8 11h6'],
+  },
+  {
     to: '/issues',
-    label: 'Issues',
+    label: 'Backlog',
+    title: 'Backlog — explicit work items and GitHub issues',
+    data: 'issues',
     match: (p) => p.startsWith('/issues'),
     // circle-dot — the issue-tracker glyph.
     paths: ['M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Z', 'M12 11a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z'],
@@ -106,7 +118,7 @@ const active = computed(() => (item: RailItem) => item.match(route.path));
       :key="item.to"
       :to="item.to"
       :title="item.title ?? item.label"
-      :data-rail="item.label.toLowerCase()"
+      :data-rail="item.data ?? item.label.toLowerCase()"
       :aria-current="active(item) ? 'page' : undefined"
       class="relative flex flex-col items-center gap-0.5 py-2.5 transition-colors"
       :class="active(item) ? 'text-fg' : 'text-faint hover:text-muted'"

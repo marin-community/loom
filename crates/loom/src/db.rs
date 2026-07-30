@@ -85,6 +85,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "chat-block-ref-id",
         include_str!("../migrations/0015_chat_block_ref_id.sql"),
     ),
+    (
+        16,
+        "channels",
+        include_str!("../migrations/0016_channels.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -449,6 +454,75 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn v14_database_backfills_same_id_session_channels() {
+        let db = core_connect_in_memory().await.unwrap();
+        LOOM_STREAM.ensure_indicator(&db).await.unwrap();
+        for (version, name, migration) in LOOM_MIGRATIONS.iter().take(14) {
+            for statement in split_statements(migration) {
+                sqlx::query(&statement).execute(&db).await.unwrap();
+            }
+            LOOM_STREAM.stamp(&db, *version, name).await.unwrap();
+        }
+        insert_branch(&db, "channel-branch").await;
+        sqlx::query(
+            "UPDATE branches
+             SET title = 'Backfilled channel', goal = 'Keep the launch charter'
+             WHERE id = 'channel-branch'",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions
+             (id, branch_id, work_dir, term_session, status, created_by,
+              creator_kind, creator_subject, created_at)
+             VALUES ('legacy-session', 'channel-branch', '/w', 'term', 'running',
+                     'alice', 'user', 'alice', '2026-01-01T00:00:00.000Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        LOOM_STREAM.apply_pending(&db).await.unwrap();
+
+        let channel: (String, String, String) = sqlx::query_as(
+            "SELECT id, name, topic FROM channels WHERE session_id = 'legacy-session'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            channel,
+            (
+                "legacy-session".to_string(),
+                "Backfilled channel".to_string(),
+                "Keep the launch charter".to_string(),
+            )
+        );
+        let opening: (String, String) = sqlx::query_as(
+            "SELECT kind, body FROM channel_messages
+             WHERE channel_id = 'legacy-session' AND seq = 1",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            opening,
+            ("goal".to_string(), "Keep the launch charter".to_string())
+        );
+        let owner: (String, i64) = sqlx::query_as(
+            "SELECT mode, read_seq FROM channel_subscriptions
+             WHERE channel_id = 'legacy-session'
+               AND subject_kind = 'session'
+               AND subject_id = 'legacy-session'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(owner, ("deliver".to_string(), 1));
     }
 
     #[tokio::test]

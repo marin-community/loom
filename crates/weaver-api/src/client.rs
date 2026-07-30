@@ -12,11 +12,12 @@ use serde_json::Value;
 
 use crate::dto::{
     AddReviewCommentReq, AnchorDto, ArtifactMeta, ArtifactUpsertReq, ArtifactView,
-    AutomationTokenReq, AutomationTokenView, BranchStatusReq, BranchView, CloneProfileReq,
-    CommentDto, CreateEventReq, CreateIssueReq, CreateRepoIssueReq, CreateReq, CreateReviewReq,
-    CreateSessionGroupReq, CreateSessionSpaceReq, CreateTokenReq, CreateWatchReq, CreatedTokenView,
-    CustomMcpReq, CustomMcpView, DeleteSessionGroupReq, DeleteSessionSpaceReq, DeploymentReq,
-    DeploymentView, DiagnosticsView, EffectiveProfileView, EnsureResumptionCueReq,
+    AutomationTokenReq, AutomationTokenView, BranchStatusReq, BranchView, ChannelMessageView,
+    ChannelSubscriptionView, ChannelView, CloneProfileReq, CommentDto, CreateChannelMessageReq,
+    CreateChannelReq, CreateEventReq, CreateIssueReq, CreateRepoIssueReq, CreateReq,
+    CreateReviewReq, CreateSessionGroupReq, CreateSessionSpaceReq, CreateTokenReq, CreateWatchReq,
+    CreatedTokenView, CustomMcpReq, CustomMcpView, DeleteSessionGroupReq, DeleteSessionSpaceReq,
+    DeploymentReq, DeploymentView, DiagnosticsView, EffectiveProfileView, EnsureResumptionCueReq,
     ExpectedReviewRevisionReq, FederationReq, FederationView, HandoffReq, HistoryPageView,
     IssueActionsReq, IssueActionsResult, IssueView, McpRegistryView, MoveSessionsReq,
     NewCommentBody, NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq, ProfileProbeView,
@@ -24,10 +25,10 @@ use crate::dto::{
     ResolveLaunchReq, ResolveReviewCommentReq, ResolvedLaunchView, RestoreSessionGroupsReq,
     ResumptionCueView, ReviewCommentDto, ReviewDto, RunReq, RunView, RunWatchReq,
     ScratchLimitsView, SearchSessionsOptions, SendReq, SessionGroupPreferenceReq,
-    SessionLayoutView, SessionPlacementSelectorKind, SessionView, SetSessionPlacementDefaultReq,
-    SetTagsReq, SetTitleGenerationReq, SettingsEnvelope, SubmitReviewReq, TagReq, ThreadDto,
-    TokenView, UpdateReviewCommentReq, UpdateReviewReq, UpdateSessionGroupReq,
-    UpdateSessionSpaceReq, WatchView,
+    SessionLayoutView, SessionPlacementSelectorKind, SessionView, SetChannelReadMarkerReq,
+    SetChannelSubscriptionReq, SetSessionPlacementDefaultReq, SetTagsReq, SetTitleGenerationReq,
+    SettingsEnvelope, SubmitReviewReq, TagReq, ThreadDto, TokenView, UpdateReviewCommentReq,
+    UpdateReviewReq, UpdateSessionGroupReq, UpdateSessionSpaceReq, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -614,6 +615,75 @@ impl Client {
     pub async fn branch_log(&self, key: &str) -> Result<Vec<weaver_core::events::Event>> {
         self.get_typed(&format!("/api/branches/{}/events", Self::seg(key)))
             .await
+    }
+
+    // -- Channels ----------------------------------------------------------
+
+    pub async fn list_channels(&self, archived: bool) -> Result<Vec<ChannelView>> {
+        self.get_typed(&format!("/api/channels?archived={archived}"))
+            .await
+    }
+
+    pub async fn create_channel(&self, req: &CreateChannelReq) -> Result<ChannelView> {
+        self.send_typed(Method::POST, "/api/channels", Some(req))
+            .await
+    }
+
+    pub async fn get_channel(&self, id: &str) -> Result<ChannelView> {
+        self.get_typed(&format!("/api/channels/{}", Self::seg(id)))
+            .await
+    }
+
+    pub async fn channel_messages(&self, id: &str, after: i64) -> Result<Vec<ChannelMessageView>> {
+        self.get_typed(&format!(
+            "/api/channels/{}/messages?after={}",
+            Self::seg(id),
+            after.max(0)
+        ))
+        .await
+    }
+
+    pub async fn send_channel_message(
+        &self,
+        id: &str,
+        req: &CreateChannelMessageReq,
+    ) -> Result<ChannelMessageView> {
+        self.send_typed(
+            Method::POST,
+            &format!("/api/channels/{}/messages", Self::seg(id)),
+            Some(req),
+        )
+        .await
+    }
+
+    pub async fn set_channel_subscription(
+        &self,
+        id: &str,
+        mode: &str,
+        session_id: Option<&str>,
+    ) -> Result<ChannelSubscriptionView> {
+        self.send_typed(
+            Method::PUT,
+            &format!("/api/channels/{}/subscription", Self::seg(id)),
+            Some(&SetChannelSubscriptionReq {
+                mode: mode.to_string(),
+                session_id: session_id.map(str::to_string),
+            }),
+        )
+        .await
+    }
+
+    pub async fn mark_channel_read(
+        &self,
+        id: &str,
+        seq: Option<i64>,
+    ) -> Result<ChannelSubscriptionView> {
+        self.send_typed(
+            Method::PUT,
+            &format!("/api/channels/{}/read-marker", Self::seg(id)),
+            Some(&SetChannelReadMarkerReq { seq }),
+        )
+        .await
     }
 
     // -- Branches -----------------------------------------------------------

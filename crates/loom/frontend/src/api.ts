@@ -238,7 +238,44 @@ import type {
   WatchRunResult,
   WatchUpdateInput,
   ProgramView,
+  Channel,
+  ChannelMessage,
+  ChannelSubscription,
 } from './types';
+
+// --- Channels --------------------------------------------------------------
+
+export const listChannels = (archived = false) =>
+  get(`/channels?archived=${archived}`) as Promise<Channel[]>;
+
+export const getChannel = (id: string) =>
+  get(`/channels/${encodeURIComponent(id)}`) as Promise<Channel>;
+
+export const createChannel = (name: string, topic: string, repoRoot: string) =>
+  post('/channels', { name, topic, repo_root: repoRoot }) as Promise<Channel>;
+
+export const listChannelMessages = (id: string, after = 0) =>
+  get(`/channels/${encodeURIComponent(id)}/messages?after=${Math.max(0, after)}`) as Promise<
+    ChannelMessage[]
+  >;
+
+export const sendChannelMessage = (
+  id: string,
+  body: string,
+  kind: ChannelMessage['kind'] = 'message',
+  urgency: ChannelMessage['urgency'] = 'normal',
+) =>
+  post(`/channels/${encodeURIComponent(id)}/messages`, {
+    body,
+    kind,
+    urgency,
+    payload: {},
+  }) as Promise<ChannelMessage>;
+
+export const markChannelRead = (id: string, seq?: number) =>
+  put(`/channels/${encodeURIComponent(id)}/read-marker`, {
+    seq,
+  }) as Promise<ChannelSubscription>;
 
 // --- Managed repos ---------------------------------------------------------
 

@@ -44,7 +44,7 @@ other `weaver` subcommand.
 | `crates/weaver-core/` | lib: `branches`, `issues`, `events`, `db`, `migrations` (ordered SQL + `schema_migrations` indicator), `git`, `config`, `artifacts` (versioned documents), `review` (durable staged feedback + delivery outbox), `repo_config` (`.weaver/config.toml`), `transcript` (agent conversation logs: raw → iris format → markdown), agent helpers. Pure logic; used by `loom` for DB access, and by `weaver` only for the DB-free pieces (`transcript`, `tags` constants/validators, the agent primer). |
 | `crates/weaver-api/` | typed loom REST client + DTOs (`Client`, `*View`/`*Req` types, `endpoint::default_client()` for resolving `$WEAVER_API`/`$LOOM_TOKEN`). Zero server deps (no `axum`, no sqlite driver) — the one cross-process seam `weaver` links against instead of `weaver-core`'s DB layer. |
 | `crates/smartdoc/` | the markdown-convention layer: parse references (`#N`, `artifact:<name>`), project live status into the render. Dependency-free of weaver. See [artifacts.md](artifacts.md). |
-| `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`summary`, `readme`, `status` [read or set level + message], `tag` [`set`/`rm`/`ls` a branch tag], `issue …`, `where`, `log`, `chatlog` [render the agent's conversation transcript], `hook`, `config` [read-only: `get`/`ls`; writes go through `loom config set` or the settings pane]) — every command drives `weaver-api::Client` over HTTP; none touch sqlite |
+| `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`summary`, `readme`, `status` [read or set level + message], `channel …`, `tag` [`set`/`rm`/`ls` a branch tag], explicit-backlog `issue …`, `where`, `log`, `chatlog` [render the agent's conversation transcript], `hook`, `config` [read-only: `get`/`ls`; writes go through `loom config set` or the settings pane]) — every command drives `weaver-api::Client` over HTTP; none touch sqlite |
 | `crates/loom/src/web/` | axum routes, request/response types, SSE — **the API surface** (incl. the auth middleware + login/token/user handlers) |
 | `crates/loom/src/lib.rs` | crate boundary plus the shared `AppState` process composition; runtime services and `web/*` consume this state, while the crate does not publicly re-export `weaver-core` storage/domain modules |
 | `crates/loom/src/auth.rs` | authentication core: token/password crypto, the `users`/`api_tokens`/`auth_sessions` tables, the machine-local token, and the GitHub OAuth calls. `axum`-free so it unit-tests directly |
@@ -63,6 +63,7 @@ other `weaver` subcommand.
 | `crates/loom/src/provision.rs` | ordinary session provisioning: trusted actor attribution, canonical launch resolution, repository/worktree/setup lifecycle, stamped launch snapshots, tracking, recoverable launch-failure surfacing, and title generation; returns only the created `Session` + `Branch` domain facts |
 | `crates/loom/src/scratch.rs` | shared Scratch validation and filesystem storage for launch-time attachments and live route mutations; Axum-free semantic errors keep transport mapping in `web/` |
 | `crates/loom/src/session.rs` | `Session` row + sqlx queries |
+| `crates/loom/src/channels.rs` | same-id session channels and custom communication contexts: atomic creation, append-only typed messages, per-subject subscriptions/read markers, lifecycle, and runtime-delivery receipts |
 | `crates/loom/src/session_layout.rs` | durable Spaces → Groups → Sessions placement, defaults, ordering, optimistic mutation revisions, and revision-invalidation publication; independent of immutable provenance and launch policy |
 | `crates/loom/src/session_manager.rs` | database-backed ownership reconciliation for detached agent/debug supervisors; removes Loom-namespaced runtimes without a live session or active launch-reservation owner |
 | `crates/loom/src/review_delivery.rs` | submitted-review outbox and protected conversation-inbox delivery, including ACP claim fencing and terminal retry/rehome behavior |
@@ -156,7 +157,8 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
     origins default to `automation` while `github`/`slack` stay `interactive` —
     a person asked for those sessions and expects to find them on the board;
     `turn_count` — incremented on each `working` lifecycle edge;
-    `tracking_issue_id` — the weaver issue opened at create. One *active*
+    `tracking_issue_id` — the optional explicitly claimed/imported compatibility
+    work item. One *active*
     session per branch is enforced by a partial unique index on `branch_id`
     where `status NOT IN ('done', 'error', 'archived')` — an archived session
     releases its branch slot, so relaunching a done/archived branch is never
@@ -164,6 +166,9 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
     `session_groups`, `session_placements` (one canonical ordered placement per
     session), `session_placement_defaults` (origin/profile routing), and
     `user_session_group_state` (operator-local collapse preferences),
+    `channels`, `channel_messages`, `channel_subscriptions`, and
+    `channel_deliveries` (durable communication context, append-only stream,
+    per-subject read/mode state, and separate runtime acceptance receipts),
     `recent_repos`,
     `branch_github` (per-branch PR snapshot), `chat_blocks` (the ACP
     [chat journal](#rest-api): one row per `(session_id, turn, seq)` block),
@@ -272,7 +277,10 @@ route truth, including internal proxy and compatibility paths.
 | `GET /metrics` | public OpenMetrics scrape derived from durable session/profile/run/migration state; labels are bounded operational dimensions and never contain session/branch/path/user/token/error values (deployments normally restrict this at the public edge) |
 | `GET /api/diagnostics` | admin-only redacted counts, profile capacity, automation failures/staleness, orphan/error inventory, migration state, and non-secret federation metadata; backs Settings → Diagnostics |
 | `POST /api/session-launches/resolve` | resolve a canonical profile selection plus one-launch overrides into concrete selectors, provenance, policy, capacity, validation, and profile/resolver revisions without provisioning |
-| `GET /api/sessions` / `POST /api/sessions` | list / create sessions (list takes `archived` — default `false` — `automation` — default `false` — and admin-only `managed` — default `false`; canonical create requires both revisions from resolve and returns 409 plus a fresh preview on drift/admission change; flattened selectors remain compatible; valid Scratch input is decoded before provisioning; visible creates atomically assign configured origin/profile placement while managed warm infrastructure has no placement or layout revision effect; create stamps `resolved_launch`, opens a tracking issue, and returns its id as `tracking_issue`) |
+| `GET /api/sessions` / `POST /api/sessions` | list / create sessions (list takes `archived` — default `false` — `automation` — default `false` — and admin-only `managed` — default `false`; canonical create requires both revisions from resolve and returns 409 plus a fresh preview on drift/admission change; flattened selectors remain compatible; valid Scratch input is decoded before provisioning; visible creates atomically assign configured origin/profile placement and a same-id default channel while managed warm infrastructure has no placement or layout revision effect; create stamps `resolved_launch`; `tracking_issue` is present only for an explicit claimed/imported work item) |
+| `GET POST /api/channels`; `GET DELETE /api/channels/{id}` | list/create communication contexts, inspect one, or archive a custom channel; session channels follow their session lifecycle |
+| `GET POST /api/channels/{id}/messages` | read the ordered append-only stream or append a typed goal/message/status/result/system item; an external ordinary message to a session channel also receives a runtime delivery receipt |
+| `PUT /api/channels/{id}/{subscription,read-marker}` | set the caller's observe/deliver mode or monotonic read-through sequence |
 | `GET /api/sessions/summary` | compact fleet row projection for polling and search; accepts `archived`, `archived_only`, `automation`, `q`, `status`, and `attention`, searches goal text server-side without returning goals, and omits launch/MCP/title-generation/runtime detail retained by `GET /api/sessions/{id}` |
 | `GET /api/sessions/search` | case-insensitive fleet search across qualified placement, title/prompt, repo/branch, issue/PR, tags, status, profile, and provenance; optional widening `history`, archived-only `archived_only`, `status`, and `attention` filters |
 | `GET /api/session-layout`; `GET /api/session-layout/events` | admin-only read of the ordered Spaces → Groups → Sessions model plus defaults/revision; SSE is invalidation-only and every membership/layout change emits one so clients reload canonical state |
@@ -333,7 +341,7 @@ route truth, including internal proxy and compatibility paths.
 | `PUT /api/sessions/{id}/mode` | `{mode_id}` → change the ACP session's permission mode (`session/set_mode`), journaled as a `mode_change` |
 | `GET /api/branches` / `GET PATCH /api/branches/{id}` | list / inspect / edit tracked branches |
 | `GET POST /api/branches/{id}/issues` | issues claimed by the branch / create one |
-| `GET /api/issues?all=…` | the cross-repo issue board (every repo's issues; `all=true` includes closed, `automation=true` includes automation-class sessions' tracking issues, otherwise hidden) — what the loom Issues pane reads |
+| `GET /api/issues?all=…` | the cross-repo intentional-work board (every repo's explicit issues; `all=true` includes closed, `automation=true` includes automation-class sessions' claimed items, otherwise hidden) — what the loom Backlog pane reads |
 | `POST /api/issues/actions` | atomically close, reopen, tag/untag, or delete a validated set of issue IDs; returns updated views/deleted IDs or structured precondition details with no mutation |
 | `GET PATCH DELETE /api/issues/{id}` | per-issue CRUD |
 | `PUT DELETE /api/issues/{id}/tags/{key}` | set (upsert) / clear a free-form issue label — quiet `(key, value)` pills, no loud `attention`/`triage` ladder |
@@ -374,8 +382,8 @@ the journal's latest `usage` block), `origin` (the channel that created it:
 `user`/`agent`/`github`/`slack`/`watch`/`actions`/`ops`), `class`
 (`interactive`/`automation`), `turn_count` (incremented on each `working`
 lifecycle edge), `placement` (qualified space/group plus integer rank), and
-`tracking_issue` (the weaver issue opened at create; populated on every read,
-not just the create response)) plus a nested
+`tracking_issue` (an optional explicit claimed/imported compatibility work item,
+populated on every read)) plus a nested
 `branch: BranchView`
 (`id`, `name`, `title`, `goal`, `description`, `tags`,
 `repo_root`, `branch`, `base_branch`, `created_at`, `updated_at`,
@@ -680,8 +688,9 @@ launched interactively by a human, excluding a watch's own warm sessions —
 carries a turn cap (`automation.turn_cap`, default `100`, `0` disables)
 counted by `sessions.turn_count`. Exceeding the cap raises a loud `blocked`
 attention tag and the ACP driver refuses to start a new turn. The monitor also
-reaps automation sessions: one is archived once its `tracking_issue_id`
-closes, or after `automation.idle_archive_secs` (default `28800`, `0`
+reaps automation sessions: a legacy explicit work-item session is archived once
+its `tracking_issue_id` closes; any automation session is eligible after
+`automation.idle_archive_secs` (default `28800`, `0`
 disables) of inactivity — both guarded by a no-live-turn check and a grace
 period, so a session mid-turn or only just gone quiet is never torn down out
 from under it. Every automatic retention path skips a branch carrying the exact

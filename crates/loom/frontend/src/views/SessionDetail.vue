@@ -11,7 +11,7 @@ import {
   nextTick,
 } from 'vue';
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router';
-import { clearSessionTag, get, getSession, ideInfo } from '../api';
+import { clearSessionTag, get, getSession, ideInfo, markChannelRead } from '../api';
 import type { Session, WeaverEvent } from '../types';
 import SessionTerminals from '../components/SessionTerminals.vue';
 import IdeFrame from '../components/IdeFrame.vue';
@@ -31,6 +31,7 @@ import { signalChips } from '../lib/sessionState';
 // deep-links) resolves to this one instance, so moving terminal ⇄ artifacts is a
 // tab flip on a warm page — no remount, no reconnect, no jump.
 defineOptions({ name: 'SessionDetail' });
+const CHANNEL_ACK_ERROR = "Couldn't acknowledge the channel's new messages.";
 
 const props = defineProps<{ id: string; name?: string }>();
 const route = useRoute();
@@ -326,6 +327,15 @@ async function loadSession() {
 
 async function acknowledgeSessionAttention(): Promise<string> {
   let session = await getSession(props.id);
+  let channelMarkerFailed = false;
+  try {
+    // The session id is also its default channel id. Opening the workbench is
+    // the user's acknowledgement gesture for both legacy tags and channel
+    // urgency; future messages raise unread attention again.
+    await markChannelRead(props.id);
+  } catch {
+    channelMarkerFailed = true;
+  }
   // Attention is a wake-up signal, not a permanent task state. Entering (or
   // returning to) a session acknowledges every loud tag visible in the
   // snapshot the user opened. Lifecycle failures remain visible because they
@@ -334,7 +344,7 @@ async function acknowledgeSessionAttention(): Promise<string> {
   const keys = [...new Set(signalChips(session).map((chip) => chip.key))];
   if (!keys.length) {
     ws.value = session;
-    return '';
+    return channelMarkerFailed ? CHANNEL_ACK_ERROR : '';
   }
   const results = await Promise.allSettled(keys.map((key) => clearSessionTag(props.id, key)));
   // Re-read even after a partial failure: successful acknowledgements should
@@ -343,7 +353,12 @@ async function acknowledgeSessionAttention(): Promise<string> {
   session = await getSession(props.id);
   ws.value = session;
   const failed = results.filter((result) => result.status === 'rejected').length;
-  return failed ? `Couldn't acknowledge ${failed} attention signal${failed === 1 ? '' : 's'}.` : '';
+  const notices = [];
+  if (failed) {
+    notices.push(`Couldn't acknowledge ${failed} attention signal${failed === 1 ? '' : 's'}.`);
+  }
+  if (channelMarkerFailed) notices.push(CHANNEL_ACK_ERROR);
+  return notices.join(' ');
 }
 
 async function loadAllWith(sessionLoad: () => Promise<string>) {

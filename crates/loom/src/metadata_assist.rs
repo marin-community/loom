@@ -553,7 +553,10 @@ async fn generate_title(
         )
         .await?
         {
-            TitleUpdate::Applied(_) => "generated",
+            TitleUpdate::Applied(_) => {
+                crate::channels::update_branch_channel_names(db, &branch.id, &output).await?;
+                "generated"
+            }
             TitleUpdate::Stale(current) if !current.title_provenance.can_generate(true) => {
                 "protected"
             }

@@ -212,11 +212,26 @@ async fn health_is_public_but_protected_routes_are_not() {
 #[serial]
 async fn session_token_is_limited_to_its_tree_and_work_items() {
     let ts = TestServer::start().await;
+    let explicit = weaver_core::issue::add(
+        &ts.state.db,
+        &weaver_core::issue::NewIssue {
+            repo_root: ts.cwd(),
+            title: "explicit scoped work".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     let created = ts
         .client
         .post(
             "/api/sessions",
-            json!({ "cwd": ts.cwd(), "goal": "scoped parent", "agent": "shell" }),
+            json!({
+                "cwd": ts.cwd(),
+                "goal": "scoped parent",
+                "agent": "shell",
+                "claim_issue": explicit.id
+            }),
         )
         .await
         .unwrap();
@@ -260,6 +275,13 @@ async fn session_token_is_limited_to_its_tree_and_work_items() {
         .await
         .unwrap();
     assert_eq!(own.status(), StatusCode::OK);
+    let own_channel = http
+        .get(url(&ts, &format!("/api/channels/{session_id}")))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(own_channel.status(), StatusCode::OK);
     let issue = http
         .get(url(&ts, &format!("/api/issues/{tracking_issue}")))
         .bearer_auth(&token)
@@ -284,11 +306,85 @@ async fn session_token_is_limited_to_its_tree_and_work_items() {
         .unwrap();
     assert_eq!(child.status(), StatusCode::OK);
     let child: Value = child.json().await.unwrap();
+    let child_id = child["id"].as_str().unwrap();
     let child_row = loom::session::get(&ts.state.db, child["id"].as_str().unwrap())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(child_row.parent_session_id.as_deref(), Some(session_id));
+    let child_channel = http
+        .get(url(&ts, &format!("/api/channels/{child_id}")))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(child_channel.status(), StatusCode::OK);
+    let custom = http
+        .post(url(&ts, "/api/channels"))
+        .bearer_auth(&token)
+        .json(&json!({ "name": "shared review", "topic": "explicit pipe" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(custom.status(), StatusCode::CREATED);
+    let custom: Value = custom.json().await.unwrap();
+    let custom_id = custom["id"].as_str().unwrap();
+    let invite = http
+        .put(url(&ts, &format!("/api/channels/{custom_id}/subscription")))
+        .bearer_auth(&token)
+        .json(&json!({ "mode": "deliver", "session_id": child_id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invite.status(), StatusCode::OK);
+    let invite: Value = invite.json().await.unwrap();
+    assert_eq!(invite["subject_id"], child_id);
+    assert_eq!(invite["mode"], "deliver");
+    let visible_channels = http
+        .get(url(&ts, "/api/channels"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(visible_channels.status(), StatusCode::OK);
+    let visible_channels: Vec<Value> = visible_channels.json().await.unwrap();
+    let visible_ids = visible_channels
+        .iter()
+        .filter_map(|channel| channel["id"].as_str())
+        .collect::<Vec<_>>();
+    assert!(visible_ids.contains(&session_id));
+    assert!(visible_ids.contains(&child_id));
+    assert!(visible_ids.contains(&custom_id));
+    assert!(!visible_ids.contains(&sibling_id.as_str()));
+    let child_token = loom::auth::create_session_token(
+        &ts.state.db,
+        Some("rjpower"),
+        child_id,
+        &child_row.branch_id,
+    )
+    .await
+    .unwrap();
+    let invited_archive = http
+        .delete(url(&ts, &format!("/api/channels/{custom_id}")))
+        .bearer_auth(&child_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invited_archive.status(), StatusCode::FORBIDDEN);
+    let sibling_channel = http
+        .get(url(&ts, &format!("/api/channels/{sibling_id}")))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sibling_channel.status(), StatusCode::FORBIDDEN);
+    let creator_archive = http
+        .delete(url(&ts, &format!("/api/channels/{custom_id}")))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(creator_archive.status(), StatusCode::OK);
 
     let unrelated = http
         .get(url(&ts, &format!("/api/issues/{}", unrelated.id)))

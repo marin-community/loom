@@ -654,7 +654,7 @@ async function removeTag(i: Issue, key: string) {
     <!-- One toolbar line: view label, open count, then the filters pushed
          right — same anatomy as the fleet list's toolbar. -->
     <div class="mb-3 flex min-h-7 flex-wrap items-center gap-2.5">
-      <h1 class="text-2xs font-semibold uppercase tracking-wider text-muted">Issues</h1>
+      <h1 class="text-2xs font-semibold uppercase tracking-wider text-muted">Backlog</h1>
       <span class="pill font-mono" data-testid="issues-open-count">{{ openCount }} open</span>
       <span
         v-if="hasScope"

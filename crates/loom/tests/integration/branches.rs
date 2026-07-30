@@ -1,13 +1,13 @@
-//! Branches and their issues: the tracking issue a launch opens, branch-claimed
-//! issues vs the repo-wide board, claim release on teardown, and attaching a
-//! session to a pre-existing git branch (with or without an existing worktree).
+//! Branches and intentional work items: branch-claimed issues vs the repo-wide
+//! board, claim release on teardown, and attaching a session to a pre-existing
+//! git branch (with or without an existing worktree).
 
 use serde_json::json;
 use serial_test::serial;
 
 use crate::fixtures::{branch_tag, branch_tag_value, sh, TestServer};
 
-/// A launch opens a self-sourced tracking issue; hand-created issues are claimed
+/// Ordinary launches do not manufacture issues. Hand-created issues are claimed
 /// by the branch and show on the repo board; teardown releases the claims but
 /// keeps the issues.
 #[serial]
@@ -36,26 +36,13 @@ async fn branch_issues_and_repo_board() {
     let arr = branches.as_array().unwrap();
     assert_eq!(arr.len(), 1, "one branch tracked");
     assert_eq!(arr[0]["branch"], "weaver/integration-test-goal");
-    // The launch opened one tracking issue, claimed by the new branch. With no
-    // parent agent it is self-sourced (source_branch == claimed_branch).
-    assert_eq!(
-        arr[0]["open_issue_count"], 1,
-        "launch opens a tracking issue"
-    );
+    assert_eq!(arr[0]["open_issue_count"], 0);
     let tracking = client
         .get(&format!("/api/branches/{branch_id}/issues"))
         .await
         .unwrap();
     let tracking = tracking.as_array().unwrap();
-    assert_eq!(tracking.len(), 1, "exactly the tracking issue");
-    assert_eq!(
-        tracking[0]["claimed_branch"],
-        "weaver/integration-test-goal"
-    );
-    assert_eq!(
-        tracking[0]["source_branch"], "weaver/integration-test-goal",
-        "self-sourced when no parent launched it"
-    );
+    assert!(tracking.is_empty(), "ordinary launch opens no issue");
 
     // Branch issues are claimed by the branch; the repo-wide board lives at
     // /api/repos/issues.
@@ -78,20 +65,20 @@ async fn branch_issues_and_repo_board() {
         .unwrap();
     assert_eq!(
         listed.as_array().unwrap().len(),
-        2,
-        "the tracking issue plus the hand-created one"
+        1,
+        "only the hand-created work item"
     );
     let branch_view = client
         .get(&format!("/api/branches/{branch_id}"))
         .await
         .unwrap();
-    assert_eq!(branch_view["open_issue_count"], 2);
-    // The repo board sees both claimed issues; the unclaimed backlog does not.
+    assert_eq!(branch_view["open_issue_count"], 1);
+    // The repo board sees the claimed issue; the unclaimed backlog does not.
     let board = client
         .get(&format!("/api/repos/issues?repo_root={repo_root}"))
         .await
         .unwrap();
-    assert_eq!(board.as_array().unwrap().len(), 2);
+    assert_eq!(board.as_array().unwrap().len(), 1);
     let backlog = client
         .get(&format!(
             "/api/repos/issues?repo_root={repo_root}&scope=backlog"
@@ -104,16 +91,15 @@ async fn branch_issues_and_repo_board() {
         "issue is claimed, not backlog"
     );
 
-    // Issues are repo-owned: deleting the session returns its claimed issues to
-    // the unclaimed backlog rather than deleting them. The tracking issue and
-    // the hand-created "fix it" both survive, every claim released.
+    // Issues are repo-owned: deleting the session returns its claimed issue to
+    // the unclaimed backlog rather than deleting it.
     client.delete(&format!("/api/sessions/{id}")).await.unwrap();
     let board = client
         .get(&format!("/api/repos/issues?repo_root={repo_root}&all=true"))
         .await
         .unwrap();
     let board = board.as_array().unwrap();
-    assert_eq!(board.len(), 2, "tracking + manual issues survived teardown");
+    assert_eq!(board.len(), 1, "manual issue survived teardown");
     assert!(
         board.iter().all(|i| i["claimed_branch"].is_null()),
         "every claim was released on teardown"
