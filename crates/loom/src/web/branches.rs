@@ -205,11 +205,7 @@ pub(super) async fn set_branch_status(
     if let Some(channel_id) =
         crate::channels::session_channel_for_branch(&st.db, &branch.id).await?
     {
-        let urgency = match level.as_str() {
-            "blocked" => crate::channels::Urgency::Blocked,
-            "attention" => crate::channels::Urgency::Attention,
-            _ => crate::channels::Urgency::Normal,
-        };
+        let urgency = crate::channels::Urgency::from_status_level(&level);
         let author =
             crate::channels::Subject::new(crate::channels::SubjectKind::Session, &channel_id);
         crate::channels::append(

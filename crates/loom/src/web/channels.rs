@@ -12,7 +12,7 @@ use weaver_api::{
 
 use crate::{
     auth::{Grant, Principal},
-    channels::{self, MessageKind, NewMessage, Subject, SubjectKind, Urgency},
+    channels::{self, MessageKind, NewMessage, Subject, SubjectKind, SubscriptionMode, Urgency},
     events,
 };
 
@@ -237,7 +237,8 @@ pub(super) async fn set_channel_subscription(
     Json(req): Json<SetChannelSubscriptionReq>,
 ) -> ApiResult<Json<ChannelSubscriptionView>> {
     require_channel(&st, &id).await?;
-    validate_subscription_mode(&req.mode)?;
+    let mode = SubscriptionMode::parse(&req.mode)
+        .ok_or_else(|| AppError::bad_request("unknown channel subscription mode"))?;
     let subject = match req
         .session_id
         .as_deref()
@@ -271,7 +272,7 @@ pub(super) async fn set_channel_subscription(
         }
     };
     Ok(Json(
-        channels::set_subscription(&st.db, &id, &subject, &req.mode).await?,
+        channels::set_subscription(&st.db, &id, &subject, mode).await?,
     ))
 }
 
@@ -336,12 +337,4 @@ fn validate_text(name: &str, value: &str, min: usize, max: usize) -> ApiResult<(
         )));
     }
     Ok(())
-}
-
-fn validate_subscription_mode(value: &str) -> ApiResult<()> {
-    if matches!(value, channels::OBSERVE_MODE | channels::DELIVER_MODE) {
-        Ok(())
-    } else {
-        Err(AppError::bad_request("unknown channel subscription mode"))
-    }
 }

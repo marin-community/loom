@@ -17,9 +17,6 @@ pub const CUSTOM_KIND: &str = "custom";
 pub const OPEN_STATE: &str = "open";
 pub const ARCHIVED_STATE: &str = "archived";
 
-pub const OBSERVE_MODE: &str = weaver_api::CHANNEL_DEFAULT_SUBSCRIPTION_MODE;
-pub const DELIVER_MODE: &str = "deliver";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageKind {
     Goal,
@@ -53,6 +50,29 @@ impl MessageKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionMode {
+    Observe,
+    Deliver,
+}
+
+impl SubscriptionMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Observe => weaver_api::CHANNEL_DEFAULT_SUBSCRIPTION_MODE,
+            Self::Deliver => "deliver",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "observe" => Some(Self::Observe),
+            "deliver" => Some(Self::Deliver),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Urgency {
     Normal,
     Attention,
@@ -74,6 +94,14 @@ impl Urgency {
             "attention" => Some(Self::Attention),
             "blocked" => Some(Self::Blocked),
             _ => None,
+        }
+    }
+
+    pub fn from_status_level(value: &str) -> Self {
+        match value {
+            "blocked" => Self::Blocked,
+            "attention" => Self::Attention,
+            _ => Self::Normal,
         }
     }
 }
@@ -250,7 +278,7 @@ pub(crate) async fn insert_session_channel_tx(
         tx,
         &session.id,
         &Subject::new(SubjectKind::Session, &session.id),
-        Some(DELIVER_MODE),
+        Some(SubscriptionMode::Deliver),
         Some(goal_seq),
         &now,
     )
@@ -259,7 +287,7 @@ pub(crate) async fn insert_session_channel_tx(
         tx,
         &session.id,
         &Subject::from_parts(&policy.creator_kind, &policy.creator_subject)?,
-        Some(OBSERVE_MODE),
+        Some(SubscriptionMode::Observe),
         Some(goal_seq),
         &now,
     )
@@ -269,7 +297,7 @@ pub(crate) async fn insert_session_channel_tx(
             tx,
             &session.id,
             &Subject::new(SubjectKind::User, username),
-            Some(OBSERVE_MODE),
+            Some(SubscriptionMode::Observe),
             Some(goal_seq),
             &now,
         )
@@ -280,7 +308,7 @@ pub(crate) async fn insert_session_channel_tx(
             tx,
             &session.id,
             &Subject::new(SubjectKind::Session, parent),
-            Some(OBSERVE_MODE),
+            Some(SubscriptionMode::Observe),
             Some(goal_seq),
             &now,
         )
@@ -293,7 +321,7 @@ async fn upsert_subscription_tx(
     tx: &mut SqliteConnection,
     channel_id: &str,
     subject: &Subject,
-    mode: Option<&str>,
+    mode: Option<SubscriptionMode>,
     read_seq: Option<i64>,
     now: &str,
 ) -> Result<()> {
@@ -309,7 +337,7 @@ async fn upsert_subscription_tx(
     .bind(channel_id)
     .bind(subject.kind.as_str())
     .bind(&subject.id)
-    .bind(mode.unwrap_or(OBSERVE_MODE))
+    .bind(mode.unwrap_or(SubscriptionMode::Observe).as_str())
     .bind(read_seq.unwrap_or(0))
     .bind(now)
     .bind(now)
@@ -358,7 +386,15 @@ pub async fn create_custom(
     .bind(&now)
     .execute(&mut *tx)
     .await?;
-    upsert_subscription_tx(&mut tx, &id, creator, Some(OBSERVE_MODE), Some(0), &now).await?;
+    upsert_subscription_tx(
+        &mut tx,
+        &id,
+        creator,
+        Some(SubscriptionMode::Observe),
+        Some(0),
+        &now,
+    )
+    .await?;
     tx.commit().await?;
     get(db, &id, creator)
         .await?
@@ -546,7 +582,7 @@ async fn message_view(db: &Db, row: MessageRow) -> Result<ChannelMessageView> {
         author_kind: row.author_kind,
         author_id: row.author_id,
         body: row.body,
-        payload: serde_json::from_str(&row.payload).unwrap_or(Value::Null),
+        payload: serde_json::from_str(&row.payload)?,
         reply_to: row.reply_to,
         created_at: row.created_at,
         deliveries,
@@ -642,7 +678,7 @@ pub async fn set_subscription(
     db: &Db,
     channel_id: &str,
     subject: &Subject,
-    mode: &str,
+    mode: SubscriptionMode,
 ) -> Result<ChannelSubscriptionView> {
     let now = now_iso();
     let mut tx = weaver_core::db::begin_immediate(db).await?;
@@ -994,7 +1030,7 @@ mod tests {
         assert_eq!(posted.id, replay.id, "idempotent replay appends once");
 
         let subscription = mark_read(&db, "session-1", &owner, None).await.unwrap();
-        assert_eq!(subscription.mode, DELIVER_MODE);
+        assert_eq!(subscription.mode, SubscriptionMode::Deliver.as_str());
         assert_eq!(subscription.read_seq, posted.seq);
 
         let custom = create_custom(
@@ -1007,7 +1043,7 @@ mod tests {
         )
         .await
         .unwrap();
-        set_subscription(&db, &custom.id, &owner, DELIVER_MODE)
+        set_subscription(&db, &custom.id, &owner, SubscriptionMode::Deliver)
             .await
             .unwrap();
         assert_eq!(
