@@ -4,111 +4,37 @@
 //! the REST API, the Vue web UI, the monitor loop, and recently-used repository
 //! bookkeeping. The agent-facing `weaver` CLI does not depend on loom; running
 //! loom is purely additive.
+//!
+//! This crate is the HTTP/SSE/WebSocket adapter and the CLI. The engine beneath
+//! it is three crates, stacked: [`loom_ctx`] (leaf utilities and the ambient
+//! `Ctx`), [`loom_domain`] (persistent state and the rules over it), and
+//! [`loom_ops`] (everything that reaches outside the process). Each is
+//! re-exported here, so `loom::session`, `loom::AppState` and friends name the
+//! same items they always did regardless of which crate now defines them.
 
-pub mod acp;
-pub mod agent;
-pub mod agent_env;
-pub mod auth;
-pub mod automation;
-pub mod backend;
-pub mod builtins;
-pub(crate) mod changes;
-pub(crate) mod channels;
-pub mod chat;
-pub(crate) mod chatlog;
 pub mod client;
-pub mod client_context;
-pub mod ctx;
-pub mod custom_agents;
-pub mod custom_mcp;
-pub mod db;
 pub mod endpoint;
-pub mod envfile;
-pub mod github;
-pub mod github_app;
-pub mod github_manifest;
-pub mod github_trigger;
-pub(crate) mod handoff;
-pub(crate) mod history;
-pub mod ide;
-pub(crate) mod launch;
-pub mod launch_gate;
-pub mod lifecycle;
-pub mod links;
-pub mod logs;
-pub mod loom_config;
-pub mod mcp;
-pub mod metadata_assist;
-pub mod monitor;
-pub mod profile;
-pub(crate) mod provision;
-pub mod repo;
-pub mod repo_env;
-pub mod review_delivery;
-pub mod review_inbox;
-pub mod runner;
-pub mod runs;
-pub(crate) mod runtime;
-pub(crate) mod scratch;
 pub mod server;
-pub mod session;
-pub(crate) mod session_layout;
-pub mod session_manager;
-pub(crate) mod setup;
-pub mod shell;
-pub(crate) mod slack;
-pub mod status;
-pub(crate) mod tasks;
-pub(crate) mod terminal;
-pub mod user_token;
-pub mod watch;
 pub mod web;
 
-/// Shared process state consumed by Loom's runtime services and REST adapter.
-///
-/// The [`Ctx`] inside is what most of loom actually needs; the fields beside it
-/// are live, process-local registries that only the orchestration and HTTP
-/// layers touch. `AppState` derefs to its `Ctx`, so `st.db` and `st.bus` read
-/// the same whichever one a function was handed.
-#[derive(Clone)]
-pub struct AppState {
-    pub ctx: Ctx,
-    /// Per-session embedded code-server lifecycle + reverse-proxy registry.
-    pub ide: std::sync::Arc<ide::IdeManager>,
-    /// The inbound GitHub trigger: its GitHub gateway (the `gh`-backed default)
-    /// and per-repo rate limiter. Shared across requests; a test swaps in a fake
-    /// gateway via [`github_trigger::GithubTrigger::with_gateway`].
-    pub trigger: std::sync::Arc<github_trigger::GithubTrigger>,
-    /// The registry of live ACP session tasks — the conversation routes drive
-    /// sessions through it and subscribe to its SSE stream.
-    pub acp: acp::AcpRegistry,
-    /// Namespaced repository provisioning, capped-profile admission, and
-    /// per-session Scratch mutation locks.
-    pub launch_gate: launch_gate::RepoLaunchGate,
-}
-
-impl AppState {
-    /// The slice of process state an ACP session task needs — durable state
-    /// plus the task registry, without the editor/GitHub/admission registries
-    /// it never reads.
-    pub fn acp_ctx(&self) -> acp::AcpCtx {
-        acp::AcpCtx {
-            ctx: self.ctx.clone(),
-            acp: self.acp.clone(),
-        }
-    }
-}
-
-impl std::ops::Deref for AppState {
-    type Target = Ctx;
-    fn deref(&self) -> &Ctx {
-        &self.ctx
-    }
-}
-
-pub use ctx::Ctx;
+pub use loom_ctx::Ctx;
+pub use loom_ctx::{
+    backend, changes, client_context, ctx, envfile, launch_gate, links, logs, loom_config, runner,
+    scratch,
+};
+pub use loom_domain::{
+    acp, agent, agent_env, auth, automation, channels, chat, chatlog, custom_agents, custom_mcp,
+    db, history, mcp, profile, repo_env, review_inbox, runs, session, session_layout,
+    session_manager, shell, status,
+};
+pub use loom_ops::AppState;
+pub use loom_ops::{
+    builtins, github, github_app, github_manifest, github_trigger, handoff, ide, launch, lifecycle,
+    metadata_assist, monitor, provision, repo, review_delivery, runtime, setup, slack, tasks,
+    terminal, user_token, watch,
+};
 
 // Crate-local aliases keep Loom implementation imports short without exposing
 // weaver-core's storage and domain modules as part of Loom's public API.
 pub(crate) use weaver_core::db::Db;
-pub(crate) use weaver_core::{branch, config, events, git};
+pub(crate) use weaver_core::{config, events, git};

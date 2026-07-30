@@ -606,8 +606,8 @@ impl GithubTrigger {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_app(app: Arc<crate::github_app::GithubApp>) -> Arc<Self> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_app(app: Arc<crate::github_app::GithubApp>) -> Arc<Self> {
         Arc::new(Self {
             gh: app.clone(),
             app: Some(app),

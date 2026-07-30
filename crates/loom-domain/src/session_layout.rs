@@ -23,13 +23,13 @@ use crate::session::{NewSession, Session, SessionLaunchPolicy};
 
 const USER_INBOX: &str = "group-user-inbox";
 
-pub(crate) async fn publish_invalidation(db: &Db, bus: &EventBus, revision: i64) {
+pub async fn publish_invalidation(db: &Db, bus: &EventBus, revision: i64) {
     crate::events::record_system(db, bus, "session_layout", json!({ "revision": revision }))
         .await
         .ok();
 }
 
-pub(crate) async fn insert_session(
+pub async fn insert_session(
     db: &Db,
     bus: &EventBus,
     session: &NewSession,

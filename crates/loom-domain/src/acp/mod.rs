@@ -846,8 +846,11 @@ impl AcpRegistry {
         generation
     }
 
-    #[cfg(test)]
-    pub(crate) fn register_review_wake_probe(
+    /// Register a probe in place of a real session task, so a test can assert
+    /// which sessions the delivery worker wakes without standing up an adapter.
+    /// Not `#[cfg(test)]`: the suites that drive it live in `loom-ops`, and a
+    /// cfg flag only ever applies within the crate that sets it.
+    pub fn register_review_wake_probe(
         &self,
         session_id: &str,
         acknowledge: bool,
@@ -939,7 +942,7 @@ impl AcpRegistry {
         }
     }
 
-    pub(crate) fn is_claim_owner_live(&self, session_id: &str, owner: &str) -> bool {
+    pub fn is_claim_owner_live(&self, session_id: &str, owner: &str) -> bool {
         self.inner
             .lock()
             .unwrap()

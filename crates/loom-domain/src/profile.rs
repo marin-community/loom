@@ -406,12 +406,12 @@ pub async fn get_including_retired(db: &Db, name: &str) -> Result<Option<Profile
     )
 }
 
-pub(crate) struct PreparedProfile {
+pub struct PreparedProfile {
     normalized: ProfileInput,
     mcp_policy: weaver_api::McpPolicySnapshot,
 }
 
-pub(crate) async fn prepare_input(db: &Db, input: &ProfileInput) -> Result<PreparedProfile> {
+pub async fn prepare_input(db: &Db, input: &ProfileInput) -> Result<PreparedProfile> {
     let (normalized, mcp_policy) = normalized_input(db, input).await?;
     Ok(PreparedProfile {
         normalized,
@@ -799,7 +799,7 @@ async fn create_clone(
 /// Commit an already normalized clone proposal and its environment edits in
 /// one transaction. The caller owns the resolver-generation fence from
 /// [`prepare_input`] through this function.
-pub(crate) async fn create_clone_prepared(
+pub async fn create_clone_prepared(
     db: &Db,
     source_name: &str,
     expected_source_revision: i64,

@@ -16,7 +16,7 @@ use crate::session::{self as session_mod, NewSession, Session};
 use crate::{agent, config, db, events, git, github, repo, setup, AppState, Db};
 
 #[derive(Debug)]
-pub(crate) enum ProvisionError {
+pub enum ProvisionError {
     Invalid(String, Option<Box<ResolvedLaunchView>>),
     Forbidden(String),
     NotFound(String),
@@ -113,7 +113,7 @@ impl From<crate::scratch::ScratchError> for ProvisionError {
 type Result<T> = std::result::Result<T, ProvisionError>;
 
 #[derive(Debug)]
-pub(crate) struct Provisioned {
+pub struct Provisioned {
     pub session: Session,
     pub branch: Branch,
 }
@@ -143,10 +143,10 @@ enum ActorKind {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct Actor(ActorKind);
+pub struct Actor(ActorKind);
 
 impl Actor {
-    pub(crate) fn from_principal(principal: &Principal, delegated: bool) -> Self {
+    pub fn from_principal(principal: &Principal, delegated: bool) -> Self {
         match &principal.grant {
             Grant::Admin => Self(ActorKind::Admin {
                 username: principal.username.clone(),
@@ -170,7 +170,7 @@ impl Actor {
         }
     }
 
-    pub(crate) fn producer(origin: &'static str, subject: impl Into<String>) -> Self {
+    pub fn producer(origin: &'static str, subject: impl Into<String>) -> Self {
         debug_assert!(matches!(
             origin,
             "github" | "slack" | "watch" | "monitor" | "startup"
@@ -181,7 +181,7 @@ impl Actor {
         })
     }
 
-    pub(crate) fn automation(
+    pub fn automation(
         origin: impl Into<String>,
         subject: impl Into<String>,
         profiles: Vec<String>,
@@ -220,7 +220,7 @@ impl Actor {
         }
     }
 
-    pub(crate) fn bound_parent_branch(&self) -> Option<&str> {
+    pub fn bound_parent_branch(&self) -> Option<&str> {
         match &self.0 {
             ActorKind::Session { branch_id, .. } => Some(branch_id),
             _ => None,
@@ -422,7 +422,7 @@ fn create_selection(req: &CreateReq) -> Result<LaunchSelection> {
     Ok(selection.clone())
 }
 
-pub(crate) async fn create(st: AppState, req: CreateReq, actor: Actor) -> Result<Provisioned> {
+pub async fn create(st: AppState, req: CreateReq, actor: Actor) -> Result<Provisioned> {
     let created_by = actor.display_creator();
     let origin = actor.origin();
     tracing::info!(

@@ -238,8 +238,15 @@ impl IntoResponse for AppError {
 impl<E: Into<anyhow::Error>> From<E> for AppError {
     fn from(err: E) -> Self {
         let err = err.into();
+        // A lifecycle transition that refused for a reason the caller could have
+        // avoided carries the status it means; anything else is a real 500.
+        let status = match err.downcast_ref::<crate::lifecycle::Refusal>() {
+            Some(crate::lifecycle::Refusal::Conflict(_)) => StatusCode::CONFLICT,
+            Some(crate::lifecycle::Refusal::Invalid(_)) => StatusCode::BAD_REQUEST,
+            None => StatusCode::INTERNAL_SERVER_ERROR,
+        };
         Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
+            status,
             message: err.to_string(),
             details: None,
             fields: None,

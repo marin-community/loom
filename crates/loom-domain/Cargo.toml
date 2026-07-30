@@ -1,0 +1,51 @@
+[package]
+name = "loom-domain"
+version = "0.2.0"
+edition = "2021"
+description = "Loom's persistent state and the rules over it — sessions, profiles, agents, ACP."
+
+[dependencies]
+loom-ctx = { path = "../loom-ctx" }
+weaver-core = { path = "../weaver-core" }
+weaver-api = { path = "../weaver-api" }
+tapestry = { path = "../tapestry" }
+anyhow = "1"
+# Password hashing for the user/password login path (the OWASP-recommended KDF).
+argon2 = "0.5"
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Hex-encode the SHA-256 digests we store for API tokens and session cookies.
+hex = "0.4"
+# Sign the GitHub App JWT (RS256) we exchange for short-lived installation
+# tokens — the hardening that replaces the ambient GH_TOKEN (crate::github_app).
+jsonwebtoken = "9"
+percent-encoding = "2"
+rand = "0.9"
+# Generate and load the machine-local Ed25519 keypair used to sign scoped
+# automation JWTs. jsonwebtoken performs the actual JWT signing/verification.
+ring = "0.17"
+# `rustls-tls` is needed for the GitHub OAuth token/user calls over HTTPS — the
+# rest of loom's HTTP is loopback to its own daemon, but the OAuth dance reaches
+# github.com directly.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# SHA-256 for hashing API tokens / session ids at rest (high-entropy secrets, so
+# a fast digest is right — the slow KDF above is only for low-entropy passwords).
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "derive"] }
+# The authored `loom.toml` (crate::loom_config) — parsed *and* serialized, unlike
+# weaver-core's read-only `.weaver/config.toml` loader.
+toml = { version = "1", default-features = false, features = ["parse", "display", "serde"] }
+# The watch engine materializes embedded builtin scripts to a scratch file
+# before running them; the tests reuse it for fixtures.
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+
+[dev-dependencies]
+# The suites here share process-global env (WEAVER_HOME and friends), so they
+# must not run concurrently within a test binary; `#[serial]` serializes them.
+serial_test = "3"
+tempfile = "3"

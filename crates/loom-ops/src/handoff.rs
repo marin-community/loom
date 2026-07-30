@@ -16,7 +16,7 @@ const HANDOFF_RECENT_CHARS: usize = 16 * 1024;
 const HANDOFF_SUMMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 #[derive(Debug)]
-pub(crate) enum HandoffError {
+pub enum HandoffError {
     BadRequest(String),
     Forbidden(String),
     NotFound(String),
@@ -165,7 +165,7 @@ fn require_handoff_source(session: &Session) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn resolve_session_handoff(
+pub async fn resolve_session_handoff(
     st: &AppState,
     session: &Session,
     selection: &LaunchSelection,
@@ -357,7 +357,7 @@ async fn legacy_handoff_plan(
 
 /// Replace the provider behind an idle ACP work session while preserving Loom's
 /// stable session/branch/worktree identity and canonical journal.
-pub(crate) async fn handoff_session(
+pub async fn handoff_session(
     st: &AppState,
     initial_session: Session,
     req: HandoffReq,

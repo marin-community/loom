@@ -830,7 +830,7 @@ pub async fn refresh(
 /// session whose PR has merged and close the weaver issues that session claimed.
 /// Split from [`refresh`] so the storage and merge-archive behaviour is testable
 /// without invoking `gh`.
-pub(crate) async fn apply_snapshot(
+pub async fn apply_snapshot(
     state: &AppState,
     session: &Session,
     branch: &Branch,

@@ -6,11 +6,38 @@
 //! restart-time adopt sweep, the watch engine — so keeping the transitions here
 //! lets those paths run without reaching up into the web layer.
 //!
-//! Errors are plain [`anyhow::Error`]; the REST adapter maps them to a status.
+//! Errors are plain [`anyhow::Error`]. A refusal the *caller* could have
+//! avoided carries a [`Refusal`] inside it, so the REST adapter can recover the
+//! status it used to return directly; anything else is a genuine 500.
 
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
+
+/// Why a lifecycle operation refused, when the reason is the caller's to fix.
+///
+/// These transitions are driven from requests *and* from background work, so
+/// they cannot speak in HTTP types. Attaching one of these to the error lets the
+/// REST adapter recover the status while the reaper and the watch engine go on
+/// logging a message like any other failure.
+#[derive(Debug)]
+pub enum Refusal {
+    /// The session is not in a state that permits this — 409.
+    Conflict(String),
+    /// The request itself is not admissible — 400.
+    Invalid(String),
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict(m) | Self::Invalid(m) => f.write_str(m),
+        }
+    }
+}
+
+impl std::error::Error for Refusal {}
+
 use serde_json::{json, Value};
 
 use crate::db::Db;
@@ -24,7 +51,7 @@ use weaver_core::branch::{Branch, TitleProvenance};
 use weaver_core::tags;
 use weaver_core::watch::Watch;
 
-pub(crate) async fn delete_session_row(st: &AppState, session_id: &str) -> Result<()> {
+pub async fn delete_session_row(st: &AppState, session_id: &str) -> Result<()> {
     if let Some(revision) = session_mod::delete(&st.db, session_id).await? {
         crate::session_layout::publish_invalidation(&st.db, &st.bus, revision).await;
     }
@@ -78,7 +105,7 @@ pub(crate) async fn rotate_session_token(
 /// explicit `auto-archive: disabled` opt-out. The check and teardown share the
 /// lifecycle lock, so setting the label before an automatic operation acquires
 /// the lock reliably prevents that operation; manual [`archive`] ignores it.
-pub(crate) async fn auto_archive(
+pub async fn auto_archive(
     st: &AppState,
     session: &Session,
     _branch: &Branch,
@@ -104,7 +131,7 @@ pub(crate) async fn auto_archive(
 
 /// Shared teardown after the caller has acquired the runtime lifecycle lock and
 /// refreshed the session row.
-pub(crate) async fn archive_locked(
+pub async fn archive_locked(
     st: &AppState,
     session: &Session,
     branch: &Branch,
@@ -226,31 +253,33 @@ pub(crate) async fn create_warm_session(
     )
     .await?;
     if !resolved.view.valid {
-        return Err(anyhow!(resolved
-            .view
-            .errors
-            .first()
-            .cloned()
-            .unwrap_or_else(|| {
+        return Err(anyhow!(Refusal::Conflict(
+            resolved.view.errors.first().cloned().unwrap_or_else(|| {
                 "warm session launch is not currently admissible".to_string()
-            })));
+            })
+        )));
     }
     let profile_environment = crate::profile::env_pairs(&st.db, &resolved.profile.name)
         .await
-        .map_err(|error| anyhow!(error.to_string()))?;
+        .map_err(|error| anyhow!(Refusal::Invalid(error.to_string())))?;
     let current_profile = crate::profile::get(&st.db, &resolved.profile.name)
         .await?
-        .ok_or_else(|| anyhow!("watch profile changed during warm launch"))?;
+        .ok_or_else(|| {
+            anyhow!(Refusal::Conflict(
+                "watch profile changed during warm launch".to_string()
+            ))
+        })?;
     if current_profile.revision != resolved.view.profile_revision
         || current_profile.lifetime != resolved.view.profile_lifetime
     {
-        return Err(anyhow!(
-            "watch profile changed during warm launch; retry against a fresh resolution",
-        ));
+        return Err(anyhow!(Refusal::Conflict(
+            "watch profile changed during warm launch; retry against a fresh resolution"
+                .to_string(),
+        )));
     }
     let launch_snapshot =
         crate::launch::serialize_snapshot(&resolved.view, resolved.custom_agent.as_ref())
-            .map_err(|error| anyhow!(error.to_string()))?;
+            .map_err(|error| anyhow!(Refusal::Invalid(error.to_string())))?;
     let custom_agent = resolved.custom_agent.clone();
     let launch_profile = resolved.profile;
     let agent = resolved.view.agent;
@@ -260,9 +289,9 @@ pub(crate) async fn create_warm_session(
     let mode = resolved.view.mode;
     let class = resolved.view.class;
     let stamped_allowed_tools = serde_json::to_string(&resolved.runtime_permissions)
-        .map_err(|error| anyhow!(error.to_string()))?;
-    let stamped_mcp_access =
-        serde_json::to_string(&resolved.mcp_policy).map_err(|error| anyhow!(error.to_string()))?;
+        .map_err(|error| anyhow!(Refusal::Invalid(error.to_string())))?;
+    let stamped_mcp_access = serde_json::to_string(&resolved.mcp_policy)
+        .map_err(|error| anyhow!(Refusal::Invalid(error.to_string())))?;
 
     let launch_permit = st.launch_gate.acquire(&repo_root).await;
     let repo_root_str = repo_root.display().to_string();
@@ -289,7 +318,7 @@ pub(crate) async fn create_warm_session(
     tracing::info!(watch = %watch.id, branch = %branch_name, work_dir = %work_dir.display(), "provisioning worktree for warm session");
     git::worktree_add(&repo_root, &work_dir, &branch_name, &base)
         .await
-        .map_err(|e| anyhow!(e.to_string()))?;
+        .map_err(|e| anyhow!(Refusal::Invalid(e.to_string())))?;
 
     let branch = branch_mod::upsert(&st.db, &repo_root_str, &branch_name, &base).await?;
     branch_mod::set_title(
@@ -335,7 +364,7 @@ pub(crate) async fn create_warm_session(
     if launch_profile.env_clear {
         let allowlist = launch_profile
             .ambient_names()
-            .map_err(|error| anyhow!(error.to_string()))?;
+            .map_err(|error| anyhow!(Refusal::Invalid(error.to_string())))?;
         extra_env = crate::profile::cleared_environment(extra_env, &allowlist);
     }
 
@@ -448,7 +477,7 @@ pub(crate) async fn create_warm_session(
         st.acp.stop(&session_id);
         backend::kill_session(&term_session).await.ok();
         delete_session_row(st, &session_id).await.ok();
-        return Err(anyhow!(error.to_string(),));
+        return Err(anyhow!(Refusal::Invalid(error.to_string(),)));
     }
     tracing::info!(watch = %watch.id, session = %session_id, "warm session agent launched");
     drop(launch_permit);
@@ -467,17 +496,17 @@ pub(crate) async fn create_warm_session(
 /// the slot may have been re-let since this session left the fleet — resuming it
 /// then would collide on the worktree path and the one-active-session-per-branch
 /// index.
-pub(crate) async fn require_branch_slot_free(
+pub async fn require_branch_slot_free(
     st: &AppState,
     session: &Session,
     branch: &Branch,
 ) -> Result<()> {
     if let Some(other) = session_mod::active_for_branch(&st.db, &branch.id).await? {
         if other.id != session.id {
-            return Err(anyhow!(format!(
+            return Err(anyhow!(Refusal::Conflict(format!(
                 "branch '{}' already has an active session ({})",
                 branch.branch, other.id
-            )));
+            ))));
         }
     }
     Ok(())
@@ -486,62 +515,60 @@ pub(crate) async fn require_branch_slot_free(
 /// Prove that a respawn still targets the profile lifetime accepted by this
 /// session. A same-lifetime edit, credential rotation, or retirement remains
 /// valid; a recreate under the same name does not.
-pub(crate) async fn require_session_profile_lifetime(
+pub async fn require_session_profile_lifetime(
     db: &Db,
     session: &Session,
 ) -> Result<crate::profile::Profile> {
     let profile = crate::profile::get_including_retired(db, &session.profile)
         .await?
         .ok_or_else(|| {
-            anyhow!(format!(
+            anyhow!(Refusal::Conflict(format!(
                 "session '{}' profile lifetime is no longer available",
                 session.profile
-            ))
+            )))
         })?;
     if session.profile_lifetime == 0 || profile.lifetime != session.profile_lifetime {
-        return Err(anyhow!(format!(
+        return Err(anyhow!(Refusal::Conflict(format!(
             "session '{}' belongs to an unavailable profile lifetime; create a canonical replacement instead of reusing same-name credentials",
             session.id
-        )));
+        ))));
     }
     Ok(profile)
 }
 
-pub(crate) fn stamped_custom_agent(
-    session: &Session,
-) -> Result<Option<custom_agents::CustomAgent>> {
+pub fn stamped_custom_agent(session: &Session) -> Result<Option<custom_agents::CustomAgent>> {
     if agent::builtin_agent_type(&session.agent_kind).is_some() {
         return Ok(None);
     }
     if session.launch_snapshot.trim().is_empty() {
-        return Err(anyhow!(format!(
+        return Err(anyhow!(Refusal::Conflict(format!(
             "session '{}' has no captured custom-agent definition; create a canonical replacement instead of consulting the mutable registry",
             session.id
-        )));
+        ))));
     }
     let snapshot =
         crate::launch::deserialize_snapshot(&session.launch_snapshot).map_err(|error| {
-            anyhow!(format!(
+            anyhow!(Refusal::Conflict(format!(
                 "session '{}' has an unreadable launch snapshot: {error}",
                 session.id
-            ))
+            )))
         })?;
     let custom = snapshot.custom_agent.ok_or_else(|| {
-        anyhow!(format!(
+        anyhow!(Refusal::Conflict(format!(
             "session '{}' has no captured custom-agent definition; create a canonical replacement instead of consulting the mutable registry",
             session.id
-        ))
+        )))
     })?;
     if custom.name != session.agent_kind {
-        return Err(anyhow!(format!(
+        return Err(anyhow!(Refusal::Conflict(format!(
             "session '{}' captured custom agent '{}' but is stamped as '{}'",
             session.id, custom.name, session.agent_kind
-        )));
+        ))));
     }
     Ok(Some(custom))
 }
 
-pub(crate) async fn require_resume_capacity(
+pub async fn require_resume_capacity(
     db: &Db,
     session: &Session,
     profile: &crate::profile::Profile,
@@ -552,10 +579,10 @@ pub(crate) async fn require_resume_capacity(
     let active = crate::profile::active_count(db, &profile.name).await?;
     let keeps_existing_slot = crate::profile::status_consumes_capacity(&session.status);
     if !keeps_existing_slot && active >= profile.max_concurrent {
-        return Err(anyhow!(format!(
+        return Err(anyhow!(Refusal::Conflict(format!(
             "profile '{}' has reached its max_concurrent limit ({})",
             profile.name, profile.max_concurrent
-        )));
+        ))));
     }
     Ok(())
 }
@@ -564,7 +591,7 @@ pub(crate) async fn require_resume_capacity(
 /// expected to still be on disk (an orphaned session only lost its terminal); a
 /// missing worktree is an error here — recovering a *torn-down* (archived)
 /// session, which rebuilds the worktree first, goes through [`recover`].
-pub(crate) async fn adopt(st: &AppState, session: &Session, _branch: &Branch) -> Result<()> {
+pub async fn adopt(st: &AppState, session: &Session, _branch: &Branch) -> Result<()> {
     // Lock order shared with handoff/archive/delete: source session, global
     // lifecycle mutation, then profile lifetime/admission. Profile CRUD never
     // waits on a session/lifecycle lock, so this order cannot form a cycle.
@@ -600,14 +627,16 @@ pub(crate) async fn adopt(st: &AppState, session: &Session, _branch: &Branch) ->
     }
     tracing::info!(session = %session.id, branch = %branch.id, "adopting orphaned session");
     if backend::has_session(&session.term_session).await {
-        return Err(anyhow!("session already has a running terminal process",));
+        return Err(anyhow!(Refusal::Conflict(
+            "session already has a running terminal process".to_string(),
+        )));
     }
     let work_dir = PathBuf::from(&session.work_dir);
     if !work_dir.exists() {
-        return Err(anyhow!(format!(
+        return Err(anyhow!(Refusal::Invalid(format!(
             "worktree {} no longer exists on disk — cannot adopt",
             session.work_dir
-        )));
+        ))));
     }
     tracing::debug!(session = %session.id, work_dir = %work_dir.display(), "adopt preflight checks passed");
     // The post-flip conversion: a terminal session whose builtin runtime now
@@ -727,7 +756,7 @@ pub(crate) async fn adopt_terminal_into_acp(
 /// task), just re-attach ([`crate::acp::attach`]). When the relay is gone, respawn
 /// it and reopen via `session/load` (the adapter advertised `loadSession` and we
 /// have its id), falling back to a fresh session re-oriented from the goal file.
-pub(crate) async fn adopt_acp(
+pub async fn adopt_acp(
     st: &AppState,
     session: &Session,
     branch: &Branch,
@@ -736,14 +765,16 @@ pub(crate) async fn adopt_acp(
 ) -> Result<()> {
     tracing::info!(session = %session.id, branch = %branch.id, "adopting acp session");
     if st.acp.is_live(&session.id) {
-        return Err(anyhow!("session already has a live ACP task"));
+        return Err(anyhow!(Refusal::Conflict(
+            "session already has a live ACP task".to_string()
+        )));
     }
     let work_dir = PathBuf::from(&session.work_dir);
     if !work_dir.exists() {
-        return Err(anyhow!(format!(
+        return Err(anyhow!(Refusal::Conflict(format!(
             "worktree {} no longer exists on disk — cannot adopt",
             session.work_dir
-        )));
+        ))));
     }
 
     if backend::has_session(&session.term_session).await {
@@ -868,7 +899,7 @@ pub(crate) async fn resume_prompt_files(
 /// string. Setup is never re-run here — the worktree is already provisioned; this
 /// only resumes the agent (Claude via `--continue`, so it reloads its prior
 /// conversation from the same cwd).
-pub(crate) async fn resume_agent(
+pub async fn resume_agent(
     st: &AppState,
     session: &Session,
     branch: &Branch,

@@ -62,7 +62,7 @@ pub const AGENTIC_MIN_COOLDOWN_SECS: i64 = 15 * 60;
 /// Read an integer setting, falling back to `default` on absence or parse
 /// failure. `weaver_core::config` has bool/string getters but no int getter, so
 /// the engine parses the raw value itself.
-pub(crate) async fn get_int(db: &crate::Db, key: &str, default: i64) -> i64 {
+pub async fn get_int(db: &crate::Db, key: &str, default: i64) -> i64 {
     core_config::get(db, key)
         .await
         .and_then(|v| v.trim().parse::<i64>().ok())

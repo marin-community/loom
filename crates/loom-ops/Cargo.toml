@@ -1,0 +1,80 @@
+[package]
+name = "loom-ops"
+version = "0.2.0"
+edition = "2021"
+description = "Everything that touches the outside world: git, GitHub, Slack, containers, editors, the scheduler."
+
+[features]
+# Exposes the GitHub App mock (`github_app::tests`) and the trigger's
+# app-injection constructor to *other* crates' test builds — `#[cfg(test)]`
+# only ever applies within the crate that sets it, and loom's REST tests need
+# both. Enabled from loom's dev-dependencies, never in a release build.
+test-support = []
+
+[dependencies]
+loom-ctx = { path = "../loom-ctx" }
+loom-domain = { path = "../loom-domain" }
+weaver-core = { path = "../weaver-core" }
+weaver-api = { path = "../weaver-api" }
+tapestry = { path = "../tapestry" }
+anyhow = "1"
+# Trait objects with async methods — the GitHub trigger's gateway abstraction
+# (`GithubApi`), so the `gh`-backed implementation and a test fake share a type.
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+futures-util = "0.3"
+# Hex-encode the SHA-256 digests we store for API tokens and session cookies.
+hex = "0.4"
+# Sign the GitHub App JWT (RS256) we exchange for short-lived installation
+# tokens — the hardening that replaces the ambient GH_TOKEN (crate::github_app).
+jsonwebtoken = "9"
+# HMAC-SHA256 for verifying the GitHub webhook signature (`X-Hub-Signature-256`).
+# `Mac::verify_slice` is a constant-time compare, so the verification can't be
+# turned into a timing oracle.
+hmac = "0.12"
+# Reverse-proxying the embedded code-server (crate::ide): a pooled HTTP client
+# (hyper-util legacy) for the asset/API plane, and hyper's low-level conn for the
+# transparent WebSocket-upgrade passthrough (extension host + integrated terminal).
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+# Sending SIGKILL to a timed-out setup script's whole process group (crate::setup),
+# so a bootstrap that spawns children doesn't leave them behind on timeout.
+libc = "0.2"
+percent-encoding = "2"
+rand = "0.9"
+# Generate and load the machine-local Ed25519 keypair used to sign scoped
+# automation JWTs. jsonwebtoken performs the actual JWT signing/verification.
+ring = "0.17"
+# `rustls-tls` is needed for the GitHub OAuth token/user calls over HTTPS — the
+# rest of loom's HTTP is loopback to its own daemon, but the OAuth dance reaches
+# github.com directly.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# SHA-256 for hashing API tokens / session ids at rest (high-entropy secrets, so
+# a fast digest is right — the slow KDF above is only for low-entropy passwords).
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "derive"] }
+# The authored `loom.toml` (crate::loom_config) — parsed *and* serialized, unlike
+# weaver-core's read-only `.weaver/config.toml` loader.
+toml = { version = "1", default-features = false, features = ["parse", "display", "serde"] }
+# The watch engine materializes embedded builtin scripts to a scratch file
+# before running them; the tests reuse it for fixtures.
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+# The Slack Socket Mode client (crate::slack) dials `wss://` out to Slack, so it
+# needs a real (not dev-only) dependency *with* a TLS feature — the bare crate
+# can't open a secure socket ("TLS support not compiled in"). `rustls-tls-webpki-
+# roots` bundles the roots, matching reqwest's rustls stack above (no system dep).
+# 0.29 matches axum 0.8's own tokio-tungstenite so the two speak one protocol
+# stack; the terminal round-trip integration test reuses this same client.
+tokio-tungstenite = { version = "0.29", features = ["connect", "rustls-tls-webpki-roots"] }
+tracing = "0.1"
+croner = "3"
+
+[dev-dependencies]
+# The suites here share process-global env (WEAVER_HOME and friends), so they
+# must not run concurrently within a test binary; `#[serial]` serializes them.
+serial_test = "3"
+tempfile = "3"

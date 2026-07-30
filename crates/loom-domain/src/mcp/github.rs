@@ -14,8 +14,8 @@ use super::{Adapter, CapabilitySet, ServeFuture};
 const SERVER_NAME: &str = "loom_github";
 const COMMENT_TOOL_SET: &str = "mcp/github/comment";
 const COMMENT_TOOL_SET_V1: &str = "mcp/github/comment@v1";
-pub(crate) const BODY_MAX_BYTES: usize = 65_536;
-pub(crate) const TITLE_MAX_BYTES: usize = 256;
+pub const BODY_MAX_BYTES: usize = 65_536;
+pub const TITLE_MAX_BYTES: usize = 256;
 const GITHUB_TOOL_NAMES: [&str; 6] = [
     "issue_view",
     "issue_comment",
@@ -49,7 +49,7 @@ fn capability_sets() -> &'static [CapabilitySet] {
     CAPABILITY_SETS
 }
 
-pub(crate) fn permission_rule(tool: &str) -> Option<String> {
+pub fn permission_rule(tool: &str) -> Option<String> {
     GITHUB_TOOL_NAMES
         .contains(&tool)
         .then(|| format!("mcp__{SERVER_NAME}__{tool}"))

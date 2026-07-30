@@ -9,7 +9,7 @@ pub(crate) const MISSING_GITHUB_TOKEN_MESSAGE: &str = "No GitHub token configure
 /// compare-and-set database transitions at their commit boundaries. The app
 /// manages only hundreds of sessions, so a coarse lock keeps the invariant
 /// legible without adding a per-session lock registry.
-pub(crate) static LIFECYCLE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub static LIFECYCLE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn config_env_pairs(cfg: &weaver_core::repo_config::RepoConfig) -> Vec<(String, String)> {
     // Invalid shell identifiers and Loom's reserved prefixes could corrupt the

@@ -97,7 +97,7 @@ impl From<PersistedCustomAgent> for crate::custom_agents::CustomAgent {
     }
 }
 
-pub(crate) struct LaunchSnapshot {
+pub struct LaunchSnapshot {
     pub view: ResolvedLaunchView,
     pub custom_agent: Option<crate::custom_agents::CustomAgent>,
 }
@@ -112,7 +112,7 @@ pub(crate) fn serialize_snapshot(
     })
 }
 
-pub(crate) fn deserialize_snapshot(snapshot: &str) -> serde_json::Result<LaunchSnapshot> {
+pub fn deserialize_snapshot(snapshot: &str) -> serde_json::Result<LaunchSnapshot> {
     let persisted: PersistedLaunchSnapshot = serde_json::from_str(snapshot)?;
     Ok(LaunchSnapshot {
         view: persisted.view,

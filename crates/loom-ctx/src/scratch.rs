@@ -3,13 +3,13 @@
 use base64::Engine as _;
 use weaver_api::ScratchUpload;
 
-pub(crate) const MAX_SCRATCH_FILES: usize = 20;
-pub(crate) const MAX_SCRATCH_FILE_BYTES: usize = 25 * 1024 * 1024;
-pub(crate) const MAX_SCRATCH_TOTAL_BYTES: usize = 50 * 1024 * 1024;
+pub const MAX_SCRATCH_FILES: usize = 20;
+pub const MAX_SCRATCH_FILE_BYTES: usize = 25 * 1024 * 1024;
+pub const MAX_SCRATCH_TOTAL_BYTES: usize = 50 * 1024 * 1024;
 /// Portable single-component bound below common 255-byte filesystem limits.
-pub(crate) const MAX_SCRATCH_NAME_BYTES: usize = 240;
+pub const MAX_SCRATCH_NAME_BYTES: usize = 240;
 #[derive(Debug)]
-pub(crate) enum ScratchError {
+pub enum ScratchError {
     Invalid(String),
     NotFound(String),
     Internal(anyhow::Error),
@@ -30,7 +30,7 @@ impl From<std::io::Error> for ScratchError {
 type Result<T> = std::result::Result<T, ScratchError>;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct ScratchFile {
+pub struct ScratchFile {
     pub name: String,
     pub bytes: u64,
 }
@@ -74,7 +74,7 @@ fn validate_scratch_size(name: &str, bytes: usize) -> Result<()> {
 /// A fully decoded and validated launch-time batch. Construct this before any
 /// repository, branch, issue, or session side effect; writing it later cannot
 /// discover malformed client input.
-pub(crate) struct PreparedScratch {
+pub struct PreparedScratch {
     files: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
@@ -113,7 +113,7 @@ async fn scratch_inventory(
     Ok(files)
 }
 
-pub(crate) fn prepare_initial_scratch(files: &[ScratchUpload]) -> Result<PreparedScratch> {
+pub fn prepare_initial_scratch(files: &[ScratchUpload]) -> Result<PreparedScratch> {
     if files.is_empty() {
         return Ok(PreparedScratch {
             files: std::collections::BTreeMap::new(),
@@ -148,7 +148,7 @@ pub(crate) fn prepare_initial_scratch(files: &[ScratchUpload]) -> Result<Prepare
 
 /// Write a batch that has already passed [`prepare_initial_scratch`] into
 /// `<work_dir>/scratch/`, returning sorted, de-duplicated bare names.
-pub(crate) async fn write_prepared_initial_scratch(
+pub async fn write_prepared_initial_scratch(
     work_dir: &std::path::Path,
     prepared: &PreparedScratch,
 ) -> Result<Vec<String>> {
@@ -197,7 +197,7 @@ async fn write_initial_scratch(
 /// A sentence telling the agent about its launch-time scratch files, or `None`
 /// when none were attached. Appended to the launch prompt so a fresh agent
 /// knows the reference material exists without the user having to mention it.
-pub(crate) fn scratch_note(names: &[String]) -> Option<String> {
+pub fn scratch_note(names: &[String]) -> Option<String> {
     if names.is_empty() {
         return None;
     }
@@ -213,7 +213,7 @@ pub(crate) fn scratch_note(names: &[String]) -> Option<String> {
     ))
 }
 
-pub(crate) async fn list(work_dir: &std::path::Path) -> Result<Vec<ScratchFile>> {
+pub async fn list(work_dir: &std::path::Path) -> Result<Vec<ScratchFile>> {
     let dir = work_dir.join("scratch");
     let mut files = Vec::new();
     match tokio::fs::read_dir(&dir).await {
@@ -244,7 +244,7 @@ pub(crate) async fn list(work_dir: &std::path::Path) -> Result<Vec<ScratchFile>>
     Ok(files)
 }
 
-pub(crate) async fn upload(
+pub async fn upload(
     work_dir: &std::path::Path,
     raw_name: &str,
     body: &[u8],
@@ -283,7 +283,7 @@ pub(crate) async fn upload(
     })
 }
 
-pub(crate) async fn delete(work_dir: &std::path::Path, raw_name: &str) -> Result<String> {
+pub async fn delete(work_dir: &std::path::Path, raw_name: &str) -> Result<String> {
     let name = scratch_name(raw_name)?;
     let path = work_dir.join("scratch").join(&name);
     match tokio::fs::remove_file(&path).await {

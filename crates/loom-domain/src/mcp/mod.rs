@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::HashSet, future::Future, pin::Pin};
 use weaver_api::{McpAdapterView, McpCapabilitySetView, McpRegistryView};
 
-pub(crate) mod github;
+pub mod github;
 pub(crate) mod history;
 pub(crate) mod messaging;
 
@@ -59,7 +59,7 @@ pub(crate) fn is_builtin_group(group: &str) -> bool {
     })
 }
 
-pub(crate) fn registry() -> McpRegistryView {
+pub fn registry() -> McpRegistryView {
     let mut adapters = Vec::new();
     let mut capability_sets = Vec::new();
     for adapter in ADAPTERS {
@@ -109,7 +109,7 @@ pub(crate) fn registry() -> McpRegistryView {
 /// Report whether an exact profile snapshot is still launchable. Profiles
 /// remain inspectable when a set is retired or a custom server is disabled,
 /// but a new session must not silently substitute current registry content.
-pub(crate) async fn snapshot_errors(
+pub async fn snapshot_errors(
     db: &crate::Db,
     snapshot: &weaver_api::McpPolicySnapshot,
 ) -> Result<Vec<String>> {
@@ -373,7 +373,7 @@ pub(crate) fn server_configs_for_snapshot(
 }
 
 /// Convert Loom's trusted server map to ACP v1's provider-neutral stdio shape.
-pub(crate) fn acp_server_configs(
+pub fn acp_server_configs(
     allowed_rules: &[String],
     snapshot: Option<&weaver_api::McpPolicySnapshot>,
 ) -> Vec<Value> {

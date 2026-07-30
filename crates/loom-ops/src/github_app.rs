@@ -329,7 +329,7 @@ impl GithubApp {
     /// Resolve `owner/name` to an installation and return a valid token for it —
     /// the two-step the REST gateway methods share, and what `crate::repo`
     /// mints a per-clone credential from.
-    pub(crate) async fn token_for_repo(&self, owner: &str, name: &str) -> Result<String> {
+    pub async fn token_for_repo(&self, owner: &str, name: &str) -> Result<String> {
         let installation_id = self.installation_id(owner, name).await?;
         self.installation_token(installation_id).await
     }
@@ -640,8 +640,13 @@ async fn check_status(resp: reqwest::Response, what: &str) -> Result<reqwest::Re
     bail!("{what}: GitHub returned {status}: {}", body.trim())
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
+    // Under `test-support` this module is compiled for *another* crate's tests,
+    // which reach for `configured_test_app` and `MOCK_INSTALLATION_TOKEN` and
+    // leave the rest of the mock — and this crate's own unit tests — unbuilt.
+    #![allow(dead_code, unused_imports)]
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -772,7 +777,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
 
     /// The id the mock stamps on every created comment.
     const MOCK_COMMENT_ID: i64 = 4242;
-    pub(crate) const MOCK_INSTALLATION_TOKEN: &str = "ghs_installation_token";
+    pub const MOCK_INSTALLATION_TOKEN: &str = "ghs_installation_token";
     /// A comment id the mock's PATCH route answers with 404, standing in for a
     /// comment a human deleted.
     const MOCK_DELETED_COMMENT_ID: i64 = 404_404;
@@ -968,7 +973,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         GithubApp::with_parts(db, api_base, fallback)
     }
 
-    pub(crate) async fn configured_test_app(db: Db) -> GithubApp {
+    pub async fn configured_test_app(db: Db) -> GithubApp {
         let base = spawn_mock(MockState::new(3600)).await;
         configured_app_for_db(db, base, Arc::new(crate::github_trigger::GhCli)).await
     }

@@ -14,7 +14,8 @@
 
 use anyhow::{bail, Result};
 
-use crate::{db::Db, runner};
+use crate::runner;
+use weaver_core::db::Db;
 
 /// Whether a session with this name has a live supervisor.
 pub async fn has_session(name: &str) -> bool {
