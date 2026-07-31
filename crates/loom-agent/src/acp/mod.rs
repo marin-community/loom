@@ -1,0 +1,3982 @@
+//! Loom's Agent Client Protocol client.
+//!
+//! For an ACP session (`protocol='acp'`) the agent is a headless adapter
+//! subprocess under a detached tapestry *relay* supervisor. Loom drives it over
+//! JSON-RPC 2.0, newline-delimited, spooled and replayed by the relay (see
+//! `crate::backend::{new_relay_session, subscribe_relay, ...}`). One
+//! [`tokio`] task per live session — a [`Session`](Task) — owns the relay
+//! subscription, a JSON-RPC id map, the delta-consolidation buffers, the
+//! [journal](crate::chat) writer, and a per-session [`broadcast`] the `/chat/stream`
+//! SSE route tails.
+//!
+//! ## Journal blocks
+//!
+//! The task consolidates streaming chunks in memory and writes one journal block
+//! per *block* boundary; live updates ride SSE only. Block `kind`s + payloads:
+//!
+//! - `user_message`   `{ text, by }` — a dispatched prompt, journaled once at
+//!   dispatch ([`Task::start_turn`]). Adapter-streamed `user_message_chunk`s are
+//!   never journaled: loom is the only prompt source, so every user chunk is an
+//!   echo or a history replay (`session/load`, post-`/compact` context replay)
+//!   and journaling it would duplicate the transcript.
+//! - `agent_message`  `{ text }` — a whole consolidated agent message.
+//! - `thought`        `{ text, ms }` — a whole consolidated reasoning passage.
+//! - `tool_call`      `{ tool_call_id, title, tool_kind, status, content, locations }`
+//!   — written once at terminal status; live state rides `tool` SSE.
+//! - `plan`           `{ entries: [{content, status}] }`.
+//! - `permission_request` `{ request_id, tool_call_id, title, options, outcome }`
+//!   — inserted open, `UPDATE`d in place on resolution.
+//! - `mode_change`    `{ mode_id, by }`.
+//! - `usage`          `{ used, size, cost? }` (or an internal null marker at a
+//!   provider boundary).
+//! - `turn_end`       `{ stop_reason }`.
+//! - `handoff`        `{ from, to, model, effort, prompt_version,
+//!   summary_status, summary_model, summary, through_turn, through_seq }` — the
+//!   provider boundary and best-effort digest provenance that replace the
+//!   synthetic bootstrap prompt in the visible journal.
+//!
+//! ## Acking
+//!
+//! Every agent→client frame carries a spool seq. The task acks a frame only after
+//! the sqlite write for any block that frame *completed* has committed: the ack
+//! watermark is held back to just before the earliest frame still feeding an open
+//! consolidation buffer, a live tool call, or an unanswered permission request
+//! (block-boundary acking). Journal writes are idempotent (conflicts ignored on
+//! `(session_id, turn, seq)`, plus upstream-id guards for tool calls and turn
+//! ends), so a replay after a loom restart re-ingests without duplicating.
+
+mod wire;
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, bail, Context, Result};
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use tapestry::RelayEvent;
+use tokio::sync::{broadcast, mpsc, oneshot};
+
+use crate::chat::{self, kind, ChatBlockView};
+use crate::db::{now_iso, Db};
+use crate::session;
+use crate::Ctx;
+use weaver_api::{AcpCost, AcpUsage};
+use weaver_core::tags;
+use wire::{
+    method, Incoming, IncomingKind, PermissionOption, RequestPermissionParams, SessionNotification,
+    SessionUpdate, ToolCall, ToolCallContent, ToolCallLocation,
+};
+
+/// Persisting the relay cursor for every streaming delta turns a restart replay
+/// into thousands of SQLite writes. A short periodic flush keeps the possible
+/// duplicate replay bounded while allowing catch-up to run at spool speed.
+const ACK_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How often a live ACP session restamps `last_activity_at`. Frames arrive far
+/// faster than idleness is measured, so the stamp is throttled to keep a chatty
+/// adapter from turning every delta into a write.
+const ACTIVITY_TOUCH_INTERVAL: Duration = Duration::from_secs(30);
+
+// ---------------------------------------------------------------------------
+// Public surface
+// ---------------------------------------------------------------------------
+
+/// How to open the ACP session at [`start`]: a fresh `session/new`, or a
+/// `session/load` replay of an existing agent session id.
+#[derive(Debug, Clone)]
+pub enum NewOrLoad {
+    /// A fresh session in `cwd`; `meta` is the optional `_meta` object for
+    /// adapter options (e.g. `{"claudeCode":{"options":{...}}}`).
+    New { cwd: PathBuf, meta: Option<Value> },
+    /// Reopen the agent's existing on-disk session by id (`session/load`).
+    Load {
+        acp_session_id: String,
+        /// Adapter options are restated when a new adapter process resumes the
+        /// provider session. Restricted sessions rely on this to preserve the
+        /// stamped settings and tool boundary across server restarts.
+        meta: Option<Value>,
+    },
+}
+
+/// Everything [`start`] needs to bring an ACP session up.
+#[derive(Debug, Clone)]
+pub struct AcpLaunch {
+    /// The shell command the relay runs to launch the adapter over stdio.
+    pub adapter_cmd: String,
+    /// The relay child's working directory.
+    pub cwd: PathBuf,
+    /// Out-of-band environment for the adapter process (delivered over the
+    /// supervisor, never on argv).
+    pub env: Vec<(String, String)>,
+    pub env_clear: bool,
+    /// Provider-neutral ACP v1 stdio MCP server descriptors.
+    pub mcp_servers: Vec<Value>,
+    /// Open a fresh session or reload an existing one.
+    pub new_or_load: NewOrLoad,
+    /// The initial permission posture (`bypassPermissions`, `acceptEdits`,
+    /// `default`, `plan`), applied via `session/set_mode` after setup. `None`
+    /// leaves the adapter's default mode.
+    pub mode: Option<String>,
+    /// Resolved launch selectors that must also be reflected in the adapter's
+    /// live config controls. Some adapters pass these through to the underlying
+    /// runtime before constructing their ACP `configOptions`, so the model can
+    /// be correct while the advertised picker is still on its own default.
+    pub initial_model: Option<String>,
+    /// The matching reasoning-effort selector, when the launch pinned one.
+    pub initial_effort: Option<String>,
+    /// The session's goal, sent as the first `session/prompt` (journaled as the
+    /// first `user_message`). `None` waits for the first REST prompt.
+    pub goal: Option<String>,
+    /// Maximum time to wait for one ACP setup response. Kept on the launch so
+    /// integration tests can exercise a silent adapter without a 30-second wait.
+    pub setup_timeout: Duration,
+}
+
+const ONE_SHOT_INPUT_MAX_BYTES: usize = 128 * 1024;
+const ONE_SHOT_OUTPUT_MAX_BYTES: usize = 32 * 1024;
+
+/// A completed prompt from a transient ACP session. `model` is the exact
+/// adapter-advertised value used for the prompt, when the adapter exposes one.
+#[derive(Debug)]
+pub struct AcpPromptOutput {
+    pub text: String,
+    pub model: Option<String>,
+}
+
+/// How a transient prompt chooses the model from the adapter's live ACP
+/// configuration. API callers request one exact advertised value; handoff
+/// summarization instead searches for the first economy-class name.
+pub enum AcpPromptModel<'a> {
+    Default,
+    Exact(&'a str),
+    FirstContaining(&'a [&'a str]),
+}
+
+/// Exact effort is part of the public one-shot contract; handoff merely prefers
+/// low effort because some otherwise-valid economy models expose no effort
+/// control.
+pub enum AcpPromptEffort<'a> {
+    Default,
+    Exact(&'a str),
+    Prefer(&'a str),
+}
+
+/// Run one isolated prompt through an ordinary ACP adapter launch. Model and
+/// effort are selected through the adapter's live `configOptions`; this path
+/// never knows or invokes a provider CLI. The relay and provider session are
+/// transient and always torn down, so the prompt does not remain in the real
+/// session that will subsequently take over.
+pub async fn prompt_once(
+    db: &Db,
+    launch: AcpLaunch,
+    prompt: &str,
+    model: AcpPromptModel<'_>,
+    effort: AcpPromptEffort<'_>,
+    timeout: Duration,
+) -> Result<Option<AcpPromptOutput>> {
+    if prompt.len() > ONE_SHOT_INPUT_MAX_BYTES {
+        return Ok(None);
+    }
+    if !matches!(launch.new_or_load, NewOrLoad::New { .. }) {
+        bail!("one-shot ACP prompts require a fresh session");
+    }
+
+    let relay_name = format!("weaver-acp-prompt-{:016x}", rand::random::<u64>());
+    let env: Vec<(&str, &str)> = launch
+        .env
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    crate::backend::new_relay_session(
+        &relay_name,
+        &launch.adapter_cmd,
+        &env,
+        launch.env_clear,
+        &launch.cwd,
+        crate::backend::memory_max_gb(db).await,
+    )
+    .await?;
+
+    let operation = async {
+        let stream = crate::backend::subscribe_relay(&relay_name, 0).await?;
+        AcpPromptClient::new(stream)
+            .run(&launch, prompt, model, effort)
+            .await
+    };
+    let result = match tokio::time::timeout(timeout, operation).await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow!(
+            "timed out waiting for transient ACP prompt after {timeout:?}"
+        )),
+    };
+    let cleanup = crate::backend::kill_session_and_wait(&relay_name).await;
+    match (result, cleanup) {
+        (Ok(output), Ok(())) => Ok(output),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(cleanup)) => Err(cleanup.context("cleaning up transient ACP prompt relay")),
+        (Err(error), Err(cleanup)) => Err(anyhow!(
+            "{error}; failed to clean up transient ACP prompt relay: {cleanup}"
+        )),
+    }
+}
+
+struct AcpPromptClient {
+    stream: tapestry::RelayStream,
+    next_id: u64,
+    session_id: String,
+    output: String,
+    output_oversized: bool,
+}
+
+impl AcpPromptClient {
+    fn new(stream: tapestry::RelayStream) -> Self {
+        Self {
+            stream,
+            next_id: 0,
+            session_id: String::new(),
+            output: String::new(),
+            output_oversized: false,
+        }
+    }
+
+    async fn run(
+        mut self,
+        launch: &AcpLaunch,
+        prompt: &str,
+        model: AcpPromptModel<'_>,
+        effort: AcpPromptEffort<'_>,
+    ) -> Result<Option<AcpPromptOutput>> {
+        self.request(method::INITIALIZE, wire::initialize_params())
+            .await?;
+        let (cwd, meta) = match &launch.new_or_load {
+            NewOrLoad::New { cwd, meta } => (cwd, meta.as_ref()),
+            NewOrLoad::Load { .. } => unreachable!("checked by prompt_once"),
+        };
+        let opened = self
+            .request(
+                method::SESSION_NEW,
+                wire::new_session_params(&cwd.to_string_lossy(), &launch.mcp_servers, meta),
+            )
+            .await?;
+        let opened: wire::NewSessionResult =
+            serde_json::from_value(opened).context("invalid ACP session/new response")?;
+        self.session_id = opened.session_id;
+        let mut options = opened.config_options.unwrap_or_default();
+
+        let model = match model {
+            AcpPromptModel::Default => current_model(&options),
+            AcpPromptModel::Exact(value) => {
+                let Some((model_config, model)) =
+                    preferred_config_value(&options, "model", &[value], false)
+                else {
+                    return Ok(None);
+                };
+                options = self
+                    .set_config_option(&model_config, Value::String(model.clone()))
+                    .await?;
+                Some(model)
+            }
+            AcpPromptModel::FirstContaining(preferences) => {
+                let Some((model_config, model)) =
+                    preferred_config_value(&options, "model", preferences, true)
+                else {
+                    return Ok(None);
+                };
+                options = self
+                    .set_config_option(&model_config, Value::String(model.clone()))
+                    .await?;
+                Some(model)
+            }
+        };
+        match effort {
+            AcpPromptEffort::Default => {}
+            AcpPromptEffort::Exact(value) => {
+                let Some((effort_config, effort)) =
+                    preferred_config_value(&options, "effort", &[value], false)
+                else {
+                    return Ok(None);
+                };
+                self.set_config_option(&effort_config, Value::String(effort))
+                    .await?;
+            }
+            AcpPromptEffort::Prefer(value) => {
+                if let Some((effort_config, effort)) =
+                    preferred_config_value(&options, "effort", &[value], false)
+                {
+                    self.set_config_option(&effort_config, Value::String(effort))
+                        .await?;
+                }
+            }
+        }
+        if let Some(mode) = opened
+            .modes
+            .as_ref()
+            .and_then(|modes| preferred_mode(&modes.available_modes))
+        {
+            self.request(
+                method::SESSION_SET_MODE,
+                wire::set_mode_params(&self.session_id, &mode),
+            )
+            .await?;
+        } else if let Some((mode_config, mode)) =
+            preferred_config_value(&options, "mode", &["plan", "read-only"], false)
+        {
+            self.set_config_option(&mode_config, Value::String(mode))
+                .await?;
+        }
+
+        self.output.clear();
+        self.output_oversized = false;
+        let result = self
+            .request(
+                method::SESSION_PROMPT,
+                wire::prompt_params(&self.session_id, prompt, &[]),
+            )
+            .await?;
+        let result: wire::PromptResult =
+            serde_json::from_value(result).context("invalid ACP session/prompt response")?;
+        if result.stop_reason == "cancelled" || self.output_oversized {
+            return Ok(None);
+        }
+        let text = self.output.trim();
+        if text.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(AcpPromptOutput {
+            text: text.to_string(),
+            model,
+        }))
+    }
+
+    async fn set_config_option(&mut self, id: &str, value: Value) -> Result<Vec<Value>> {
+        let result = self
+            .request(
+                method::SESSION_SET_CONFIG_OPTION,
+                wire::set_config_option_params(&self.session_id, id, value),
+            )
+            .await?;
+        let result: wire::SetConfigOptionResult = serde_json::from_value(result)
+            .context("invalid ACP session/set_config_option response")?;
+        Ok(result.config_options)
+    }
+
+    async fn request(&mut self, method_name: &str, params: Value) -> Result<Value> {
+        self.next_id += 1;
+        let request_id = self.next_id;
+        self.stream
+            .write(&wire::request_line(request_id, method_name, params))
+            .await?;
+        loop {
+            match self.stream.recv().await {
+                Some(RelayEvent::Frame { seq, payload }) => {
+                    let incoming: Incoming = serde_json::from_slice(&payload)
+                        .context("invalid JSON-RPC frame from ACP prompt adapter")?;
+                    if incoming.kind() == IncomingKind::Response
+                        && incoming.id.as_ref().and_then(Value::as_u64) == Some(request_id)
+                    {
+                        self.stream.ack(seq).await?;
+                        if let Some(error) = incoming.error {
+                            bail!("ACP {method_name} failed: {error}");
+                        }
+                        return incoming
+                            .result
+                            .ok_or_else(|| anyhow!("ACP {method_name} returned no result"));
+                    }
+                    self.handle_incoming(incoming).await?;
+                    self.stream.ack(seq).await?;
+                }
+                Some(RelayEvent::Exit { status }) => {
+                    bail!("ACP prompt adapter exited with status {status:?}")
+                }
+                None => bail!("ACP prompt relay closed"),
+            }
+        }
+    }
+
+    async fn handle_incoming(&mut self, incoming: Incoming) -> Result<()> {
+        match incoming.kind() {
+            IncomingKind::Notification
+                if incoming.method.as_deref() == Some(method::SESSION_UPDATE) =>
+            {
+                let notification: SessionNotification =
+                    serde_json::from_value(incoming.params.unwrap_or(Value::Null))?;
+                if let SessionUpdate::AgentMessageChunk { content } = notification.update {
+                    if let Some(text) = content.text() {
+                        if self.output.len() + text.len() <= ONE_SHOT_OUTPUT_MAX_BYTES {
+                            self.output.push_str(text);
+                        } else {
+                            self.output_oversized = true;
+                        }
+                    }
+                }
+            }
+            IncomingKind::Request
+                if incoming.method.as_deref() == Some(method::SESSION_REQUEST_PERMISSION) =>
+            {
+                let id = incoming
+                    .id
+                    .ok_or_else(|| anyhow!("ACP permission request had no id"))?;
+                self.stream
+                    .write(&wire::response_line(&id, wire::permission_cancelled()))
+                    .await?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+fn current_model(config_options: &[Value]) -> Option<String> {
+    config_options.iter().find_map(|option| {
+        let id = option.get("id").and_then(Value::as_str).unwrap_or("");
+        let category = option.get("category").and_then(Value::as_str).unwrap_or("");
+        (category == "model" || id == "model")
+            .then(|| option.get("currentValue").and_then(Value::as_str))
+            .flatten()
+            .map(str::to_string)
+    })
+}
+
+fn preferred_config_value(
+    config_options: &[Value],
+    kind: &str,
+    preferences: &[&str],
+    allow_contains: bool,
+) -> Option<(String, String)> {
+    let option = config_options.iter().find(|option| {
+        let id = option.get("id").and_then(Value::as_str).unwrap_or("");
+        let category = option.get("category").and_then(Value::as_str).unwrap_or("");
+        match kind {
+            "model" => category == "model" || id == "model",
+            "effort" => category == "thought_level" || id == "effort" || id.contains("reasoning"),
+            "mode" => category == "mode" || id == "mode",
+            _ => false,
+        }
+    })?;
+    let id = option.get("id")?.as_str()?.to_string();
+    let values = option
+        .get("options")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(|choice| choice.get("value").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    for preference in preferences {
+        if let Some(value) = values
+            .iter()
+            .find(|value| value.eq_ignore_ascii_case(preference))
+        {
+            return Some((id, (*value).to_string()));
+        }
+    }
+    if allow_contains {
+        for preference in preferences {
+            let preference = preference.to_ascii_lowercase();
+            if let Some(value) = values
+                .iter()
+                .find(|value| value.to_ascii_lowercase().contains(&preference))
+            {
+                return Some((id, (*value).to_string()));
+            }
+        }
+    }
+    None
+}
+
+fn preferred_mode(modes: &[Value]) -> Option<String> {
+    ["plan", "read-only"].into_iter().find_map(|preferred| {
+        modes
+            .iter()
+            .filter_map(|mode| mode.get("id").and_then(Value::as_str))
+            .find(|id| *id == preferred)
+            .map(str::to_string)
+    })
+}
+
+/// How a prompt was accepted plus the turn it belongs to — the `POST /prompt`
+/// 202 body. `steered` is true only when the adapter injected it into the
+/// already-running turn; unsupported adapters retain the durable queue.
+#[derive(Debug, Clone, Serialize)]
+pub struct PromptAck {
+    pub queued: bool,
+    pub steered: bool,
+    pub turn: Option<i64>,
+}
+
+/// The outcome of answering a permission request over REST.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermAnswer {
+    /// Answered — the JSON-RPC response was sent and the block resolved.
+    Ok,
+    /// No permission request with that id (404).
+    NotFound,
+    /// The request was already resolved (409).
+    AlreadyResolved,
+}
+
+/// One SSE event the `/chat/stream` route emits: an event name (`block`, `delta`,
+/// `tool`, `turn`, `queue`, `metadata`) and its JSON data.
+#[derive(Debug, Clone, Serialize)]
+pub struct SseEvent {
+    pub event: String,
+    pub data: Value,
+}
+
+/// Agent-owned controls for the conversation composer. These are deliberately
+/// kept as ACP-shaped JSON: command inputs and session config options are an
+/// extensible protocol surface, and loom forwards fields it does not yet render
+/// instead of narrowing the wire contract and making adapters stale again.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AcpMetadata {
+    pub commands: Vec<Value>,
+    pub config_options: Vec<Value>,
+    pub modes: Vec<Value>,
+    /// Whether the adapter advertised the codex-acp steering extension during
+    /// initialize. The browser uses this observed capability instead of
+    /// optimistically probing a private method that may not exist.
+    pub steering_supported: bool,
+}
+
+/// A live session's control surface, held in the [`AcpRegistry`]: send commands
+/// to its task and subscribe to its SSE stream.
+#[derive(Clone)]
+pub struct AcpHandle {
+    cmd_tx: mpsc::Sender<Command>,
+    events_tx: broadcast::Sender<SseEvent>,
+    metadata: Arc<Mutex<AcpMetadata>>,
+}
+
+impl AcpHandle {
+    /// Subscribe to the session's SSE broadcast.
+    pub fn subscribe(&self) -> broadcast::Receiver<SseEvent> {
+        self.events_tx.subscribe()
+    }
+
+    /// Snapshot the latest agent-owned composer metadata. The `/chat` snapshot
+    /// carries this before the browser tails updates over SSE.
+    pub fn metadata(&self) -> AcpMetadata {
+        self.metadata.lock().unwrap().clone()
+    }
+
+    /// Send a user message: dispatched as a `session/prompt` when idle, steered
+    /// into a live turn when the adapter advertises support, or appended to the
+    /// durable queue otherwise.
+    pub async fn prompt(
+        &self,
+        text: String,
+        by: Option<String>,
+        force_steer: bool,
+        resources: Vec<Value>,
+    ) -> Result<PromptAck> {
+        let delivery = if force_steer {
+            PromptDelivery::ForceSteer
+        } else {
+            PromptDelivery::Queue
+        };
+        self.send_prompt(text, by, delivery, resources).await
+    }
+
+    /// Deliver a cross-session send without leaving it behind a live turn:
+    /// steer when the adapter supports it, otherwise cancel the current turn
+    /// and start the message normally.
+    pub async fn send_now(
+        &self,
+        text: String,
+        by: Option<String>,
+        resources: Vec<Value>,
+    ) -> Result<PromptAck> {
+        self.send_prompt(text, by, PromptDelivery::Immediate, resources)
+            .await
+    }
+
+    async fn send_prompt(
+        &self,
+        text: String,
+        by: Option<String>,
+        delivery: PromptDelivery,
+        resources: Vec<Value>,
+    ) -> Result<PromptAck> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::Prompt {
+                text,
+                by,
+                delivery,
+                resources,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| anyhow!("acp task is gone"))?;
+        rx.await
+            .map_err(|_| anyhow!("acp task dropped the reply"))?
+    }
+
+    /// Send the current durable next-turn queue now: promote it when the adapter
+    /// advertises steering, otherwise cancel the live turn and start it normally.
+    /// The task reads the queue itself so the browser cannot accidentally send
+    /// stale or partial text.
+    pub async fn force_pending(&self, by: Option<String>) -> Result<PromptAck> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::ForcePending { by, reply: tx })
+            .await
+            .map_err(|_| anyhow!("acp task is gone"))?;
+        rx.await
+            .map_err(|_| anyhow!("acp task dropped the reply"))?
+    }
+
+    /// Notice immutable submitted feedback in the protected conversation inbox.
+    /// Start it when idle; while a turn is live, leave it queued for the normal
+    /// turn boundary. The editable prompt lane is never read or modified here.
+    pub async fn notify_pending(&self) -> Result<PromptAck> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::NotifyPending { reply: tx })
+            .await
+            .map_err(|_| anyhow!("acp task is gone"))?;
+        rx.await
+            .map_err(|_| anyhow!("acp task dropped the reply"))?
+    }
+
+    /// Atomically retract the durable next-turn queue for editing. This runs on
+    /// the ACP task so a turn boundary cannot dispatch the same text while the
+    /// browser is moving it back into the composer.
+    pub async fn retract_pending(&self) -> Result<String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::RetractPending { reply: tx })
+            .await
+            .map_err(|_| anyhow!("acp task is gone"))?;
+        rx.await
+            .map_err(|_| anyhow!("acp task dropped the reply"))?
+    }
+
+    /// Interrupt the in-flight turn (`session/cancel`).
+    pub async fn cancel(&self) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::Cancel { reply: tx })
+            .await
+            .map_err(|_| anyhow!("acp task is gone"))?;
+        rx.await
+            .map_err(|_| anyhow!("acp task dropped the reply"))?
+    }
+
+    /// Answer a pending permission request.
+    pub async fn answer_permission(
+        &self,
+        request_id: String,
+        option_id: String,
+        by: String,
+    ) -> Result<PermAnswer> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::AnswerPermission {
+                request_id,
+                option_id,
+                by,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| anyhow!("acp task is gone"))?;
+        rx.await.map_err(|_| anyhow!("acp task dropped the reply"))
+    }
+
+    /// Change the session mode (`session/set_mode`), journaling a `mode_change`.
+    pub async fn set_mode(&self, mode_id: String, by: Option<String>) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::SetMode {
+                mode_id,
+                by,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| anyhow!("acp task is gone"))?;
+        rx.await
+            .map_err(|_| anyhow!("acp task dropped the reply"))?
+    }
+    /// Change an ACP session configuration option (`model`, reasoning effort,
+    /// mode, or another adapter-defined value). The task waits for the agent's
+    /// full refreshed option set before acknowledging the REST write and returns
+    /// that authoritative state to the caller.
+    pub async fn set_config_option(&self, config_id: String, value: Value) -> Result<AcpMetadata> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::SetConfigOption {
+                config_id,
+                value,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| anyhow!("acp task is gone"))?;
+        rx.await
+            .map_err(|_| anyhow!("acp task dropped the reply"))?
+    }
+
+    /// Atomically snapshot and quiesce an idle task for provider replacement.
+    /// The command is ordered with prompts on the same channel; acknowledgement
+    /// arrives only after the task has removed its registry slot and will accept
+    /// no more work. The returned journal cannot race a later completed turn.
+    pub async fn prepare_handoff(&self) -> Result<Vec<ChatBlockView>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::PrepareHandoff { reply: tx })
+            .await
+            .map_err(|_| anyhow!("acp task is gone"))?;
+        rx.await
+            .map_err(|_| anyhow!("acp task dropped the handoff reply"))?
+    }
+}
+
+/// What an ACP session task needs to run: loom's durable state plus the
+/// registry the task lives in. This is the whole of [`crate::AppState`] that
+/// `acp` ever reads, so taking one keeps the protocol layer independent of the
+/// live editor/GitHub/admission registries beside it. Derefs to [`Ctx`], so
+/// `st.db` and `st.bus` read the same as they would off an `AppState`.
+#[derive(Clone)]
+pub struct AcpCtx {
+    pub ctx: Ctx,
+    pub acp: AcpRegistry,
+}
+
+impl std::ops::Deref for AcpCtx {
+    type Target = Ctx;
+    fn deref(&self) -> &Ctx {
+        &self.ctx
+    }
+}
+
+/// The registry of live ACP session tasks, held on [`crate::AppState`]. Clone-cheap
+/// (an `Arc`ed map); handlers look a session up to drive it or tail its stream.
+/// Each registration carries a generation so a task that exits after it has been
+/// superseded (stopped then re-attached) removes only its own slot.
+#[derive(Clone, Default)]
+pub struct AcpRegistry {
+    inner: Arc<Mutex<RegistryInner>>,
+}
+
+#[derive(Default)]
+struct RegistryInner {
+    map: HashMap<String, RegistryEntry>,
+    next_gen: u64,
+}
+
+struct RegistryEntry {
+    generation: u64,
+    active_review_claim: Option<String>,
+    handle: AcpHandle,
+}
+
+pub(crate) struct ActiveReviewClaim {
+    registry: AcpRegistry,
+    session_id: String,
+    generation: u64,
+    owner: String,
+}
+
+impl ActiveReviewClaim {
+    pub(crate) fn owner(&self) -> &str {
+        &self.owner
+    }
+}
+
+impl Drop for ActiveReviewClaim {
+    fn drop(&mut self) {
+        self.registry
+            .clear_review_claim(&self.session_id, self.generation, &self.owner);
+    }
+}
+
+struct InflightReview {
+    delivery_key: String,
+    claim_token: String,
+    /// Present only for a claim activated by this process. A recovered turn is
+    /// fenced durably by `sessions.acp_inflight` instead.
+    active_claim: Option<ActiveReviewClaim>,
+}
+
+#[cfg(test)]
+pub(crate) struct ClaimLivenessProbe {
+    _receiver: mpsc::Receiver<Command>,
+}
+
+impl AcpRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The live handle for `session_id`, or `None` when no task is running.
+    pub fn get(&self, session_id: &str) -> Option<AcpHandle> {
+        self.inner
+            .lock()
+            .unwrap()
+            .map
+            .get(session_id)
+            .map(|entry| entry.handle.clone())
+    }
+
+    /// Whether a task is running for `session_id`.
+    pub fn is_live(&self, session_id: &str) -> bool {
+        self.inner.lock().unwrap().map.contains_key(session_id)
+    }
+
+    /// Stop a live session: drop its handle so the task's command channel closes
+    /// and it winds down. Returns whether a task was registered. (Tests use this
+    /// to simulate a loom-side crash before re-attaching.)
+    pub fn stop(&self, session_id: &str) -> bool {
+        self.inner.lock().unwrap().map.remove(session_id).is_some()
+    }
+
+    fn register(&self, session_id: &str, handle: AcpHandle) -> u64 {
+        let mut inner = self.inner.lock().unwrap();
+        let generation = inner.next_gen;
+        inner.next_gen += 1;
+        inner.map.insert(
+            session_id.to_string(),
+            RegistryEntry {
+                generation,
+                active_review_claim: None,
+                handle,
+            },
+        );
+        generation
+    }
+
+    /// Register a probe in place of a real session task, so a test can assert
+    /// which sessions the delivery worker wakes without standing up an adapter.
+    /// Not `#[cfg(test)]`: the suites that drive it live in upper crates, and a
+    /// cfg flag only ever applies within the crate that sets it.
+    pub fn register_review_wake_probe(
+        &self,
+        session_id: &str,
+        acknowledge: bool,
+        wakes: Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let (events_tx, _) = broadcast::channel(8);
+        self.register(
+            session_id,
+            AcpHandle {
+                cmd_tx,
+                events_tx,
+                metadata: Arc::new(Mutex::new(AcpMetadata::default())),
+            },
+        );
+        tokio::spawn(async move {
+            while let Some(command) = cmd_rx.recv().await {
+                if let Command::NotifyPending { reply } = command {
+                    wakes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if acknowledge {
+                        let _ = reply.send(Ok(PromptAck {
+                            queued: false,
+                            steered: false,
+                            turn: Some(0),
+                        }));
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                }
+            }
+        });
+    }
+
+    /// Remove the session's slot only if it still holds `generation` — a task
+    /// that has been superseded leaves the newer registration untouched.
+    fn remove_own(&self, session_id: &str, generation: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.map.get(session_id).map(|entry| entry.generation) == Some(generation) {
+            inner.map.remove(session_id);
+        }
+    }
+
+    /// Whether `generation` is still the registered task for `session_id`.
+    /// `stop` drops the handle without aborting the task future, so a stopped
+    /// or superseded task can linger on a final turn boundary; it must not
+    /// consume shared durable state (the prompt queue) its successor owns.
+    fn is_current(&self, session_id: &str, generation: u64) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .map
+            .get(session_id)
+            .map(|entry| entry.generation)
+            == Some(generation)
+    }
+
+    pub(crate) fn activate_review_claim(
+        &self,
+        session_id: &str,
+        generation: u64,
+    ) -> Option<ActiveReviewClaim> {
+        let mut inner = self.inner.lock().unwrap();
+        let entry = inner.map.get_mut(session_id)?;
+        if entry.generation != generation
+            || entry.handle.cmd_tx.is_closed()
+            || entry.active_review_claim.is_some()
+        {
+            return None;
+        }
+        let mut token = [0_u8; 16];
+        rand::rng().fill_bytes(&mut token);
+        let token = hex::encode(token);
+        entry.active_review_claim = Some(token.clone());
+        Some(ActiveReviewClaim {
+            registry: self.clone(),
+            session_id: session_id.to_string(),
+            generation,
+            owner: token,
+        })
+    }
+
+    fn clear_review_claim(&self, session_id: &str, generation: u64, owner: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(entry) = inner.map.get_mut(session_id) else {
+            return;
+        };
+        if entry.generation == generation && entry.active_review_claim.as_deref() == Some(owner) {
+            entry.active_review_claim = None;
+        }
+    }
+
+    pub fn is_claim_owner_live(&self, session_id: &str, owner: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .map
+            .get(session_id)
+            .is_some_and(|entry| {
+                !entry.handle.cmd_tx.is_closed()
+                    && entry.active_review_claim.as_deref() == Some(owner)
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_claim_liveness_probe(
+        &self,
+        session_id: &str,
+    ) -> (u64, ClaimLivenessProbe) {
+        let (cmd_tx, cmd_rx) = mpsc::channel(1);
+        let (events_tx, _) = broadcast::channel(1);
+        let generation = self.register(
+            session_id,
+            AcpHandle {
+                cmd_tx,
+                events_tx,
+                metadata: Arc::new(Mutex::new(AcpMetadata::default())),
+            },
+        );
+        (generation, ClaimLivenessProbe { _receiver: cmd_rx })
+    }
+}
+
+/// Spawn a fresh ACP session: create the relay running `launch.adapter_cmd`,
+/// `initialize`, open (or load) the ACP session, store its id on the session row,
+/// send the goal as the first prompt when present, then run the session task.
+pub async fn start(state: &AcpCtx, session_id: &str, launch: AcpLaunch) -> Result<()> {
+    start_inner(state, session_id, launch, None).await
+}
+
+/// Start a fresh provider against an existing loom session. The opening prompt
+/// carries the provider-neutral history to the adapter, while `handoff` is the
+/// compact block journaled in its place.
+pub async fn start_handoff(
+    state: &AcpCtx,
+    session_id: &str,
+    launch: AcpLaunch,
+    handoff: Value,
+) -> Result<()> {
+    start_inner(state, session_id, launch, Some(handoff)).await
+}
+
+async fn start_inner(
+    state: &AcpCtx,
+    session_id: &str,
+    launch: AcpLaunch,
+    handoff: Option<Value>,
+) -> Result<()> {
+    let session = session::get(&state.db, session_id)
+        .await?
+        .ok_or_else(|| anyhow!("session {session_id} not found"))?;
+    let relay_name = session.term_session.clone();
+
+    let env: Vec<(&str, &str)> = launch
+        .env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    crate::backend::new_relay_session(
+        &relay_name,
+        &launch.adapter_cmd,
+        &env,
+        launch.env_clear,
+        &launch.cwd,
+        crate::backend::memory_max_gb(&state.db).await,
+    )
+    .await?;
+    let (events_tx, _) = broadcast::channel(256);
+    // From this point onward the detached relay exists. Any failure must tear it
+    // down and clear partially-persisted provider state before returning, or the
+    // caller gets a stuck row plus a relay name handoff cannot safely reuse.
+    let prepared: Result<(Task, mpsc::Receiver<Command>)> = async {
+        let stream = crate::backend::subscribe_relay(&relay_name, 0).await?;
+        let mut task = Task::fresh(
+            state,
+            &session,
+            relay_name.clone(),
+            stream,
+            events_tx.clone(),
+        )
+        .await?;
+        // `session/load` may replay an unanswered permission request and wait
+        // for the client response before returning. Register the task before
+        // setup so the REST permission route can drive that request instead of
+        // deadlocking against a handshake that has not published its handle.
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(64);
+        task.generation = state.acp.register(
+            session_id,
+            AcpHandle {
+                cmd_tx,
+                events_tx: events_tx.clone(),
+                metadata: task.metadata.clone(),
+            },
+        );
+        if let Err(error) = task.handshake(&launch, handoff, &mut cmd_rx).await {
+            task.registry.remove_own(&task.session_id, task.generation);
+            return Err(error);
+        }
+        Ok((task, cmd_rx))
+    }
+    .await;
+    let (task, cmd_rx) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let latest = session::get(&state.db, session_id).await.ok().flatten();
+            if let Some(turn) = latest.as_ref().and_then(session::acp_inflight_turn) {
+                let _ = chat::close_abandoned_turn(&state.db, session_id, turn).await;
+            }
+            let _ = session::clear_acp_state(&state.db, session_id).await;
+            if let Err(cleanup) = crate::backend::kill_session_and_wait(&relay_name).await {
+                return Err(anyhow!(
+                    "{error}; failed to clean up ACP relay after setup error: {cleanup}"
+                ));
+            }
+            return Err(error);
+        }
+    };
+
+    tokio::spawn(async move { task.run(cmd_rx).await });
+    Ok(())
+}
+
+/// Re-attach to an ACP session whose relay outlived a loom restart: subscribe from
+/// the persisted ack cursor, re-adopt the in-flight request state and the block
+/// cursor from the journal, and run the session task. Un-acked frames replay and
+/// re-ingest idempotently.
+pub async fn attach(state: &AcpCtx, session_id: &str) -> Result<()> {
+    let session = session::get(&state.db, session_id)
+        .await?
+        .ok_or_else(|| anyhow!("session {session_id} not found"))?;
+    if session.protocol != "acp" {
+        bail!("session {session_id} is not an acp session");
+    }
+    let acp_session_id = session
+        .acp_session_id
+        .clone()
+        .ok_or_else(|| anyhow!("session {session_id} has no acp_session_id"))?;
+    let relay_name = session.term_session.clone();
+    let cursor = session.acp_ack_seq.max(0) as u64;
+    let stream = crate::backend::subscribe_relay(&relay_name, cursor).await?;
+
+    let (events_tx, _) = broadcast::channel(256);
+    let mut task = Task::recover(
+        state,
+        &session,
+        acp_session_id,
+        relay_name,
+        stream,
+        events_tx.clone(),
+    )
+    .await?;
+
+    let (cmd_tx, cmd_rx) = mpsc::channel(64);
+    task.generation = state.acp.register(
+        session_id,
+        AcpHandle {
+            cmd_tx,
+            events_tx,
+            metadata: task.metadata.clone(),
+        },
+    );
+    tokio::spawn(async move { task.run(cmd_rx).await });
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Commands (REST → task)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PromptDelivery {
+    /// Preserve the conversation composer's queue-first behavior.
+    Queue,
+    /// Require the adapter's steering extension and surface rejection.
+    ForceSteer,
+    /// Cross-session control: steer, or cancel and restart as a fallback.
+    Immediate,
+}
+
+enum Command {
+    Prompt {
+        text: String,
+        by: Option<String>,
+        delivery: PromptDelivery,
+        resources: Vec<Value>,
+        reply: oneshot::Sender<Result<PromptAck>>,
+    },
+    ForcePending {
+        by: Option<String>,
+        reply: oneshot::Sender<Result<PromptAck>>,
+    },
+    NotifyPending {
+        reply: oneshot::Sender<Result<PromptAck>>,
+    },
+    RetractPending {
+        reply: oneshot::Sender<Result<String>>,
+    },
+    Cancel {
+        reply: oneshot::Sender<Result<()>>,
+    },
+    AnswerPermission {
+        request_id: String,
+        option_id: String,
+        by: String,
+        reply: oneshot::Sender<PermAnswer>,
+    },
+    SetMode {
+        mode_id: String,
+        by: Option<String>,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    SetConfigOption {
+        config_id: String,
+        value: Value,
+        reply: oneshot::Sender<Result<AcpMetadata>>,
+    },
+    PrepareHandoff {
+        reply: oneshot::Sender<Result<Vec<ChatBlockView>>>,
+    },
+}
+
+struct PendingMode {
+    mode_id: String,
+    by: Option<String>,
+    reply: oneshot::Sender<Result<()>>,
+}
+
+// ---------------------------------------------------------------------------
+// Task state
+// ---------------------------------------------------------------------------
+
+/// An open consolidation buffer accumulating chunk deltas of one `kind` until a
+/// block boundary flushes it.
+struct ChunkBuf {
+    kind: &'static str,
+    text: String,
+    first_seq: u64,
+}
+
+/// Presentation-only prose some adapters emit after `session/cancel`. Loom's
+/// durable `turn_end(cancelled)` block is the canonical interruption boundary;
+/// keeping this late notice as agent prose can attach it to the next turn.
+const ADAPTER_INTERRUPT_NOTICE: &str = "Conversation interrupted";
+
+/// The last-known state of a tool call, tracked from `tool_call`/`tool_call_update`
+/// until it reaches a terminal status.
+struct LiveTool {
+    id: String,
+    first_seq: u64,
+    title: Option<String>,
+    kind: Option<String>,
+    status: Option<String>,
+    content: Vec<ToolCallContent>,
+    locations: Vec<ToolCallLocation>,
+}
+
+impl LiveTool {
+    fn new(id: &str, first_seq: u64) -> Self {
+        Self {
+            id: id.to_string(),
+            first_seq,
+            title: None,
+            kind: None,
+            status: None,
+            content: Vec::new(),
+            locations: Vec::new(),
+        }
+    }
+
+    fn merge(&mut self, tc: &ToolCall) {
+        if tc.title.is_some() {
+            self.title = tc.title.clone();
+        }
+        if tc.kind.is_some() {
+            self.kind = tc.kind.clone();
+        }
+        if tc.status.is_some() {
+            self.status = tc.status.clone();
+        }
+        if let Some(c) = &tc.content {
+            self.content = c.clone();
+        }
+        if let Some(l) = &tc.locations {
+            self.locations = l.clone();
+        }
+    }
+
+    fn is_terminal(&self) -> bool {
+        matches!(
+            self.status.as_deref(),
+            Some("completed") | Some("failed") | Some("cancelled")
+        )
+    }
+
+    /// Map ACP content into the journal contract's content array.
+    fn content_json(&self) -> Vec<Value> {
+        let mut out = Vec::new();
+        for c in &self.content {
+            match c {
+                ToolCallContent::Content { content } => match content {
+                    wire::ContentBlock::Text { text } => out.push(json!({
+                        "type": "text",
+                        "text": text,
+                    })),
+                    wire::ContentBlock::Image {
+                        data,
+                        mime_type,
+                        uri,
+                    } => out.push(json!({
+                        "type": "image",
+                        "data": data,
+                        "mime_type": mime_type,
+                        "uri": uri,
+                    })),
+                    wire::ContentBlock::Other => {}
+                },
+                ToolCallContent::Diff {
+                    path,
+                    old_text,
+                    new_text,
+                } => out.push(json!({
+                    "type": "diff",
+                    "path": path.clone(),
+                    "old": old_text.clone(),
+                    "new": new_text.clone(),
+                })),
+                ToolCallContent::Other => {}
+            }
+        }
+        out
+    }
+
+    fn locations_json(&self) -> Vec<Value> {
+        self.locations
+            .iter()
+            .map(|l| json!({ "path": l.path.clone(), "line": l.line }))
+            .collect()
+    }
+
+    /// The status to journal: a live tool flushed at turn end reads as `cancelled`.
+    fn terminal_status(&self) -> &str {
+        match self.status.as_deref() {
+            Some(s @ ("completed" | "failed" | "cancelled")) => s,
+            _ => "cancelled",
+        }
+    }
+
+    fn block_payload(&self) -> Value {
+        json!({
+            "tool_call_id": self.id.clone(),
+            "title": self.title.clone().unwrap_or_default(),
+            "tool_kind": self.kind.clone().unwrap_or_else(|| "other".to_string()),
+            "status": self.terminal_status().to_string(),
+            "content": self.content_json(),
+            "locations": self.locations_json(),
+        })
+    }
+
+    fn sse(&self, turn: i64) -> Value {
+        json!({
+            "turn": turn,
+            "tool_call_id": self.id.clone(),
+            "title": self.title.clone().unwrap_or_default(),
+            "tool_kind": self.kind.clone().unwrap_or_else(|| "other".to_string()),
+            "status": self.status.clone().unwrap_or_else(|| "pending".to_string()),
+            "content": self.content_json(),
+            "locations": self.locations_json(),
+        })
+    }
+}
+
+/// An unanswered permission request awaiting a client answer: its JSON-RPC id (to
+/// echo in the response) and the frame seq (held un-acked until answered).
+struct PendingPerm {
+    jsonrpc_id: Value,
+    frame_seq: u64,
+}
+
+/// A `_session/steering` request waiting for the adapter's acceptance response.
+struct PendingSteer {
+    text: String,
+    by: Option<String>,
+    turn: i64,
+    delivery: PromptDelivery,
+    /// Exact durable queue prefix promoted by this request. Consumed only after
+    /// the adapter accepts steering, preserving messages appended behind it.
+    promoted_queue: Option<String>,
+    resources: Vec<Value>,
+    /// Forced and immediate delivery wait for the adapter's final answer. An
+    /// ordinary composer prompt is acknowledged as durably queued before
+    /// steering starts, so it carries no waiting HTTP reply and cannot lock the
+    /// composer behind a private RPC.
+    reply: Option<oneshot::Sender<Result<PromptAck>>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TurnEndSource {
+    MatchingPromptResponse,
+    Synthetic,
+}
+
+impl TurnEndSource {
+    fn review_claim_settlement(self) -> crate::review_inbox::ReviewClaimSettlement {
+        match self {
+            Self::MatchingPromptResponse => {
+                crate::review_inbox::ReviewClaimSettlement::MatchingPromptResponse
+            }
+            Self::Synthetic => crate::review_inbox::ReviewClaimSettlement::Abandoned,
+        }
+    }
+}
+
+struct Task {
+    db: Db,
+    /// The loom event bus — used to drive the turn-boundary status/idle lifecycle
+    /// through [`crate::status::record_acp_lifecycle`] (working at turn start,
+    /// idle at turn end), the sole reason the acp task holds it.
+    bus: crate::events::EventBus,
+    registry: AcpRegistry,
+    /// This task's registry generation — used to remove only its own slot on exit.
+    generation: u64,
+    session_id: String,
+    branch_id: String,
+    #[allow(dead_code)]
+    relay_name: String,
+    acp_session_id: String,
+    events_tx: broadcast::Sender<SseEvent>,
+    stream: tapestry::RelayStream,
+
+    next_req_id: u64,
+    /// The in-flight `session/prompt` request id + its turn, mirrored on the
+    /// session row so a replayed turn-end response is recognized after a restart.
+    inflight_prompt: Option<(u64, i64)>,
+    /// A protected review inbox claim stays recoverable until the matching ACP
+    /// prompt response proves that the adapter accepted the attempted write.
+    inflight_review: Option<InflightReview>,
+
+    current_turn: i64,
+    next_seq: i64,
+    turns_dispatched: i64,
+    turn_live: bool,
+
+    buf: Option<ChunkBuf>,
+    tools: HashMap<String, LiveTool>,
+    pending_perms: HashMap<String, PendingPerm>,
+
+    /// Permission posture captured when the active turn started. `current_mode`
+    /// may advance while that turn is running, but a provider cannot retroactively
+    /// rebuild the turn's approval policy or sandbox.
+    effective_mode: Option<String>,
+    current_mode: Option<String>,
+    metadata: Arc<Mutex<AcpMetadata>>,
+    pending_mode: HashMap<u64, PendingMode>,
+    pending_config: HashMap<u64, oneshot::Sender<Result<AcpMetadata>>>,
+    #[allow(dead_code)]
+    load_session_cap: bool,
+    /// codex-acp advertises this experimental extension in
+    /// `_meta.steering.supported`; other adapters keep queue semantics.
+    steering_cap: bool,
+    pending_steers: HashMap<u64, PendingSteer>,
+    /// A turn started internally by the steering extension after the previous
+    /// turn raced to completion. It has no `session/prompt` response id, so its
+    /// end is taken from codex-acp's `session_info_update` idle edge.
+    external_turn: bool,
+    pending_external: Option<PendingSteer>,
+    /// A cancelled turn may be followed by the adapter's presentation-only
+    /// "Conversation interrupted" prose after the next turn has already begun.
+    /// Consume that one notice rather than journaling it under the wrong turn.
+    pending_interrupt_notice_through: Option<i64>,
+    /// Latched for the duration of a `session/load` replay: the adapter re-streams
+    /// the whole conversation as `session/update` notifications, but we already
+    /// hold it in the journal, so journal writes are suppressed (and the seq
+    /// cursor left untouched) until the load response lands.
+    suppress_journal: bool,
+
+    highest_seq: u64,
+    acked: u64,
+    /// Latched when a journal write fails: the ack watermark freezes (so the
+    /// un-journaled frames replay after a restart) and the failure is logged.
+    journal_failed: bool,
+    /// When this task last stamped `last_activity_at`. See [`Task::touch_activity`].
+    last_activity_touch: Option<Instant>,
+}
+
+impl Task {
+    async fn load_persisted_metadata(db: &Db, session_id: &str) -> Result<AcpMetadata> {
+        let Some(stored) = session::get_acp_metadata(db, session_id).await? else {
+            return Ok(AcpMetadata::default());
+        };
+        serde_json::from_str(&stored).context("decoding persisted ACP metadata")
+    }
+
+    async fn persist_metadata(&self) -> Result<()> {
+        let metadata = self.metadata.lock().unwrap().clone();
+        let encoded = serde_json::to_string(&metadata)?;
+        session::set_acp_metadata(&self.db, &self.session_id, &encoded).await
+    }
+
+    async fn fresh(
+        state: &AcpCtx,
+        session: &session::Session,
+        relay_name: String,
+        stream: tapestry::RelayStream,
+        events_tx: broadcast::Sender<SseEvent>,
+    ) -> Result<Self> {
+        let cursor = chat::max_turn_seq(&state.db, &session.id).await?;
+        let (current_turn, next_seq, turns_dispatched) = match cursor {
+            Some((turn, seq)) => (turn, seq + 1, turn + 1),
+            None => (0, 0, 0),
+        };
+        Ok(Self {
+            db: state.db.clone(),
+            bus: state.bus.clone(),
+            registry: state.acp.clone(),
+            generation: 0,
+            session_id: session.id.clone(),
+            branch_id: session.branch_id.clone(),
+            relay_name,
+            acp_session_id: String::new(),
+            events_tx,
+            stream,
+            next_req_id: 0,
+            inflight_prompt: None,
+            inflight_review: None,
+            current_turn,
+            next_seq,
+            turns_dispatched,
+            turn_live: false,
+            buf: None,
+            tools: HashMap::new(),
+            pending_perms: HashMap::new(),
+            effective_mode: None,
+            current_mode: None,
+            metadata: Arc::new(Mutex::new(AcpMetadata::default())),
+            pending_mode: HashMap::new(),
+            pending_config: HashMap::new(),
+            load_session_cap: false,
+            steering_cap: false,
+            pending_steers: HashMap::new(),
+            external_turn: false,
+            pending_external: None,
+            pending_interrupt_notice_through: None,
+            suppress_journal: false,
+            highest_seq: 0,
+            acked: 0,
+            journal_failed: false,
+            last_activity_touch: None,
+        })
+    }
+
+    async fn recover(
+        state: &AcpCtx,
+        session: &session::Session,
+        acp_session_id: String,
+        relay_name: String,
+        stream: tapestry::RelayStream,
+        events_tx: broadcast::Sender<SseEvent>,
+    ) -> Result<Self> {
+        let (max_turn, max_seq) = chat::max_turn_seq(&state.db, &session.id)
+            .await?
+            .unwrap_or((0, -1));
+        let inflight_value = session
+            .acp_inflight
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok());
+        let live_turn = inflight_value
+            .as_ref()
+            .and_then(|v| v.get("turn"))
+            .and_then(Value::as_i64);
+        let external_turn = inflight_value
+            .as_ref()
+            .and_then(|v| v.get("external"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let inflight = inflight_value
+            .as_ref()
+            .and_then(|v| Some((v.get("prompt_id")?.as_u64()?, v.get("turn")?.as_i64()?)));
+        let inflight_review = inflight_value.as_ref().and_then(|value| {
+            Some(InflightReview {
+                delivery_key: value.get("delivery_key")?.as_str()?.to_string(),
+                claim_token: value.get("review_claim_token")?.as_str()?.to_string(),
+                active_claim: None,
+            })
+        });
+        let effective_mode = inflight_value
+            .as_ref()
+            .and_then(|v| v.get("mode"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let current_turn = live_turn.unwrap_or(max_turn);
+        // The journal always holds at least this turn's `user_message`, so
+        // `max_seq + 1` continues the turn without colliding.
+        let next_seq = max_seq + 1;
+        let turns_dispatched = if max_seq < 0 { 0 } else { current_turn + 1 };
+
+        let metadata = Self::load_persisted_metadata(&state.db, &session.id).await?;
+        let steering_cap = metadata.steering_supported;
+        Ok(Self {
+            db: state.db.clone(),
+            bus: state.bus.clone(),
+            registry: state.acp.clone(),
+            generation: 0,
+            session_id: session.id.clone(),
+            branch_id: session.branch_id.clone(),
+            relay_name,
+            acp_session_id,
+            events_tx,
+            stream,
+            next_req_id: 0,
+            inflight_prompt: inflight,
+            inflight_review,
+            current_turn,
+            next_seq,
+            turns_dispatched,
+            turn_live: live_turn.is_some(),
+            buf: None,
+            tools: HashMap::new(),
+            pending_perms: HashMap::new(),
+            // Old in-flight records have no mode. Keep that unknown rather than
+            // applying a newer session selection to an older turn.
+            effective_mode,
+            current_mode: session.current_mode.clone(),
+            metadata: Arc::new(Mutex::new(metadata)),
+            pending_mode: HashMap::new(),
+            pending_config: HashMap::new(),
+            load_session_cap: false,
+            steering_cap,
+            pending_steers: HashMap::new(),
+            external_turn,
+            pending_external: None,
+            pending_interrupt_notice_through: None,
+            suppress_journal: false,
+            highest_seq: session.acp_ack_seq.max(0) as u64,
+            acked: session.acp_ack_seq.max(0) as u64,
+            journal_failed: false,
+            last_activity_touch: None,
+        })
+    }
+
+    fn next_id(&mut self) -> u64 {
+        self.next_req_id += 1;
+        self.next_req_id
+    }
+
+    fn emit(&self, event: &str, data: Value) {
+        let _ = self.events_tx.send(SseEvent {
+            event: event.to_string(),
+            data,
+        });
+    }
+
+    fn emit_queue(&self, pending_prompt: Option<&str>) {
+        self.emit("queue", json!({ "pending_prompt": pending_prompt }));
+    }
+
+    fn emit_metadata(&self) {
+        let metadata = self.metadata.lock().unwrap().clone();
+        self.emit(
+            "metadata",
+            serde_json::to_value(metadata).unwrap_or(Value::Null),
+        );
+    }
+
+    fn replace_commands(&self, commands: Vec<Value>, emit: bool) {
+        self.metadata.lock().unwrap().commands = commands;
+        if emit {
+            self.emit_metadata();
+        }
+    }
+
+    fn replace_config_options(&mut self, config_options: Vec<Value>, emit: bool) {
+        if let Some(mode) = config_options.iter().find_map(|option| {
+            let is_mode = option.get("category").and_then(Value::as_str) == Some("mode")
+                || option.get("id").and_then(Value::as_str) == Some("mode");
+            is_mode
+                .then(|| option.get("currentValue").and_then(Value::as_str))
+                .flatten()
+                .map(str::to_string)
+        }) {
+            self.current_mode = Some(mode);
+        }
+        self.metadata.lock().unwrap().config_options = config_options;
+        if emit {
+            self.emit_metadata();
+        }
+    }
+
+    fn replace_modes(&mut self, modes: wire::SessionModeState, emit: bool) {
+        self.current_mode = Some(modes.current_mode_id.clone());
+        self.metadata.lock().unwrap().modes = modes.available_modes;
+        if emit {
+            self.emit_metadata();
+        }
+    }
+
+    /// Bring the adapter-owned model/effort controls into line with Loom's
+    /// resolved launch selectors. Claude's adapter, for example, forwards the
+    /// `_meta` model to the SDK but independently seeds its model config option
+    /// from settings/defaults. Going through the ordinary ACP config method
+    /// gives both sides one acknowledged state before the first prompt.
+    async fn reconcile_initial_config(
+        &mut self,
+        launch: &AcpLaunch,
+        cmd_rx: &mut mpsc::Receiver<Command>,
+    ) -> Result<()> {
+        for (kind, desired) in [
+            ("model", launch.initial_model.as_deref()),
+            ("effort", launch.initial_effort.as_deref()),
+        ] {
+            let Some(desired) = desired.map(str::trim).filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            let option = {
+                let metadata = self.metadata.lock().unwrap();
+                metadata.config_options.iter().find_map(|option| {
+                    let id = option.get("id").and_then(Value::as_str)?;
+                    let category = option.get("category").and_then(Value::as_str);
+                    let matches = match kind {
+                        "model" => category == Some("model") || id == "model",
+                        "effort" => {
+                            category == Some("thought_level")
+                                || id == "effort"
+                                || id.contains("reasoning")
+                        }
+                        _ => false,
+                    };
+                    matches.then(|| {
+                        (
+                            id.to_string(),
+                            option
+                                .get("currentValue")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        )
+                    })
+                })
+            };
+            let Some((config_id, current)) = option else {
+                // Older/custom adapters may not expose this selector. The
+                // launch channel still owns the runtime value in that case.
+                continue;
+            };
+            if current.as_deref() == Some(desired) {
+                continue;
+            }
+
+            let id = self.next_id();
+            self.stream
+                .write(&wire::request_line(
+                    id,
+                    method::SESSION_SET_CONFIG_OPTION,
+                    wire::set_config_option_params(
+                        &self.acp_session_id,
+                        &config_id,
+                        Value::String(desired.to_string()),
+                    ),
+                ))
+                .await?;
+            let (result, error) = self
+                .recv_until_response(
+                    id,
+                    method::SESSION_SET_CONFIG_OPTION,
+                    launch.setup_timeout,
+                    cmd_rx,
+                )
+                .await?;
+            let result = result.ok_or_else(|| {
+                anyhow!(
+                    "session/set_config_option failed while applying launch {kind} '{desired}': {error:?}"
+                )
+            })?;
+            let updated: wire::SetConfigOptionResult =
+                serde_json::from_value(result).with_context(|| {
+                    format!(
+                        "session/set_config_option returned invalid launch {kind} state for '{desired}'"
+                    )
+                })?;
+            self.replace_config_options(updated.config_options, false);
+        }
+        Ok(())
+    }
+
+    // -- handshake ----------------------------------------------------------
+
+    async fn handshake(
+        &mut self,
+        launch: &AcpLaunch,
+        handoff: Option<Value>,
+        cmd_rx: &mut mpsc::Receiver<Command>,
+    ) -> Result<()> {
+        let id = self.next_id();
+        self.stream
+            .write(&wire::request_line(
+                id,
+                method::INITIALIZE,
+                wire::initialize_params(),
+            ))
+            .await?;
+        let (res, err) = self
+            .recv_until_response(id, method::INITIALIZE, launch.setup_timeout, cmd_rx)
+            .await?;
+        let res = res.ok_or_else(|| anyhow!("initialize failed: {err:?}"))?;
+        if let Ok(init) = serde_json::from_value::<wire::InitializeResult>(res) {
+            self.load_session_cap = init.agent_capabilities.load_session;
+            self.steering_cap = init.meta.steering.supported;
+            self.metadata.lock().unwrap().steering_supported = self.steering_cap;
+        }
+
+        match &launch.new_or_load {
+            NewOrLoad::New { cwd, meta } => {
+                let id = self.next_id();
+                let params = wire::new_session_params(
+                    &cwd.to_string_lossy(),
+                    &launch.mcp_servers,
+                    meta.as_ref(),
+                );
+                self.stream
+                    .write(&wire::request_line(id, method::SESSION_NEW, params))
+                    .await?;
+                let (res, err) = self
+                    .recv_until_response(id, method::SESSION_NEW, launch.setup_timeout, cmd_rx)
+                    .await?;
+                let res = res.ok_or_else(|| anyhow!("session/new failed: {err:?}"))?;
+                let ns: wire::NewSessionResult = serde_json::from_value(res)?;
+                self.acp_session_id = ns.session_id.clone();
+                if let Some(m) = ns.modes {
+                    self.replace_modes(m, false);
+                }
+                if let Some(options) = ns.config_options {
+                    self.replace_config_options(options, false);
+                }
+            }
+            NewOrLoad::Load {
+                acp_session_id,
+                meta,
+            } => {
+                self.acp_session_id = acp_session_id.clone();
+                // Continue the *existing* journal: seed the turn/seq cursor from it
+                // so a post-load prompt opens a fresh turn (rather than colliding
+                // with `Task::fresh`'s zeroed counters). `turns_dispatched > 0` makes
+                // the next `start_turn` advance the turn.
+                let (max_turn, max_seq) = chat::max_turn_seq(&self.db, &self.session_id)
+                    .await?
+                    .unwrap_or((0, -1));
+                self.current_turn = max_turn;
+                self.next_seq = max_seq + 1;
+                self.turns_dispatched = if max_seq < 0 { 0 } else { max_turn + 1 };
+                // The adapter re-streams the whole conversation as `session/update`
+                // notifications during the load — we already hold it — so suppress
+                // re-journaling for the duration of the call.
+                self.suppress_journal = true;
+                let id = self.next_id();
+                let params = wire::load_session_params(
+                    acp_session_id,
+                    &launch.cwd.to_string_lossy(),
+                    &launch.mcp_servers,
+                    meta.as_ref(),
+                );
+                self.stream
+                    .write(&wire::request_line(id, method::SESSION_LOAD, params))
+                    .await?;
+                // History replays as `session/update` notifications during the call.
+                let load_timeout = launch.setup_timeout.saturating_mul(4);
+                let (res, err) = self
+                    .recv_until_response(id, method::SESSION_LOAD, load_timeout, cmd_rx)
+                    .await?;
+                self.suppress_journal = false;
+                // Drop any consolidation the suppressed replay left half-open so it
+                // can't flush stale history into a later turn.
+                self.buf = None;
+                self.tools.clear();
+                if res.is_none() {
+                    bail!("session/load failed: {err:?}");
+                }
+                if let Some(load) =
+                    res.and_then(|r| serde_json::from_value::<wire::LoadSessionResult>(r).ok())
+                {
+                    if let Some(m) = load.modes {
+                        self.replace_modes(m, false);
+                    }
+                    if let Some(options) = load.config_options {
+                        self.replace_config_options(options, false);
+                    }
+                }
+            }
+        }
+        session::set_acp(&self.db, &self.session_id, &self.acp_session_id).await?;
+
+        self.reconcile_initial_config(launch, cmd_rx).await?;
+
+        if let Some(mode) = &launch.mode {
+            let id = self.next_id();
+            self.stream
+                .write(&wire::request_line(
+                    id,
+                    method::SESSION_SET_MODE,
+                    wire::set_mode_params(&self.acp_session_id, mode),
+                ))
+                .await?;
+            let (result, error) = self
+                .recv_until_response(id, method::SESSION_SET_MODE, launch.setup_timeout, cmd_rx)
+                .await?;
+            if result.is_none() {
+                bail!("session/set_mode failed: {error:?}");
+            }
+            self.current_mode = Some(mode.clone());
+        }
+        if let Some(mode) = &self.current_mode {
+            session::set_current_mode(&self.db, &self.session_id, mode).await?;
+        }
+        self.persist_metadata().await?;
+
+        if let Some(goal) = &launch.goal {
+            match handoff {
+                Some(payload) => self.start_handoff_turn(goal.clone(), payload).await?,
+                None => self.start_turn(goal.clone(), None, Vec::new()).await?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Drive frames until the response to `want` arrives, processing interleaved
+    /// notifications/requests normally. Used only during the synchronous handshake.
+    async fn recv_until_response(
+        &mut self,
+        want: u64,
+        method_name: &str,
+        timeout: Duration,
+        cmd_rx: &mut mpsc::Receiver<Command>,
+    ) -> Result<(Option<Value>, Option<Value>)> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                bail!("timed out waiting for ACP {method_name} response after {timeout:?}");
+            }
+            tokio::select! {
+                event = self.stream.recv() => match event {
+                    Some(RelayEvent::Frame { seq, payload }) => {
+                        self.highest_seq = seq;
+                        let inc: Incoming = match serde_json::from_slice(&payload) {
+                            Ok(i) => i,
+                            Err(_) => {
+                                self.maybe_ack().await?;
+                                continue;
+                            }
+                        };
+                        if inc.kind() == IncomingKind::Response
+                            && inc.id.as_ref().and_then(Value::as_u64) == Some(want)
+                        {
+                            self.maybe_ack().await?;
+                            return Ok((inc.result, inc.error));
+                        }
+                        self.dispatch_frame(seq, inc).await;
+                        self.maybe_ack().await?;
+                    }
+                    Some(RelayEvent::Exit { status }) => {
+                        bail!("agent exited during handshake (status {status:?})")
+                    }
+                    None => bail!("relay closed during handshake"),
+                },
+                cmd = cmd_rx.recv() => match cmd {
+                    Some(cmd) => self.on_setup_command(cmd).await,
+                    None => bail!("ACP session setup was stopped"),
+                },
+                _ = tokio::time::sleep_until(deadline) => {
+                    bail!("timed out waiting for ACP {method_name} response after {timeout:?}")
+                }
+            }
+        }
+    }
+
+    /// During initialize/new/load only permission answers are safe to drive.
+    /// In particular, a replayed open permission can be a prerequisite for the
+    /// `session/load` response itself. Reject other controls promptly rather
+    /// than queueing an HTTP request behind setup or sending it with an empty
+    /// provider session id.
+    async fn on_setup_command(&mut self, cmd: Command) {
+        let setup_error = || anyhow!("ACP session setup is still in progress");
+        match cmd {
+            Command::AnswerPermission {
+                request_id,
+                option_id,
+                by,
+                reply,
+            } => {
+                let answer = self.answer_permission(&request_id, &option_id, &by).await;
+                let _ = reply.send(answer);
+            }
+            Command::Prompt { reply, .. }
+            | Command::ForcePending { reply, .. }
+            | Command::NotifyPending { reply } => {
+                let _ = reply.send(Err(setup_error()));
+            }
+            Command::RetractPending { reply } => {
+                let _ = reply.send(Err(setup_error()));
+            }
+            Command::Cancel { reply } | Command::SetMode { reply, .. } => {
+                let _ = reply.send(Err(setup_error()));
+            }
+            Command::SetConfigOption { reply, .. } => {
+                let _ = reply.send(Err(setup_error()));
+            }
+            Command::PrepareHandoff { reply } => {
+                let _ = reply.send(Err(setup_error()));
+            }
+        }
+    }
+
+    // -- main loop ----------------------------------------------------------
+
+    async fn run(mut self, mut cmd_rx: mpsc::Receiver<Command>) {
+        let mut handoff_reply = None;
+        let mut ack_tick = tokio::time::interval(ACK_FLUSH_INTERVAL);
+        ack_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Consume interval's immediate first tick; the handshake already
+        // flushed everything safe before the main loop starts.
+        ack_tick.tick().await;
+        loop {
+            tokio::select! {
+                ev = self.stream.recv() => match ev {
+                    Some(RelayEvent::Frame { seq, payload }) => {
+                        self.highest_seq = seq;
+                        self.touch_activity().await;
+                        match serde_json::from_slice::<Incoming>(&payload) {
+                            Ok(inc) => self.dispatch_frame(seq, inc).await,
+                            Err(e) => tracing::warn!(session = %self.session_id, error = %e, "unparseable acp frame"),
+                        }
+                        if self.journal_replay_needed() {
+                            break;
+                        }
+                    }
+                    Some(RelayEvent::Exit { status }) => {
+                        self.on_exit(status).await;
+                        break;
+                    }
+                    None => break,
+                },
+                cmd = cmd_rx.recv() => match cmd {
+                    Some(Command::PrepareHandoff { reply }) => {
+                        let pending = session::read_pending_prompt(&self.db, &self.session_id)
+                            .await
+                            .unwrap_or_default();
+                        if self.turn_live || !pending.trim().is_empty() {
+                            let _ = reply.send(Err(anyhow!("cannot hand off while a turn or queued prompt is active")));
+                        } else {
+                            match chat::list(&self.db, &self.session_id).await {
+                                Ok(snapshot) => {
+                                    handoff_reply = Some((reply, snapshot));
+                                    break;
+                                }
+                                Err(error) => {
+                                    let _ = reply.send(Err(error));
+                                }
+                            }
+                        }
+                    }
+                    Some(c) => {
+                        self.on_command(c).await;
+                        if self.journal_replay_needed() {
+                            break;
+                        }
+                    }
+                    None => break,
+                },
+                _ = ack_tick.tick() => {
+                    if let Err(e) = self.maybe_ack().await {
+                        tracing::warn!(session = %self.session_id, error = %e, "acp ack failed");
+                    }
+                },
+            }
+        }
+        self.registry.remove_own(&self.session_id, self.generation);
+        if let Some((reply, snapshot)) = handoff_reply {
+            let _ = reply.send(Ok(snapshot));
+        }
+        tracing::info!(session = %self.session_id, "acp task stopped");
+    }
+
+    fn journal_replay_needed(&self) -> bool {
+        if !self.journal_failed {
+            return false;
+        }
+        tracing::warn!(
+            session = %self.session_id,
+            acked = self.acked,
+            "acp task yielding after journal failure so the durable relay backlog can replay"
+        );
+        true
+    }
+
+    /// Route one inbound frame (notification / agent request / response).
+    /// Record that the adapter is producing output.
+    ///
+    /// `last_activity_at` is what the staleness monitor and the metadata
+    /// assistant read. Turn boundaries alone are far too coarse a signal for an
+    /// ACP session: a single turn runs for hours, so a session streaming tool
+    /// calls the whole time would otherwise be indistinguishable from one that
+    /// stopped at the prompt. A turn that genuinely wedges still goes stale —
+    /// this stamps output, not liveness.
+    ///
+    /// A `session/load` replay is deliberately excluded: re-streamed history is
+    /// not new activity, and stamping it would date a recovered session to its
+    /// restart.
+    async fn touch_activity(&mut self) {
+        if self.suppress_journal {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .last_activity_touch
+            .is_some_and(|last| now.duration_since(last) < ACTIVITY_TOUCH_INTERVAL)
+        {
+            return;
+        }
+        self.last_activity_touch = Some(now);
+        if let Err(e) = session::touch(&self.db, &self.session_id).await {
+            tracing::warn!(session = %self.session_id, error = %e, "could not stamp session activity");
+        }
+    }
+
+    async fn dispatch_frame(&mut self, seq: u64, inc: Incoming) {
+        match inc.kind() {
+            IncomingKind::Notification => {
+                if inc.method.as_deref() == Some(method::SESSION_UPDATE) {
+                    if let Err(e) = self
+                        .handle_notification(seq, inc.params.unwrap_or(Value::Null))
+                        .await
+                    {
+                        tracing::warn!(session = %self.session_id, error = %e, "bad session/update");
+                    }
+                }
+            }
+            IncomingKind::Request => {
+                if inc.method.as_deref() == Some(method::SESSION_REQUEST_PERMISSION) {
+                    if let Err(e) = self.handle_permission(seq, inc).await {
+                        tracing::warn!(session = %self.session_id, error = %e, "bad request_permission");
+                    }
+                }
+            }
+            IncomingKind::Response => self.handle_response(inc).await,
+            IncomingKind::Unknown => {}
+        }
+    }
+
+    // -- session/update handling -------------------------------------------
+
+    async fn handle_notification(&mut self, seq: u64, params: Value) -> Result<()> {
+        let notif: SessionNotification = serde_json::from_value(params)?;
+        match notif.update {
+            SessionUpdate::UserMessageChunk => {
+                // Never journaled: loom writes the `user_message` block itself at
+                // dispatch (`start_turn`), so an adapter-streamed user chunk is
+                // always an echo or a history replay — e.g. claude re-streams the
+                // retained user turns after a `/compact` — and journaling it here
+                // duplicated the visible chat history.
+            }
+            SessionUpdate::AgentMessageChunk { content } => {
+                if let Some(t) = content.text().map(str::to_string) {
+                    self.on_chunk(kind::AGENT_MESSAGE, &t, seq).await;
+                }
+            }
+            SessionUpdate::AgentThoughtChunk { content } => {
+                if let Some(t) = content.text().map(str::to_string) {
+                    self.on_chunk(kind::THOUGHT, &t, seq).await;
+                }
+            }
+            SessionUpdate::ToolCall(tc) | SessionUpdate::ToolCallUpdate(tc) => {
+                self.flush_buf().await;
+                self.on_tool(seq, tc).await;
+            }
+            SessionUpdate::Plan(p) => {
+                self.flush_buf().await;
+                let entries: Vec<Value> = p
+                    .entries
+                    .iter()
+                    .map(|e| json!({ "content": e.content.clone(), "status": e.status.clone() }))
+                    .collect();
+                self.journal_block(kind::PLAN, json!({ "entries": entries }))
+                    .await;
+            }
+            SessionUpdate::CurrentModeUpdate { current_mode_id } => {
+                self.flush_buf().await;
+                if self.current_mode.as_deref() != Some(current_mode_id.as_str()) {
+                    self.current_mode = Some(current_mode_id.clone());
+                    let _ = session::set_current_mode(&self.db, &self.session_id, &current_mode_id)
+                        .await;
+                    self.journal_block(
+                        kind::MODE_CHANGE,
+                        json!({ "mode_id": current_mode_id, "by": Value::Null }),
+                    )
+                    .await;
+                }
+            }
+            SessionUpdate::UsageUpdate { used, size, cost } => {
+                // Usage is metadata, not a prose boundary. Flushing here split
+                // replies into tiny blocks when an adapter reported it often.
+                // ACP requires both context fields; silently ignore a malformed
+                // legacy update instead of publishing a misleading 0/0 meter.
+                if let (Some(used), Some(size)) = (used, size) {
+                    let usage = AcpUsage {
+                        used,
+                        size,
+                        cost: cost.map(|cost| AcpCost {
+                            amount: cost.amount,
+                            currency: cost.currency,
+                        }),
+                    };
+                    self.journal_block(
+                        kind::USAGE,
+                        serde_json::to_value(usage).unwrap_or(Value::Null),
+                    )
+                    .await;
+                }
+            }
+            SessionUpdate::SessionInfoUpdate { meta } => {
+                let status = meta
+                    .codex
+                    .and_then(|codex| codex.thread_status)
+                    .map(|s| s.kind);
+                if self.external_turn && matches!(status.as_deref(), Some("idle" | "systemError")) {
+                    self.external_turn = false;
+                    let reason = if status.as_deref() == Some("systemError") {
+                        "error"
+                    } else {
+                        "end_turn"
+                    };
+                    self.on_turn_end(
+                        self.current_turn,
+                        Some(json!({ "stopReason": reason })),
+                        None,
+                        TurnEndSource::Synthetic,
+                    )
+                    .await;
+                }
+            }
+            SessionUpdate::AvailableCommandsUpdate { available_commands } => {
+                self.replace_commands(available_commands, true);
+                if let Err(error) = self.persist_metadata().await {
+                    tracing::warn!(session = %self.session_id, %error, "failed to persist acp metadata");
+                }
+            }
+            SessionUpdate::ConfigOptionUpdate { config_options } => {
+                self.replace_config_options(config_options, true);
+                if let Err(error) = self.persist_metadata().await {
+                    tracing::warn!(session = %self.session_id, %error, "failed to persist acp metadata");
+                }
+                if let Some(mode) = &self.current_mode {
+                    let _ = session::set_current_mode(&self.db, &self.session_id, mode).await;
+                }
+            }
+            SessionUpdate::Other => {}
+        }
+        Ok(())
+    }
+
+    async fn on_chunk(&mut self, kind: &'static str, text: &str, seq: u64) {
+        let need_flush = self.buf.as_ref().map(|b| b.kind != kind).unwrap_or(false);
+        if need_flush {
+            self.flush_buf().await;
+        }
+        let b = self.buf.get_or_insert_with(|| ChunkBuf {
+            kind,
+            text: String::new(),
+            first_seq: seq,
+        });
+        b.text.push_str(text);
+        self.emit(
+            "delta",
+            json!({ "turn": self.current_turn, "kind": kind, "text": text }),
+        );
+    }
+
+    async fn flush_buf(&mut self) {
+        let Some(b) = self.buf.take() else { return };
+        let (kind, payload) = match b.kind {
+            kind::AGENT_MESSAGE
+                if self
+                    .pending_interrupt_notice_through
+                    .is_some_and(|through| self.current_turn <= through)
+                    && b.text.trim() == ADAPTER_INTERRUPT_NOTICE =>
+            {
+                self.pending_interrupt_notice_through = None;
+                // Journal an empty block so the ordinary `block` SSE clears the
+                // already-streamed shadow in connected browsers. Empty agent
+                // prose is ignored by the renderer and handoff history.
+                (kind::AGENT_MESSAGE, json!({ "text": "" }))
+            }
+            kind::AGENT_MESSAGE => (kind::AGENT_MESSAGE, json!({ "text": b.text })),
+            kind::THOUGHT => (kind::THOUGHT, json!({ "text": b.text, "ms": Value::Null })),
+            _ => return,
+        };
+        self.journal_block(kind, payload).await;
+    }
+
+    async fn on_tool(&mut self, seq: u64, tc: ToolCall) {
+        let mut tool = self
+            .tools
+            .remove(&tc.tool_call_id)
+            .unwrap_or_else(|| LiveTool::new(&tc.tool_call_id, seq));
+        tool.merge(&tc);
+        self.emit("tool", tool.sse(self.current_turn));
+        if tool.is_terminal() {
+            if !chat::tool_call_exists(&self.db, &self.session_id, &tool.id)
+                .await
+                .unwrap_or(false)
+            {
+                let payload = tool.block_payload();
+                self.journal_block(kind::TOOL_CALL, payload).await;
+            }
+            // Terminal: dropped from the live map.
+        } else {
+            self.tools.insert(tool.id.clone(), tool);
+        }
+    }
+
+    // -- responses / turn state machine ------------------------------------
+
+    async fn handle_response(&mut self, inc: Incoming) {
+        let Some(id) = inc.id.as_ref().and_then(Value::as_u64) else {
+            return;
+        };
+        if let Some(pending) = self.pending_steers.remove(&id) {
+            self.on_steering_response(pending, inc.result, inc.error)
+                .await;
+            return;
+        }
+        if let Some(pending) = self.pending_mode.remove(&id) {
+            let result = if let Some(error) = inc.error {
+                Err(anyhow!("session/set_mode failed: {error}"))
+            } else {
+                if self.current_mode.as_deref() != Some(pending.mode_id.as_str()) {
+                    self.current_mode = Some(pending.mode_id.clone());
+                    let _ = session::set_current_mode(&self.db, &self.session_id, &pending.mode_id)
+                        .await;
+                    let by = pending.by.map(Value::from).unwrap_or(Value::Null);
+                    self.journal_block(
+                        kind::MODE_CHANGE,
+                        json!({ "mode_id": pending.mode_id, "by": by }),
+                    )
+                    .await;
+                }
+                Ok(())
+            };
+            let _ = pending.reply.send(result);
+            return;
+        }
+        if let Some(reply) = self.pending_config.remove(&id) {
+            let result = if let Some(error) = inc.error {
+                Err(anyhow!("session/set_config_option failed: {error}"))
+            } else {
+                match inc
+                    .result
+                    .and_then(|v| serde_json::from_value::<wire::SetConfigOptionResult>(v).ok())
+                {
+                    Some(updated) => {
+                        self.replace_config_options(updated.config_options, true);
+                        let persisted = self.persist_metadata().await;
+                        if let Some(mode) = &self.current_mode {
+                            let _ =
+                                session::set_current_mode(&self.db, &self.session_id, mode).await;
+                        }
+                        match persisted {
+                            Ok(()) => Ok(self.metadata.lock().unwrap().clone()),
+                            Err(error) => Err(error),
+                        }
+                    }
+                    None => Err(anyhow!(
+                        "session/set_config_option returned an invalid response"
+                    )),
+                }
+            };
+            let _ = reply.send(result);
+            return;
+        }
+        if let Some((pid, turn)) = self.inflight_prompt {
+            if id == pid {
+                self.on_turn_end(
+                    turn,
+                    inc.result,
+                    inc.error,
+                    TurnEndSource::MatchingPromptResponse,
+                )
+                .await;
+            }
+        }
+        // Other responses need no follow-up.
+    }
+
+    async fn settle_inflight_review(
+        &mut self,
+        settlement: crate::review_inbox::ReviewClaimSettlement,
+        reason: &'static str,
+    ) {
+        let Some(inflight) = self.inflight_review.take() else {
+            return;
+        };
+        let settled = crate::review_inbox::settle_review_inbox_claim(
+            &self.db,
+            &inflight.delivery_key,
+            &inflight.claim_token,
+            &self.session_id,
+            settlement,
+        )
+        .await;
+        // Local ownership ends at a real response or synthetic cancellation
+        // regardless of SQLite success. The durable row can then age into
+        // recovery instead of a registered-but-idle task fencing it forever.
+        drop(inflight.active_claim);
+        match settled {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(
+                    session = %self.session_id,
+                    delivery_key = %inflight.delivery_key,
+                    %reason,
+                    "protected review turn no longer owns its inbox claim at settlement"
+                );
+            }
+            Err(error) => {
+                tracing::error!(
+                    session = %self.session_id,
+                    delivery_key = %inflight.delivery_key,
+                    %reason,
+                    %error,
+                    "could not settle protected review feedback"
+                );
+            }
+        }
+    }
+
+    async fn on_turn_end(
+        &mut self,
+        turn: i64,
+        result: Option<Value>,
+        error: Option<Value>,
+        source: TurnEndSource,
+    ) {
+        // A synthetic cancellation is not an acknowledgement from the adapter.
+        // Release before making the task idle so the immutable prompt can retry
+        // or rehome, and never let synthetic settlement consume the claim.
+        let settlement = source.review_claim_settlement();
+        if settlement == crate::review_inbox::ReviewClaimSettlement::Abandoned {
+            self.settle_inflight_review(settlement, "synthetic turn settlement")
+                .await;
+        }
+        self.current_turn = turn;
+        self.flush_buf().await;
+        // Flush any tool still live at turn end (mapped to `cancelled`).
+        let live: Vec<LiveTool> = self.tools.drain().map(|(_, t)| t).collect();
+        for t in live {
+            if !chat::tool_call_exists(&self.db, &self.session_id, &t.id)
+                .await
+                .unwrap_or(false)
+            {
+                self.journal_block(kind::TOOL_CALL, t.block_payload()).await;
+            }
+        }
+        let stop = result
+            .as_ref()
+            .and_then(|r| serde_json::from_value::<wire::PromptResult>(r.clone()).ok())
+            .map(|p| p.stop_reason)
+            .unwrap_or_else(|| {
+                if error.is_some() {
+                    "error".to_string()
+                } else {
+                    "end_turn".to_string()
+                }
+            });
+        if !chat::has_turn_end(&self.db, &self.session_id, turn)
+            .await
+            .unwrap_or(false)
+        {
+            self.journal_block(kind::TURN_END, json!({ "stop_reason": stop }))
+                .await;
+        }
+        if settlement == crate::review_inbox::ReviewClaimSettlement::MatchingPromptResponse {
+            self.settle_inflight_review(settlement, "matching ACP prompt response")
+                .await;
+        }
+        self.finish_turn_state(turn, &stop).await;
+    }
+
+    async fn finish_turn_state(&mut self, turn: i64, stop: &str) {
+        // Settle the durable turn state *before* signalling the end over SSE, so a
+        // client that reacts to the event sees a consistent `live_turn`.
+        self.turn_live = false;
+        self.inflight_prompt = None;
+        self.effective_mode = None;
+        let _ = session::set_inflight(&self.db, &self.session_id, None).await;
+        self.emit(
+            "turn",
+            json!({ "turn": turn, "state": "ended", "stop_reason": stop }),
+        );
+
+        // Turn end ⇒ the `idle` lifecycle edge: stamp the quiet `idle` mark (the
+        // "resting, no one needed" state). Mirrors the terminal path's `Stop` hook.
+        crate::status::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "idle").await;
+
+        // Stop is a user-owned boundary. In particular, do not immediately
+        // turn feedback they have not seen acknowledged into another running
+        // turn; leave the durable queue visible until they explicitly send it.
+        if stop == "cancelled" {
+            return;
+        }
+
+        // The steering extension may have raced this boundary and started the
+        // user's message as a fresh adapter-owned turn. Adopt it before the
+        // ordinary durable queue so prompts retain their arrival order.
+        if let Some(pending) = self.pending_external.take() {
+            self.begin_external_turn(pending).await;
+            return;
+        }
+
+        // A steering request can finish just after the original prompt. Let its
+        // response decide whether the adapter already started the next turn
+        // before dispatching any later, durably queued message.
+        if !self.pending_steers.is_empty() {
+            return;
+        }
+
+        self.dispatch_pending_prompt().await;
+    }
+
+    async fn dispatch_review_inbox(&mut self) -> bool {
+        if self.refuse_if_turn_capped().await.is_err() {
+            return false;
+        }
+        let Some(active_claim) = self
+            .registry
+            .activate_review_claim(&self.session_id, self.generation)
+        else {
+            return false;
+        };
+        let item = match crate::review_inbox::claim_review_inbox(
+            &self.db,
+            &self.branch_id,
+            &self.session_id,
+            Some(active_claim.owner()),
+            |session, owner| self.registry.is_claim_owner_live(session, owner),
+        )
+        .await
+        {
+            Ok(item) => item,
+            Err(error) => {
+                tracing::error!(
+                    session = %self.session_id,
+                    %error,
+                    "could not claim protected review feedback"
+                );
+                return false;
+            }
+        };
+        let Some(item) = item else {
+            return false;
+        };
+        match self.start_review_turn(&item, active_claim).await {
+            Ok(outcome) if outcome.blocks_followup_dispatch() => {
+                if let crate::review_inbox::ReviewTurnStartOutcome::TransportWrittenUnpersisted {
+                    error,
+                } = outcome
+                {
+                    tracing::error!(
+                        session = %self.session_id,
+                        delivery_key = %item.delivery_key,
+                        %error,
+                        "holding protected review turn after post-write persistence failure"
+                    );
+                }
+                true
+            }
+            Ok(crate::review_inbox::ReviewTurnStartOutcome::ClaimLostBeforeWrite) => {
+                tracing::warn!(
+                    session = %self.session_id,
+                    delivery_key = %item.delivery_key,
+                    "protected review inbox claim was lost before relay write"
+                );
+                false
+            }
+            Ok(crate::review_inbox::ReviewTurnStartOutcome::TransportNotWritten { error })
+            | Err(error) => {
+                let released = crate::review_inbox::release_review_inbox(
+                    &self.db,
+                    &item.delivery_key,
+                    &item.claim_token,
+                )
+                .await;
+                tracing::error!(
+                    session = %self.session_id,
+                    delivery_key = %item.delivery_key,
+                    %error,
+                    "could not start protected review feedback turn"
+                );
+                if let Err(release_error) = released {
+                    tracing::error!(
+                        session = %self.session_id,
+                        delivery_key = %item.delivery_key,
+                        error = %release_error,
+                        "could not release protected review feedback after dispatch failure"
+                    );
+                }
+                // The relay write did not happen, so no live turn exists and
+                // releasing the protected claim is safe.
+                false
+            }
+            Ok(crate::review_inbox::ReviewTurnStartOutcome::Persisted)
+            | Ok(crate::review_inbox::ReviewTurnStartOutcome::TransportWrittenUnpersisted {
+                ..
+            }) => unreachable!("held review outcomes matched the dispatch gate"),
+        }
+    }
+
+    async fn dispatch_pending_prompt(&mut self) {
+        // A lingering superseded task's deferred turn boundary can fire after a
+        // handoff has re-let the session; letting it drain the queue would lose
+        // the prompt against its dead relay.
+        if !self.registry.is_current(&self.session_id, self.generation) {
+            return;
+        }
+        // Submitted review feedback is immutable and gets its own turn. It is
+        // never concatenated with or exposed through the editable queue.
+        if self.dispatch_review_inbox().await {
+            return;
+        }
+        // The cap gate runs before the durable queue is consumed, so a refused
+        // dispatch keeps the prompt queued and visible instead of dropping it.
+        if self.refuse_if_turn_capped().await.is_err() {
+            return;
+        }
+        // Consuming the durable copy is a precondition for dispatch. Starting a
+        // turn after a failed clear leaves the same text eligible at every later
+        // boundary and turns one SQLite error into an unbounded replay loop.
+        match session::take_pending_prompt(&self.db, &self.session_id).await {
+            Ok(Some(pending)) => {
+                self.emit_queue(None);
+                if let Err(error) = self.start_turn(pending, None, Vec::new()).await {
+                    tracing::error!(
+                        session = %self.session_id,
+                        %error,
+                        "consumed queued prompt but could not start its turn"
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(
+                    session = %self.session_id,
+                    %error,
+                    "could not consume queued prompt; leaving it idle"
+                );
+            }
+        }
+    }
+
+    async fn on_steering_response(
+        &mut self,
+        pending: PendingSteer,
+        result: Option<Value>,
+        error: Option<Value>,
+    ) {
+        let outcome = result
+            .and_then(|v| serde_json::from_value::<wire::SteeringResult>(v).ok())
+            .map(|r| r.outcome);
+        match (outcome, error) {
+            (Some(wire::SteeringOutcome::Injected), None) => {
+                self.consume_promoted_queue(&pending).await;
+                // A steer belongs to the live turn rather than opening another
+                // item in the turn index. Journal it only after the adapter has
+                // accepted it; a rejected extension falls back without leaving
+                // a phantom message in the transcript.
+                self.current_turn = pending.turn;
+                let by = pending.by.map(Value::from).unwrap_or(Value::Null);
+                self.journal_block(
+                    kind::USER_MESSAGE,
+                    json!({
+                        "text": pending.text,
+                        "by": by,
+                        "steered": true,
+                        "resources": pending.resources,
+                    }),
+                )
+                .await;
+                if let Some(reply) = pending.reply {
+                    let _ = reply.send(Ok(PromptAck {
+                        queued: false,
+                        steered: true,
+                        turn: Some(pending.turn),
+                    }));
+                }
+                if !self.turn_live {
+                    self.dispatch_pending_prompt().await;
+                }
+            }
+            (Some(wire::SteeringOutcome::StartedNewTurn), None) => {
+                self.consume_promoted_queue(&pending).await;
+                if self.turn_live {
+                    // codex-acp waits for its old prompt to settle before taking
+                    // this branch. Keep the request until loom consumes that
+                    // prompt response, then adopt the already-started turn.
+                    self.pending_external = Some(pending);
+                } else {
+                    self.begin_external_turn(pending).await;
+                }
+            }
+            (outcome, error) => {
+                tracing::warn!(
+                    session = %self.session_id,
+                    ?outcome,
+                    ?error,
+                    "steering failed"
+                );
+                match pending.delivery {
+                    PromptDelivery::Queue => self.fallback_prompt(pending).await,
+                    PromptDelivery::ForceSteer => {
+                        let detail = error
+                            .map(|e| e.to_string())
+                            .unwrap_or_else(|| format!("adapter returned {outcome:?}"));
+                        if let Some(reply) = pending.reply {
+                            let _ =
+                                reply.send(Err(anyhow!("adapter rejected forced steer: {detail}")));
+                        }
+                    }
+                    PromptDelivery::Immediate => {
+                        let result = self
+                            .restart_prompt(pending.text, pending.by, pending.resources)
+                            .await;
+                        if let Some(reply) = pending.reply {
+                            let _ = reply.send(result);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn consume_promoted_queue(&self, pending: &PendingSteer) {
+        let Some(promoted) = pending.promoted_queue.as_deref() else {
+            return;
+        };
+        if let Err(error) =
+            session::consume_pending_prompt(&self.db, &self.session_id, promoted).await
+        {
+            // The adapter has already accepted the feedback, so continue the
+            // turn and make the durability failure loud. A healthy database
+            // preserves any messages appended behind the promoted prefix.
+            tracing::error!(
+                session = %self.session_id,
+                %error,
+                "steered queued feedback but could not consume its durable copy"
+            );
+        } else {
+            match session::read_pending_prompt(&self.db, &self.session_id).await {
+                Ok(remaining) => {
+                    self.emit_queue((!remaining.trim().is_empty()).then_some(remaining.as_str()));
+                }
+                Err(error) => tracing::error!(
+                    session = %self.session_id,
+                    %error,
+                    "consumed steered feedback but could not refresh the queue view"
+                ),
+            }
+        }
+    }
+
+    async fn fallback_prompt(&mut self, pending: PendingSteer) {
+        let ack = if pending.promoted_queue.is_some() {
+            if self.turn_live {
+                Ok(PromptAck {
+                    queued: true,
+                    steered: false,
+                    turn: Some(self.current_turn),
+                })
+            } else {
+                self.start_pending_prompt(pending.by).await
+            }
+        } else if self.turn_live {
+            self.queue_prompt(&pending.text, &pending.resources).await
+        } else {
+            self.start_prompt(pending.text, pending.by, pending.resources)
+                .await
+        };
+        if let Some(reply) = pending.reply {
+            let _ = reply.send(ack);
+        }
+    }
+
+    async fn restart_prompt(
+        &mut self,
+        text: String,
+        by: Option<String>,
+        resources: Vec<Value>,
+    ) -> Result<PromptAck> {
+        if self.turn_live {
+            self.cancel_live_turn().await?;
+        }
+        self.start_prompt(text, by, resources).await
+    }
+
+    async fn queue_prompt(&self, text: &str, resources: &[Value]) -> Result<PromptAck> {
+        self.queue_prompt_with_value(text, resources)
+            .await
+            .map(|(ack, _)| ack)
+    }
+
+    async fn queue_prompt_with_value(
+        &self,
+        text: &str,
+        resources: &[Value],
+    ) -> Result<(PromptAck, String)> {
+        let queued = queued_prompt_text(text, resources);
+        let pending = session::append_pending_prompt(&self.db, &self.session_id, &queued).await?;
+        self.emit_queue(Some(&pending));
+        Ok((
+            PromptAck {
+                queued: true,
+                steered: false,
+                turn: Some(self.current_turn),
+            },
+            pending,
+        ))
+    }
+
+    async fn start_pending_prompt(&mut self, by: Option<String>) -> Result<PromptAck> {
+        if !self.registry.is_current(&self.session_id, self.generation) {
+            bail!("session task was superseded");
+        }
+        // Gate before consuming the durable copy so a capped session keeps it.
+        self.refuse_if_turn_capped().await?;
+        let pending = session::take_pending_prompt(&self.db, &self.session_id)
+            .await?
+            .ok_or_else(|| anyhow!("there is no queued feedback to send"))?;
+        self.emit_queue(None);
+        self.start_prompt(pending, by, Vec::new()).await
+    }
+
+    async fn start_prompt(
+        &mut self,
+        text: String,
+        by: Option<String>,
+        resources: Vec<Value>,
+    ) -> Result<PromptAck> {
+        self.start_turn(text, by, resources).await?;
+        Ok(PromptAck {
+            queued: false,
+            steered: false,
+            turn: Some(self.current_turn),
+        })
+    }
+
+    async fn begin_external_turn(&mut self, pending: PendingSteer) {
+        let turn = if self.turns_dispatched > 0 {
+            self.current_turn + 1
+        } else {
+            self.current_turn
+        };
+        self.effective_mode = self.current_mode.clone();
+        let inflight = json!({
+            "turn": turn,
+            "external": true,
+            "mode": self.effective_mode,
+        })
+        .to_string();
+        let persisted = session::set_inflight(&self.db, &self.session_id, Some(&inflight)).await;
+        if let Err(e) = persisted {
+            if let Some(reply) = pending.reply {
+                let _ = reply.send(Err(e));
+            }
+            return;
+        }
+        self.current_turn = turn;
+        if self
+            .pending_interrupt_notice_through
+            .is_some_and(|through| self.current_turn > through)
+        {
+            self.pending_interrupt_notice_through = None;
+        }
+        self.next_seq = 0;
+        self.turns_dispatched += 1;
+        self.turn_live = true;
+        self.external_turn = true;
+        self.emit(
+            "turn",
+            json!({
+                "turn": self.current_turn,
+                "state": "started",
+                "effective_mode": self.effective_mode,
+            }),
+        );
+        let by = pending.by.map(Value::from).unwrap_or(Value::Null);
+        self.journal_block(
+            kind::USER_MESSAGE,
+            json!({
+                "text": pending.text,
+                "by": by,
+                "steered": false,
+                "resources": pending.resources,
+            }),
+        )
+        .await;
+        crate::status::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "working").await;
+        if let Some(reply) = pending.reply {
+            let _ = reply.send(Ok(PromptAck {
+                queued: false,
+                steered: false,
+                turn: Some(self.current_turn),
+            }));
+        }
+    }
+
+    async fn start_turn(
+        &mut self,
+        text: String,
+        by: Option<String>,
+        resources: Vec<Value>,
+    ) -> Result<()> {
+        let by_v = by.map(Value::from).unwrap_or(Value::Null);
+        self.start_turn_with_block(
+            text.clone(),
+            resources.clone(),
+            kind::USER_MESSAGE,
+            json!({ "text": text, "by": by_v, "resources": resources }),
+        )
+        .await
+    }
+
+    async fn start_review_turn(
+        &mut self,
+        item: &crate::review_inbox::ReviewInboxItem,
+        active_claim: ActiveReviewClaim,
+    ) -> Result<crate::review_inbox::ReviewTurnStartOutcome> {
+        self.refuse_if_turn_capped().await?;
+        let turn = if self.turns_dispatched > 0 {
+            self.current_turn + 1
+        } else {
+            self.current_turn
+        };
+        let seq = if self.turns_dispatched > 0 {
+            0
+        } else {
+            self.next_seq
+        };
+        let effective_mode = self.current_mode.clone();
+        let id = self.next_id();
+        let inflight = json!({
+            "prompt_id": id,
+            "turn": turn,
+            "mode": effective_mode,
+            "delivery_key": item.delivery_key,
+            "review_claim_token": item.claim_token,
+        })
+        .to_string();
+        let opening_payload = json!({
+            "text": item.payload,
+            "by": Value::Null,
+            "resources": [],
+            "delivery_key": item.delivery_key,
+        });
+        let outcome = crate::review_inbox::start_review_inbox_turn(
+            &self.db,
+            item,
+            &self.session_id,
+            crate::review_inbox::ReviewTurnBoundary {
+                turn,
+                seq,
+                opening_payload: &opening_payload,
+                inflight: &inflight,
+            },
+            self.stream.write(&wire::request_line(
+                id,
+                method::SESSION_PROMPT,
+                wire::prompt_params(&self.acp_session_id, &item.payload, &[]),
+            )),
+        )
+        .await;
+        if !outcome.blocks_followup_dispatch() {
+            return Ok(outcome);
+        }
+
+        self.current_turn = turn;
+        self.next_seq = seq + 1;
+        self.turns_dispatched += 1;
+        self.turn_live = true;
+        self.effective_mode = effective_mode;
+        if self
+            .pending_interrupt_notice_through
+            .is_some_and(|through| self.current_turn > through)
+        {
+            self.pending_interrupt_notice_through = None;
+        }
+        self.emit(
+            "turn",
+            json!({
+                "turn": self.current_turn,
+                "state": "started",
+                "effective_mode": self.effective_mode,
+            }),
+        );
+        let view = ChatBlockView {
+            turn,
+            seq,
+            kind: kind::USER_MESSAGE.to_string(),
+            payload: opening_payload,
+            created_at: now_iso(),
+        };
+        self.emit("block", serde_json::to_value(&view).unwrap_or(Value::Null));
+        self.inflight_prompt = Some((id, turn));
+        self.inflight_review = Some(InflightReview {
+            delivery_key: item.delivery_key.clone(),
+            claim_token: item.claim_token.clone(),
+            active_claim: Some(active_claim),
+        });
+        crate::status::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "working").await;
+        Ok(outcome)
+    }
+
+    async fn start_handoff_turn(&mut self, text: String, payload: Value) -> Result<()> {
+        self.start_turn_with_block(text, Vec::new(), kind::HANDOFF, payload)
+            .await
+    }
+
+    /// Refuse to open a new turn once an automation-class session has spent its
+    /// `automation.turn_cap` turns: make sure the branch carries the loud
+    /// `blocked` attention tag (recorded on the bus so it lands on SSE) and
+    /// return the refusal as an error. Warm (watch-managed) sessions are exempt
+    /// infrastructure and 0 disables the cap. Only *new* turns are gated — an
+    /// in-flight turn is never interrupted. Best-effort reads: a lookup failure
+    /// never blocks a turn.
+    async fn refuse_if_turn_capped(&self) -> Result<()> {
+        let Some(session) = session::get(&self.db, &self.session_id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return Ok(());
+        };
+        if session.class != "automation" || session.managed_by.is_some() {
+            return Ok(());
+        }
+        let cap = session.policy_turn_budget;
+        if cap <= 0 || session.turn_count < cap {
+            return Ok(());
+        }
+        let note = format!("turn cap ({cap}) reached");
+        tracing::info!(
+            session = %self.session_id,
+            turn_count = session.turn_count,
+            "refusing new acp turn: {note}"
+        );
+        let already_blocked = tags::get(&self.db, &session.branch_id, tags::ATTENTION_KEY)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|t| t.value == "blocked");
+        if !already_blocked {
+            let _ = tags::set(
+                &self.db,
+                &session.branch_id,
+                tags::ATTENTION_KEY,
+                "blocked",
+                &note,
+                "agent",
+            )
+            .await;
+            let _ = crate::events::record_tag(
+                &self.db,
+                &self.bus,
+                &session.branch_id,
+                tags::ATTENTION_KEY,
+                "blocked",
+                &note,
+                "agent",
+            )
+            .await;
+        }
+        bail!("{note}")
+    }
+
+    async fn start_turn_with_block(
+        &mut self,
+        text: String,
+        resources: Vec<Value>,
+        opening_kind: &str,
+        opening_payload: Value,
+    ) -> Result<()> {
+        // The cap gate sits before any turn state advances, so a refusal leaves
+        // the counters, the journal, and any queued prompt untouched.
+        self.refuse_if_turn_capped().await?;
+        if self.turns_dispatched > 0 {
+            self.current_turn += 1;
+            self.next_seq = 0;
+        }
+        if self
+            .pending_interrupt_notice_through
+            .is_some_and(|through| self.current_turn > through)
+        {
+            self.pending_interrupt_notice_through = None;
+        }
+        self.turns_dispatched += 1;
+        self.turn_live = true;
+        self.effective_mode = self.current_mode.clone();
+
+        self.emit(
+            "turn",
+            json!({
+                "turn": self.current_turn,
+                "state": "started",
+                "effective_mode": self.effective_mode,
+            }),
+        );
+        self.journal_block(opening_kind, opening_payload).await;
+
+        let id = self.next_id();
+        self.inflight_prompt = Some((id, self.current_turn));
+        let inflight = json!({
+            "prompt_id": id,
+            "turn": self.current_turn,
+            "mode": self.effective_mode,
+        })
+        .to_string();
+        session::set_inflight(&self.db, &self.session_id, Some(&inflight)).await?;
+        self.stream
+            .write(&wire::request_line(
+                id,
+                method::SESSION_PROMPT,
+                wire::prompt_params(&self.acp_session_id, &text, &resources),
+            ))
+            .await?;
+        // Turn start ⇒ the `working` lifecycle edge: status `running`, the calm
+        // `idle` mark and the agent's `attention` tag cleared. Mirrors what the
+        // terminal path's `UserPromptSubmit` hook does (see `crate::monitor`).
+        crate::status::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "working").await;
+        Ok(())
+    }
+
+    // -- permissions --------------------------------------------------------
+
+    async fn handle_permission(&mut self, seq: u64, inc: Incoming) -> Result<()> {
+        let jsonrpc_id = inc.id.clone().unwrap_or(Value::Null);
+        let req_key = id_key(&jsonrpc_id);
+        let params: RequestPermissionParams =
+            serde_json::from_value(inc.params.unwrap_or(Value::Null))?;
+        self.flush_buf().await;
+        let restricted = session::get(&self.db, &self.session_id)
+            .await?
+            .is_some_and(|session| session.policy_restricted);
+
+        match chat::permission_outcome(&self.db, &self.session_id, &req_key).await? {
+            chat::PermissionOutcome::Resolved(option_id) => {
+                // Already answered before a crash: re-send the stored answer.
+                let _ = self
+                    .stream
+                    .write(&wire::response_line(
+                        &jsonrpc_id,
+                        wire::permission_selected(&option_id),
+                    ))
+                    .await;
+                return Ok(());
+            }
+            chat::PermissionOutcome::Cancelled => {
+                let _ = self
+                    .stream
+                    .write(&wire::response_line(
+                        &jsonrpc_id,
+                        wire::permission_cancelled(),
+                    ))
+                    .await;
+                return Ok(());
+            }
+            chat::PermissionOutcome::Open => {
+                // Open block already journaled (replay): re-register the pending id.
+                self.pending_perms.insert(
+                    req_key.clone(),
+                    PendingPerm {
+                        jsonrpc_id: jsonrpc_id.clone(),
+                        frame_seq: seq,
+                    },
+                );
+            }
+            chat::PermissionOutcome::Unknown => {
+                let options = permission_options_json(&params.options);
+                let payload = json!({
+                    "request_id": req_key.clone(),
+                    "tool_call_id": params.tool_call.tool_call_id.clone(),
+                    "title": params.tool_call.title.clone().unwrap_or_default(),
+                    "options": options,
+                    "effective_mode": self.effective_mode,
+                    "outcome": Value::Null,
+                });
+                self.journal_block(kind::PERMISSION_REQUEST, payload).await;
+                self.pending_perms.insert(
+                    req_key.clone(),
+                    PendingPerm {
+                        jsonrpc_id: jsonrpc_id.clone(),
+                        frame_seq: seq,
+                    },
+                );
+            }
+        }
+
+        // Policy follows the mode captured when this turn started. A config write
+        // during the turn changes `current_mode` for the next prompt only; using it
+        // here would auto-approve a request raised by an older, restricted turn.
+        if restricted {
+            if let Some(opt) = deny_choice(&params.options) {
+                let _ = self
+                    .answer_permission(&req_key, &opt, "restricted-profile")
+                    .await;
+            } else if let Some(pending) = self.pending_perms.remove(&req_key) {
+                let _ = self
+                    .stream
+                    .write(&wire::response_line(
+                        &pending.jsonrpc_id,
+                        wire::permission_cancelled(),
+                    ))
+                    .await;
+                if let Ok(Some(view)) = chat::cancel_permission(
+                    &self.db,
+                    &self.session_id,
+                    &req_key,
+                    "restricted-profile",
+                )
+                .await
+                {
+                    self.emit("block", serde_json::to_value(&view).unwrap_or(Value::Null));
+                }
+                let _ = self.maybe_ack().await;
+            }
+            return Ok(());
+        }
+        let auto_approve = self
+            .effective_mode
+            .as_deref()
+            .is_some_and(crate::agent_kind::auto_approves_permissions);
+        if auto_approve {
+            if let Some(opt) = auto_choice(&params.options) {
+                let _ = self.answer_permission(&req_key, &opt, "policy").await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn answer_permission(
+        &mut self,
+        request_id: &str,
+        option_id: &str,
+        by: &str,
+    ) -> PermAnswer {
+        if let Some(pp) = self.pending_perms.remove(request_id) {
+            let _ = self
+                .stream
+                .write(&wire::response_line(
+                    &pp.jsonrpc_id,
+                    wire::permission_selected(option_id),
+                ))
+                .await;
+            if let Ok(Some(view)) =
+                chat::resolve_permission(&self.db, &self.session_id, request_id, option_id, by)
+                    .await
+            {
+                self.emit("block", serde_json::to_value(&view).unwrap_or(Value::Null));
+            }
+            let _ = self.maybe_ack().await;
+            PermAnswer::Ok
+        } else {
+            match chat::permission_outcome(&self.db, &self.session_id, request_id).await {
+                Ok(chat::PermissionOutcome::Resolved(_)) => PermAnswer::AlreadyResolved,
+                _ => PermAnswer::NotFound,
+            }
+        }
+    }
+
+    // -- commands -----------------------------------------------------------
+
+    async fn cancel_live_turn(&mut self) -> Result<()> {
+        let result = self
+            .stream
+            .write(&wire::notification_line(
+                method::SESSION_CANCEL,
+                wire::cancel_params(&self.acp_session_id),
+            ))
+            .await;
+        if result.is_ok() && self.turn_live {
+            // The adapter notice belongs to the cancelled turn even when it
+            // arrives after an immediate restart. Bound suppression to that
+            // turn and its direct successor so unrelated future prose is never
+            // mistaken for adapter chrome if this adapter emits no notice.
+            self.pending_interrupt_notice_through = Some(self.current_turn + 1);
+            for (_, pending) in self.pending_steers.drain() {
+                if let Some(reply) = pending.reply {
+                    let _ = reply.send(Err(anyhow!("turn was cancelled")));
+                }
+            }
+            if let Some(pending) = self.pending_external.take() {
+                if let Some(reply) = pending.reply {
+                    let _ = reply.send(Err(anyhow!("turn was cancelled")));
+                }
+            }
+            // Cancellation is a client-owned boundary. Some adapters do not
+            // answer the cancelled prompt, so settle loom's journal and
+            // lifecycle immediately after the notification lands.
+            self.on_turn_end(
+                self.current_turn,
+                Some(json!({ "stopReason": "cancelled" })),
+                None,
+                TurnEndSource::Synthetic,
+            )
+            .await;
+        }
+        // ACP requires the client to answer every pending permission request
+        // with the `cancelled` outcome when it cancels a turn.
+        for (_, pp) in self.pending_perms.drain() {
+            let _ = self
+                .stream
+                .write(&wire::response_line(
+                    &pp.jsonrpc_id,
+                    wire::permission_cancelled(),
+                ))
+                .await;
+        }
+        result
+    }
+
+    async fn on_command(&mut self, cmd: Command) {
+        match cmd {
+            Command::Prompt {
+                text,
+                by,
+                delivery,
+                resources,
+                reply,
+            } => {
+                if self.turn_live {
+                    if self.steering_cap
+                        && self.pending_steers.is_empty()
+                        && self.pending_external.is_none()
+                    {
+                        let id = self.next_id();
+                        let request = wire::request_line(
+                            id,
+                            method::SESSION_STEERING,
+                            wire::steering_params(&self.acp_session_id, &text, &resources),
+                        );
+                        if delivery != PromptDelivery::Queue {
+                            // Explicit steering reports the adapter's real answer
+                            // and does not also leave a queued copy behind if the
+                            // private extension is rejected.
+                            match self.stream.write(&request).await {
+                                Ok(()) => {
+                                    self.pending_steers.insert(
+                                        id,
+                                        PendingSteer {
+                                            text,
+                                            by,
+                                            turn: self.current_turn,
+                                            delivery,
+                                            promoted_queue: None,
+                                            resources,
+                                            reply: Some(reply),
+                                        },
+                                    );
+                                }
+                                Err(error) => {
+                                    let result = if delivery == PromptDelivery::Immediate {
+                                        self.restart_prompt(text, by, resources).await
+                                    } else {
+                                        Err(error)
+                                    };
+                                    let _ = reply.send(result);
+                                }
+                            }
+                        } else {
+                            // Durability and the HTTP acknowledgement come before
+                            // the private steering RPC. If the adapter hangs,
+                            // rejects, or disappears, the message remains visibly
+                            // queued and the browser can keep accepting feedback.
+                            match self.queue_prompt_with_value(&text, &resources).await {
+                                Ok((queued_ack, promoted_queue)) => {
+                                    match self.stream.write(&request).await {
+                                        Ok(()) => {
+                                            let _ = reply.send(Ok(queued_ack));
+                                            self.pending_steers.insert(
+                                                id,
+                                                PendingSteer {
+                                                    text,
+                                                    by,
+                                                    turn: self.current_turn,
+                                                    delivery,
+                                                    promoted_queue: Some(promoted_queue),
+                                                    resources,
+                                                    reply: None,
+                                                },
+                                            );
+                                        }
+                                        Err(error) => {
+                                            tracing::warn!(session = %self.session_id, %error,
+                                                "steering write failed; feedback remains queued");
+                                            let _ = reply.send(Ok(queued_ack));
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    let _ = reply.send(Err(error));
+                                }
+                            }
+                        }
+                    } else {
+                        match delivery {
+                            PromptDelivery::Queue => {
+                                // A failed queue write must surface — a 202 that
+                                // silently dropped the prompt would be worse
+                                // than an error.
+                                let ack = self.queue_prompt(&text, &resources).await;
+                                let _ = reply.send(ack);
+                            }
+                            PromptDelivery::ForceSteer => {
+                                let message = if self.steering_cap {
+                                    "another steer is still pending; retry when it settles"
+                                } else {
+                                    "this agent does not support steering; queue the feedback or stop and send it"
+                                };
+                                let _ = reply.send(Err(anyhow!(message)));
+                            }
+                            PromptDelivery::Immediate => {
+                                let ack = self.restart_prompt(text, by, resources).await;
+                                let _ = reply.send(ack);
+                            }
+                        }
+                    }
+                } else {
+                    let ack = self.start_prompt(text, by, resources).await;
+                    let _ = reply.send(ack);
+                }
+            }
+            Command::ForcePending { by, reply } => {
+                if !self.pending_steers.is_empty() || self.pending_external.is_some() {
+                    let _ = reply.send(Err(anyhow!(
+                        "another steer is still pending; retry when it settles"
+                    )));
+                } else {
+                    let queued =
+                        match session::read_pending_prompt(&self.db, &self.session_id).await {
+                            Ok(queued) => queued,
+                            Err(error) => {
+                                let _ = reply.send(Err(error));
+                                return;
+                            }
+                        };
+                    if queued.trim().is_empty() {
+                        let _ = reply.send(Err(anyhow!("there is no queued feedback to send")));
+                    } else if !self.turn_live {
+                        let result = self.start_pending_prompt(by).await;
+                        let _ = reply.send(result);
+                    } else if !self.steering_cap {
+                        let result = match self.cancel_live_turn().await {
+                            Ok(()) => self.start_pending_prompt(by).await,
+                            Err(error) => Err(error),
+                        };
+                        let _ = reply.send(result);
+                    } else {
+                        let id = self.next_id();
+                        let request = wire::request_line(
+                            id,
+                            method::SESSION_STEERING,
+                            wire::steering_params(&self.acp_session_id, &queued, &[]),
+                        );
+                        match self.stream.write(&request).await {
+                            Ok(()) => {
+                                self.pending_steers.insert(
+                                    id,
+                                    PendingSteer {
+                                        text: queued.clone(),
+                                        by,
+                                        turn: self.current_turn,
+                                        delivery: PromptDelivery::ForceSteer,
+                                        promoted_queue: Some(queued),
+                                        resources: Vec::new(),
+                                        reply: Some(reply),
+                                    },
+                                );
+                            }
+                            Err(error) => {
+                                let _ = reply.send(Err(error));
+                            }
+                        }
+                    }
+                }
+            }
+            Command::NotifyPending { reply } => {
+                // Submitted review feedback lives in the protected inbox, not
+                // the user-editable pending prompt. A live task picks it up at
+                // its next turn boundary; an idle task can start it now.
+                if self.turn_live {
+                    let _ = reply.send(Ok(PromptAck {
+                        queued: true,
+                        steered: false,
+                        turn: Some(self.current_turn),
+                    }));
+                } else if self.dispatch_review_inbox().await {
+                    let _ = reply.send(Ok(PromptAck {
+                        queued: false,
+                        steered: false,
+                        turn: Some(self.current_turn),
+                    }));
+                } else {
+                    let _ = reply.send(Err(anyhow!(
+                        "there is no protected review feedback ready to send"
+                    )));
+                }
+            }
+            Command::RetractPending { reply } => {
+                // A steering RPC may already have handed this text to the
+                // adapter even though its durable fallback is still visible.
+                // Once that request is in flight, claiming the text is editable
+                // would be a lie: the eventual response can consume or run it.
+                if !self.pending_steers.is_empty() || self.pending_external.is_some() {
+                    let _ = reply.send(Err(anyhow!(
+                        "queued feedback is already being steered; wait for it to settle"
+                    )));
+                } else {
+                    let result = session::take_pending_prompt(&self.db, &self.session_id)
+                        .await
+                        .and_then(|pending| {
+                            pending.ok_or_else(|| anyhow!("there is no queued feedback to edit"))
+                        });
+                    if result.is_ok() {
+                        self.emit_queue(None);
+                    }
+                    let _ = reply.send(result);
+                }
+            }
+            Command::Cancel { reply } => {
+                let _ = reply.send(self.cancel_live_turn().await);
+            }
+            Command::AnswerPermission {
+                request_id,
+                option_id,
+                by,
+                reply,
+            } => {
+                let ans = self.answer_permission(&request_id, &option_id, &by).await;
+                let _ = reply.send(ans);
+            }
+            Command::SetMode { mode_id, by, reply } => {
+                let id = self.next_id();
+                let write = self
+                    .stream
+                    .write(&wire::request_line(
+                        id,
+                        method::SESSION_SET_MODE,
+                        wire::set_mode_params(&self.acp_session_id, &mode_id),
+                    ))
+                    .await;
+                match write {
+                    Ok(()) => {
+                        self.pending_mode
+                            .insert(id, PendingMode { mode_id, by, reply });
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
+            }
+            Command::SetConfigOption {
+                config_id,
+                value,
+                reply,
+            } => {
+                let id = self.next_id();
+                let write = self
+                    .stream
+                    .write(&wire::request_line(
+                        id,
+                        method::SESSION_SET_CONFIG_OPTION,
+                        wire::set_config_option_params(
+                            self.acp_session_id.as_str(),
+                            &config_id,
+                            value,
+                        ),
+                    ))
+                    .await;
+                match write {
+                    Ok(()) => {
+                        self.pending_config.insert(id, reply);
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
+            }
+            // The run loop intercepts this variant so it can acknowledge only
+            // after registry removal. Keep the match exhaustive defensively.
+            Command::PrepareHandoff { reply } => {
+                let _ = reply.send(Err(anyhow!("handoff command reached the task dispatcher")));
+            }
+        }
+    }
+
+    // -- exit ---------------------------------------------------------------
+
+    async fn on_exit(&mut self, status: Option<i32>) {
+        tracing::warn!(session = %self.session_id, ?status, "acp agent exited");
+        self.settle_inflight_review(
+            crate::review_inbox::ReviewClaimSettlement::Abandoned,
+            "ACP process exit",
+        )
+        .await;
+        let ending_turn = self
+            .inflight_prompt
+            .take()
+            .map(|(_, turn)| turn)
+            .or_else(|| self.external_turn.then_some(self.current_turn));
+        if let Some(turn) = ending_turn {
+            self.flush_buf().await;
+            if !chat::has_turn_end(&self.db, &self.session_id, turn)
+                .await
+                .unwrap_or(false)
+            {
+                self.journal_block(kind::TURN_END, json!({ "stop_reason": "error" }))
+                    .await;
+            }
+            self.emit(
+                "turn",
+                json!({ "turn": turn, "state": "ended", "stop_reason": "error" }),
+            );
+            self.turn_live = false;
+            self.external_turn = false;
+            self.effective_mode = None;
+            let _ = session::set_inflight(&self.db, &self.session_id, None).await;
+        }
+    }
+
+    // -- journal + ack ------------------------------------------------------
+
+    async fn journal_block(&mut self, kind: &str, payload: Value) -> ChatBlockView {
+        let turn = self.current_turn;
+        let seq = self.next_seq;
+        // A `session/load` replay is already in the journal: don't rewrite it, and
+        // leave the seq cursor where the seeded continuation expects it.
+        if self.suppress_journal {
+            return ChatBlockView {
+                turn,
+                seq,
+                kind: kind.to_string(),
+                payload,
+                created_at: now_iso(),
+            };
+        }
+        self.next_seq += 1;
+        let inserted = chat::insert(&self.db, &self.session_id, turn, seq, kind, &payload).await;
+        let view = ChatBlockView {
+            turn,
+            seq,
+            kind: kind.to_string(),
+            payload,
+            created_at: now_iso(),
+        };
+        if let Err(e) = inserted {
+            // The block never became durable: freeze the ack watermark (its
+            // frames must replay after a restart) and don't announce it.
+            tracing::error!(session = %self.session_id, turn, seq, kind, error = %e,
+                "chat journal write failed; freezing ack watermark");
+            self.journal_failed = true;
+            return view;
+        }
+        self.emit("block", serde_json::to_value(&view).unwrap_or(Value::Null));
+        view
+    }
+
+    /// The highest seq safe to ack: just before the earliest frame still feeding
+    /// an open buffer, live tool, or unanswered permission — else the highest
+    /// frame seen.
+    fn safe_watermark(&self) -> u64 {
+        let mut min_pending: Option<u64> = None;
+        let mut track = |s: u64| {
+            min_pending = Some(min_pending.map_or(s, |m| m.min(s)));
+        };
+        if let Some(b) = &self.buf {
+            track(b.first_seq);
+        }
+        for t in self.tools.values() {
+            track(t.first_seq);
+        }
+        for p in self.pending_perms.values() {
+            track(p.frame_seq);
+        }
+        match min_pending {
+            Some(m) => m.saturating_sub(1),
+            None => self.highest_seq,
+        }
+    }
+
+    async fn maybe_ack(&mut self) -> Result<()> {
+        if self.journal_failed {
+            return Ok(());
+        }
+        let w = self.safe_watermark();
+        if w > self.acked {
+            self.stream.ack(w).await?;
+            session::set_ack_seq(&self.db, &self.session_id, w as i64).await?;
+            self.acked = w;
+        }
+        Ok(())
+    }
+}
+
+/// The one-shot grant an auto-answer may select, if the adapter offers one.
+fn auto_choice(options: &[PermissionOption]) -> Option<String> {
+    options
+        .iter()
+        // Never turn a no-prompt posture into a persisted policy mutation. If
+        // the adapter offers no one-shot grant, surface the request for an
+        // explicit answer instead of guessing.
+        .find(|o| o.kind == "allow_once")
+        .map(|o| o.option_id.clone())
+}
+
+/// The one-shot denial a restricted profile selects for every tool call that
+/// reached ACP permission handling (allowed rules execute before this point).
+fn deny_choice(options: &[PermissionOption]) -> Option<String> {
+    options
+        .iter()
+        .find(|o| o.kind == "reject_once")
+        .or_else(|| options.iter().find(|o| o.kind.starts_with("reject")))
+        .map(|o| o.option_id.clone())
+}
+
+/// Render permission options into the journal contract's `options` array.
+fn permission_options_json(options: &[PermissionOption]) -> Vec<Value> {
+    options
+        .iter()
+        .map(|o| {
+            json!({
+                "option_id": o.option_id.clone(),
+                "name": o.name.clone(),
+                "kind": o.kind.clone(),
+            })
+        })
+        .collect()
+}
+
+/// A JSON-RPC id as a stable string key (numbers stringify, strings pass through).
+fn id_key(id: &Value) -> String {
+    match id {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Render ACP resources into the durable text-only pending queue. Prefer the
+/// worktree-relative display name so queued prompts stay readable and do not
+/// expose the server's absolute filesystem layout.
+fn queued_prompt_text(text: &str, resources: &[Value]) -> String {
+    let references: Vec<&str> = resources
+        .iter()
+        .filter_map(|resource| {
+            resource
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .or_else(|| resource.get("uri").and_then(Value::as_str))
+        })
+        .collect();
+    if references.is_empty() {
+        return text.to_string();
+    }
+
+    let mut queued = format!("{text}\n\nReferenced files:\n");
+    for reference in references {
+        queued.push_str("- ");
+        queued.push_str(reference);
+        queued.push('\n');
+    }
+    queued
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        auto_choice, deny_choice, preferred_config_value, preferred_mode, queued_prompt_text,
+        LiveTool, PermissionOption,
+    };
+    use crate::acp::wire::{ContentBlock, ToolCallContent};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn review_claim_fence_tracks_activation_rotation_and_task_death() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let branch = weaver_core::branch::upsert(&db, "/repo", "weaver/review-inbox", "main")
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions
+                (id, branch_id, work_dir, term_session, status, protocol)
+             VALUES ('acp-review', ?, '/repo', 'relay', 'running', 'acp')",
+        )
+        .bind(&branch.id)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO reviews
+                (id, repo_root, branch_id, session_id, subject_kind, subject_id,
+                 subject_key, subject_label, subject_version, status, created_by,
+                 delivery_state, delivery_key)
+             VALUES
+                (1, '/repo', ?, 'acp-review', 'artifact', '1',
+                 'design', 'design', '1', 'submitted', 'alice',
+                 'delivered', 'review:stable')",
+        )
+        .bind(&branch.id)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO review_conversation_inbox
+                (delivery_key, review_id, branch_id, preferred_session_id, payload)
+             VALUES ('review:stable', 1, ?, 'acp-review', 'immutable')",
+        )
+        .bind(&branch.id)
+        .execute(&db)
+        .await
+        .unwrap();
+        crate::review_inbox::claim_review_inbox(
+            &db,
+            &branch.id,
+            "acp-review",
+            Some("owner-a"),
+            |_, _| false,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let registry = super::AcpRegistry::new();
+        let (generation, probe) = registry.register_claim_liveness_probe("acp-review");
+        let owner_a = registry
+            .activate_review_claim("acp-review", generation)
+            .unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-26T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        sqlx::query(
+            "UPDATE review_conversation_inbox
+             SET claimed_at = '2026-07-26T11:00:00.000Z', claim_owner = ?
+             WHERE delivery_key = 'review:stable'",
+        )
+        .bind(owner_a.owner())
+        .execute(&db)
+        .await
+        .unwrap();
+
+        assert!(
+            crate::review_inbox::claim_review_inbox_at(
+                &db,
+                &branch.id,
+                "acp-replacement",
+                Some("owner-b"),
+                |session, owner| registry.is_claim_owner_live(session, owner),
+                now,
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "age alone cannot steal a claim from its exact live task"
+        );
+        drop(owner_a);
+        let owner_b = registry
+            .activate_review_claim("acp-review", generation)
+            .unwrap();
+        crate::review_inbox::claim_review_inbox_at(
+            &db,
+            &branch.id,
+            "acp-review",
+            Some(owner_b.owner()),
+            |session, owner| registry.is_claim_owner_live(session, owner),
+            now,
+        )
+        .await
+        .unwrap()
+        .expect("a relinquished old token must not revive when the task rotates owners");
+
+        let later = now + chrono::TimeDelta::minutes(2);
+        assert!(
+            crate::review_inbox::claim_review_inbox_at(
+                &db,
+                &branch.id,
+                "acp-final",
+                Some("owner-c"),
+                |session, owner| registry.is_claim_owner_live(session, owner),
+                later,
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "the rotated token fences only the currently active claim"
+        );
+        drop(probe);
+        assert!(
+            crate::review_inbox::claim_review_inbox_at(
+                &db,
+                &branch.id,
+                "acp-final",
+                Some("owner-c"),
+                |session, owner| registry.is_claim_owner_live(session, owner),
+                later,
+            )
+            .await
+            .unwrap()
+            .is_some(),
+            "a closed command receiver cannot leave a dead registry slot live"
+        );
+    }
+
+    #[test]
+    fn queued_resources_prefer_relative_names_over_server_uris() {
+        let resources = [
+            json!({"name": "src/main.rs", "uri": "file:///server/worktree/src/main.rs"}),
+            json!({"uri": "https://example.test/context"}),
+        ];
+
+        assert_eq!(
+            queued_prompt_text("review", &resources),
+            "review\n\nReferenced files:\n- src/main.rs\n- https://example.test/context\n"
+        );
+    }
+
+    #[test]
+    fn live_tool_preserves_image_content_for_the_journal() {
+        let mut tool = LiveTool::new("call-image", 1);
+        tool.content = vec![ToolCallContent::Content {
+            content: ContentBlock::Image {
+                data: "aW1hZ2U=".to_string(),
+                mime_type: "image/png".to_string(),
+                uri: Some("file:///tmp/screenshot.png".to_string()),
+            },
+        }];
+
+        assert_eq!(
+            tool.content_json(),
+            vec![json!({
+                "type": "image",
+                "data": "aW1hZ2U=",
+                "mime_type": "image/png",
+                "uri": "file:///tmp/screenshot.png",
+            })]
+        );
+    }
+
+    #[test]
+    fn transient_prompt_selectors_use_advertised_acp_values() {
+        let options = vec![
+            json!({
+                "id":"provider-model",
+                "category":"model",
+                "options":[
+                    {"value":"expensive","name":"Expensive"},
+                    {"value":"claude-haiku-4-5","name":"Haiku"},
+                    {"value":"haiku","name":"Exact Haiku"}
+                ]
+            }),
+            json!({
+                "id":"reasoning",
+                "category":"thought_level",
+                "options":[
+                    {"value":"medium","name":"Medium"},
+                    {"value":"low","name":"Low"}
+                ]
+            }),
+        ];
+        assert_eq!(
+            preferred_config_value(&options, "model", &["haiku", "luna"], true),
+            Some(("provider-model".to_string(), "haiku".to_string()))
+        );
+        assert_eq!(
+            preferred_config_value(&options, "effort", &["low"], false),
+            Some(("reasoning".to_string(), "low".to_string()))
+        );
+        assert_eq!(
+            preferred_config_value(&options, "model", &["claude-haiku"], false),
+            None
+        );
+        assert_eq!(
+            preferred_config_value(&options, "model", &["luna"], true),
+            None
+        );
+        assert_eq!(
+            preferred_mode(&[
+                json!({"id":"agent","name":"Agent"}),
+                json!({"id":"read-only","name":"Read only"})
+            ]),
+            Some("read-only".to_string())
+        );
+    }
+
+    #[test]
+    fn automatic_permission_choice_never_persists_policy() {
+        let options = [
+            PermissionOption {
+                option_id: "persist".to_string(),
+                name: "Always allow".to_string(),
+                kind: "allow_always".to_string(),
+            },
+            PermissionOption {
+                option_id: "once".to_string(),
+                name: "Allow once".to_string(),
+                kind: "allow_once".to_string(),
+            },
+        ];
+        assert_eq!(auto_choice(&options).as_deref(), Some("once"));
+        assert_eq!(auto_choice(&options[..1]), None);
+    }
+
+    #[test]
+    fn restricted_permission_choice_prefers_one_shot_rejection() {
+        let options = [
+            PermissionOption {
+                option_id: "allow".to_string(),
+                name: "Allow once".to_string(),
+                kind: "allow_once".to_string(),
+            },
+            PermissionOption {
+                option_id: "deny".to_string(),
+                name: "Reject".to_string(),
+                kind: "reject_once".to_string(),
+            },
+        ];
+        assert_eq!(deny_choice(&options).as_deref(), Some("deny"));
+        assert_eq!(deny_choice(&options[..1]), None);
+    }
+}

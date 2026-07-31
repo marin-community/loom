@@ -1,6 +1,6 @@
 """The builtin review-wait program's decision logic, with no server required.
 
-Loads `crates/loom-ops/watches/review_wait.py` straight from the repo and drives
+Loads `crates/loom-watch/watches/review_wait.py` straight from the repo and drives
 it with a stubbed client: the waiting-for-review predicate (open + not draft +
 REVIEW_REQUIRED), the park / un-park reconcile, ownership (it touches only its
 own marks), the capability + dry-run branches, and the summary all live here.
@@ -14,7 +14,7 @@ from pathlib import Path
 
 from weaver_loom import PARKED_VALUES, Round
 
-WATCHES = Path(__file__).resolve().parents[3] / "crates" / "loom-ops" / "watches"
+WATCHES = Path(__file__).resolve().parents[3] / "crates" / "loom-watch" / "watches"
 
 
 def load_program(name):

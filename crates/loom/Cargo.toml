@@ -14,8 +14,15 @@ path = "src/bin/loom.rs"
 
 [dependencies]
 loom-ctx = { path = "../loom-ctx" }
-loom-domain = { path = "../loom-domain" }
-loom-ops = { path = "../loom-ops" }
+loom-store = { path = "../loom-store" }
+loom-agent = { path = "../loom-agent" }
+loom-policy = { path = "../loom-policy" }
+loom-core = { path = "../loom-core" }
+loom-editor = { path = "../loom-editor" }
+loom-forge = { path = "../loom-forge" }
+loom-launch = { path = "../loom-launch" }
+loom-watch = { path = "../loom-watch" }
+loom-deliver = { path = "../loom-deliver" }
 weaver-core = { path = "../weaver-core" }
 weaver-api = { path = "../weaver-api" }
 smartdoc = { path = "../smartdoc" }
@@ -64,7 +71,7 @@ futures-util = "0.3"
 hmac = "0.12"
 tokio-tungstenite = { version = "0.29", features = ["connect", "rustls-tls-webpki-roots"] }
 # The REST tests drive the GitHub App mock that lives with the App itself.
-loom-ops = { path = "../loom-ops", features = ["test-support"] }
+loom-forge = { path = "../loom-forge", features = ["test-support"] }
 # Raw-body HTTP client for the scratch-upload integration test, plus `stream`
 # for reading the ACP `/chat/stream` SSE body chunk by chunk.
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }

@@ -51,39 +51,46 @@ and the rule for placing a new module.
 | `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`summary`, `readme`, `status` [read or set level + message], `channel …`, `tag` [`set`/`rm`/`ls` a branch tag], explicit-backlog `issue …`, `where`, `log`, `chatlog` [render the agent's conversation transcript], `hook`, `config` [read-only: `get`/`ls`; writes go through `loom config set` or the settings pane]) — every command drives `weaver-api::Client` over HTTP; none touch sqlite |
 | `crates/loom/src/web/` | axum routes, request/response types, SSE — **the API surface** (incl. the auth middleware + login/token/user handlers) |
 | `crates/loom-ctx/` | leaf utilities and `Ctx` (the storage handle, event bus and server address every layer above threads through). No loom dependency of its own; knows nothing about sessions |
-| `crates/loom-domain/` | what a session, profile, agent or conversation *is*, and the rules for changing one. Reaches storage and the bus through `Ctx` and stops there — no process spawning, no network calls, no live registries, so it tests against an in-memory database |
-| `crates/loom-ops/` | everything that reaches outside the process: git and GitHub, Slack, container and editor lifecycles, the watch scheduler, session provisioning and teardown. Defines `AppState` — the process-wide registries belong to the layer that drives them |
-| `crates/loom/src/lib.rs` | crate boundary: the HTTP adapter and CLI over the three engine crates, re-exported here so `loom::session`, `loom::AppState` and friends resolve regardless of which crate defines them. The crate does not publicly re-export `weaver-core` storage/domain modules |
-| `crates/loom-domain/src/auth.rs` | authentication core: token/password crypto, the `users`/`api_tokens`/`auth_sessions` tables, the machine-local token, and the GitHub OAuth calls. `axum`-free so it unit-tests directly |
+| `crates/loom-store/` | durable records and storage operations: sessions, chat, channels, layout, runs, history, and the profile record |
+| `crates/loom-agent/` | agent mechanisms: ACP, builtin/custom runtimes, and trusted MCP adapters |
+| `crates/loom-policy/` | launch and access policy: profiles, authentication, automation, custom MCP administration, and composed database initialization |
+| `crates/loom-core/` | shared engine operations: launch resolution, shells, and detached-session ownership reconciliation |
+| `crates/loom-editor/` | attaching a human to a live session through the terminal or embedded editor |
+| `crates/loom-forge/` | GitHub, registered repositories, credentials, runtime lifecycle, and `AppState` |
+| `crates/loom-launch/` | repository/worktree preparation, provisioning, metadata assistance, and handoff |
+| `crates/loom-watch/` | status monitor, watch scheduler, builtin programs, and background maintenance |
+| `crates/loom-deliver/` | Slack and submitted-review delivery |
+| `crates/loom/src/lib.rs` | crate boundary: the HTTP adapter and CLI over the ten engine crates, re-exported here so `loom::session`, `loom::AppState` and friends resolve regardless of which crate defines them. The crate does not publicly re-export `weaver-core` storage/domain modules |
+| `crates/loom-policy/src/auth.rs` | authentication core: token/password crypto, the `users`/`api_tokens`/`auth_sessions` tables, the machine-local token, and the GitHub OAuth calls. `axum`-free so it unit-tests directly |
 | `crates/loom-ctx/src/client_context.rs` | named endpoint and credential resolution for the `loom` CLI: XDG user config, private credentials, and repository context selection |
 | `crates/loom/src/server.rs` | bind, write `server.json`, spawn bg tasks |
-| `crates/loom-ops/src/monitor.rs` | status detection, orphan marking, hook-event consumer, and the shared lifecycle-promotion path (`promote_lifecycle`) both the terminal hook consumer and the ACP turn-boundary driver (`record_acp_lifecycle`) run through |
-| `crates/loom-ops/src/watch.rs` | the watch engine: cron timer + event dispatcher + the round executor (the script subprocess executor every program runs on) |
-| `crates/loom-ops/src/builtins.rs` | the builtin watch program registry; the script programs are real Python files in `crates/loom-ops/watches/`, embedded into the binary |
+| `crates/loom-watch/src/monitor.rs` | status detection, orphan marking, hook-event consumer, and the shared lifecycle-promotion path (`promote_lifecycle`) both the terminal hook consumer and the ACP turn-boundary driver (`record_acp_lifecycle`) run through |
+| `crates/loom-watch/src/watch.rs` | the watch engine: cron timer + event dispatcher + the round executor (the script subprocess executor every program runs on) |
+| `crates/loom-watch/src/builtins.rs` | the builtin watch program registry; the script programs are real Python files in `crates/loom-watch/watches/`, embedded into the binary |
 | `python/weaver-loom/` | the pure-Python layer over the loom REST API (`weaver_loom`: client + watch round context); stdlib-only, uv-buildable, vendored onto every script's `PYTHONPATH` by the engine; server-free contract tests in `tests/` (`uv run pytest`, CI's `python-binding` job) |
-| `crates/loom-domain/src/agent.rs` | `AgentManager` plus launch mapping: resolves registered runtimes, launches terminal agents, builds ACP launches, and runs transient ACP judgement prompts for handoff summaries and `POST /api/agent/oneshot` |
-| `crates/loom-domain/src/mcp/` | trusted builtin MCP registry and stdio adapters: provider-neutral versioned capability sets, exact permission translation, and the fixed GitHub/messaging/self-history bridges |
-| `crates/loom-domain/src/custom_mcp.rs` | operator-authored MCP definitions: grouped path identities, immutable sqlite revisions, bounded `uv` validation, and exact session-snapshot execution |
-| `crates/loom-domain/src/profile.rs` | named launch policy, including provider-neutral `mcp_access` resolution and the restricted-profile trust boundary |
-| `crates/loom-ops/src/launch.rs` | canonical profile-template and override resolution for previews, creates, clones, and handoffs; returns the concrete private launch snapshot plus its transport-safe view |
-| `crates/loom-ops/src/handoff.rs` | provider handoff orchestration: canonical/legacy target resolution, conversation continuity, lifecycle fencing, rollback, and replacement cleanup; depends on runtime/domain owners, never the REST adapter |
-| `crates/loom-ops/src/provision.rs` | ordinary session provisioning: trusted actor attribution, canonical launch resolution, repository/worktree/setup lifecycle, stamped launch snapshots, tracking, recoverable launch-failure surfacing, and title generation; returns only the created `Session` + `Branch` domain facts |
+| `crates/loom-agent/src/agent.rs` | `AgentManager` plus launch mapping: resolves registered runtimes, launches terminal agents, builds ACP launches, and runs transient ACP judgement prompts for handoff summaries and `POST /api/agent/oneshot` |
+| `crates/loom-agent/src/mcp/` | trusted builtin MCP registry and stdio adapters: provider-neutral versioned capability sets, exact permission translation, and the fixed GitHub/messaging/self-history bridges |
+| `crates/loom-policy/src/custom_mcp.rs` | operator-authored MCP definitions: grouped path identities, immutable sqlite revisions, bounded `uv` validation, and exact session-snapshot execution |
+| `crates/loom-policy/src/profile.rs` | named launch policy, including provider-neutral `mcp_access` resolution and the restricted-profile trust boundary |
+| `crates/loom-core/src/launch.rs` | canonical profile-template and override resolution for previews, creates, clones, and handoffs; returns the concrete private launch snapshot plus its transport-safe view |
+| `crates/loom-launch/src/handoff.rs` | provider handoff orchestration: canonical/legacy target resolution, conversation continuity, lifecycle fencing, rollback, and replacement cleanup; depends on runtime/domain owners, never the REST adapter |
+| `crates/loom-launch/src/provision.rs` | ordinary session provisioning: trusted actor attribution, canonical launch resolution, repository/worktree/setup lifecycle, stamped launch snapshots, tracking, recoverable launch-failure surfacing, and title generation; returns only the created `Session` + `Branch` domain facts |
 | `crates/loom-ctx/src/scratch.rs` | shared Scratch validation and filesystem storage for launch-time attachments and live route mutations; Axum-free semantic errors keep transport mapping in `web/` |
-| `crates/loom-domain/src/session.rs` | `Session` row + sqlx queries |
-| `crates/loom-domain/src/channels.rs` | same-id session channels and custom communication contexts: atomic creation, append-only typed messages, per-subject subscriptions/read markers, lifecycle, and runtime-delivery receipts |
-| `crates/loom-domain/src/session_layout.rs` | durable Spaces → Groups → Sessions placement, defaults, ordering, optimistic mutation revisions, and revision-invalidation publication; independent of immutable provenance and launch policy |
-| `crates/loom-domain/src/session_manager.rs` | database-backed ownership reconciliation for detached agent/debug supervisors; removes Loom-namespaced runtimes without a live session or active launch-reservation owner |
-| `crates/loom-ops/src/review_delivery.rs` | submitted-review outbox and protected conversation-inbox delivery, including ACP claim fencing and terminal retry/rehome behavior |
-| `crates/loom-ops/src/metadata_assist.rs` | bounded generated task-title and resumption-cue assistance on the session's ACP runtime, with privacy eligibility, source fences, and deterministic fallback |
-| `crates/loom-domain/src/chatlog.rs` | conversation log: capture at archive (write the iris `chat.json` + rendered `chat.md` under `session.log_dir`) and serve it for the Conversation tab (`conversation()` — a terminal session's live transcript, an acp session's chat journal mapped to iris (`journal_to_log`), else the capture) |
-| `crates/loom-domain/src/history.rs` | provider-neutral session-history records and bounded paging/literal search across the ACP journal or terminal Iris normalization; optional fields describe only source-supplied data |
+| `crates/loom-store/src/session.rs` | `Session` row + sqlx queries |
+| `crates/loom-store/src/channels.rs` | same-id session channels and custom communication contexts: atomic creation, append-only typed messages, per-subject subscriptions/read markers, lifecycle, and runtime-delivery receipts |
+| `crates/loom-store/src/session_layout.rs` | durable Spaces → Groups → Sessions placement, defaults, ordering, optimistic mutation revisions, and revision-invalidation publication; independent of immutable provenance and launch policy |
+| `crates/loom-core/src/session_manager.rs` | database-backed ownership reconciliation for detached agent/debug supervisors; removes Loom-namespaced runtimes without a live session or active launch-reservation owner |
+| `crates/loom-deliver/src/review_delivery.rs` | submitted-review outbox and protected conversation-inbox delivery, including ACP claim fencing and terminal retry/rehome behavior |
+| `crates/loom-launch/src/metadata_assist.rs` | bounded generated task-title and resumption-cue assistance on the session's ACP runtime, with privacy eligibility, source fences, and deterministic fallback |
+| `crates/loom-store/src/chatlog.rs` | conversation log: capture at archive (write the iris `chat.json` + rendered `chat.md` under `session.log_dir`) and serve it for the Conversation tab (`conversation()` — a terminal session's live transcript, an acp session's chat journal mapped to iris (`journal_to_log`), else the capture) |
+| `crates/loom-store/src/history.rs` | provider-neutral session-history records and bounded paging/literal search across the ACP journal or terminal Iris normalization; optional fields describe only source-supplied data |
 | `crates/loom-ctx/src/backend.rs` | the terminal-management seam: every programmatic terminal op (create/has/capture/send/kill/list) drives the session's `tapestry` supervisor. Also the ACP transport seam — `new_relay_session`/`subscribe_relay`/`relay_write`/`relay_ack` drive a session's tapestry **relay** supervisor (a durable JSON-RPC frame spool) |
 | `crates/tapestry/` | the per-session detached supervisor that outlives loom. Two modes: a **terminal** (PTY + vt100 screen emulator + unix control socket, streaming raw PTY bytes so an attached xterm owns its own scrollback/search), and a **relay** (a headless stdio subprocess whose stdout is split into newline-delimited frames, spooled with monotonic seqs, and replayed to a subscriber from any cursor — the durable transport under `loom::acp`) |
-| `crates/loom-ops/src/terminal.rs` | WebSocket ⇄ live-terminal bridge: xterm.js ⇄ the tapestry session socket |
-| `crates/loom-ops/src/ide.rs` | lazy per-session code-server ownership plus the authenticated same-origin HTTP/WebSocket reverse proxy used by the advanced editor panel |
-| `crates/loom-domain/src/acp/` | the [Agent Client Protocol](https://agentclientprotocol.com) client: one `tokio` task per `protocol='acp'` session drives a headless adapter subprocess (under a tapestry relay) over JSON-RPC 2.0 — consolidating streaming `session/update`s into journal blocks, block-boundary acking the relay spool, running the turn state machine, and answering permission requests. `start`/`attach` register a task into the `AppState.acp` registry the `/chat`, `/prompt`, `/permissions`, `/mode`, `/interrupt` routes drive. `acp/wire.rs` holds the JSON-RPC line codec + serde types |
-| `crates/loom-domain/src/chat.rs` | the ACP **chat journal**: the durable, block-structured (`chat_blocks`, one row per `(session_id, turn, seq)`) conversation record `loom::acp` writes idempotently and the `/chat` routes read |
-| `crates/loom-ops/src/github.rs` | `gh` CLI shell-out: issue seeding, PR opening, and the PR-status poll loop (snapshots each branch's PR; archives on merge) |
+| `crates/loom-editor/src/terminal.rs` | WebSocket ⇄ live-terminal bridge: xterm.js ⇄ the tapestry session socket |
+| `crates/loom-editor/src/ide.rs` | lazy per-session code-server ownership plus the authenticated same-origin HTTP/WebSocket reverse proxy used by the advanced editor panel |
+| `crates/loom-agent/src/acp/` | the [Agent Client Protocol](https://agentclientprotocol.com) client: one `tokio` task per `protocol='acp'` session drives a headless adapter subprocess (under a tapestry relay) over JSON-RPC 2.0 — consolidating streaming `session/update`s into journal blocks, block-boundary acking the relay spool, running the turn state machine, and answering permission requests. `start`/`attach` register a task into the `AppState.acp` registry the `/chat`, `/prompt`, `/permissions`, `/mode`, `/interrupt` routes drive. `acp/wire.rs` holds the JSON-RPC line codec + serde types |
+| `crates/loom-store/src/chat.rs` | the ACP **chat journal**: the durable, block-structured (`chat_blocks`, one row per `(session_id, turn, seq)`) conversation record `loom::acp` writes idempotently and the `/chat` routes read |
+| `crates/loom-forge/src/github.rs` | `gh` CLI shell-out: issue seeding, PR opening, and the PR-status poll loop (snapshots each branch's PR; archives on merge) |
 | `crates/loom/src/client.rs` | HTTP client used by the `loom` CLI to talk to its own daemon |
 | `crates/loom/src/bin/loom.rs` | the orchestrator CLI (`server`, `session`, `ps`, `attach`, …) |
 | `crates/loom/frontend/` | Vue 3 SPA, rspack, Tailwind. `api.ts` + views in `views/`; the visual rules live in [loom-ui.md](loom-ui.md) |
@@ -155,7 +162,7 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
   opened only by `loom` — `weaver` reaches it over HTTP. WAL mode handles
   concurrency among loom's own connections.
   - Core tables: `branches`, `issues`, `events`, `settings`.
-  - Loom tables (`crates/loom-domain/src/db.rs`): `sessions` (`origin` — the channel
+  - Loom tables (`crates/loom-store/src/db.rs`): `sessions` (`origin` — the channel
     it was created through: `user`/`agent`/`github`/`slack`/`watch`/`actions`/
     `ops`, stamped server-side at create; `class` — `interactive`/`automation`,
     retained as machine provenance and for policy rather than as a separate
@@ -188,7 +195,7 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
     the owner), `api_tokens` (hashed bearer tokens), and `auth_sessions`
     (hashed login cookies). See [Authentication](#authentication). Loom-owned
     tables have their own ordered migration stream under
-    `crates/loom/migrations/`, recorded in `loom_schema_migrations`. This is a
+    `crates/loom-store/migrations/`, recorded in `loom_schema_migrations`. This is a
     separate stream because the core migrations run before loom creates its
     tables. A pre-stream loom database is adopted once by presence-based
     introspection, then stamped at the baseline version; do not add more
@@ -926,7 +933,7 @@ spawned in `server::serve`, self-gated on the
 
 A round runs the **program** the watch names:
 
-- **Builtin scripts** — real Python files in `crates/loom-ops/watches/`,
+- **Builtin scripts** — real Python files in `crates/loom-watch/watches/`,
   embedded into the binary and registered in `loom::builtins`:
   `builtin:status` (an opt-in agentic watch that stamps a `triage` mark on a
   stale in-scope session, judging

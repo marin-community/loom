@@ -21,7 +21,7 @@ for session in rnd.sessions():
 rnd.finish(f"surveyed {rnd.surveyed}, {len(rnd.actions)} findings")
 ```
 
-The builtin programs under `crates/loom-ops/watches/` are working examples;
+The builtin programs under `crates/loom-watch/watches/` are working examples;
 the program contract is documented in `docs/ARCHITECTURE.md` (Watches).
 
 ## Google workload credentials

@@ -1349,9 +1349,16 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
+ "loom-agent",
+ "loom-core",
  "loom-ctx",
- "loom-domain",
- "loom-ops",
+ "loom-deliver",
+ "loom-editor",
+ "loom-forge",
+ "loom-launch",
+ "loom-policy",
+ "loom-store",
+ "loom-watch",
  "percent-encoding",
  "reqwest",
  "ring",
@@ -1371,6 +1378,49 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "weaver-api",
+ "weaver-core",
+]
+
+[[package]]
+name = "loom-agent"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "chrono",
+ "hex",
+ "loom-store",
+ "percent-encoding",
+ "rand",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sha2",
+ "sqlx",
+ "tapestry",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "weaver-api",
+ "weaver-core",
+]
+
+[[package]]
+name = "loom-core"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "loom-policy",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sha2",
+ "sqlx",
+ "tokio",
+ "tracing",
  "weaver-api",
  "weaver-core",
 ]
@@ -1405,7 +1455,104 @@ dependencies = [
 ]
 
 [[package]]
-name = "loom-domain"
+name = "loom-deliver"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "futures-util",
+ "hex",
+ "loom-launch",
+ "percent-encoding",
+ "rand",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "weaver-api",
+ "weaver-core",
+]
+
+[[package]]
+name = "loom-editor"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "futures-util",
+ "hyper",
+ "hyper-util",
+ "loom-core",
+ "serde",
+ "tapestry",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "weaver-core",
+]
+
+[[package]]
+name = "loom-forge"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "hex",
+ "hmac",
+ "jsonwebtoken",
+ "loom-editor",
+ "percent-encoding",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sha2",
+ "sqlx",
+ "tapestry",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "weaver-api",
+ "weaver-core",
+]
+
+[[package]]
+name = "loom-launch"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "hex",
+ "libc",
+ "loom-forge",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sha2",
+ "sqlx",
+ "tapestry",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "weaver-api",
+ "weaver-core",
+]
+
+[[package]]
+name = "loom-policy"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -1415,7 +1562,8 @@ dependencies = [
  "chrono",
  "hex",
  "jsonwebtoken",
- "loom-ctx",
+ "loom-agent",
+ "loom-store",
  "percent-encoding",
  "rand",
  "reqwest",
@@ -1425,47 +1573,47 @@ dependencies = [
  "serial_test",
  "sha2",
  "sqlx",
- "tapestry",
  "tempfile",
  "tokio",
- "toml",
  "tracing",
  "weaver-api",
  "weaver-core",
 ]
 
 [[package]]
-name = "loom-ops"
+name = "loom-store"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "async-trait",
- "axum",
+ "base64",
  "chrono",
- "croner",
- "futures-util",
- "hex",
- "hmac",
- "hyper",
- "hyper-util",
- "jsonwebtoken",
- "libc",
  "loom-ctx",
- "loom-domain",
- "percent-encoding",
- "rand",
  "reqwest",
- "ring",
  "serde",
  "serde_json",
  "serial_test",
- "sha2",
  "sqlx",
- "tapestry",
  "tempfile",
  "tokio",
- "tokio-tungstenite",
- "toml",
+ "tracing",
+ "weaver-api",
+ "weaver-core",
+]
+
+[[package]]
+name = "loom-watch"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "croner",
+ "loom-launch",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sqlx",
+ "tempfile",
+ "tokio",
  "tracing",
  "weaver-api",
  "weaver-core",

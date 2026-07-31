@@ -376,7 +376,7 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     // default loom runs it. Turning the switch off idles it cheaply.
     tokio::spawn(watch::run(state.clone()));
     // Retire embedded code-server instances that have gone idle.
-    tokio::spawn(crate::ide::reap_loop(state.clone()));
+    tokio::spawn(crate::ide::reap_loop(state.editor_state()));
     // The Slack Socket Mode client. Always spawned; it self-gates on token
     // presence and the `slack.enabled` switch, so an unconfigured loom idles
     // here cheaply.

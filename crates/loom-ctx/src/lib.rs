@@ -6,6 +6,7 @@
 //! the scratch store, `.env` and `loom.toml` parsing — and [`Ctx`], the storage
 //! handle plus event bus that every layer above threads through.
 
+pub mod agent_kind;
 pub mod backend;
 pub mod changes;
 pub mod client_context;
@@ -15,6 +16,7 @@ pub mod launch_gate;
 pub mod links;
 pub mod logs;
 pub mod loom_config;
+pub mod paths;
 pub mod runner;
 pub mod scratch;
 

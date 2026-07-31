@@ -1,6 +1,6 @@
 """The builtin resume program's decision logic, with no server required.
 
-Loads `crates/loom-ops/watches/resume.py` straight from the repo and drives it
+Loads `crates/loom-watch/watches/resume.py` straight from the repo and drives it
 with a stubbed client and a frozen clock: the detection (screen pattern), the
 exponential backoff cadence carried in the lookaside state, the dynamic-wake
 scheduling, escalation after `max_attempts`, recovery, reactive-vs-sweep
@@ -15,7 +15,7 @@ from pathlib import Path
 
 from weaver_loom import Round
 
-WATCHES = Path(__file__).resolve().parents[3] / "crates" / "loom-ops" / "watches"
+WATCHES = Path(__file__).resolve().parents[3] / "crates" / "loom-watch" / "watches"
 
 
 def load_program(name):

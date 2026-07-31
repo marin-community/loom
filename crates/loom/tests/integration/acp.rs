@@ -1788,10 +1788,12 @@ async fn repair_restores_a_live_relay_after_journal_failure() {
         "repair registers a replacement ACP task"
     );
 
-    let chat = poll_chat(&ts, "acp-repair", Duration::from_secs(10), |blocks| {
-        blocks
-            .iter()
-            .any(|block| block["kind"] == "agent_message" && block["payload"]["text"] == "survived")
+    let chat = poll_chat_state(&ts, "acp-repair", Duration::from_secs(10), |chat| {
+        let blocks = chat["blocks"].as_array().unwrap();
+        chat["live_turn"].is_null()
+            && blocks.iter().any(|block| {
+                block["kind"] == "agent_message" && block["payload"]["text"] == "survived"
+            })
             && blocks.iter().any(|block| block["kind"] == "turn_end")
     })
     .await;

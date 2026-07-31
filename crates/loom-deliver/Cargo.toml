@@ -1,0 +1,29 @@
+[package]
+name = "loom-deliver"
+version = "0.2.0"
+edition = "2021"
+description = "Out-of-band Slack and submitted-review delivery."
+
+[dependencies]
+loom-launch = { path = "../loom-launch" }
+weaver-core = { path = "../weaver-core" }
+weaver-api = { path = "../weaver-api" }
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+futures-util = "0.3"
+hex = "0.4"
+percent-encoding = "2"
+rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "derive"] }
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.29", features = ["connect", "rustls-tls-webpki-roots"] }
+tracing = "0.1"
+
+[dev-dependencies]
+serial_test = "3"
+tempfile = "3"

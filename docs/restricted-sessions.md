@@ -11,7 +11,7 @@ settings, repository-scoped read tools, and a fixed GitHub issue/PR MCP surface.
 The profile selects that reviewed surface as `mcp/github/comment@v1`; Loom expands
 the set into exact tool permissions when it stamps the session and launches the
 corresponding built-in adapter from its registry. Profile data cannot provide an
-adapter command. New adapter families belong in `crates/loom-domain/src/mcp/` and must
+adapter command. New adapter families belong in `crates/loom-agent/src/mcp/` and must
 be registered by Loom before a profile can select one.
 The MCP bridge calls a session-scoped Loom endpoint; Loom runs `gh` server-side
 against the session's fixed repository and linked issue/PR number, so neither a

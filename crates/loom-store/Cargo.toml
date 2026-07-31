@@ -1,0 +1,23 @@
+[package]
+name = "loom-store"
+version = "0.2.0"
+edition = "2021"
+description = "Loom's durable records and storage operations."
+
+[dependencies]
+loom-ctx = { path = "../loom-ctx" }
+weaver-core = { path = "../weaver-core" }
+weaver-api = { path = "../weaver-api" }
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "derive"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+
+[dev-dependencies]
+serial_test = "3"
+tempfile = "3"

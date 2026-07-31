@@ -38,6 +38,7 @@ export interface Branch {
   id: string;
   name: string;
   title: string;
+  title_provenance: string;
   goal: string;
   /** Current-state message, set with the `attention` tag via `weaver status`. */
   description: string;
