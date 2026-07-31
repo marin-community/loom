@@ -66,7 +66,7 @@ INSTRUCTIONS = (
 # in its env, $WEAVER_BRANCH would make each hook stamp an idle/working event on
 # the *parent* branch mid-review, corrupting the dashboard and `loom session wait`
 # signal. Stripping it makes `weaver hook` a no-op. (Mirrors the Rust STRIPPED_ENV
-# in crates/loom/src/agent.rs.)
+# in crates/loom-agent/src/agent.rs.)
 STRIPPED_ENV = (
     "ANTHROPIC_API_KEY",
     "CLAUDECODE",

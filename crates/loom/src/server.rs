@@ -11,6 +11,7 @@ use tokio::net::TcpListener;
 use crate::events::EventBus;
 use crate::session as session_mod;
 use crate::AppState;
+use crate::Ctx;
 use crate::{backend, config, db, github, monitor, runner, session_manager, watch, web};
 use weaver_core::branch as branch_mod;
 use weaver_core::watch as watch_store;
@@ -99,9 +100,11 @@ pub async fn run(addr: &str) -> Result<()> {
     runner::validate().await?;
     let trigger = crate::github_trigger::GithubTrigger::production(db.clone());
     let state = AppState {
-        db,
-        bus: EventBus::new(),
-        addr: actual.to_string(),
+        ctx: Ctx {
+            db,
+            bus: EventBus::new(),
+            addr: actual.to_string(),
+        },
         ide: std::sync::Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
         trigger,
         acp: crate::acp::AcpRegistry::new(),
@@ -203,7 +206,7 @@ pub async fn repair_acp_sessions(state: &AppState) {
         if !backend::has_session(&session.term_session).await {
             continue; // dead relay — the monitor will mark it orphaned.
         }
-        match crate::acp::attach(state, &session.id).await {
+        match crate::acp::attach(&state.acp_ctx(), &session.id).await {
             Ok(()) => tracing::info!("acp repair: re-attached session {}", session.id),
             Err(e) => tracing::warn!(
                 "acp repair: could not re-attach session {}: {e}",
@@ -261,13 +264,9 @@ async fn reconcile_sessions(state: &AppState) {
         let Ok(Some(branch)) = branch_mod::get(&state.db, &session.branch_id).await else {
             continue;
         };
-        match web::adopt(state, &session, &branch).await {
+        match crate::lifecycle::adopt(state, &session, &branch).await {
             Ok(()) => tracing::info!("auto-adopt: adopted session {}", session.id),
-            Err(e) => tracing::warn!(
-                "auto-adopt: could not adopt session {}: {}",
-                session.id,
-                e.message()
-            ),
+            Err(e) => tracing::warn!("auto-adopt: could not adopt session {}: {}", session.id, e),
         }
     }
 }
@@ -319,7 +318,7 @@ pub async fn reconcile_managed_sessions(state: &AppState) {
             if session_mod::is_terminal(&session.status) {
                 continue;
             }
-            match web::auto_archive(state, &session, &branch).await {
+            match crate::lifecycle::auto_archive(state, &session, &branch).await {
                 Ok(Some(_)) => tracing::info!(
                     "warm-adopt: archived orphaned managed session {} (owner gone)",
                     session.id
@@ -331,7 +330,7 @@ pub async fn reconcile_managed_sessions(state: &AppState) {
                 Err(e) => tracing::warn!(
                     "warm-adopt: could not archive managed session {}: {}",
                     session.id,
-                    e.message()
+                    e
                 ),
             }
             continue;
@@ -345,12 +344,12 @@ pub async fn reconcile_managed_sessions(state: &AppState) {
         if backend::has_session(&session.term_session).await {
             continue;
         }
-        match web::adopt(state, &session, &branch).await {
+        match crate::lifecycle::adopt(state, &session, &branch).await {
             Ok(()) => tracing::info!("warm-adopt: adopted managed session {}", session.id),
             Err(e) => tracing::warn!(
                 "warm-adopt: could not adopt managed session {}: {}",
                 session.id,
-                e.message()
+                e
             ),
         }
     }
@@ -377,7 +376,7 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     // default loom runs it. Turning the switch off idles it cheaply.
     tokio::spawn(watch::run(state.clone()));
     // Retire embedded code-server instances that have gone idle.
-    tokio::spawn(crate::ide::reap_loop(state.clone()));
+    tokio::spawn(crate::ide::reap_loop(state.editor_state()));
     // The Slack Socket Mode client. Always spawned; it self-gates on token
     // presence and the `slack.enabled` switch, so an unconfigured loom idles
     // here cheaply.

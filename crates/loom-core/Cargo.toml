@@ -1,0 +1,20 @@
+[package]
+name = "loom-core"
+version = "0.2.0"
+edition = "2021"
+description = "Loom's complete in-process engine."
+
+[dependencies]
+loom-policy = { path = "../loom-policy" }
+weaver-core = { path = "../weaver-core" }
+weaver-api = { path = "../weaver-api" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "derive"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+
+[dev-dependencies]
+serial_test = "3"

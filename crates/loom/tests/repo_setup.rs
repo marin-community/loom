@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use loom::session as session_mod;
 use loom::AppState;
+use loom::Ctx;
 use loom::{agent_env, client, db, repo, repo_env, server};
 use serde_json::{json, Value};
 use serial_test::serial;
@@ -114,9 +115,11 @@ async fn start_server() -> (TestHome, loom::client::Client, db::Db, String) {
     .await
     .unwrap();
     let state = AppState {
-        db: pool.clone(),
-        bus: EventBus::new(),
-        addr: addr.to_string(),
+        ctx: Ctx {
+            db: pool.clone(),
+            bus: EventBus::new(),
+            addr: addr.to_string(),
+        },
         ide: std::sync::Arc::new(loom::ide::IdeManager::new(loom::ide::ide_home())),
         trigger: loom::github_trigger::GithubTrigger::production(pool.clone()),
         acp: loom::acp::AcpRegistry::new(),

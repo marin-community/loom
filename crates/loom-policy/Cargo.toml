@@ -1,0 +1,32 @@
+[package]
+name = "loom-policy"
+version = "0.2.0"
+edition = "2021"
+description = "Loom's launch, authentication, automation, and custom-MCP policy."
+
+[dependencies]
+loom-agent = { path = "../loom-agent" }
+loom-store = { path = "../loom-store" }
+weaver-core = { path = "../weaver-core" }
+weaver-api = { path = "../weaver-api" }
+anyhow = "1"
+argon2 = "0.5"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+hex = "0.4"
+jsonwebtoken = "9"
+percent-encoding = "2"
+rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+ring = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "derive"] }
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+
+[dev-dependencies]
+axum = { version = "0.8", features = ["ws"] }
+serial_test = "3"

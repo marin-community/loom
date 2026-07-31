@@ -16,6 +16,7 @@ use std::time::Duration;
 use futures_util::SinkExt;
 use loom::client::Client;
 use loom::AppState;
+use loom::Ctx;
 use loom::{db, server};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -191,9 +192,11 @@ impl TestServer {
             None => loom::github_trigger::GithubTrigger::production(pool.clone()),
         };
         let state = AppState {
-            db: pool,
-            bus: EventBus::new(),
-            addr: addr.to_string(),
+            ctx: Ctx {
+                db: pool,
+                bus: EventBus::new(),
+                addr: addr.to_string(),
+            },
             ide: std::sync::Arc::new(loom::ide::IdeManager::new(loom::ide::ide_home())),
             trigger,
             acp: loom::acp::AcpRegistry::new(),

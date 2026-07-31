@@ -118,12 +118,6 @@ use sessions::*;
 use settings::*;
 use watches::*;
 
-// Re-exported so the rest of the crate (server.rs, github.rs, watch.rs)
-// can keep calling these as `crate::web::{auto_archive, adopt, create_warm_session}`
-// — they're session lifecycle operations, but not routed through this file's
-// `router()`, so the glob imports above don't cover them.
-pub(crate) use sessions::{adopt, auto_archive, create_warm_session};
-
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
@@ -244,8 +238,15 @@ impl IntoResponse for AppError {
 impl<E: Into<anyhow::Error>> From<E> for AppError {
     fn from(err: E) -> Self {
         let err = err.into();
+        // A lifecycle transition that refused for a reason the caller could have
+        // avoided carries the status it means; anything else is a real 500.
+        let status = match err.downcast_ref::<crate::lifecycle::Refusal>() {
+            Some(crate::lifecycle::Refusal::Conflict(_)) => StatusCode::CONFLICT,
+            Some(crate::lifecycle::Refusal::Invalid(_)) => StatusCode::BAD_REQUEST,
+            None => StatusCode::INTERNAL_SERVER_ERROR,
+        };
         Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
+            status,
             message: err.to_string(),
             details: None,
             fields: None,
@@ -481,30 +482,9 @@ pub(crate) async fn session_summary_view(
 /// to `(Session, Branch)`. The session must exist and be active; clients hitting
 /// a branch with no live session get a 404.
 pub(crate) async fn require_session(db: &Db, key: &str) -> ApiResult<(Session, Branch)> {
-    if let Some((session, branch)) = session_mod::with_branch(db, key).await? {
-        return Ok((session, branch));
-    }
-    if let Some(branch) = branch_mod::resolve_key(db, key).await? {
-        if let Some(session) = session_mod::active_for_branch(db, &branch.id).await? {
-            return Ok((session, branch));
-        }
-    }
-    Err(AppError::not_found("session"))
-}
-
-/// The dashboard URL for a session — the page a person opens to watch it.
-/// `base` is an origin (with or without a trailing slash); pair it with
-/// [`auth::public_base`] to build a link that resolves off-box.
-pub(crate) fn session_url(base: &str, session_id: &str) -> String {
-    format!("{}/s/{session_id}", base.trim_end_matches('/'))
-}
-
-/// The dashboard deep-link for an artifact — the page a person opens to read it
-/// (`/s/:id/artifacts/:name` in the SPA router). `key` is any session key (the
-/// `$WEAVER_BRANCH` an agent carries resolves fine); pair `base` with
-/// [`auth::public_base`] so the link resolves off-box.
-pub(crate) fn artifact_url(base: &str, key: &str, name: &str) -> String {
-    format!("{}/s/{key}/artifacts/{name}", base.trim_end_matches('/'))
+    session_mod::resolve_key(db, key)
+        .await?
+        .ok_or_else(|| AppError::not_found("session"))
 }
 
 pub(crate) async fn require_branch(db: &Db, key: &str) -> ApiResult<Branch> {

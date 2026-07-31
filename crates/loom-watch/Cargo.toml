@@ -1,0 +1,22 @@
+[package]
+name = "loom-watch"
+version = "0.2.0"
+edition = "2021"
+description = "Loom's background monitor, watch scheduler, and maintenance tasks."
+
+[dependencies]
+loom-launch = { path = "../loom-launch" }
+weaver-core = { path = "../weaver-core" }
+weaver-api = { path = "../weaver-api" }
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+croner = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "derive"] }
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+
+[dev-dependencies]
+serial_test = "3"

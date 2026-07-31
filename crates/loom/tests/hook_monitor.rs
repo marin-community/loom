@@ -10,6 +10,7 @@ use std::time::Duration;
 use loom::client;
 use loom::session as session_mod;
 use loom::AppState;
+use loom::Ctx;
 use loom::{db, server};
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -106,9 +107,11 @@ async fn hook_event_drives_session_status() {
     .await
     .unwrap();
     let state = AppState {
-        db: pool.clone(),
-        bus: EventBus::new(),
-        addr: addr.to_string(),
+        ctx: Ctx {
+            db: pool.clone(),
+            bus: EventBus::new(),
+            addr: addr.to_string(),
+        },
         ide: std::sync::Arc::new(loom::ide::IdeManager::new(loom::ide::ide_home())),
         trigger: loom::github_trigger::GithubTrigger::production(pool.clone()),
         acp: loom::acp::AcpRegistry::new(),
@@ -303,7 +306,7 @@ async fn turn_cap_blocks_automation_session() {
     let branch_id = seed_classed_session(&pool, "cap1", "weaver/cap", "automation", None).await;
 
     // Turn 1 is within the cap: no attention tag raised.
-    loom::monitor::record_acp_lifecycle(&pool, &bus, "cap1", "working").await;
+    loom::status::record_acp_lifecycle(&pool, &bus, "cap1", "working").await;
     let s = session_mod::get(&pool, "cap1").await.unwrap().unwrap();
     assert_eq!(s.turn_count, 1, "working edge counts a turn");
     assert!(
@@ -315,7 +318,7 @@ async fn turn_cap_blocks_automation_session() {
     );
 
     // Turn 2 exceeds the cap: blocked, with the cap note.
-    loom::monitor::record_acp_lifecycle(&pool, &bus, "cap1", "working").await;
+    loom::status::record_acp_lifecycle(&pool, &bus, "cap1", "working").await;
     let tag = weaver_core::tags::get(&pool, &branch_id, weaver_core::tags::ATTENTION_KEY)
         .await
         .unwrap()
@@ -331,8 +334,8 @@ async fn turn_cap_blocks_automation_session() {
     // count still advances but the cap never marks it blocked.
     let warm_branch =
         seed_classed_session(&pool, "warm1", "weaver/warm", "automation", Some("w1")).await;
-    loom::monitor::record_acp_lifecycle(&pool, &bus, "warm1", "working").await;
-    loom::monitor::record_acp_lifecycle(&pool, &bus, "warm1", "working").await;
+    loom::status::record_acp_lifecycle(&pool, &bus, "warm1", "working").await;
+    loom::status::record_acp_lifecycle(&pool, &bus, "warm1", "working").await;
     let warm = session_mod::get(&pool, "warm1").await.unwrap().unwrap();
     assert_eq!(warm.turn_count, 2, "warm sessions still count turns");
     assert!(
