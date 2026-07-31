@@ -24,6 +24,15 @@ pub struct Session {
     /// Reasoning effort ('', 'low', 'medium', 'high', 'xhigh', 'max') — `--effort`.
     pub effort: String,
     pub status: String,
+    /// A durable external lifecycle operation currently in flight. The stable
+    /// `status` remains the last completed state until the operation commits.
+    pub lifecycle_transition: Option<String>,
+    /// Human-readable current stage of [`Self::lifecycle_transition`].
+    pub lifecycle_step: Option<String>,
+    pub lifecycle_transition_started_at: Option<String>,
+    /// Loom process that claimed the transition, used to avoid stealing work
+    /// from an older generation that is still draining during a rolling restart.
+    pub lifecycle_transition_owner_pid: Option<i64>,
     pub github_repo: Option<String>,
     pub last_activity_at: Option<String>,
     pub created_at: String,
@@ -139,7 +148,9 @@ fn default_class() -> String {
 }
 
 const SESSION_COLUMNS: &str = "\
-    id, branch_id, work_dir, term_session, agent_kind, model, effort, status, github_repo, \
+    id, branch_id, work_dir, term_session, agent_kind, model, effort, status, \
+    lifecycle_transition, lifecycle_step, lifecycle_transition_started_at, \
+    lifecycle_transition_owner_pid, github_repo, \
     last_activity_at, created_at, parent_branch_id, managed_by, created_by, park, sort_order, \
     protocol, acp_session_id, acp_ack_seq, acp_inflight, current_mode, pending_prompt, origin, \
     class, turn_count, tracking_issue_id, profile, launch_mode, profile_revision, \
@@ -759,6 +770,131 @@ pub async fn set_status(db: &Db, id: &str, status: &str) -> Result<()> {
     Ok(())
 }
 
+/// Begin an externally visible lifecycle transition if no other operation owns
+/// the row. This database guard complements the process-local lifecycle lock
+/// during rolling restarts, where two loom generations can briefly overlap.
+pub async fn begin_transition(db: &Db, id: &str, transition: &str, step: &str) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE sessions
+         SET lifecycle_transition = ?, lifecycle_step = ?,
+             lifecycle_transition_started_at = ?, lifecycle_transition_owner_pid = ?,
+             mutation_revision = mutation_revision + 1
+         WHERE id = ? AND lifecycle_transition IS NULL",
+    )
+    .bind(transition)
+    .bind(step)
+    .bind(now_iso())
+    .bind(i64::from(std::process::id()))
+    .bind(id)
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Advance the explanatory stage without allowing a stale operation to update
+/// a newer transition.
+pub async fn update_transition_step(
+    db: &Db,
+    id: &str,
+    transition: &str,
+    step: &str,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE sessions
+         SET lifecycle_step = ?, mutation_revision = mutation_revision + 1
+         WHERE id = ? AND lifecycle_transition = ? AND lifecycle_transition_owner_pid = ?",
+    )
+    .bind(step)
+    .bind(id)
+    .bind(transition)
+    .bind(i64::from(std::process::id()))
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+pub async fn clear_transition(db: &Db, id: &str, transition: &str) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE sessions
+         SET lifecycle_transition = NULL, lifecycle_step = NULL,
+             lifecycle_transition_started_at = NULL, lifecycle_transition_owner_pid = NULL,
+             mutation_revision = mutation_revision + 1
+         WHERE id = ? AND lifecycle_transition = ? AND lifecycle_transition_owner_pid = ?",
+    )
+    .bind(id)
+    .bind(transition)
+    .bind(i64::from(std::process::id()))
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Commit the stable lifecycle state and clear its in-flight presentation in
+/// one SQLite boundary, so readers never observe a completed state carrying a
+/// stale progress label.
+pub async fn complete_transition(
+    db: &Db,
+    id: &str,
+    transition: &str,
+    status: &str,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE sessions
+         SET status = ?, lifecycle_transition = NULL, lifecycle_step = NULL,
+             lifecycle_transition_started_at = NULL, lifecycle_transition_owner_pid = NULL,
+             mutation_revision = mutation_revision + 1
+         WHERE id = ? AND lifecycle_transition = ? AND lifecycle_transition_owner_pid = ?",
+    )
+    .bind(status)
+    .bind(id)
+    .bind(transition)
+    .bind(i64::from(std::process::id()))
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Release a transition whose recorded owner process is confirmed gone during
+/// startup reconciliation. Normal operation code must use [`clear_transition`]
+/// so an old generation cannot clear a newer generation's work.
+pub async fn clear_interrupted_transition(db: &Db, id: &str, transition: &str) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE sessions
+         SET lifecycle_transition = NULL, lifecycle_step = NULL,
+             lifecycle_transition_started_at = NULL, lifecycle_transition_owner_pid = NULL,
+             mutation_revision = mutation_revision + 1
+         WHERE id = ? AND lifecycle_transition = ?",
+    )
+    .bind(id)
+    .bind(transition)
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Commit a stale owner's interrupted transition after startup has established
+/// that process is gone. See [`clear_interrupted_transition`].
+pub async fn complete_interrupted_transition(
+    db: &Db,
+    id: &str,
+    transition: &str,
+    status: &str,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE sessions
+         SET status = ?, lifecycle_transition = NULL, lifecycle_step = NULL,
+             lifecycle_transition_started_at = NULL, lifecycle_transition_owner_pid = NULL,
+             mutation_revision = mutation_revision + 1
+         WHERE id = ? AND lifecycle_transition = ?",
+    )
+    .bind(status)
+    .bind(id)
+    .bind(transition)
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
 /// Join a branch-goal mutation to the same optimistic ordering boundary as
 /// status/lifecycle changes.
 pub async fn bump_mutation_revision(db: &Db, id: &str) -> Result<()> {
@@ -783,9 +919,13 @@ pub async fn bump_mutation_revision(db: &Db, id: &str) -> Result<()> {
 pub async fn claim_recovery(db: &Db, id: &str) -> Result<bool> {
     let result = sqlx::query(
         "UPDATE sessions
-         SET status = 'created', mutation_revision = mutation_revision + 1
-         WHERE id = ? AND status = 'archived'",
+         SET status = 'created', lifecycle_transition = 'adopting',
+             lifecycle_step = 'Preparing recovery', lifecycle_transition_started_at = ?,
+             lifecycle_transition_owner_pid = ?, mutation_revision = mutation_revision + 1
+         WHERE id = ? AND status = 'archived' AND lifecycle_transition IS NULL",
     )
+    .bind(now_iso())
+    .bind(i64::from(std::process::id()))
     .bind(id)
     .execute(db)
     .await?;
@@ -1662,6 +1802,48 @@ mod tests {
             get(&db, "archive-race").await.unwrap().unwrap().status,
             "archived"
         );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_transition_has_single_owner_and_atomic_completion() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let branch = branch_id(&db, "weaver/transition-owner").await;
+        insert(&db, &new_session("transition-owner", &branch, None))
+            .await
+            .unwrap();
+
+        assert!(
+            begin_transition(&db, "transition-owner", "archiving", "Stopping agent")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !begin_transition(&db, "transition-owner", "adopting", "Preparing adoption")
+                .await
+                .unwrap()
+        );
+        assert!(
+            update_transition_step(&db, "transition-owner", "archiving", "Removing worktree")
+                .await
+                .unwrap()
+        );
+
+        let active = get(&db, "transition-owner").await.unwrap().unwrap();
+        assert_eq!(active.status, "running");
+        assert_eq!(active.lifecycle_transition.as_deref(), Some("archiving"));
+        assert_eq!(active.lifecycle_step.as_deref(), Some("Removing worktree"));
+
+        assert!(
+            complete_transition(&db, "transition-owner", "archiving", "archived")
+                .await
+                .unwrap()
+        );
+        let archived = get(&db, "transition-owner").await.unwrap().unwrap();
+        assert_eq!(archived.status, "archived");
+        assert!(archived.lifecycle_transition.is_none());
+        assert!(archived.lifecycle_step.is_none());
+        assert!(archived.lifecycle_transition_started_at.is_none());
+        assert!(archived.lifecycle_transition_owner_pid.is_none());
     }
 
     #[tokio::test]

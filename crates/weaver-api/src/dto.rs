@@ -189,6 +189,16 @@ impl From<&BranchView> for BranchSummaryView {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionTransitionView {
+    /// Stable operation name: currently `archiving` or `adopting`.
+    pub kind: String,
+    /// Human-readable current stage, suitable for direct UI presentation.
+    pub step: String,
+    /// ISO timestamp at which this operation claimed the session.
+    pub started_at: String,
+}
+
 /// Compact session projection returned by `GET /api/sessions/summary`.
 ///
 /// This is the polling/search contract for fleet indexes. A client follows with
@@ -198,6 +208,8 @@ impl From<&BranchView> for BranchSummaryView {
 pub struct SessionSummaryView {
     pub id: String,
     pub status: String,
+    #[serde(default)]
+    pub transition: Option<SessionTransitionView>,
     pub github_repo: Option<String>,
     #[serde(default)]
     pub github_issue: Option<GithubIssueRef>,
@@ -226,6 +238,8 @@ pub struct SessionSummaryView {
 pub struct SessionView {
     pub id: String,
     pub status: String,
+    #[serde(default)]
+    pub transition: Option<SessionTransitionView>,
     pub work_dir: String,
     pub term_session: String,
     pub agent_kind: String,

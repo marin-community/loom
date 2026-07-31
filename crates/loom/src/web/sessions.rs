@@ -37,7 +37,7 @@ use super::{
 };
 use super::{ApiResult, AppError, AppState};
 use crate::lifecycle::{
-    adopt, adopt_acp, archive_locked, delete_session_row, require_branch_slot_free,
+    adopt, adopt_acp, archive, delete_session_row, require_branch_slot_free, require_no_transition,
     require_resume_capacity, require_session_profile_lifetime, resume_agent, stamped_custom_agent,
 };
 
@@ -1057,20 +1057,6 @@ async fn delete_launch_attempt(st: &AppState, session_id: &str) -> ApiResult<Jso
 /// Extracted from the route handler so the GitHub poller can archive a session
 /// the moment its PR merges (see [`crate::github::refresh`]). Returns any
 /// non-fatal teardown warnings.
-pub(crate) async fn archive(
-    st: &AppState,
-    session: &Session,
-    _branch: &Branch,
-) -> Result<Vec<String>, AppError> {
-    let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
-    let Some((current_session, current_branch)) =
-        session_mod::with_branch(&st.db, &session.id).await?
-    else {
-        return Err(AppError::not_found("session"));
-    };
-    Ok(archive_locked(st, &current_session, &current_branch).await?)
-}
-
 pub(super) async fn archive_session(
     State(st): State<AppState>,
     Path(key): Path<String>,
@@ -1249,6 +1235,7 @@ async fn recover(st: &AppState, session: &Session, _branch: &Branch) -> Result<(
     let session = &current_session;
     let branch = &current_branch;
     tracing::info!(session = %session.id, branch = %branch.id, "recovering archived session");
+    require_no_transition(session)?;
     if session.status != "archived" {
         return Err(AppError::conflict(format!(
             "session is '{}', not archived",
@@ -1305,6 +1292,14 @@ async fn recover(st: &AppState, session: &Session, _branch: &Branch) -> Result<(
         // but a later manual `git branch -D` could have deleted it — refuse
         // clearly rather than let the checkout fail cryptically.
         if !work_dir.exists() {
+            crate::lifecycle::transition_step(
+                st,
+                session,
+                branch,
+                "adopting",
+                "Rebuilding worktree",
+            )
+            .await?;
             if !git::branch_exists(&repo_root, &branch.branch).await {
                 return Err(AppError::bad_request(format!(
                     "branch '{}' no longer exists — cannot recover",
@@ -1331,6 +1326,8 @@ async fn recover(st: &AppState, session: &Session, _branch: &Branch) -> Result<(
             tracing::debug!(session = %session.id, "worktree still present, skipping rebuild");
         }
 
+        crate::lifecycle::transition_step(st, session, branch, "adopting", "Resuming agent")
+            .await?;
         tracing::debug!(session = %session.id, branch = %branch.id, protocol = %session.protocol, "resuming recovered agent");
         if session.protocol == "acp" {
             Ok(adopt_acp(
@@ -1394,8 +1391,21 @@ async fn recover(st: &AppState, session: &Session, _branch: &Branch) -> Result<(
             // `worktree add` whose directory never became visible.
             git::worktree_prune(&repo_root).await.ok();
         }
-        session_mod::set_status(&st.db, &session.id, "archived").await?;
+        session_mod::complete_transition(&st.db, &session.id, "adopting", "archived").await?;
         return Err(error);
+    }
+
+    crate::lifecycle::transition_step(st, session, branch, "adopting", "Finalizing recovery")
+        .await?;
+    let completed_status = session_mod::get(&st.db, &session.id)
+        .await?
+        .ok_or_else(|| AppError::not_found("session"))?
+        .status;
+    if !session_mod::complete_transition(&st.db, &session.id, "adopting", &completed_status).await?
+    {
+        return Err(AppError::conflict(
+            "recovery lost ownership of its lifecycle transition",
+        ));
     }
 
     crate::channels::reopen_session_channel(&st.db, &session.id).await?;

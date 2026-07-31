@@ -387,6 +387,7 @@ pub(crate) async fn session_view(
     Ok(SessionView {
         id: session.id.clone(),
         status: session.status.clone(),
+        transition: session_transition_view(session),
         work_dir: session.work_dir.clone(),
         term_session: session.term_session.clone(),
         agent_kind: session.agent_kind.clone(),
@@ -458,6 +459,7 @@ pub(crate) async fn session_summary_view(
     Ok(SessionSummaryView {
         id: session.id.clone(),
         status: session.status.clone(),
+        transition: session_transition_view(session),
         github_repo: session.github_repo.clone(),
         github_issue,
         last_activity_at: session
@@ -475,6 +477,17 @@ pub(crate) async fn session_summary_view(
         usage,
         placement,
         branch: BranchSummaryView::from(&branch),
+    })
+}
+
+fn session_transition_view(session: &Session) -> Option<weaver_api::SessionTransitionView> {
+    Some(weaver_api::SessionTransitionView {
+        kind: session.lifecycle_transition.clone()?,
+        step: session.lifecycle_step.clone().unwrap_or_default(),
+        started_at: session
+            .lifecycle_transition_started_at
+            .clone()
+            .unwrap_or_default(),
     })
 }
 

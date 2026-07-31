@@ -129,6 +129,28 @@ pub async fn auto_archive(
         .map(Some)
 }
 
+/// Manual archive entry point. Refresh after acquiring the lifecycle lock so a
+/// request queued behind adoption/recovery acts on the completed state rather
+/// than the stale row it resolved before waiting.
+pub async fn archive(st: &AppState, session: &Session, _branch: &Branch) -> Result<Vec<String>> {
+    let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
+    let Some((current_session, current_branch)) =
+        session_mod::with_branch(&st.db, &session.id).await?
+    else {
+        return Err(anyhow!("session not found"));
+    };
+    archive_locked(st, &current_session, &current_branch).await
+}
+
+pub fn require_no_transition(session: &Session) -> Result<()> {
+    if let Some(transition) = session.lifecycle_transition.as_deref() {
+        return Err(anyhow!(Refusal::Conflict(format!(
+            "session is already {transition}; wait for that transition to finish"
+        ))));
+    }
+    Ok(())
+}
+
 /// Shared teardown after the caller has acquired the runtime lifecycle lock and
 /// refreshed the session row.
 pub async fn archive_locked(
@@ -137,7 +159,18 @@ pub async fn archive_locked(
     branch: &Branch,
 ) -> Result<Vec<String>> {
     tracing::info!(session = %session.id, branch = %branch.id, "archiving session");
-    let mut warnings: Vec<String> = Vec::new();
+    require_no_transition(session)?;
+    if !session_mod::begin_transition(&st.db, &session.id, "archiving", "Capturing conversation")
+        .await?
+    {
+        return Err(anyhow!(Refusal::Conflict(
+            "another lifecycle transition already owns this session".to_string()
+        )));
+    }
+    record_transition(st, branch, "archiving", "Capturing conversation").await;
+
+    let result: Result<Vec<String>> = async {
+        let mut warnings: Vec<String> = Vec::new();
 
     // Capture the agent's conversation log before teardown. The transcript lives
     // outside the worktree so it would survive removal, but capturing first keeps
@@ -149,6 +182,7 @@ pub async fn archive_locked(
     // Cancellation is the durable boundary: an automation request that
     // finishes provisioning after this point cannot promote itself.
     crate::runs::cancel_for_session_with_summary(&st.db, &session.id, "session archived").await?;
+    transition_step(st, session, branch, "archiving", "Stopping agent").await?;
     // The row must never say `archived` while its supervisor is still live.
     // A tapestry kill is acknowledged before the socket disappears, so wait
     // for teardown and fail without flipping the row if it cannot complete.
@@ -161,6 +195,7 @@ pub async fn archive_locked(
     crate::auth::revoke_session_tokens(&st.db, &session.id).await?;
     crate::shell::kill_debug_all(&session.id).await;
     st.ide.kill(&session.id);
+    transition_step(st, session, branch, "archiving", "Removing worktree").await?;
     let repo_root = PathBuf::from(&branch.repo_root);
     let work_dir = PathBuf::from(&session.work_dir);
     tracing::debug!(session = %session.id, "killed terminal, debug shells, and ide sessions");
@@ -171,7 +206,10 @@ pub async fn archive_locked(
             tokio::fs::remove_dir_all(&work_dir).await.ok();
         }
     }
-    session_mod::set_status(&st.db, &session.id, "archived").await?;
+    transition_step(st, session, branch, "archiving", "Finalizing archive").await?;
+    if !session_mod::complete_transition(&st.db, &session.id, "archiving", "archived").await? {
+        return Err(anyhow!("archive lost ownership of its lifecycle transition"));
+    }
     crate::channels::archive_session_channel(&st.db, &session.id).await?;
     // A torn-down session cannot keep owning work. Return every issue it held
     // to the repo backlog while preserving source-branch provenance and issue
@@ -206,7 +244,51 @@ pub async fn archive_locked(
     } else {
         tracing::warn!(branch = %branch.id, warnings = warnings.len(), "session archived with warnings");
     }
-    Ok(warnings)
+        Ok(warnings)
+    }
+    .await;
+
+    if result.is_err() {
+        // The stable status was intentionally left at the last completed state.
+        // Release only our own marker; a later monitor/retry can reconcile any
+        // external teardown that completed before the error.
+        match session_mod::clear_transition(&st.db, &session.id, "archiving").await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(session = %session.id, "archive error cleanup no longer owned its transition")
+            }
+            Err(cleanup) => {
+                tracing::warn!(session = %session.id, %cleanup, "archive error cleanup could not clear its transition")
+            }
+        }
+    }
+    result
+}
+
+async fn record_transition(st: &AppState, branch: &Branch, kind: &str, step: &str) {
+    events::record(
+        &st.db,
+        &st.bus,
+        &branch.id,
+        "status",
+        json!({ "status": kind, "transition": kind, "step": step }),
+    )
+    .await
+    .ok();
+}
+
+pub async fn transition_step(
+    st: &AppState,
+    session: &Session,
+    branch: &Branch,
+    kind: &str,
+    step: &str,
+) -> Result<()> {
+    if !session_mod::update_transition_step(&st.db, &session.id, kind, step).await? {
+        return Err(anyhow!("{kind} lost ownership of its lifecycle transition"));
+    }
+    record_transition(st, branch, kind, step).await;
+    Ok(())
 }
 
 /// Bring up an engine-managed (warm) session for a watch, reusing the same
@@ -611,12 +693,33 @@ pub async fn adopt(st: &AppState, session: &Session, _branch: &Branch) -> Result
     };
     let session = &current_session;
     let branch = &current_branch;
+    require_no_transition(session)?;
+    if session.status == "archived" {
+        return Err(anyhow!(Refusal::Conflict(
+            "session is archived — recover it to rebuild the worktree".to_string()
+        )));
+    }
+    if session.status == "done" {
+        return Err(anyhow!(Refusal::Conflict(
+            "session is done and cannot be adopted".to_string()
+        )));
+    }
     let profile = require_session_profile_lifetime(&st.db, session).await?;
     require_resume_capacity(&st.db, session, &profile).await?;
     let custom_agent = stamped_custom_agent(session)?;
     require_branch_slot_free(st, session, branch).await?;
-    if session.protocol == "acp" {
-        return adopt_acp(
+    if !session_mod::begin_transition(&st.db, &session.id, "adopting", "Preparing adoption").await?
+    {
+        return Err(anyhow!(Refusal::Conflict(
+            "another lifecycle transition already owns this session".to_string()
+        )));
+    }
+    record_transition(st, branch, "adopting", "Preparing adoption").await;
+
+    let result: Result<()> = async {
+        transition_step(st, session, branch, "adopting", "Resuming agent").await?;
+        if session.protocol == "acp" {
+            return adopt_acp(
             st,
             session,
             branch,
@@ -624,44 +727,57 @@ pub async fn adopt(st: &AppState, session: &Session, _branch: &Branch) -> Result
             custom_agent.as_ref(),
         )
         .await;
+        }
+        tracing::info!(session = %session.id, branch = %branch.id, "adopting orphaned session");
+        if backend::has_session(&session.term_session).await {
+            return Err(anyhow!(Refusal::Conflict(
+                "session already has a running terminal process".to_string(),
+            )));
+        }
+        let work_dir = PathBuf::from(&session.work_dir);
+        if !work_dir.exists() {
+            return Err(anyhow!(Refusal::Invalid(format!(
+                "worktree {} no longer exists on disk — cannot adopt",
+                session.work_dir
+            ))));
+        }
+        tracing::debug!(session = %session.id, work_dir = %work_dir.display(), "adopt preflight checks passed");
+        // The post-flip conversion: a terminal session whose builtin runtime now
+        // declares acp is adopted *into* acp rather than back onto a PTY.
+        let runtime = session.agent_kind.clone();
+        let declares_acp = session.launch_snapshot.trim().is_empty()
+            && matches!(
+                agent::metadata_for(&st.db, &runtime).await?,
+                Some(meta) if meta.builtin && meta.protocol == "acp"
+            );
+        if declares_acp {
+            return adopt_terminal_into_acp(st, session, branch, &runtime).await;
+        }
+        resume_agent(
+            st,
+            session,
+            branch,
+            "session adopted",
+            custom_agent.as_ref(),
+        )
+        .await
     }
-    tracing::info!(session = %session.id, branch = %branch.id, "adopting orphaned session");
-    if backend::has_session(&session.term_session).await {
-        return Err(anyhow!(Refusal::Conflict(
-            "session already has a running terminal process".to_string(),
-        )));
+    .await;
+    let cleared = session_mod::clear_transition(&st.db, &session.id, "adopting").await;
+    match (result, cleared) {
+        (Ok(()), Ok(true)) => Ok(()),
+        (Ok(()), Ok(false)) => Err(anyhow!("adoption lost ownership of its transition")),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(error), Ok(true)) => Err(error),
+        (Err(error), Ok(false)) => {
+            tracing::warn!(session = %session.id, "adoption error cleanup no longer owned its transition");
+            Err(error)
+        }
+        (Err(error), Err(cleanup)) => {
+            tracing::warn!(session = %session.id, %cleanup, "adoption error cleanup could not clear its transition");
+            Err(error)
+        }
     }
-    let work_dir = PathBuf::from(&session.work_dir);
-    if !work_dir.exists() {
-        return Err(anyhow!(Refusal::Invalid(format!(
-            "worktree {} no longer exists on disk — cannot adopt",
-            session.work_dir
-        ))));
-    }
-    tracing::debug!(session = %session.id, work_dir = %work_dir.display(), "adopt preflight checks passed");
-    // The post-flip conversion: a terminal session whose builtin runtime now
-    // declares acp is adopted *into* acp rather than back onto a PTY. Claude
-    // reopens its own on-disk conversation (the adapter's session ids are
-    // claude's ids); codex — which never had a scoped terminal resume — starts
-    // fresh from the goal file. Custom agents and any runtime still declaring
-    // terminal keep the PTY relaunch.
-    let runtime = session.agent_kind.clone();
-    let declares_acp = session.launch_snapshot.trim().is_empty()
-        && matches!(
-            agent::metadata_for(&st.db, &runtime).await?,
-            Some(meta) if meta.builtin && meta.protocol == "acp"
-        );
-    if declares_acp {
-        return adopt_terminal_into_acp(st, session, branch, &runtime).await;
-    }
-    resume_agent(
-        st,
-        session,
-        branch,
-        "session adopted",
-        custom_agent.as_ref(),
-    )
-    .await
 }
 
 /// Convert an orphaned terminal session to ACP on adopt: respawn as a relay +

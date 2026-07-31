@@ -124,6 +124,7 @@ export interface GithubStatus {
 export interface Session {
   id: string;
   status: string;
+  transition: SessionTransition | null;
   work_dir: string;
   term_session: string;
   agent_kind: string;
@@ -227,6 +228,7 @@ export interface BranchSummary {
 export interface SessionSummary {
   id: string;
   status: string;
+  transition: SessionTransition | null;
   github_repo: string | null;
   github_issue: { repo: string; number: number } | null;
   last_activity_at: string;
@@ -241,6 +243,12 @@ export interface SessionSummary {
   usage: AcpUsage | null;
   placement: SessionPlacement | null;
   branch: BranchSummary;
+}
+
+export interface SessionTransition {
+  kind: 'archiving' | 'adopting';
+  step: string;
+  started_at: string;
 }
 
 export interface ResumptionEvidence {

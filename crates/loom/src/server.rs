@@ -12,7 +12,7 @@ use crate::events::EventBus;
 use crate::session as session_mod;
 use crate::AppState;
 use crate::Ctx;
-use crate::{backend, config, db, github, monitor, runner, session_manager, watch, web};
+use crate::{agent, backend, config, db, github, monitor, runner, session_manager, watch, web};
 use weaver_core::branch as branch_mod;
 use weaver_core::watch as watch_store;
 
@@ -111,6 +111,11 @@ pub async fn run(addr: &str) -> Result<()> {
         launch_gate: crate::launch_gate::RepoLaunchGate::default(),
     };
 
+    // A process can exit between publishing a lifecycle transition and
+    // committing its stable status. Resume those durable operations before the
+    // ordinary supervisor inventory interprets their partial external state.
+    reconcile_interrupted_transitions(&state).await;
+
     // Detached supervisors outlive this control process. Before reattaching or
     // adopting anything, remove only Loom-namespaced runtimes that have no
     // durable session/active-reservation owner. This is the inverse of the
@@ -178,6 +183,120 @@ pub async fn run(addr: &str) -> Result<()> {
         Err(e) => tracing::error!(error = %e, "loom stopped with error"),
     }
     result
+}
+
+async fn reconcile_interrupted_transitions(state: &AppState) {
+    let sessions = match session_mod::list(&state.db).await {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            tracing::warn!(%error, "transition recovery: listing sessions failed");
+            return;
+        }
+    };
+    for session in sessions {
+        let Some(transition) = session.lifecycle_transition.as_deref() else {
+            continue;
+        };
+        let current_pid = i64::from(std::process::id());
+        if session.lifecycle_transition_owner_pid.is_some_and(|owner| {
+            owner != current_pid && std::path::Path::new(&format!("/proc/{owner}")).exists()
+        }) {
+            tracing::info!(session = %session.id, transition, owner_pid = ?session.lifecycle_transition_owner_pid, "transition recovery: operation is still owned by a draining server");
+            continue;
+        }
+        let Ok(Some(branch)) = branch_mod::get(&state.db, &session.branch_id).await else {
+            tracing::warn!(session = %session.id, transition, "transition recovery: branch missing");
+            continue;
+        };
+        match transition {
+            "archiving" => {
+                // Teardown is idempotent. Release the marker owned by the dead
+                // process and run the normal archive path to completion.
+                match session_mod::clear_interrupted_transition(&state.db, &session.id, "archiving")
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::warn!(session = %session.id, "transition recovery: archive marker changed before release");
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(session = %session.id, %error, "transition recovery: could not release archive marker");
+                        continue;
+                    }
+                }
+                if let Err(error) = crate::lifecycle::archive(state, &session, &branch).await {
+                    tracing::warn!(session = %session.id, %error, "transition recovery: archive failed");
+                }
+            }
+            "adopting" => {
+                if backend::has_session(&session.term_session).await {
+                    let status = agent::initial_status(&state.db, &session.agent_kind).await;
+                    if let Err(error) = session_mod::complete_interrupted_transition(
+                        &state.db,
+                        &session.id,
+                        "adopting",
+                        status,
+                    )
+                    .await
+                    {
+                        tracing::warn!(session = %session.id, %error, "transition recovery: could not commit live adoption");
+                    } else if let Err(error) =
+                        crate::channels::reopen_session_channel(&state.db, &session.id).await
+                    {
+                        tracing::warn!(session = %session.id, %error, "transition recovery: could not reopen session channel");
+                    }
+                } else if std::path::Path::new(&session.work_dir).exists() {
+                    match session_mod::clear_interrupted_transition(
+                        &state.db,
+                        &session.id,
+                        "adopting",
+                    )
+                    .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::warn!(session = %session.id, "transition recovery: adoption marker changed before release");
+                            continue;
+                        }
+                        Err(error) => {
+                            tracing::warn!(session = %session.id, %error, "transition recovery: could not release adoption marker");
+                            continue;
+                        }
+                    }
+                    if let Err(error) = crate::lifecycle::adopt(state, &session, &branch).await {
+                        tracing::warn!(session = %session.id, %error, "transition recovery: adoption failed");
+                    } else if let Err(error) =
+                        crate::channels::reopen_session_channel(&state.db, &session.id).await
+                    {
+                        tracing::warn!(session = %session.id, %error, "transition recovery: could not reopen session channel");
+                    }
+                } else if session.status == "created" {
+                    // Recovery had not rebuilt its worktree yet (or adoption
+                    // lost it externally). The branch/history still make this
+                    // a fully recoverable archived session.
+                    if let Err(error) = session_mod::complete_interrupted_transition(
+                        &state.db,
+                        &session.id,
+                        "adopting",
+                        "archived",
+                    )
+                    .await
+                    {
+                        tracing::warn!(session = %session.id, %error, "transition recovery: could not restore archived state");
+                    }
+                } else if let Err(error) =
+                    session_mod::clear_interrupted_transition(&state.db, &session.id, "adopting")
+                        .await
+                {
+                    tracing::warn!(session = %session.id, %error, "transition recovery: could not release failed adoption");
+                }
+            }
+            other => {
+                tracing::warn!(session = %session.id, transition = other, "transition recovery: unknown transition left intact");
+            }
+        }
+    }
 }
 
 /// Restore the Loom-side driver for every live ACP relay that currently lacks
