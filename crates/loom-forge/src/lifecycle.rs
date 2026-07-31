@@ -142,6 +142,15 @@ pub async fn archive(st: &AppState, session: &Session, _branch: &Branch) -> Resu
     archive_locked(st, &current_session, &current_branch).await
 }
 
+pub fn require_no_transition(session: &Session) -> Result<()> {
+    if let Some(transition) = session.lifecycle_transition.as_deref() {
+        return Err(anyhow!(Refusal::Conflict(format!(
+            "session is already {transition}; wait for that transition to finish"
+        ))));
+    }
+    Ok(())
+}
+
 /// Shared teardown after the caller has acquired the runtime lifecycle lock and
 /// refreshed the session row.
 pub async fn archive_locked(
@@ -150,11 +159,7 @@ pub async fn archive_locked(
     branch: &Branch,
 ) -> Result<Vec<String>> {
     tracing::info!(session = %session.id, branch = %branch.id, "archiving session");
-    if let Some(transition) = session.lifecycle_transition.as_deref() {
-        return Err(anyhow!(Refusal::Conflict(format!(
-            "session is already {transition}; wait for that transition to finish"
-        ))));
-    }
+    require_no_transition(session)?;
     if !session_mod::begin_transition(&st.db, &session.id, "archiving", "Capturing conversation")
         .await?
     {
@@ -247,9 +252,15 @@ pub async fn archive_locked(
         // The stable status was intentionally left at the last completed state.
         // Release only our own marker; a later monitor/retry can reconcile any
         // external teardown that completed before the error.
-        session_mod::clear_transition(&st.db, &session.id, "archiving")
-            .await
-            .ok();
+        match session_mod::clear_transition(&st.db, &session.id, "archiving").await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(session = %session.id, "archive error cleanup no longer owned its transition")
+            }
+            Err(cleanup) => {
+                tracing::warn!(session = %session.id, %cleanup, "archive error cleanup could not clear its transition")
+            }
+        }
     }
     result
 }
@@ -682,11 +693,7 @@ pub async fn adopt(st: &AppState, session: &Session, _branch: &Branch) -> Result
     };
     let session = &current_session;
     let branch = &current_branch;
-    if let Some(transition) = session.lifecycle_transition.as_deref() {
-        return Err(anyhow!(Refusal::Conflict(format!(
-            "session is already {transition}; wait for that transition to finish"
-        ))));
-    }
+    require_no_transition(session)?;
     if session.status == "archived" {
         return Err(anyhow!(Refusal::Conflict(
             "session is archived — recover it to rebuild the worktree".to_string()
@@ -756,10 +763,21 @@ pub async fn adopt(st: &AppState, session: &Session, _branch: &Branch) -> Result
         .await
     }
     .await;
-    session_mod::clear_transition(&st.db, &session.id, "adopting")
-        .await
-        .ok();
-    result
+    let cleared = session_mod::clear_transition(&st.db, &session.id, "adopting").await;
+    match (result, cleared) {
+        (Ok(()), Ok(true)) => Ok(()),
+        (Ok(()), Ok(false)) => Err(anyhow!("adoption lost ownership of its transition")),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(error), Ok(true)) => Err(error),
+        (Err(error), Ok(false)) => {
+            tracing::warn!(session = %session.id, "adoption error cleanup no longer owned its transition");
+            Err(error)
+        }
+        (Err(error), Err(cleanup)) => {
+            tracing::warn!(session = %session.id, %cleanup, "adoption error cleanup could not clear its transition");
+            Err(error)
+        }
+    }
 }
 
 /// Convert an orphaned terminal session to ACP on adopt: respawn as a relay +

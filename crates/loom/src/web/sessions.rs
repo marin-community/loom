@@ -37,7 +37,7 @@ use super::{
 };
 use super::{ApiResult, AppError, AppState};
 use crate::lifecycle::{
-    adopt, adopt_acp, archive, delete_session_row, require_branch_slot_free,
+    adopt, adopt_acp, archive, delete_session_row, require_branch_slot_free, require_no_transition,
     require_resume_capacity, require_session_profile_lifetime, resume_agent, stamped_custom_agent,
 };
 
@@ -1235,11 +1235,7 @@ async fn recover(st: &AppState, session: &Session, _branch: &Branch) -> Result<(
     let session = &current_session;
     let branch = &current_branch;
     tracing::info!(session = %session.id, branch = %branch.id, "recovering archived session");
-    if let Some(transition) = session.lifecycle_transition.as_deref() {
-        return Err(AppError::conflict(format!(
-            "session is already {transition}; wait for that transition to finish"
-        )));
-    }
+    require_no_transition(session)?;
     if session.status != "archived" {
         return Err(AppError::conflict(format!(
             "session is '{}', not archived",

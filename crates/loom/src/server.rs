@@ -212,9 +212,19 @@ async fn reconcile_interrupted_transitions(state: &AppState) {
             "archiving" => {
                 // Teardown is idempotent. Release the marker owned by the dead
                 // process and run the normal archive path to completion.
-                session_mod::clear_interrupted_transition(&state.db, &session.id, "archiving")
+                match session_mod::clear_interrupted_transition(&state.db, &session.id, "archiving")
                     .await
-                    .ok();
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::warn!(session = %session.id, "transition recovery: archive marker changed before release");
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(session = %session.id, %error, "transition recovery: could not release archive marker");
+                        continue;
+                    }
+                }
                 if let Err(error) = crate::lifecycle::archive(state, &session, &branch).await {
                     tracing::warn!(session = %session.id, %error, "transition recovery: archive failed");
                 }
@@ -237,9 +247,23 @@ async fn reconcile_interrupted_transitions(state: &AppState) {
                         tracing::warn!(session = %session.id, %error, "transition recovery: could not reopen session channel");
                     }
                 } else if std::path::Path::new(&session.work_dir).exists() {
-                    session_mod::clear_interrupted_transition(&state.db, &session.id, "adopting")
-                        .await
-                        .ok();
+                    match session_mod::clear_interrupted_transition(
+                        &state.db,
+                        &session.id,
+                        "adopting",
+                    )
+                    .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::warn!(session = %session.id, "transition recovery: adoption marker changed before release");
+                            continue;
+                        }
+                        Err(error) => {
+                            tracing::warn!(session = %session.id, %error, "transition recovery: could not release adoption marker");
+                            continue;
+                        }
+                    }
                     if let Err(error) = crate::lifecycle::adopt(state, &session, &branch).await {
                         tracing::warn!(session = %session.id, %error, "transition recovery: adoption failed");
                     } else if let Err(error) =

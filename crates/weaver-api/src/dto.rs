@@ -189,11 +189,6 @@ impl From<&BranchView> for BranchSummaryView {
     }
 }
 
-/// Compact session projection returned by `GET /api/sessions/summary`.
-///
-/// This is the polling/search contract for fleet indexes. A client follows with
-/// `GET /api/sessions/{id}` only when it opens a session or discloses the row's
-/// complete context.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionTransitionView {
     /// Stable operation name: currently `archiving` or `adopting`.
@@ -204,6 +199,11 @@ pub struct SessionTransitionView {
     pub started_at: String,
 }
 
+/// Compact session projection returned by `GET /api/sessions/summary`.
+///
+/// This is the polling/search contract for fleet indexes. A client follows with
+/// `GET /api/sessions/{id}` only when it opens a session or discloses the row's
+/// complete context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummaryView {
     pub id: String,
