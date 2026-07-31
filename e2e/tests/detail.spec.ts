@@ -226,7 +226,12 @@ test.describe('session detail view', () => {
   });
 
   test('edits pull request and issue associations from visible pills', async ({ page, weaver }) => {
-    const s = await weaver.seedSession({ goal: 'Map my PR', name: 'pr-map' });
+    const issue = await weaver.seedBacklogIssue(weaver.repoPath, 'Map my issue');
+    const s = await weaver.seedSession({
+      goal: 'Map my PR',
+      name: 'pr-map',
+      claimIssue: issue.id,
+    });
     let requestBody: unknown;
     await page.route(`**/api/sessions/${s.id}/github`, async (route) => {
       if (route.request().method() !== 'PUT') return route.fallback();

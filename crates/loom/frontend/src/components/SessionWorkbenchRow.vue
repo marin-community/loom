@@ -25,6 +25,8 @@ interface GroupOption {
 
 const props = defineProps({
   session: { type: Object as PropType<SessionSummary>, required: true },
+  treeDepth: { type: Number, default: 0 },
+  reorderable: { type: Boolean, default: true },
   detail: { type: Object as PropType<Session | undefined>, default: undefined },
   detailLoading: { type: Boolean, default: false },
   detailError: { type: String, default: '' },
@@ -74,6 +76,11 @@ function title() {
   if (!props.qualified || !props.session.placement) return task;
   return `${props.session.placement.group_name} / ${task}`;
 }
+const titleParts = computed(() =>
+  title()
+    .split(/\s+\/\s+/)
+    .filter((part) => part.length > 0),
+);
 
 const positionOptions = computed(() => {
   const group = props.allGroups.find((entry) => entry.group.id === props.destination)?.group;
@@ -120,6 +127,7 @@ function onKeydown(event: KeyboardEvent) {
   <li
     data-testid="session-card"
     :data-session-id="session.id"
+    :data-tree-depth="treeDepth"
     class="session-mailbox-row group relative flex flex-wrap items-start gap-1.5 border-b border-line px-2 py-1.5 last:border-0 hover:bg-subtle/70 focus-within:bg-subtle/70"
     :class="[
       dragging ? 'opacity-40' : '',
@@ -127,6 +135,7 @@ function onKeydown(event: KeyboardEvent) {
       cursor ? 'session-mailbox-row--cursor' : '',
     ]"
     :data-cursor="cursor ? 'true' : undefined"
+    :style="{ paddingLeft: `${0.5 + Math.min(treeDepth, 5)}rem` }"
     @dragover.stop.prevent="emit('dragOver')"
     @drop.stop.prevent="emit('drop')"
     @keydown="onKeydown"
@@ -134,7 +143,7 @@ function onKeydown(event: KeyboardEvent) {
     @mousedown="emit('activate')"
   >
     <span
-      v-if="session.status !== 'archived'"
+      v-if="session.status !== 'archived' && reorderable"
       draggable="true"
       data-testid="session-drag"
       aria-hidden="true"
@@ -145,6 +154,9 @@ function onKeydown(event: KeyboardEvent) {
       ⠿
     </span>
     <span v-else class="w-3" aria-hidden="true"></span>
+    <span v-if="treeDepth" class="mt-0.5 shrink-0 font-mono text-xs text-faint" aria-hidden="true">
+      └
+    </span>
 
     <input
       v-if="session.status !== 'archived'"
@@ -171,7 +183,10 @@ function onKeydown(event: KeyboardEvent) {
           class="session-mailbox-primary stretched-link min-w-0 truncate font-mono text-xs font-medium leading-4 text-fg hover:text-accent"
           @click="emit('recordOpen', $event)"
         >
-          {{ title() }}
+          <template v-for="(part, index) in titleParts" :key="`${part}-${index}`">
+            <span v-if="index" class="text-faint"> / </span>
+            <span :class="index < titleParts.length - 1 ? 'text-muted' : ''">{{ part }}</span>
+          </template>
         </router-link>
         <span
           v-if="effectiveAttention(session).level !== 'ok'"

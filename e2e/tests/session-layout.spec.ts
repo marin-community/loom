@@ -327,6 +327,121 @@ test.describe("durable session workbench", () => {
     await expect(row.getByTestId("session-preview")).toContainText(goal);
   });
 
+  test("session sorting keeps delegated work in a named tree", async ({
+    page,
+    weaver,
+  }) => {
+    const parent = await weaver.seedSession({
+      goal: "Parent work",
+      title: "Project / Parent",
+      name: "tree-parent",
+    });
+    const child = await weaver.seedSession({
+      goal: "Delegated work",
+      title: "Project / Child",
+      name: "tree-child",
+      parent: parent.branch.id,
+    });
+    const alpha = await weaver.seedSession({
+      goal: "Alphabetical peer",
+      name: "Alpha",
+    });
+    const zulu = await weaver.seedSession({
+      goal: "Old peer",
+      name: "Zulu",
+    });
+    const namedRoot = await weaver.seedSession({
+      goal: "Implicit tree root",
+      name: "Area",
+    });
+    const namedChild = await weaver.seedSession({
+      goal: "Implicit tree child",
+      title: "Area / Task",
+      name: "area-task",
+    });
+    const namedGrandchild = await weaver.seedSession({
+      goal: "Implicit tree grandchild",
+      title: "Area / Task / Step",
+      name: "area-task-step",
+    });
+    const activity = new Map([
+      [parent.id, "2026-01-01T00:00:00Z"],
+      [child.id, "2026-04-01T00:00:00Z"],
+      [alpha.id, "2026-03-01T00:00:00Z"],
+      [zulu.id, "2026-02-01T00:00:00Z"],
+      [namedRoot.id, "2025-01-01T00:00:00Z"],
+      [namedChild.id, "2025-02-01T00:00:00Z"],
+      [namedGrandchild.id, "2025-03-01T00:00:00Z"],
+    ]);
+    await page.route("**/api/sessions/summary**", async (route) => {
+      const response = await route.fetch();
+      const summaries = (await response.json()) as Array<{
+        id: string;
+        last_activity_at: string;
+      }>;
+      await route.fulfill({
+        response,
+        json: summaries.map((summary) => ({
+          ...summary,
+          last_activity_at:
+            activity.get(summary.id) ?? summary.last_activity_at,
+        })),
+      });
+    });
+
+    await page.goto(weaver.baseUrl);
+    const rows = page.getByTestId("session-card");
+    const ids = async () =>
+      rows.evaluateAll((items) =>
+        items.map((item) => item.getAttribute("data-session-id")),
+      );
+    await expect(rows).toHaveCount(7);
+    await expect(
+      page.locator(`[data-session-id="${child.id}"]`),
+    ).toHaveAttribute("data-tree-depth", "1");
+    await expect(
+      page
+        .locator(`[data-session-id="${child.id}"] [data-session-primary]`)
+        .locator(".text-muted"),
+    ).toContainText("Project");
+    await expect(
+      page.locator(`[data-session-id="${namedChild.id}"]`),
+    ).toHaveAttribute("data-tree-depth", "1");
+    await expect(
+      page.locator(`[data-session-id="${namedGrandchild.id}"]`),
+    ).toHaveAttribute("data-tree-depth", "2");
+
+    await page.getByTestId("session-sort").selectOption("name");
+    await expect(page).toHaveURL(/[?&]sort=name(?:&|$)/);
+    await expect
+      .poll(ids)
+      .toEqual([
+        alpha.id,
+        namedRoot.id,
+        namedChild.id,
+        namedGrandchild.id,
+        parent.id,
+        child.id,
+        zulu.id,
+      ]);
+    await expect(page.getByTestId("session-drag")).toHaveCount(0);
+
+    await page.reload();
+    await expect(page.getByTestId("session-sort")).toHaveValue("name");
+    await page.getByTestId("session-sort").selectOption("activity");
+    await expect
+      .poll(ids)
+      .toEqual([
+        parent.id,
+        child.id,
+        alpha.id,
+        zulu.id,
+        namedRoot.id,
+        namedChild.id,
+        namedGrandchild.id,
+      ]);
+  });
+
   test("@workbench pointer, keyboard, undo, preference, and SSE share one layout", async ({
     page,
     weaver,

@@ -43,6 +43,11 @@ const router = useRouter();
 const { sessions, runs, layout, resourceErrors, refresh, loadHistory, focusSession } = useFleet();
 
 type WorkbenchView = 'space' | 'attention' | 'all' | 'history';
+type SessionSort = 'manual' | 'name' | 'activity' | 'created';
+interface SessionTreeRow {
+  session: SessionSummary;
+  depth: number;
+}
 
 const liveSessions = computed(() =>
   sessions.value.filter((session) => session.status !== 'archived'),
@@ -111,13 +116,21 @@ function attentionFromQuery(value: unknown): SessionSearchAttention | '' {
     ? (value as SessionSearchAttention)
     : '';
 }
+const SESSION_SORTS = new Set<SessionSort>(['manual', 'name', 'activity', 'created']);
+function sortFromQuery(value: unknown): SessionSort {
+  return typeof value === 'string' && SESSION_SORTS.has(value as SessionSort)
+    ? (value as SessionSort)
+    : 'manual';
+}
 const statusFilter = ref<SessionSearchStatus | ''>(statusFromQuery(route.query.status));
 const attentionFilter = ref<SessionSearchAttention | ''>(attentionFromQuery(route.query.attention));
+const sessionSort = ref<SessionSort>(sortFromQuery(route.query.sort));
 watch(
-  () => [route.query.status, route.query.attention],
-  ([status, attention]) => {
+  () => [route.query.status, route.query.attention, route.query.sort],
+  ([status, attention, sort]) => {
     statusFilter.value = statusFromQuery(status);
     attentionFilter.value = attentionFromQuery(attention);
+    sessionSort.value = sortFromQuery(sort);
   },
 );
 function updateFilters() {
@@ -126,6 +139,14 @@ function updateFilters() {
       ...route.query,
       status: statusFilter.value || undefined,
       attention: attentionFilter.value || undefined,
+    },
+  });
+}
+function updateSort() {
+  router.replace({
+    query: {
+      ...route.query,
+      sort: sessionSort.value === 'manual' ? undefined : sessionSort.value,
     },
   });
 }
@@ -249,6 +270,119 @@ function parentSessionOf(session: SessionSummary) {
   const legacyCandidates = sessionsByBranch.value.get(session.parent_id) ?? [];
   return legacyCandidates.length === 1 ? legacyCandidates[0] : undefined;
 }
+function sessionName(session: SessionSummary) {
+  return session.branch.title || session.branch.name;
+}
+function directSessionComparison(left: SessionSummary, right: SessionSummary) {
+  if (sessionSort.value === 'name') {
+    return sessionName(left).localeCompare(sessionName(right), undefined, {
+      numeric: true,
+      sensitivity: 'base',
+    });
+  }
+  if (sessionSort.value === 'activity') {
+    return right.last_activity_at.localeCompare(left.last_activity_at);
+  }
+  if (sessionSort.value === 'created') {
+    return right.created_at.localeCompare(left.created_at);
+  }
+  return 0;
+}
+function nameParentOf(session: SessionSummary, input: SessionSummary[]) {
+  const path = sessionName(session).split(/\s+\/\s+/);
+  if (path.length < 2) return undefined;
+  const candidates = input
+    .filter((candidate) => candidate.id !== session.id)
+    .map((candidate) => ({
+      session: candidate,
+      path: sessionName(candidate).split(/\s+\/\s+/),
+    }))
+    .filter(
+      (candidate) =>
+        candidate.path.length < path.length &&
+        candidate.path.every(
+          (segment, index) =>
+            segment.localeCompare(path[index], undefined, { sensitivity: 'base' }) === 0,
+        ),
+    );
+  const longest = Math.max(0, ...candidates.map((candidate) => candidate.path.length));
+  const closest = candidates.filter((candidate) => candidate.path.length === longest);
+  return closest.length === 1 ? closest[0].session : undefined;
+}
+function sessionTree(input: SessionSummary[]): SessionTreeRow[] {
+  const inputIndex = new Map(input.map((session, index) => [session.id, index]));
+  const inputById = new Map(input.map((session) => [session.id, session]));
+  const inputByBranch = input.reduce((byBranch, session) => {
+    const candidates = byBranch.get(session.branch.id) ?? [];
+    candidates.push(session);
+    byBranch.set(session.branch.id, candidates);
+    return byBranch;
+  }, new Map<string, SessionSummary[]>());
+  const inputIds = new Set(inputIndex.keys());
+  const children = new Map<string, SessionSummary[]>();
+  const roots: SessionSummary[] = [];
+
+  for (const session of input) {
+    const legacyParents = session.parent_id ? (inputByBranch.get(session.parent_id) ?? []) : [];
+    const persistedParent = session.parent_session_id
+      ? inputById.get(session.parent_session_id)
+      : legacyParents.length === 1
+        ? legacyParents[0]
+        : parentSessionOf(session);
+    const parent =
+      persistedParent ??
+      (!session.parent_session_id && !session.parent_id ? nameParentOf(session, input) : undefined);
+    if (!parent || parent.id === session.id || !inputIds.has(parent.id)) {
+      roots.push(session);
+      continue;
+    }
+    const siblings = children.get(parent.id) ?? [];
+    siblings.push(session);
+    children.set(parent.id, siblings);
+  }
+
+  const threadTimestamp = new Map<string, string>();
+  function timestampFor(session: SessionSummary, visiting = new Set<string>()): string {
+    const cached = threadTimestamp.get(session.id);
+    if (cached !== undefined) return cached;
+    if (visiting.has(session.id)) return '';
+    visiting.add(session.id);
+    const own = sessionSort.value === 'created' ? session.created_at : session.last_activity_at;
+    const latest = (children.get(session.id) ?? []).reduce((value, child) => {
+      const childTimestamp = timestampFor(child, visiting);
+      return childTimestamp > value ? childTimestamp : value;
+    }, own);
+    visiting.delete(session.id);
+    threadTimestamp.set(session.id, latest);
+    return latest;
+  }
+  function compare(left: SessionSummary, right: SessionSummary) {
+    if (sessionSort.value === 'activity' || sessionSort.value === 'created') {
+      const difference = timestampFor(right).localeCompare(timestampFor(left));
+      if (difference) return difference;
+    }
+    return (
+      directSessionComparison(left, right) ||
+      (inputIndex.get(left.id) ?? 0) - (inputIndex.get(right.id) ?? 0)
+    );
+  }
+
+  const rows: SessionTreeRow[] = [];
+  const emitted = new Set<string>();
+  function append(session: SessionSummary, depth: number) {
+    if (emitted.has(session.id)) return;
+    emitted.add(session.id);
+    rows.push({ session, depth });
+    for (const child of [...(children.get(session.id) ?? [])].sort(compare)) {
+      append(child, depth + 1);
+    }
+  }
+  for (const root of [...roots].sort(compare)) append(root, 0);
+  // Corrupt legacy ancestry can contain a cycle. Keep every row operable by
+  // projecting any unvisited nodes as roots rather than dropping the cycle.
+  for (const session of [...input].sort(compare)) append(session, 0);
+  return rows;
+}
 const groupedSessions = computed(() =>
   (activeSpace.value?.groups ?? []).map((group) => ({
     group,
@@ -278,23 +412,30 @@ const displayedGroups = computed(() => {
     return groupedSessions.value.map(({ group, sessions }) => ({
       key: group.id,
       group,
-      sessions,
+      rows: sessionTree(sessions),
       qualified: false,
     }));
   }
   return smartSessions.value.length
-    ? [{ key: 'smart', group: undefined, sessions: smartSessions.value, qualified: true }]
+    ? [
+        {
+          key: 'smart',
+          group: undefined,
+          rows: sessionTree(smartSessions.value),
+          qualified: true,
+        },
+      ]
     : [];
 });
 const cursorSessionIds = computed(() =>
   displayedGroups.value.flatMap((display) =>
-    display.group?.collapsed ? [] : display.sessions.map((session) => session.id),
+    display.group?.collapsed ? [] : display.rows.map(({ session }) => session.id),
   ),
 );
 const cursorSessionId = ref('');
 const cursorSession = computed(() =>
   displayedGroups.value
-    .flatMap((display) => display.sessions)
+    .flatMap((display) => display.rows.map(({ session }) => session))
     .find((session) => session.id === cursorSessionId.value),
 );
 const cursorPosition = computed(() => cursorSessionIds.value.indexOf(cursorSessionId.value) + 1);
@@ -996,6 +1137,18 @@ function scrollSpaces(direction: number) {
         <option value="attention">Attention</option>
         <option value="ok">Calm</option>
       </select>
+      <select
+        v-model="sessionSort"
+        aria-label="Sort sessions"
+        data-testid="session-sort"
+        class="rounded border border-line bg-input px-2 py-1.5 text-xs"
+        @change="updateSort"
+      >
+        <option value="manual">Manual order</option>
+        <option value="activity">Last active</option>
+        <option value="name">Name</option>
+        <option value="created">Date created</option>
+      </select>
       <button
         class="btn-secondary px-2.5 py-1 text-xs"
         type="button"
@@ -1390,7 +1543,7 @@ function scrollSpaces(direction: number) {
             >
               <span class="text-faint" :class="display.group.collapsed ? '' : 'rotate-90'">▸</span>
               <span class="truncate text-sm font-medium text-fg">{{ display.group.name }}</span>
-              <span class="font-mono text-2xs text-faint">{{ display.sessions.length }}</span>
+              <span class="font-mono text-2xs text-faint">{{ display.rows.length }}</span>
             </button>
           </header>
           <ul
@@ -1399,48 +1552,52 @@ function scrollSpaces(direction: number) {
             data-testid="session-list"
           >
             <SessionWorkbenchRow
-              v-for="session in display.sessions"
-              :key="session.id"
-              :session="session"
-              :detail="rowDetails[session.id]"
-              :detail-loading="rowDetailLoading.has(session.id)"
-              :detail-error="rowDetailErrors[session.id]"
+              v-for="row in display.rows"
+              :key="row.session.id"
+              :session="row.session"
+              :tree-depth="row.depth"
+              :reorderable="sessionSort === 'manual'"
+              :detail="rowDetails[row.session.id]"
+              :detail-loading="rowDetailLoading.has(row.session.id)"
+              :detail-error="rowDetailErrors[row.session.id]"
               :qualified="display.qualified"
-              :selected="isSelected(session.id)"
-              :expanded="rowExpanded(session.id)"
-              :move-open="moveOpenId === session.id"
-              :destination="rowDestination[session.id]"
-              :before="rowBefore[session.id]"
+              :selected="isSelected(row.session.id)"
+              :expanded="rowExpanded(row.session.id)"
+              :move-open="moveOpenId === row.session.id"
+              :destination="rowDestination[row.session.id]"
+              :before="rowBefore[row.session.id]"
               :all-groups="allGroups"
               :all-sessions="sessions"
-              :parent-session="parentSessionOf(session)"
-              :dragging="draggingId === session.id"
+              :parent-session="parentSessionOf(row.session)"
+              :dragging="draggingId === row.session.id"
               :drop-before="
-                dropGroupId === (display.group?.id ?? session.placement?.group_id) &&
-                dropBeforeId === session.id
+                dropGroupId === (display.group?.id ?? row.session.placement?.group_id) &&
+                dropBeforeId === row.session.id
               "
               :clearing-tag="clearingTag"
-              :cursor="cursorSessionId === session.id"
-              @activate="cursorSessionId = session.id"
-              @toggle-select="setSelected(session.id, $event)"
-              @toggle-details="toggleRow(session.id)"
-              @open-move="openMove(session)"
-              @update-destination="rowDestination[session.id] = $event"
-              @update-before="rowBefore[session.id] = $event"
-              @move="performMove([session.id], $event.groupId, $event.beforeId || null)"
-              @drag-start="dragStart(session.id, $event)"
+              :cursor="cursorSessionId === row.session.id"
+              @activate="cursorSessionId = row.session.id"
+              @toggle-select="setSelected(row.session.id, $event)"
+              @toggle-details="toggleRow(row.session.id)"
+              @open-move="openMove(row.session)"
+              @update-destination="rowDestination[row.session.id] = $event"
+              @update-before="rowBefore[row.session.id] = $event"
+              @move="performMove([row.session.id], $event.groupId, $event.beforeId || null)"
+              @drag-start="dragStart(row.session.id, $event)"
               @drag-end="clearDrag"
               @drag-over="
-                dragOver(display.group?.id ?? session.placement?.group_id ?? '', session.id)
+                dragOver(display.group?.id ?? row.session.placement?.group_id ?? '', row.session.id)
               "
-              @drop="drop(display.group?.id ?? session.placement?.group_id ?? '', session.id)"
+              @drop="
+                drop(display.group?.id ?? row.session.placement?.group_id ?? '', row.session.id)
+              "
               @changed="refresh"
               @error="error = $event"
-              @clear-tag="clearTag(session.id, $event)"
-              @record-open="recordSessionLinkOpen($event, session.id)"
+              @clear-tag="clearTag(row.session.id, $event)"
+              @record-open="recordSessionLinkOpen($event, row.session.id)"
             />
             <li
-              v-if="display.group && !display.sessions.length"
+              v-if="display.group && !display.rows.length"
               data-testid="empty-group"
               class="px-3 py-5 text-center text-sm text-faint"
             >

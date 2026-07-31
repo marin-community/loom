@@ -88,6 +88,8 @@ export interface SeedOpts {
   base?: string;
   /** Branch id of the launching session — sets this session's tree parent. */
   parent?: string;
+  /** Existing backlog issue this session should claim as its explicit work item. */
+  claimIssue?: number;
 }
 
 /** A watch as returned by `/api/watches` (the fields the e2e tests
@@ -531,6 +533,7 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
             name: opts.name,
             base: opts.base,
             parent_branch: opts.parent,
+            claim_issue: opts.claimIssue,
           }),
         })) as Session;
       },
