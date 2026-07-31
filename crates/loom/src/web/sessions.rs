@@ -869,6 +869,7 @@ pub(super) async fn regenerate_session_title(
     crate::metadata_assist::spawn_title_generation(
         st.db.clone(),
         st.bus.clone(),
+        st.acp.clone(),
         session.clone(),
         branch,
         true,
@@ -906,7 +907,7 @@ pub(super) async fn ensure_resumption_cue(
 ) -> ApiResult<Json<ResumptionCueView>> {
     let (session, branch) = require_session(&st.db, &key).await?;
     Ok(Json(
-        crate::metadata_assist::ensure_cue(&st.db, &session, &branch, req.force).await?,
+        crate::metadata_assist::ensure_cue(&st.db, &st.acp, &session, &branch, req.force).await?,
     ))
 }
 

@@ -12,10 +12,51 @@
 //! restart leaves running terminals untouched — the recovery property that keeps
 //! agents alive across restarts.
 
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+
 use anyhow::{bail, Result};
 
 use crate::runner;
 use weaver_core::db::Db;
+
+/// Names of nondurable supervisors currently owned by this Loom process.
+#[derive(Clone, Default)]
+pub struct TransientSessionRegistry {
+    names: Arc<Mutex<HashSet<String>>>,
+}
+
+/// Process-local ownership for a short-lived detached supervisor.
+///
+/// One-shot ACP prompts need Tapestry's relay transport but do not have a
+/// durable session row. The resource reconciler uses this lease to distinguish
+/// a live prompt from a relay left behind by a crashed Loom process.
+pub struct TransientSessionLease {
+    registry: TransientSessionRegistry,
+    name: String,
+}
+
+impl Drop for TransientSessionLease {
+    fn drop(&mut self) {
+        self.registry.names.lock().unwrap().remove(&self.name);
+    }
+}
+
+impl TransientSessionRegistry {
+    /// Claim a transient supervisor name until the returned guard is dropped.
+    pub fn lease(&self, name: &str) -> TransientSessionLease {
+        self.names.lock().unwrap().insert(name.to_string());
+        TransientSessionLease {
+            registry: self.clone(),
+            name: name.to_string(),
+        }
+    }
+
+    /// Whether this Loom process currently owns the transient supervisor.
+    pub fn contains(&self, name: &str) -> bool {
+        self.names.lock().unwrap().contains(name)
+    }
+}
 
 /// Whether a session with this name has a live supervisor.
 pub async fn has_session(name: &str) -> bool {

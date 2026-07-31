@@ -177,6 +177,7 @@ async fn transient_prompt_uses_acp_and_cleans_its_relay() {
 
     let output = acp::prompt_once(
         &ts.state.db,
+        ts.state.acp.transient_sessions(),
         transient_launch(&ts, vec![]),
         "say:summary",
         AcpPromptModel::Exact("fake-fast"),
@@ -199,6 +200,7 @@ async fn transient_prompt_failures_fall_back_without_leaking_relays() {
 
     let missing_model = acp::prompt_once(
         &ts.state.db,
+        ts.state.acp.transient_sessions(),
         transient_launch(&ts, vec![]),
         "say:unused",
         AcpPromptModel::FirstContaining(&["haiku", "luna"]),
@@ -211,6 +213,7 @@ async fn transient_prompt_failures_fall_back_without_leaking_relays() {
 
     let missing_effort = acp::prompt_once(
         &ts.state.db,
+        ts.state.acp.transient_sessions(),
         transient_launch(&ts, vec![]),
         "say:unused",
         AcpPromptModel::Exact("fake-fast"),
@@ -223,6 +226,7 @@ async fn transient_prompt_failures_fall_back_without_leaking_relays() {
 
     let empty = acp::prompt_once(
         &ts.state.db,
+        ts.state.acp.transient_sessions(),
         transient_launch(&ts, vec![]),
         "think:not returned",
         AcpPromptModel::Exact("fake-fast"),
@@ -235,6 +239,7 @@ async fn transient_prompt_failures_fall_back_without_leaking_relays() {
 
     let oversized = acp::prompt_once(
         &ts.state.db,
+        ts.state.acp.transient_sessions(),
         transient_launch(&ts, vec![]),
         &format!("say:{}", "x".repeat(33 * 1024)),
         AcpPromptModel::Exact("fake-fast"),
@@ -247,6 +252,7 @@ async fn transient_prompt_failures_fall_back_without_leaking_relays() {
 
     let cancelled = acp::prompt_once(
         &ts.state.db,
+        ts.state.acp.transient_sessions(),
         transient_launch(&ts, vec![]),
         "permission:file.txt",
         AcpPromptModel::Exact("fake-fast"),
@@ -259,6 +265,7 @@ async fn transient_prompt_failures_fall_back_without_leaking_relays() {
 
     let timeout = acp::prompt_once(
         &ts.state.db,
+        ts.state.acp.transient_sessions(),
         transient_launch(
             &ts,
             vec![(

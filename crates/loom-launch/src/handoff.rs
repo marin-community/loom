@@ -636,7 +636,7 @@ pub async fn handoff_session(
             return Err(HandoffError::internal(error.to_string()));
         }
     };
-    let digest = agent::AgentManager::new(&st.db)
+    let digest = agent::AgentManager::new(&st.db, &st.acp)
         .summarize_handoff(
             &target,
             &context.summary_request,

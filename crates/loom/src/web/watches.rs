@@ -320,7 +320,7 @@ pub(super) async fn agent_oneshot(
                 runtime
             }
         });
-    let output = agent::AgentManager::new(&st.db)
+    let output = agent::AgentManager::new(&st.db, &st.acp)
         .run_oneshot(
             runtime,
             &req.prompt,

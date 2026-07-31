@@ -120,7 +120,7 @@ pub async fn run(addr: &str) -> Result<()> {
     // adopting anything, remove only Loom-namespaced runtimes that have no
     // durable session/active-reservation owner. This is the inverse of the
     // monitor's missing-supervisor -> orphaned transition.
-    match session_manager::reconcile_supervisors(&state.db).await {
+    match session_manager::reconcile_supervisors(&state.db, &state.acp).await {
         Ok(report) if !report.warnings.is_empty() => tracing::warn!(
             warnings = report.warnings.len(),
             "session resource reconciliation completed with warnings"
@@ -484,7 +484,7 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     }
     tokio::spawn(monitor::run(state.clone()));
     tokio::spawn(repair_acp_sessions_loop(state.clone()));
-    tokio::spawn(session_manager::run(state.db.clone()));
+    tokio::spawn(session_manager::run(state.db.clone(), state.acp.clone()));
     tokio::spawn(crate::review_delivery::run(state.clone()));
     // The GitHub poller is always spawned; it self-gates on the `github.poll`
     // setting and on `gh` being available, so it idles cheaply when GitHub
