@@ -39,6 +39,10 @@ other `weaver` subcommand.
 
 ## Module layout
 
+[crate-layering.md](crate-layering.md) covers the crate split itself: why the
+loom crates are cut where they are, the module cycles that constrain the cut,
+and the rule for placing a new module.
+
 | Path | What's in it |
 |---|---|
 | `crates/weaver-core/` | lib: `branches`, `issues`, `events`, `db`, `migrations` (ordered SQL + `schema_migrations` indicator), `git`, `config`, `artifacts` (versioned documents), `review` (durable staged feedback + delivery outbox), `repo_config` (`.weaver/config.toml`), `transcript` (agent conversation logs: raw → iris format → markdown), agent helpers. Pure logic; used by `loom` for DB access, and by `weaver` only for the DB-free pieces (`transcript`, `tags` constants/validators, the agent primer). |
