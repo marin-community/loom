@@ -66,7 +66,14 @@ test.describe('session lifecycle actions', () => {
     await page.getByTestId('action-archive').scrollIntoViewIfNeeded();
     await page.getByTestId('action-archive').click();
     await expect(dialog).toContainText('branch, conversation, placement, and Weaver history');
+    const archivedResponse = page.waitForResponse(
+      (response) =>
+        response.ok() &&
+        response.request().method() === 'POST' &&
+        new URL(response.url()).pathname === `/api/sessions/${archived.id}/archive`,
+    );
     await confirm.click();
+    await archivedResponse;
     await expect(page.getByTestId('status-badge')).toHaveText(/archived/i);
     expect((await weaver.getSession(archived.id)).status).toBe('archived');
 

@@ -222,6 +222,13 @@ function onKeydown(event: KeyboardEvent) {
       </p>
     </div>
 
+    <GithubStatus
+      v-if="session.branch.github"
+      :gh="session.branch.github"
+      compact
+      class="relative z-10 shrink-0"
+    />
+
     <time
       v-if="session.last_activity_at"
       :datetime="session.last_activity_at"
@@ -291,7 +298,6 @@ function onKeydown(event: KeyboardEvent) {
           delegated from {{ parentSession.branch.title || parentSession.branch.name }}
         </router-link>
       </div>
-      <GithubStatus v-if="session.branch.github" :gh="session.branch.github" compact class="mt-1" />
 
       <div v-if="session.status !== 'archived'" class="mt-2 border-t border-line pt-2">
         <button

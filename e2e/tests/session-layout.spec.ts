@@ -184,6 +184,13 @@ test.describe("durable session workbench", () => {
     await page.goto(weaver.baseUrl);
     const rows = page.locator('[data-testid="session-card"]');
     await expect(rows).toHaveCount(3);
+    const firstPr = rows.nth(0).getByRole("link", { name: "PR #238" });
+    await expect(firstPr).toBeVisible();
+    await expect(firstPr).toHaveAttribute(
+      "href",
+      "https://github.com/marin-community/loom/pull/238",
+    );
+    await expect(rows.nth(2).getByTestId("github-compact")).toHaveCount(0);
     await expect(page.locator("html")).toHaveClass(/dark/);
     await expect(page.locator('[data-cursor="true"]')).toHaveCount(1);
     const preview = page.getByTestId("session-mailbox-preview");
