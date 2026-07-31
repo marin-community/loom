@@ -1,6 +1,20 @@
 import { test, expect } from '../fixtures/weaver';
 
 test.describe('session detail view', () => {
+  test('does not surface a failed background channel acknowledgement', async ({
+    page,
+    weaver,
+  }) => {
+    const session = await weaver.seedSession({ goal: 'Keep working', name: 'ack-failure' });
+    await page.route(`**/api/channels/${session.id}/read-marker`, async (route) => {
+      await route.fulfill({ status: 500, json: { error: 'read marker failed' } });
+    });
+
+    await page.goto(`${weaver.baseUrl}/s/${session.id}`);
+    await expect(page.getByRole('heading', { name: 'ack-failure' })).toBeVisible();
+    await expect(page.getByText(/couldn't acknowledge the channel/i)).toHaveCount(0);
+  });
+
   test('session exit commands are discoverable without stealing text input', async ({
     page,
     weaver,

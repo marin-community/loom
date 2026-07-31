@@ -69,6 +69,37 @@ function footDistance(conv: ReturnType<Page['getByTestId']>) {
 }
 
 test.describe('conversation view', () => {
+  test('offers a plain-language catch-up without exposing resumption internals', async ({
+    page,
+    weaver,
+  }) => {
+    const session = await weaver.seedSession({ goal: 'demo', name: 'catch-up' });
+    await weaver.seedConversation(session, demoLog());
+    await page.route(`**/api/sessions/${session.id}/resumption-cue`, async (route) => {
+      const generated = route.request().method() === 'POST';
+      await route.fulfill({
+        json: {
+          status: generated ? 'generated' : 'not_due',
+          source_cursor: generated ? 'cursor-1' : null,
+          text: generated ? 'The sorting work is ready for review.' : null,
+          generated_at: generated ? '2026-07-30T12:00:00Z' : null,
+          evidence: [],
+        },
+      });
+    });
+
+    await page.goto(`${weaver.baseUrl}/s/${session.id}`);
+    await page.locator('[data-tab="conversation"]').click();
+    const catchUp = page.getByTestId('generate-resumption-cue');
+    await expect(catchUp).toHaveText('Catch me up');
+    await expect(page.getByText(/resumption cue/i)).toHaveCount(0);
+    await catchUp.click();
+    await expect(page.getByLabel('Session catch-up')).toContainText('Where you left off');
+    await expect(page.getByLabel('Session catch-up')).toContainText(
+      'The sorting work is ready for review.',
+    );
+  });
+
   // A chat opens at its newest exchange — the transcript scrolls to its foot on
   // load (waiting out the async markdown paint), not to turn one.
   test('opens scrolled to the foot — the newest exchange shows first', async ({ page, weaver }) => {

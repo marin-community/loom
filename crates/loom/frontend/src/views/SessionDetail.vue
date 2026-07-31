@@ -31,7 +31,6 @@ import { signalChips } from '../lib/sessionState';
 // deep-links) resolves to this one instance, so moving terminal ⇄ artifacts is a
 // tab flip on a warm page — no remount, no reconnect, no jump.
 defineOptions({ name: 'SessionDetail' });
-const CHANNEL_ACK_ERROR = "Couldn't acknowledge the channel's new messages.";
 
 const props = defineProps<{ id: string; name?: string }>();
 const route = useRoute();
@@ -327,14 +326,15 @@ async function loadSession() {
 
 async function acknowledgeSessionAttention(): Promise<string> {
   let session = await getSession(props.id);
-  let channelMarkerFailed = false;
   try {
     // The session id is also its default channel id. Opening the workbench is
     // the user's acknowledgement gesture for both legacy tags and channel
     // urgency; future messages raise unread attention again.
     await markChannelRead(props.id);
   } catch {
-    channelMarkerFailed = true;
+    // A read receipt is best-effort bookkeeping, not a failed session load.
+    // Leave the channel unread so another view can retry without presenting an
+    // internal acknowledgement failure the user cannot act on.
   }
   // Attention is a wake-up signal, not a permanent task state. Entering (or
   // returning to) a session acknowledges every loud tag visible in the
@@ -344,7 +344,7 @@ async function acknowledgeSessionAttention(): Promise<string> {
   const keys = [...new Set(signalChips(session).map((chip) => chip.key))];
   if (!keys.length) {
     ws.value = session;
-    return channelMarkerFailed ? CHANNEL_ACK_ERROR : '';
+    return '';
   }
   const results = await Promise.allSettled(keys.map((key) => clearSessionTag(props.id, key)));
   // Re-read even after a partial failure: successful acknowledgements should
@@ -357,7 +357,6 @@ async function acknowledgeSessionAttention(): Promise<string> {
   if (failed) {
     notices.push(`Couldn't acknowledge ${failed} attention signal${failed === 1 ? '' : 's'}.`);
   }
-  if (channelMarkerFailed) notices.push(CHANNEL_ACK_ERROR);
   return notices.join(' ');
 }
 
