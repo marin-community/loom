@@ -1,6 +1,20 @@
 import { test, expect } from '../fixtures/weaver';
 
 test.describe('session detail view', () => {
+  test('does not surface a failed background channel acknowledgement', async ({
+    page,
+    weaver,
+  }) => {
+    const session = await weaver.seedSession({ goal: 'Keep working', name: 'ack-failure' });
+    await page.route(`**/api/channels/${session.id}/read-marker`, async (route) => {
+      await route.fulfill({ status: 500, json: { error: 'read marker failed' } });
+    });
+
+    await page.goto(`${weaver.baseUrl}/s/${session.id}`);
+    await expect(page.getByRole('heading', { name: 'ack-failure' })).toBeVisible();
+    await expect(page.getByText(/couldn't acknowledge the channel/i)).toHaveCount(0);
+  });
+
   test('session exit commands are discoverable without stealing text input', async ({
     page,
     weaver,
@@ -226,7 +240,12 @@ test.describe('session detail view', () => {
   });
 
   test('edits pull request and issue associations from visible pills', async ({ page, weaver }) => {
-    const s = await weaver.seedSession({ goal: 'Map my PR', name: 'pr-map' });
+    const issue = await weaver.seedBacklogIssue(weaver.repoPath, 'Map my issue');
+    const s = await weaver.seedSession({
+      goal: 'Map my PR',
+      name: 'pr-map',
+      claimIssue: issue.id,
+    });
     let requestBody: unknown;
     await page.route(`**/api/sessions/${s.id}/github`, async (route) => {
       if (route.request().method() !== 'PUT') return route.fallback();

@@ -64,8 +64,8 @@ async function loadCue(onReturn = false) {
     cue.value = current;
     if (ensuredDue && current.status === 'generated') cueOpen.value = true;
     if (current.status === 'generating') await followGeneration(sessionId, epoch);
-  } catch (error) {
-    if (isCurrent(sessionId, epoch)) cueError.value = (error as Error).message;
+  } catch {
+    if (isCurrent(sessionId, epoch)) cueError.value = "Couldn't prepare a catch-up. Try again.";
   } finally {
     if (isCurrent(sessionId, epoch)) cueOperation.value = '';
   }
@@ -83,8 +83,8 @@ async function generateCue() {
     cue.value = generated;
     if (generated.status === 'generated') cueOpen.value = true;
     if (generated.status === 'generating') await followGeneration(sessionId, epoch);
-  } catch (error) {
-    if (isCurrent(sessionId, epoch)) cueError.value = (error as Error).message;
+  } catch {
+    if (isCurrent(sessionId, epoch)) cueError.value = "Couldn't prepare a catch-up. Try again.";
   } finally {
     if (isCurrent(sessionId, epoch)) cueOperation.value = '';
   }
@@ -111,7 +111,7 @@ watch(
       v-if="cue?.status === 'generated' && cue.text"
       data-testid="resumption-cue"
       class="mx-3 mt-2 flex shrink-0 items-start gap-2 rounded border border-line bg-subtle px-3 py-2 text-sm"
-      aria-label="Generated resumption cue"
+      aria-label="Session catch-up"
     >
       <details
         class="min-w-0 flex-1"
@@ -119,7 +119,7 @@ watch(
         @toggle="cueOpen = ($event.target as HTMLDetailsElement).open"
       >
         <summary class="cursor-pointer text-xs font-medium text-fg">
-          Resume context
+          Where you left off
           <span v-if="cue.generated_at" class="ml-1 font-mono text-2xs font-normal text-faint">
             {{ new Date(cue.generated_at).toLocaleString() }}
           </span>
@@ -141,7 +141,7 @@ watch(
         :disabled="!!cueOperation"
         @click="generateCue"
       >
-        {{ cueOperation === 'generating' ? 'Generating…' : 'Refresh' }}
+        {{ cueOperation === 'generating' ? 'Preparing…' : 'Update' }}
       </button>
     </section>
     <div
@@ -159,15 +159,15 @@ watch(
       >
         {{
           cueOperation === 'checking'
-            ? 'Checking resumption cue…'
+            ? 'Checking where you left off…'
             : cueOperation === 'generating'
-              ? 'Generating resumption cue…'
+              ? 'Preparing your catch-up…'
               : cue?.status === 'generating'
-                ? 'Check resumption cue'
-                : 'Generate resumption cue'
+                ? 'Check catch-up'
+                : 'Catch me up'
         }}
       </button>
-      <span v-else>Metadata assistance is unavailable for this session.</span>
+      <span v-else>Catch-up is unavailable for this session.</span>
       <span v-if="cueError" class="text-block" role="alert">{{ cueError }}</span>
     </div>
     <AcpConversation

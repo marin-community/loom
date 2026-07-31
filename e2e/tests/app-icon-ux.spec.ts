@@ -42,7 +42,7 @@ test.describe('consistent page titles', () => {
     await expect(page).toHaveTitle('Weaver - Settings');
 
     await page.goto(`${weaver.baseUrl}/issues`);
-    await expect(page).toHaveTitle('Weaver - Issues');
+    await expect(page).toHaveTitle('Weaver - Backlog');
 
     await page.goto(`${weaver.baseUrl}/watches`);
     await expect(page).toHaveTitle('Weaver - Watches');
