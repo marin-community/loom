@@ -220,10 +220,11 @@ const LIVE_STATUSES = new Set(['running']);
 // the agent is running. Reuses LIVE_STATUSES: the same "the agent is here" notion
 // as the idle mark.
 export function canSend(s: SessionSummary): boolean {
-  return LIVE_STATUSES.has(s.status);
+  return !s.transition && LIVE_STATUSES.has(s.status);
 }
 
 export function idleTag(s: SessionSummary): Tag | null {
+  if (s.transition) return null;
   if (!LIVE_STATUSES.has(s.status)) return null;
   if (loudTags(s).length > 0) return null;
   return (s.branch.tags ?? []).find((t) => t.key === IDLE_KEY) ?? null;
@@ -242,6 +243,14 @@ export interface ConvState {
 
 export function conversationState(s: SessionSummary): ConvState {
   // Lifecycle first for the unambiguous mechanical states.
+  if (s.transition) {
+    const label = s.transition.kind === 'archiving' ? 'Archiving' : 'Adopting';
+    return {
+      glyph: '▶',
+      label: s.transition.step ? `${label} — ${s.transition.step}` : label,
+      tone: 'info',
+    };
+  }
   if (s.status === 'archived') return { glyph: '◦', label: 'Archived', tone: 'muted' };
   if (s.status === 'orphaned') return { glyph: '●', label: 'Orphaned — detached', tone: 'attn' };
   if (s.status === 'error') return { glyph: '●', label: 'Error', tone: 'attn' };
@@ -340,6 +349,7 @@ const REMOVE: LifecycleAction = {
 // announces the state, so the cure sits with the diagnosis rather than behind a
 // menu. Null for every healthy session — there is nothing to fix.
 export function remedyAction(s: SessionSummary): LifecycleAction | null {
+  if (s.transition) return null;
   if (s.status === 'orphaned') return ADOPT;
   if (s.status === 'archived') return RECOVER;
   return null;
@@ -348,6 +358,7 @@ export function remedyAction(s: SessionSummary): LifecycleAction | null {
 // Every lifecycle action available on a session, in menu order: its remedy (if
 // stuck), then archive (unless it already is), then the destructive remove.
 export function lifecycleActions(s: SessionSummary): LifecycleAction[] {
+  if (s.transition) return [];
   const actions: LifecycleAction[] = [];
   const remedy = remedyAction(s);
   if (remedy) actions.push(remedy);

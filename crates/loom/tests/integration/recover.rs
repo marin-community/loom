@@ -109,6 +109,91 @@ async fn recover_rebuilds_worktree_and_resumes() {
     );
 }
 
+/// Regression for archive/adopt racing on the lifecycle lock: once archive has
+/// removed the worktree and committed `archived`, a stale adopt request must
+/// direct the caller to recovery instead of reporting that the very worktree
+/// archive intentionally removed makes adoption impossible.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_adopt_after_archive_points_to_recovery() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+    let sess = client
+        .post(
+            "/api/sessions",
+            json!({ "goal": "archive adopt race", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let id = sess["id"].as_str().unwrap();
+
+    client
+        .post(&format!("/api/sessions/{id}/archive"), json!({}))
+        .await
+        .unwrap();
+    let error = client
+        .post(&format!("/api/sessions/{id}/adopt"), json!({}))
+        .await
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("recover"), "{message}");
+    assert!(!message.contains("no longer exists on disk"), "{message}");
+
+    let recovered = client
+        .post(&format!("/api/sessions/{id}/recover"), json!({}))
+        .await
+        .unwrap();
+    assert_eq!(recovered["status"], "running");
+    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transition_stage_is_visible_in_detail_and_fleet_views() {
+    let ts = TestServer::start().await;
+    let sess = ts
+        .client
+        .post(
+            "/api/sessions",
+            json!({ "goal": "show lifecycle progress", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let id = sess["id"].as_str().unwrap();
+    assert!(
+        loom::session::begin_transition(&ts.state.db, id, "archiving", "Removing worktree")
+            .await
+            .unwrap()
+    );
+
+    let detail = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    assert_eq!(detail["status"], "running");
+    assert_eq!(detail["transition"]["kind"], "archiving");
+    assert_eq!(detail["transition"]["step"], "Removing worktree");
+    assert!(!detail["transition"]["started_at"]
+        .as_str()
+        .unwrap()
+        .is_empty());
+
+    let fleet = ts.client.get("/api/sessions/summary").await.unwrap();
+    let summary = fleet
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == id)
+        .unwrap();
+    assert_eq!(summary["transition"]["kind"], "archiving");
+    assert_eq!(summary["transition"]["step"], "Removing worktree");
+
+    loom::session::clear_transition(&ts.state.db, id, "archiving")
+        .await
+        .unwrap();
+    ts.client
+        .delete(&format!("/api/sessions/{id}"))
+        .await
+        .unwrap();
+}
+
 /// Repair an old partial archive whose row says `archived` even though its
 /// terminal supervisor survived. New archives wait for teardown before flipping
 /// the row, but recovery must self-heal rows written by older loom versions.

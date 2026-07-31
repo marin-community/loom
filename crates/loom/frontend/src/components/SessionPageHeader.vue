@@ -219,7 +219,10 @@ const handoffResolving = ref(false);
 const handoffBusy = ref(false);
 const handoffError = ref('');
 const canHandoff = computed(
-  () => props.ws.protocol === 'acp' && ['running', 'orphaned', 'error'].includes(props.ws.status),
+  () =>
+    !props.ws.transition &&
+    props.ws.protocol === 'acp' &&
+    ['running', 'orphaned', 'error'].includes(props.ws.status),
 );
 const handoffSelection = computed<LaunchSelection>(() => ({
   profile: handoffProfile.value || 'default',
@@ -401,7 +404,13 @@ async function submitHandoff() {
 
         <!-- Lifecycle pill only for off-nominal states — running is the silent
              default here just as on the fleet list. -->
-        <StatusBadge v-if="ws.status !== 'running'" :status="ws.status" />
+        <StatusBadge
+          v-if="ws.transition || ws.status !== 'running'"
+          :status="ws.transition?.kind ?? ws.status"
+        />
+        <span v-if="ws.transition?.step" class="text-2xs text-info" data-testid="transition-step">
+          {{ ws.transition.step }}
+        </span>
 
         <!-- The remedy, promoted out of the menu and parked against the badge
              that announces the problem: an orphaned session offers Adopt, an
@@ -529,7 +538,7 @@ async function submitHandoff() {
                   </button>
                 </form>
                 <button
-                  v-if="ws.status !== 'archived'"
+                  v-if="ws.status !== 'archived' && !ws.transition"
                   type="button"
                   data-testid="action-auto-archive"
                   :disabled="!!busy"

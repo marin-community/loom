@@ -203,11 +203,14 @@ function onKeydown(event: KeyboardEvent) {
           {{ session.profile }}
         </span>
         <span
-          v-if="['created', 'done', 'error', 'orphaned'].includes(session.status)"
+          v-if="
+            session.transition || ['created', 'done', 'error', 'orphaned'].includes(session.status)
+          "
           class="meta-chip shrink-0"
-          :aria-label="`Lifecycle: ${session.status}`"
+          :aria-label="`Lifecycle: ${session.transition?.kind ?? session.status}`"
         >
-          {{ session.status }}
+          {{ session.transition?.kind ?? session.status }}
+          <template v-if="session.transition?.step"> · {{ session.transition.step }}</template>
         </span>
       </div>
       <p

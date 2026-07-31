@@ -27,28 +27,31 @@ stateDiagram-v2
 
     Created --> Running: supervisor starts
     Created --> Error: setup / launch fails
-    Created --> Archived: archive
+    Created --> Archiving: archive
     Created --> Removed: remove
 
     Running --> Orphaned: supervisor disappears
     Running --> Done: agent finishes
     Running --> Error: agent / control failure
-    Running --> Archived: archive
+    Running --> Archiving: archive
     Running --> Removed: remove
 
-    Orphaned --> Running: adopt
-    Orphaned --> Archived: archive
+    Orphaned --> Adopting: adopt
+    Orphaned --> Archiving: archive
     Orphaned --> Removed: remove
 
-    Error --> Running: handoff / recover
-    Error --> Archived: archive
+    Error --> Running: handoff
+    Error --> Archiving: archive
     Error --> Removed: remove
 
-    Done --> Archived: archive
+    Done --> Archiving: archive
     Done --> Removed: remove
 
-    Archived --> Running: recover
+    Archived --> Adopting: recover
     Archived --> Removed: remove
+
+    Archiving --> Archived: teardown complete
+    Adopting --> Running: resume complete
 
     state "Launch failed" as FailedAttempt
     state "Launch cancelled" as CancelledAttempt
@@ -59,6 +62,17 @@ The session lifecycle is the mechanical `sessions.status` axis:
 `created`, `running`, `orphaned`, `done`, `error`, or `archived`. It remains
 separate from branch attention tags, which describe whether the agent needs a
 person.
+
+Long-running external mutations keep that last completed status and publish a
+durable `transition` alongside it. Archive reports `archiving` with stages such
+as conversation capture, agent shutdown, worktree removal, and finalization.
+Adopt/recover report `adopting`, including worktree rebuild where recovery needs
+one. Fleet and detail views show the transition and current free-text stage;
+lifecycle actions and conversation input stay unavailable until it clears.
+Competing operations serialize on the lifecycle lock and also claim the marker
+atomically, so overlapping server generations cannot both mutate the same row.
+On restart Loom resumes an interrupted archive/adoption or restores the last
+recoverable stable state before ordinary supervisor reconciliation.
 
 `automation_runs.status` describes delivery/provisioning rather than agent
 liveness: `creating`, `waiting`, `delivering`, `running`, `failed`,

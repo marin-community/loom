@@ -90,6 +90,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "channels",
         include_str!("../migrations/0016_channels.sql"),
     ),
+    (
+        17,
+        "session-transitions",
+        include_str!("../migrations/0017_session_transitions.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);

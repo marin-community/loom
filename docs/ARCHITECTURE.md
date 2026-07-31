@@ -696,6 +696,12 @@ the branch's unique active-session slot before it rebuilds or launches anything.
 A failed recovery cleans up its new external state before restoring `archived`.
 Recovery also repairs historical partial archives by adopting an already-live
 supervisor instead of leaving the row in an unusable in-between state.
+Both operations publish a durable `lifecycle_transition` (`archiving` or
+`adopting`) plus a human-readable `lifecycle_step` while external work is in
+flight. REST detail/summary views expose these as `transition`; the SPA shows
+the stage and suppresses lifecycle actions until completion. Transition claims
+are atomic across overlapping server generations, and startup reconciles a
+marker left by a process exit before normal supervisor inventory runs.
 
 **Automation lifecycle.** A `class = automation` session — every session not
 launched interactively by a human, excluding a watch's own warm sessions —

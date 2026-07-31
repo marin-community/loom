@@ -78,7 +78,7 @@ function onKeydown(event: KeyboardEvent) {
       @keydown="onKeydown"
     >
       <button
-        v-if="ws.status !== 'archived'"
+        v-if="ws.status !== 'archived' && !ws.transition"
         type="button"
         data-testid="row-action-auto-archive"
         :disabled="!!busy"
