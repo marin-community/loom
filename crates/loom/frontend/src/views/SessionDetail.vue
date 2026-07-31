@@ -319,12 +319,16 @@ const ideEnabled = ref(false);
 const ideOpen = ref(false);
 
 let source: SessionEventsHandle | null = null;
+let sessionLoadEpoch = 0;
 
 async function loadSession() {
-  ws.value = await getSession(props.id);
+  const epoch = ++sessionLoadEpoch;
+  const session = await getSession(props.id);
+  if (epoch === sessionLoadEpoch) ws.value = session;
 }
 
 async function acknowledgeSessionAttention(): Promise<string> {
+  const epoch = ++sessionLoadEpoch;
   let session = await getSession(props.id);
   try {
     // The session id is also its default channel id. Opening the workbench is
@@ -343,7 +347,7 @@ async function acknowledgeSessionAttention(): Promise<string> {
   // attention again through the normal event stream.
   const keys = [...new Set(signalChips(session).map((chip) => chip.key))];
   if (!keys.length) {
-    ws.value = session;
+    if (epoch === sessionLoadEpoch) ws.value = session;
     return '';
   }
   const results = await Promise.allSettled(keys.map((key) => clearSessionTag(props.id, key)));
@@ -351,7 +355,7 @@ async function acknowledgeSessionAttention(): Promise<string> {
   // disappear, while any failed tag remains available for the existing manual
   // clear gesture.
   session = await getSession(props.id);
-  ws.value = session;
+  if (epoch === sessionLoadEpoch) ws.value = session;
   const failed = results.filter((result) => result.status === 'rejected').length;
   const notices = [];
   if (failed) {

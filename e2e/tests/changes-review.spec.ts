@@ -21,7 +21,14 @@ test('preserves Changes drafts through refresh and peer-submit conflicts', async
   await input.fill('Explain why this line belongs here.');
 
   writeFileSync(changedPath, 'first\nchanged\nthird\n');
+  const refreshedChanges = page.waitForResponse(
+    (response) =>
+      response.ok() &&
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === `/api/sessions/${session.id}/changes`,
+  );
   await page.getByRole('button', { name: 'Refresh' }).click();
+  await refreshedChanges;
   await expect(input).toHaveValue('Explain why this line belongs here.');
   const staleSave = page.waitForResponse(
     (response) =>
