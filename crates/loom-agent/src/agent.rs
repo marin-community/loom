@@ -120,9 +120,9 @@ const CODEX_MODEL_CHOICES: &[(&str, &str)] = &[
     ("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
 ];
 
-const CODEX_AGENT_MODE: &str = "agent";
-
-pub use crate::agent_kind::{auto_approves_permissions, DEFAULT_ACP_MODE};
+pub use crate::agent_kind::{
+    auto_approves_permissions, BuiltinAgentKind, CODEX_AGENT_MODE, DEFAULT_ACP_MODE,
+};
 
 const EFFORT_CHOICES: &[(&str, &str)] = &[
     ("low", "Low"),
@@ -146,10 +146,9 @@ static CODEX_AGENT_TYPE: CodexAgentType = CodexAgentType;
 /// agents live in the database and are resolved by [`resolve`]; this covers only
 /// the code-shipped runtimes, which need no DB lookup.
 pub fn builtin_agent_type(kind: &str) -> Option<&'static dyn AgentType> {
-    match kind {
-        "claude" => Some(&CLAUDE_AGENT_TYPE),
-        "codex" => Some(&CODEX_AGENT_TYPE),
-        _ => None,
+    match BuiltinAgentKind::parse(kind)? {
+        BuiltinAgentKind::Claude => Some(&CLAUDE_AGENT_TYPE),
+        BuiltinAgentKind::Codex => Some(&CODEX_AGENT_TYPE),
     }
 }
 
@@ -826,16 +825,6 @@ fn weaver_bin_path() -> String {
 // then brings up. See `docs/ARCHITECTURE.md` and `docs/mcp-profiles.md`.
 // ---------------------------------------------------------------------------
 
-/// The permission posture every ACP session boots in when the create request
-/// names none. `auto` is
-/// Claude Code's background-classifier posture: a safety model vets each tool
-/// call, executing routine work on its own and escalating only genuinely risky
-/// actions as an interactive permission card (surfaced in the conversation with a
-/// loud `attention` tag, answerable from the dashboard). An explicit request
-/// `mode` / `--mode` still overrides — e.g. `bypassPermissions` for a fully
-/// unattended run. For a codex session Loom combines codex-acp's workspace-write
-/// `agent` mode with Loom-owned one-shot approval; see
-/// [`codex_acp_mode`] and [`configure_codex_acp`].
 /// Resolve the execution backend for a launch: the agent's declared `protocol`
 /// unless the create request overrides it. A blank/absent override keeps the
 /// declared value. Both builtins may opt into `acp` (claude via
@@ -1221,14 +1210,6 @@ fn codex_acp_mode(mode: &str) -> String {
     }
 }
 
-/// Whether an ACP mode asks Loom to auto-answer one-shot permission requests.
-///
-/// Claude's `bypassPermissions` and Codex's `agent-full-access` are explicit
-/// no-prompt postures. Codex's ordinary `agent` mode is also included because
-/// Loom configures its reviewer as the ACP client and owns automatic approval
-/// instead of delegating it to Codex's non-deterministic model reviewer. This is
-/// the single source of truth for the turn-scoped gate in [`crate::acp`].
-/// Restricted profiles are denied before this gate is consulted.
 /// The `_meta.claudeCode.options` object for the claude adapter — only the fields
 /// that are actually configured (model, the primer as `appendSystemPrompt`, the
 /// permission mode). `None` when nothing is set.
@@ -1711,9 +1692,7 @@ impl<'a> AgentManager<'a> {
                     extra_env = crate::profile::cleared_environment(extra_env, &allowlist);
                 }
                 let allowed_tools = match profile.mcp_policy_snapshot().and_then(|snapshot| {
-                    let mut rules = crate::mcp::expand_tool_sets(&profile.allowed_tool_rules()?)?;
-                    rules.extend(crate::mcp::rules_for_snapshot(&snapshot)?);
-                    Ok(rules)
+                    crate::mcp::effective_allowed_tool_rules_for(profile, &snapshot)
                 }) {
                     Ok(rules) => match serde_json::to_string(&rules) {
                         Ok(value) => value,

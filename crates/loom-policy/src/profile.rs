@@ -10,29 +10,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::{now_iso, Db};
 
+pub use crate::mcp::effective_allowed_tool_rules_for;
 use crate::profile_data::validate_gcp_secret_ref;
 pub use crate::profile_data::{
     allowed_tool_name, cleared_environment, env_pairs, Profile, ProfileInput, DEFAULT_PROFILE,
 };
-
-/// Exact rules to stamp onto a session from a profile and its pinned MCP
-/// snapshot.
-pub fn effective_allowed_tool_rules_for(
-    profile: &Profile,
-    snapshot: &weaver_api::McpPolicySnapshot,
-) -> Result<Vec<String>> {
-    let mut rules = crate::mcp::expand_tool_sets(&profile.allowed_tool_rules()?)?;
-    for rule in crate::mcp::rules_for_snapshot(snapshot)? {
-        if !rules.contains(&rule) {
-            rules.push(rule);
-        }
-    }
-    Ok(rules)
-}
-
-pub fn effective_allowed_tool_rules(profile: &Profile) -> Result<Vec<String>> {
-    effective_allowed_tool_rules_for(profile, &profile.mcp_policy_snapshot()?)
-}
 
 const STOCK_PROFILES: &[(&str, &str)] = &[
     (

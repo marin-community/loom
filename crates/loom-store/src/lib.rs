@@ -1,6 +1,7 @@
 //! Loom's durable records and storage operations.
 
 pub mod agent_env;
+pub mod channel_data;
 pub mod channels;
 pub mod chat;
 pub mod chatlog;

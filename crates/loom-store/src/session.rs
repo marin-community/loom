@@ -5,6 +5,9 @@ use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqliteConnection};
 
+use crate::channel_data::{
+    MessageKind, SubjectKind, SubscriptionMode, Urgency, OPEN_STATE, SESSION_KIND,
+};
 use crate::db::{now_iso, Db};
 use weaver_core::branch::{self as branch_mod, Branch};
 
@@ -252,13 +255,13 @@ pub struct SessionHandoffPolicy {
 impl SessionLaunchPolicy {
     fn compatible(s: &NewSession) -> Self {
         let creator_kind = if s.origin == "agent" {
-            "session"
+            SubjectKind::Session
         } else if matches!(s.origin.as_str(), "actions" | "ops") {
-            "automation"
+            SubjectKind::Automation
         } else if s.created_by.is_some() {
-            "user"
+            SubjectKind::User
         } else {
-            "system"
+            SubjectKind::System
         };
         Self {
             profile: crate::agent_kind::DEFAULT_PROFILE.to_string(),
@@ -276,7 +279,7 @@ impl SessionLaunchPolicy {
             mcp_access: r#"{"selection":{"mode":"none","groups":[]},"capability_sets":[]}"#
                 .to_string(),
             launch_snapshot: String::new(),
-            creator_kind: creator_kind.to_string(),
+            creator_kind: creator_kind.as_str().to_string(),
             creator_subject: s.created_by.clone().unwrap_or_else(|| s.origin.clone()),
             parent_session_id: None,
             automation_run_id: None,
@@ -380,15 +383,12 @@ async fn insert_default_placement_tx(
 async fn upsert_initial_subscription_tx(
     tx: &mut SqliteConnection,
     channel_id: &str,
-    subject_kind: &str,
+    subject_kind: SubjectKind,
     subject_id: &str,
-    mode: &str,
+    mode: SubscriptionMode,
     read_seq: i64,
     now: &str,
 ) -> Result<()> {
-    if !matches!(subject_kind, "session" | "user" | "automation" | "system") {
-        bail!("unknown channel subject kind '{subject_kind}'");
-    }
     sqlx::query(
         "INSERT INTO channel_subscriptions
          (channel_id, subject_kind, subject_id, mode, read_seq, created_at, updated_at)
@@ -399,9 +399,9 @@ async fn upsert_initial_subscription_tx(
            updated_at = excluded.updated_at",
     )
     .bind(channel_id)
-    .bind(subject_kind)
+    .bind(subject_kind.as_str())
     .bind(subject_id)
-    .bind(mode)
+    .bind(mode.as_str())
     .bind(read_seq)
     .bind(now)
     .bind(now)
@@ -424,13 +424,16 @@ async fn insert_session_channel_tx(
     let title: String = row.get("title");
     let goal: String = row.get("goal");
     let now = now_iso();
+    let creator_kind = SubjectKind::parse(&policy.creator_kind)
+        .ok_or_else(|| anyhow!("unknown channel subject kind '{}'", policy.creator_kind))?;
     sqlx::query(
         "INSERT INTO channels
          (id, kind, repo_root, branch_id, session_id, name, topic, state,
           created_by_kind, created_by, created_at)
-         VALUES (?, 'session', ?, ?, ?, ?, ?, 'open', ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&session.id)
+    .bind(SESSION_KIND)
     .bind(repo_root)
     .bind(&session.branch_id)
     .bind(&session.id)
@@ -440,7 +443,8 @@ async fn insert_session_channel_tx(
         title.trim()
     })
     .bind(&goal)
-    .bind(&policy.creator_kind)
+    .bind(OPEN_STATE)
+    .bind(creator_kind.as_str())
     .bind(&policy.creator_subject)
     .bind(&now)
     .execute(&mut *tx)
@@ -453,11 +457,13 @@ async fn insert_session_channel_tx(
             "INSERT INTO channel_messages
              (id, channel_id, seq, kind, urgency, author_kind, author_id,
               body, payload, created_at)
-             VALUES (?, ?, 1, 'goal', 'normal', ?, ?, ?, '{}', ?)",
+             VALUES (?, ?, 1, ?, ?, ?, ?, ?, '{}', ?)",
         )
         .bind(weaver_core::branch::new_id())
         .bind(&session.id)
-        .bind(&policy.creator_kind)
+        .bind(MessageKind::Goal.as_str())
+        .bind(Urgency::Normal.as_str())
+        .bind(creator_kind.as_str())
         .bind(&policy.creator_subject)
         .bind(goal)
         .bind(&now)
@@ -469,9 +475,9 @@ async fn insert_session_channel_tx(
     upsert_initial_subscription_tx(
         tx,
         &session.id,
-        "session",
+        SubjectKind::Session,
         &session.id,
-        "deliver",
+        SubscriptionMode::Deliver,
         goal_seq,
         &now,
     )
@@ -479,9 +485,9 @@ async fn insert_session_channel_tx(
     upsert_initial_subscription_tx(
         tx,
         &session.id,
-        &policy.creator_kind,
+        creator_kind,
         &policy.creator_subject,
-        "observe",
+        SubscriptionMode::Observe,
         goal_seq,
         &now,
     )
@@ -490,9 +496,9 @@ async fn insert_session_channel_tx(
         upsert_initial_subscription_tx(
             tx,
             &session.id,
-            "user",
+            SubjectKind::User,
             username,
-            "observe",
+            SubscriptionMode::Observe,
             goal_seq,
             &now,
         )
@@ -502,9 +508,9 @@ async fn insert_session_channel_tx(
         upsert_initial_subscription_tx(
             tx,
             &session.id,
-            "session",
+            SubjectKind::Session,
             parent,
-            "observe",
+            SubscriptionMode::Observe,
             goal_seq,
             &now,
         )

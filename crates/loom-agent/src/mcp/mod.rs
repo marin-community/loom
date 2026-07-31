@@ -306,6 +306,18 @@ pub fn rules_for_snapshot(snapshot: &weaver_api::McpPolicySnapshot) -> Result<Ve
     Ok(rules)
 }
 
+/// Resolve the exact profile and MCP snapshot rules stamped onto a session.
+pub fn effective_allowed_tool_rules_for(
+    profile: &crate::profile_data::Profile,
+    snapshot: &weaver_api::McpPolicySnapshot,
+) -> Result<Vec<String>> {
+    let mut rules = expand_tool_sets(&profile.allowed_tool_rules()?)?;
+    for rule in rules_for_snapshot(snapshot)? {
+        push_unique(&mut rules, rule);
+    }
+    Ok(rules)
+}
+
 fn capability_set_digest(adapter: &Adapter, set: &CapabilitySet, advertised: &Value) -> String {
     let mut hasher = Sha256::new();
     hasher.update(adapter.name);

@@ -733,10 +733,10 @@ impl AcpHandle {
 }
 
 /// What an ACP session task needs to run: loom's durable state plus the
-/// registry the task lives in. This is the whole of [`crate::AppState`] that
-/// `acp` ever reads, so taking one keeps the protocol layer independent of the
-/// live editor/GitHub/admission registries beside it. Derefs to [`Ctx`], so
-/// `st.db` and `st.bus` read the same as they would off an `AppState`.
+/// registry the task lives in. This narrow state keeps the protocol layer
+/// independent of the live editor, GitHub, and admission registries in the
+/// process-wide application state. Derefs to [`Ctx`], so `st.db` and `st.bus`
+/// keep their ordinary field syntax.
 #[derive(Clone)]
 pub struct AcpCtx {
     pub ctx: Ctx,

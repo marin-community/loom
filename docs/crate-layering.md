@@ -27,10 +27,10 @@ public paths.
 
 | crate | Rust files | lines | contents |
 |---|---:|---:|---|
-| `loom-ctx` | 14 | 5,024 | leaf utilities, shared agent constants and paths, and `Ctx` |
-| `loom-store` | 14 | 10,111 | durable sessions, chat, channels, layout, status, runs, history, and profile records |
-| `loom-agent` | 9 | 9,411 | ACP, agent runtimes, trusted MCP adapters, and custom-agent records |
-| `loom-policy` | 6 | 4,362 | profiles, auth, automation, custom-MCP administration, and database initialization |
+| `loom-ctx` | 14 | 5,050 | leaf utilities, shared agent constants and paths, and `Ctx` |
+| `loom-store` | 15 | 10,134 | durable sessions, chat, channels, layout, status, runs, history, and profile records |
+| `loom-agent` | 9 | 9,402 | ACP, agent runtimes, trusted MCP adapters, and custom-agent records |
+| `loom-policy` | 6 | 4,344 | profiles, auth, automation, custom-MCP administration, and database initialization |
 | `loom-core` | 4 | 1,107 | launch resolution, shells, and detached-session ownership reconciliation |
 | `loom-editor` | 3 | 1,318 | terminal and embedded-editor attachment |
 | `loom-forge` | 9 | 6,501 | GitHub, repository registration, runtime lifecycle, and `AppState` |
@@ -73,6 +73,7 @@ graph BT
   store --> ctx
   agent --> store
   policy --> agent
+  policy --> store
   core --> policy
   editor --> core
   forge --> editor
