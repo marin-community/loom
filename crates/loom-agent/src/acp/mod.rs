@@ -185,7 +185,11 @@ pub async fn prompt_once(
         bail!("one-shot ACP prompts require a fresh session");
     }
 
-    let relay_name = format!("weaver-acp-prompt-{:016x}", rand::random::<u64>());
+    let relay_name = format!(
+        "{}{:016x}",
+        crate::backend::TRANSIENT_SESSION_PREFIX,
+        rand::random::<u64>()
+    );
     // The relay is detached like a normal work session, but deliberately has
     // no database row. Keep the periodic supervisor reconciler from mistaking
     // this in-flight prompt for crash debris; dropping the lease after cleanup

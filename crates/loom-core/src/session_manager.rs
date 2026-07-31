@@ -39,7 +39,7 @@ enum OwnedResource<'a> {
 /// Parse only supervisor names reserved by Loom.
 fn owned_resource(name: &str) -> Option<OwnedResource<'_>> {
     if name
-        .strip_prefix("weaver-acp-prompt-")
+        .strip_prefix(backend::TRANSIENT_SESSION_PREFIX)
         .is_some_and(|nonce| !nonce.is_empty())
     {
         return Some(OwnedResource::TransientRelay);

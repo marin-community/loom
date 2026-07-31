@@ -20,6 +20,9 @@ use anyhow::{bail, Result};
 use crate::runner;
 use weaver_core::db::Db;
 
+/// Supervisor namespace reserved for one-shot ACP prompts.
+pub const TRANSIENT_SESSION_PREFIX: &str = "weaver-acp-prompt-";
+
 /// Names of nondurable supervisors currently owned by this Loom process.
 #[derive(Clone, Default)]
 pub struct TransientSessionRegistry {
