@@ -1315,6 +1315,7 @@ pub async fn create(st: AppState, req: CreateReq, actor: Actor) -> Result<Provis
     crate::metadata_assist::spawn_title_generation(
         st.db.clone(),
         st.bus.clone(),
+        st.acp.clone(),
         session.clone(),
         branch.clone(),
         false,

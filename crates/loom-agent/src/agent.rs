@@ -1515,11 +1515,12 @@ struct OneShotLaunchPolicy<'a> {
 /// provider-specific execution remains behind that runtime's ACP adapter.
 pub struct AgentManager<'a> {
     db: &'a Db,
+    acp: &'a crate::acp::AcpRegistry,
 }
 
 impl<'a> AgentManager<'a> {
-    pub fn new(db: &'a Db) -> Self {
-        Self { db }
+    pub fn new(db: &'a Db, acp: &'a crate::acp::AcpRegistry) -> Self {
+        Self { db, acp }
     }
 
     /// Ask the incoming runtime's advertised Haiku/Luna-class model for a
@@ -1555,6 +1556,7 @@ impl<'a> AgentManager<'a> {
         let launch = transient_prompt_launch(incoming);
         match crate::acp::prompt_once(
             self.db,
+            self.acp.transient_sessions(),
             launch,
             prompt,
             crate::acp::AcpPromptModel::FirstContaining(&["haiku", "luna"]),
@@ -1803,6 +1805,7 @@ impl<'a> AgentManager<'a> {
         };
         match crate::acp::prompt_once(
             self.db,
+            self.acp.transient_sessions(),
             launch,
             prompt,
             preferred_model,

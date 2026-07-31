@@ -443,6 +443,7 @@ async fn title_preflight(
 pub async fn spawn_title_generation(
     db: Db,
     bus: EventBus,
+    acp: crate::acp::AcpRegistry,
     session: Session,
     branch: Branch,
     explicit: bool,
@@ -482,7 +483,7 @@ pub async fn spawn_title_generation(
 
     tokio::spawn(async move {
         let _claim = claim;
-        let status = match generate_title(&db, &session, &branch, &fence).await {
+        let status = match generate_title(&db, &acp, &session, &branch, &fence).await {
             Ok(status) => status,
             Err(error) => {
                 tracing::warn!(session = %session.id, %error, "metadata title generation failed");
@@ -511,6 +512,7 @@ pub async fn spawn_title_generation(
 
 async fn generate_title(
     db: &Db,
+    acp: &crate::acp::AcpRegistry,
     session: &Session,
     branch: &Branch,
     fence: &TitleFence,
@@ -531,7 +533,7 @@ async fn generate_title(
         Ok(snapshot) => snapshot,
         Err(status) => return Ok(status),
     };
-    let output = AgentManager::new(db)
+    let output = AgentManager::new(db, acp)
         .run_metadata(&run.session.agent_kind, &prompt, PROMPT_TIMEOUT)
         .await
         .and_then(|text| branch::sanitize_generated_title(&text))
@@ -911,6 +913,7 @@ pub async fn current_cue(db: &Db, session: &Session, branch: &Branch) -> Result<
 
 pub async fn ensure_cue(
     db: &Db,
+    acp: &crate::acp::AcpRegistry,
     session: &Session,
     branch: &Branch,
     force: bool,
@@ -941,11 +944,12 @@ pub async fn ensure_cue(
     // UI hanging on whichever session was opened. `current_cue` reports
     // `generating` for as long as the claim is held, which is what clients poll.
     let db = db.clone();
+    let acp = acp.clone();
     let session = session.clone();
     let branch = branch.clone();
     tokio::spawn(async move {
         let _claim = claim;
-        if let Err(error) = generate_cue(&db, &session, &branch, force).await {
+        if let Err(error) = generate_cue(&db, &acp, &session, &branch, force).await {
             tracing::warn!(session = %session.id, %error, "resumption cue generation failed");
         }
     });
@@ -959,6 +963,7 @@ pub async fn ensure_cue(
 /// `generating` rather than starting a duplicate model call.
 async fn generate_cue(
     db: &Db,
+    acp: &crate::acp::AcpRegistry,
     session: &Session,
     branch: &Branch,
     force: bool,
@@ -983,7 +988,7 @@ async fn generate_cue(
             Ok(snapshot) => snapshot,
             Err(view) => return Ok(view),
         };
-    let output = AgentManager::new(db)
+    let output = AgentManager::new(db, acp)
         .run_metadata(
             &run_snapshot.session.agent_kind,
             &prepared.prompt,

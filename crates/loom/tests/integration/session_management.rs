@@ -131,19 +131,27 @@ async fn supervisor_reconciliation_removes_only_unowned_loom_resources() {
         .await
         .unwrap();
     let stray = "weaver-no-database-owner";
+    let transient = "weaver-acp-prompt-active";
+    let stale_transient = "weaver-acp-prompt-stale";
     let unrelated = "other-tapestry-user";
-    for name in [&owned, stray, unrelated] {
+    let transient_lease = ts.state.acp.transient_sessions().lease(transient);
+    for name in [&owned, stray, transient, stale_transient, unrelated] {
         backend::new_session(name, ts.repo_path(), "sleep 60", &[], false, 0)
             .await
             .unwrap();
     }
 
-    let report = loom::session_manager::reconcile_supervisors(&ts.state.db)
+    let report = loom::session_manager::reconcile_supervisors(&ts.state.db, &ts.state.acp)
         .await
         .unwrap();
-    assert_eq!(report.removed_agents, 1);
+    assert_eq!(report.removed_agents, 2);
     wait_dead(stray).await;
+    wait_dead(stale_transient).await;
     assert!(backend::has_session(&owned).await);
+    assert!(
+        backend::has_session(transient).await,
+        "an in-flight one-shot ACP relay retains process-local ownership"
+    );
     assert!(
         backend::has_session(finished_term).await,
         "rollout must preserve supervisors owned by inspectable terminal sessions"
@@ -153,10 +161,15 @@ async fn supervisor_reconciliation_removes_only_unowned_loom_resources() {
     runs::cancel_for_session(&ts.state.db, &active.session_id)
         .await
         .unwrap();
-    loom::session_manager::reconcile_supervisors(&ts.state.db)
+    loom::session_manager::reconcile_supervisors(&ts.state.db, &ts.state.acp)
         .await
         .unwrap();
     wait_dead(&owned).await;
+    drop(transient_lease);
+    loom::session_manager::reconcile_supervisors(&ts.state.db, &ts.state.acp)
+        .await
+        .unwrap();
+    wait_dead(transient).await;
     ts.client
         .delete(&format!("/api/sessions/{finished_id}"))
         .await
@@ -200,7 +213,7 @@ async fn reconciliation_terminalizes_a_session_that_landed_after_cancellation() 
         .await
         .unwrap();
 
-    let report = loom::session_manager::reconcile_supervisors(&ts.state.db)
+    let report = loom::session_manager::reconcile_supervisors(&ts.state.db, &ts.state.acp)
         .await
         .unwrap();
     assert_eq!(report.invalidated_sessions, 1);

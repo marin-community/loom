@@ -952,13 +952,15 @@ pub async fn increment_turn_count(db: &Db, id: &str) -> Result<i64> {
 /// The monitor discovers liveness from a fleet snapshot, which can be stale by
 /// the time teardown finishes. Keep the terminal-state guard in the UPDATE so
 /// an archive racing that snapshot cannot be overwritten back to `orphaned`.
+/// A handoff owns an intentional supervisor-free interval while replacing the
+/// provider, so the monitor must not invalidate its mutation generation either.
 /// Returns whether this call performed the transition.
 pub async fn mark_orphaned(db: &Db, id: &str) -> Result<bool> {
     let result = sqlx::query(
         "UPDATE sessions
          SET status = 'orphaned', mutation_revision = mutation_revision + 1
          WHERE id = ?
-           AND status NOT IN ('orphaned', 'done', 'error', 'archived')",
+           AND status NOT IN ('orphaned', 'done', 'error', 'archived', 'handoff')",
     )
     .bind(id)
     .execute(db)
@@ -1862,6 +1864,21 @@ mod tests {
         assert!(
             !mark_orphaned(&db, "orphan").await.unwrap(),
             "an already-orphaned row does not emit another edge"
+        );
+    }
+
+    #[tokio::test]
+    async fn orphan_transition_does_not_interrupt_a_handoff() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let branch = branch_id(&db, "weaver/handoff-orphan-race").await;
+        let mut session = new_session("handoff-orphan-race", &branch, None);
+        session.status = "handoff".to_string();
+        insert(&db, &session).await.unwrap();
+
+        assert!(!mark_orphaned(&db, &session.id).await.unwrap());
+        assert_eq!(
+            get(&db, &session.id).await.unwrap().unwrap().status,
+            "handoff"
         );
     }
 

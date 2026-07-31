@@ -171,6 +171,7 @@ pub enum AcpPromptEffort<'a> {
 /// session that will subsequently take over.
 pub async fn prompt_once(
     db: &Db,
+    transient_sessions: &crate::backend::TransientSessionRegistry,
     launch: AcpLaunch,
     prompt: &str,
     model: AcpPromptModel<'_>,
@@ -184,7 +185,16 @@ pub async fn prompt_once(
         bail!("one-shot ACP prompts require a fresh session");
     }
 
-    let relay_name = format!("weaver-acp-prompt-{:016x}", rand::random::<u64>());
+    let relay_name = format!(
+        "{}{:016x}",
+        crate::backend::TRANSIENT_SESSION_PREFIX,
+        rand::random::<u64>()
+    );
+    // The relay is detached like a normal work session, but deliberately has
+    // no database row. Keep the periodic supervisor reconciler from mistaking
+    // this in-flight prompt for crash debris; dropping the lease after cleanup
+    // makes a relay left by a process crash reclaimable on restart.
+    let _relay_lease = transient_sessions.lease(&relay_name);
     let env: Vec<(&str, &str)> = launch
         .env
         .iter()
@@ -750,13 +760,15 @@ impl std::ops::Deref for AcpCtx {
     }
 }
 
-/// The registry of live ACP session tasks, held on [`crate::AppState`]. Clone-cheap
-/// (an `Arc`ed map); handlers look a session up to drive it or tail its stream.
-/// Each registration carries a generation so a task that exits after it has been
-/// superseded (stopped then re-attached) removes only its own slot.
+/// The registry of live ACP work and transient prompt tasks, held on
+/// [`crate::AppState`]. Clone-cheap (through `Arc`); handlers look a session up
+/// to drive it or tail its stream. Each work-session registration carries a
+/// generation so a task that exits after it has been superseded (stopped then
+/// re-attached) removes only its own slot.
 #[derive(Clone, Default)]
 pub struct AcpRegistry {
     inner: Arc<Mutex<RegistryInner>>,
+    transient_sessions: crate::backend::TransientSessionRegistry,
 }
 
 #[derive(Default)]
@@ -807,6 +819,10 @@ pub(crate) struct ClaimLivenessProbe {
 impl AcpRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn transient_sessions(&self) -> &crate::backend::TransientSessionRegistry {
+        &self.transient_sessions
     }
 
     /// The live handle for `session_id`, or `None` when no task is running.

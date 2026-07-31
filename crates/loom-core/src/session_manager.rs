@@ -32,11 +32,18 @@ pub struct ReconcileReport {
 #[derive(Debug, PartialEq, Eq)]
 enum OwnedResource<'a> {
     Agent(&'a str),
+    TransientRelay,
     DebugShell(&'a str),
 }
 
 /// Parse only supervisor names reserved by Loom.
 fn owned_resource(name: &str) -> Option<OwnedResource<'_>> {
+    if name
+        .strip_prefix(backend::TRANSIENT_SESSION_PREFIX)
+        .is_some_and(|nonce| !nonce.is_empty())
+    {
+        return Some(OwnedResource::TransientRelay);
+    }
     if let Some(id) = name.strip_prefix("weaver-").filter(|id| !id.is_empty()) {
         return Some(OwnedResource::Agent(id));
     }
@@ -68,9 +75,13 @@ pub async fn teardown_reserved_runtime(session_id: &str) -> Vec<String> {
 ///
 /// Every non-archived session owns its agent and debug supervisors, including
 /// inspectable `done`/`error` sessions. An active automation run temporarily
-/// owns the agent's deterministic name before a session row appears. Archived,
-/// missing, and cancellation-invalidated sessions own no runtime.
-pub async fn reconcile_supervisors(db: &Db) -> Result<ReconcileReport> {
+/// owns the agent's deterministic name before a session row appears. A live
+/// one-shot ACP prompt owns its nondurable relay through the ACP registry.
+/// Archived, missing, and cancellation-invalidated sessions own no runtime.
+pub async fn reconcile_supervisors(
+    db: &Db,
+    acp: &crate::acp::AcpRegistry,
+) -> Result<ReconcileReport> {
     // Close the only crash window in cancellation-wins provisioning: a session
     // row may have landed just before the request was cancelled, while the
     // provisioning task died before it could perform its final ownership check.
@@ -110,6 +121,7 @@ pub async fn reconcile_supervisors(db: &Db) -> Result<ReconcileReport> {
                     && (sessions.get(id).is_some_and(|status| status != "archived")
                         || run_owners.contains(id))
             }
+            OwnedResource::TransientRelay => acp.transient_sessions().contains(&name),
             OwnedResource::DebugShell(id) => {
                 !invalidated.contains(id)
                     && sessions.get(id).is_some_and(|status| status != "archived")
@@ -121,7 +133,9 @@ pub async fn reconcile_supervisors(db: &Db) -> Result<ReconcileReport> {
 
         match backend::kill_session(&name).await {
             Ok(()) => match resource {
-                OwnedResource::Agent(_) => report.removed_agents += 1,
+                OwnedResource::Agent(_) | OwnedResource::TransientRelay => {
+                    report.removed_agents += 1
+                }
                 OwnedResource::DebugShell(_) => report.removed_debug_shells += 1,
             },
             Err(error) => report.warnings.push(format!("{name}: {error}")),
@@ -146,12 +160,12 @@ pub async fn reconcile_supervisors(db: &Db) -> Result<ReconcileReport> {
 /// Periodically converge detached supervisors after startup. A one-shot pass
 /// runs before adoption in `server::run`; this loop handles a process crash or
 /// a late provisioning/cancellation race after the server is already serving.
-pub async fn run(db: Db) {
+pub async fn run(db: Db, acp: crate::acp::AcpRegistry) {
     let start = tokio::time::Instant::now() + RECONCILE_INTERVAL;
     let mut interval = tokio::time::interval_at(start, RECONCILE_INTERVAL);
     loop {
         interval.tick().await;
-        if let Err(error) = reconcile_supervisors(&db).await {
+        if let Err(error) = reconcile_supervisors(&db, &acp).await {
             tracing::warn!(%error, "session resource reconciliation failed");
         }
     }
@@ -166,6 +180,10 @@ mod tests {
         assert_eq!(
             owned_resource("weaver-abc-123"),
             Some(OwnedResource::Agent("abc-123"))
+        );
+        assert_eq!(
+            owned_resource("weaver-acp-prompt-deadbeef"),
+            Some(OwnedResource::TransientRelay)
         );
         assert_eq!(
             owned_resource("loom-shell-abc-123-7"),
