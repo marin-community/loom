@@ -476,7 +476,21 @@ async fn session_token_can_delegate_through_the_cli_resolve_then_create_path() {
         .await
         .unwrap();
 
-    let cwd = ts.cwd();
+    // The session tree spans repositories. Branch ancestry and work-item
+    // provenance remain repository-scoped, but the authenticated launcher is
+    // still the exact parent of a child created elsewhere.
+    let other_repo = tempfile::tempdir().unwrap();
+    crate::fixtures::sh(other_repo.path(), "git", &["init", "-b", "main"]);
+    crate::fixtures::sh(
+        other_repo.path(),
+        "git",
+        &["config", "user.email", "t@t.test"],
+    );
+    crate::fixtures::sh(other_repo.path(), "git", &["config", "user.name", "Test"]);
+    std::fs::write(other_repo.path().join("README.md"), "other\n").unwrap();
+    crate::fixtures::sh(other_repo.path(), "git", &["add", "."]);
+    crate::fixtures::sh(other_repo.path(), "git", &["commit", "-m", "init"]);
+    let cwd = other_repo.path().to_string_lossy().into_owned();
     let output = Command::new(env!("CARGO_BIN_EXE_loom"))
         .args([
             "session",
@@ -502,6 +516,10 @@ async fn session_token_can_delegate_through_the_cli_resolve_then_create_path() {
     let child = children
         .iter()
         .find(|session| session.parent_session_id.as_deref() == Some(parent_id))
-        .expect("CLI launch created a child of the scoped session");
+        .expect("cross-repo CLI launch created a child of the scoped session");
     assert_eq!(child.creator_kind, "session");
+    assert_eq!(
+        child.parent_branch_id, None,
+        "legacy branch ancestry remains repository-scoped"
+    );
 }
