@@ -227,6 +227,13 @@ impl Actor {
         }
     }
 
+    fn bound_parent_session(&self) -> Option<&str> {
+        match &self.0 {
+            ActorKind::Session { session_id, .. } => Some(session_id),
+            _ => None,
+        }
+    }
+
     fn creator_identity(&self) -> (&'static str, String) {
         match &self.0 {
             ActorKind::Admin { username, .. } => ("user", username.clone()),
@@ -895,11 +902,12 @@ pub async fn create(st: AppState, req: CreateReq, actor: Actor) -> Result<Provis
         .ok_or_else(|| ProvisionError::internal("branch vanished"))?;
     tracing::debug!(branch = %branch.id, title = %title, "stamped branch title/goal/description");
 
-    // Resolve the launching parent once: it names an explicitly claimed work
-    // item's `source_branch` and the session's tree parent (`parent_branch_id`).
-    // Only attribute to a parent in *this* repo, and never to the branch itself
-    // — `resolve_key` searches globally, so a stray `$WEAVER_BRANCH` from a
-    // checkout elsewhere must not misattribute the link to an unrelated branch.
+    // Resolve the repository-scoped launching branch once: it names an
+    // explicitly claimed work item's `source_branch` and supplies the legacy
+    // `parent_branch_id` fallback. Only attribute that branch link inside this
+    // repo, and never to the branch itself — `resolve_key` searches globally,
+    // so a stray `$WEAVER_BRANCH` from a checkout elsewhere must not
+    // misattribute work-item provenance to an unrelated repository.
     let parent = match req
         .parent_branch
         .as_deref()
@@ -912,11 +920,19 @@ pub async fn create(st: AppState, req: CreateReq, actor: Actor) -> Result<Provis
         None => None,
     };
     let parent_branch_name = parent.as_ref().map(|b| b.branch.clone());
-    let parent_session_id = match &parent {
-        Some(parent) => session_mod::active_for_branch(&st.db, &parent.id)
-            .await?
-            .map(|session| session.id),
-        None => None,
+    // Session ancestry is global, unlike branch/work-item provenance. A scoped
+    // session credential identifies the exact launcher even when the child is
+    // created in another repository. Admin compatibility launches have no
+    // bound session, so retain the same-repo active-branch lookup for them.
+    let parent_session_id = if let Some(parent_session_id) = actor.bound_parent_session() {
+        Some(parent_session_id.to_string())
+    } else {
+        match &parent {
+            Some(parent) => session_mod::active_for_branch(&st.db, &parent.id)
+                .await?
+                .map(|session| session.id),
+            None => None,
+        }
     };
     let stamped_allowed_tools = serde_json::to_string(&resolved.runtime_permissions)
         .map_err(|error| ProvisionError::invalid(error.to_string()))?;
