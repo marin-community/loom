@@ -347,8 +347,8 @@ function closeStream() {
 function openStream() {
   closeStream();
   source = openSessionEvents(props.id);
-  source.on('artifact_written', (e) => {
-    const d = JSON.parse(e.data).data as { name?: string; rev?: number };
+  source.on('artifact_written', (ev) => {
+    const d = ev.data as { name?: string; rev?: number };
     loadList().catch(() => {});
     // If the artifact that just changed is the one we're viewing (and we're not
     // mid-edit), refresh the viewer to its new latest — but only while visible;
@@ -364,8 +364,8 @@ function openStream() {
       else pendingRefresh.value = true;
     }
   });
-  source.on('artifact_deleted', (e) => {
-    const d = JSON.parse(e.data).data as { name?: string };
+  source.on('artifact_deleted', (ev) => {
+    const d = ev.data as { name?: string };
     loadList().catch(() => {});
     // The open artifact was removed elsewhere (CLI, or another tab) — clear the
     // viewer back to the empty state. Our own delete already advanced the view.
@@ -375,17 +375,17 @@ function openStream() {
     }
   });
   // Inline comments: forward to ArtifactDocument rather than subscribing twice.
-  source.on('comment_added', (e) => {
-    const d = JSON.parse(e.data).data as { artifact?: string; thread?: number };
+  source.on('comment_added', (ev) => {
+    const d = ev.data as { artifact?: string; thread?: number };
     commentsRef.value?.onCommentEvent('comment_added', d);
   });
-  source.on('comment_resolved', (e) => {
-    const d = JSON.parse(e.data).data as { artifact?: string; thread?: number };
+  source.on('comment_resolved', (ev) => {
+    const d = ev.data as { artifact?: string; thread?: number };
     commentsRef.value?.onCommentEvent('comment_resolved', d);
   });
   for (const kind of ['review_submitted', 'review_delivery', 'review_comment_resolved']) {
-    source.on(kind, (e) => {
-      const d = JSON.parse(e.data).data as {
+    source.on(kind, (ev) => {
+      const d = ev.data as {
         subject_key?: string;
         session_id?: string;
       };

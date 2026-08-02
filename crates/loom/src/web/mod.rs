@@ -77,6 +77,7 @@ mod deployment;
 mod diagnostics;
 mod discussion;
 mod env;
+mod eventmux;
 mod issues;
 mod launches;
 mod logview;
@@ -103,6 +104,7 @@ use deployment::*;
 use diagnostics::*;
 use discussion::*;
 use env::*;
+use eventmux::*;
 use issues::*;
 use launches::*;
 use logview::*;
@@ -716,6 +718,10 @@ pub fn router(state: AppState) -> Router {
     // Everything else requires an authenticated principal — a bearer token, a
     // session cookie, or a trusted-loopback request — gated by `require_auth`.
     let protected = Router::new()
+        // Every live stream the browser wants, folded onto one connection so a
+        // tab spends 1 of its 6 per-origin sockets instead of 3. The per-stream
+        // routes below remain the single-stream API.
+        .route("/events", get(events_mux))
         // Shared Spaces → Groups → Sessions workbench organization.
         .route("/session-layout", get(get_session_layout))
         .route("/session-layout/events", get(session_layout_events))

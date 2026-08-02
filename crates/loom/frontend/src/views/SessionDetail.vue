@@ -397,8 +397,7 @@ function openStream() {
   // triage, any free-form key); a tag write re-fetches the session so the
   // resolved badge and the pill row refresh.
   for (const kind of ['status', 'tag', 'github', 'handoff', 'metadata']) {
-    source.on(kind, (e) => {
-      const ev = JSON.parse(e.data) as WeaverEvent;
+    source.on(kind, (ev) => {
       events.value.push(ev);
       loadSession().catch(() => {});
     });

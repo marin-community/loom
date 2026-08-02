@@ -137,7 +137,11 @@ async fn automation_owns_session(st: &AppState, subject: &str, session_id: &str)
     .unwrap_or(false)
 }
 
-async fn grant_allows(
+/// Whether `principal`'s grant permits `method raw_path`. The router runs this
+/// over every request; the multiplexed `/api/events` stream re-runs it per topic
+/// against the route that topic stands in for, so folding streams onto one
+/// connection cannot widen what a scoped credential can read.
+pub(super) async fn grant_allows(
     st: &AppState,
     principal: &Principal,
     method: &axum::http::Method,
@@ -148,6 +152,12 @@ async fn grant_allows(
     }
     let path = raw_path.strip_prefix("/api").unwrap_or(raw_path);
     let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    // The multiplexed stream carries no authority of its own: it is a container
+    // whose every topic is re-checked here against the single-stream route it
+    // stands in for. Reaching the route grants nothing; the topic list does.
+    if *method == axum::http::Method::GET && path == "/events" {
+        return true;
+    }
     match &principal.grant {
         Grant::Admin => true,
         Grant::Automation { subject, .. } => {
