@@ -46,6 +46,7 @@ import type {
   AcpUsage,
 } from '../types';
 import { canSend } from '../lib/sessionState';
+import { openTopic, type TopicHandle } from '../lib/eventStream';
 import { useFollowFoot } from '../lib/followFoot';
 import { formatTokens } from '../lib/usage';
 import MarkdownView from './MarkdownView.vue';
@@ -297,21 +298,19 @@ function onQueue(ev: SseQueue) {
 }
 
 // ── SSE lifecycle (kept-alive discipline) ────────────────────────────────────
-let source: EventSource | null = null;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let source: TopicHandle | null = null;
 let snapshotFallbackTimer: ReturnType<typeof setTimeout> | null = null;
-function rebindStream() {
-  closeStream();
-  openStream();
-}
 function rebindAfterHandoff(event: Event) {
   const handedOffId = (event as CustomEvent<{ id?: string }>).detail?.id;
   if (handedOffId !== id.value) return;
-  rebindStream();
+  // A handoff replaces the task behind this session and closes the old
+  // broadcast. The topic name is unchanged, so only a reconnect makes the
+  // server re-resolve it onto the new task.
+  source?.refresh();
 }
 function openStream() {
-  const stream = new EventSource(`/api/sessions/${id.value}/chat/stream`);
-  source = stream;
+  const topic = openTopic(`chat:${id.value}`);
+  source = topic;
   // The stream normally opens immediately and then owns the first snapshot,
   // closing the snapshot→SSE gap. If a proxy/browser delays EventSource setup,
   // do not leave the conversation on "Loading…" forever: fetch after a short
@@ -322,46 +321,24 @@ function openStream() {
       if (state.value === 'loading') load();
     }, 1500);
   }
-  stream.addEventListener('block', (e) =>
-    onBlock(JSON.parse((e as MessageEvent).data) as ChatBlock),
-  );
-  stream.addEventListener('delta', (e) =>
-    onDelta(JSON.parse((e as MessageEvent).data) as SseDelta),
-  );
-  stream.addEventListener('tool', (e) => onTool(JSON.parse((e as MessageEvent).data) as SseTool));
-  stream.addEventListener('turn', (e) => onTurn(JSON.parse((e as MessageEvent).data) as SseTurn));
-  stream.addEventListener('queue', (e) =>
-    onQueue(JSON.parse((e as MessageEvent).data) as SseQueue),
-  );
-  stream.addEventListener('metadata', (e) => {
-    applyMetadata(JSON.parse((e as MessageEvent).data) as AcpMetadata);
-  });
+  topic.on('block', (d) => onBlock(d as ChatBlock));
+  topic.on('delta', (d) => onDelta(d as SseDelta));
+  topic.on('tool', (d) => onTool(d as SseTool));
+  topic.on('turn', (d) => onTurn(d as SseTurn));
+  topic.on('queue', (d) => onQueue(d as SseQueue));
+  topic.on('metadata', (d) => applyMetadata(d as AcpMetadata));
   // Fetch only after the server installed the subscription, closing the
   // snapshot-to-stream gap without the former duplicate journal request. A
   // reconnect reconciles the newest page while retaining explicitly loaded
-  // older pages.
-  stream.addEventListener('open', () => {
+  // older pages. `onOpen` also fires when the shared stream reconnects for an
+  // unrelated topic, which is exactly when a gap could have opened here.
+  topic.onOpen(() => {
     if (snapshotFallbackTimer) clearTimeout(snapshotFallbackTimer);
     snapshotFallbackTimer = null;
     load({ preserve: state.value === 'ready' });
   });
-  // A provider handoff cleanly closes the old task's broadcast. Browsers do not
-  // consistently reconnect an EventSource after a clean EOF, so explicitly
-  // replace it and refetch the durable snapshot before tailing the new task.
-  stream.onerror = () => {
-    if (source !== stream) return;
-    stream.close();
-    source = null;
-    if (reconnectTimer) return;
-    reconnectTimer = setTimeout(() => {
-      reconnectTimer = null;
-      if (!source) openStream();
-    }, 100);
-  };
 }
 function closeStream() {
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-  reconnectTimer = null;
   if (snapshotFallbackTimer) clearTimeout(snapshotFallbackTimer);
   snapshotFallbackTimer = null;
   source?.close();
@@ -393,7 +370,7 @@ watch(
     // A handoff replaces the task and its broadcast channel without replacing
     // loom's stable session id. Rebind deterministically when the header reloads
     // the new provider; clean SSE EOF is not reported consistently by browsers.
-    rebindStream();
+    source?.refresh();
   },
 );
 

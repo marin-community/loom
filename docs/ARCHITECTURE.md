@@ -290,6 +290,7 @@ route truth, including internal proxy and compatibility paths.
 | `GET /api/ready` | public structured readiness: database access plus core and loom migration versions; optional future remote runner degradation will be reported without failing the whole API |
 | `GET /metrics` | public OpenMetrics scrape derived from durable session/profile/run/migration state; labels are bounded operational dimensions and never contain session/branch/path/user/token/error values (deployments normally restrict this at the public edge) |
 | `GET /api/diagnostics` | admin-only redacted counts, profile capacity, automation failures/staleness, orphan/error inventory, migration state, and non-secret federation metadata; backs Settings → Diagnostics |
+| `GET /api/events?topics=…` | every live stream the caller names, multiplexed onto one SSE connection — the browser holds 6 per origin, so the SPA subscribes here rather than opening one EventSource per view. Topics are `layout`, `logs`, `session:{id}`, `chat:{id}`; each frame is the default `message` event carrying `{topic, event, data}`, where `event` is the name the single-stream route below uses. Every topic is authorized against the route it stands in for, so this widens no credential; an unresolvable topic reports one `error` frame on its own topic and leaves the rest streaming |
 | `POST /api/session-launches/resolve` | resolve a canonical profile selection plus one-launch overrides into concrete selectors, provenance, policy, capacity, validation, and profile/resolver revisions without provisioning |
 | `GET /api/sessions` / `POST /api/sessions` | list / create sessions (list takes `archived` — default `false` — `automation` — default `false` — and admin-only `managed` — default `false`; canonical create requires both revisions from resolve and returns 409 plus a fresh preview on drift/admission change; flattened selectors remain compatible; valid Scratch input is decoded before provisioning; visible creates atomically assign configured origin/profile placement and a same-id default channel while managed warm infrastructure has no placement or layout revision effect; create stamps `resolved_launch`; `tracking_issue` is present only for an explicit claimed/imported work item) |
 | `GET POST /api/channels`; `GET DELETE /api/channels/{id}` | list/create communication contexts, inspect one, or archive a custom channel; session channels follow their session lifecycle |
@@ -502,10 +503,13 @@ Details → Advanced, not as the primary file or work surface.
   runtime supervisors, git, gh, and agent adapters) go through
   `tokio::process::Command`. The `weaver` CLI remains synchronous-feeling while
   delegating its reads and writes to `weaver-api` over HTTP.
-- **Events:** state changes flow through `EventBus`; the SSE handler in
-  `web.rs` fans them out. `weaver hook` posts to the branch events route; Loom
+- **Events:** state changes flow through `EventBus`; the SSE handlers in
+  `web.rs` fan them out. `weaver hook` posts to the branch events route; Loom
   writes the row, and the monitor tick promotes it into session status and a
-  fresh `EventBus` notification.
+  fresh `EventBus` notification. Browsers cap HTTP/1.1 at 6 connections per
+  origin and an EventSource holds one for its whole life, so the SPA subscribes
+  to `GET /api/events` and receives every topic over that single connection;
+  the per-stream routes remain the single-stream API for other clients.
 - **No tracking-branch state in the server:** loom can be killed and restarted
   at any time. Terminal *and* relay supervisors and worktrees survive (the
   supervisor is a detached process, independent of `loom server run`); "orphaned"

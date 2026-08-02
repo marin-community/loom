@@ -17,6 +17,7 @@ mod conversation;
 mod custom_agents;
 mod diagnostics;
 mod env;
+mod eventmux;
 mod ide;
 mod logs;
 mod mcp_conformance;

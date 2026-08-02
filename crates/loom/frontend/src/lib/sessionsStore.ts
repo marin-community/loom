@@ -1,5 +1,6 @@
 import { computed, ref } from 'vue';
 import { getSessionLayout, listRuns, listSessionSummaries } from '../api';
+import { openTopic, type TopicHandle } from './eventStream';
 import type { AutomationRun, SessionLayout, SessionSummary } from '../types';
 
 // One shared snapshot of the fleet. The session list, the status bar, and the
@@ -119,15 +120,15 @@ function focusSession(id: string): void {
 // caller is authenticated and stopped on sign-out. Guarded so a double-call
 // (HMR, a re-mount) can't leave two intervals running.
 let timer: number | undefined;
-let layoutEvents: EventSource | undefined;
+let layoutEvents: TopicHandle | undefined;
 const POLL_MS = 3000;
 
 function startFleetPoll(): void {
   if (timer !== undefined) return;
   refreshActive();
   timer = window.setInterval(refreshActive, POLL_MS);
-  layoutEvents = new EventSource('/api/session-layout/events');
-  layoutEvents.addEventListener('session_layout', () => void refreshActive());
+  layoutEvents = openTopic('layout');
+  layoutEvents.on('session_layout', () => void refreshActive());
 }
 
 function stopFleetPoll(): void {

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
 import * as api from '../api';
+import { openTopic, type TopicHandle } from '../lib/eventStream';
 import type { Diagnostics, LogLine, ServerStatus, TaskRecord } from '../types';
 
 // Live server logs, straight from the process's tracing output — the same lines
@@ -65,7 +66,7 @@ const shortTime = (ts: string): string => {
 
 // --- Live stream -----------------------------------------------------------
 const live = ref(true);
-let source: EventSource | null = null;
+let source: TopicHandle | null = null;
 
 function push(line: LogLine) {
   lines.value.push(line);
@@ -77,15 +78,10 @@ function push(line: LogLine) {
 
 function openStream() {
   closeStream();
-  source = new EventSource('/api/logs/stream');
-  source.addEventListener('log', (e) => {
-    try {
-      push(JSON.parse((e as MessageEvent).data) as LogLine);
-    } catch {
-      /* ignore a malformed frame */
-    }
-  });
-  // EventSource auto-reconnects on transient errors; nothing to do here.
+  source = openTopic('logs');
+  // The shared stream owns reconnection; a dropped tail resumes from the ring
+  // buffer's newest lines, so no snapshot is refetched here.
+  source.on('log', (data) => push(data as LogLine));
 }
 
 function closeStream() {
