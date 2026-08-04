@@ -184,6 +184,44 @@ impl SlackWeb {
         self.call(method, body, &token).await
     }
 
+    /// GET `method` with query parameters and the bot token. Slack documents
+    /// both JSON and form encodings for conversation reads, but
+    /// `conversations.replies` currently ignores a JSON POST body and reports
+    /// its required fields as missing. Query parameters work consistently for
+    /// both history endpoints.
+    async fn get_bot(&self, method: &str, query: &[(&str, &str)]) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}/{method}", self.base))
+            .bearer_auth(&self.bot_token)
+            .query(query)
+            .send()
+            .await
+            .with_context(|| format!("slack {method}: request failed"))?;
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("1");
+            return Err(anyhow!(
+                "slack {method}: rate limited (retry after {retry}s)"
+            ));
+        }
+        let value: Value = resp
+            .json()
+            .await
+            .with_context(|| format!("slack {method}: decoding response failed"))?;
+        if value.get("ok").and_then(Value::as_bool) != Some(true) {
+            let err = value
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            return Err(anyhow!("slack {method}: {err}"));
+        }
+        Ok(value)
+    }
+
     /// Resolve our own identity — the bot user id (to skip our own events) and
     /// the workspace `team_id` (the authorization boundary).
     pub async fn auth_test(&self) -> Result<AuthTest> {
@@ -241,16 +279,26 @@ impl SlackWeb {
     /// order). Best-effort: a `not_in_channel` (the bot was never invited)
     /// surfaces as the error so the caller can tell the user.
     pub async fn conversations_replies(&self, channel: &str, ts: &str) -> Result<Vec<HistMsg>> {
-        let body = json!({ "channel": channel, "ts": ts, "limit": HISTORY_CAP });
-        let v = self.call_bot("conversations.replies", body).await?;
+        let limit = HISTORY_CAP.to_string();
+        let v = self
+            .get_bot(
+                "conversations.replies",
+                &[("channel", channel), ("ts", ts), ("limit", &limit)],
+            )
+            .await?;
         Ok(parse_history(&v))
     }
 
     /// The channel's recent top-level messages. Slack returns newest-first, so
     /// the result is reversed to chronological order.
     pub async fn conversations_history(&self, channel: &str) -> Result<Vec<HistMsg>> {
-        let body = json!({ "channel": channel, "limit": HISTORY_CAP });
-        let v = self.call_bot("conversations.history", body).await?;
+        let limit = HISTORY_CAP.to_string();
+        let v = self
+            .get_bot(
+                "conversations.history",
+                &[("channel", channel), ("limit", &limit)],
+            )
+            .await?;
         let mut msgs = parse_history(&v);
         msgs.reverse();
         Ok(msgs)
@@ -399,14 +447,19 @@ pub fn trigger_from_slash(payload: &Value) -> Option<Trigger> {
 /// Build a [`Trigger`] from an `events_api` payload, for `app_mention` only.
 /// Returns `None` for other event types and for the bot's own mentions (a
 /// self-trigger guard). `bot_user_id` is our own user id from `auth.test`.
+///
+/// Slack may attach a `bot_id` to messages posted through another app's user
+/// token while preserving the human user's id. Those messages still pass the
+/// configured allowed-user check in [`handle_trigger`]; rejecting every
+/// `bot_id` here would silently discard an explicitly authorized identity.
 pub fn trigger_from_event(payload: &Value, bot_user_id: &str) -> Option<Trigger> {
     let event = &payload["event"];
     if event["type"].as_str() != Some("app_mention") {
         return None;
     }
     let user_id = event["user"].as_str()?.to_string();
-    // Skip our own posts and any bot message — never trigger on ourselves.
-    if user_id == bot_user_id || event.get("bot_id").is_some() {
+    // Skip our own posts — never trigger on ourselves.
+    if user_id == bot_user_id {
         return None;
     }
     let team_id = payload["team_id"].as_str().unwrap_or_default().to_string();
@@ -934,17 +987,32 @@ async fn launch(
     Ok(())
 }
 
+#[derive(Debug, PartialEq)]
+enum HistoryTarget<'a> {
+    Channel,
+    Thread(&'a str),
+}
+
+fn history_target(trigger: &Trigger) -> HistoryTarget<'_> {
+    match &trigger.anchor {
+        Anchor::Mention { root_ts, event_ts } if root_ts != event_ts => {
+            HistoryTarget::Thread(root_ts)
+        }
+        Anchor::Mention { .. } | Anchor::Slash => HistoryTarget::Channel,
+    }
+}
+
 /// Pull the conversation context to seed the session — the thread's replies for
-/// a mention, or the channel's recent messages for a slash command (which has no
-/// thread of its own). Best-effort: a `not_in_channel` becomes a note in the
-/// seed rather than a hard failure.
+/// a mention inside an existing thread, or the channel's recent messages for a
+/// top-level mention or slash command. Best-effort: a `not_in_channel` becomes a
+/// note in the seed rather than a hard failure.
 async fn pull_history(web: &SlackWeb, trigger: &Trigger) -> String {
-    let result = match &trigger.anchor {
-        Anchor::Mention { root_ts, .. } => {
+    let result = match history_target(trigger) {
+        HistoryTarget::Thread(root_ts) => {
             web.conversations_replies(&trigger.channel_id, root_ts)
                 .await
         }
-        Anchor::Slash => web.conversations_history(&trigger.channel_id).await,
+        HistoryTarget::Channel => web.conversations_history(&trigger.channel_id).await,
     };
     match result {
         Ok(msgs) => msgs
@@ -980,8 +1048,8 @@ fn slack_goal(repo: &str, trigger: &Trigger, instruction: &str, history: &str) -
          ## Conversation context\n{history}\n\n\
          ## How to respond\n\
          - Do the work on this branch and open a pull request against the default branch when it's ready.\n\
-         - Your `weaver status` messages are mirrored onto the Slack thread (loom edits its \"On it\" message into a live status trail), so progress reporting is automatic — write status messages for that audience.\n\
-         - Reply on the thread only when you need a person — a question, a design to review, the finished result — by POSTing to `$WEAVER_API/api/branches/$WEAVER_BRANCH/slack/reply` with `{{\"text\": \"…\"}}` and your `LOOM_TOKEN`.",
+         - Your `weaver status` messages and the built-in `status_update` MCP tool are mirrored onto the Slack thread (loom edits its \"On it\" message into a live status trail), so progress reporting is automatic — write status messages for that audience.\n\
+         - Reply on the thread only when you need a person — a question, a design to review, or the finished result. Prefer the built-in `slack_reply` MCP tool; if it is unavailable, POST to `$WEAVER_API/api/branches/$WEAVER_BRANCH/slack/reply` with `{{\"text\": \"…\"}}` and your `LOOM_TOKEN`.",
         channel = trigger.channel_id,
         user = trigger.user_id,
     )
@@ -1169,6 +1237,13 @@ mod tests {
         let mut own = payload.clone();
         own["event"]["user"] = json!("BOT");
         assert!(trigger_from_event(&own, "BOT").is_none());
+
+        // An allowed human posting through another app's user token retains
+        // their user id but also carries a bot_id. Authorization happens after
+        // parsing, so this must remain eligible for the allowed-user check.
+        let mut app_post = payload;
+        app_post["event"]["bot_id"] = json!("OTHER_APP");
+        assert!(trigger_from_event(&app_post, "BOT").is_some());
     }
 
     #[test]
@@ -1189,6 +1264,50 @@ mod tests {
                 event_ts: "5.5".into()
             }
         );
+        assert_eq!(history_target(&t), HistoryTarget::Channel);
+    }
+
+    #[test]
+    fn threaded_mention_reads_its_thread() {
+        let trigger = Trigger {
+            team_id: "T1".into(),
+            channel_id: "C1".into(),
+            user_id: "U1".into(),
+            text: "look above".into(),
+            anchor: Anchor::Mention {
+                root_ts: "4.4".into(),
+                event_ts: "5.5".into(),
+            },
+            dedupe_id: "slack:Ev3".into(),
+        };
+
+        assert_eq!(history_target(&trigger), HistoryTarget::Thread("4.4"));
+    }
+
+    #[test]
+    fn slack_goal_prefers_fixed_thread_messaging_tools() {
+        let trigger = Trigger {
+            team_id: "T1".into(),
+            channel_id: "C1".into(),
+            user_id: "U1".into(),
+            text: "inspect the failure".into(),
+            anchor: Anchor::Mention {
+                root_ts: "1.0".into(),
+                event_ts: "1.1".into(),
+            },
+            dedupe_id: "slack:Ev1".into(),
+        };
+
+        let goal = slack_goal(
+            "marin-community/marin",
+            &trigger,
+            "inspect the failure",
+            "preceding context",
+        );
+
+        assert!(goal.contains("built-in `status_update` MCP tool"));
+        assert!(goal.contains("Prefer the built-in `slack_reply` MCP tool"));
+        assert!(goal.contains("/slack/reply"));
     }
 
     #[test]
