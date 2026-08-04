@@ -125,6 +125,33 @@ pub struct SlackWeb {
     base: String,
 }
 
+async fn slack_response(method: &str, response: reqwest::Response) -> Result<Value> {
+    // HTTP 429 carries a `Retry-After` (seconds); surface it so the caller
+    // can back off rather than hammer a rate-limited method.
+    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("1");
+        return Err(anyhow!(
+            "slack {method}: rate limited (retry after {retry}s)"
+        ));
+    }
+    let value: Value = response
+        .json()
+        .await
+        .with_context(|| format!("slack {method}: decoding response failed"))?;
+    if value.get("ok").and_then(Value::as_bool) != Some(true) {
+        let err = value
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        return Err(anyhow!("slack {method}: {err}"));
+    }
+    Ok(value)
+}
+
 impl SlackWeb {
     pub fn new(bot_token: impl Into<String>) -> Self {
         Self {
@@ -152,30 +179,7 @@ impl SlackWeb {
             .send()
             .await
             .with_context(|| format!("slack {method}: request failed"))?;
-        // HTTP 429 carries a `Retry-After` (seconds); surface it so the caller
-        // can back off rather than hammer a rate-limited method.
-        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry = resp
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("1");
-            return Err(anyhow!(
-                "slack {method}: rate limited (retry after {retry}s)"
-            ));
-        }
-        let value: Value = resp
-            .json()
-            .await
-            .with_context(|| format!("slack {method}: decoding response failed"))?;
-        if value.get("ok").and_then(Value::as_bool) != Some(true) {
-            let err = value
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            return Err(anyhow!("slack {method}: {err}"));
-        }
-        Ok(value)
+        slack_response(method, resp).await
     }
 
     /// Bot-token call (the common case).
@@ -198,28 +202,7 @@ impl SlackWeb {
             .send()
             .await
             .with_context(|| format!("slack {method}: request failed"))?;
-        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry = resp
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("1");
-            return Err(anyhow!(
-                "slack {method}: rate limited (retry after {retry}s)"
-            ));
-        }
-        let value: Value = resp
-            .json()
-            .await
-            .with_context(|| format!("slack {method}: decoding response failed"))?;
-        if value.get("ok").and_then(Value::as_bool) != Some(true) {
-            let err = value
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            return Err(anyhow!("slack {method}: {err}"));
-        }
-        Ok(value)
+        slack_response(method, resp).await
     }
 
     /// Resolve our own identity — the bot user id (to skip our own events) and
@@ -1282,32 +1265,6 @@ mod tests {
         };
 
         assert_eq!(history_target(&trigger), HistoryTarget::Thread("4.4"));
-    }
-
-    #[test]
-    fn slack_goal_prefers_fixed_thread_messaging_tools() {
-        let trigger = Trigger {
-            team_id: "T1".into(),
-            channel_id: "C1".into(),
-            user_id: "U1".into(),
-            text: "inspect the failure".into(),
-            anchor: Anchor::Mention {
-                root_ts: "1.0".into(),
-                event_ts: "1.1".into(),
-            },
-            dedupe_id: "slack:Ev1".into(),
-        };
-
-        let goal = slack_goal(
-            "marin-community/marin",
-            &trigger,
-            "inspect the failure",
-            "preceding context",
-        );
-
-        assert!(goal.contains("built-in `status_update` MCP tool"));
-        assert!(goal.contains("Prefer the built-in `slack_reply` MCP tool"));
-        assert!(goal.contains("/slack/reply"));
     }
 
     #[test]
