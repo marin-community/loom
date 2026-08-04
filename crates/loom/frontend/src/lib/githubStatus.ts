@@ -54,6 +54,23 @@ export function githubChecksChip(gh: GithubStatus): GithubChip | null {
   return chips[checks] ?? { key: checks, label: `CI ${checks}`, cls: 'text-muted' };
 }
 
+/** One unambiguous word for the fleet row. Terminal PR states override CI;
+ * otherwise the label describes CI only: OK passed, TESTING is running,
+ * FAILED needs work, and PENDING means GitHub has not reported checks yet. */
+export function githubCompactChip(gh: GithubStatus): GithubChip {
+  const state = githubStateChip(gh);
+  if (state.key !== 'OPEN') {
+    return { ...state, label: state.key };
+  }
+  const checks: Record<string, GithubChip> = {
+    passing: { key: 'OK', label: 'OK', cls: 'text-ok' },
+    pending: { key: 'TESTING', label: 'TESTING', cls: 'text-info' },
+    failing: { key: 'FAILED', label: 'FAILED', cls: 'text-block' },
+  };
+  const reported = gh.checks ? checks[gh.checks] : undefined;
+  return reported ?? { key: 'PENDING', label: 'PENDING', cls: 'text-faint' };
+}
+
 export function githubConflictChip(gh: GithubStatus): GithubChip | null {
   return gh.mergeable === 'CONFLICTING'
     ? { key: 'CONFLICTING', label: 'conflicts', cls: 'text-block' }

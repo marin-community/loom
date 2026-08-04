@@ -19,6 +19,13 @@ export function timeAgo(iso: string | null | undefined, now: number = Date.now()
   return `${Math.round(days / 30)}mo ago`;
 }
 
+// Tighter age for compact operational metadata, e.g. "now", "10m", "1h".
+// Keep this separate from timeAgo: prose/activity surfaces still benefit from
+// reading "10m ago", while a PR pill should spend as little width as possible.
+export function compactAge(iso: string | null | undefined, now: number = Date.now()): string {
+  return timeAgo(iso, now).replace('just now', 'now').replace(' ago', '');
+}
+
 /** Locale-formatted exact time for a relative timestamp's tooltip/a11y label.
  *  Invalid input is preserved rather than silently disappearing. */
 export function exactTime(iso: string): string {

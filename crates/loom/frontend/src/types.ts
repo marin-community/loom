@@ -116,6 +116,10 @@ export interface GithubStatus {
   /** 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN' | null. */
   mergeable: string | null;
   merged_at: string | null;
+  /** Current GitHub PR head and the update time associated with that head. The
+   * time stays fixed across metadata-only PR updates. */
+  head_sha: string | null;
+  head_updated_at: string | null;
   fetched_at: string;
 }
 

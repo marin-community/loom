@@ -95,6 +95,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "session-transitions",
         include_str!("../migrations/0017_session_transitions.sql"),
     ),
+    (
+        18,
+        "github-head-freshness",
+        include_str!("../migrations/0018_github_head_freshness.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -400,6 +405,13 @@ mod tests {
             assert!(
                 inbox_columns.iter().any(|column| column == expected),
                 "missing review inbox column {expected}"
+            );
+        }
+        let github_columns = table_columns(&db, "branch_github").await.unwrap();
+        for expected in ["head_sha", "head_updated_at"] {
+            assert!(
+                github_columns.iter().any(|column| column == expected),
+                "missing GitHub freshness column {expected}"
             );
         }
 
