@@ -26,8 +26,17 @@ async fn layout_http_session_view_conflict_and_cli_share_one_contract() {
     assert_eq!(created["placement"]["group_id"], "group-user-inbox");
 
     let seeded = ts.client.get("/api/session-layout").await.unwrap();
-    assert_eq!(seeded["spaces"].as_array().unwrap().len(), 3);
+    assert_eq!(seeded["spaces"].as_array().unwrap().len(), 4);
     assert_eq!(seeded["spaces"][0]["name"], "User");
+    let slack = seeded["spaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|space| space["id"] == "space-slack")
+        .unwrap();
+    assert_eq!(slack["name"], "Slack");
+    assert_eq!(slack["groups"][0]["id"], "group-slack-inbox");
+    assert_eq!(slack["groups"][0]["name"], "Inbox");
     let seeded_revision = seeded["revision"].as_i64().unwrap();
 
     let with_group = ts
