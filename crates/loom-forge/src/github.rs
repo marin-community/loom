@@ -860,7 +860,9 @@ pub async fn apply_snapshot(
         current.head_updated_at = previous.head_updated_at.clone().or(current.head_updated_at);
     }
     upsert_status(&state.db, &branch.id, &current).await?;
-    let changed = prev.as_ref().map(GithubStatus::signature) != Some(current.signature());
+    let changed = prev
+        .as_ref()
+        .is_none_or(|previous| current.meaningfully_differs_from(previous));
     if changed {
         events::record(
             &state.db,

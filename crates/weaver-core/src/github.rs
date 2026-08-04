@@ -39,24 +39,13 @@ impl GithubStatus {
     /// identity and the human-meaningful state. `mergeable` and timestamps are
     /// deliberately excluded: they flap (e.g. `UNKNOWN` ⇄ `MERGEABLE`) without
     /// telling the user anything.
-    pub fn signature(
-        &self,
-    ) -> (
-        i64,
-        String,
-        Option<String>,
-        Option<String>,
-        bool,
-        Option<String>,
-    ) {
-        (
-            self.pr_number,
-            self.pr_state.clone(),
-            self.review_decision.clone(),
-            self.checks.clone(),
-            self.is_draft,
-            self.head_sha.clone(),
-        )
+    pub fn meaningfully_differs_from(&self, other: &Self) -> bool {
+        self.pr_number != other.pr_number
+            || self.pr_state != other.pr_state
+            || self.review_decision != other.review_decision
+            || self.checks != other.checks
+            || self.is_draft != other.is_draft
+            || self.head_sha != other.head_sha
     }
 
     /// Payload for the `github` event the poller records when the snapshot
