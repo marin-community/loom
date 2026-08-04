@@ -172,6 +172,11 @@ test.describe("durable session workbench", () => {
                 checks: needsAction ? "failing" : "passing",
                 mergeable: needsAction ? "CONFLICTING" : "MERGEABLE",
                 merged_at: null,
+                head_sha: `head-${number}`,
+                head_updated_at: new Date(
+                  Date.now() -
+                    (needsAction ? 2 * 60 * 60 * 1000 : 10 * 60 * 1000),
+                ).toISOString(),
                 fetched_at: new Date().toISOString(),
               },
             },
@@ -190,6 +195,8 @@ test.describe("durable session workbench", () => {
       "href",
       "https://github.com/marin-community/loom/pull/238",
     );
+    await expect(rows.nth(0).getByTestId("github-compact")).toContainText("OK");
+    await expect(rows.nth(0).getByTestId("github-head-age")).toHaveText("10m");
     await expect(rows.nth(2).getByTestId("github-compact")).toHaveCount(0);
     await expect(page.locator("html")).toHaveClass(/dark/);
     await expect(page.locator('[data-cursor="true"]')).toHaveCount(1);

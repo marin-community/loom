@@ -118,7 +118,7 @@ pub async fn create_pr(work_dir: &Path, base: &str, title: &str, body: &str) -> 
 // has no GitHub remote.
 // ---------------------------------------------------------------------------
 
-const POLL_TICK: Duration = Duration::from_secs(30);
+const POLL_TICK: Duration = Duration::from_secs(5 * 60);
 
 /// Branch tag marking that loom has back-linked this branch's PR to its session
 /// (posted the `…/s/{id}` comment). Set by the poll loop's back-link poster or,
@@ -437,8 +437,7 @@ pub async fn record_status_comment(
 
 /// The fields requested from `gh pr view --json`. Kept in one place so the parse
 /// struct and the query can't drift.
-const PR_FIELDS: &str =
-    "number,url,state,title,isDraft,reviewDecision,mergeable,mergedAt,statusCheckRollup";
+const PR_FIELDS: &str = "number,url,state,title,isDraft,reviewDecision,mergeable,mergedAt,statusCheckRollup,headRefOid,updatedAt";
 
 /// The shape of one `gh pr view --json` record. Internal — callers see
 /// [`GithubStatus`].
@@ -456,6 +455,10 @@ struct PrJson {
     mergeable: Option<String>,
     #[serde(rename = "mergedAt", default)]
     merged_at: Option<String>,
+    #[serde(rename = "headRefOid", default)]
+    head_ref_oid: Option<String>,
+    #[serde(rename = "updatedAt", default)]
+    updated_at: Option<String>,
     #[serde(rename = "statusCheckRollup", default)]
     status_check_rollup: Option<Vec<CheckJson>>,
 }
@@ -486,6 +489,11 @@ impl PrJson {
             checks: rollup_checks(self.status_check_rollup.as_deref().unwrap_or(&[])),
             mergeable: nonempty(self.mergeable),
             merged_at: nonempty(self.merged_at),
+            head_sha: nonempty(self.head_ref_oid),
+            // GitHub's PR `updatedAt` is only the initial estimate. Once a
+            // snapshot exists, `apply_snapshot` holds this timestamp steady
+            // until `headRefOid` changes, excluding comments/labels/reviews.
+            head_updated_at: nonempty(self.updated_at),
             fetched_at: now_iso(),
         }
     }
@@ -662,7 +670,7 @@ pub async fn fetch_open_pr(
 pub async fn get_status(db: &Db, branch_id: &str) -> Result<Option<GithubStatus>> {
     let row = sqlx::query_as::<_, GithubStatus>(
         "SELECT pr_number, pr_url, pr_state, pr_title, is_draft, review_decision,
-                checks, mergeable, merged_at, fetched_at
+                checks, mergeable, merged_at, head_sha, head_updated_at, fetched_at
          FROM branch_github WHERE branch_id = ?",
     )
     .bind(branch_id)
@@ -743,14 +751,17 @@ pub async fn upsert_status(db: &Db, branch_id: &str, s: &GithubStatus) -> Result
     sqlx::query(
         "INSERT INTO branch_github
            (branch_id, pr_number, pr_url, pr_state, pr_title, is_draft,
-            review_decision, checks, mergeable, merged_at, fetched_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            review_decision, checks, mergeable, merged_at, head_sha,
+            head_updated_at, fetched_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(branch_id) DO UPDATE SET
            pr_number = excluded.pr_number, pr_url = excluded.pr_url,
            pr_state = excluded.pr_state, pr_title = excluded.pr_title,
            is_draft = excluded.is_draft, review_decision = excluded.review_decision,
            checks = excluded.checks, mergeable = excluded.mergeable,
-           merged_at = excluded.merged_at, fetched_at = excluded.fetched_at",
+           merged_at = excluded.merged_at, head_sha = excluded.head_sha,
+           head_updated_at = excluded.head_updated_at,
+           fetched_at = excluded.fetched_at",
     )
     .bind(branch_id)
     .bind(s.pr_number)
@@ -762,6 +773,8 @@ pub async fn upsert_status(db: &Db, branch_id: &str, s: &GithubStatus) -> Result
     .bind(&s.checks)
     .bind(&s.mergeable)
     .bind(&s.merged_at)
+    .bind(&s.head_sha)
+    .bind(&s.head_updated_at)
     .bind(&s.fetched_at)
     .execute(db)
     .await?;
@@ -838,15 +851,23 @@ pub async fn apply_snapshot(
     archive_on_merge: bool,
 ) -> Result<()> {
     let prev = get_status(&state.db, &branch.id).await?;
-    upsert_status(&state.db, &branch.id, snap).await?;
-    let changed = prev.as_ref().map(GithubStatus::signature) != Some(snap.signature());
+    let mut current = snap.clone();
+    if let Some(previous) = prev.as_ref().filter(|previous| {
+        previous.pr_number == current.pr_number
+            && previous.head_sha.is_some()
+            && previous.head_sha == current.head_sha
+    }) {
+        current.head_updated_at = previous.head_updated_at.clone().or(current.head_updated_at);
+    }
+    upsert_status(&state.db, &branch.id, &current).await?;
+    let changed = prev.as_ref().map(GithubStatus::signature) != Some(current.signature());
     if changed {
         events::record(
             &state.db,
             &state.bus,
             &branch.id,
             "github",
-            snap.event_data(),
+            current.event_data(),
         )
         .await
         .ok();
@@ -862,27 +883,27 @@ pub async fn apply_snapshot(
     let prev_state = prev.as_ref().map(|p| p.pr_state.as_str());
     for (fire, kind, data) in [
         (
-            pr_just_opened(prev_state, snap),
+            pr_just_opened(prev_state, &current),
             "pr_opened",
             json!({ "pr": snap.pr_number }),
         ),
         (
-            pr_just_merged(prev_state, snap),
+            pr_just_merged(prev_state, &current),
             "pr_merged",
             json!({ "pr": snap.pr_number }),
         ),
         (
-            checks_went_red(prev_checks, snap),
+            checks_went_red(prev_checks, &current),
             "pr_red",
             json!({ "pr": snap.pr_number, "checks": "failing" }),
         ),
         (
-            checks_went_green(prev_checks, snap),
+            checks_went_green(prev_checks, &current),
             "pr_green",
             json!({ "pr": snap.pr_number, "checks": "passing" }),
         ),
         (
-            review_decision_changed(prev.as_ref(), snap),
+            review_decision_changed(prev.as_ref(), &current),
             "pr_review",
             json!({ "pr": snap.pr_number, "decision": snap.review_decision }),
         ),
@@ -898,17 +919,17 @@ pub async fn apply_snapshot(
     // first sees the PR open, so someone reading the GitHub thread can jump to the
     // live session. Gated on the open *transition* (not every poll while OPEN): a
     // repo where loom can't comment then fails once, rather than re-posting — and
-    // logging a failure — on every 30s poll. Skipped once the branch is tagged
+    // logging a failure — on every poll. Skipped once the branch is tagged
     // linked (here or by the `@loom` reply).
-    if pr_just_opened(prev_state, snap) {
-        maybe_post_backlink(state, session, branch, snap).await;
+    if pr_just_opened(prev_state, &current) {
+        maybe_post_backlink(state, session, branch, &current).await;
     }
 
     let recovered = tags::get(&state.db, &branch.id, tags::RECOVERED_KEY)
         .await?
         .is_some_and(|tag| tag.value == tags::RECOVERED_VALUE);
     if archive_on_merge
-        && snap.pr_state == "MERGED"
+        && current.pr_state == "MERGED"
         && !session_mod::is_terminal(&session.status)
         && !recovered
     {
@@ -920,10 +941,10 @@ pub async fn apply_snapshot(
         // archive records a `status` event, so no extra log line is needed.
         match crate::lifecycle::auto_archive(state, session, branch).await {
             Ok(Some(_)) => {
-                close_claimed_issues(state, branch, snap.pr_number, &claimed).await;
+                close_claimed_issues(state, branch, current.pr_number, &claimed).await;
                 tracing::info!(
                     branch = %branch.branch,
-                    pr = snap.pr_number,
+                    pr = current.pr_number,
                     "archived session after PR merge"
                 );
             }
@@ -1120,6 +1141,11 @@ mod tests {
     }
 
     #[test]
+    fn background_poll_is_five_minutes() {
+        assert_eq!(POLL_TICK, Duration::from_secs(5 * 60));
+    }
+
+    #[test]
     fn slug_from_managed_clone_root() {
         // A managed clone lives at `<repos_dir>/owner/name`.
         let root = crate::repo::repos_dir().join("acme").join("widgets");
@@ -1248,7 +1274,8 @@ mod tests {
         let json = r#"{
             "number": 7, "url": "https://x/pr/7", "state": "OPEN", "title": "T",
             "isDraft": false, "reviewDecision": "", "mergeable": "MERGEABLE",
-            "mergedAt": null, "statusCheckRollup": []
+            "mergedAt": null, "headRefOid": "abc123", "updatedAt": "2026-08-03T21:42:17Z",
+            "statusCheckRollup": []
         }"#;
         let status = serde_json::from_str::<PrJson>(json).unwrap().into_status();
         assert_eq!(status.pr_number, 7);
@@ -1259,6 +1286,11 @@ mod tests {
         // Empty rollup means "no checks", not "passing".
         assert_eq!(status.checks, None);
         assert_eq!(status.mergeable.as_deref(), Some("MERGEABLE"));
+        assert_eq!(status.head_sha.as_deref(), Some("abc123"));
+        assert_eq!(
+            status.head_updated_at.as_deref(),
+            Some("2026-08-03T21:42:17Z")
+        );
     }
 
     // ---- apply_snapshot: storage + archive-on-merge --------------------------
@@ -1290,6 +1322,8 @@ mod tests {
             checks: Some("passing".to_string()),
             mergeable: Some("MERGEABLE".to_string()),
             merged_at: (state == "MERGED").then(now_iso),
+            head_sha: Some("head-one".to_string()),
+            head_updated_at: Some("2026-08-03T21:42:17Z".to_string()),
             fetched_at: now_iso(),
         }
     }
@@ -1388,6 +1422,11 @@ mod tests {
         assert_eq!(stored.pr_number, 5);
         assert_eq!(stored.pr_state, "OPEN");
         assert_eq!(stored.checks.as_deref(), Some("passing"));
+        assert_eq!(stored.head_sha.as_deref(), Some("head-one"));
+        assert_eq!(
+            stored.head_updated_at.as_deref(),
+            Some("2026-08-03T21:42:17Z")
+        );
         // …and an open PR leaves the live session (and its worktree) alone.
         let session = session_mod::get(&f.state.db, &f.session.id)
             .await
@@ -1395,6 +1434,45 @@ mod tests {
             .unwrap();
         assert_eq!(session.status, "running");
         assert!(f.work_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn head_freshness_changes_only_with_the_head_sha() {
+        let f = fixture().await;
+        let first = snapshot("OPEN");
+        apply_snapshot(&f.state, &f.session, &f.branch, &first, false)
+            .await
+            .unwrap();
+
+        let mut metadata_only = first.clone();
+        metadata_only.head_updated_at = Some("2026-08-04T10:00:00Z".to_string());
+        apply_snapshot(&f.state, &f.session, &f.branch, &metadata_only, false)
+            .await
+            .unwrap();
+        let stored = get_status(&f.state.db, &f.branch.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.head_updated_at.as_deref(),
+            Some("2026-08-03T21:42:17Z"),
+            "unrelated PR metadata must not make the head look fresh"
+        );
+
+        let mut pushed = metadata_only;
+        pushed.head_sha = Some("head-two".to_string());
+        apply_snapshot(&f.state, &f.session, &f.branch, &pushed, false)
+            .await
+            .unwrap();
+        let stored = get_status(&f.state.db, &f.branch.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.head_sha.as_deref(), Some("head-two"));
+        assert_eq!(
+            stored.head_updated_at.as_deref(),
+            Some("2026-08-04T10:00:00Z")
+        );
     }
 
     #[tokio::test]

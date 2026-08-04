@@ -3,11 +3,13 @@ import { computed } from 'vue';
 import type { GithubStatus } from '../types';
 import {
   githubChecksChip,
+  githubCompactChip,
   githubConflictChip,
   githubReviewChip,
   githubStateChip,
   type GithubChip,
 } from '../lib/githubStatus';
+import { compactAge, exactTime } from '../lib/time';
 
 // A branch's GitHub pull-request snapshot, fetched server-side via `gh`. Tints
 // are text-color only (never a loud fill) and use GitHub's own familiar hue
@@ -23,6 +25,26 @@ const reviewChip = computed(() => githubReviewChip(props.gh));
 const checksChip = computed(() => githubChecksChip(props.gh));
 // Only surface mergeability when it's a problem — a clean PR needn't say so.
 const conflicting = computed(() => githubConflictChip(props.gh));
+const compactChip = computed(() => githubCompactChip(props.gh));
+const headAge = computed(() => compactAge(props.gh.head_updated_at));
+const headAgeClass = computed(() => {
+  if (!props.gh.head_updated_at) return 'text-faint';
+  const ageMs = Date.now() - Date.parse(props.gh.head_updated_at);
+  if (!Number.isFinite(ageMs) || ageMs >= 24 * 60 * 60 * 1000) return 'text-faint';
+  return ageMs < 60 * 60 * 1000 ? 'text-ok' : 'text-muted';
+});
+const compactDescription = computed(() => {
+  const descriptions: Record<string, string> = {
+    OK: 'CI passed',
+    TESTING: 'CI is running',
+    FAILED: 'CI failed',
+    PENDING: 'CI has not reported checks',
+    DRAFT: 'draft pull request',
+    MERGED: 'merged pull request',
+    CLOSED: 'closed pull request',
+  };
+  return descriptions[compactChip.value.key] ?? compactChip.value.label;
+});
 </script>
 
 <template>
@@ -40,10 +62,24 @@ const conflicting = computed(() => githubConflictChip(props.gh));
       @click.stop
       >PR #{{ gh.pr_number }}</a
     >
-    <span :class="stateChip.cls" class="font-mono uppercase tracking-wide">{{
-      stateChip.label
-    }}</span>
-    <span v-if="checksChip" :class="checksChip.cls" class="font-mono" title="CI checks">●</span>
+    <span
+      :class="compactChip.cls"
+      class="font-mono uppercase tracking-wide"
+      :title="compactDescription"
+    >
+      {{ compactChip.label }}
+    </span>
+    <time
+      v-if="gh.head_updated_at"
+      :datetime="gh.head_updated_at"
+      :title="`PR head updated ${exactTime(gh.head_updated_at)}`"
+      :aria-label="`PR head updated ${exactTime(gh.head_updated_at)}`"
+      :class="headAgeClass"
+      class="font-mono"
+      data-testid="github-head-age"
+    >
+      {{ headAge }}
+    </time>
   </span>
 
   <!-- Full: a labelled block for the session overview. -->
@@ -66,6 +102,14 @@ const conflicting = computed(() => githubConflictChip(props.gh));
       >
         {{ (chip as GithubChip).label }}
       </span>
+      <time
+        v-if="gh.head_updated_at"
+        :datetime="gh.head_updated_at"
+        :title="exactTime(gh.head_updated_at)"
+        class="rounded bg-subtle px-1.5 py-0.5 font-mono text-[0.7rem] text-muted"
+      >
+        updated {{ headAge }}
+      </time>
       <span
         v-if="conflicting"
         :class="conflicting.cls"

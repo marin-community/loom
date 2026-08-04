@@ -3,7 +3,7 @@
   "scripts": {
     "build": "rspack build --mode production",
     "dev": "rspack serve --mode development",
-    "test:unit": "node --no-warnings --experimental-strip-types --test src/lib/reviewDraftController.test.mjs",
+    "test:unit": "node --no-warnings --experimental-strip-types --test src/lib/*.test.mjs",
     "typecheck": "vue-tsc --noEmit",
     "format": "prettier --write src",
     "format:check": "prettier --check src"

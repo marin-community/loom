@@ -232,12 +232,14 @@ loom config set server.auto_adopt true
 ## GitHub
 
 With the `gh` CLI installed and authenticated, loom tracks each active session's
-pull request. A background loop polls `gh pr view` for the branch every 30s and
-surfaces the result on the dashboard: a link straight to the PR, its state
-(open / draft / merged / closed), the review decision (approved / changes
-requested / review required), and a rolled-up CI verdict (checks passing /
-failing / pending). Session **Details** keeps the associations and a **Refresh**
-button available without occupying the workbench header.
+pull request. A background loop polls `gh pr view` for the branch every five
+minutes, with an immediate refresh available from Session **Details**, and
+surfaces the result on the dashboard: a link straight to the PR, its head-update
+age, its state (open / draft / merged / closed), the review decision (approved /
+changes requested / review required), and a rolled-up CI verdict. Compact rows
+render CI as `OK` / `TESTING` / `FAILED` / `PENDING`; Session **Details** keeps
+the associations and an immediate **Refresh** button available without occupying
+the workbench header.
 
 Every session detail has a **Conversation** tab that renders the agent's chat
 with the model — user turns, replies, thinking, and tool calls — live and

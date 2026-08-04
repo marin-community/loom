@@ -426,9 +426,9 @@ canonical space/group placement.
 
 `BranchView::github` is the branch's latest GitHub pull-request snapshot
 (`pr_number`, `pr_url`, `pr_state`, `pr_title`, `is_draft`, `review_decision`,
-`checks`, `mergeable`, `merged_at`, `fetched_at`), or `null` when GitHub polling
-is off, there is no PR, or `gh` is unavailable. See [GitHub
-integration](#github-integration).
+`checks`, `mergeable`, `merged_at`, `head_sha`, `head_updated_at`, `fetched_at`),
+or `null` when GitHub polling is off, there is no PR, or `gh` is unavailable.
+See [GitHub integration](#github-integration).
 
 Status is two orthogonal axes. The session's `status` is the **lifecycle**
 (orchestrator-owned, mechanical): `created` / `running` / `orphaned` / `done` /
@@ -727,14 +727,16 @@ manual Archive deliberately ignores it. The `automation.*` settings live in
 When the `gh` CLI is installed and authenticated, loom keeps a per-branch
 pull-request snapshot alongside the session. A second background loop
 (`github::poll`, sibling of the monitor, spawned in `server::serve`) ticks every
-30s and, for each active session, runs `gh pr list --head <branch> …` from the
-repo root. `<branch>` is the worktree's live HEAD (falling back to loom's stored
+five minutes and, for each active session, runs
+`gh pr list --head <branch> …` from the repo root. `<branch>` is the worktree's live
+HEAD (falling back to loom's stored
 branch identity when the worktree cannot be read), so an agent that switches or
 renames its branch before opening a PR is still discovered. The result — PR
 number, URL, state (`OPEN`/`CLOSED`/`MERGED`), draft
 flag, `reviewDecision`, a rolled-up `checks` verdict (`passing`/`failing`/
-`pending`), and mergeability — is written to the loom-owned `branch_github`
-table (one row per branch, keyed `branch_id`) and served as `BranchView.github`.
+`pending`), head SHA/update age, and mergeability — is written to the loom-owned
+`branch_github` table (one row per branch, keyed `branch_id`) and served as
+`BranchView.github`.
 The dashboard renders it on the session list and session header; `POST
 /api/sessions/{id}/github` forces an immediate re-poll.
 

@@ -985,6 +985,8 @@ fn pr_snapshot(state: &str, number: i64) -> weaver_core::github::GithubStatus {
         checks: Some("passing".to_string()),
         mergeable: None,
         merged_at: (state == "MERGED").then(db::now_iso),
+        head_sha: Some(format!("head-{number}")),
+        head_updated_at: Some(db::now_iso()),
         fetched_at: db::now_iso(),
     }
 }
