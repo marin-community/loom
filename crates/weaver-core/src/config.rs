@@ -202,6 +202,19 @@ pub const REGISTRY: &[SettingSpec] = &[
         options: &[],
     },
     SettingSpec {
+        key: "slack.idle_archive_secs",
+        label: "Slack idle archive (seconds)",
+        description: "Archive a Slack-origin session after this many seconds \
+            without session activity. The agent, worktree, and terminal are \
+            removed while the branch, conversation, and history remain \
+            recoverable. A live ACP turn is never interrupted. Set 0 to \
+            disable; an individual session can opt out with auto-archive.",
+        kind: SettingKind::Int,
+        default: "86400",
+        group: "Slack",
+        options: &[],
+    },
+    SettingSpec {
         key: "auth.trust_loopback",
         label: "Trust loopback requests",
         description: "When enabled, requests from 127.0.0.1/::1 are trusted as \
@@ -506,6 +519,10 @@ pub const DEFAULT_AUTOMATION_TURN_CAP: i64 = 100;
 /// session (8 hours). 0 disables the TTL trigger; a closed tracking issue
 /// still archives the session.
 pub const DEFAULT_AUTOMATION_IDLE_ARCHIVE_SECS: i64 = 28800;
+
+/// Idle TTL after which the retention reaper archives a Slack-origin session
+/// (24 hours). 0 disables the TTL trigger.
+pub const DEFAULT_SLACK_IDLE_ARCHIVE_SECS: i64 = 86400;
 
 /// Look up the [`SettingSpec`] for a key, if it is a registered setting.
 pub fn spec(key: &str) -> Option<&'static SettingSpec> {

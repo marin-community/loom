@@ -219,6 +219,8 @@ Attention, All, and History are projections over it. Successful automation is
 placed as an ordinary session in Ops; an unmatched provisioning or failed run
 is projected as an Intervention in Attention/Ops without inventing a browser-
 local session. Hidden warm infrastructure has no placement.
+GitHub and Slack triggers have their own origin-default Inbox spaces; delegated
+sessions inherit their parent's placement.
 
 ### Database ownership and the PostgreSQL seam
 
@@ -721,6 +723,12 @@ from under it. Every automatic retention path skips a branch carrying the exact
 quiet tag `auto-archive: disabled`; the session Details popover toggles it, while a
 manual Archive deliberately ignores it. The `automation.*` settings live in
 `weaver-core::config::registry()` under the **Automation** group.
+
+Slack-origin sessions remain interactive but share the retention reaper's
+lifecycle safeguards. `slack.idle_archive_secs` defaults to `86400` seconds;
+the reaper uses the same durable `last_activity_at`, no-live-ACP-turn guard,
+grace period, and per-session `auto-archive: disabled` opt-out before archiving
+a Slack conversation.
 
 ## GitHub integration
 

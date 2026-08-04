@@ -154,8 +154,23 @@ Do not create standalone Slack-token secrets that the deployment never reads.
 
 `slack.enabled` (default on) closes the socket without discarding the tokens
 — use it to pause the integration without losing configuration. It, along
-with `slack.allowed_users` and `slack.default_repo`, lives in **Settings →
-Slack**.
+with `slack.allowed_users`, `slack.default_repo`, and
+`slack.idle_archive_secs`, lives in **Settings → Slack**.
+
+## Placement and retention
+
+Slack-origin sessions are placed in **Slack → Inbox**. Sessions created before
+this space existed move there only when they are still in the fallback
+**User → Inbox**; an operator's manual placement is preserved.
+
+The retention monitor archives a Slack-origin session after
+`slack.idle_archive_secs` without session activity (default `86400`, one day).
+Activity includes agent output and user prompts through Loom, so an active
+conversation keeps extending the deadline. A live ACP turn is never
+interrupted. Archiving removes the agent, terminal, and worktree while keeping
+the branch, conversation, artifacts, and history recoverable. Set the value to
+`0` to disable Slack retention globally, or disable auto-archive on one session
+from its actions menu.
 
 ## The reply route
 

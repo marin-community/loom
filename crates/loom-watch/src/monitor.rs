@@ -185,30 +185,34 @@ pub async fn run(state: AppState) {
         screen_hash.retain(|k, _| alive.contains(k));
         stale_seen.retain(|k| alive.contains(k));
 
-        // 3. Retention: reap finished / long-idle automation sessions, on a
-        //    slower cadence than the tick.
+        // 3. Retention: reap finished / long-idle automation sessions and
+        //    inactive Slack conversations, on a slower cadence than the tick.
         reap_tick += 1;
         if reap_tick >= REAP_EVERY_TICKS {
             reap_tick = 0;
-            reap_automation(&state, &sessions, now).await;
+            let slack_idle_archive_secs = core_config::get(&state.db, "slack.idle_archive_secs")
+                .await
+                .and_then(|value| value.trim().parse::<i64>().ok())
+                .unwrap_or(core_config::DEFAULT_SLACK_IDLE_ARCHIVE_SECS);
+            reap_sessions(&state, &sessions, slack_idle_archive_secs, now).await;
         }
     }
 }
 
-/// Why the reaper archives an automation session — [`reap_decision`]'s verdict.
+/// Why the retention reaper archives a session — [`reap_decision`]'s verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReapReason {
-    /// The tracking issue the session was launched for has been closed.
+    /// The tracking issue an automation session was launched for has closed.
     IssueClosed,
-    /// The session sat idle past `automation.idle_archive_secs`.
+    /// The session sat idle past its origin's configured TTL.
     IdleTtl,
 }
 
-/// Whether the reaper may consider `session` at all: automation-class, not a
-/// warm (watch-managed) session — those are exempt infrastructure — and in a
-/// non-terminal status.
+/// Whether the reaper may consider `session` at all: automation-class or
+/// Slack-origin, not a warm (watch-managed) session — those are exempt
+/// infrastructure — and in a non-terminal status.
 fn reap_candidate(session: &Session) -> bool {
-    session.class == "automation"
+    (session.class == "automation" || session.origin == "slack")
         && session.managed_by.is_none()
         && matches!(session.status.as_str(), "created" | "running" | "orphaned")
 }
@@ -233,7 +237,7 @@ fn reap_decision(
     if idle < REAP_GRACE_SECS {
         return None;
     }
-    if issue_closed {
+    if issue_closed && session.class == "automation" {
         return Some(ReapReason::IssueClosed);
     }
     if idle_archive_secs > 0 && idle >= idle_archive_secs {
@@ -242,27 +246,39 @@ fn reap_decision(
     None
 }
 
-/// One reaper pass: archive every automation session [`reap_decision`] convicts,
-/// via the shared archive path (worktree teardown + transcript capture + the
-/// `status` event that lands on SSE). Errors are logged, never fatal to a tick.
-async fn reap_automation(state: &AppState, sessions: &[Session], now: DateTime<Utc>) {
+/// One reaper pass: archive every session [`reap_decision`] convicts via the
+/// shared archive path (worktree teardown + transcript capture + the `status`
+/// event that lands on SSE). Errors are logged, never fatal to a tick.
+async fn reap_sessions(
+    state: &AppState,
+    sessions: &[Session],
+    slack_idle_archive_secs: i64,
+    now: DateTime<Utc>,
+) {
     for session in sessions {
-        // Only a candidate's tracking issue is worth a lookup.
         if !reap_candidate(session) {
             continue;
         }
-        let issue_closed = match session.tracking_issue_id {
-            Some(issue_id) => match weaver_core::issue::get(&state.db, issue_id).await {
-                Ok(issue) => issue.is_some_and(|i| i.status == "closed"),
-                Err(e) => {
-                    tracing::warn!(id = %session.id, issue = issue_id, error = %e,
-                        "reaper: tracking issue lookup failed");
-                    false
-                }
-            },
-            None => false,
+        let issue_closed = if session.class == "automation" {
+            match session.tracking_issue_id {
+                Some(issue_id) => match weaver_core::issue::get(&state.db, issue_id).await {
+                    Ok(issue) => issue.is_some_and(|i| i.status == "closed"),
+                    Err(e) => {
+                        tracing::warn!(id = %session.id, issue = issue_id, error = %e,
+                            "reaper: tracking issue lookup failed");
+                        false
+                    }
+                },
+                None => false,
+            }
+        } else {
+            false
         };
-        let ttl = session.policy_idle_archive_secs.unwrap_or(0);
+        let ttl = if session.origin == "slack" {
+            slack_idle_archive_secs
+        } else {
+            session.policy_idle_archive_secs.unwrap_or(0)
+        };
         let Some(reason) = reap_decision(session, issue_closed, ttl, now) else {
             continue;
         };
@@ -279,7 +295,7 @@ async fn reap_automation(state: &AppState, sessions: &[Session], now: DateTime<U
             }
         };
         tracing::info!(id = %session.id, branch = %branch.branch, ?reason,
-            "reaping automation session");
+            "reaping session");
         match crate::lifecycle::auto_archive(state, session, &branch).await {
             Ok(Some(_)) => {}
             Ok(None) => tracing::info!(
@@ -554,6 +570,18 @@ mod tests {
         );
         assert_eq!(reap_decision(&idle, false, 0, now), None);
 
+        // Slack conversations remain interactive sessions, but their
+        // origin-specific TTL makes them retention candidates. A closed issue
+        // is not a Slack retention signal.
+        let mut slack = idle.clone();
+        slack.class = "interactive".to_string();
+        slack.origin = "slack".to_string();
+        assert_eq!(
+            reap_decision(&slack, false, ttl, now),
+            Some(ReapReason::IdleTtl)
+        );
+        assert_eq!(reap_decision(&slack, true, 0, now), None);
+
         // Past the grace window but under the TTL: kept on the TTL axis, but a
         // closed tracking issue still reaps it.
         let mid = iso(now - Duration::seconds(REAP_GRACE_SECS + 60));
@@ -575,8 +603,8 @@ mod tests {
         inflight.acp_inflight = Some("{}".to_string());
         assert_eq!(reap_decision(&inflight, true, ttl, now), None);
 
-        // Not a candidate: interactive class, warm (watch-managed), or already
-        // in a terminal status.
+        // Not a candidate: an ordinary interactive session, warm
+        // (watch-managed), or already in a terminal status.
         let mut interactive = idle.clone();
         interactive.class = "interactive".to_string();
         assert_eq!(reap_decision(&interactive, true, ttl, now), None);

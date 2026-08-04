@@ -100,6 +100,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "github-head-freshness",
         include_str!("../migrations/0018_github_head_freshness.sql"),
     ),
+    (
+        19,
+        "slack-space",
+        include_str!("../migrations/0019_slack_space.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -361,7 +366,7 @@ mod tests {
                 .fetch_one(&db)
                 .await
                 .unwrap();
-        assert_eq!(spaces, 3);
+        assert_eq!(spaces, 4);
         assert_eq!(revision, 1);
 
         let columns = table_columns(&db, "sessions").await.unwrap();
@@ -529,7 +534,122 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v11_database_upgrades_to_layout_v12_deterministically_and_idempotently() {
+    async fn v17_database_adopts_manual_slack_space_without_overwriting_placements() {
+        let db = core_connect_in_memory().await.unwrap();
+        LOOM_STREAM.ensure_indicator(&db).await.unwrap();
+        for (version, name, migration) in LOOM_MIGRATIONS.iter().take(17) {
+            for statement in split_statements(migration) {
+                sqlx::query(&statement).execute(&db).await.unwrap();
+            }
+            LOOM_STREAM.stamp(&db, *version, name).await.unwrap();
+        }
+
+        sqlx::query(
+            "INSERT INTO session_spaces
+             (id, name, rank, system_key, created_at, updated_at)
+             VALUES ('custom-slack', 'Slack', 3, NULL, '', '')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO session_groups
+             (id, space_id, name, rank, system_key, created_at, updated_at)
+             VALUES ('custom-slack-inbox', 'custom-slack', 'Inbox', 0, NULL, '', '')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO session_placement_defaults
+             (selector_kind, selector_value, group_id)
+             VALUES ('origin', 'slack', 'custom-slack-inbox')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        for id in ["fallback-slack", "manually-placed-slack"] {
+            insert_branch(&db, id).await;
+        }
+        sqlx::query(
+            "INSERT INTO sessions
+             (id, branch_id, work_dir, term_session, status, origin, class, created_at)
+             VALUES
+             ('fallback-slack', 'fallback-slack', '/fallback', 't-fallback',
+              'running', 'slack', 'interactive', ''),
+             ('manually-placed-slack', 'manually-placed-slack', '/manual', 't-manual',
+              'running', 'slack', 'interactive', '')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO session_placements (session_id, group_id, rank, updated_at)
+             VALUES
+             ('fallback-slack', 'group-user-inbox', 0, ''),
+             ('manually-placed-slack', 'group-github-inbox', 0, '')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        LOOM_STREAM.apply_pending(&db).await.unwrap();
+        LOOM_STREAM.apply_pending(&db).await.unwrap();
+
+        let adopted_space: (String, String) =
+            sqlx::query_as("SELECT id, system_key FROM session_spaces WHERE name = 'Slack'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            adopted_space,
+            ("custom-slack".to_string(), "slack".to_string())
+        );
+        let adopted_group: (String, String) = sqlx::query_as(
+            "SELECT id, system_key FROM session_groups
+             WHERE space_id = 'custom-slack' AND name = 'Inbox'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            adopted_group,
+            ("custom-slack-inbox".to_string(), "inbox".to_string())
+        );
+        let placement_default: String = sqlx::query_scalar(
+            "SELECT group_id FROM session_placement_defaults
+             WHERE selector_kind = 'origin' AND selector_value = 'slack'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(placement_default, "custom-slack-inbox");
+        let placements: Vec<(String, String)> = sqlx::query_as(
+            "SELECT session_id, group_id FROM session_placements
+             WHERE session_id IN ('fallback-slack', 'manually-placed-slack')
+             ORDER BY session_id",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            placements,
+            [
+                (
+                    "fallback-slack".to_string(),
+                    "custom-slack-inbox".to_string(),
+                ),
+                (
+                    "manually-placed-slack".to_string(),
+                    "group-github-inbox".to_string(),
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn v11_database_upgrades_layout_deterministically_and_idempotently() {
         let db = core_connect_in_memory().await.unwrap();
         LOOM_STREAM.ensure_indicator(&db).await.unwrap();
         for (version, name, migration) in LOOM_MIGRATIONS.iter().take(11) {
@@ -554,6 +674,7 @@ mod tests {
             "user",
             "github",
             "ops",
+            "slack",
             "parent",
             "child",
             "parked-child",
@@ -576,6 +697,8 @@ mod tests {
               'parked', NULL, '2026-01-01T00:00:01.000Z'),
              ('ops', 'ops', '/ops', 't-ops', 'running', 'actions', 'automation',
               'parked', NULL, '2026-01-01T00:00:02.000Z'),
+             ('slack', 'slack', '/slack', 't-slack', 'running', 'slack', 'interactive',
+              NULL, NULL, '2026-01-01T00:00:02.500Z'),
              ('parent', 'parent', '/parent', 't-parent', 'running', 'github', 'interactive',
               NULL, NULL, '2026-01-01T00:00:03.000Z'),
              ('child', 'child', '/child', 't-child', 'running', 'agent', 'interactive',
@@ -628,6 +751,7 @@ mod tests {
             ("user", "group-user-later"),
             ("github", "group-github-later"),
             ("ops", "group-ops-later"),
+            ("slack", "group-slack-inbox"),
             ("parent", "group-github-inbox"),
             ("child", "group-github-inbox"),
             ("parked-child", "group-github-later"),
@@ -644,7 +768,7 @@ mod tests {
             .fetch_one(&db)
             .await
             .unwrap();
-        assert_eq!(placed, 10);
+        assert_eq!(placed, 11);
         let inbox_order: Vec<String> = sqlx::query_scalar(
             "SELECT session_id FROM session_placements
              WHERE group_id = 'group-user-inbox' ORDER BY rank",
@@ -665,7 +789,7 @@ mod tests {
             .fetch_one(&db)
             .await
             .unwrap();
-        assert_eq!(defaults, 8);
+        assert_eq!(defaults, 9);
         let revision: i64 =
             sqlx::query_scalar("SELECT revision FROM session_layout_state WHERE id = 1")
                 .fetch_one(&db)

@@ -29,6 +29,8 @@ Successful automation is an ordinary session placed in the Ops space. A failed
 or incomplete run without a session appears as a typed **Intervention** in
 Attention and Ops, where the operator can inspect or clean it up. There is no
 separate Automations destination.
+GitHub and Slack triggers land in their respective Inbox spaces. Delegated
+sessions inherit their parent's placement.
 
 Search, moves, ordering, collapse preferences, and placement defaults all use
 the layout REST API. Selecting a row opens the session without changing its
