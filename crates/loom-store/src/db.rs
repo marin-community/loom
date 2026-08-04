@@ -324,6 +324,16 @@ mod tests {
         .unwrap();
     }
 
+    async fn migrate_through(db: &Db, count: usize) {
+        LOOM_STREAM.ensure_indicator(db).await.unwrap();
+        for (version, name, migration) in LOOM_MIGRATIONS.iter().take(count) {
+            for statement in split_statements(migration) {
+                sqlx::query(&statement).execute(db).await.unwrap();
+            }
+            LOOM_STREAM.stamp(db, *version, name).await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn fresh_schema_records_baseline_and_has_final_shape() {
         let db = connect_in_memory().await.unwrap();
@@ -434,13 +444,7 @@ mod tests {
     #[tokio::test]
     async fn v12_database_adds_the_review_inbox_while_upgrading_to_latest() {
         let db = core_connect_in_memory().await.unwrap();
-        LOOM_STREAM.ensure_indicator(&db).await.unwrap();
-        for (version, name, migration) in LOOM_MIGRATIONS.iter().take(12) {
-            for statement in split_statements(migration) {
-                sqlx::query(&statement).execute(&db).await.unwrap();
-            }
-            LOOM_STREAM.stamp(&db, *version, name).await.unwrap();
-        }
+        migrate_through(&db, 12).await;
         assert!(table_columns(&db, "review_conversation_inbox")
             .await
             .unwrap()
@@ -467,13 +471,7 @@ mod tests {
     #[tokio::test]
     async fn v14_database_backfills_same_id_session_channels() {
         let db = core_connect_in_memory().await.unwrap();
-        LOOM_STREAM.ensure_indicator(&db).await.unwrap();
-        for (version, name, migration) in LOOM_MIGRATIONS.iter().take(14) {
-            for statement in split_statements(migration) {
-                sqlx::query(&statement).execute(&db).await.unwrap();
-            }
-            LOOM_STREAM.stamp(&db, *version, name).await.unwrap();
-        }
+        migrate_through(&db, 14).await;
         insert_branch(&db, "channel-branch").await;
         sqlx::query(
             "UPDATE branches
@@ -536,13 +534,7 @@ mod tests {
     #[tokio::test]
     async fn v17_database_adopts_manual_slack_space_without_overwriting_placements() {
         let db = core_connect_in_memory().await.unwrap();
-        LOOM_STREAM.ensure_indicator(&db).await.unwrap();
-        for (version, name, migration) in LOOM_MIGRATIONS.iter().take(17) {
-            for statement in split_statements(migration) {
-                sqlx::query(&statement).execute(&db).await.unwrap();
-            }
-            LOOM_STREAM.stamp(&db, *version, name).await.unwrap();
-        }
+        migrate_through(&db, 17).await;
 
         sqlx::query(
             "INSERT INTO session_spaces
@@ -651,13 +643,7 @@ mod tests {
     #[tokio::test]
     async fn v11_database_upgrades_layout_deterministically_and_idempotently() {
         let db = core_connect_in_memory().await.unwrap();
-        LOOM_STREAM.ensure_indicator(&db).await.unwrap();
-        for (version, name, migration) in LOOM_MIGRATIONS.iter().take(11) {
-            for statement in split_statements(migration) {
-                sqlx::query(&statement).execute(&db).await.unwrap();
-            }
-            LOOM_STREAM.stamp(&db, *version, name).await.unwrap();
-        }
+        migrate_through(&db, 11).await;
         let recorded: Vec<(i64, String)> =
             sqlx::query_as("SELECT version, name FROM loom_schema_migrations ORDER BY version")
                 .fetch_all(&db)

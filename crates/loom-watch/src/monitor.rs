@@ -217,6 +217,13 @@ fn reap_candidate(session: &Session) -> bool {
         && matches!(session.status.as_str(), "created" | "running" | "orphaned")
 }
 
+fn retention_issue_id(session: &Session) -> Option<i64> {
+    if session.class != "automation" {
+        return None;
+    }
+    session.tracking_issue_id
+}
+
 /// The pure reaper verdict for one session. `issue_closed` is the pre-fetched
 /// status of the session's tracking issue (false when it has none), and
 /// `idle_archive_secs <= 0` disables the TTL trigger. Both triggers share a
@@ -237,7 +244,7 @@ fn reap_decision(
     if idle < REAP_GRACE_SECS {
         return None;
     }
-    if issue_closed && session.class == "automation" {
+    if issue_closed {
         return Some(ReapReason::IssueClosed);
     }
     if idle_archive_secs > 0 && idle >= idle_archive_secs {
@@ -259,20 +266,16 @@ async fn reap_sessions(
         if !reap_candidate(session) {
             continue;
         }
-        let issue_closed = if session.class == "automation" {
-            match session.tracking_issue_id {
-                Some(issue_id) => match weaver_core::issue::get(&state.db, issue_id).await {
-                    Ok(issue) => issue.is_some_and(|i| i.status == "closed"),
-                    Err(e) => {
-                        tracing::warn!(id = %session.id, issue = issue_id, error = %e,
-                            "reaper: tracking issue lookup failed");
-                        false
-                    }
-                },
-                None => false,
-            }
-        } else {
-            false
+        let issue_closed = match retention_issue_id(session) {
+            Some(issue_id) => match weaver_core::issue::get(&state.db, issue_id).await {
+                Ok(issue) => issue.is_some_and(|i| i.status == "closed"),
+                Err(e) => {
+                    tracing::warn!(id = %session.id, issue = issue_id, error = %e,
+                        "reaper: tracking issue lookup failed");
+                    false
+                }
+            },
+            None => false,
         };
         let ttl = if session.origin == "slack" {
             slack_idle_archive_secs
@@ -549,7 +552,7 @@ mod tests {
 
     #[test]
     fn reap_decision_triggers_and_guards() {
-        use super::{reap_decision, ReapReason, REAP_GRACE_SECS};
+        use super::{reap_decision, retention_issue_id, ReapReason, REAP_GRACE_SECS};
         let now = Utc::now();
         let iso = |t: chrono::DateTime<Utc>| t.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
         let long_ago = iso(now - Duration::hours(9));
@@ -580,7 +583,9 @@ mod tests {
             reap_decision(&slack, false, ttl, now),
             Some(ReapReason::IdleTtl)
         );
-        assert_eq!(reap_decision(&slack, true, 0, now), None);
+        slack.tracking_issue_id = Some(42);
+        assert_eq!(retention_issue_id(&slack), None);
+        assert_eq!(reap_decision(&slack, false, 0, now), None);
 
         // Past the grace window but under the TTL: kept on the TTL axis, but a
         // closed tracking issue still reaps it.
