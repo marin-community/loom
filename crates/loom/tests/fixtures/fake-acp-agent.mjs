@@ -22,6 +22,8 @@
 //   permission:NAME      a session/request_permission that BLOCKS the turn until the
 //                        client answers (exercises both auto-answer and REST-answer)
 //   resources            echo the names of supplied resource_link blocks
+//   poison               make this adapter reject this and every later prompt;
+//                        only a process restart clears the failure
 //
 // The turn ends with stop reason `end_turn`, or `cancelled` if a `session/cancel`
 // arrived (or a pending permission was answered `cancelled`) while it ran.
@@ -50,6 +52,7 @@ const summaryOutput =
     : Buffer.from(process.env.FAKE_ACP_SUMMARY_OUTPUT_B64, "base64").toString("utf8");
 let promptActive = false;
 let promptResources = [];
+let poisoned = false;
 const steeringQueue = [];
 let deferredSteering = null;
 const pending = new Map(); // our request id -> resolver awaiting the client's response
@@ -306,6 +309,18 @@ async function handlePrompt(id, params) {
     .map((b) => b.text || "")
     .join("")
     .split("\n\n")[0];
+  if (text === "poison") poisoned = true;
+  if (poisoned) {
+    promptActive = false;
+    if (id !== null) {
+      send({
+        jsonrpc: JSONRPC,
+        id,
+        error: { code: -32000, message: "fake adapter is poisoned" },
+      });
+    }
+    return;
+  }
   if (fixedOutput !== undefined) {
     if (fixedOutput.length > 0) {
       notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: fixedOutput } });

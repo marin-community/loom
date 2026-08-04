@@ -5,8 +5,8 @@
 //! * `/api/sessions` — list + create active sessions (each session is one
 //!   terminal + one agent attached to a branch).
 //! * `/api/sessions/{id}` — GET / PATCH / DELETE a single session, plus the
-//!   action subroutes `/archive`, `/adopt`, `/recover` (rebuild the worktree of
-//!   an archived session and resume its agent), `/tags` (PUT to atomically
+//!   action subroutes `/archive`, `/adopt`, `/recover` (rebuild an archived
+//!   session or restart a failed live ACP runtime), `/tags` (PUT to atomically
 //!   replace one author's tag set), `/tags/{key}` (PUT to set a tag, DELETE to
 //!   clear it), `/log`, `/events`, and `/terminal` (a WebSocket bridged to the
 //!   session's terminal via a PTY — see `crate::terminal`).

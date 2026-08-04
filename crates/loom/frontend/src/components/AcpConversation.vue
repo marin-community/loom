@@ -21,6 +21,7 @@ import {
   setSessionConfigOption,
   listSessionFiles,
   uploadSessionScratch,
+  recoverSession,
 } from '../api';
 import type {
   Session,
@@ -168,6 +169,9 @@ const errorMsg = ref('');
 const olderCursor = ref<{ turn: number; seq: number } | null>(null);
 const loadingOlder = ref(false);
 const olderError = ref('');
+const recovering = ref(false);
+const recoveryError = ref('');
+const recoveryNotice = ref('');
 
 let loadSeq = 0;
 async function load({ preserve = false }: { preserve?: boolean } = {}) {
@@ -249,6 +253,8 @@ function onBlock(b: ChatBlock) {
     const m = (b.payload as { mode_id?: string }).mode_id;
     if (m) currentMode.value = m;
   } else if (b.kind === 'user_message') {
+    recoveryError.value = '';
+    recoveryNotice.value = '';
     const text = (b.payload as unknown as UserMessagePayload).text ?? '';
     const i = optimistic.value.findIndex((o) => o.text === text);
     if (i >= 0) optimistic.value.splice(i, 1);
@@ -655,6 +661,26 @@ async function stopTurn() {
   }
 }
 
+async function recoverRuntime() {
+  if (recovering.value) return;
+  recovering.value = true;
+  recoveryError.value = '';
+  recoveryNotice.value = '';
+  try {
+    await recoverSession(id.value);
+    recoveryNotice.value = 'Recovered';
+    sendError.value = '';
+    // Recovery replaces the task and its broadcast channel behind the stable
+    // session id. Re-resolve that channel, then reconcile the durable journal.
+    source?.refresh();
+    await load({ preserve: true });
+  } catch (e) {
+    recoveryError.value = (e as Error).message ?? 'Failed to recover the session';
+  } finally {
+    recovering.value = false;
+  }
+}
+
 // ── Mode chip ────────────────────────────────────────────────────────────────
 // The well-known claude/codex ACP modes, used until the adapter advertises its
 // live mode catalogue through the conversation metadata.
@@ -820,6 +846,7 @@ type Row =
       stop: string;
       usage: AcpUsage | null;
       loud: boolean;
+      recoverable: boolean;
     }
   | {
       type: 'user';
@@ -1022,7 +1049,8 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
           turn: b.turn,
           stop,
           usage: currentUsage ? { ...currentUsage } : null,
-          loud: stop === 'refusal',
+          loud: stop === 'refusal' || stop === 'error',
+          recoverable: false,
         });
         break;
       }
@@ -1033,6 +1061,14 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
     }
   }
   flushActivity();
+
+  // Recovery is a session action, not a historical action on every failed
+  // turn. Offer it only beside the newest completed turn when that latest
+  // observed outcome is an error.
+  const latestTurnRule = [...rows].reverse().find((row) => row.type === 'turnRule');
+  if (latestTurnRule?.type === 'turnRule' && latestTurnRule.stop === 'error') {
+    latestTurnRule.recoverable = true;
+  }
 
   // Trailing live prose of the in-flight turn. A streaming thought renders open
   // (its tail visible); a streaming message renders as ordinary prose growing in
@@ -1335,8 +1371,9 @@ function goTo(anchor: string) {
               <div
                 v-if="row.type === 'turnRule'"
                 class="acp-turn-rule"
-                :class="{ loud: row.loud }"
+                :class="{ loud: row.loud, error: row.stop === 'error' }"
                 data-testid="acp-turn-rule"
+                :role="row.recoverable ? 'alert' : undefined"
               >
                 <span
                   >turn {{ row.turn + 1 }} · {{ row.stop
@@ -1345,6 +1382,24 @@ function goTo(anchor: string) {
                     {{ formatTokens(row.usage.size) }} context</template
                   ></span
                 >
+                <template v-if="row.recoverable">
+                  <span aria-hidden="true">·</span>
+                  <button
+                    type="button"
+                    class="acp-recover-action"
+                    data-testid="acp-recover"
+                    :disabled="recovering || !!recoveryNotice"
+                    @click="recoverRuntime"
+                  >
+                    {{ recovering ? 'Recovering…' : recoveryNotice || 'Recover' }}
+                  </button>
+                  <span
+                    v-if="recoveryError"
+                    class="acp-recover-error"
+                    data-testid="acp-recover-error"
+                    >{{ recoveryError }}</span
+                  >
+                </template>
               </div>
 
               <!-- YOU — the human turn. -->
@@ -2188,6 +2243,7 @@ function goTo(anchor: string) {
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: 0.35rem;
   margin: 1rem 0 0.25rem;
   max-width: 46rem;
   border-top: 1px dashed var(--line);
@@ -2200,6 +2256,36 @@ function goTo(anchor: string) {
 .acp-turn-rule.loud {
   color: var(--block);
   border-top-color: var(--block-line);
+}
+.acp-turn-rule.error > span:first-child {
+  border: 1px solid color-mix(in srgb, var(--block-line) 42%, transparent);
+  border-radius: 999px;
+  background: var(--block-soft);
+  padding: 0.15rem 0.45rem;
+  color: var(--block);
+  font-weight: 700;
+}
+.acp-recover-action {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 0.15rem;
+  cursor: pointer;
+}
+.acp-recover-action:hover:not(:disabled) {
+  color: color-mix(in srgb, var(--block) 72%, var(--fg));
+}
+.acp-recover-action:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+.acp-recover-error {
+  max-width: 24rem;
+  text-align: left;
 }
 .acp-turn-rule:first-child {
   margin-top: 0.25rem;

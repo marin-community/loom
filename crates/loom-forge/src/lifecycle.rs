@@ -1,4 +1,5 @@
-//! Session lifecycle operations — archive, adopt, and warm-session creation.
+//! Session lifecycle operations — archive, adopt, recovery, and warm-session
+//! creation.
 //!
 //! These are the state transitions a session goes through, factored out of the
 //! HTTP handlers that used to own them. The callers that drive a session are
@@ -967,6 +968,155 @@ pub async fn adopt_acp(
     .await
     .ok();
     tracing::info!(session = %session.id, branch = %branch.id, "acp session adopted");
+    Ok(())
+}
+
+async fn mark_failed_acp_recovery_orphaned(st: &AppState, session_id: &str, branch_id: &str) {
+    match session_mod::mark_orphaned(&st.db, session_id).await {
+        Ok(true) => {
+            events::record(
+                &st.db,
+                &st.bus,
+                branch_id,
+                "status",
+                json!({ "status": "orphaned", "reason": "session runtime recovery failed" }),
+            )
+            .await
+            .ok();
+        }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(
+                session = %session_id,
+                %error,
+                "failed ACP recovery could not mark the session orphaned"
+            );
+        }
+    }
+}
+
+/// Restart the provider behind a live ACP session without touching its worktree,
+/// branch, or canonical journal.
+///
+/// A provider can remain alive while every new `session/prompt` fails. Ordinary
+/// adoption cannot repair that state because both the Loom-side task and relay
+/// still exist. Recovery deliberately retires both, closes any abandoned turn,
+/// and lets [`adopt_acp`] reopen the provider session through `session/load`.
+pub async fn recover_acp_runtime(st: &AppState, session: &Session, _branch: &Branch) -> Result<()> {
+    let _source_permit = st.launch_gate.acquire_session(&session.id).await;
+    let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
+    let Some((current_session, _current_branch)) =
+        session_mod::with_branch(&st.db, &session.id).await?
+    else {
+        return Err(anyhow!("session not found"));
+    };
+    let session = &current_session;
+    require_no_transition(session)?;
+    if session.protocol != "acp" {
+        return Err(anyhow!(Refusal::Conflict(
+            "runtime recovery is available only for ACP sessions".to_string()
+        )));
+    }
+    if !matches!(session.status.as_str(), "running" | "orphaned") {
+        return Err(anyhow!(Refusal::Conflict(format!(
+            "session is '{}' — runtime recovery requires a live or orphaned ACP session",
+            session.status
+        ))));
+    }
+
+    let _profile_permit = st.launch_gate.acquire_profile(&session.profile).await;
+    let Some((current_session, current_branch)) =
+        session_mod::with_branch(&st.db, &session.id).await?
+    else {
+        return Err(anyhow!("session not found"));
+    };
+    let session = &current_session;
+    let branch = &current_branch;
+    require_no_transition(session)?;
+    if session.protocol != "acp" || !matches!(session.status.as_str(), "running" | "orphaned") {
+        return Err(anyhow!(Refusal::Conflict(
+            "session changed before runtime recovery could start".to_string()
+        )));
+    }
+    let profile = require_session_profile_lifetime(&st.db, session).await?;
+    require_resume_capacity(&st.db, session, &profile).await?;
+    require_branch_slot_free(st, session, branch).await?;
+    let custom_agent = stamped_custom_agent(session)?;
+
+    tracing::info!(
+        session = %session.id,
+        branch = %branch.id,
+        "recovering ACP runtime"
+    );
+
+    // Fence new route lookups before teardown. A task that was stuck inside its
+    // adapter may never observe the command channel closing, so the relay kill
+    // below remains the authoritative stop.
+    st.acp.stop(&session.id);
+    let latest = session_mod::get(&st.db, &session.id)
+        .await?
+        .ok_or_else(|| anyhow!("session not found"))?;
+    let abandoned_turn = session_mod::acp_inflight_turn(&latest);
+
+    if let Err(error) = backend::kill_session_and_wait(&session.term_session).await {
+        // A failed kill may leave the original provider usable. Restore its
+        // Loom-side driver with its original in-flight state rather than turn a
+        // recoverable provider into a guaranteed zombie.
+        if backend::has_session(&session.term_session).await {
+            if let Err(attach) = crate::acp::attach(&st.acp_ctx(), &session.id).await {
+                mark_failed_acp_recovery_orphaned(st, &session.id, &branch.id).await;
+                return Err(anyhow!(
+                    "ACP runtime teardown failed ({error}); the surviving provider could not be reattached ({attach})"
+                ));
+            }
+        } else {
+            let cleanup = async {
+                if let Some(turn) = abandoned_turn {
+                    crate::chat::close_abandoned_turn(&st.db, &session.id, turn).await?;
+                }
+                session_mod::set_inflight(&st.db, &session.id, None).await
+            }
+            .await;
+            mark_failed_acp_recovery_orphaned(st, &session.id, &branch.id).await;
+            if let Err(cleanup) = cleanup {
+                return Err(anyhow!(
+                    "ACP runtime teardown failed ({error}); abandoned-turn cleanup also failed ({cleanup})"
+                ));
+            }
+        }
+        return Err(anyhow!("ACP runtime teardown failed: {error}"));
+    }
+
+    let cleanup = async {
+        if let Some(turn) = abandoned_turn {
+            crate::chat::close_abandoned_turn(&st.db, &session.id, turn).await?;
+        }
+        session_mod::set_inflight(&st.db, &session.id, None).await
+    }
+    .await;
+    if let Err(error) = cleanup {
+        mark_failed_acp_recovery_orphaned(st, &session.id, &branch.id).await;
+        return Err(error.context("cleaning up the abandoned ACP turn during runtime recovery"));
+    }
+
+    if let Err(error) = adopt_acp(
+        st,
+        session,
+        branch,
+        "session runtime recovered",
+        custom_agent.as_ref(),
+    )
+    .await
+    {
+        mark_failed_acp_recovery_orphaned(st, &session.id, &branch.id).await;
+        return Err(error);
+    }
+
+    tracing::info!(
+        session = %session.id,
+        branch = %branch.id,
+        "ACP runtime recovered"
+    );
     Ok(())
 }
 
