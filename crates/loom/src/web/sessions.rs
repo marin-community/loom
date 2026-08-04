@@ -1453,7 +1453,7 @@ pub(super) async fn recover_session(
     if session.status == "archived" {
         recover(&st, &session, &branch).await?;
     } else {
-        crate::lifecycle::recover_acp_runtime(&st, &session, &branch).await?;
+        crate::lifecycle::recover_acp_runtime(&st, &session).await?;
     }
     let (session, branch) = require_session(&st.db, &session.id).await?;
     Ok(Json(session_view(&st.db, &session, &branch).await?))

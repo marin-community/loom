@@ -995,6 +995,17 @@ async fn mark_failed_acp_recovery_orphaned(st: &AppState, session_id: &str, bran
     }
 }
 
+async fn settle_abandoned_acp_turn(
+    st: &AppState,
+    session_id: &str,
+    abandoned_turn: Option<i64>,
+) -> Result<()> {
+    if let Some(turn) = abandoned_turn {
+        crate::chat::close_abandoned_turn(&st.db, session_id, turn).await?;
+    }
+    session_mod::set_inflight(&st.db, session_id, None).await
+}
+
 /// Restart the provider behind a live ACP session without touching its worktree,
 /// branch, or canonical journal.
 ///
@@ -1002,7 +1013,7 @@ async fn mark_failed_acp_recovery_orphaned(st: &AppState, session_id: &str, bran
 /// adoption cannot repair that state because both the Loom-side task and relay
 /// still exist. Recovery deliberately retires both, closes any abandoned turn,
 /// and lets [`adopt_acp`] reopen the provider session through `session/load`.
-pub async fn recover_acp_runtime(st: &AppState, session: &Session, _branch: &Branch) -> Result<()> {
+pub async fn recover_acp_runtime(st: &AppState, session: &Session) -> Result<()> {
     let _source_permit = st.launch_gate.acquire_session(&session.id).await;
     let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
     let Some((current_session, _current_branch)) =
@@ -1070,13 +1081,7 @@ pub async fn recover_acp_runtime(st: &AppState, session: &Session, _branch: &Bra
                 ));
             }
         } else {
-            let cleanup = async {
-                if let Some(turn) = abandoned_turn {
-                    crate::chat::close_abandoned_turn(&st.db, &session.id, turn).await?;
-                }
-                session_mod::set_inflight(&st.db, &session.id, None).await
-            }
-            .await;
+            let cleanup = settle_abandoned_acp_turn(st, &session.id, abandoned_turn).await;
             mark_failed_acp_recovery_orphaned(st, &session.id, &branch.id).await;
             if let Err(cleanup) = cleanup {
                 return Err(anyhow!(
@@ -1087,13 +1092,7 @@ pub async fn recover_acp_runtime(st: &AppState, session: &Session, _branch: &Bra
         return Err(anyhow!("ACP runtime teardown failed: {error}"));
     }
 
-    let cleanup = async {
-        if let Some(turn) = abandoned_turn {
-            crate::chat::close_abandoned_turn(&st.db, &session.id, turn).await?;
-        }
-        session_mod::set_inflight(&st.db, &session.id, None).await
-    }
-    .await;
+    let cleanup = settle_abandoned_acp_turn(st, &session.id, abandoned_turn).await;
     if let Err(error) = cleanup {
         mark_failed_acp_recovery_orphaned(st, &session.id, &branch.id).await;
         return Err(error.context("cleaning up the abandoned ACP turn during runtime recovery"));
