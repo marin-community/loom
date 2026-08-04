@@ -1626,6 +1626,17 @@ mod tests {
     async fn placement_defaults_route_ops_and_delegated_sessions_inherit() {
         let db = crate::db::connect_in_memory().await.unwrap();
 
+        let slack_branch = branch_id(&db, "weaver/slack-thread").await;
+        let mut slack = new_session("slack-thread", &slack_branch, None);
+        slack.origin = "slack".to_string();
+        insert(&db, &slack).await.unwrap();
+        let slack_placement = crate::session_layout::placement(&db, "slack-thread")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(slack_placement.space_name, "Slack");
+        assert_eq!(slack_placement.group_name, "Inbox");
+
         let watch_branch = branch_id(&db, "weaver/watch-result").await;
         let mut watch = new_session("watch-result", &watch_branch, None);
         watch.origin = "watch".to_string();
