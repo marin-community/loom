@@ -47,6 +47,12 @@ pub(crate) struct CapabilitySet {
 
 const ADAPTERS: &[Adapter] = &[github::ADAPTER, history::ADAPTER, messaging::ADAPTER];
 pub(crate) const ALLOWED_TOOLS_ENV: &str = "LOOM_MCP_ALLOWED_TOOLS";
+const BUILTIN_RUNTIME_ENV: [&str; 4] = [
+    "WEAVER_API",
+    "WEAVER_BRANCH",
+    "LOOM_TOKEN",
+    "LOOM_SESSION_ID",
+];
 
 #[derive(Debug, FromRow)]
 struct CustomMcpRow {
@@ -479,6 +485,7 @@ pub(crate) fn server_configs_for_snapshot(
 pub fn acp_server_configs(
     allowed_rules: &[String],
     snapshot: Option<&weaver_api::McpPolicySnapshot>,
+    runtime_env: &[(String, String)],
 ) -> Vec<Value> {
     let loom_command = std::env::current_exe()
         .ok()
@@ -491,7 +498,7 @@ pub fn acp_server_configs(
                 "loom" => loom_command.clone(),
                 command => command.to_string(),
             };
-            let env = config["env"]
+            let mut env = config["env"]
                 .as_object()
                 .map(|env| {
                     env.iter()
@@ -503,6 +510,15 @@ pub fn acp_server_configs(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            if ADAPTERS.iter().any(|adapter| adapter.server_name == name) {
+                for required in BUILTIN_RUNTIME_ENV {
+                    if let Some((_, value)) =
+                        runtime_env.iter().rev().find(|(key, _)| key == required)
+                    {
+                        env.push(serde_json::json!({ "name": required, "value": value }));
+                    }
+                }
+            }
             serde_json::json!({
                 "name": name,
                 "command": command,

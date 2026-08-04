@@ -963,7 +963,6 @@ pub async fn build_acp_launch(
         .context("invalid session runtime-permission snapshot")?;
     let mcp_snapshot: weaver_api::McpPolicySnapshot =
         serde_json::from_str(spec.mcp_access).context("invalid session MCP policy snapshot")?;
-    let mcp_servers = crate::mcp::acp_server_configs(&allowed_tools, Some(&mcp_snapshot));
     if is_codex && goal_text.is_none() {
         // No appendSystemPrompt analogue: a primer-only launch seeds the primer
         // positionally, mirroring the terminal path's
@@ -1005,6 +1004,7 @@ pub async fn build_acp_launch(
         configure_codex_acp(&mut env, spec.model, spec.effort, &codex_mode)?;
         push_env_default(&mut env, "INITIAL_AGENT_MODE", &codex_mode);
     }
+    let mcp_servers = crate::mcp::acp_server_configs(&allowed_tools, Some(&mcp_snapshot), &env);
 
     let (new_or_load, goal) = match open {
         AcpOpen::Fresh => (
@@ -2637,6 +2637,7 @@ mod tests {
         let extra_env = vec![
             ("GH_TOKEN".to_string(), "server-only".to_string()),
             ("ANTHROPIC_API_KEY".to_string(), "model-key".to_string()),
+            ("LOOM_TOKEN".to_string(), "session-token".to_string()),
         ];
         let launch = build_acp_launch(
             &db,
@@ -2692,10 +2693,28 @@ mod tests {
         );
         assert_eq!(
             launch.mcp_servers[0]["env"],
-            json!([{
-                "name": "LOOM_MCP_ALLOWED_TOOLS",
-                "value": "[\"issue_edit\"]"
-            }])
+            json!([
+                {
+                    "name": "LOOM_MCP_ALLOWED_TOOLS",
+                    "value": "[\"issue_edit\"]"
+                },
+                {
+                    "name": "WEAVER_API",
+                    "value": "http://127.0.0.1:7878"
+                },
+                {
+                    "name": "WEAVER_BRANCH",
+                    "value": "branch-1"
+                },
+                {
+                    "name": "LOOM_TOKEN",
+                    "value": "session-token"
+                },
+                {
+                    "name": "LOOM_SESSION_ID",
+                    "value": "session-1"
+                }
+            ])
         );
     }
 }

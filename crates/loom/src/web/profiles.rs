@@ -106,7 +106,7 @@ async fn effective(st: &AppState, item: Profile) -> ApiResult<EffectiveProfileVi
         .map_err(|error| AppError::bad_request(error.to_string()))?;
     let runtime_permissions = profile::effective_allowed_tool_rules_for(&item, &mcp_policy)
         .map_err(|error| AppError::bad_request(error.to_string()))?;
-    let mcp_servers = crate::mcp::acp_server_configs(&runtime_permissions, Some(&mcp_policy))
+    let mcp_servers = crate::mcp::acp_server_configs(&runtime_permissions, Some(&mcp_policy), &[])
         .into_iter()
         .map(|config| McpServerProcessView {
             name: config["name"].as_str().unwrap_or_default().to_string(),
