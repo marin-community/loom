@@ -562,7 +562,7 @@ enum SessionCmd {
     Archive { session: String },
     /// Recreate the terminal session for an orphaned session.
     Adopt { session: String },
-    /// Recover an archived session: rebuild its worktree and resume the agent.
+    /// Recover a session: restart a failed ACP runtime, or rebuild an archive.
     Recover { session: String },
     /// Replace the provider behind a live ACP session, preserving its worktree
     /// and canonical conversation journal.

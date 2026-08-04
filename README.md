@@ -229,6 +229,23 @@ automatically on startup (off by default):
 loom config set server.auto_adopt true
 ```
 
+## Recovery
+
+An ACP provider can stay connected but become unusable, with one failed turn
+followed by every new message ending in `error`. The Conversation view renders
+the latest error in red and offers **Recover** beside it. Recovery restarts only
+that session's provider runtime and reloads its provider conversation; the
+worktree, branch, durable journal, and session URL stay in place.
+
+The same action is available outside the browser:
+
+```sh
+loom session recover <branch>
+```
+
+For an archived session, this command retains its existing meaning: rebuild the
+kept branch's worktree and resume the agent.
+
 ## GitHub
 
 With the `gh` CLI installed and authenticated, loom tracks each active session's

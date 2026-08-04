@@ -546,6 +546,9 @@ export const sendMessage = (id: string, text: string, submit = true) =>
  * loom session, worktree, branch, and canonical conversation journal. */
 export const handoffSession = (id: string, body: import('./types').HandoffInput) =>
   post(`/sessions/${id}/handoff`, body) as Promise<Session>;
+/** Recover a session: restart a failed live ACP runtime while preserving its
+ * worktree/journal, or rebuild and resume an archived session. */
+export const recoverSession = (id: string) => post(`/sessions/${id}/recover`) as Promise<Session>;
 /** Resolve a profile-first handoff against an existing session's class and
  * capacity slot before sending its optimistic revisions. */
 export const resolveSessionHandoff = (id: string, selection: LaunchSelection) =>

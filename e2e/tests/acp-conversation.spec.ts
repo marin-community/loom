@@ -629,6 +629,48 @@ test.describe('acp conversation', () => {
     });
   });
 
+  test('makes a failed turn obvious and recovers a poisoned session in place', async ({
+    page,
+    weaver,
+  }) => {
+    await openAcp(page, weaver, {
+      goal: 'say:ready',
+      name: 'acp-recover-error',
+    });
+    const input = page.getByTestId('acp-composer-input');
+
+    let expectedErrors = 0;
+    for (const prompt of ['poison', 'say:never reached']) {
+      await input.fill(prompt);
+      await page.getByTestId('acp-composer-send').click();
+      expectedErrors += 1;
+      await expect(page.getByTestId('acp-turn-rule').filter({ hasText: 'error' })).toHaveCount(
+        expectedErrors,
+        { timeout: 15_000 },
+      );
+    }
+
+    const errorRule = page.getByTestId('acp-turn-rule').last();
+    await expect(errorRule).toHaveClass(/loud/);
+    await expect(errorRule).toHaveClass(/error/);
+    await expect(errorRule).toHaveAttribute('role', 'alert');
+    await expect(page.getByTestId('acp-recover')).toHaveCount(1);
+    await expect(page.getByTestId('acp-recover')).toHaveText('Recover');
+
+    await page.getByTestId('acp-recover').click();
+    await expect(page.getByTestId('acp-recover')).toHaveText('Recovered', {
+      timeout: 15_000,
+    });
+
+    await input.fill('say:healthy again');
+    await page.getByTestId('acp-composer-send').click();
+    await expect(page.getByText('healthy again', { exact: true })).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByTestId('acp-turn-rule').last()).toContainText('end_turn');
+    await expect(page.getByTestId('acp-recover')).toBeHidden();
+  });
+
   test('force steer is offered only when the agent advertises it', async ({ page, weaver }) => {
     await openAcp(page, weaver, {
       goal: 'say:ready',

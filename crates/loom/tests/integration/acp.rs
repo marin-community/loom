@@ -2260,6 +2260,91 @@ async fn rest_create_drives_the_turn_lifecycle() {
     assert_eq!(nudges, 1, "the send recorded exactly one nudge audit event");
 }
 
+/// A provider can remain connected while rejecting every prompt. Recovery must
+/// replace that poisoned adapter, load the same provider session, and continue
+/// the durable journal without rebuilding the worktree.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recover_restarts_a_poisoned_live_acp_runtime() {
+    let ts = TestServer::start().await;
+    seed_acp_agent(&ts, "fake-recover").await;
+
+    let created = rest_create(&ts, "fake-recover", "say:ready").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let work_dir = created["work_dir"].as_str().unwrap().to_string();
+    poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
+        blocks.iter().any(|block| block["kind"] == "turn_end")
+    })
+    .await;
+    let before = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    let acp_session_id = before["acp_session_id"].as_str().unwrap().to_string();
+
+    for (prompt, error_count) in [("poison", 1), ("say:never reached", 2)] {
+        ts.client
+            .post(
+                &format!("/api/sessions/{id}/prompt"),
+                json!({ "text": prompt }),
+            )
+            .await
+            .expect("the live task accepts the prompt");
+        poll_chat(&ts, &id, Duration::from_secs(10), |blocks| {
+            blocks
+                .iter()
+                .filter(|block| {
+                    block["kind"] == "turn_end" && block["payload"]["stop_reason"] == "error"
+                })
+                .count()
+                >= error_count
+        })
+        .await;
+    }
+    assert!(
+        ts.state.acp.is_live(&id),
+        "prompt errors leave the poisoned ACP task registered"
+    );
+
+    let recovered = ts
+        .client
+        .post(&format!("/api/sessions/{id}/recover"), json!({}))
+        .await
+        .expect("runtime recovery succeeds");
+    assert_eq!(recovered["status"], "running");
+    assert_eq!(recovered["work_dir"], work_dir);
+    assert_eq!(
+        recovered["acp_session_id"], acp_session_id,
+        "recovery reloads the same provider conversation"
+    );
+    assert!(Path::new(&work_dir).exists(), "the worktree is untouched");
+    assert!(
+        ts.state.acp.is_live(&id),
+        "the replacement ACP task is registered"
+    );
+
+    ts.client
+        .post(
+            &format!("/api/sessions/{id}/prompt"),
+            json!({ "text": "say:healthy again" }),
+        )
+        .await
+        .expect("the replacement accepts a prompt");
+    let chat = poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
+        blocks.iter().any(|block| {
+            block["kind"] == "agent_message" && block["payload"]["text"] == "healthy again"
+        })
+    })
+    .await;
+    assert_eq!(
+        chat["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|block| block["kind"] == "turn_end")
+            .count(),
+        4,
+        "recovery continues the existing journal"
+    );
+}
+
 /// REST keeps failure semantics for non-browser callers, while returning the
 /// durable failed session id so the UI can navigate to its recovery controls.
 #[serial]
