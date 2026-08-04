@@ -67,9 +67,8 @@ export function githubCompactChip(gh: GithubStatus): GithubChip {
     pending: { key: 'TESTING', label: 'TESTING', cls: 'text-info' },
     failing: { key: 'FAILED', label: 'FAILED', cls: 'text-block' },
   };
-  return gh.checks
-    ? (checks[gh.checks] ?? { key: 'PENDING', label: 'PENDING', cls: 'text-faint' })
-    : { key: 'PENDING', label: 'PENDING', cls: 'text-faint' };
+  const reported = gh.checks ? checks[gh.checks] : undefined;
+  return reported ?? { key: 'PENDING', label: 'PENDING', cls: 'text-faint' };
 }
 
 export function githubConflictChip(gh: GithubStatus): GithubChip | null {

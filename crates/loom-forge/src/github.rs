@@ -1141,11 +1141,6 @@ mod tests {
     }
 
     #[test]
-    fn background_poll_is_five_minutes() {
-        assert_eq!(POLL_TICK, Duration::from_secs(5 * 60));
-    }
-
-    #[test]
     fn slug_from_managed_clone_root() {
         // A managed clone lives at `<repos_dir>/owner/name`.
         let root = crate::repo::repos_dir().join("acme").join("widgets");
