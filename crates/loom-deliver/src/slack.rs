@@ -987,7 +987,10 @@ async fn handle_trigger(state: AppState, web: SlackWeb, bot: AuthTest, trigger: 
     };
 
     match launch(&state, &web, &bot, &trigger, &repo, &instruction).await {
-        Ok(()) => update_health(|h| h.sessions_launched += 1),
+        Ok(Outcome::Launched) => update_health(|h| h.sessions_launched += 1),
+        // An ack on a thread that already has a session is not a launch, and
+        // counting it as one would overstate what the trigger path did.
+        Ok(Outcome::AlreadyRunning) => {}
         Err(e) => {
             tracing::warn!(error = %e, repo = %repo, "slack: launch failed");
             record_skip(&format!("launch failed: {e}"));
@@ -1015,6 +1018,15 @@ async fn notify(web: &SlackWeb, trigger: &Trigger, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// What an authorized trigger did.
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    Launched,
+    /// The thread already had a live session, so the trigger was acknowledged
+    /// rather than acted on.
+    AlreadyRunning,
+}
+
 /// The launch body: seed context, reuse-or-create the session, wire it, and post
 /// the card. Serialized on [`CREATE_LOCK`].
 async fn launch(
@@ -1024,7 +1036,7 @@ async fn launch(
     trigger: &Trigger,
     repo: &str,
     instruction: &str,
-) -> Result<()> {
+) -> Result<Outcome> {
     let _guard = CREATE_LOCK.lock().await;
 
     // Establish the thread root. A slash command is thread-blind, so we post the
@@ -1074,7 +1086,7 @@ async fn launch(
                     .await
                     .ok();
             }
-            return Ok(());
+            return Ok(Outcome::AlreadyRunning);
         }
     }
 
@@ -1147,7 +1159,7 @@ async fn launch(
     tracing::info!(session = %created.session.id, repo = %repo, channel = %trigger.channel_id, "slack: launched session");
     drop(_guard);
     sync_status_message(state.clone(), created.branch.id.clone()).await;
-    Ok(())
+    Ok(Outcome::Launched)
 }
 
 #[derive(Debug, PartialEq)]
