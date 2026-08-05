@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::json;
 use weaver_api::{BranchStatusReq, BranchView, CreateEventReq, TagReq};
 use weaver_core::branch::{TitleProvenance, TitleUpdate};
-use weaver_core::{branch as branch_mod, tags};
+use weaver_core::{branch as branch_mod, config, tags};
 
 use crate::{events, session as session_mod};
 
@@ -269,31 +269,54 @@ pub(super) async fn slack_reply(
     Ok(Json(json!({ "posted": true, "ts": ts })))
 }
 
-/// `GET /api/slack/status` — read-only connection state for the Connections
-/// settings pane. `connected` reflects whether an `auth.test` with the bot token
-/// succeeds (a credential-health proxy for the live socket).
+/// `GET /api/slack/status` — the state of every link in the Slack trigger path,
+/// for the Connections settings pane.
+///
+/// One `connected` boolean is not enough to run this integration: a deployment
+/// can hold a live socket and still discard every mention — because the bot
+/// token is a person's rather than the app's, because the app-level token opened
+/// a different app than the bot belongs to, because no repository is set, or
+/// because the access list excludes everyone. Each link is reported separately
+/// so the pane can name the one that is broken instead of reporting health.
 pub(super) async fn slack_status(State(st): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
-    let configured = !crate::slack::app_token(&st.db).await.is_empty()
-        && !crate::slack::bot_token(&st.db).await.is_empty();
+    let app_token_set = !crate::slack::app_token(&st.db).await.is_empty();
+    let bot_token_set = !crate::slack::bot_token(&st.db).await.is_empty();
     let enabled = crate::slack::is_enabled(&st.db).await;
-    let (connected, bot_user, team, error) = if configured {
-        match crate::slack::SlackWeb::from_db(&st.db).await {
-            Some(web) => match web.auth_test().await {
-                Ok(id) => (true, Some(id.user_id), Some(id.team_id), None),
-                Err(e) => (false, None, None, Some(e.to_string())),
-            },
-            None => (false, None, None, None),
-        }
-    } else {
-        (false, None, None, None)
+
+    // `auth.test` proves the bot credential still works and says who loom is —
+    // including whether the token belongs to the app or to a person.
+    let identity = match crate::slack::SlackWeb::from_db(&st.db).await {
+        Some(web) => match web.auth_test().await {
+            Ok(id) => json!({
+                "user_id": id.user_id,
+                "team_id": id.team_id,
+                "token_kind": if id.is_bot() { "bot" } else { "user" },
+                "error": serde_json::Value::Null,
+            }),
+            Err(e) => json!({ "error": e.to_string() }),
+        },
+        None => serde_json::Value::Null,
     };
+
+    let access = match crate::slack::access(&st.db).await {
+        crate::slack::Access::Workspace => json!({ "mode": "workspace", "users": [] }),
+        crate::slack::Access::Listed(users) => json!({ "mode": "listed", "users": users }),
+    };
+
     Ok(Json(json!({
-        "configured": configured,
         "enabled": enabled,
-        "connected": connected,
-        "bot_user": bot_user,
-        "team": team,
-        "error": error,
+        "app_token_set": app_token_set,
+        "bot_token_set": bot_token_set,
+        "configured": app_token_set && bot_token_set,
+        "identity": identity,
+        "access": access,
+        "default_repo": config::get(&st.db, "slack.default_repo")
+            .await
+            .unwrap_or_default()
+            .trim(),
+        // What the supervisor is actually doing, as opposed to what a fresh
+        // credential probe suggests it could do.
+        "socket": crate::slack::health(),
     })))
 }
 

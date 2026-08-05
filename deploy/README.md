@@ -361,10 +361,15 @@ Full behaviour, authorization rules, and hardening notes:
 
 Set `slack_app_token` and `slack_bot_token` in `loom.toml` (`loom config
 render-env` writes them into `.env` as `LOOM_SLACK_APP_TOKEN` /
-`LOOM_SLACK_BOT_TOKEN`), then add the Slack user ids allowed to trigger it to
-`slack.allowed_users` — empty means no one can, even from inside the
-workspace. Full behaviour, the Slack app's required scopes, and invite
-requirements: [docs/slack-trigger.md](../docs/slack-trigger.md).
+`LOOM_SLACK_BOT_TOKEN`), then set `slack.default_repo` to the repository a
+prefix-less request targets. `slack_bot_token` must be the app's **bot** token
+(`xoxb-…`): the user token from the same install connects and passes
+`auth.test` just as well, then makes loom post as that person and discard their
+mentions as its own. Anyone in the workspace can trigger from a channel the bot
+has been invited to; `slack.allowed_users` narrows that to named user ids.
+**Settings → Connections** reports every link in the path. Full behaviour, the
+Slack app's required scopes, and invite requirements:
+[docs/slack-trigger.md](../docs/slack-trigger.md).
 
 ## Where state lives
 

@@ -1474,19 +1474,55 @@ export interface GithubConfig {
   app_slug: string;
 }
 
-/** Read-only Slack connection state for the Connections settings pane
- *  (`GET /api/slack/status`). `configured` means both the app-level and bot
- *  tokens are set (via env, outside the settings registry); `connected` means
- *  an `auth.test` with the bot token just succeeded — a live credential-health
- *  check, not merely "tokens present". `bot_user`/`team` are populated only
- *  when connected; `error` only when configured but not connected. */
-export interface SlackStatus {
-  configured: boolean;
-  enabled: boolean;
-  connected: boolean;
-  bot_user: string | null;
-  team: string | null;
+/** What the Socket Mode supervisor is doing right now. Only `connected` can
+ *  carry a mention to loom. */
+export type SlackSocketState = 'idle' | 'connecting' | 'connected' | 'failed';
+
+/** The live supervisor, as opposed to a fresh credential probe. `app_id` comes
+ *  from the `hello` frame and names the Slack app the app-level token opened.
+ *  `last_skip` is why the most recent trigger did not become a session — the
+ *  integration's quietest failure. */
+export interface SlackSocket {
+  state: SlackSocketState;
+  app_id: string | null;
+  connected_at: string | null;
+  last_error: string | null;
+  last_event_at: string | null;
+  events_received: number;
+  sessions_launched: number;
+  last_skip: string | null;
+  last_skip_at: string | null;
+}
+
+/** Who loom is in Slack. `token_kind` is `'user'` when `LOOM_SLACK_BOT_TOKEN`
+ *  holds a person's token (`xoxp-…`) instead of the app's (`xoxb-…`): that
+ *  connects and authenticates normally, then posts as that person and discards
+ *  their mentions as loom's own. */
+export interface SlackIdentity {
+  user_id?: string;
+  team_id?: string;
+  token_kind?: 'bot' | 'user';
   error: string | null;
+}
+
+/** Who may launch a session: everyone in the installed workspace, or a list. */
+export interface SlackAccess {
+  mode: 'workspace' | 'listed';
+  users: string[];
+}
+
+/** Every link in the Slack trigger path (`GET /api/slack/status`), reported
+ *  link by link because a live socket is not the same as a working
+ *  integration. */
+export interface SlackStatus {
+  enabled: boolean;
+  app_token_set: boolean;
+  bot_token_set: boolean;
+  configured: boolean;
+  identity: SlackIdentity | null;
+  access: SlackAccess;
+  default_repo: string;
+  socket: SlackSocket;
 }
 
 // --- Conversation log (iris format) ----------------------------------------
