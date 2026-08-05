@@ -176,13 +176,16 @@ pub const REGISTRY: &[SettingSpec] = &[
     },
     SettingSpec {
         key: "slack.allowed_users",
-        label: "Slack allowed users",
-        description: "Space- or comma-separated Slack user IDs (e.g. `U0123ABCD`) \
-            permitted to trigger `/marinbot`. A session is privileged — it holds \
-            repo and agent credentials — so the trigger is deny-by-default: with \
-            this empty, no one can launch even inside the installed workspace. \
-            Events from another workspace or an externally-shared (Slack Connect) \
-            channel are always rejected, regardless of this list.",
+        label: "Restrict to Slack users",
+        description: "Leave empty (the default) to let anyone in the installed \
+            workspace launch a session from a conversation the bot has been \
+            invited to — Slack's own workspace membership and channel invite are \
+            the boundary. Fill in space- or comma-separated Slack user IDs (e.g. \
+            `U0123ABCD`) to narrow it to those people. Three rules hold either \
+            way: another workspace, including an externally-shared Slack Connect \
+            channel, is always rejected; loom never triggers on its own posts; \
+            and a message posted by another app counts only when its ID is \
+            listed here.",
         kind: SettingKind::String,
         default: "",
         group: "Slack",

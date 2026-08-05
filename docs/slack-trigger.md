@@ -14,10 +14,9 @@ HMAC-verified webhook, loom is an **outbound [Socket Mode]** websocket client
 — there is no public URL to expose or secret to verify a signature against.
 The connection self-gates on configuration: it only opens once both Slack
 tokens are set and the `slack.enabled` kill switch is on (see [Configure the
-tokens](#configure-the-tokens)). In place of GitHub's signature check, two
-authorization gates protect the trigger — the event's workspace must be the
-one the app is installed in, and the Slack user must be on an explicit
-allowlist (see [Who can trigger](#who-can-trigger)).
+tokens](#configure-the-tokens)). In place of GitHub's signature check, the
+trigger is protected by the workspace the app is installed in and the channels
+its bot has been invited to (see [Who can trigger](#who-can-trigger)).
 
 [Socket Mode]: https://docs.slack.dev/apis/events-api/using-socket-mode/
 
@@ -33,18 +32,19 @@ frame it receives, in order:
    reason GitHub's webhook handler returns `200` before finishing a clone.
 2. **Parses the trigger.** A `slash_commands` payload becomes a thread-blind
    trigger (see [Anchor](#the-status-card)); an `events_api` payload is kept
-   only for `app_mention` — other event types, and any event from the bot's
-   own user id, are dropped without dispatch (a self-trigger guard, since
-   loom subscribes to `app_mention` only, not `message.*` — see [Slack app
-   configuration](#slack-app-configuration)).
+   only for `app_mention`. Parsing is structural — *who may act on the result*
+   is step 4's decision, so every rejection is one loom can log, count, and
+   show rather than a silent drop.
 3. **Dedupes.** Socket Mode delivery is *at-least-once* — a missed ACK or a
    reconnect boundary redelivers a frame — so loom keeps the same delivery
    ledger the GitHub webhook uses, keyed on Slack's `event_id` (a mention) or
    `trigger_id` (a slash command). A replay is a no-op.
-4. **Authorizes.** The event's `team_id` must match the workspace loom's bot
-   token belongs to, and the Slack user id must be on the [allowed-users
-   list](#who-can-trigger). Either failing drops the trigger — the second
-   with a reply nudging the user to ask an admin, rather than a silent drop.
+4. **Authorizes.** The event must come from loom's own workspace, must not be
+   loom's own post, and must be typed by a person rather than posted through
+   another app (see [Who can trigger](#who-can-trigger)). Every refusal is
+   logged with its reason and shown as the last skipped trigger in **Settings →
+   Connections**; a person excluded by an explicit allow-list also gets a reply
+   telling them to ask an admin.
 5. **Resolves the repo** from an `owner/name:` prefix on the command text, or
    the `slack.default_repo` setting (see [Which repo](#which-repo)). Neither
    set gets a reply asking for one.
@@ -89,26 +89,34 @@ busy thread's status trail never spams the channel.
 
 ## Who can trigger
 
-Two gates, both deny-by-default:
+By default the boundary is the one Slack already enforces: **anyone in the
+installed workspace, in a conversation the bot has been invited to.** Both
+halves are real grants — someone has an account in this workspace, and someone
+ran `/invite @marinbot` in that channel — and Socket Mode only delivers
+`app_mention` from channels the bot is in, so there is no second list of opaque
+user IDs to keep in sync with the team.
 
-- **Workspace.** The socket is authenticated as one workspace's bot, but
-  events still carry an explicit `team_id` — Slack Connect delivers events
-  from external, shared-channel teams over the same connection, so every
-  trigger's `team_id` is checked against the bot's own before anything else
-  runs. An event from another workspace is rejected outright.
-- **`slack.allowed_users`** — a space- or comma-separated list of Slack user
-  IDs (`U0123ABCD`, not display names) permitted to trigger. A session is
-  privileged — it holds repo and agent credentials — so this defaults to
-  empty, meaning **no one** can launch until it's set, even from inside the
-  installed workspace:
+Three rules hold regardless, and none of them is configurable:
 
-  ```sh
-  loom config set slack.allowed_users "U0123ABCD U0456EFGH"
-  ```
+- **One workspace.** The socket is authenticated as one workspace's bot, but
+  events still carry an explicit `team_id` — Slack Connect delivers events from
+  external, shared-channel teams over the same connection, so every trigger's
+  `team_id` is checked against the bot's own before anything else runs. An event
+  from another workspace is rejected outright.
+- **Never itself.** loom does not trigger on its own posts.
+- **People, not apps.** A message posted through another app carries a `bot_id`
+  while keeping the human's user ID. Those do not trigger, so an alerting bot
+  whose text happens to contain `@marinbot` cannot launch a privileged session.
 
-  Also settable in **Settings → Slack**. Membership in a channel or workspace
-  admin status is not by itself a grant — the same principle as GitHub's
-  approved-users list being separate from repo write access.
+To narrow it further, list the Slack user IDs (`U0123ABCD`, not display names)
+allowed to trigger:
+
+```sh
+loom config set slack.allowed_users "U0123ABCD U0456EFGH"
+```
+
+Also settable in **Settings → Slack**. A listed ID is trusted even when it posts
+through another app, which is how an approved automation identity opts in.
 
 ## Which repo
 
@@ -141,6 +149,13 @@ Two secrets enable the integration — set **both**, or it stays idle
   OAuth token (`xoxb-…`) every Web API call (`chat.postMessage`,
   `conversations.history`, …) authenticates as.
 
+  It must be the **bot** token, not the user token (`xoxp-…`) issued by the same
+  install. A user token authenticates, connects, and passes `auth.test` exactly
+  like the bot token — but it resolves to a *person*, so loom posts as them and
+  discards every mention they type as its own. **Settings → Connections** names
+  this outright; `auth.test` returns a `bot_id` only for the bot token, and that
+  is what the pane checks.
+
 Both are held outside the settings registry — like the GitHub webhook secret
 and App private key — so `GET /api/settings` never returns them. Set them
 through the environment, or in `loom.toml` (see
@@ -152,10 +167,25 @@ versioned `LOOM_DOTENV` payload managed by the
 [Marin `infra/loom` runbook](https://github.com/marin-community/marin/tree/main/infra/loom).
 Do not create standalone Slack-token secrets that the deployment never reads.
 
-`slack.enabled` (default on) closes the socket without discarding the tokens
-— use it to pause the integration without losing configuration. It, along
-with `slack.allowed_users`, `slack.default_repo`, and
+`slack.enabled` (default on) closes the live socket within ten seconds without
+discarding the tokens — use it to pause the integration without losing
+configuration. It, along with `slack.allowed_users`, `slack.default_repo`, and
 `slack.idle_archive_secs`, lives in **Settings → Slack**.
+
+## Diagnosing it
+
+**Settings → Connections** shows the whole trigger path in the order the server
+checks it — tokens, switch, connection, identity, who can trigger, repository —
+so a broken link names itself. A live socket is not the same as a working
+integration: the connection can be up while the bot token belongs to a person,
+or while no repository is configured, and the pane distinguishes those.
+
+`GET /api/slack/status` returns the same structure for scripting. Alongside it,
+the server log carries one line per arriving envelope (`slack: envelope
+received`, with the event type, channel, and user), the app id from the `hello`
+frame, and a reason for every trigger that did not become a session. The most
+recent of those reasons is also kept on the pane, since a mention that is
+silently dropped otherwise looks exactly like a mention that never arrived.
 
 ## Placement and retention
 

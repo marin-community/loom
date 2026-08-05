@@ -17,10 +17,12 @@
 //!
 //! [Socket Mode]: https://docs.slack.dev/apis/events-api/using-socket-mode/
 
+use std::sync::RwLock;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
+use serde::Serialize;
 use serde_json::{json, Value};
 use weaver_core::{config, events, tags};
 
@@ -48,6 +50,66 @@ const STATUS_CARD_CAP: usize = 15;
 /// Cap on how many conversation messages seed a session, so a busy channel can't
 /// produce an unbounded launch prompt.
 const HISTORY_CAP: usize = 40;
+
+// ---------------------------------------------------------------------------
+// Live supervisor health.
+// ---------------------------------------------------------------------------
+
+/// What the Socket Mode supervisor is doing right now.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SocketState {
+    /// A token is missing, or `slack.enabled` is off. Nothing is listening.
+    #[default]
+    Idle,
+    /// Opening the websocket.
+    Connecting,
+    /// Live — envelopes are arriving on this connection.
+    Connected,
+    /// The last attempt failed; the supervisor is backing off before retrying.
+    Failed,
+}
+
+/// What the supervisor has seen, for the Connections pane and the logs. An
+/// `auth.test` probe only proves a credential works; this proves the socket is
+/// actually up and shows what it has done with what arrived.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SocketHealth {
+    pub state: SocketState,
+    /// The app this connection belongs to, from the `hello` frame's
+    /// `connection_info`. The one way to tell — from inside — that the app token
+    /// and the bot token belong to the same Slack app.
+    pub app_id: Option<String>,
+    pub connected_at: Option<String>,
+    pub last_error: Option<String>,
+    pub last_event_at: Option<String>,
+    pub events_received: u64,
+    pub sessions_launched: u64,
+    /// Why the most recent trigger was not acted on. A dropped mention is the
+    /// integration's quietest failure, so it is kept where an operator looks.
+    pub last_skip: Option<String>,
+    pub last_skip_at: Option<String>,
+}
+
+static HEALTH: RwLock<Option<SocketHealth>> = RwLock::new(None);
+
+/// The supervisor's current health snapshot.
+pub fn health() -> SocketHealth {
+    HEALTH
+        .read()
+        .expect("health lock")
+        .clone()
+        .unwrap_or_default()
+}
+
+fn update_health(f: impl FnOnce(&mut SocketHealth)) {
+    let mut guard = HEALTH.write().expect("health lock");
+    f(guard.get_or_insert_with(SocketHealth::default));
+}
+
+fn now() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
 
 /// `env`, else the `key` setting; empty when neither is set. Mirrors
 /// [`crate::github_trigger`]'s private resolver — kept per-module by design.
@@ -90,17 +152,107 @@ fn api_base() -> String {
         .unwrap_or_else(|| "https://slack.com/api".to_string())
 }
 
-/// The allowlist of Slack user IDs permitted to trigger, from
-/// `slack.allowed_users` (space/comma separated). Empty ⇒ deny-by-default.
-async fn allowed_users(db: &Db) -> Vec<String> {
-    config::get(db, "slack.allowed_users")
+/// Who may launch a session from Slack.
+///
+/// Two gates hold regardless of this setting and are not configurable: the
+/// event must come from the workspace the app is installed in (which excludes
+/// Slack Connect channels shared with an external org), and loom never triggers
+/// on its own posts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Access {
+    /// The default. Any person in the installed workspace, in a conversation the
+    /// bot has been invited to. Slack's own two grants — workspace membership
+    /// and the channel invite — are the boundary, so there is no second list of
+    /// opaque user ids to maintain. Posts from *other apps* are excluded: an
+    /// alerting bot that happens to say `@loom` must not launch a privileged
+    /// session.
+    Workspace,
+    /// Only these Slack user ids, from `slack.allowed_users`. A tighter boundary
+    /// for a large or mixed workspace. A listed id is trusted even when it posts
+    /// through another app's user token, which is how an approved automation
+    /// identity opts in.
+    Listed(Vec<String>),
+}
+
+/// Read the configured access boundary. `slack.allowed_users` empty ⇒
+/// [`Access::Workspace`].
+pub async fn access(db: &Db) -> Access {
+    let listed: Vec<String> = config::get(db, "slack.allowed_users")
         .await
         .unwrap_or_default()
         .split([' ', ',', '\n', '\t'])
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
-        .collect()
+        .collect();
+    if listed.is_empty() {
+        Access::Workspace
+    } else {
+        Access::Listed(listed)
+    }
+}
+
+/// Why a trigger was not acted on. Every variant is logged, counted, and shown
+/// in the Connections pane — a silently dropped mention is indistinguishable
+/// from a broken socket, which is the failure this whole path exists to avoid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Denial {
+    /// From another Slack workspace, including a Slack Connect channel shared
+    /// with an external org.
+    OtherWorkspace,
+    /// loom's own post. Never trigger on ourselves.
+    Own,
+    /// Posted through another app rather than typed by a person, under
+    /// [`Access::Workspace`].
+    Automation,
+    /// Not on `slack.allowed_users`, under [`Access::Listed`].
+    NotListed,
+}
+
+impl Denial {
+    /// The one-line reason recorded in [`SocketHealth::last_skip`] and the log.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Denial::OtherWorkspace => "event came from another Slack workspace",
+            Denial::Own => "loom's own message",
+            Denial::Automation => {
+                "posted by an app, not a person (add its user id to slack.allowed_users to allow it)"
+            }
+            Denial::NotListed => "user is not on slack.allowed_users",
+        }
+    }
+
+    /// What to say in-thread, or `None` to drop silently. Only a person who
+    /// could have meant to trigger gets a reply. Replying to our own posts would
+    /// loop, replying to an app would answer a machine, and replying into a
+    /// foreign workspace would talk to an org loom does not serve.
+    pub fn reply(&self) -> Option<&'static str> {
+        match self {
+            Denial::NotListed => Some(
+                "You're not on this bot's allowed-users list — ask an admin to add your Slack user id.",
+            ),
+            Denial::Own | Denial::Automation | Denial::OtherWorkspace => None,
+        }
+    }
+}
+
+/// Decide whether a parsed trigger may launch a session. Pure, so the whole
+/// policy is unit-testable without a database or a socket.
+pub fn authorize(access: &Access, bot: &AuthTest, trigger: &Trigger) -> Result<(), Denial> {
+    if trigger.user_id == bot.user_id {
+        return Err(Denial::Own);
+    }
+    // The socket is one workspace, but events still carry an explicit team_id and
+    // Slack Connect delivers events from external teams.
+    if trigger.team_id != bot.team_id {
+        return Err(Denial::OtherWorkspace);
+    }
+    match access {
+        Access::Workspace if trigger.via_app => Err(Denial::Automation),
+        Access::Workspace => Ok(()),
+        Access::Listed(users) if users.iter().any(|u| u == &trigger.user_id) => Ok(()),
+        Access::Listed(_) => Err(Denial::NotListed),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -205,13 +357,15 @@ impl SlackWeb {
         slack_response(method, resp).await
     }
 
-    /// Resolve our own identity — the bot user id (to skip our own events) and
-    /// the workspace `team_id` (the authorization boundary).
+    /// Resolve our own identity — the bot user id (to skip our own events), the
+    /// workspace `team_id` (the authorization boundary), and whether the token
+    /// is really a bot token.
     pub async fn auth_test(&self) -> Result<AuthTest> {
         let v = self.call_bot("auth.test", json!({})).await?;
         Ok(AuthTest {
             user_id: v["user_id"].as_str().unwrap_or_default().to_string(),
             team_id: v["team_id"].as_str().unwrap_or_default().to_string(),
+            bot_id: v["bot_id"].as_str().map(str::to_string),
         })
     }
 
@@ -306,6 +460,19 @@ impl SlackWeb {
 pub struct AuthTest {
     pub user_id: String,
     pub team_id: String,
+    /// Set only for a real bot token. `auth.test` answers for a human's user
+    /// token (`xoxp-…`) too — with that person's user id and no `bot_id` — so a
+    /// deployment handed the wrong token connects, reports healthy, and then
+    /// discards every mention its operator types as loom's own. This field is
+    /// what tells the two apart.
+    pub bot_id: Option<String>,
+}
+
+impl AuthTest {
+    /// Whether the configured token is a bot token rather than a user token.
+    pub fn is_bot(&self) -> bool {
+        self.bot_id.is_some()
+    }
 }
 
 /// Extract `{user, text}` messages from a `conversations.*` response.
@@ -357,13 +524,20 @@ pub struct Trigger {
     pub anchor: Anchor,
     /// The id we dedupe on (`event_id` for events; the slash `trigger_id`).
     pub dedupe_id: String,
+    /// The source message carried a `bot_id`: posted through an app rather than
+    /// typed by a person. Slack keeps the human's user id on such a message, so
+    /// this is the only signal that separates the two.
+    pub via_app: bool,
 }
 
 /// A decoded Socket Mode envelope.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Envelope {
-    /// The connection is live.
-    Hello,
+    /// The connection is live. `app_id` comes from `connection_info` and is the
+    /// only in-band evidence of *which* Slack app the app-level token opened —
+    /// the check that catches an app token and a bot token from two different
+    /// apps, a pairing that otherwise connects and then receives nothing.
+    Hello { app_id: Option<String> },
     /// Slack is about to close this socket. `reason` is `warning` (a ~10s
     /// pre-close notice), `refresh_requested`, or `link_disabled`.
     Disconnect { reason: String },
@@ -381,7 +555,9 @@ pub enum Envelope {
 /// Decode a raw Socket Mode frame.
 pub fn parse_envelope(v: &Value) -> Envelope {
     match v["type"].as_str().unwrap_or_default() {
-        "hello" => Envelope::Hello,
+        "hello" => Envelope::Hello {
+            app_id: v["connection_info"]["app_id"].as_str().map(str::to_string),
+        },
         "disconnect" => Envelope::Disconnect {
             reason: v["reason"].as_str().unwrap_or_default().to_string(),
         },
@@ -424,27 +600,23 @@ pub fn trigger_from_slash(payload: &Value) -> Option<Trigger> {
         text,
         anchor: Anchor::Slash,
         dedupe_id,
+        // A slash command is always typed by a person.
+        via_app: false,
     })
 }
 
 /// Build a [`Trigger`] from an `events_api` payload, for `app_mention` only.
-/// Returns `None` for other event types and for the bot's own mentions (a
-/// self-trigger guard). `bot_user_id` is our own user id from `auth.test`.
+/// Returns `None` for any other event type.
 ///
-/// Slack may attach a `bot_id` to messages posted through another app's user
-/// token while preserving the human user's id. Those messages still pass the
-/// configured allowed-user check in [`handle_trigger`]; rejecting every
-/// `bot_id` here would silently discard an explicitly authorized identity.
-pub fn trigger_from_event(payload: &Value, bot_user_id: &str) -> Option<Trigger> {
+/// Parsing is structural only — who may act on the result is
+/// [`authorize`]'s decision, so every rejection is one that can be logged and
+/// shown rather than a silent `None` here.
+pub fn trigger_from_event(payload: &Value) -> Option<Trigger> {
     let event = &payload["event"];
     if event["type"].as_str() != Some("app_mention") {
         return None;
     }
     let user_id = event["user"].as_str()?.to_string();
-    // Skip our own posts — never trigger on ourselves.
-    if user_id == bot_user_id {
-        return None;
-    }
     let team_id = payload["team_id"].as_str().unwrap_or_default().to_string();
     let channel_id = event["channel"].as_str()?.to_string();
     let event_ts = event["ts"].as_str()?.to_string();
@@ -462,6 +634,7 @@ pub fn trigger_from_event(payload: &Value, bot_user_id: &str) -> Option<Trigger>
         text,
         anchor: Anchor::Mention { root_ts, event_ts },
         dedupe_id,
+        via_app: event.get("bot_id").is_some(),
     })
 }
 
@@ -779,23 +952,17 @@ async fn handle_trigger(state: AppState, web: SlackWeb, bot: AuthTest, trigger: 
         Err(e) => tracing::warn!(error = %e, "slack: dedupe insert failed; proceeding"),
     }
 
-    // Authorize. The socket is one workspace, but events still carry an explicit
-    // team_id, and Slack Connect delivers events from external teams — so gate on
-    // our own team, then on the allowlist.
-    if trigger.team_id != bot.team_id {
-        tracing::warn!(team = %trigger.team_id, "slack: rejecting event from another workspace");
-        return;
-    }
-    let allowed = allowed_users(&state.db).await;
-    if !allowed.iter().any(|u| u == &trigger.user_id) {
-        tracing::info!(user = %trigger.user_id, "slack: user not on slack.allowed_users; ignoring");
-        // A gentle nudge so the person knows to ask, rather than a silent drop.
-        let _ = notify(
-            &web,
-            &trigger,
-            "You're not on this bot's allowed-users list — ask an admin to add your Slack user id.",
-        )
-        .await;
+    if let Err(denial) = authorize(&access(&state.db).await, &bot, &trigger) {
+        tracing::info!(
+            user = %trigger.user_id,
+            channel = %trigger.channel_id,
+            reason = denial.reason(),
+            "slack: trigger not authorized"
+        );
+        record_skip(denial.reason());
+        if let Some(text) = denial.reply() {
+            let _ = notify(&web, &trigger, text).await;
+        }
         return;
     }
 
@@ -811,6 +978,7 @@ async fn handle_trigger(state: AppState, web: SlackWeb, bot: AuthTest, trigger: 
                 .trim()
                 .to_string();
             if d.is_empty() {
+                record_skip("no repository: slack.default_repo is unset and the request has no owner/name: prefix");
                 let _ = notify(&web, &trigger, "No repository to work on. Prefix your request with `owner/name:` or set a Slack default repository in loom's settings.").await;
                 return;
             }
@@ -818,10 +986,25 @@ async fn handle_trigger(state: AppState, web: SlackWeb, bot: AuthTest, trigger: 
         }
     };
 
-    if let Err(e) = launch(&state, &web, &bot, &trigger, &repo, &instruction).await {
-        tracing::warn!(error = %e, repo = %repo, "slack: launch failed");
-        let _ = notify(&web, &trigger, &format!("Couldn't start a session: {e}")).await;
+    match launch(&state, &web, &bot, &trigger, &repo, &instruction).await {
+        Ok(Outcome::Launched) => update_health(|h| h.sessions_launched += 1),
+        // An ack on a thread that already has a session is not a launch, and
+        // counting it as one would overstate what the trigger path did.
+        Ok(Outcome::AlreadyRunning) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, repo = %repo, "slack: launch failed");
+            record_skip(&format!("launch failed: {e}"));
+            let _ = notify(&web, &trigger, &format!("Couldn't start a session: {e}")).await;
+        }
     }
+}
+
+/// Record why a trigger did not become a session, for the Connections pane.
+fn record_skip(reason: &str) {
+    update_health(|h| {
+        h.last_skip = Some(reason.to_string());
+        h.last_skip_at = Some(now());
+    });
 }
 
 /// Post a short message back to the trigger's thread (an error/ack). For a
@@ -835,6 +1018,15 @@ async fn notify(web: &SlackWeb, trigger: &Trigger, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// What an authorized trigger did.
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    Launched,
+    /// The thread already had a live session, so the trigger was acknowledged
+    /// rather than acted on.
+    AlreadyRunning,
+}
+
 /// The launch body: seed context, reuse-or-create the session, wire it, and post
 /// the card. Serialized on [`CREATE_LOCK`].
 async fn launch(
@@ -844,7 +1036,7 @@ async fn launch(
     trigger: &Trigger,
     repo: &str,
     instruction: &str,
-) -> Result<()> {
+) -> Result<Outcome> {
     let _guard = CREATE_LOCK.lock().await;
 
     // Establish the thread root. A slash command is thread-blind, so we post the
@@ -894,7 +1086,7 @@ async fn launch(
                     .await
                     .ok();
             }
-            return Ok(());
+            return Ok(Outcome::AlreadyRunning);
         }
     }
 
@@ -967,7 +1159,7 @@ async fn launch(
     tracing::info!(session = %created.session.id, repo = %repo, channel = %trigger.channel_id, "slack: launched session");
     drop(_guard);
     sync_status_message(state.clone(), created.branch.id.clone()).await;
-    Ok(())
+    Ok(Outcome::Launched)
 }
 
 #[derive(Debug, PartialEq)]
@@ -1059,9 +1251,15 @@ pub async fn run(state: AppState) {
         if !is_enabled(&state.db).await {
             // Not configured / switched off — poll occasionally for a later
             // config change rather than spin.
+            update_health(|h| {
+                h.state = SocketState::Idle;
+                h.app_id = None;
+                h.connected_at = None;
+            });
             tokio::time::sleep(Duration::from_secs(30)).await;
             continue;
         }
+        update_health(|h| h.state = SocketState::Connecting);
         match connect_and_run(&state).await {
             Ok(reason) => {
                 // A clean disconnect (`warning`/`refresh_requested`) — reconnect
@@ -1069,11 +1267,20 @@ pub async fn run(state: AppState) {
                 // drops the instant it opens can't spin `apps.connections.open`
                 // (itself rate-limited).
                 tracing::debug!(reason = %reason, "slack: reconnecting");
+                update_health(|h| {
+                    h.state = SocketState::Connecting;
+                    h.connected_at = None;
+                });
                 backoff = 1;
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
             Err(e) => {
                 tracing::warn!(error = %e, backoff, "slack: connection error; backing off");
+                update_health(|h| {
+                    h.state = SocketState::Failed;
+                    h.connected_at = None;
+                    h.last_error = Some(e.to_string());
+                });
                 // Jittered, capped backoff so a flapping endpoint isn't hammered
                 // in lockstep.
                 let jitter = rand::random::<u64>() % 500;
@@ -1083,6 +1290,11 @@ pub async fn run(state: AppState) {
         }
     }
 }
+
+/// How often a live socket re-reads `slack.enabled`. The switch documents
+/// itself as closing a live connection, so it cannot wait for Slack's own
+/// refresh (tens of minutes away) to take effect.
+const KILL_SWITCH_POLL: Duration = Duration::from_secs(10);
 
 /// One connection lifecycle: open the socket, then read/ACK/dispatch until Slack
 /// asks us to disconnect or the stream ends. Returns the disconnect reason on a
@@ -1103,10 +1315,46 @@ async fn connect_and_run(state: &AppState) -> Result<String> {
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
         .await
         .context("opening the socket")?;
-    tracing::info!(bot = %bot.user_id, team = %bot.team_id, "slack: socket connected");
+    tracing::info!(
+        bot = %bot.user_id,
+        team = %bot.team_id,
+        token = if bot.is_bot() { "bot" } else { "user" },
+        "slack: socket connected"
+    );
+    // A user token authenticates and connects exactly like a bot token, then
+    // silently discards every mention typed by the person it belongs to. Say so
+    // once per connection rather than leaving a healthy-looking dead socket.
+    if !bot.is_bot() {
+        tracing::warn!(
+            user = %bot.user_id,
+            "slack: LOOM_SLACK_BOT_TOKEN is a user token (xoxp-…), not a bot token (xoxb-…) — \
+             loom will post as that person and ignore their mentions as its own"
+        );
+    }
+    update_health(|h| {
+        h.state = SocketState::Connected;
+        h.connected_at = Some(now());
+        h.last_error = None;
+    });
 
-    while let Some(msg) = ws.next().await {
-        let msg = msg.context("reading from the socket")?;
+    let mut kill_switch = tokio::time::interval(KILL_SWITCH_POLL);
+    kill_switch.tick().await; // the first tick completes immediately
+
+    loop {
+        let msg = tokio::select! {
+            frame = ws.next() => match frame {
+                Some(msg) => msg.context("reading from the socket")?,
+                None => break,
+            },
+            _ = kill_switch.tick() => {
+                if is_enabled(&state.db).await {
+                    continue;
+                }
+                tracing::info!("slack: disabled by settings; closing the socket");
+                ws.close(None).await.ok();
+                return Ok("disabled".to_string());
+            }
+        };
         let text = match msg {
             Message::Text(t) => t.as_str().to_string(),
             Message::Ping(p) => {
@@ -1120,7 +1368,10 @@ async fn connect_and_run(state: &AppState) -> Result<String> {
             continue;
         };
         match parse_envelope(&frame) {
-            Envelope::Hello => tracing::debug!("slack: hello"),
+            Envelope::Hello { app_id } => {
+                tracing::info!(app = app_id.as_deref().unwrap_or("?"), "slack: hello");
+                update_health(|h| h.app_id = app_id);
+            }
             Envelope::Disconnect { reason } => return Ok(reason),
             Envelope::Other {
                 envelope_id: Some(id),
@@ -1141,18 +1392,46 @@ async fn connect_and_run(state: &AppState) -> Result<String> {
                 ))
                 .await
                 .ok();
+                // Every arriving envelope is logged. Whether loom is receiving
+                // at all is the first question a stalled integration raises, and
+                // it used to be unanswerable from the outside.
+                let event_type = payload["event"]["type"].as_str().unwrap_or("-");
+                tracing::info!(
+                    kind = %kind,
+                    event = %event_type,
+                    channel = payload["event"]["channel"]
+                        .as_str()
+                        .or_else(|| payload["channel_id"].as_str())
+                        .unwrap_or("-"),
+                    user = payload["event"]["user"]
+                        .as_str()
+                        .or_else(|| payload["user_id"].as_str())
+                        .unwrap_or("-"),
+                    "slack: envelope received"
+                );
+                update_health(|h| {
+                    h.events_received += 1;
+                    h.last_event_at = Some(now());
+                });
                 let trigger = match kind.as_str() {
                     "slash_commands" => trigger_from_slash(&payload),
-                    "events_api" => trigger_from_event(&payload, &bot.user_id),
+                    "events_api" => trigger_from_event(&payload),
                     _ => None, // `interactive` is unused in V1
                 };
-                if let Some(trigger) = trigger {
-                    tokio::spawn(handle_trigger(
-                        state.clone(),
-                        web.clone(),
-                        bot.clone(),
-                        trigger,
-                    ));
+                match trigger {
+                    Some(trigger) => {
+                        tokio::spawn(handle_trigger(
+                            state.clone(),
+                            web.clone(),
+                            bot.clone(),
+                            trigger,
+                        ));
+                    }
+                    // Slack delivers every subscribed event type, so this is the
+                    // ordinary case for anything that isn't an app_mention.
+                    None => {
+                        tracing::debug!(kind = %kind, event = %event_type, "slack: not a trigger")
+                    }
                 }
             }
         }
@@ -1165,9 +1444,44 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn auth(user_id: &str, team_id: &str) -> AuthTest {
+        AuthTest {
+            user_id: user_id.into(),
+            team_id: team_id.into(),
+            bot_id: Some("B1".into()),
+        }
+    }
+
+    fn trigger(user_id: &str, team_id: &str, via_app: bool) -> Trigger {
+        Trigger {
+            team_id: team_id.into(),
+            channel_id: "C1".into(),
+            user_id: user_id.into(),
+            text: "do it".into(),
+            anchor: Anchor::Mention {
+                root_ts: "1.1".into(),
+                event_ts: "1.1".into(),
+            },
+            dedupe_id: "slack:Ev1".into(),
+            via_app,
+        }
+    }
+
     #[test]
     fn parse_envelope_classifies_frames() {
-        assert_eq!(parse_envelope(&json!({"type": "hello"})), Envelope::Hello);
+        assert_eq!(
+            parse_envelope(&json!({"type": "hello"})),
+            Envelope::Hello { app_id: None }
+        );
+        // The hello frame names the app the app-level token opened.
+        assert_eq!(
+            parse_envelope(&json!({
+                "type": "hello", "connection_info": {"app_id": "A123"}
+            })),
+            Envelope::Hello {
+                app_id: Some("A123".into())
+            }
+        );
         assert_eq!(
             parse_envelope(&json!({"type": "disconnect", "reason": "warning"})),
             Envelope::Disconnect {
@@ -1200,13 +1514,13 @@ mod tests {
     }
 
     #[test]
-    fn mention_anchors_on_thread_and_skips_self() {
+    fn mention_anchors_on_its_thread() {
         let payload = json!({
             "team_id": "T1", "event_id": "Ev1",
             "event": {"type": "app_mention", "user": "U2", "channel": "C1",
                       "ts": "1.1", "thread_ts": "0.9", "text": "<@BOT> do it"}
         });
-        let t = trigger_from_event(&payload, "BOT").unwrap();
+        let t = trigger_from_event(&payload).unwrap();
         assert_eq!(
             t.anchor,
             Anchor::Mention {
@@ -1216,29 +1530,114 @@ mod tests {
         );
         assert_eq!(t.text, "do it");
         assert_eq!(t.dedupe_id, "slack:Ev1");
-        // The bot's own mention never triggers.
-        let mut own = payload.clone();
-        own["event"]["user"] = json!("BOT");
-        assert!(trigger_from_event(&own, "BOT").is_none());
+        assert!(!t.via_app);
 
-        // An allowed human posting through another app's user token retains
-        // their user id but also carries a bot_id. Authorization happens after
-        // parsing, so this must remain eligible for the allowed-user check.
+        // A message posted through another app keeps the human's user id, so
+        // `bot_id` is the only thing separating the two.
         let mut app_post = payload;
         app_post["event"]["bot_id"] = json!("OTHER_APP");
-        assert!(trigger_from_event(&app_post, "BOT").is_some());
+        assert!(trigger_from_event(&app_post).unwrap().via_app);
+    }
+
+    #[test]
+    fn only_app_mentions_parse_as_triggers() {
+        let payload = json!({
+            "team_id": "T1", "event_id": "Ev9",
+            "event": {"type": "message", "user": "U2", "channel": "C1", "ts": "1.1", "text": "hi"}
+        });
+        assert!(trigger_from_event(&payload).is_none());
+    }
+
+    /// The default boundary: the workspace plus the channel invite. No list to
+    /// maintain, and a deployment that ships tokens works for the people who can
+    /// already see the bot.
+    #[test]
+    fn workspace_access_admits_any_person_in_the_workspace() {
+        let bot = auth("BOT", "T1");
+        let t = trigger("U2", "T1", false);
+        assert_eq!(authorize(&Access::Workspace, &bot, &t), Ok(()));
+    }
+
+    #[test]
+    fn workspace_access_rejects_other_apps() {
+        let bot = auth("BOT", "T1");
+        // An alerting bot whose message happens to contain `@loom` must not
+        // launch a privileged session.
+        assert_eq!(
+            authorize(&Access::Workspace, &bot, &trigger("U2", "T1", true)),
+            Err(Denial::Automation)
+        );
+        // …unless its identity is named explicitly, which is how an approved
+        // automation opts in.
+        assert_eq!(
+            authorize(
+                &Access::Listed(vec!["U2".into()]),
+                &bot,
+                &trigger("U2", "T1", true)
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn hard_gates_hold_under_every_access_mode() {
+        let bot = auth("BOT", "T1");
+        for access in [
+            Access::Workspace,
+            Access::Listed(vec!["BOT".into(), "U2".into()]),
+        ] {
+            // loom's own post never triggers loom, even when listed.
+            assert_eq!(
+                authorize(&access, &bot, &trigger("BOT", "T1", false)),
+                Err(Denial::Own)
+            );
+            // Another workspace (a Slack Connect channel) is always rejected.
+            assert_eq!(
+                authorize(&access, &bot, &trigger("U2", "T_OTHER", false)),
+                Err(Denial::OtherWorkspace)
+            );
+        }
+    }
+
+    #[test]
+    fn listed_access_admits_only_listed_users() {
+        let bot = auth("BOT", "T1");
+        let access = Access::Listed(vec!["U2".into()]);
+        assert_eq!(
+            authorize(&access, &bot, &trigger("U2", "T1", false)),
+            Ok(())
+        );
+        assert_eq!(
+            authorize(&access, &bot, &trigger("U3", "T1", false)),
+            Err(Denial::NotListed)
+        );
+        // A rejected person is told why; the quiet denials stay quiet.
+        assert!(Denial::NotListed.reply().is_some());
+        assert!(Denial::Own.reply().is_none());
+        assert!(Denial::Automation.reply().is_none());
+        assert!(Denial::OtherWorkspace.reply().is_none());
+    }
+
+    /// A user token authenticates and connects like a bot token; `bot_id` is the
+    /// only field that distinguishes them.
+    #[test]
+    fn auth_test_separates_bot_tokens_from_user_tokens() {
+        assert!(auth("U1", "T1").is_bot());
+        assert!(!AuthTest {
+            user_id: "U1".into(),
+            team_id: "T1".into(),
+            bot_id: None,
+        }
+        .is_bot());
     }
 
     #[test]
     fn top_level_mention_anchors_on_its_own_ts() {
-        let t = trigger_from_event(
-            &json!({
-                "team_id": "T1", "event_id": "Ev2",
-                "event": {"type": "app_mention", "user": "U2", "channel": "C1",
-                          "ts": "5.5", "text": "<@BOT> hi"}
-            }),
-            "BOT",
-        )
+        let t = trigger_from_event(&json!({
+            "team_id": "T1", "event_id": "Ev2",
+            "event": {"type": "app_mention", "user": "U2", "channel": "C1",
+                      "ts": "5.5", "text": "<@BOT> hi"}
+        }))
         .unwrap();
         assert_eq!(
             t.anchor,
@@ -1252,19 +1651,13 @@ mod tests {
 
     #[test]
     fn threaded_mention_reads_its_thread() {
-        let trigger = Trigger {
-            team_id: "T1".into(),
-            channel_id: "C1".into(),
-            user_id: "U1".into(),
-            text: "look above".into(),
-            anchor: Anchor::Mention {
-                root_ts: "4.4".into(),
-                event_ts: "5.5".into(),
-            },
-            dedupe_id: "slack:Ev3".into(),
+        let mut t = trigger("U1", "T1", false);
+        t.anchor = Anchor::Mention {
+            root_ts: "4.4".into(),
+            event_ts: "5.5".into(),
         };
 
-        assert_eq!(history_target(&trigger), HistoryTarget::Thread("4.4"));
+        assert_eq!(history_target(&t), HistoryTarget::Thread("4.4"));
     }
 
     #[test]
