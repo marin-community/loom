@@ -201,9 +201,8 @@ fn status_bullet(event: &weaver_core::events::Event) -> Option<String> {
     Some(line)
 }
 
-/// Render the status card: the "On it" header linking the session, the
-/// documents the agent has published (linked into the dashboard's artifact
-/// viewer), then the trail of `weaver status` reports (oldest first, capped at
+/// Render the status card: the "On it" header linking the session, any
+/// published-document links, then the trail of `weaver status` reports (oldest first, capped at
 /// [`STATUS_CARD_CAP`]). Pure, so the format is unit-testable; `events` is the
 /// branch's history oldest-first, filtered here to the agent's own attention
 /// reports.
@@ -253,7 +252,7 @@ pub fn render_status_card(
                 format!("[{label}]({session_url}/artifacts/{path})")
             })
             .collect();
-        body.push_str(&format!("\nDocs: {}", links.join(" · ")));
+        body.push_str(&format!("\n{}", links.join(" · ")));
     }
     if bullets.is_empty() {
         return body;
@@ -1787,8 +1786,9 @@ mod tests {
         let lines: Vec<&str> = card.lines().collect();
         assert_eq!(
             lines[1],
-            "Docs: [design](http://loom/s/abc/artifacts/design) · [plan](http://loom/s/abc/artifacts/plan)"
+            "[design](http://loom/s/abc/artifacts/design) · [plan](http://loom/s/abc/artifacts/plan)"
         );
+        assert!(!card.contains("Docs:"));
         assert!(lines[3].contains("drafted the design"));
     }
 
@@ -1799,7 +1799,7 @@ mod tests {
         let card = render_status_card("http://loom/s/abc", &["a](x) [b".to_string()], &[]);
         assert_eq!(
             card.lines().nth(1).unwrap(),
-            "Docs: [a\\](x) \\[b](http://loom/s/abc/artifacts/a%5D%28x%29%20%5Bb)"
+            "[a\\](x) \\[b](http://loom/s/abc/artifacts/a%5D%28x%29%20%5Bb)"
         );
     }
 

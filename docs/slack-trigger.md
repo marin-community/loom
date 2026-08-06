@@ -69,7 +69,7 @@ records the card message's `ts`. From then on, every `weaver status <level>
 "<message>"` the agent writes re-renders that message via `chat.update`:
 
 > On it — <{base}/s/{id}>
-> Docs: <{base}/s/{id}/artifacts/design|design>
+> <{base}/s/{id}/artifacts/design|design>
 >
 > • 🟢 `Jul 18 21:04` reading the thread; mapping the code
 > • 🟠 `Jul 18 22:15` *attention* — ready for review
@@ -86,6 +86,14 @@ An **`@marinbot` mention** continues whatever thread it was typed in
 (`thread_ts`), or starts one at its own `ts` if it was posted at the top
 level. Either way, the card is edited in place — edits don't renotify — so a
 busy thread's status trail never spams the channel.
+
+The launch prompt distinguishes conversational answers from repository
+changes. A question, walkthrough, evaluation, explanation, or review request
+is answered directly in the Slack thread without repository edits or a pull
+request. An explicit implementation/fix/PR request uses the branch workflow.
+When either interpretation could work, loom asks the agent to answer first.
+Supporting detail may live in a Weaver artifact, but the thread still receives
+a self-contained answer.
 
 ## Who can trigger
 
@@ -170,7 +178,10 @@ Do not create standalone Slack-token secrets that the deployment never reads.
 `slack.enabled` (default on) closes the live socket within ten seconds without
 discarding the tokens — use it to pause the integration without losing
 configuration. It, along with `slack.allowed_users`, `slack.default_repo`, and
-`slack.idle_archive_secs`, lives in **Settings → Slack**.
+`slack.idle_archive_secs`, lives in **Settings → Slack**. `slack.effort`
+defaults Slack-origin sessions to `high` reasoning effort for a faster
+conversational response; `agent-default` preserves the selected profile's
+effort, and locked or incompatible profiles fall back automatically.
 
 ## Diagnosing it
 

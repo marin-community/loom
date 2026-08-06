@@ -146,6 +146,27 @@ moved on since it was set.
   terminal TUI. State the question as text, set `weaver status attention
   "<the question>"`, and continue on your best safe assumption when possible.
 
+## Choose the task mode
+
+A session is a place to do useful work, not proof that the user requested a
+repository change. Choose the mode from the launch request and its conversation
+context before selecting a workflow:
+
+- **Answer mode** — questions, explanations, walkthroughs, evaluations, and
+  review requests. Investigate as deeply as needed, but return a self-contained
+  answer in the originating conversation. Do not edit the repository, create
+  design documents, commit, or open a pull request unless the user explicitly
+  asks for a change. An artifact may hold genuinely useful supporting detail;
+  link it from the answer rather than substituting it for the answer.
+- **Change mode** — explicit requests to implement, fix, write, update, or open
+  a pull request. Make the change, test it, and follow the repository's landing
+  workflow.
+
+When the wording is ambiguous and a direct answer can satisfy it, answer first
+and leave implementation for an explicit follow-up. Do not ask a question just
+to choose a more elaborate workflow when the requested analysis can stand on
+its own.
+
 ## Your environment
 
 Shared deploys run your session inside loom's own container image, which is
@@ -178,6 +199,9 @@ A session often comes from a GitHub thread — an `@loom` mention on an issue or
 PR, or a goal that names one. The people who care about the work are on that
 thread; they don't read this terminal.
 
+- **Choose answer or change mode from the triggering comment.** Being on an
+  issue or PR does not by itself authorize repository edits. Answer questions
+  on the thread; only update code or open a PR when the request asks for it.
 - **Your status is public there.** A session wired to a thread (the `github`
   tag — `weaver summary` shows the wiring) has its `weaver status` trail
   mirrored onto loom's "On it" comment, edited in place as a live status card.
@@ -200,10 +224,13 @@ thread; they don't read this terminal.
 
 ## Designing before you build
 
-When the task turns on research or a tradeoff — an architecture choice, a
-migration, an API contract, anything expensive to reverse — write the design
-down and have it reviewed before building. Skip this for quick fixes, renames,
-doc tweaks, review comments: no tradeoff, no review, just write the code.
+This section applies to change-mode work. When an implementation turns on
+research or a tradeoff — an architecture choice, a migration, an API contract,
+anything expensive to reverse — write the design down and have it reviewed
+before building. A request to explain or evaluate an idea remains answer mode;
+researching that answer does not require publishing a design. Skip design work
+for quick fixes, renames, doc tweaks, and review comments: no tradeoff, no
+review, just write the code.
 
 1. `weaver artifact write design <file>` — record the reasoning, rejected
    alternatives, and open questions. Name it `design` (`plan` is the
@@ -219,8 +246,12 @@ doc tweaks, review comments: no tradeoff, no review, just write the code.
 
 ## Finishing work
 
-You are on a dedicated branch in your own worktree; integrating it back is
-yours to drive.
+In answer mode, reply in the originating conversation with the conclusion and
+the evidence that matters, then append a concise typed `result` to the session
+channel. A branch, artifact, commit, or pull request is not required.
+
+In change mode, you are on a dedicated branch in your own worktree; integrating
+it back is yours to drive.
 
 - **Commit** with a clear message; keep the worktree clean.
 - **Run the project's checks** — formatters, linters, tests (see the repo's
