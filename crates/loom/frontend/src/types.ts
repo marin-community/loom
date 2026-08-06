@@ -1171,7 +1171,8 @@ export interface ProgramView {
   };
 }
 
-export type SettingKind = 'string' | 'int' | 'bool' | 'enum';
+export type SettingKind = 'string' | 'text' | 'int' | 'bool' | 'enum';
+export type SettingSource = 'default' | 'deployment' | 'runtime';
 
 /** One configurable setting: its registry metadata plus its current value. */
 export interface SettingView {
@@ -1184,6 +1185,10 @@ export interface SettingView {
   /** Allowed values for an `enum` setting, in display order; empty otherwise. */
   options: string[];
   value: string;
+  /** Layer supplying the effective value: runtime > deployment > built-in. */
+  source: SettingSource;
+  /** Value declared by deployment IaC, when present. */
+  deployment_value: string | null;
   is_default: boolean;
 }
 

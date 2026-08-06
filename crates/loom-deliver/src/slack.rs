@@ -719,20 +719,85 @@ fn status_bullet(event: &events::Event) -> Option<String> {
     Some(line)
 }
 
-/// Render the Slack status card: the "On it" header linking the session, any
-/// published-document links, then the `weaver status` trail (oldest-first, capped).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusPresentation {
+    pub header_template: String,
+    pub show_artifacts: bool,
+    pub show_updates: bool,
+}
+
+impl Default for StatusPresentation {
+    fn default() -> Self {
+        Self {
+            header_template: config::DEFAULT_SLACK_STATUS_HEADER_TEMPLATE.to_string(),
+            show_artifacts: config::DEFAULT_SLACK_STATUS_ARTIFACTS,
+            show_updates: config::DEFAULT_SLACK_STATUS_UPDATES,
+        }
+    }
+}
+
+async fn status_presentation(db: &Db) -> StatusPresentation {
+    let header_template = config::get_or(
+        db,
+        "slack.status_header_template",
+        config::DEFAULT_SLACK_STATUS_HEADER_TEMPLATE,
+    )
+    .await;
+    StatusPresentation {
+        header_template: if header_template.trim().is_empty() {
+            config::DEFAULT_SLACK_STATUS_HEADER_TEMPLATE.to_string()
+        } else {
+            header_template
+        },
+        show_artifacts: config::get_bool(
+            db,
+            "slack.status_artifacts",
+            config::DEFAULT_SLACK_STATUS_ARTIFACTS,
+        )
+        .await,
+        show_updates: config::get_bool(
+            db,
+            "slack.status_updates",
+            config::DEFAULT_SLACK_STATUS_UPDATES,
+        )
+        .await,
+    }
+}
+
+fn retain_current_session_events(
+    events: &mut Vec<events::Event>,
+    wired_at: &str,
+    session_created_at: &str,
+) {
+    let publish_after = std::cmp::max(wired_at, session_created_at);
+    events.retain(|event| event.created_at.as_str() >= publish_after);
+}
+
+/// Render the configured Slack status card: its header, optional artifact
+/// links, then the optional `weaver status` trail (oldest-first, capped).
 /// Pure, so the mrkdwn format is unit-testable. Slack link syntax is
 /// `<url|label>`, not Markdown's `[label](url)`.
-pub fn render_status(session_url: &str, artifacts: &[String], events: &[events::Event]) -> String {
-    let bullets: Vec<String> = events
-        .iter()
-        .filter(|e| {
-            e.kind == "tag" && e.data["key"] == tags::ATTENTION_KEY && e.data["by"] == "agent"
-        })
-        .filter_map(status_bullet)
-        .collect();
-    let mut body = format!("On it — <{session_url}>");
-    if !artifacts.is_empty() {
+pub fn render_status(
+    session_url: &str,
+    artifacts: &[String],
+    events: &[events::Event],
+    presentation: &StatusPresentation,
+) -> String {
+    let bullets: Vec<String> = if presentation.show_updates {
+        events
+            .iter()
+            .filter(|e| {
+                e.kind == "tag" && e.data["key"] == tags::ATTENTION_KEY && e.data["by"] == "agent"
+            })
+            .filter_map(status_bullet)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut body = presentation
+        .header_template
+        .replace("{session_url}", session_url);
+    if presentation.show_artifacts && !artifacts.is_empty() {
         let links: Vec<String> = artifacts
             .iter()
             .map(|name| {
@@ -824,32 +889,43 @@ async fn sync_status_message_once(state: &AppState, branch_id: &str) -> bool {
     };
 
     let _guard = SYNC_LOCK.lock().await;
-    let mut events = match events::history(&state.db, branch_id, 500).await {
-        Ok(ev) => ev,
-        Err(e) => {
-            tracing::warn!(branch = %branch_id, error = %e, "slack status card: reading event history failed");
-            return true;
+    let presentation = status_presentation(&state.db).await;
+    let mut events = if presentation.show_updates {
+        match events::history(&state.db, branch_id, 500).await {
+            Ok(ev) => ev,
+            Err(e) => {
+                tracing::warn!(branch = %branch_id, error = %e, "slack status card: reading event history failed");
+                return true;
+            }
         }
+    } else {
+        Vec::new()
     };
-    // Statuses from before the wiring stay private — hand-wiring an old session
-    // must not retroactively publish its history.
-    events.retain(|e| e.created_at >= wired.set_at);
-    let artifacts: Vec<String> = match crate::branch::get(&state.db, branch_id).await {
-        Ok(Some(branch)) => {
-            weaver_core::artifact::list_for_session(&state.db, &branch.repo_root, branch_id)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|a| a.name)
-                .filter(|n| n != "goal")
-                .collect()
+    // Statuses from before the wiring stay private, and a fresh session on a
+    // reused conversation starts a fresh trail. Branch event history outlives
+    // individual sessions, so the session boundary is essential on relaunch.
+    retain_current_session_events(&mut events, &wired.set_at, &session.created_at);
+    let artifacts: Vec<String> = if presentation.show_artifacts {
+        match crate::branch::get(&state.db, branch_id).await {
+            Ok(Some(branch)) => {
+                weaver_core::artifact::list_for_session(&state.db, &branch.repo_root, branch_id)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|a| a.name)
+                    .filter(|n| n != "goal")
+                    .collect()
+            }
+            _ => Vec::new(),
         }
-        _ => Vec::new(),
+    } else {
+        Vec::new()
     };
     let body = render_status(
         &crate::links::session_url(&base, &session.id),
         &artifacts,
         &events,
+        &presentation,
     );
 
     // Trust the tracked message ts only while its note still names the current
@@ -1147,7 +1223,10 @@ async fn launch(
         }
     }
 
-    let goal = slack_goal(repo, trigger, instruction, &history);
+    let prompt_instructions = config::get(&state.db, "slack.prompt_instructions")
+        .await
+        .unwrap_or_default();
+    let goal = slack_goal(repo, trigger, instruction, &history, &prompt_instructions);
     let branch_exists = crate::git::branch_exists(&repo_root, &branch_ref).await;
     let mut req = weaver_api::dto::CreateReq {
         repo: Some(repo.to_string()),
@@ -1331,13 +1410,19 @@ async fn pull_history(web: &SlackWeb, trigger: &Trigger) -> String {
 
 /// The seed goal handed to the session — the Slack analog of GitHub's
 /// `trigger_goal`.
-fn slack_goal(repo: &str, trigger: &Trigger, instruction: &str, history: &str) -> String {
+fn slack_goal(
+    repo: &str,
+    trigger: &Trigger,
+    instruction: &str,
+    history: &str,
+    prompt_instructions: &str,
+) -> String {
     let instruction = if instruction.trim().is_empty() {
         "(no explicit instruction — infer the task from the conversation)"
     } else {
         instruction.trim()
     };
-    format!(
+    let mut goal = format!(
         "You've been summoned from Slack (channel {channel}) to work on `{repo}`.\n\n\
          ## Request (from <@{user}>)\n{instruction}\n\n\
          ## Conversation context\n{history}\n\n\
@@ -1350,7 +1435,12 @@ fn slack_goal(repo: &str, trigger: &Trigger, instruction: &str, history: &str) -
          - Your `weaver status` messages and the built-in `status_update` MCP tool are mirrored onto the Slack thread. For a short answer, avoid narrating every lookup; use status updates only when they add useful progress context.",
         channel = trigger.channel_id,
         user = trigger.user_id,
-    )
+    );
+    if !prompt_instructions.trim().is_empty() {
+        goal.push_str("\n\n## Organization instructions\n");
+        goal.push_str(prompt_instructions.trim());
+    }
+    goal
 }
 
 /// Resolve the Slack-specific effort override without making an otherwise valid
@@ -1893,7 +1983,12 @@ mod tests {
             data: json!({"key": "attention", "value": "attention", "note": "ready <now>", "by": "agent"}),
             created_at: "2026-07-20T21:04:00Z".into(),
         };
-        let card = render_status("http://loom/s/abc", &[], std::slice::from_ref(&ev));
+        let card = render_status(
+            "http://loom/s/abc",
+            &[],
+            std::slice::from_ref(&ev),
+            &StatusPresentation::default(),
+        );
         assert!(card.starts_with("On it — <http://loom/s/abc>"));
         assert!(card.contains("*attention*"), "single-star bold: {card}");
         assert!(card.contains("ready &lt;now&gt;"), "escaped: {card}");
@@ -1901,11 +1996,24 @@ mod tests {
     }
 
     #[test]
-    fn render_status_links_artifacts_without_a_docs_label() {
+    fn render_status_hides_artifacts_by_default_and_can_enable_them() {
+        let artifacts = ["design".to_string(), "plan".to_string()];
+        let default_card = render_status(
+            "http://loom/s/abc",
+            &artifacts,
+            &[],
+            &StatusPresentation::default(),
+        );
+        assert_eq!(default_card, "On it — <http://loom/s/abc>");
+
         let card = render_status(
             "http://loom/s/abc",
-            &["design".to_string(), "plan".to_string()],
+            &artifacts,
             &[],
+            &StatusPresentation {
+                show_artifacts: true,
+                ..StatusPresentation::default()
+            },
         );
         assert_eq!(
             card.lines().nth(1),
@@ -1914,5 +2022,61 @@ mod tests {
             )
         );
         assert!(!card.contains("Docs:"));
+    }
+
+    #[test]
+    fn render_status_can_customize_the_header_and_hide_updates() {
+        let ev = events::Event {
+            id: 1,
+            branch_id: "b".into(),
+            kind: "tag".into(),
+            data: json!({"key": "attention", "value": "", "note": "old update", "by": "agent"}),
+            created_at: "2026-07-20T21:04:00Z".into(),
+        };
+        let card = render_status(
+            "http://loom/s/abc",
+            &[],
+            &[ev],
+            &StatusPresentation {
+                header_template: "Working: {session_url}".into(),
+                show_updates: false,
+                ..StatusPresentation::default()
+            },
+        );
+        assert_eq!(card, "Working: http://loom/s/abc");
+    }
+
+    #[test]
+    fn status_trail_starts_at_the_current_session_on_a_reused_thread() {
+        let event = |id, created_at: &str| events::Event {
+            id,
+            branch_id: "b".into(),
+            kind: "tag".into(),
+            data: json!({"key": "attention", "value": "", "note": format!("update {id}"), "by": "agent"}),
+            created_at: created_at.into(),
+        };
+        let mut events = vec![
+            event(1, "2026-08-06T07:47:00.000Z"),
+            event(2, "2026-08-06T10:45:00.000Z"),
+        ];
+        retain_current_session_events(
+            &mut events,
+            "2026-08-06T07:00:00.000Z",
+            "2026-08-06T10:44:00.000Z",
+        );
+        assert_eq!(events.iter().map(|event| event.id).collect::<Vec<_>>(), [2]);
+    }
+
+    #[test]
+    fn slack_goal_appends_organization_instructions_last() {
+        let goal = slack_goal(
+            "acme/widgets",
+            &trigger("U1", "T1", false),
+            "summarize",
+            "thread context",
+            "Use our incident template.",
+        );
+        assert!(goal.contains("## How to respond"));
+        assert!(goal.ends_with("## Organization instructions\nUse our incident template."));
     }
 }

@@ -4,7 +4,9 @@ import type { SettingView } from '../types';
 defineProps<{
   setting: SettingView;
   defaultLabel: string;
+  sourceLabel: string;
   isDefault: boolean;
+  canReset: boolean;
   dirty: boolean;
   busy: boolean;
 }>();
@@ -26,7 +28,7 @@ const emit = defineEmits<{
           class="rounded px-1.5 py-0.5 text-2xs"
           :class="isDefault ? 'bg-input text-faint' : 'bg-info-soft text-info'"
         >
-          {{ isDefault ? 'default' : 'custom' }}
+          {{ sourceLabel }}
         </span>
       </div>
       <p class="mt-0.5 line-clamp-2 text-xs text-muted">{{ setting.description }}</p>
@@ -45,15 +47,15 @@ const emit = defineEmits<{
         </button>
         <button
           class="btn-secondary px-2.5 py-1 text-xs disabled:opacity-50"
-          :disabled="busy || isDefault"
-          :title="`Reset to default: ${defaultLabel}`"
+          :disabled="busy || !canReset"
+          :title="`Clear runtime override; inherit: ${defaultLabel}`"
           @click="emit('reset')"
         >
           Reset
         </button>
       </div>
       <p class="text-2xs text-faint">
-        Default <code class="font-mono">{{ defaultLabel }}</code>
+        Inherited value <code class="font-mono">{{ defaultLabel }}</code>
       </p>
     </div>
   </div>

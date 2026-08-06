@@ -1,11 +1,13 @@
-//! Key/value settings stored in the `settings` table.
+//! Layered key/value settings.
 //!
-//! The table itself is a plain key/value store, but every setting weaver knows
-//! about is also declared in [`REGISTRY`] — a single source of truth that gives
-//! each key a label, help text, type, default, and group. The registry drives
-//! validation ([`validate`]) and the settings pane in the web UI
-//! ([`describe`]); the raw [`get`]/[`set`] helpers still accept arbitrary keys
-//! so nothing breaks if a setting is read before it is registered.
+//! Runtime overrides live in `settings`, infrastructure-provided defaults live
+//! in `deployment_settings`, and reads resolve in that order before the
+//! built-in default. Every setting weaver knows about is declared in
+//! [`REGISTRY`] — a single source of truth that gives each key a label, help
+//! text, type, default, and group. The registry drives validation
+//! ([`validate`]) and the settings pane in the web UI ([`describe`]); the raw
+//! [`get`]/[`apply`] helpers still accept arbitrary runtime keys so nothing
+//! breaks if a setting is read before it is registered.
 
 use anyhow::Result;
 use serde::Serialize;
@@ -37,6 +39,17 @@ pub const DEFAULT_GITHUB_TRIGGER_PHRASE: &str = "@loom";
 pub const DEFAULT_SLACK_EFFORT: &str = "high";
 /// Sentinel that leaves a Slack-origin session's profile effort unchanged.
 pub const SLACK_AGENT_DEFAULT_EFFORT: &str = "agent-default";
+/// Whether Slack status cards include this session's progress trail.
+pub const DEFAULT_SLACK_STATUS_UPDATES: bool = true;
+/// Whether Slack status cards link session artifacts.
+pub const DEFAULT_SLACK_STATUS_ARTIFACTS: bool = false;
+/// Slack mrkdwn template for a status card's first line.
+pub const DEFAULT_SLACK_STATUS_HEADER_TEMPLATE: &str = "On it — <{session_url}>";
+/// Bound organization prompt additions so a mistaken setting cannot dominate
+/// every Slack launch payload.
+pub const MAX_SLACK_PROMPT_INSTRUCTIONS_BYTES: usize = 16 * 1024;
+/// Slack messages are bounded; reserve most of that budget for status content.
+pub const MAX_SLACK_STATUS_HEADER_TEMPLATE_BYTES: usize = 1024;
 /// The palette the browser terminal (xterm.js) renders with. `dark` keeps the
 /// classic black background; `light` swaps in a light, readable palette.
 pub const DEFAULT_TERMINAL_THEME: &str = "dark";
@@ -80,8 +93,10 @@ pub const DEFAULT_SESSION_MEMORY_MAX_GB: i64 = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SettingKind {
-    /// Free-form text (commands, names, …).
+    /// One-line free-form text (commands, names, …).
     String,
+    /// Multi-line free-form text (prompts, templates, …).
+    Text,
     /// A signed integer.
     Int,
     /// A boolean — stored as `true`/`false`.
@@ -230,6 +245,53 @@ pub const REGISTRY: &[SettingSpec] = &[
             "xhigh",
             "max",
         ],
+    },
+    SettingSpec {
+        key: "slack.status_updates",
+        label: "Show Slack progress updates",
+        description: "Include this session's `weaver status` reports in the \
+            editable Slack status card. Reports from an earlier session on the \
+            same conversation are never repeated.",
+        kind: SettingKind::Bool,
+        default: "true",
+        group: "Slack",
+        options: &[],
+    },
+    SettingSpec {
+        key: "slack.status_artifacts",
+        label: "Link Slack artifacts",
+        description: "Include links to the session's published artifacts in \
+            the Slack status card. Off by default: the thread should receive a \
+            self-contained answer, and internal design documents are rarely \
+            useful conversation links.",
+        kind: SettingKind::Bool,
+        default: "false",
+        group: "Slack",
+        options: &[],
+    },
+    SettingSpec {
+        key: "slack.status_header_template",
+        label: "Slack status header",
+        description: "Header template for the editable Slack status card. \
+            `{session_url}` expands to the public session URL; Slack mrkdwn is \
+            accepted. Keep the placeholder when readers should be able to open \
+            the session.",
+        kind: SettingKind::String,
+        default: DEFAULT_SLACK_STATUS_HEADER_TEMPLATE,
+        group: "Slack",
+        options: &[],
+    },
+    SettingSpec {
+        key: "slack.prompt_instructions",
+        label: "Additional Slack instructions",
+        description: "Organization-specific instructions appended to every \
+            Slack launch prompt. Use this to tune response style and workflow \
+            without copying Loom's maintained response contract. Never put \
+            secrets here.",
+        kind: SettingKind::Text,
+        default: "",
+        group: "Slack",
+        options: &[],
     },
     SettingSpec {
         key: "slack.idle_archive_secs",
@@ -567,8 +629,24 @@ pub fn validate(key: &str, value: &str) -> std::result::Result<(), String> {
     let Some(spec) = spec(key) else {
         return Ok(());
     };
+    match key {
+        "slack.prompt_instructions" if value.len() > MAX_SLACK_PROMPT_INSTRUCTIONS_BYTES => {
+            return Err(format!(
+                "must be at most {MAX_SLACK_PROMPT_INSTRUCTIONS_BYTES} bytes"
+            ));
+        }
+        "slack.status_header_template" if value.trim().is_empty() => {
+            return Err("must not be empty".to_string());
+        }
+        "slack.status_header_template" if value.len() > MAX_SLACK_STATUS_HEADER_TEMPLATE_BYTES => {
+            return Err(format!(
+                "must be at most {MAX_SLACK_STATUS_HEADER_TEMPLATE_BYTES} bytes"
+            ));
+        }
+        _ => {}
+    }
     match spec.kind {
-        SettingKind::String => Ok(()),
+        SettingKind::String | SettingKind::Text => Ok(()),
         SettingKind::Int => value
             .trim()
             .parse::<i64>()
@@ -591,36 +669,62 @@ pub fn validate(key: &str, value: &str) -> std::result::Result<(), String> {
     }
 }
 
+/// Which configuration layer supplies a setting's effective value.
+///
+/// Runtime overrides are ordinary rows in `settings`; deployment defaults are
+/// reconciled separately by infrastructure tooling; `default` is the immutable
+/// value compiled into [`REGISTRY`]. Keeping the two mutable layers separate
+/// lets an operator experiment live and later reset cleanly to the deployment's
+/// declared policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingSource {
+    Default,
+    Deployment,
+    Runtime,
+}
+
 /// A registered setting paired with its current effective value — what the
-/// settings pane renders. `value` is the stored value, or the default when the
-/// key is absent; `is_default` says which.
+/// settings pane renders.
 #[derive(Debug, Clone, Serialize)]
 pub struct SettingView {
     #[serde(flatten)]
     pub spec: &'static SettingSpec,
-    /// Effective value: the stored value, or `spec.default` when unset.
+    /// Effective value, resolved runtime → deployment → built-in default.
     pub value: String,
-    /// True when no value is stored and `value` is the default.
+    /// The layer supplying [`Self::value`].
+    pub source: SettingSource,
+    /// The deployment-provided fallback, if one is declared. The Settings UI
+    /// uses this to explain what clearing a runtime override will reveal.
+    pub deployment_value: Option<String>,
+    /// Backward-compatible shorthand for `source == default`.
     pub is_default: bool,
 }
 
 /// The full registry with each setting's current effective value, ordered as
 /// declared in [`REGISTRY`].
 pub async fn describe(db: &Db) -> Result<Vec<SettingView>> {
-    let stored: std::collections::HashMap<String, String> = list(db).await?.into_iter().collect();
+    let runtime: std::collections::HashMap<String, String> = list(db).await?.into_iter().collect();
+    let deployment: std::collections::HashMap<String, String> =
+        list_deployment(db).await?.into_iter().collect();
     Ok(REGISTRY
         .iter()
-        .map(|spec| match stored.get(spec.key) {
-            Some(value) => SettingView {
+        .map(|spec| {
+            let deployment_value = deployment.get(spec.key).cloned();
+            let (value, source) = if let Some(value) = runtime.get(spec.key) {
+                (value.clone(), SettingSource::Runtime)
+            } else if let Some(value) = &deployment_value {
+                (value.clone(), SettingSource::Deployment)
+            } else {
+                (spec.default.to_string(), SettingSource::Default)
+            };
+            SettingView {
                 spec,
-                value: value.clone(),
-                is_default: false,
-            },
-            None => SettingView {
-                spec,
-                value: spec.default.to_string(),
-                is_default: true,
-            },
+                value,
+                source,
+                deployment_value,
+                is_default: source == SettingSource::Default,
+            }
         })
         .collect())
 }
@@ -630,15 +734,32 @@ pub async fn describe(db: &Db) -> Result<Vec<SettingView>> {
 // ---------------------------------------------------------------------------
 
 pub async fn get(db: &Db, key: &str) -> Option<String> {
-    let value = sqlx::query("SELECT value FROM settings WHERE key = ?")
+    let runtime = sqlx::query("SELECT value FROM settings WHERE key = ?")
         .bind(key)
         .fetch_optional(db)
         .await
         .ok()
         .flatten()
         .map(|r| r.get::<String, _>("value"));
-    tracing::debug!(key, found = value.is_some(), "config get");
-    value
+    if runtime.is_some() {
+        tracing::debug!(key, source = "runtime", "config get");
+        return runtime;
+    }
+    let deployment = sqlx::query("SELECT value FROM deployment_settings WHERE key = ?")
+        .bind(key)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .map(|r| r.get::<String, _>("value"));
+    tracing::debug!(
+        key,
+        source = deployment
+            .as_ref()
+            .map_or("built-in default", |_| "deployment"),
+        "config get"
+    );
+    deployment
 }
 
 pub async fn get_or(db: &Db, key: &str, default: &str) -> String {
@@ -659,8 +780,8 @@ pub async fn get_bool(db: &Db, key: &str, default: bool) -> bool {
     }
 }
 
-/// One requested change: `Some(value)` writes a key, `None` clears it (so the
-/// key falls back to its registered default).
+/// One requested runtime change: `Some(value)` writes a key, `None` clears it
+/// (so the key falls back to its deployment value, then its registered default).
 pub type Change = (String, Option<String>);
 
 /// Apply a batch of [`Change`]s atomically — either all writes land or none do.
@@ -707,6 +828,57 @@ pub async fn list(db: &Db) -> Result<Vec<(String, String)>> {
         .collect())
 }
 
+/// Deployment-provided setting defaults, kept separate from live runtime
+/// overrides so a Settings-pane reset has deterministic precedence semantics.
+pub async fn list_deployment(db: &Db) -> Result<Vec<(String, String)>> {
+    let rows = sqlx::query("SELECT key, value FROM deployment_settings ORDER BY key")
+        .fetch_all(db)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.get::<String, _>("key"), r.get::<String, _>("value")))
+        .collect())
+}
+
+/// Reconcile the deployment-default layer atomically.
+///
+/// Values must already have passed [`validate`]. With `prune`, omitted
+/// deployment keys are removed; runtime rows are never touched.
+pub async fn reconcile_deployment(db: &Db, values: &[(String, String)], prune: bool) -> Result<()> {
+    let mut tx = crate::db::begin_immediate(db).await?;
+    let now = now_iso();
+    for (key, value) in values {
+        sqlx::query(
+            "INSERT INTO deployment_settings (key, value, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(key) DO UPDATE
+               SET value = excluded.value, updated_at = excluded.updated_at",
+        )
+        .bind(key)
+        .bind(value)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+    }
+    if prune {
+        let declared: std::collections::HashSet<&str> =
+            values.iter().map(|(key, _)| key.as_str()).collect();
+        let existing: Vec<String> =
+            sqlx::query_scalar("SELECT key FROM deployment_settings ORDER BY key")
+                .fetch_all(&mut *tx)
+                .await?;
+        for key in existing {
+            if !declared.contains(key.as_str()) {
+                sqlx::query("DELETE FROM deployment_settings WHERE key = ?")
+                    .bind(key)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,6 +910,21 @@ mod tests {
         assert!(validate("server.auto_adopt", "maybe").is_err());
         // Unregistered keys are free-form.
         assert!(validate("some.future.key", "anything").is_ok());
+    }
+
+    #[test]
+    fn validate_bounds_slack_prompt_and_header_text() {
+        assert!(validate("slack.status_header_template", " ").is_err());
+        assert!(validate(
+            "slack.status_header_template",
+            &"x".repeat(MAX_SLACK_STATUS_HEADER_TEMPLATE_BYTES + 1)
+        )
+        .is_err());
+        assert!(validate(
+            "slack.prompt_instructions",
+            &"x".repeat(MAX_SLACK_PROMPT_INSTRUCTIONS_BYTES + 1)
+        )
+        .is_err());
     }
 
     #[test]
@@ -784,6 +971,8 @@ mod tests {
         assert_eq!(json["kind"], "enum");
         assert_eq!(json["options"], serde_json::json!(["dark", "light"]));
         assert_eq!(json["value"], "dark");
+        assert_eq!(json["source"], "default");
+        assert_eq!(json["deployment_value"], serde_json::Value::Null);
         assert_eq!(json["is_default"], true);
 
         assert!(views
@@ -813,6 +1002,7 @@ mod tests {
             .find(|v| v.spec.key == "server.auto_adopt")
             .unwrap();
         assert!(auto_adopt.is_default);
+        assert_eq!(auto_adopt.source, SettingSource::Default);
         assert_eq!(auto_adopt.value, "false");
 
         apply(&db, &[("server.auto_adopt".into(), Some("true".into()))])
@@ -824,7 +1014,57 @@ mod tests {
             .find(|v| v.spec.key == "server.auto_adopt")
             .unwrap();
         assert!(!auto_adopt.is_default);
+        assert_eq!(auto_adopt.source, SettingSource::Runtime);
         assert_eq!(auto_adopt.value, "true");
+    }
+
+    #[tokio::test]
+    async fn runtime_overrides_deployment_and_reset_reveals_it() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let key = "slack.status_updates";
+
+        reconcile_deployment(&db, &[(key.into(), "false".into())], false)
+            .await
+            .unwrap();
+        assert_eq!(get(&db, key).await.as_deref(), Some("false"));
+        let deployed = describe(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|view| view.spec.key == key)
+            .unwrap();
+        assert_eq!(deployed.source, SettingSource::Deployment);
+        assert_eq!(deployed.deployment_value.as_deref(), Some("false"));
+        assert!(!deployed.is_default);
+
+        apply(&db, &[(key.into(), Some("true".into()))])
+            .await
+            .unwrap();
+        let runtime = describe(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|view| view.spec.key == key)
+            .unwrap();
+        assert_eq!(runtime.value, "true");
+        assert_eq!(runtime.source, SettingSource::Runtime);
+        assert_eq!(runtime.deployment_value.as_deref(), Some("false"));
+
+        apply(&db, &[(key.into(), None)]).await.unwrap();
+        assert_eq!(get(&db, key).await.as_deref(), Some("false"));
+
+        reconcile_deployment(&db, &[], true).await.unwrap();
+        assert_eq!(get(&db, key).await, None);
+        let reset = describe(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|view| view.spec.key == key)
+            .unwrap();
+        assert_eq!(reset.value, "true");
+        assert_eq!(reset.source, SettingSource::Default);
+        assert_eq!(reset.deployment_value, None);
+        assert!(reset.is_default);
     }
 
     #[tokio::test]

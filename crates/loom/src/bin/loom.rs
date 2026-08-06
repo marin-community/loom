@@ -969,9 +969,9 @@ enum FederationCmd {
 
 #[derive(Subcommand)]
 enum DeploymentCmd {
-    /// Reconcile profiles, secret references, and workload federation mappings.
+    /// Reconcile settings, profiles, secret references, and workload federation mappings.
     Apply {
-        /// JSON manifest path, or `-` for stdin.
+        /// YAML (or JSON) manifest path, or `-` for stdin.
         #[arg(long, default_value = "-")]
         file: String,
     },
@@ -2255,17 +2255,21 @@ async fn run_deployment(cmd: DeploymentCmd) -> Result<()> {
                 std::fs::read_to_string(&file)
                     .with_context(|| format!("reading deployment manifest {file}"))?
             };
-            let request: weaver_api::DeploymentReq =
-                serde_json::from_str(&contents).context("decoding deployment manifest")?;
+            let request = parse_deployment_manifest(&contents)?;
             let result = client::default()?.reconcile_deployment(&request).await?;
             println!(
-                "reconciled {} profiles and {} federation mappings",
+                "reconciled {} settings, {} profiles, and {} federation mappings",
+                result.settings.len(),
                 result.profiles.len(),
                 result.federations.len()
             );
         }
     }
     Ok(())
+}
+
+fn parse_deployment_manifest(contents: &str) -> Result<weaver_api::DeploymentReq> {
+    serde_yaml_ng::from_str(contents).context("decoding deployment manifest as YAML or JSON")
 }
 
 async fn run_profile(cmd: ProfileCmd) -> Result<()> {
@@ -5663,6 +5667,51 @@ mod tests {
         );
 
         std::env::remove_var("WEAVER_HOME");
+    }
+
+    #[test]
+    fn deployment_manifest_accepts_yaml_and_json_scalars() {
+        let yaml = parse_deployment_manifest(
+            r#"
+settings:
+  slack.status_updates: false
+  slack.idle_archive_secs: 7200
+  slack.prompt_instructions: |
+    Answer in the thread.
+    Keep it concise.
+prune: true
+"#,
+        )
+        .unwrap();
+        assert_eq!(yaml.settings["slack.status_updates"].stored(), "false");
+        assert_eq!(yaml.settings["slack.idle_archive_secs"].stored(), "7200");
+        assert_eq!(
+            yaml.settings["slack.prompt_instructions"].stored(),
+            "Answer in the thread.\nKeep it concise.\n"
+        );
+        assert!(yaml.prune);
+
+        let json = parse_deployment_manifest(
+            r#"{"settings":{"slack.status_header_template":"Working — <{session_url}>"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            json.settings["slack.status_header_template"].stored(),
+            "Working — <{session_url}>"
+        );
+    }
+
+    #[test]
+    fn deployment_manifest_rejects_non_scalar_settings() {
+        let error = parse_deployment_manifest(
+            r#"
+settings:
+  slack.status_updates:
+    nested: false
+"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("deployment manifest"));
     }
 
     #[test]

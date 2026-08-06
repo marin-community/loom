@@ -72,15 +72,24 @@ records the card message's `ts`. From then on, every `weaver status <level>
 "<message>"` the agent writes re-renders that message via `chat.update`:
 
 > On it — <{base}/s/{id}>
-> <{base}/s/{id}/artifacts/design|design>
 >
 > • 🟢 `Jul 18 21:04` reading the thread; mapping the code
 > • 🟠 `Jul 18 22:15` *attention* — ready for review
 
 Up to 15 bullets show in full (oldest first); older ones collapse into a
 single `… N earlier update(s)` line rather than growing the message
-unbounded. If the tracked message was deleted, loom posts a fresh one and
-re-records its `ts` — the same recreate-on-drop behavior as the GitHub card.
+unbounded. A relaunched session on the same conversation starts a new trail;
+the branch's older status history is not repeated. If the tracked message was
+deleted, loom posts a fresh one and re-records its `ts` — the same
+recreate-on-drop behavior as the GitHub card.
+
+Artifact links are off by default: the thread should receive a self-contained
+answer, and an internal design document is rarely useful conversation context.
+`slack.status_artifacts` can opt a deployment back in. The progress trail,
+header template, and additional launch instructions are likewise registered
+settings (`slack.status_updates`, `slack.status_header_template`, and
+`slack.prompt_instructions`), configurable through both the runtime Settings
+API and a deployment manifest. See [Configuration policy](configuration.md).
 
 Where a trigger anchors differs by shape: a **slash command's payload carries
 no thread reference at all**, so it can only start a new thread — loom posts
@@ -181,10 +190,11 @@ Do not create standalone Slack-token secrets that the deployment never reads.
 `slack.enabled` (default on) closes the live socket within ten seconds without
 discarding the tokens — use it to pause the integration without losing
 configuration. It, along with `slack.allowed_users`, `slack.default_repo`, and
-`slack.idle_archive_secs`, lives in **Settings → Slack**. `slack.effort`
-defaults Slack-origin sessions to `high` reasoning effort for a faster
-conversational response; `agent-default` preserves the selected profile's
-effort, and locked or incompatible profiles fall back automatically.
+`slack.idle_archive_secs`, lives in **Settings → Slack**. Presentation and
+prompt settings live there as well. `slack.effort` defaults Slack-origin
+sessions to `high` reasoning effort for a faster conversational response;
+`agent-default` preserves the selected profile's effort, and locked or
+incompatible profiles fall back automatically.
 
 ## Diagnosing it
 
