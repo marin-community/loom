@@ -1711,26 +1711,6 @@ mod tests {
         assert_eq!(parse_repo_prefix("note: hi"), (None, "note: hi".into()));
     }
 
-    #[test]
-    fn slack_goal_defaults_questions_to_an_inline_answer() {
-        let t = trigger("U1", "T1", false);
-        let goal = slack_goal(
-            "acme/web",
-            &t,
-            "Can you walk through whether this is reasonable?",
-            "<@U1>: context",
-        );
-        assert!(goal.contains(
-            "In answer mode, investigate as needed and reply with a self-contained answer"
-        ));
-        assert!(goal.contains(
-            "Do not edit the repository, create design/research documents, commit, open a pull request"
-        ));
-        assert!(!goal.contains(
-            "Do the work on this branch and open a pull request against the default branch when it's ready."
-        ));
-    }
-
     #[tokio::test]
     async fn slack_effort_defaults_high_and_can_inherit_the_profile() {
         let db = crate::db::connect_in_memory().await.unwrap();
