@@ -84,7 +84,7 @@ on, every `weaver status <level> "<message>"` the agent writes re-renders that
 comment:
 
 > On it — {base}/s/{id}
-> Docs: [design]({base}/s/{id}/artifacts/design)
+> [design]({base}/s/{id}/artifacts/design)
 >
 > - 🟢 `Jul 18 21:04Z` reading the thread; mapping the code
 > - 🟠 `Jul 18 22:15Z` **attention** — ready for review
@@ -94,6 +94,13 @@ never spammed; a reader opening the thread sees the whole arc, plus links to
 the documents the agent has published (the dashboard's artifact viewer). The
 agent still posts real comments when it needs a person — a question, a design
 review, the result — and those do notify.
+
+The triggering comment determines whether the session should answer or change
+the repository. Questions, walkthroughs, evaluations, explanations, and review
+requests receive a concise answer on the issue or PR with no repository edits.
+Explicit implementation/fix/PR requests use the branch workflow. If a direct
+answer can satisfy ambiguous wording, the agent answers first rather than
+manufacturing a change.
 
 The mirroring works on any session, not just triggered ones: `weaver tag set
 github owner/name#123` wires a session by hand (the card appears on its next

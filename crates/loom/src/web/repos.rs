@@ -578,8 +578,8 @@ async fn handle_trigger(
 }
 
 /// Build the opening goal for a trigger-launched session: the issue/PR title and
-/// body, the triggering comment, and how to respond — push to the PR branch (or
-/// open a PR) and reply on the thread with `gh`.
+/// body, the triggering comment, and instructions to choose answer or change
+/// mode before replying on the thread with `gh`.
 fn trigger_goal(
     repo: &str,
     is_pr: bool,
@@ -607,16 +607,19 @@ fn trigger_goal(
         .map(str::trim)
         .filter(|b| !b.is_empty())
         .unwrap_or("(no description)");
-    let work = if is_pr {
-        format!("- This worktree is checked out on the PR's own branch — commit and `git push` here to update pull request #{number} directly.")
+    let change_work = if is_pr {
+        format!("This worktree is checked out on the PR's own branch — commit and `git push` here to update pull request #{number} directly.")
     } else {
-        "- Do the work on this branch and open a pull request against the default branch when it's ready.".to_string()
+        "Do the work on this branch and open a pull request against the default branch when it is ready.".to_string()
     };
     let comment_cmd = if is_pr { "pr" } else { "issue" };
     let respond = format!(
-        "{work}\n\
-         - Your `weaver status` messages are mirrored onto this thread (loom edits its \"On it\" comment into a live status trail), so progress reporting is automatic — write status messages for that audience.\n\
-         - Comment on the thread only when you need a person there — a question, a design to review, the finished result: `gh {comment_cmd} comment {number} --repo {repo} --body \"…\"`."
+        "- First choose the response mode from the triggering comment and thread context. Questions, walkthroughs, evaluations, explanations, and review requests are *answer mode*. Explicit requests to implement, fix, change files, or update/open a pull request are *change mode*.\n\
+         - In answer mode, investigate as needed and post a concise, self-contained answer on this thread. Do not edit the repository, create design/research documents, commit, or open a pull request unless the user explicitly asks for a change.\n\
+         - In change mode, {change_work}\n\
+         - If the request is ambiguous and a direct answer can satisfy it, use answer mode rather than requiring a follow-up or manufacturing a change.\n\
+         - Your `weaver status` messages are mirrored onto this thread (loom edits its \"On it\" comment into a live status trail), so progress reporting is automatic. For a short answer, avoid narrating every lookup.\n\
+         - Post the final answer or completed result on the thread: `gh {comment_cmd} comment {number} --repo {repo} --body \"…\"`."
     );
     format!(
         "You've been tagged into GitHub {kind} #{number} of {repo} ({url}) via a comment.\n\n\
@@ -708,4 +711,53 @@ pub(super) async fn repo_branches(
         rank(a).cmp(&rank(b)).then_with(|| a.name.cmp(&b.name))
     });
     Ok(Json(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn trigger_event(is_pr: bool) -> github_trigger::IssueCommentEvent {
+        let pull_request = if is_pr {
+            serde_json::json!({"url": "https://api.github.test/pulls/7"})
+        } else {
+            serde_json::Value::Null
+        };
+        github_trigger::IssueCommentEvent::parse(
+            serde_json::json!({
+                "action": "created",
+                "issue": {
+                    "number": 7,
+                    "title": "Accelerator scheduling",
+                    "body": "Background",
+                    "pull_request": pull_request,
+                },
+                "comment": {
+                    "id": 9,
+                    "body": "@loom can you walk through whether this is reasonable?",
+                    "user": {"login": "octocat"},
+                },
+                "repository": {"full_name": "acme/web"},
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn github_trigger_goal_distinguishes_answers_from_changes() {
+        let issue_goal = trigger_goal("acme/web", false, 7, &trigger_event(false), "octocat");
+        assert!(issue_goal.contains("Questions, walkthroughs, evaluations"));
+        assert!(issue_goal.contains("In answer mode"));
+        assert!(issue_goal.contains("Do not edit the repository"));
+        assert!(issue_goal.contains("Post the final answer or completed result on the thread"));
+        assert!(issue_goal
+            .contains("In change mode, Do the work on this branch and open a pull request"));
+
+        let pr_goal = trigger_goal("acme/web", true, 7, &trigger_event(true), "octocat");
+        assert!(
+            pr_goal.contains("In change mode, This worktree is checked out on the PR's own branch")
+        );
+    }
 }

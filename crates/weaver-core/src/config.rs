@@ -31,6 +31,10 @@ pub const DEFAULT_GITHUB_ARCHIVE_ON_MERGE: bool = true;
 /// The phrase an `issue_comment` must begin with to trigger a loom session via
 /// the GitHub webhook. Fixed (not free-text) in v1 to shrink the abuse surface.
 pub const DEFAULT_GITHUB_TRIGGER_PHRASE: &str = "@loom";
+/// Reasoning effort for Slack-origin sessions. Slack conversations usually
+/// expect a prompt answer, so they use a cheaper/faster tier than long-form
+/// workspace sessions by default.
+pub const DEFAULT_SLACK_EFFORT: &str = "high";
 /// The palette the browser terminal (xterm.js) renders with. `dark` keeps the
 /// classic black background; `light` swaps in a light, readable palette.
 pub const DEFAULT_TERMINAL_THEME: &str = "dark";
@@ -203,6 +207,20 @@ pub const REGISTRY: &[SettingSpec] = &[
         default: "",
         group: "Slack",
         options: &[],
+    },
+    SettingSpec {
+        key: "slack.effort",
+        label: "Slack reasoning effort",
+        description: "Reasoning effort for Slack-origin sessions. Slack \
+            conversations generally favor a faster direct answer, so the \
+            default is `high` rather than an extra-high tier. Choose \
+            `agent-default` to inherit the selected agent profile unchanged. \
+            Profiles that lock or do not support this setting also keep their \
+            configured effort.",
+        kind: SettingKind::Enum,
+        default: DEFAULT_SLACK_EFFORT,
+        group: "Slack",
+        options: &["agent-default", "low", "medium", "high", "xhigh", "max"],
     },
     SettingSpec {
         key: "slack.idle_archive_secs",

@@ -718,8 +718,8 @@ fn status_bullet(event: &events::Event) -> Option<String> {
     Some(line)
 }
 
-/// Render the Slack status card: the "On it" header linking the session, the
-/// published documents, then the `weaver status` trail (oldest-first, capped).
+/// Render the Slack status card: the "On it" header linking the session, any
+/// published-document links, then the `weaver status` trail (oldest-first, capped).
 /// Pure, so the mrkdwn format is unit-testable. Slack link syntax is
 /// `<url|label>`, not Markdown's `[label](url)`.
 pub fn render_status(session_url: &str, artifacts: &[String], events: &[events::Event]) -> String {
@@ -740,7 +740,7 @@ pub fn render_status(session_url: &str, artifacts: &[String], events: &[events::
                 format!("<{session_url}/artifacts/{path}|{}>", escape_mrkdwn(name))
             })
             .collect();
-        body.push_str(&format!("\nDocs: {}", links.join(" · ")));
+        body.push_str(&format!("\n{}", links.join(" · ")));
     }
     if bullets.is_empty() {
         return body;
@@ -1095,6 +1095,7 @@ async fn launch(
     let mut req = weaver_api::dto::CreateReq {
         repo: Some(repo.to_string()),
         goal: Some(goal),
+        effort: slack_launch_effort(&state.db).await?,
         ..Default::default()
     };
     if branch_exists || existing.is_some() {
@@ -1222,12 +1223,51 @@ fn slack_goal(repo: &str, trigger: &Trigger, instruction: &str, history: &str) -
          ## Request (from <@{user}>)\n{instruction}\n\n\
          ## Conversation context\n{history}\n\n\
          ## How to respond\n\
-         - Do the work on this branch and open a pull request against the default branch when it's ready.\n\
-         - Your `weaver status` messages and the built-in `status_update` MCP tool are mirrored onto the Slack thread (loom edits its \"On it\" message into a live status trail), so progress reporting is automatic — write status messages for that audience.\n\
-         - Reply on the thread only when you need a person — a question, a design to review, or the finished result. Prefer the built-in `slack_reply` MCP tool; if it is unavailable, POST to `$WEAVER_API/api/branches/$WEAVER_BRANCH/slack/reply` with `{{\"text\": \"…\"}}` and your `LOOM_TOKEN`.",
+         - First choose the response mode from the request and conversation. Questions, walkthroughs, evaluations, explanations, and review requests are *answer mode*. Explicit requests to implement, fix, change files, or open a pull request are *change mode*.\n\
+         - In answer mode, investigate as needed and reply with a self-contained answer, normally one to three short paragraphs. Do not edit the repository, create design/research documents, commit, open a pull request, or invoke a change workflow unless the user explicitly asks for a change. A Weaver artifact may hold genuinely useful supporting detail, but link it from the Slack answer instead of replacing the answer with it.\n\
+         - In change mode, do the work on this branch and open a pull request against the default branch when it is ready.\n\
+         - If the request is ambiguous and a direct answer can satisfy it, use answer mode. Do not require a follow-up merely to choose a more elaborate workflow.\n\
+         - Finish by replying on this Slack thread with the answer or completed result. Prefer the built-in `slack_reply` MCP tool; if it is unavailable, POST to `$WEAVER_API/api/branches/$WEAVER_BRANCH/slack/reply` with `{{\"text\": \"…\"}}` and your `LOOM_TOKEN`.\n\
+         - Your `weaver status` messages and the built-in `status_update` MCP tool are mirrored onto the Slack thread. For a short answer, avoid narrating every lookup; use status updates only when they add useful progress context.",
         channel = trigger.channel_id,
         user = trigger.user_id,
     )
+}
+
+/// Resolve the Slack-specific effort override without making an otherwise valid
+/// locked or custom default profile unlaunchable.
+async fn slack_launch_effort(db: &Db) -> Result<Option<String>> {
+    let effort = config::get_or(db, "slack.effort", config::DEFAULT_SLACK_EFFORT)
+        .await
+        .trim()
+        .to_string();
+    if effort == "agent-default" {
+        return Ok(None);
+    }
+    let Some(profile) = crate::profile::get(db, crate::profile::DEFAULT_PROFILE).await? else {
+        return Ok(None);
+    };
+    if profile.strict {
+        tracing::debug!("slack: default profile is strict; keeping its configured effort");
+        return Ok(None);
+    }
+    let Some(metadata) = crate::agent::metadata_for(db, &profile.agent_kind).await? else {
+        tracing::warn!(
+            agent = %profile.agent_kind,
+            "slack: default-profile agent is unavailable; keeping its configured effort"
+        );
+        return Ok(None);
+    };
+    if metadata.efforts.iter().any(|choice| choice.id == effort) {
+        Ok(Some(effort))
+    } else {
+        tracing::warn!(
+            agent = %profile.agent_kind,
+            effort,
+            "slack: configured effort is unsupported; keeping the agent profile default"
+        );
+        Ok(None)
+    }
 }
 
 /// A short, filesystem-safe digest of the thread identity for the branch name.
@@ -1672,6 +1712,44 @@ mod tests {
     }
 
     #[test]
+    fn slack_goal_defaults_questions_to_an_inline_answer() {
+        let t = trigger("U1", "T1", false);
+        let goal = slack_goal(
+            "acme/web",
+            &t,
+            "Can you walk through whether this is reasonable?",
+            "<@U1>: context",
+        );
+        assert!(goal.contains("Questions, walkthroughs, evaluations"));
+        assert!(goal.contains("normally one to three short paragraphs"));
+        assert!(goal.contains("Do not edit the repository"));
+        assert!(goal.contains("Finish by replying on this Slack thread"));
+        assert!(!goal.contains(
+            "Do the work on this branch and open a pull request against the default branch when it's ready."
+        ));
+    }
+
+    #[tokio::test]
+    async fn slack_effort_defaults_high_and_can_inherit_the_profile() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        assert_eq!(
+            slack_launch_effort(&db).await.unwrap().as_deref(),
+            Some("high")
+        );
+
+        weaver_core::config::apply(
+            &db,
+            &[(
+                "slack.effort".to_string(),
+                Some("agent-default".to_string()),
+            )],
+        )
+        .await
+        .unwrap();
+        assert_eq!(slack_launch_effort(&db).await.unwrap(), None);
+    }
+
+    #[test]
     fn wiring_round_trips_and_rejects_junk() {
         assert_eq!(
             parse_wiring("T1/C1/1720.5"),
@@ -1701,5 +1779,21 @@ mod tests {
         assert!(card.contains("*attention*"), "single-star bold: {card}");
         assert!(card.contains("ready &lt;now&gt;"), "escaped: {card}");
         assert!(!card.contains("**"), "no markdown bold: {card}");
+    }
+
+    #[test]
+    fn render_status_links_artifacts_without_a_docs_label() {
+        let card = render_status(
+            "http://loom/s/abc",
+            &["design".to_string(), "plan".to_string()],
+            &[],
+        );
+        assert_eq!(
+            card.lines().nth(1),
+            Some(
+                "<http://loom/s/abc/artifacts/design|design> · <http://loom/s/abc/artifacts/plan|plan>"
+            )
+        );
+        assert!(!card.contains("Docs:"));
     }
 }
