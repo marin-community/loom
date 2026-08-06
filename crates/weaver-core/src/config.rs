@@ -35,6 +35,8 @@ pub const DEFAULT_GITHUB_TRIGGER_PHRASE: &str = "@loom";
 /// expect a prompt answer, so they use a cheaper/faster tier than long-form
 /// workspace sessions by default.
 pub const DEFAULT_SLACK_EFFORT: &str = "high";
+/// Sentinel that leaves a Slack-origin session's profile effort unchanged.
+pub const SLACK_AGENT_DEFAULT_EFFORT: &str = "agent-default";
 /// The palette the browser terminal (xterm.js) renders with. `dark` keeps the
 /// classic black background; `light` swaps in a light, readable palette.
 pub const DEFAULT_TERMINAL_THEME: &str = "dark";
@@ -220,7 +222,14 @@ pub const REGISTRY: &[SettingSpec] = &[
         kind: SettingKind::Enum,
         default: DEFAULT_SLACK_EFFORT,
         group: "Slack",
-        options: &["agent-default", "low", "medium", "high", "xhigh", "max"],
+        options: &[
+            SLACK_AGENT_DEFAULT_EFFORT,
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        ],
     },
     SettingSpec {
         key: "slack.idle_archive_secs",

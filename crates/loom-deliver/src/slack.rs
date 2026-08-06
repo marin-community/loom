@@ -1241,7 +1241,7 @@ async fn slack_launch_effort(db: &Db) -> Result<Option<String>> {
         .await
         .trim()
         .to_string();
-    if effort == "agent-default" {
+    if effort == config::SLACK_AGENT_DEFAULT_EFFORT {
         return Ok(None);
     }
     let Some(profile) = crate::profile::get(db, crate::profile::DEFAULT_PROFILE).await? else {
@@ -1720,10 +1720,12 @@ mod tests {
             "Can you walk through whether this is reasonable?",
             "<@U1>: context",
         );
-        assert!(goal.contains("Questions, walkthroughs, evaluations"));
-        assert!(goal.contains("normally one to three short paragraphs"));
-        assert!(goal.contains("Do not edit the repository"));
-        assert!(goal.contains("Finish by replying on this Slack thread"));
+        assert!(goal.contains(
+            "In answer mode, investigate as needed and reply with a self-contained answer"
+        ));
+        assert!(goal.contains(
+            "Do not edit the repository, create design/research documents, commit, open a pull request"
+        ));
         assert!(!goal.contains(
             "Do the work on this branch and open a pull request against the default branch when it's ready."
         ));
@@ -1741,7 +1743,7 @@ mod tests {
             &db,
             &[(
                 "slack.effort".to_string(),
-                Some("agent-default".to_string()),
+                Some(config::SLACK_AGENT_DEFAULT_EFFORT.to_string()),
             )],
         )
         .await
