@@ -1079,7 +1079,7 @@ async fn launch(
             let prompt = followup_prompt(trigger, instruction);
             match forward_followup(state, &session, &prompt).await {
                 Ok(()) => {
-                    events::record(
+                    if let Err(error) = events::record(
                         &state.db,
                         &state.bus,
                         &b.id,
@@ -1090,7 +1090,14 @@ async fn launch(
                         }),
                     )
                     .await
-                    .ok();
+                    {
+                        tracing::warn!(
+                            session = %session.id,
+                            branch = %b.id,
+                            %error,
+                            "slack: recording forwarded follow-up failed"
+                        );
+                    }
                     // Acknowledge only after the conversation accepted the
                     // follow-up. The eyes reaction therefore means "delivered
                     // to the session", not merely "received by loom".
