@@ -48,6 +48,9 @@ rpassword = "7"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Deployment manifests are operator-authored YAML; JSON remains accepted
+# because it is a YAML subset.
+serde_yaml_ng = "0.10"
 # SHA-256 for hashing API tokens / session ids at rest (high-entropy secrets, so
 # a fast digest is right — the slow KDF above is only for low-entropy passwords).
 sha2 = "0.10"

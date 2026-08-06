@@ -4,6 +4,7 @@ use axum::{extract::State, http::StatusCode, Extension, Json};
 use weaver_api::{DeploymentReq, DeploymentView};
 
 use crate::auth::Principal;
+use crate::config;
 
 use super::{profiles, ApiResult, AppError, AppState};
 
@@ -17,6 +18,18 @@ pub(super) async fn reconcile_deployment(
 ) -> ApiResult<Json<DeploymentView>> {
     if !principal.is_admin() {
         return Err(AppError::new(StatusCode::FORBIDDEN, "admin grant required"));
+    }
+
+    let mut setting_values = Vec::with_capacity(req.settings.len());
+    for (key, declared) in &req.settings {
+        if config::spec(key).is_none() {
+            return Err(AppError::bad_request(format!("unknown setting '{key}'")));
+        }
+        let value = declared.stored();
+        if let Err(why) = config::validate(key, &value) {
+            return Err(AppError::bad_request(format!("{key}: {why}")));
+        }
+        setting_values.push((key.clone(), value));
     }
 
     let mut profile_names = BTreeSet::new();
@@ -63,6 +76,8 @@ pub(super) async fn reconcile_deployment(
     // Keep the common lock order (profiles, then registry generation). Profile
     // validation and persistence must observe one custom-agent/MCP generation.
     let _resolver_permit = st.launch_gate.acquire_resolver().await;
+
+    config::reconcile_deployment(&st.db, &setting_values, req.prune).await?;
 
     for declared in &req.profiles {
         let input = super::profiles::input(
@@ -139,7 +154,15 @@ pub(super) async fn reconcile_deployment(
         .into_iter()
         .filter(|mapping| federation_names.contains(&mapping.name))
         .collect();
+    let setting_names: BTreeSet<&str> = req.settings.keys().map(String::as_str).collect();
+    let settings = config::describe(&st.db)
+        .await?
+        .into_iter()
+        .filter(|setting| setting_names.contains(setting.spec.key))
+        .map(Into::into)
+        .collect();
     Ok(Json(DeploymentView {
+        settings,
         profiles: profile_views,
         federations: mappings,
     }))

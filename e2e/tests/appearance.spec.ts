@@ -39,9 +39,9 @@ test.describe('settings · terminal appearance', () => {
     await expect(page.getByTestId('font-jetbrains')).toHaveAttribute('aria-pressed', 'true');
     await expect(page.getByTestId('font-size-input')).toHaveValue('16');
 
-    // Reset returns all three to their registry defaults.
-    await panel.getByRole('button', { name: 'Reset to defaults' }).click();
-    await expect(panel.getByText('Reset terminal appearance to defaults.')).toBeVisible();
+    // Clearing overrides returns all three to their inherited values.
+    await panel.getByRole('button', { name: 'Clear overrides' }).click();
+    await expect(panel.getByText('Cleared terminal appearance overrides.')).toBeVisible();
     await expect(page.getByTestId('theme-dark')).toHaveAttribute('aria-pressed', 'true');
     await expect(page.getByTestId('font-plex')).toHaveAttribute('aria-pressed', 'true');
     await expect(page.getByTestId('font-size-input')).toHaveValue('13');

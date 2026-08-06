@@ -450,7 +450,9 @@ and keep provider credentials server-side. See
 The complete setting registry is self-documenting in Settings and
 `weaver config ls`. Environment variables and runtime defaults are catalogued in
 [Architecture](docs/ARCHITECTURE.md#environment); standalone deployment values
-live in [deploy/README.md](deploy/README.md).
+live in [deploy/README.md](deploy/README.md). Registered settings share one
+[configuration precedence policy](docs/configuration.md): runtime override →
+deployment default → built-in default.
 
 ## Developing weaver
 

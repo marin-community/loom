@@ -10,6 +10,8 @@
 //! call these once they've gathered the parts — so the wire struct has exactly
 //! one definition while the DB access stays where the daemon owns it.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -1101,9 +1103,33 @@ pub struct DeploymentProfileEnvReq {
     pub secret_ref: Option<String>,
 }
 
-/// Declarative runtime resources rendered by Pulumi and reconciled by name.
+/// A scalar setting value in a JSON or YAML deployment manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DeploymentSettingValue {
+    String(String),
+    Int(i64),
+    Bool(bool),
+}
+
+impl DeploymentSettingValue {
+    pub fn stored(&self) -> String {
+        match self {
+            Self::String(value) => value.clone(),
+            Self::Int(value) => value.to_string(),
+            Self::Bool(value) => value.to_string(),
+        }
+    }
+}
+
+/// Declarative runtime resources rendered by infrastructure tooling and
+/// reconciled by name.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeploymentReq {
+    /// Organization defaults for registered runtime settings. Live DB values
+    /// remain a higher-precedence override.
+    #[serde(default)]
+    pub settings: BTreeMap<String, DeploymentSettingValue>,
     #[serde(default)]
     pub profiles: Vec<DeploymentProfileReq>,
     #[serde(default)]
@@ -1115,6 +1141,7 @@ pub struct DeploymentReq {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentView {
+    pub settings: Vec<SettingView>,
     pub profiles: Vec<ProfileView>,
     pub federations: Vec<FederationView>,
 }
@@ -2630,6 +2657,7 @@ pub struct CreateEventReq {
 
 wire_enum!(SettingKind {
     String => "string",
+    Text => "text",
     Int => "int",
     Bool => "bool",
     Enum => "enum",
@@ -2639,9 +2667,26 @@ impl From<weaver_core::config::SettingKind> for SettingKind {
     fn from(kind: weaver_core::config::SettingKind) -> Self {
         match kind {
             weaver_core::config::SettingKind::String => Self::String,
+            weaver_core::config::SettingKind::Text => Self::Text,
             weaver_core::config::SettingKind::Int => Self::Int,
             weaver_core::config::SettingKind::Bool => Self::Bool,
             weaver_core::config::SettingKind::Enum => Self::Enum,
+        }
+    }
+}
+
+wire_enum!(SettingSource {
+    Default => "default",
+    Deployment => "deployment",
+    Runtime => "runtime",
+});
+
+impl From<weaver_core::config::SettingSource> for SettingSource {
+    fn from(source: weaver_core::config::SettingSource) -> Self {
+        match source {
+            weaver_core::config::SettingSource::Default => Self::Default,
+            weaver_core::config::SettingSource::Deployment => Self::Deployment,
+            weaver_core::config::SettingSource::Runtime => Self::Runtime,
         }
     }
 }
@@ -2658,6 +2703,8 @@ pub struct SettingView {
     pub group: String,
     pub options: Vec<String>,
     pub value: String,
+    pub source: SettingSource,
+    pub deployment_value: Option<String>,
     pub is_default: bool,
 }
 
@@ -2677,6 +2724,8 @@ impl From<weaver_core::config::SettingView> for SettingView {
                 .map(|option| (*option).to_string())
                 .collect(),
             value: setting.value,
+            source: setting.source.into(),
+            deployment_value: setting.deployment_value,
             is_default: setting.is_default,
         }
     }

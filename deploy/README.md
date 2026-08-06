@@ -13,6 +13,11 @@ The rest of this README documents the **standalone** stack. It exposes loom to
 the internet, so its front-door and auth settings are wired for untrusted
 exposure out of the box.
 
+Non-secret runtime policy can also be declared in an operator-owned YAML
+manifest and reconciled on each rollout, while live database edits remain a
+higher-precedence override. See the
+[configuration policy](../docs/configuration.md).
+
 ## What the standalone stack runs
 
 [`standalone/docker-compose.yml`](standalone/docker-compose.yml) brings up three

@@ -108,6 +108,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "title_provenance",
         include_str!("../migrations/0017_title_provenance.sql"),
     ),
+    (
+        18,
+        "deployment_settings",
+        include_str!("../migrations/0018_deployment_settings.sql"),
+    ),
 ];
 
 /// Latest core schema version compiled into this binary.
@@ -482,6 +487,10 @@ mod tests {
             table_columns(&pool, "notes").await.unwrap().is_empty(),
             "the notes table must be dropped"
         );
+        assert!(!table_columns(&pool, "deployment_settings")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     /// Review migration 16 shipped the final review shape; later unrelated

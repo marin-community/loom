@@ -67,7 +67,7 @@ let disposed = false;
 const sizeNumber = computed(() => clampFontSize(Number(draft[SIZE_KEY])));
 
 const dirty = computed(() => KEYS.some((k) => draft[k] !== stored.value[k]?.value));
-const allDefault = computed(() => KEYS.every((k) => stored.value[k]?.is_default));
+const allInherited = computed(() => KEYS.every((k) => stored.value[k]?.source !== 'runtime'));
 
 function adopt(settings: SettingView[]) {
   const byKey: Record<string, SettingView> = {};
@@ -115,7 +115,7 @@ async function save() {
 }
 
 async function resetDefaults() {
-  await commit(patchBody(true), 'Reset terminal appearance to defaults.');
+  await commit(patchBody(true), 'Cleared terminal appearance overrides.');
 }
 
 function nudgeSize(delta: number) {
@@ -323,11 +323,11 @@ onUnmounted(() => {
         </button>
         <button
           class="btn-secondary px-3 py-1.5 text-xs disabled:opacity-50"
-          :disabled="busy || allDefault || !loaded"
-          title="Reset theme, font, and size to their defaults"
+          :disabled="busy || allInherited || !loaded"
+          title="Clear runtime overrides and inherit deployment or built-in values"
           @click="resetDefaults"
         >
-          Reset to defaults
+          Clear overrides
         </button>
         <span v-if="dirty" class="text-2xs text-faint"
           >Unsaved changes — applies to terminals opened after saving.</span

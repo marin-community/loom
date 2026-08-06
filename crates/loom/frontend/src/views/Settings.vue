@@ -138,11 +138,23 @@ function setting(key: string): SettingView | undefined {
 }
 
 function isDefaultValue(s: SettingView): boolean {
-  return s.is_default && !dirty(s);
+  return s.source === 'default' && !dirty(s);
 }
 
 function dirty(s: SettingView): boolean {
   return drafts.value[s.key] !== s.value;
+}
+
+function sourceLabel(s: SettingView): string {
+  return dirty(s) ? 'unsaved' : s.source;
+}
+
+function inheritedValue(s: SettingView): string {
+  return s.deployment_value ?? s.default;
+}
+
+function canReset(s: SettingView): boolean {
+  return dirty(s) || s.source === 'runtime';
 }
 
 function dirtyKeys(keys: string[]): string[] {
@@ -324,8 +336,10 @@ onMounted(load);
               v-for="s in currentSettings"
               :key="s.key"
               :setting="s"
-              :default-label="defaultText(s.default)"
+              :inherited-label="defaultText(inheritedValue(s))"
+              :source-label="sourceLabel(s)"
               :is-default="isDefaultValue(s)"
+              :can-reset="canReset(s)"
               :dirty="dirty(s)"
               :busy="busy === s.label"
               @save="saveSetting(s)"
@@ -376,11 +390,20 @@ onMounted(load);
                     {{ opt.label }}
                   </button>
                 </div>
+                <textarea
+                  v-if="s.kind === 'text'"
+                  :id="s.key"
+                  v-model="drafts[s.key]"
+                  rows="5"
+                  :placeholder="defaultText(inheritedValue(s))"
+                  class="w-full resize-y rounded bg-input px-2 py-1 font-mono text-sm outline-none ring-accent focus:ring-1"
+                />
                 <input
+                  v-else
                   :id="s.key"
                   v-model="drafts[s.key]"
                   :type="s.kind === 'int' ? 'number' : 'text'"
-                  :placeholder="defaultText(s.default)"
+                  :placeholder="defaultText(inheritedValue(s))"
                   class="w-full rounded bg-input px-2 py-1 text-sm outline-none ring-accent focus:ring-1"
                   :class="{ 'font-mono': s.kind === 'string' }"
                 />

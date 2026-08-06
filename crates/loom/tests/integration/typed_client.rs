@@ -9,7 +9,7 @@
 use serial_test::serial;
 
 use serde_json::{Map, Value};
-use weaver_api::{CreateReq, SettingKind};
+use weaver_api::{CreateReq, SettingKind, SettingSource};
 
 use crate::fixtures::TestServer;
 
@@ -134,6 +134,8 @@ async fn typed_settings_get_and_patch_share_the_rich_envelope() {
     assert!(!initial_setting.label.is_empty());
     assert!(!initial_setting.description.is_empty());
     assert_eq!(initial_setting.default, "false");
+    assert_eq!(initial_setting.source, SettingSource::Default);
+    assert_eq!(initial_setting.deployment_value, None);
     assert!(!initial_setting.group.is_empty());
     assert!(initial_setting.options.is_empty());
 
@@ -152,5 +154,6 @@ async fn typed_settings_get_and_patch_share_the_rich_envelope() {
     assert_eq!(updated_setting.group, initial_setting.group);
     assert_eq!(updated_setting.options, initial_setting.options);
     assert_eq!(updated_setting.value, "true");
+    assert_eq!(updated_setting.source, SettingSource::Runtime);
     assert!(!updated_setting.is_default);
 }

@@ -736,7 +736,28 @@ async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn deployment_reconcile_rest_journey() {
     let ts = TestServer::start_api_only().await;
+    let invalid = ts
+        .client
+        .post(
+            "/api/deployment/reconcile",
+            json!({
+                "settings": { "slack.status_updates": "sometimes" },
+                "profiles": [],
+                "federations": []
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        invalid.to_string().contains("slack.status_updates"),
+        "validation error should name the setting: {invalid}"
+    );
+
     let manifest = json!({
+        "settings": {
+            "slack.status_updates": false,
+            "slack.prompt_instructions": "Use the Marin response style."
+        },
         "profiles": [{
             "profile": {
                 "name": "ops",
@@ -774,6 +795,21 @@ async fn deployment_reconcile_rest_journey() {
         .post("/api/deployment/reconcile", manifest.clone())
         .await
         .unwrap();
+    let deployed_settings = first["settings"].as_array().unwrap();
+    let prompt_setting = deployed_settings
+        .iter()
+        .find(|setting| setting["key"] == "slack.prompt_instructions")
+        .unwrap();
+    assert_eq!(prompt_setting["source"], "deployment");
+    assert_eq!(
+        prompt_setting["deployment_value"],
+        "Use the Marin response style."
+    );
+    let status_setting = deployed_settings
+        .iter()
+        .find(|setting| setting["key"] == "slack.status_updates")
+        .unwrap();
+    assert_eq!(status_setting["value"], "false");
     assert_eq!(first["profiles"][0]["revision"], 2);
     assert_eq!(
         first["profiles"][0]["mcp_access"],
@@ -784,9 +820,41 @@ async fn deployment_reconcile_rest_journey() {
         first["profiles"][0]["env"][0]["secret_ref"],
         "projects/example/secrets/ops-kubeconfig/versions/latest"
     );
-    assert!(!first.to_string().contains("value"));
+    assert!(first["profiles"][0]["env"][0].get("value").is_none());
     let mapping_id = first["federations"][0]["id"].clone();
     assert_eq!(first["federations"][0]["service_tag"], "marin-ops");
+
+    let runtime = ts
+        .client
+        .patch("/api/settings", json!({ "slack.status_updates": true }))
+        .await
+        .unwrap();
+    let runtime_setting = runtime["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|setting| setting["key"] == "slack.status_updates")
+        .unwrap();
+    assert_eq!(runtime_setting["value"], "true");
+    assert_eq!(runtime_setting["source"], "runtime");
+    assert_eq!(runtime_setting["deployment_value"], "false");
+
+    let inherited = ts
+        .client
+        .patch(
+            "/api/settings",
+            json!({ "slack.status_updates": serde_json::Value::Null }),
+        )
+        .await
+        .unwrap();
+    let inherited_setting = inherited["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|setting| setting["key"] == "slack.status_updates")
+        .unwrap();
+    assert_eq!(inherited_setting["value"], "false");
+    assert_eq!(inherited_setting["source"], "deployment");
 
     let second = ts
         .client
@@ -799,10 +867,19 @@ async fn deployment_reconcile_rest_journey() {
     ts.client
         .post(
             "/api/deployment/reconcile",
-            json!({ "profiles": [], "federations": [], "prune": true }),
+            json!({ "settings": {}, "profiles": [], "federations": [], "prune": true }),
         )
         .await
         .unwrap();
+    let pruned = ts.client.get("/api/settings").await.unwrap();
+    let pruned_setting = pruned["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|setting| setting["key"] == "slack.status_updates")
+        .unwrap();
+    assert_eq!(pruned_setting["value"], "true");
+    assert_eq!(pruned_setting["source"], "default");
     let profile = reqwest::Client::new()
         .get(format!("http://{}/api/profiles/ops", ts.addr))
         .send()

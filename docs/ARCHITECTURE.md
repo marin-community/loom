@@ -260,12 +260,14 @@ local SQLite.
 - **`server.json`** in `$WEAVER_HOME`: pid + bound addr, written when `loom`
   comes up. The `loom` CLI uses it to find the daemon when `WEAVER_API` is
   unset.
-- **Settings** live in the `settings` table; each key is declared in
-  `weaver-core::config::registry()`. Both binaries read it. This is the
-  **global** (machine/user) store; **per-repo** conventions instead live in a
-  committed `.weaver/config.toml` read by `weaver-core::repo_config` — distinct
-  from the settings table, and resolved repo-file → builtin-default like a repo's
-  own `WEAVER.md`.
+- **Settings** use runtime rows in `settings`, deployment defaults in
+  `deployment_settings`, and immutable defaults declared in
+  `weaver-core::config::REGISTRY`; reads resolve in that order. Both binaries
+  use the same helpers. This is the **global** (machine/user) store; see
+  [configuration policy](configuration.md). **Per-repo** conventions instead
+  live in a committed `.weaver/config.toml` read by
+  `weaver-core::repo_config` — distinct from global settings, and resolved
+  repo-file → builtin-default like a repo's own `WEAVER.md`.
 - **Worktrees** live under `<repo>/.worktrees/<slug>` on `weaver/<slug>`
   (unless `--branch` reused an existing branch).
 - **Which repo a session forks from** is either a local checkout (`CreateReq.cwd`
@@ -311,7 +313,7 @@ route truth, including internal proxy and compatibility paths.
 | `GET /api/mcps` | merged trusted-builtin and operator-authored MCP registry |
 | `GET POST /api/mcps/custom`; `GET PUT DELETE /api/mcps/custom/{path}` | admin-only custom MCP CRUD; every write creates an immutable revision and validates real MCP discovery plus optional tests through `uv` |
 | `PUT DELETE /api/profiles/{profile}/env/{name}` | write-only profile environment management; a write supplies exactly one literal `value` or a full GCP Secret Manager `secret_ref`, and reads expose only source/reference metadata |
-| `POST /api/deployment/reconcile` | admin-only idempotent reconciliation of deployment-managed profiles, environment references, and federation mappings; pruning never touches operator-managed rows |
+| `POST /api/deployment/reconcile` | admin-only idempotent reconciliation of deployment setting defaults, profiles, environment references, and federation mappings; runtime setting overrides and other operator-managed rows are never pruned |
 | `POST /api/auth/federate` | exchange an exact mapped, signature-verified GitHub or Google OIDC identity for a ten-minute Ed25519-signed, profile-scoped Loom automation token |
 | `GET POST /api/runs`; `GET /api/runs/{id}` | durable, subject-scoped automation runs with idempotency reservation; an optional channel routes distinct deliveries through one live ACP session, and verified GitHub callers may provide a validated deterministic key or use the workflow run/attempt |
 | `POST /api/sessions/{id}/restricted-github/{tool}` | session-token-scoped fixed GitHub operations for a restricted session; checks stamped tool policy, fixes the target repository and thread from the session, and resolves a GitHub App token or explicit App-less profile token server-side |

@@ -2111,8 +2111,7 @@ async fn cmd_config(cmd: ConfigCmd) -> Result<()> {
         ConfigCmd::Ls => {
             let settings = client.list_settings().await?;
             for s in &settings.settings {
-                let suffix = if s.is_default { "  (default)" } else { "" };
-                println!("{} = {}{suffix}", s.key, s.value);
+                println!("{} = {}  ({})", s.key, s.value, s.source);
             }
         }
         ConfigCmd::Get { key } => {
