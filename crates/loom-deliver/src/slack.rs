@@ -5,8 +5,9 @@
 //! inbound, HMAC-verified webhook, loom is an **outbound websocket client**. A
 //! background task ([`run`]) opens a [Socket Mode] connection with the app-level
 //! token, receives `slash_commands` / `app_mention` envelopes, and — for an
-//! authorized trigger — pulls the conversation, launches a session, and replies
-//! in-thread with a live "On it" card. As the session reports `weaver status`,
+//! authorized trigger — continues the session already wired to that thread or
+//! pulls the conversation and launches one, replying in-thread with a live "On
+//! it" card only for a launch. As the session reports `weaver status`,
 //! [`sync_status_message`] edits that Slack message in place, exactly as
 //! [`crate::github::sync_status_comment`] edits the GitHub comment.
 //!
@@ -988,9 +989,9 @@ async fn handle_trigger(state: AppState, web: SlackWeb, bot: AuthTest, trigger: 
 
     match launch(&state, &web, &bot, &trigger, &repo, &instruction).await {
         Ok(Outcome::Launched) => update_health(|h| h.sessions_launched += 1),
-        // An ack on a thread that already has a session is not a launch, and
+        // A follow-up delivered to an existing session is not a launch, and
         // counting it as one would overstate what the trigger path did.
-        Ok(Outcome::AlreadyRunning) => {}
+        Ok(Outcome::Forwarded) => {}
         Err(e) => {
             tracing::warn!(error = %e, repo = %repo, "slack: launch failed");
             record_skip(&format!("launch failed: {e}"));
@@ -1022,9 +1023,9 @@ async fn notify(web: &SlackWeb, trigger: &Trigger, text: &str) -> Result<()> {
 #[derive(Debug, PartialEq, Eq)]
 enum Outcome {
     Launched,
-    /// The thread already had a live session, so the trigger was acknowledged
-    /// rather than acted on.
-    AlreadyRunning,
+    /// The thread already had a live session and the follow-up was delivered
+    /// into its conversation.
+    Forwarded,
 }
 
 /// The launch body: seed context, reuse-or-create the session, wire it, and post
@@ -1074,19 +1075,75 @@ async fn launch(
         // An archived session no longer counts as active, so a thread whose
         // session was archived falls straight through to a fresh launch on the
         // kept branch.
-        if let Ok(Some(_)) = crate::session::active_for_branch(&state.db, &b.id).await {
-            // A live session already owns this thread — don't launch a
-            // second. Ack (👀 on the mention; a note for a slash) and stop.
-            if let Anchor::Mention { event_ts, .. } = &trigger.anchor {
-                web.add_reaction(&trigger.channel_id, event_ts, "eyes")
+        if let Ok(Some(session)) = crate::session::active_for_branch(&state.db, &b.id).await {
+            let prompt = followup_prompt(trigger, instruction);
+            match forward_followup(state, &session, &prompt).await {
+                Ok(()) => {
+                    if let Err(error) = events::record(
+                        &state.db,
+                        &state.bus,
+                        &b.id,
+                        "nudge",
+                        json!({
+                            "by": format!("slack ({})", trigger.user_id),
+                            "text": instruction,
+                        }),
+                    )
                     .await
-                    .ok();
-            } else {
-                notify(web, trigger, "Already working on this thread.")
-                    .await
-                    .ok();
+                    {
+                        tracing::warn!(
+                            session = %session.id,
+                            branch = %b.id,
+                            %error,
+                            "slack: recording forwarded follow-up failed"
+                        );
+                    }
+                    // Acknowledge only after the conversation accepted the
+                    // follow-up. The eyes reaction therefore means "delivered
+                    // to the session", not merely "received by loom".
+                    if let Anchor::Mention { event_ts, .. } = &trigger.anchor {
+                        web.add_reaction(&trigger.channel_id, event_ts, "eyes")
+                            .await
+                            .ok();
+                    } else {
+                        notify(web, trigger, "Passed this to the existing session.")
+                            .await
+                            .ok();
+                    }
+                    tracing::info!(
+                        session = %session.id,
+                        channel = %trigger.channel_id,
+                        "slack: forwarded follow-up to active session"
+                    );
+                    return Ok(Outcome::Forwarded);
+                }
+                Err(error) => {
+                    // The DB can briefly outlive the ACP task or terminal. Do
+                    // not acknowledge and drop the message: retire that stale
+                    // owner, then launch below with this request in its goal.
+                    tracing::warn!(
+                        session = %session.id,
+                        branch = %b.id,
+                        %error,
+                        "slack: active session unreachable; archiving it and launching a fresh session"
+                    );
+                    match crate::lifecycle::auto_archive(state, &session, b).await {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            return Err(anyhow!(
+                                "session {} is unreachable and automatic archive is disabled",
+                                session.id
+                            ));
+                        }
+                        Err(archive_error) => {
+                            return Err(anyhow!(
+                                "archiving unreachable session {} failed: {archive_error}",
+                                session.id
+                            ));
+                        }
+                    }
+                }
             }
-            return Ok(Outcome::AlreadyRunning);
         }
     }
 
@@ -1161,6 +1218,68 @@ async fn launch(
     drop(_guard);
     sync_status_message(state.clone(), created.branch.id.clone()).await;
     Ok(Outcome::Launched)
+}
+
+/// Prompt text for a follow-up sent into an already-running Slack session.
+///
+/// The opening goal already carries the reply endpoint and thread wiring. This
+/// compact wrapper preserves attribution and makes the new request explicit in
+/// the conversation without replaying up to 40 history messages on every turn.
+fn followup_prompt(trigger: &Trigger, instruction: &str) -> String {
+    let instruction = if instruction.trim().is_empty() {
+        "(no explicit instruction — inspect the latest Slack thread context)"
+    } else {
+        instruction.trim()
+    };
+    format!(
+        "New Slack follow-up from <@{user}> in channel {channel}:\n\n{instruction}\n\n\
+         Continue this session and reply on its wired Slack thread when a response is warranted.",
+        user = trigger.user_id,
+        channel = trigger.channel_id,
+    )
+}
+
+/// Send an ACP prompt through the registered task so it is journaled and either
+/// started or durably queued according to the conversation's current state.
+async fn forward_acp_followup(
+    registry: &crate::acp::AcpRegistry,
+    session_id: &str,
+    prompt: &str,
+) -> Result<()> {
+    let handle = registry
+        .get(session_id)
+        .ok_or_else(|| anyhow!("session has no live ACP task"))?;
+    handle
+        .prompt(
+            prompt.to_string(),
+            Some("slack".to_string()),
+            false,
+            Vec::new(),
+        )
+        .await
+        .context("sending follow-up to ACP conversation")?;
+    Ok(())
+}
+
+/// Deliver a Slack follow-up through the session's actual conversation
+/// protocol. ACP relays speak JSON-RPC on stdin, so terminal paste would corrupt
+/// that stream; terminal agents keep using their interactive composer.
+async fn forward_followup(
+    state: &AppState,
+    session: &crate::session::Session,
+    prompt: &str,
+) -> Result<()> {
+    if session.protocol == "acp" {
+        forward_acp_followup(&state.acp, &session.id, prompt).await
+    } else {
+        crate::backend::paste(&session.term_session, prompt)
+            .await
+            .context("pasting follow-up into terminal session")?;
+        crate::backend::send_enter(&session.term_session)
+            .await
+            .context("submitting terminal follow-up")?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -1698,6 +1817,24 @@ mod tests {
         };
 
         assert_eq!(history_target(&t), HistoryTarget::Thread("4.4"));
+    }
+
+    #[tokio::test]
+    async fn active_acp_session_receives_slack_followup() {
+        let registry = crate::acp::AcpRegistry::new();
+        let (prompt_tx, mut prompts) = tokio::sync::mpsc::unbounded_channel();
+        registry.register_prompt_probe("s-live", prompt_tx);
+        let t = trigger("U2", "T1", false);
+        let prompt = followup_prompt(&t, "replace the existing PR");
+
+        forward_acp_followup(&registry, "s-live", &prompt)
+            .await
+            .unwrap();
+
+        let (delivered, by) = prompts.recv().await.unwrap();
+        assert_eq!(delivered, prompt);
+        assert_eq!(by.as_deref(), Some("slack"));
+        assert!(delivered.contains("replace the existing PR"));
     }
 
     #[test]

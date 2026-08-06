@@ -900,6 +900,43 @@ impl AcpRegistry {
         });
     }
 
+    /// Register a prompt probe in place of a real session task.
+    ///
+    /// Upper-crate delivery tests use this to prove that an integration hands a
+    /// follow-up to the ACP conversation rather than merely acknowledging its
+    /// transport event. Production code never registers probes.
+    pub fn register_prompt_probe(
+        &self,
+        session_id: &str,
+        prompts: mpsc::UnboundedSender<(String, Option<String>)>,
+    ) {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let (events_tx, _) = broadcast::channel(8);
+        self.register(
+            session_id,
+            AcpHandle {
+                cmd_tx,
+                events_tx,
+                metadata: Arc::new(Mutex::new(AcpMetadata::default())),
+            },
+        );
+        tokio::spawn(async move {
+            while let Some(command) = cmd_rx.recv().await {
+                if let Command::Prompt {
+                    text, by, reply, ..
+                } = command
+                {
+                    let _ = prompts.send((text, by));
+                    let _ = reply.send(Ok(PromptAck {
+                        queued: false,
+                        steered: false,
+                        turn: Some(0),
+                    }));
+                }
+            }
+        });
+    }
+
     /// Remove the session's slot only if it still holds `generation` — a task
     /// that has been superseded leaves the newer registration untouched.
     fn remove_own(&self, session_id: &str, generation: u64) {

@@ -48,14 +48,17 @@ frame it receives, in order:
 5. **Resolves the repo** from an `owner/name:` prefix on the command text, or
    the `slack.default_repo` setting (see [Which repo](#which-repo)). Neither
    set gets a reply asking for one.
-6. **Reuses or launches.** A thread that already has a live session attached
-   is acknowledged — a 👀 reaction on the mention, or an "Already working on
-   this thread." reply for a slash command — rather than launched again.
-   Otherwise loom clones/resolves the repo, pulls conversation history to
-   seed the session goal (the thread's replies for a mention, the channel's
-   recent messages for a slash command, capped at 40 messages), and creates
-   the session on a stable `slack-<hash>` branch derived from the thread
-   identity, so a later trigger on the same thread finds the same branch.
+6. **Continues or launches.** A thread that already has a live session attached
+   receives the new request in that session's conversation, then is
+   acknowledged — a 👀 reaction on the mention, or a short confirmation for a
+   slash command — rather than launched again. If the recorded session is
+   unreachable, loom archives it and relaunches on the kept branch so the
+   request is not dropped. Otherwise loom clones/resolves the repo, pulls
+   conversation history to seed the session goal (the thread's replies for a
+   mention, the channel's recent messages for a slash command, capped at 40
+   messages), and creates the session on a stable `slack-<hash>` branch derived
+   from the thread identity, so a later trigger on the same thread finds the
+   same branch.
 7. **Wires and replies.** The branch is tagged with the thread's identity (the
    `slack` tag — see [The status card](#the-status-card)), and loom posts (or,
    for a slash command, edits its placeholder into) the "On it" card.
