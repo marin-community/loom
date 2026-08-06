@@ -3,7 +3,7 @@ import type { SettingView } from '../types';
 
 defineProps<{
   setting: SettingView;
-  defaultLabel: string;
+  inheritedLabel: string;
   sourceLabel: string;
   isDefault: boolean;
   canReset: boolean;
@@ -48,14 +48,14 @@ const emit = defineEmits<{
         <button
           class="btn-secondary px-2.5 py-1 text-xs disabled:opacity-50"
           :disabled="busy || !canReset"
-          :title="`Clear runtime override; inherit: ${defaultLabel}`"
+          :title="`Clear runtime override; inherit: ${inheritedLabel}`"
           @click="emit('reset')"
         >
           Reset
         </button>
       </div>
       <p class="text-2xs text-faint">
-        Inherited value <code class="font-mono">{{ defaultLabel }}</code>
+        Inherited value <code class="font-mono">{{ inheritedLabel }}</code>
       </p>
     </div>
   </div>

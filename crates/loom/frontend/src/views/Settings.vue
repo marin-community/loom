@@ -336,7 +336,7 @@ onMounted(load);
               v-for="s in currentSettings"
               :key="s.key"
               :setting="s"
-              :default-label="defaultText(inheritedValue(s))"
+              :inherited-label="defaultText(inheritedValue(s))"
               :source-label="sourceLabel(s)"
               :is-default="isDefaultValue(s)"
               :can-reset="canReset(s)"
