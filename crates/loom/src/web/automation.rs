@@ -5,7 +5,7 @@ use axum::{
 };
 use weaver_api::{
     AutomationTokenReq, AutomationTokenView, FederateReq, FederationReq, FederationView, RunReq,
-    RunView,
+    RunView, SlackThreadRef,
 };
 
 use crate::auth::{Grant, Principal};
@@ -153,6 +153,34 @@ async fn remove_late_session(st: &AppState, session_id: &str) {
     }
 }
 
+/// Point the delivery's Slack thread at the branch the run landed on, so that
+/// session can reply there and a mention in that thread reaches it. Best-effort:
+/// the run itself already succeeded, and a lost route degrades to a thread the
+/// operator has to answer from the dashboard instead.
+async fn route_slack_thread(
+    st: &AppState,
+    target: Option<&SlackThreadRef>,
+    branch_id: &str,
+    source: &str,
+) {
+    let Some(target) = target else {
+        return;
+    };
+    let Ok((channel, thread_ts)) = crate::slack::parse_thread_ref(target) else {
+        return;
+    };
+    if let Err(error) =
+        crate::slack_routes::record(&st.db, &channel, &thread_ts, branch_id, source).await
+    {
+        tracing::warn!(
+            branch = branch_id,
+            channel = %channel,
+            %error,
+            "could not route the delivery's Slack thread to its session"
+        );
+    }
+}
+
 async fn launch_run(
     st: &AppState,
     req: RunReq,
@@ -162,15 +190,18 @@ async fn launch_run(
     failure: LaunchFailure,
 ) -> ApiResult<Json<RunView>> {
     let actor = crate::provision::Actor::automation(
-        req.source,
+        req.source.clone(),
         subject,
         profiles,
         run.id.clone(),
         run.session_id.clone(),
     );
+    let slack = req.slack.clone();
+    let source = req.source.clone();
     match crate::provision::create(st.clone(), req.session, actor).await {
         Ok(created) => {
             if crate::runs::launched(&st.db, &run.id, &created.session.id).await? {
+                route_slack_thread(st, slack.as_ref(), &created.branch.id, &source).await;
                 run_view(st, &run.id).await
             } else {
                 remove_late_session(st, &created.session.id).await;
@@ -270,6 +301,11 @@ async fn prompt_channel_run(
             "automation delivery was archived or removed while running",
         ));
     }
+    // Each alert on a channel arrives in its own thread while the session stays
+    // the same, so routes accumulate on this one branch. The session's `slack`
+    // wiring tag is deliberately left alone: one status card cannot follow a
+    // session that is triaging several incidents at once.
+    route_slack_thread(st, req.slack.as_ref(), &session.branch_id, &run.source).await;
     run_view(st, &run.id).await
 }
 
@@ -312,6 +348,11 @@ pub(super) async fn create_run(
     }
     req.session.profile = Some(profile.clone());
     req.session.class = None;
+    // Reject a malformed thread up front rather than accepting the run and
+    // silently dropping the route: the caller can then fix and redeliver.
+    if let Some(target) = req.slack.as_ref() {
+        crate::slack::parse_thread_ref(target).map_err(AppError::bad_request)?;
+    }
     req.channel = match req.channel.take() {
         Some(channel) => {
             let channel = channel.trim().to_string();

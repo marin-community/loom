@@ -8,7 +8,7 @@ pub use loom_core::{
     acp, agent, agent_env, agent_kind, auth, automation, backend, changes, channels, chat, chatlog,
     client_context, ctx, custom_agents, custom_mcp, db, envfile, history, launch, launch_gate,
     links, logs, loom_config, mcp, paths, profile, profile_data, repo_env, review_inbox, runner,
-    runs, scratch, session, session_layout, session_manager, shell, status,
+    runs, scratch, session, session_layout, session_manager, shell, slack_routes, status,
 };
 
 /// The state slice editor and terminal handlers actually consume.

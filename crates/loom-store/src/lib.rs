@@ -13,6 +13,7 @@ pub mod review_inbox;
 pub mod runs;
 pub mod session;
 pub mod session_layout;
+pub mod slack_routes;
 pub mod status;
 
 pub use loom_ctx::Ctx;

@@ -10,7 +10,8 @@ pub use loom_agent::Ctx;
 pub use loom_agent::{
     acp, agent, agent_env, agent_kind, backend, changes, channels, chat, chatlog, client_context,
     ctx, custom_agents, envfile, history, launch_gate, links, logs, loom_config, mcp, paths,
-    profile_data, repo_env, review_inbox, runner, runs, scratch, session, session_layout, status,
+    profile_data, repo_env, review_inbox, runner, runs, scratch, session, session_layout,
+    slack_routes, status,
 };
 
 pub(crate) use weaver_core::config;

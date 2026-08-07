@@ -184,6 +184,9 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
     `channel_deliveries` (durable communication context, append-only stream,
     per-subject read/mode state, and separate runtime acceptance receipts),
     `recent_repos`,
+    `slack_routes` (Slack threads an automation delivery pointed at a branch,
+    keyed on the thread: many alert threads may route to one operator session,
+    which is why this is not the single-valued `slack` branch tag),
     `branch_github` (per-branch PR snapshot), `chat_blocks` (the ACP
     [chat journal](#rest-api): one row per `(session_id, turn, seq)` block),
     `session_acp_metadata` (the latest provider-advertised composer controls,

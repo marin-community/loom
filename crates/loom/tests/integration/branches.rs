@@ -2,6 +2,7 @@
 //! board, claim release on teardown, and attaching a session to a pre-existing
 //! git branch (with or without an existing worktree).
 
+use reqwest::StatusCode;
 use serde_json::json;
 use serial_test::serial;
 
@@ -450,6 +451,69 @@ async fn attach_to_existing_branch() {
         .delete(&format!(
             "/api/sessions/{}",
             attached_y["id"].as_str().unwrap()
+        ))
+        .await
+        .unwrap();
+}
+
+/// The Slack reply route's destination is server-resolved. A thread the session
+/// was never delivered is refused, so `thread` selects among the session's own
+/// alert threads rather than granting the agent the workspace. Both refusals
+/// land before any Slack call, so they hold on a server with no Slack
+/// configured — which is also what a leaked `LOOM_TOKEN` would face.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slack_reply_refuses_a_thread_the_session_was_not_delivered() {
+    let ts = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let session = ts
+        .client
+        .post(
+            "/api/sessions",
+            json!({ "goal": "slack reply scope", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let branch_id = session["branch"]["id"].as_str().unwrap().to_string();
+    let reply_url = format!("http://{}/api/branches/{branch_id}/slack/reply", ts.addr);
+
+    // An unrouted thread is forbidden even though it is well-formed.
+    let unrouted = http
+        .post(&reply_url)
+        .json(&json!({
+            "text": "status update",
+            "thread": { "channel": "C0123ABCD", "thread_ts": "1700000000.123456" },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unrouted.status(), StatusCode::FORBIDDEN);
+
+    // A channel name is not an id: rejected on shape, before any Slack call.
+    let malformed = http
+        .post(&reply_url)
+        .json(&json!({
+            "text": "status update",
+            "thread": { "channel": "#marin-eng", "thread_ts": "1700000000.123456" },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+
+    // Without `thread`, an unwired branch still reports that it has no thread.
+    let unwired = http
+        .post(&reply_url)
+        .json(&json!({ "text": "status update" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unwired.status(), StatusCode::BAD_REQUEST);
+
+    ts.client
+        .delete(&format!(
+            "/api/sessions/{}",
+            session["id"].as_str().unwrap()
         ))
         .await
         .unwrap();

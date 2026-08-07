@@ -2327,21 +2327,23 @@ async fn recover_restarts_a_poisoned_live_acp_runtime() {
         )
         .await
         .expect("the replacement accepts a prompt");
+    // Wait for the turn to close, not for its message: turn_end is journaled
+    // after agent_message, so counting on the message's snapshot races it.
     let chat = poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
-        blocks.iter().any(|block| {
-            block["kind"] == "agent_message" && block["payload"]["text"] == "healthy again"
-        })
+        count_kind(blocks, "turn_end") >= 4
     })
     .await;
+    let blocks = chat["blocks"].as_array().unwrap();
     assert_eq!(
-        chat["blocks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|block| block["kind"] == "turn_end")
-            .count(),
+        count_kind(blocks, "turn_end"),
         4,
         "recovery continues the existing journal"
+    );
+    assert!(
+        blocks.iter().any(|block| {
+            block["kind"] == "agent_message" && block["payload"]["text"] == "healthy again"
+        }),
+        "the replacement task answered the prompt"
     );
 }
 

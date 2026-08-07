@@ -1146,6 +1146,17 @@ pub struct DeploymentView {
     pub federations: Vec<FederationView>,
 }
 
+/// One Slack thread, as an automation caller names it. `channel` is a Slack
+/// channel id (`C…`/`G…`/`D…`, never a `#name`) and `thread_ts` the message `ts`
+/// of the thread's root. The workspace is loom's own — a caller cannot address
+/// another team — and the bot token stays server-side, so this is a destination
+/// request, not a capability the caller holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlackThreadRef {
+    pub channel: String,
+    pub thread_ts: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunReq {
     pub profile: String,
@@ -1164,6 +1175,12 @@ pub struct RunReq {
     /// live ACP session.
     #[serde(default)]
     pub channel: Option<String>,
+    /// The Slack thread this delivery was announced in. Loom routes the thread to
+    /// the session the run lands on, which lets that session reply there and
+    /// lets a `@bot` mention in the thread reach it — without re-pointing the
+    /// session's single `slack` status-card wiring.
+    #[serde(default)]
+    pub slack: Option<SlackThreadRef>,
     pub session: CreateReq,
 }
 

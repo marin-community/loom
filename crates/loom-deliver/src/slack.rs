@@ -51,6 +51,10 @@ const STATUS_CARD_CAP: usize = 15;
 /// Cap on how many conversation messages seed a session, so a busy channel can't
 /// produce an unbounded launch prompt.
 const HISTORY_CAP: usize = 40;
+/// Bounds on a caller-supplied Slack channel id and message `ts`. Slack's own
+/// ids are far shorter; these only keep a malformed value out of a Web API call.
+const MAX_CHANNEL_ID: usize = 32;
+const MAX_THREAD_TS: usize = 32;
 
 // ---------------------------------------------------------------------------
 // Live supervisor health.
@@ -86,6 +90,10 @@ pub struct SocketHealth {
     pub last_event_at: Option<String>,
     pub events_received: u64,
     pub sessions_launched: u64,
+    /// Mentions delivered into the session an automation run had routed that
+    /// thread to, rather than launching. Distinguishes a working alert-thread
+    /// conversation from one that silently launches a duplicate session per reply.
+    pub followups_routed: u64,
     /// Why the most recent trigger was not acted on. A dropped mention is the
     /// integration's quietest failure, so it is kept where an operator looks.
     pub last_skip: Option<String>,
@@ -991,6 +999,39 @@ pub fn parse_wiring(value: &str) -> Option<(String, String, String)> {
     Some((team.to_string(), channel.to_string(), root.to_string()))
 }
 
+/// Validate a caller-supplied [`weaver_api::SlackThreadRef`] into a trimmed
+/// `(channel, thread_ts)`. Slack ids are opaque, so this is a shape check, not a
+/// existence check: enough that a malformed or injected value cannot reach a Web
+/// API call or be stored as a route. Existence is Slack's answer to give, at
+/// `chat.postMessage` time.
+pub fn parse_thread_ref(
+    target: &weaver_api::SlackThreadRef,
+) -> Result<(String, String), &'static str> {
+    const CHANNEL_SHAPE: &str = "slack channel must be a Slack channel id such as C0123ABCD";
+    const TS_SHAPE: &str = "slack thread_ts must look like 1700000000.123456";
+
+    let channel = target.channel.trim();
+    if channel.len() > MAX_CHANNEL_ID
+        || !matches!(channel.as_bytes().first(), Some(b'C' | b'G' | b'D'))
+        || !channel
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    {
+        return Err(CHANNEL_SHAPE);
+    }
+    let thread_ts = target.thread_ts.trim();
+    let (seconds, fraction) = thread_ts.split_once('.').ok_or(TS_SHAPE)?;
+    if thread_ts.len() > MAX_THREAD_TS
+        || seconds.is_empty()
+        || fraction.is_empty()
+        || !seconds.bytes().all(|b| b.is_ascii_digit())
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(TS_SHAPE);
+    }
+    Ok((channel.to_string(), thread_ts.to_string()))
+}
+
 /// Spawn every status-card mirror a branch is wired for. The one seam the status
 /// write path (and artifact publish/delete) calls — GitHub self-gates on the
 /// `github` tag, Slack on the `slack` tag, so an unwired branch is a no-op for
@@ -1043,9 +1084,26 @@ async fn handle_trigger(state: AppState, web: SlackWeb, bot: AuthTest, trigger: 
         return;
     }
 
+    let (prefix_repo, instruction) = parse_repo_prefix(&trigger.text);
+
+    // A thread an automation delivery already pointed at a session belongs to
+    // that session — an operator answering under an alert means "you, the session
+    // handling this alert", not "start something new". This runs before the repo
+    // is resolved because a routed thread needs none: the session already exists.
+    if let Some(outcome) = forward_to_routed_session(&state, &web, &trigger, &instruction).await {
+        match outcome {
+            Ok(()) => update_health(|h| h.followups_routed += 1),
+            Err(e) => {
+                tracing::warn!(error = %e, "slack: routed follow-up failed");
+                record_skip(&format!("routed follow-up failed: {e}"));
+                let _ = notify(&web, &trigger, &format!("Couldn't reach that session: {e}")).await;
+            }
+        }
+        return;
+    }
+
     // Resolve the repo: an `owner/name:` prefix wins, else the configured
     // default. Without either there's nothing to work on.
-    let (prefix_repo, instruction) = parse_repo_prefix(&trigger.text);
     let repo = match prefix_repo {
         Some(r) => r,
         None => {
@@ -1074,6 +1132,91 @@ async fn handle_trigger(state: AppState, web: SlackWeb, bot: AuthTest, trigger: 
             let _ = notify(&web, &trigger, &format!("Couldn't start a session: {e}")).await;
         }
     }
+}
+
+/// Deliver a mention into the session an automation run routed this thread to.
+///
+/// `None` means "not ours, carry on": the thread has no route, the trigger is a
+/// thread-blind slash command, or the routed session is no longer live (an
+/// archived operator session leaves its alert threads behind, and a human
+/// reviving one is better served by the ordinary launch path than by an error).
+/// `Some(Err(_))` is a route that exists and could not be delivered to.
+async fn forward_to_routed_session(
+    state: &AppState,
+    web: &SlackWeb,
+    trigger: &Trigger,
+    instruction: &str,
+) -> Option<Result<()>> {
+    let Anchor::Mention { event_ts, .. } = &trigger.anchor else {
+        return None;
+    };
+    let (route, session) = routed_session(&state.db, trigger).await?;
+
+    let prompt = followup_prompt(trigger, instruction);
+    if let Err(error) = forward_followup(state, &session, &prompt).await {
+        return Some(Err(error));
+    }
+    if let Err(error) = events::record(
+        &state.db,
+        &state.bus,
+        &route.branch_id,
+        "nudge",
+        json!({
+            "by": format!("slack ({})", trigger.user_id),
+            "text": instruction,
+        }),
+    )
+    .await
+    {
+        tracing::warn!(
+            session = %session.id,
+            branch = %route.branch_id,
+            %error,
+            "slack: recording routed follow-up failed"
+        );
+    }
+    // Acknowledge only once the conversation accepted it, so 👀 means "delivered
+    // to the session" rather than "received by loom".
+    web.add_reaction(&trigger.channel_id, event_ts, "eyes")
+        .await
+        .ok();
+    tracing::info!(
+        session = %session.id,
+        branch = %route.branch_id,
+        channel = %trigger.channel_id,
+        thread = %route.thread_ts,
+        source = %route.source,
+        "slack: forwarded follow-up to the session routed to this thread"
+    );
+    Some(Ok(()))
+}
+
+/// Resolve a mention's thread to the live session an automation delivery routed
+/// it to. The whole routing decision, over `Db` alone: a lookup failure is
+/// treated as "no route" so a database hiccup falls back to the ordinary launch
+/// path rather than dropping the operator's message.
+async fn routed_session(
+    db: &Db,
+    trigger: &Trigger,
+) -> Option<(crate::slack_routes::SlackRoute, crate::session::Session)> {
+    let Anchor::Mention { root_ts, .. } = &trigger.anchor else {
+        return None;
+    };
+    let route = match crate::slack_routes::for_thread(db, &trigger.channel_id, root_ts).await {
+        Ok(route) => route?,
+        Err(error) => {
+            tracing::warn!(%error, "slack: reading the thread's route failed");
+            return None;
+        }
+    };
+    let session = match crate::session::active_for_branch(db, &route.branch_id).await {
+        Ok(session) => session?,
+        Err(error) => {
+            tracing::warn!(branch = %route.branch_id, %error, "slack: routed session lookup failed");
+            return None;
+        }
+    };
+    Some((route, session))
 }
 
 /// Record why a trigger did not become a session, for the Connections pane.
@@ -1927,6 +2070,104 @@ mod tests {
         assert!(delivered.contains("replace the existing PR"));
     }
 
+    /// A live operator session plus one alert thread routed to it.
+    async fn db_with_routed_alert(status: &str) -> (Db, String) {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let branch = weaver_core::branch::upsert(&db, "/repo", "weaver/ops", "main")
+            .await
+            .unwrap();
+        crate::session::insert(
+            &db,
+            &crate::session::NewSession {
+                id: "s-ops".to_string(),
+                branch_id: branch.id.clone(),
+                work_dir: "/work/s-ops".to_string(),
+                term_session: "weaver-s-ops".to_string(),
+                agent_kind: "shell".to_string(),
+                model: String::new(),
+                effort: String::new(),
+                status: status.to_string(),
+                github_repo: None,
+                parent_branch_id: None,
+                managed_by: None,
+                created_by: None,
+                protocol: "acp".to_string(),
+                origin: "grafana".to_string(),
+                class: "automation".to_string(),
+                tracking_issue_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        crate::slack_routes::record(&db, "C1", "1700.1", &branch.id, "grafana")
+            .await
+            .unwrap();
+        (db, branch.id)
+    }
+
+    fn mention_in(channel: &str, root_ts: &str) -> Trigger {
+        Trigger {
+            team_id: "T1".into(),
+            channel_id: channel.into(),
+            user_id: "U2".into(),
+            text: "try restarting the controller".into(),
+            anchor: Anchor::Mention {
+                root_ts: root_ts.into(),
+                event_ts: "1700.9".into(),
+            },
+            dedupe_id: "slack:Ev1".into(),
+            via_app: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_mention_under_a_routed_alert_finds_that_session() {
+        let (db, branch) = db_with_routed_alert("running").await;
+
+        let (route, session) = routed_session(&db, &mention_in("C1", "1700.1"))
+            .await
+            .expect("the alert's thread routes to the operator session");
+        assert_eq!(route.branch_id, branch);
+        assert_eq!(session.id, "s-ops");
+    }
+
+    /// The fall-through cases all mean "let the ordinary launch path handle it",
+    /// which is what keeps an unrelated mention from being swallowed.
+    #[tokio::test]
+    async fn an_unrouted_thread_falls_through_to_a_launch() {
+        let (db, _branch) = db_with_routed_alert("running").await;
+
+        // Another thread in the same channel, and the same ts in another channel.
+        assert!(routed_session(&db, &mention_in("C1", "1700.2"))
+            .await
+            .is_none());
+        assert!(routed_session(&db, &mention_in("C2", "1700.1"))
+            .await
+            .is_none());
+    }
+
+    /// A slash command carries no thread at all, so it can never continue an
+    /// alert conversation — only start its own.
+    #[tokio::test]
+    async fn a_slash_command_never_routes() {
+        let (db, _branch) = db_with_routed_alert("running").await;
+        let mut slash = mention_in("C1", "1700.1");
+        slash.anchor = Anchor::Slash;
+
+        assert!(routed_session(&db, &slash).await.is_none());
+    }
+
+    /// Operator sessions are archived on idle, leaving their alert threads behind.
+    /// A later reply should start a fresh session rather than fail.
+    #[tokio::test]
+    async fn an_archived_session_leaves_its_threads_to_the_launch_path() {
+        let (db, _branch) = db_with_routed_alert("archived").await;
+
+        assert!(routed_session(&db, &mention_in("C1", "1700.1"))
+            .await
+            .is_none());
+    }
+
     #[test]
     fn repo_prefix_splits_only_a_leading_slug() {
         assert_eq!(
@@ -1972,6 +2213,46 @@ mod tests {
         // Two branches for the same thread hash to the same short name.
         assert_eq!(short_hash("T1/C1/1720.5"), short_hash("T1/C1/1720.5"));
         assert_ne!(short_hash("T1/C1/1720.5"), short_hash("T1/C1/1720.6"));
+    }
+
+    fn thread_ref(channel: &str, thread_ts: &str) -> weaver_api::SlackThreadRef {
+        weaver_api::SlackThreadRef {
+            channel: channel.into(),
+            thread_ts: thread_ts.into(),
+        }
+    }
+
+    #[test]
+    fn a_thread_ref_accepts_slack_ids_and_trims() {
+        assert_eq!(
+            parse_thread_ref(&thread_ref(" C0123ABCD ", " 1700000000.123456 ")),
+            Ok(("C0123ABCD".to_string(), "1700000000.123456".to_string()))
+        );
+        // Private channels and DMs are addressable too.
+        assert!(parse_thread_ref(&thread_ref("G0123ABCD", "1700000000.1")).is_ok());
+        assert!(parse_thread_ref(&thread_ref("D0123ABCD", "1700000000.1")).is_ok());
+    }
+
+    /// A channel *name* is the likely caller mistake, and it would post to
+    /// whatever Slack resolves `#alerts` to rather than failing.
+    #[test]
+    fn a_thread_ref_rejects_anything_that_is_not_an_id_and_a_ts() {
+        for bad in [
+            thread_ref("#marin-eng", "1700000000.1"),
+            thread_ref("c0123abcd", "1700000000.1"),
+            thread_ref("X0123ABCD", "1700000000.1"),
+            thread_ref("", "1700000000.1"),
+            thread_ref("C0123ABCD", "1700000000"),
+            thread_ref("C0123ABCD", "1700000000."),
+            thread_ref("C0123ABCD", ".123456"),
+            thread_ref("C0123ABCD", "17e9.123456"),
+            thread_ref("C0123ABCD", &"9".repeat(40)),
+        ] {
+            assert!(
+                parse_thread_ref(&bad).is_err(),
+                "{bad:?} should not parse as a Slack thread"
+            );
+        }
     }
 
     #[test]

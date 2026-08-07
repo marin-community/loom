@@ -101,12 +101,21 @@ fn tools() -> Value {
         },
         {
             "name": "slack_reply",
-            "description": "Post a message to the Slack thread fixed to this session.",
+            "description": "Post a message to a Slack thread this session owns. Omit 'thread' for the thread fixed to this session. Pass 'thread' to answer in a thread an automation delivery announced to this session — an alert's own thread, whose channel and thread_ts arrive with the alert.",
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                    "text": { "type": "string", "minLength": 1, "maxLength": 4000 }
+                    "text": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                    "thread": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "channel": { "type": "string" },
+                            "thread_ts": { "type": "string" }
+                        },
+                        "required": ["channel", "thread_ts"]
+                    }
                 },
                 "required": ["text"]
             }
@@ -156,6 +165,12 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
             if text.is_empty() || text.len() > 4000 {
                 bail!("slack_reply text must contain 1 to 4000 bytes");
             }
+            let mut body = json!({ "text": text });
+            // The server authorizes the thread against this session's routes, so
+            // pass it through as given rather than validating a Slack id here.
+            if let Some(thread) = arguments.get("thread") {
+                body["thread"] = thread.clone();
+            }
             client
                 .post(
                     &format!(
@@ -165,7 +180,7 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
                             percent_encoding::NON_ALPHANUMERIC
                         )
                     ),
-                    json!({ "text": text }),
+                    body,
                 )
                 .await?;
             "message posted to the session Slack thread".to_string()

@@ -105,6 +105,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "slack-space",
         include_str!("../migrations/0019_slack_space.sql"),
     ),
+    (
+        20,
+        "slack-alert-routes",
+        include_str!("../migrations/0020_slack_alert_routes.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);

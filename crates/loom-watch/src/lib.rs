@@ -12,7 +12,7 @@ pub use loom_launch::{
     github_manifest, github_trigger, handoff, history, ide, launch, launch_gate, lifecycle, links,
     logs, loom_config, mcp, metadata_assist, paths, profile, profile_data, provision, repo,
     repo_env, review_inbox, runner, runs, runtime, scratch, session, session_layout,
-    session_manager, setup, shell, status, terminal, user_token, Ctx, EditorState,
+    session_manager, setup, shell, slack_routes, status, terminal, user_token, Ctx, EditorState,
 };
 
 pub(crate) use weaver_core::db::Db;
