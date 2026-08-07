@@ -88,18 +88,6 @@ pub async fn allows(db: &Db, branch_id: &str, channel_id: &str, thread_ts: &str)
     Ok(allowed)
 }
 
-/// Every thread routed to a branch, most recently delivered first.
-pub async fn for_branch(db: &Db, branch_id: &str) -> Result<Vec<SlackRoute>> {
-    let routes = sqlx::query_as::<_, SlackRoute>(
-        "SELECT channel_id, thread_ts, branch_id, source, created_at, updated_at
-         FROM slack_routes WHERE branch_id = ? ORDER BY updated_at DESC",
-    )
-    .bind(branch_id)
-    .fetch_all(db)
-    .await?;
-    Ok(routes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +113,8 @@ mod tests {
         assert!(for_thread(&db, "C1", "9999.9").await.unwrap().is_none());
     }
 
+    /// The relation this table exists for: one operator session triaging several
+    /// alerts, each announced in its own thread.
     #[tokio::test]
     async fn one_session_owns_many_threads() {
         let (db, branch) = db_with_branch().await;
@@ -135,8 +125,17 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(for_branch(&db, &branch).await.unwrap().len(), 2);
-        assert!(allows(&db, &branch, "C1", "1800.2").await.unwrap());
+        for thread_ts in ["1700.1", "1800.2"] {
+            assert_eq!(
+                for_thread(&db, "C1", thread_ts)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .branch_id,
+                branch
+            );
+            assert!(allows(&db, &branch, "C1", thread_ts).await.unwrap());
+        }
     }
 
     /// The route is the authorization: a branch may not address a thread that
@@ -153,16 +152,41 @@ mod tests {
         assert!(!allows(&db, "other-branch", "C1", "1700.1").await.unwrap());
     }
 
+    /// Grafana redelivers the same alert; the newest delivery owns the thread, so
+    /// a relaunched operator session inherits the conversation rather than losing it.
     #[tokio::test]
-    async fn redelivery_is_idempotent() {
+    async fn redelivery_is_idempotent_and_the_newest_session_takes_the_thread() {
         let (db, branch) = db_with_branch().await;
-        record(&db, "C1", "1700.1", &branch, "grafana")
-            .await
-            .unwrap();
-        record(&db, "C1", "1700.1", &branch, "grafana")
+        let relaunched = weaver_core::branch::upsert(&db, "/tmp/repo", "weaver/ops-2", "main")
             .await
             .unwrap();
 
-        assert_eq!(for_branch(&db, &branch).await.unwrap().len(), 1);
+        record(&db, "C1", "1700.1", &branch, "grafana")
+            .await
+            .unwrap();
+        record(&db, "C1", "1700.1", &branch, "grafana")
+            .await
+            .unwrap();
+        assert_eq!(
+            for_thread(&db, "C1", "1700.1")
+                .await
+                .unwrap()
+                .unwrap()
+                .branch_id,
+            branch
+        );
+
+        record(&db, "C1", "1700.1", &relaunched.id, "grafana")
+            .await
+            .unwrap();
+        assert_eq!(
+            for_thread(&db, "C1", "1700.1")
+                .await
+                .unwrap()
+                .unwrap()
+                .branch_id,
+            relaunched.id
+        );
+        assert!(!allows(&db, &branch, "C1", "1700.1").await.unwrap());
     }
 }
