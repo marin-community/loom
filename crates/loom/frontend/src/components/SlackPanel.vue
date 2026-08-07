@@ -53,7 +53,10 @@ const traffic = computed(() => {
   const s = socket.value;
   if (!s || s.state !== 'connected') return '';
   const last = s.last_event_at ? `last ${compactAge(s.last_event_at)} ago` : 'none yet';
-  return `${s.events_received} received · ${s.sessions_launched} launched · ${last}`;
+  // Routed follow-ups only appear once an automation delivery has claimed a
+  // thread, so they stay out of the line entirely until then.
+  const routed = s.followups_routed ? ` · ${s.followups_routed} routed` : '';
+  return `${s.events_received} received · ${s.sessions_launched} launched${routed} · ${last}`;
 });
 
 onMounted(() => {

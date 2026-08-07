@@ -32,7 +32,7 @@ pub use loom_launch::{handoff, metadata_assist, provision, setup};
 pub use loom_policy::{auth, automation, custom_mcp, db, profile};
 pub use loom_store::{
     agent_env, channels, chat, chatlog, history, profile_data, repo_env, review_inbox, runs,
-    session, session_layout, status,
+    session, session_layout, slack_routes, status,
 };
 pub use loom_watch::{builtins, monitor, tasks, watch};
 

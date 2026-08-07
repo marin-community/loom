@@ -236,6 +236,48 @@ branch's `slack` wiring tag server-side; the bot token itself never reaches
 the agent, the same separation the GitHub trigger keeps between an agent's
 `GH_TOKEN` and any App-level credential.
 
+Adding `"thread": {"channel": "C…", "thread_ts": "…"}` posts to one of the
+session's *routed* threads instead (see [Automation-delivered
+threads](#automation-delivered-threads)). The route is the authorization: a
+thread that was never delivered to this branch is refused, so the field selects
+among the session's own threads rather than granting it the workspace. The
+`slack_reply` MCP tool takes the same optional `thread`.
+
+## Automation-delivered threads
+
+A `POST /api/runs` body may carry `"slack": {"channel": "C…", "thread_ts": "…"}`
+— the thread the caller announced this delivery in. loom **routes** that thread
+to whichever session the run lands on, and from then on the thread and the
+session are joined in both directions:
+
+- The session may reply into the thread (`thread` on the reply route above).
+- An `@marinbot` mention in the thread is delivered into that session's
+  conversation and acknowledged with 👀, rather than launching a second session
+  on top of it. A routed thread needs no repository: the session already exists,
+  so `slack.default_repo` is not consulted.
+
+This is a **many-to-one** relation, which is why it is not the `slack` tag.
+That tag fixes *one* thread as a session's status-card home, the right model for
+a session born from a conversation. An operator session is the other shape: one
+long-lived session fed alerts through an [automation
+channel](configuration.md), each alert announced in its own thread. Its `slack`
+tag is deliberately left alone — a single card cannot follow a session that is
+triaging several incidents at once — so a routed thread gets explicit replies
+rather than a live trail.
+
+Routes are delivery records, not caller-chosen grants: loom writes one only
+where it accepted a run for that thread, the workspace is always loom's own, and
+`channel`/`thread_ts` are shape-checked (a `#channel-name` is rejected — Slack
+ids only). Re-delivering the same alert is idempotent. `followups_routed` in
+`GET /api/slack/status` counts mentions delivered this way, which is how a
+working alert conversation is distinguished from one quietly launching a
+duplicate session per reply.
+
+The intended consumer is Marin's Grafana bridge: it posts the alert to Slack,
+creates the run with that thread, and the operator session answers in-thread —
+see the [Marin `infra/grafana`
+runbook](https://github.com/marin-community/marin/tree/main/infra/grafana).
+
 ## Slack app configuration
 
 Under **Settings → Socket Mode**, enable it and generate an app-level token

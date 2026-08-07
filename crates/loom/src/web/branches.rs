@@ -235,13 +235,22 @@ pub(super) async fn set_branch_status(
 }
 
 /// `POST /api/branches/{id}/slack/reply` — post a message from the session back
-/// to its wired Slack thread. The token stays on the server: the agent (holding
-/// `LOOM_TOKEN`) calls this route rather than being handed the workspace-wide
-/// bot token, and loom derives the destination from the branch's `slack` wiring
-/// tag. The Slack analog of the GitHub-triggered session replying with `gh`.
+/// to a Slack thread it owns. The token stays on the server: the agent (holding
+/// `LOOM_TOKEN`) calls this route rather than being handed the workspace-wide bot
+/// token. The Slack analog of the GitHub-triggered session replying with `gh`.
+///
+/// Two destinations, both resolved server-side. Without `thread`, the branch's
+/// `slack` wiring tag — the conversation the session was born from. With
+/// `thread`, one of the threads an automation delivery routed to this branch
+/// ([`crate::slack_routes`]), which is how one operator session answers in each
+/// alert's own thread. A thread never delivered to this branch is refused, so the
+/// field selects among the session's own threads rather than granting the
+/// workspace.
 #[derive(Deserialize)]
 pub(super) struct SlackReplyReq {
     pub text: String,
+    #[serde(default)]
+    pub thread: Option<weaver_api::SlackThreadRef>,
 }
 
 pub(super) async fn slack_reply(
@@ -254,11 +263,29 @@ pub(super) async fn slack_reply(
     if text.is_empty() {
         return Err(AppError::bad_request("text is required"));
     }
-    let wired = tags::get(&st.db, &branch.id, crate::slack::WIRED_TAG)
-        .await?
-        .ok_or_else(|| AppError::bad_request("this branch is not wired to a Slack thread"))?;
-    let (_team, channel, root) = crate::slack::parse_wiring(&wired.value)
-        .ok_or_else(|| AppError::bad_request("malformed slack wiring tag"))?;
+    let (channel, root) = match req.thread.as_ref() {
+        Some(target) => {
+            let (channel, thread_ts) =
+                crate::slack::parse_thread_ref(target).map_err(AppError::bad_request)?;
+            if !crate::slack_routes::allows(&st.db, &branch.id, &channel, &thread_ts).await? {
+                return Err(AppError::new(
+                    StatusCode::FORBIDDEN,
+                    "this session holds no Slack route for that thread",
+                ));
+            }
+            (channel, thread_ts)
+        }
+        None => {
+            let wired = tags::get(&st.db, &branch.id, crate::slack::WIRED_TAG)
+                .await?
+                .ok_or_else(|| {
+                    AppError::bad_request("this branch is not wired to a Slack thread")
+                })?;
+            let (_team, channel, root) = crate::slack::parse_wiring(&wired.value)
+                .ok_or_else(|| AppError::bad_request("malformed slack wiring tag"))?;
+            (channel, root)
+        }
+    };
     let web = crate::slack::SlackWeb::from_db(&st.db)
         .await
         .ok_or_else(|| AppError::bad_request("Slack is not configured on this server"))?;

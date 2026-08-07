@@ -1495,6 +1495,9 @@ export interface SlackSocket {
   last_event_at: string | null;
   events_received: number;
   sessions_launched: number;
+  /** Mentions delivered into the session an automation run had routed that
+   *  thread to, rather than launching a second one on the same thread. */
+  followups_routed: number;
   last_skip: string | null;
   last_skip_at: string | null;
 }

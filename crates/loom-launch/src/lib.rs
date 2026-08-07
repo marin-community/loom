@@ -11,8 +11,8 @@ pub use loom_forge::{
     client_context, ctx, custom_agents, custom_mcp, db, envfile, github, github_app,
     github_manifest, github_trigger, history, ide, launch, launch_gate, lifecycle, links, logs,
     loom_config, mcp, paths, profile, profile_data, repo, repo_env, review_inbox, runner, runs,
-    runtime, scratch, session, session_layout, session_manager, shell, status, terminal,
-    user_token, Ctx, EditorState,
+    runtime, scratch, session, session_layout, session_manager, shell, slack_routes, status,
+    terminal, user_token, Ctx, EditorState,
 };
 
 pub(crate) use weaver_core::db::Db;
