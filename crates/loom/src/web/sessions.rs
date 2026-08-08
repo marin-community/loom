@@ -1967,12 +1967,12 @@ pub(super) async fn chat_stream(
     let boxed: Pin<Box<dyn Stream<Item = Result<sse::Event, Infallible>> + Send>> =
         match st.acp.get(&session.id) {
             Some(handle) => {
-                let stream = BroadcastStream::new(handle.subscribe()).filter_map(|r| {
-                    let ev = r.ok()?;
-                    Some(Ok(sse::Event::default()
-                        .event(ev.event)
-                        .json_data(ev.data)
-                        .unwrap_or_default()))
+                let stream = BroadcastStream::new(handle.subscribe()).map(|result| {
+                    let (event, data) = super::eventmux::chat_event_parts(result);
+                    Ok(sse::Event::default()
+                        .event(event)
+                        .json_data(data)
+                        .unwrap_or_default())
                 });
                 Box::pin(stream)
             }

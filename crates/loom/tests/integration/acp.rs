@@ -1569,6 +1569,78 @@ async fn session_send_steers_a_live_turn_when_supported() {
     }));
 }
 
+/// Prose observed before the adapter accepts a steer must remain before that
+/// user prompt in the durable journal. The prose is still only an in-memory
+/// consolidation buffer when the steering response arrives, which used to let
+/// the prompt take the earlier sequence number and jump above the response on
+/// refresh.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steered_prompt_follows_already_streamed_agent_prose() {
+    let ts = TestServer::start().await;
+    start_new_with_env(
+        &ts,
+        "acp-steer-order",
+        None,
+        None,
+        vec![("FAKE_ACP_STEERING".to_string(), "1".to_string())],
+    )
+    .await;
+    let mut events = ts.state.acp.get("acp-steer-order").unwrap().subscribe();
+
+    ts.client
+        .post(
+            "/api/sessions/acp-steer-order/prompt",
+            json!({ "text": "say:BEFORE|wait:1000|say:AFTER" }),
+        )
+        .await
+        .unwrap();
+    let streamed = drain_events(&mut events, Duration::from_secs(5), |event| {
+        event.event == "delta" && event.data["text"] == "ORE"
+    })
+    .await;
+    assert!(
+        streamed
+            .iter()
+            .any(|event| event.event == "delta" && event.data["text"] == "ORE"),
+        "the pre-steer response never streamed: {streamed:?}"
+    );
+
+    let sent = ts
+        .client
+        .post(
+            "/api/sessions/acp-steer-order/send",
+            json!({ "text": "say:STEER" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent["steered"], true, "response: {sent}");
+
+    let chat = poll_chat(&ts, "acp-steer-order", Duration::from_secs(10), |blocks| {
+        count_kind(blocks, "turn_end") == 1
+    })
+    .await;
+    let authored: Vec<(&str, &str)> = chat["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|block| {
+            let kind = block["kind"].as_str()?;
+            matches!(kind, "user_message" | "agent_message")
+                .then(|| (kind, block["payload"]["text"].as_str().unwrap_or("")))
+        })
+        .collect();
+    assert_eq!(
+        authored,
+        vec![
+            ("user_message", "say:BEFORE|wait:1000|say:AFTER"),
+            ("agent_message", "BEFORE"),
+            ("user_message", "say:STEER"),
+            ("agent_message", "STEERAFTER"),
+        ]
+    );
+}
+
 /// Composer-selected files are resolved inside the worktree and forwarded as
 /// ACP resource_link blocks, not left as adapter-specific `@file` prose.
 #[serial]

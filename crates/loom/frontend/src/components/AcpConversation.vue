@@ -48,6 +48,7 @@ import type {
 } from '../types';
 import { canSend } from '../lib/sessionState';
 import { openTopic, type TopicHandle } from '../lib/eventStream';
+import { ChatJournalReconciler } from '../lib/chatJournal';
 import { useFollowFoot } from '../lib/followFoot';
 import { formatTokens } from '../lib/usage';
 import MarkdownView from './MarkdownView.vue';
@@ -82,6 +83,7 @@ const id = computed(() => props.session.id);
 
 // ── The render state the stream feeds ────────────────────────────────────────
 const blocks = reactive(new Map<string, ChatBlock>());
+const journal = new ChatJournalReconciler(blocks);
 const shadows = reactive(
   new Map<string, { turn: number; kind: 'agent_message' | 'thought'; text: string }>(),
 );
@@ -181,17 +183,19 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
   if (!preserve) {
     state.value = 'loading';
     pinned.value = true;
-    blocks.clear();
+    journal.reset();
     shadows.clear();
     liveTools.clear();
     olderCursor.value = null;
     olderError.value = '';
   }
+  const journalRevision = journal.beginSnapshot();
   try {
     const snap = await getSessionChat(id.value);
     if (seq !== loadSeq) return;
     const preserveObservedTiming = preserve && liveTurnNo.value === snap.live_turn;
-    for (const b of snap.blocks) blocks.set(blockKey(b.turn, b.seq), b);
+    const accepted = journal.applySnapshot(journalRevision, snap.blocks);
+    for (const b of accepted) settleDurableBlock(b);
     if (!preserve) olderCursor.value = snap.older_cursor;
     liveTurnNo.value = snap.live_turn;
     turnLive.value = snap.live_turn != null;
@@ -220,15 +224,18 @@ async function loadOlder() {
   const cursor = olderCursor.value;
   if (!cursor || loadingOlder.value) return;
   const requestId = id.value;
+  const requestLoadSeq = loadSeq;
   loadingOlder.value = true;
   olderError.value = '';
   const root = convScroll.value;
   const oldHeight = root?.scrollHeight ?? 0;
   const oldTop = root?.scrollTop ?? 0;
+  const journalRevision = journal.beginSnapshot();
   try {
     const snap = await getSessionChat(requestId, cursor);
-    if (requestId !== id.value) return;
-    for (const b of snap.blocks) blocks.set(blockKey(b.turn, b.seq), b);
+    if (requestId !== id.value || requestLoadSeq !== loadSeq) return;
+    const accepted = journal.applySnapshot(journalRevision, snap.blocks);
+    for (const b of accepted) settleDurableBlock(b);
     olderCursor.value = snap.older_cursor;
     await nextTick();
     if (root) root.scrollTop = oldTop + (root.scrollHeight - oldHeight);
@@ -241,8 +248,7 @@ async function loadOlder() {
 }
 
 // ── Stream application ───────────────────────────────────────────────────────
-function onBlock(b: ChatBlock) {
-  blocks.set(blockKey(b.turn, b.seq), b);
+function settleDurableBlock(b: ChatBlock) {
   if (b.turn === liveTurnNo.value) markProgress(b.created_at);
   if (b.kind === 'tool_call') {
     const tid = (b.payload as unknown as ToolCallPayload).tool_call_id;
@@ -253,12 +259,15 @@ function onBlock(b: ChatBlock) {
     const m = (b.payload as { mode_id?: string }).mode_id;
     if (m) currentMode.value = m;
   } else if (b.kind === 'user_message') {
-    recoveryError.value = '';
-    recoveryNotice.value = '';
     const text = (b.payload as unknown as UserMessagePayload).text ?? '';
     const i = optimistic.value.findIndex((o) => o.text === text);
     if (i >= 0) optimistic.value.splice(i, 1);
   }
+}
+
+function onBlock(b: ChatBlock) {
+  journal.applyStream(b);
+  settleDurableBlock(b);
   autoFollow();
 }
 
@@ -333,6 +342,12 @@ function openStream() {
   topic.on('turn', (d) => onTurn(d as SseTurn));
   topic.on('queue', (d) => onQueue(d as SseQueue));
   topic.on('metadata', (d) => applyMetadata(d as AcpMetadata));
+  // A bounded server broadcast can overrun a slow client. `resync` turns that
+  // explicit gap into a fresh read of the durable journal instead of leaving
+  // the conversation incomplete until a manual browser refresh.
+  // Reset the page cursor too: an extreme gap may contain more blocks than the
+  // newest page, and retaining an older cursor would leave a hole in the middle.
+  topic.on('resync', () => load());
   // Fetch only after the server installed the subscription, closing the
   // snapshot-to-stream gap without the former duplicate journal request. A
   // reconnect reconciles the newest page while retaining explicitly loaded
@@ -446,6 +461,8 @@ async function submitPrompt(forceSteer = false) {
   const restoreComposerFocus = document.activeElement === composerInput.value;
   sending.value = true;
   sendError.value = '';
+  recoveryError.value = '';
+  recoveryNotice.value = '';
   const text = draft.value;
   const pending = { key: nextOptimisticKey++, text };
   optimistic.value.push(pending);

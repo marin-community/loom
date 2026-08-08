@@ -2674,6 +2674,12 @@ impl Task {
                 // accepted it; a rejected extension falls back without leaving
                 // a phantom message in the transcript.
                 self.current_turn = pending.turn;
+                // The steering response is ordered after everything the adapter
+                // emitted before accepting the user's message. Commit any prose
+                // already visible over SSE before assigning the prompt its
+                // journal sequence, or a later buffer flush moves that earlier
+                // response below the user's follow-up on refresh.
+                self.flush_buf().await;
                 let by = pending.by.map(Value::from).unwrap_or(Value::Null);
                 self.journal_block(
                     kind::USER_MESSAGE,
@@ -3651,22 +3657,28 @@ impl Task {
             };
         }
         self.next_seq += 1;
-        let inserted = chat::insert(&self.db, &self.session_id, turn, seq, kind, &payload).await;
-        let view = ChatBlockView {
-            turn,
-            seq,
-            kind: kind.to_string(),
-            payload,
-            created_at: now_iso(),
-        };
-        if let Err(e) = inserted {
-            // The block never became durable: freeze the ack watermark (its
-            // frames must replay after a restart) and don't announce it.
-            tracing::error!(session = %self.session_id, turn, seq, kind, error = %e,
+        let committed =
+            chat::insert_canonical(&self.db, &self.session_id, turn, seq, kind, &payload).await;
+        let view = match committed {
+            Ok((_, view)) => view,
+            Err(e) => {
+                // The block never became durable: freeze the ack watermark (its
+                // frames must replay after a restart) and don't announce it.
+                tracing::error!(session = %self.session_id, turn, seq, kind, error = %e,
                 "chat journal write failed; freezing ack watermark");
-            self.journal_failed = true;
-            return view;
-        }
+                self.journal_failed = true;
+                return ChatBlockView {
+                    turn,
+                    seq,
+                    kind: kind.to_string(),
+                    payload,
+                    created_at: now_iso(),
+                };
+            }
+        };
+        // `insert_canonical` returns the existing row on a replay collision.
+        // Publishing that durable winner keeps the SSE tail and REST snapshot
+        // identical even when the rejected candidate was not identical.
         self.emit("block", serde_json::to_value(&view).unwrap_or(Value::Null));
         view
     }
