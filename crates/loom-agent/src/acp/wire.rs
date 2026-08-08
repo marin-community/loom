@@ -385,8 +385,20 @@ pub struct PromptResult {
 pub struct InitializeResult {
     #[serde(default)]
     pub agent_capabilities: AgentCapabilities,
+    #[serde(default)]
+    pub agent_info: Option<AgentInfo>,
     #[serde(default, rename = "_meta")]
     pub meta: InitializeMeta,
+}
+
+/// Identity reported by the ACP adapter during initialization.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentInfo {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub version: String,
 }
 
 /// The subset of agent capabilities loom checks.
@@ -808,10 +820,17 @@ mod tests {
 
         let init: InitializeResult = serde_json::from_value(json!({
             "agentCapabilities": { "loadSession": true },
+            "agentInfo": {
+                "name": "@agentclientprotocol/claude-agent-acp",
+                "version": "0.66.0"
+            },
             "_meta": { "steering": { "supported": true } },
         }))
         .unwrap();
         assert!(init.agent_capabilities.load_session);
+        let agent = init.agent_info.unwrap();
+        assert_eq!(agent.name, "@agentclientprotocol/claude-agent-acp");
+        assert_eq!(agent.version, "0.66.0");
         assert!(init.meta.steering.supported);
 
         let steer: SteeringResult =
