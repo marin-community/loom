@@ -3,6 +3,10 @@ export interface JournalPosition {
   seq: number;
 }
 
+export function chatBlockKey(block: JournalPosition): string {
+  return `${block.turn}:${block.seq}`;
+}
+
 /**
  * Reconciles the REST journal snapshot with committed blocks arriving over SSE.
  *
@@ -22,10 +26,6 @@ export class ChatJournalReconciler<T extends JournalPosition> {
     this.blocks = blocks;
   }
 
-  static key(block: JournalPosition): string {
-    return `${block.turn}:${block.seq}`;
-  }
-
   reset(): void {
     this.blocks.clear();
     this.streamedAt.clear();
@@ -37,7 +37,7 @@ export class ChatJournalReconciler<T extends JournalPosition> {
   }
 
   applyStream(block: T): void {
-    const key = ChatJournalReconciler.key(block);
+    const key = chatBlockKey(block);
     this.blocks.set(key, block);
     this.streamedAt.set(key, ++this.revision);
   }
@@ -49,7 +49,7 @@ export class ChatJournalReconciler<T extends JournalPosition> {
     const accepted: T[] = [];
     if (startedAt < this.resetAt) return accepted;
     for (const block of snapshot) {
-      const key = ChatJournalReconciler.key(block);
+      const key = chatBlockKey(block);
       if ((this.streamedAt.get(key) ?? 0) > startedAt) continue;
       this.blocks.set(key, block);
       accepted.push(block);

@@ -48,7 +48,7 @@ import type {
 } from '../types';
 import { canSend } from '../lib/sessionState';
 import { openTopic, type TopicHandle } from '../lib/eventStream';
-import { ChatJournalReconciler } from '../lib/chatJournal';
+import { chatBlockKey, ChatJournalReconciler } from '../lib/chatJournal';
 import { useFollowFoot } from '../lib/followFoot';
 import { formatTokens } from '../lib/usage';
 import MarkdownView from './MarkdownView.vue';
@@ -125,8 +125,6 @@ function applyMetadata(next: AcpMetadata) {
   const mode = next.config_options.find(isModeOption)?.currentValue;
   if (typeof mode === 'string') currentMode.value = mode;
 }
-
-const blockKey = (turn: number, seq: number) => `${turn}:${seq}`;
 
 function timeOf(value: string | undefined): number | null {
   if (!value) return null;
@@ -980,7 +978,7 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
   };
 
   for (const b of sorted) {
-    const k = blockKey(b.turn, b.seq);
+    const k = chatBlockKey(b);
     switch (b.kind) {
       case 'user_message': {
         flushActivity();

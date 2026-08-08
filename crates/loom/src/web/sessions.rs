@@ -1956,8 +1956,9 @@ pub(super) async fn get_session_chat(
 }
 
 /// The live SSE tail of the conversation — `block` / `delta` / `tool` / `turn`
-/// events (see [`crate::acp`]). A client fetches `/chat` first, then applies this
-/// tail. When no task is running the stream stays open but silent (keep-alive).
+/// events (see [`crate::acp`]), plus `resync` when the bounded broadcast drops
+/// frames. A client fetches `/chat` first, then applies this tail. When no task
+/// is running the stream stays open but silent (keep-alive).
 pub(super) async fn chat_stream(
     State(st): State<AppState>,
     Path(key): Path<String>,
