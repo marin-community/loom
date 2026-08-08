@@ -159,6 +159,8 @@ pub enum SessionUpdate {
         size: Option<u64>,
         #[serde(default)]
         cost: Option<UsageCost>,
+        #[serde(default, rename = "_meta")]
+        meta: UsageMeta,
     },
     /// codex-acp's thread lifecycle. Loom normally owns turn boundaries through
     /// the `session/prompt` response; this closes the rare turn that the
@@ -188,6 +190,21 @@ pub enum SessionUpdate {
 pub struct UsageCost {
     pub amount: f64,
     pub currency: String,
+}
+
+/// Adapter provenance attached to a usage update. Claude's ACP adapter uses a
+/// cost-bearing `task-notification` update as the only terminal boundary for an
+/// autonomous continuation triggered by a completed background task; unlike a
+/// human prompt, that continuation has no `session/prompt` response.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UsageMeta {
+    #[serde(default, rename = "_claude/origin")]
+    pub claude_origin: Option<UsageOrigin>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UsageOrigin {
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -721,12 +738,33 @@ mod tests {
         }))
         .unwrap();
         match usage {
-            SessionUpdate::UsageUpdate { used, size, cost } => {
+            SessionUpdate::UsageUpdate {
+                used,
+                size,
+                cost,
+                meta,
+            } => {
                 assert_eq!(used, Some(41000));
                 assert_eq!(size, Some(200000));
                 let cost = cost.unwrap();
                 assert_eq!(cost.amount, 1.25);
                 assert_eq!(cost.currency, "USD");
+                assert!(meta.claude_origin.is_none());
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let task_usage: SessionUpdate = serde_json::from_value(json!({
+            "sessionUpdate": "usage_update",
+            "used": 42000,
+            "size": 200000,
+            "cost": { "amount": 1.5, "currency": "USD" },
+            "_meta": { "_claude/origin": { "kind": "task-notification" } },
+        }))
+        .unwrap();
+        match task_usage {
+            SessionUpdate::UsageUpdate { meta, .. } => {
+                assert_eq!(meta.claude_origin.unwrap().kind, "task-notification")
             }
             other => panic!("wrong variant: {other:?}"),
         }

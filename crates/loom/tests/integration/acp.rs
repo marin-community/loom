@@ -749,6 +749,100 @@ async fn chat_stream_route_delivers_sse() {
     );
 }
 
+/// 1c. claude-agent-acp can finish the owning prompt, then autonomously resume
+/// when a background task completes. That continuation has no prompt response;
+/// its cost-bearing task-notification usage update is the only terminal
+/// boundary. The final prose must become durable immediately and must not ride
+/// the next user's first tool/message boundary into the next turn.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_task_notification_flushes_autonomous_prose() {
+    let ts = TestServer::start().await;
+    start_new(&ts, "acp-task-notification", None, None).await;
+    let mut rx = ts
+        .state
+        .acp
+        .get("acp-task-notification")
+        .unwrap()
+        .subscribe();
+
+    ts.client
+        .post(
+            "/api/sessions/acp-task-notification/prompt",
+            json!({ "text": "task-notification:100:background finished" }),
+        )
+        .await
+        .unwrap();
+
+    let saw_background_block = std::cell::Cell::new(false);
+    let events = drain_events(&mut rx, Duration::from_secs(5), |event| {
+        if event.event == "block"
+            && event.data["turn"] == 0
+            && event.data["kind"] == "agent_message"
+            && event.data["payload"]["text"] == "background finished"
+        {
+            saw_background_block.set(true);
+        }
+        saw_background_block.get()
+            && event.event == "turn"
+            && event.data["turn"] == 0
+            && event.data["state"] == "ended"
+    })
+    .await;
+    assert!(events.iter().any(|event| {
+        event.event == "block"
+            && event.data["turn"] == 0
+            && event.data["kind"] == "agent_message"
+            && event.data["payload"]["text"] == "background finished"
+    }));
+
+    let chat = poll_chat_state(
+        &ts,
+        "acp-task-notification",
+        Duration::from_secs(5),
+        |chat| {
+            chat["live_turn"].is_null()
+                && chat["blocks"].as_array().unwrap().iter().any(|block| {
+                    block["turn"] == 0
+                        && block["kind"] == "agent_message"
+                        && block["payload"]["text"] == "background finished"
+                })
+        },
+    )
+    .await;
+    assert_eq!(
+        count_kind(chat["blocks"].as_array().unwrap(), "turn_end"),
+        1,
+        "the task-notification settles the existing turn without duplicating its durable end"
+    );
+
+    ts.client
+        .post(
+            "/api/sessions/acp-task-notification/prompt",
+            json!({ "text": "say:next turn" }),
+        )
+        .await
+        .unwrap();
+    let chat = poll_chat(
+        &ts,
+        "acp-task-notification",
+        Duration::from_secs(5),
+        |blocks| {
+            blocks.iter().any(|block| {
+                block["turn"] == 1
+                    && block["kind"] == "agent_message"
+                    && block["payload"]["text"] == "next turn"
+            })
+        },
+    )
+    .await;
+    assert!(chat["blocks"].as_array().unwrap().iter().any(|block| {
+        block["turn"] == 0
+            && block["kind"] == "agent_message"
+            && block["payload"]["text"] == "background finished"
+    }));
+}
+
 /// 2. Tool call: a live `tool` SSE, then one journaled `tool_call` block at a
 ///    terminal status carrying the diff content.
 #[serial]

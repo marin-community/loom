@@ -18,6 +18,10 @@
 //   toolfail[:title]     a tool_call that ends with status `failed`
 //   plan                 a plan update with two entries
 //   usage:USED:SIZE      a usage_update
+//   task-notification:MS:TEXT
+//                        after the prompt response, stream TEXT as an autonomous
+//                        Claude background-task continuation and close it with
+//                        Claude's cost-bearing task-notification usage marker
 //   wait:MS              sleep MS ms (cancellable) — for queueing/interrupt/crash tests
 //   permission:NAME      a session/request_permission that BLOCKS the turn until the
 //                        client answers (exercises both auto-answer and REST-answer)
@@ -281,6 +285,28 @@ async function runToken(tok) {
   } else if (tok.startsWith("usage:")) {
     const [, used, size] = tok.split(":");
     notify({ sessionUpdate: "usage_update", used: Number(used), size: Number(size) });
+  } else if (tok.startsWith("task-notification:")) {
+    const [, delay, ...textParts] = tok.split(":");
+    const text = textParts.join(":");
+    setTimeout(async () => {
+      const half = Math.ceil(text.length / 2);
+      notify({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: text.slice(0, half) },
+      });
+      await sleep(5);
+      notify({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: text.slice(half) },
+      });
+      notify({
+        sessionUpdate: "usage_update",
+        used: 42,
+        size: 1000,
+        cost: { amount: 0.01, currency: "USD" },
+        _meta: { "_claude/origin": { kind: "task-notification" } },
+      });
+    }, Number(delay));
   } else if (tok.startsWith("wait:")) {
     await sleepCancellable(Number(tok.slice(5)));
   } else if (tok.startsWith("permission:")) {

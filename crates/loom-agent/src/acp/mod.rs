@@ -2223,11 +2223,28 @@ impl Task {
                     .await;
                 }
             }
-            SessionUpdate::UsageUpdate { used, size, cost } => {
+            SessionUpdate::UsageUpdate {
+                used,
+                size,
+                cost,
+                meta,
+            } => {
                 // Usage is metadata, not a prose boundary. Flushing here split
                 // replies into tiny blocks when an adapter reported it often.
                 // ACP requires both context fields; silently ignore a malformed
                 // legacy update instead of publishing a misleading 0/0 meter.
+                //
+                // One update is a real boundary: claude-agent-acp emits a
+                // cost-bearing `task-notification` after an autonomous
+                // background-task continuation. There is no matching
+                // `session/prompt` response to close that output, so without
+                // honoring this marker its final prose stays only in the live
+                // chunk buffer until the next tool/message boundary.
+                let closes_task_notification = cost.is_some()
+                    && meta
+                        .claude_origin
+                        .as_ref()
+                        .is_some_and(|origin| origin.kind == "task-notification");
                 if let (Some(used), Some(size)) = (used, size) {
                     let usage = AcpUsage {
                         used,
@@ -2242,6 +2259,23 @@ impl Task {
                         serde_json::to_value(usage).unwrap_or(Value::Null),
                     )
                     .await;
+                }
+                if closes_task_notification {
+                    self.flush_buf().await;
+                    // A late delta makes the browser show a live continuation.
+                    // The original prompt already ended, so mirror that durable
+                    // truth after settling the shadow without writing a second
+                    // `turn_end` block for the same turn.
+                    if !self.turn_live {
+                        self.emit(
+                            "turn",
+                            json!({
+                                "turn": self.current_turn,
+                                "state": "ended",
+                                "stop_reason": "end_turn",
+                            }),
+                        );
+                    }
                 }
             }
             SessionUpdate::SessionInfoUpdate { meta } => {
@@ -3122,6 +3156,13 @@ impl Task {
         // The cap gate sits before any turn state advances, so a refusal leaves
         // the counters, the journal, and any queued prompt untouched.
         self.refuse_if_turn_capped().await?;
+        // An adapter may produce an autonomous continuation after the preceding
+        // prompt response. Keep any still-open prose on that preceding turn
+        // even when a new prompt races its explicit adapter boundary.
+        self.flush_buf().await;
+        if self.journal_failed {
+            bail!("could not persist buffered ACP output before starting a new turn");
+        }
         if self.turns_dispatched > 0 {
             self.current_turn += 1;
             self.next_seq = 0;
