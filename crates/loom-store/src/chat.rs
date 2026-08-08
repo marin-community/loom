@@ -350,6 +350,26 @@ pub async fn insert(
     kind: &str,
     payload: &Value,
 ) -> Result<bool> {
+    Ok(insert_canonical(db, session_id, turn, seq, kind, payload)
+        .await?
+        .0)
+}
+
+/// Insert a block and return the row that durably owns `(turn, seq)`.
+///
+/// A replay normally supplies the same payload, but the unique key is the final
+/// authority even if a damaged/recovered producer supplies something different.
+/// Live consumers must publish this returned row rather than the rejected
+/// candidate or the SSE transcript can disagree with the next REST snapshot.
+pub async fn insert_canonical(
+    db: &Db,
+    session_id: &str,
+    turn: i64,
+    seq: i64,
+    kind: &str,
+    payload: &Value,
+) -> Result<(bool, ChatBlockView)> {
+    let created_at = now_iso();
     let res = sqlx::query(
         "INSERT INTO chat_blocks (session_id, turn, seq, kind, payload, ref_id, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -361,10 +381,31 @@ pub async fn insert(
     .bind(kind)
     .bind(payload.to_string())
     .bind(ref_id(kind, payload))
-    .bind(now_iso())
+    .bind(&created_at)
     .execute(db)
     .await?;
-    Ok(res.rows_affected() > 0)
+    let inserted = res.rows_affected() > 0;
+    let block = if inserted {
+        ChatBlockView {
+            turn,
+            seq,
+            kind: kind.to_string(),
+            payload: payload.clone(),
+            created_at,
+        }
+    } else {
+        sqlx::query_as::<_, ChatBlockRow>(
+            "SELECT turn, seq, kind, payload, created_at FROM chat_blocks
+             WHERE session_id = ? AND turn = ? AND seq = ?",
+        )
+        .bind(session_id)
+        .bind(turn)
+        .bind(seq)
+        .fetch_one(db)
+        .await?
+        .into()
+    };
+    Ok((inserted, block))
 }
 
 /// Every block for a session, in `(turn, seq)` order.
@@ -865,6 +906,37 @@ mod tests {
         let blocks = list(&db, &s).await.unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].kind, kind::USER_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn insert_canonical_returns_the_durable_winner_on_conflict() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let s = seed_session(&db).await;
+        let (_, first) = insert_canonical(
+            &db,
+            &s,
+            0,
+            0,
+            kind::AGENT_MESSAGE,
+            &json!({"text":"durable response"}),
+        )
+        .await
+        .unwrap();
+        let (inserted, winner) = insert_canonical(
+            &db,
+            &s,
+            0,
+            0,
+            kind::USER_MESSAGE,
+            &json!({"text":"rejected replay"}),
+        )
+        .await
+        .unwrap();
+
+        assert!(!inserted);
+        assert_eq!(winner.kind, kind::AGENT_MESSAGE);
+        assert_eq!(winner.payload, json!({"text":"durable response"}));
+        assert_eq!(winner.created_at, first.created_at);
     }
 
     #[tokio::test]

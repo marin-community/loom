@@ -29,6 +29,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt, StreamMap};
 
@@ -73,6 +74,28 @@ fn frame(topic: &str, event: &str, data: Value) -> Result<sse::Event, Infallible
     Ok(sse::Event::default()
         .json_data(Frame { topic, event, data })
         .unwrap_or_default())
+}
+
+pub(super) fn chat_event_parts(
+    result: Result<crate::acp::SseEvent, BroadcastStreamRecvError>,
+) -> (String, Value) {
+    match result {
+        Ok(event) => (event.event, event.data),
+        Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+            // A dropped chat frame can hide prose or a turn boundary
+            // indefinitely. Tell the browser to reconcile from the durable
+            // journal; silently skipping gives it no reason to repair itself.
+            ("resync".to_string(), json!({ "skipped": skipped }))
+        }
+    }
+}
+
+fn chat_frame(
+    topic: &str,
+    result: Result<crate::acp::SseEvent, BroadcastStreamRecvError>,
+) -> Result<sse::Event, Infallible> {
+    let (event, data) = chat_event_parts(result);
+    frame(topic, &event, data)
 }
 
 /// The parsed form of one requested topic.
@@ -212,10 +235,8 @@ async fn topic_stream(st: &AppState, name: &str, topic: Topic) -> TopicStream {
             };
             match st.acp.get(&session.id) {
                 Some(handle) => {
-                    let stream = BroadcastStream::new(handle.subscribe()).filter_map(move |r| {
-                        let ev = r.ok()?;
-                        Some(frame(&owned, &ev.event, ev.data))
-                    });
+                    let stream = BroadcastStream::new(handle.subscribe())
+                        .map(move |result| chat_frame(&owned, result));
                     Box::pin(stream)
                 }
                 // No live task yet: hold the topic open with no events, exactly
@@ -232,4 +253,16 @@ async fn topic_stream(st: &AppState, name: &str, topic: Topic) -> TopicStream {
 fn unresolved(topic: &str, err: &AppError) -> TopicStream {
     let first = frame(topic, "error", json!({ "message": err.message() }));
     Box::pin(tokio_stream::once(first).chain(tokio_stream::pending()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_lag_is_an_explicit_resync_frame() {
+        let (event, data) = chat_event_parts(Err(BroadcastStreamRecvError::Lagged(7)));
+        assert_eq!(event, "resync");
+        assert_eq!(data, json!({ "skipped": 7 }));
+    }
 }
