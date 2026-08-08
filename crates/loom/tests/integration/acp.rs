@@ -1359,6 +1359,87 @@ async fn prompt_steers_a_live_turn_when_advertised() {
     );
 }
 
+/// claude-agent-acp can acknowledge `injected`, reject the owning prompt with
+/// an interrupted-result diagnostic, then stream the steered answer outside any
+/// prompt lifecycle (upstream #934). Until that adapter advertises a reliable
+/// ownership contract, loom must ignore its private capability and use the
+/// durable next-turn queue.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_adapter_queues_around_the_broken_steering_boundary() {
+    let ts = TestServer::start().await;
+    start_new_with_env(
+        &ts,
+        "acp-claude-steer-boundary",
+        None,
+        None,
+        vec![
+            ("FAKE_ACP_STEERING".to_string(), "1".to_string()),
+            (
+                "FAKE_ACP_STEERING_BOUNDARY_ERROR".to_string(),
+                "1".to_string(),
+            ),
+            (
+                "FAKE_ACP_AGENT_NAME".to_string(),
+                "@agentclientprotocol/claude-agent-acp".to_string(),
+            ),
+            ("FAKE_ACP_AGENT_VERSION".to_string(), "0.66.0".to_string()),
+        ],
+    )
+    .await;
+
+    let initial = ts
+        .client
+        .get("/api/sessions/acp-claude-steer-boundary/chat")
+        .await
+        .unwrap();
+    assert_eq!(initial["metadata"]["steering_supported"], false);
+
+    ts.client
+        .post(
+            "/api/sessions/acp-claude-steer-boundary/prompt",
+            json!({ "text": "wait:300|say:first" }),
+        )
+        .await
+        .unwrap();
+    let queued = ts
+        .client
+        .post(
+            "/api/sessions/acp-claude-steer-boundary/prompt",
+            json!({ "text": "say:second" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(queued["queued"], true);
+    assert_eq!(queued["steered"], false);
+
+    let chat = poll_chat_state(
+        &ts,
+        "acp-claude-steer-boundary",
+        Duration::from_secs(10),
+        |chat| {
+            chat["live_turn"].is_null()
+                && count_kind(chat["blocks"].as_array().unwrap(), "turn_end") == 2
+        },
+    )
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert!(blocks.iter().all(|block| {
+        block["kind"] != "turn_end" || block["payload"]["stop_reason"] == "end_turn"
+    }));
+    assert!(blocks.iter().any(|block| {
+        block["turn"] == 1
+            && block["kind"] == "user_message"
+            && block["payload"]["text"] == "say:second"
+            && !block["payload"]["steered"].as_bool().unwrap_or(false)
+    }));
+    assert!(blocks.iter().any(|block| {
+        block["turn"] == 1
+            && block["kind"] == "agent_message"
+            && block["payload"]["text"] == "second"
+    }));
+}
+
 /// Ordinary sends must not hold the HTTP response (and browser composer) behind
 /// a delayed private steering RPC. The queue is the immediate durable receipt;
 /// adapter acceptance later promotes it into the live turn.

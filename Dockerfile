@@ -334,8 +334,13 @@ if [ "${1:-}" = loom ] && [ "${2:-}" = server ]; then
     "$HOME/.local/bin/codex" features disable apps >/dev/null \
       || echo "loom: WARNING: could not disable Codex account-level apps" >&2
   fi
-  if ! command -v claude-agent-acp >/dev/null 2>&1 || ! command -v codex-acp >/dev/null 2>&1; then
-    echo "loom: installing the ACP adapters into $HOME/.npm-global ..." >&2
+  claude_acp_version="${CLAUDE_ACP_VERSION:-0.66.0}"
+  codex_acp_version="${CODEX_ACP_VERSION:-1.1.4}"
+  if ! command -v claude-agent-acp >/dev/null 2>&1 \
+    || ! command -v codex-acp >/dev/null 2>&1 \
+    || ! npm list -g --depth=0 "@agentclientprotocol/claude-agent-acp@$claude_acp_version" >/dev/null 2>&1 \
+    || ! npm list -g --depth=0 "@agentclientprotocol/codex-acp@$codex_acp_version" >/dev/null 2>&1; then
+    echo "loom: installing pinned ACP adapters into $HOME/.npm-global ..." >&2
     # The ACP adapters Loom's sessions speak through. Exact
     # pins, not dist-tags: two upstream projects releasing weekly sit between
     # loom and the agents, so the fleet moves versions only via a deliberate
@@ -344,10 +349,13 @@ if [ "${1:-}" = loom ] && [ "${2:-}" = server ]; then
     # resolves these installed bins from PATH without a network fetch.
     # Non-fatal like the CLIs above.
     npm install -g \
-      "@agentclientprotocol/claude-agent-acp@${CLAUDE_ACP_VERSION:-0.59.0}" \
-      "@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION:-1.1.4}" || true
-    { command -v claude-agent-acp >/dev/null 2>&1 && command -v codex-acp >/dev/null 2>&1; } \
-      || echo "loom: WARNING: ACP adapter install failed (offline?); acp sessions fall back to npx fetching at launch" >&2
+      "@agentclientprotocol/claude-agent-acp@$claude_acp_version" \
+      "@agentclientprotocol/codex-acp@$codex_acp_version" || true
+    { command -v claude-agent-acp >/dev/null 2>&1 \
+      && command -v codex-acp >/dev/null 2>&1 \
+      && npm list -g --depth=0 "@agentclientprotocol/claude-agent-acp@$claude_acp_version" >/dev/null 2>&1 \
+      && npm list -g --depth=0 "@agentclientprotocol/codex-acp@$codex_acp_version" >/dev/null 2>&1; } \
+      || echo "loom: WARNING: pinned ACP adapter install failed (offline?); existing adapters may remain in use" >&2
   fi
   # Delegate the per-session cgroup subtree (see loom-cgroup-init above).
   # Non-fatal: without it sessions run with no memory limit.

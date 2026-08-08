@@ -544,10 +544,27 @@ pub struct AcpMetadata {
     pub commands: Vec<Value>,
     pub config_options: Vec<Value>,
     pub modes: Vec<Value>,
-    /// Whether the adapter advertised the codex-acp steering extension during
-    /// initialize. The browser uses this observed capability instead of
-    /// optimistically probing a private method that may not exist.
+    /// Whether the adapter advertised a steering extension whose turn lifecycle
+    /// loom can safely own. The browser uses this observed, normalized capability
+    /// instead of optimistically probing a private method that may not exist.
     pub steering_supported: bool,
+}
+
+const CLAUDE_AGENT_ACP: &str = "@agentclientprotocol/claude-agent-acp";
+
+/// Normalize the private steering capability to the lifecycle contract loom
+/// requires. claude-agent-acp through 0.66 can acknowledge an injected steer,
+/// reject the owning `session/prompt`, then stream the steered answer after the
+/// turn has ended (upstream issue #934). The adapter does not yet advertise a
+/// capability that distinguishes a fixed lifecycle, so keep its messages on
+/// loom's durable next-turn queue meanwhile. Other adapters retain their
+/// advertised behavior.
+fn reliable_steering(init: &wire::InitializeResult) -> bool {
+    init.meta.steering.supported
+        && init
+            .agent_info
+            .as_ref()
+            .is_none_or(|agent| agent.name != CLAUDE_AGENT_ACP)
 }
 
 /// A live session's control surface, held in the [`AcpRegistry`]: send commands
@@ -1807,7 +1824,16 @@ impl Task {
         let res = res.ok_or_else(|| anyhow!("initialize failed: {err:?}"))?;
         if let Ok(init) = serde_json::from_value::<wire::InitializeResult>(res) {
             self.load_session_cap = init.agent_capabilities.load_session;
-            self.steering_cap = init.meta.steering.supported;
+            self.steering_cap = reliable_steering(&init);
+            if init.meta.steering.supported && !self.steering_cap {
+                let agent = init.agent_info.as_ref();
+                tracing::warn!(
+                    session = %self.session_id,
+                    agent = agent.map(|info| info.name.as_str()).unwrap_or("unknown"),
+                    version = agent.map(|info| info.version.as_str()).unwrap_or("unknown"),
+                    "ignoring ACP steering capability with unsafe prompt ownership"
+                );
+            }
             self.metadata.lock().unwrap().steering_supported = self.steering_cap;
         }
 
