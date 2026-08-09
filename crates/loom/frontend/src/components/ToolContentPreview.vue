@@ -1,25 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue';
 import type { ToolContent } from '../types';
+import { changedDiffLines } from '../lib/toolDiff';
 
 const props = defineProps<{
   content: ToolContent;
   title: string;
 }>();
 
-interface DiffLine {
-  sign: '-' | '+';
-  text: string;
-}
-
-function diffLines(content: Extract<ToolContent, { type: 'diff' }>): DiffLine[] {
-  const lines: DiffLine[] = [];
-  const push = (sign: '-' | '+', body: string) => {
-    for (const line of body.replace(/\n$/, '').split('\n')) lines.push({ sign, text: line });
-  };
-  if (content.old) push('-', content.old);
-  push('+', content.new);
-  return lines;
+function diffLines(content: Extract<ToolContent, { type: 'diff' }>) {
+  return changedDiffLines(content.old, content.new);
 }
 
 const imageSrc = computed(() => {

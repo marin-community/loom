@@ -176,7 +176,10 @@ test.describe('acp conversation', () => {
     await expect(head).toBeVisible();
     await expect(page.getByTestId('acp-diff')).toBeHidden();
     await head.click();
-    await expect(page.getByTestId('acp-diff')).toContainText('new line');
+    const diff = page.getByTestId('acp-diff');
+    await expect(diff).toContainText('- old line');
+    await expect(diff).toContainText('+ new line');
+    await expect(diff).not.toContainText('unchanged');
 
     // The bounded preview can expand into a full-screen code viewer and closes
     // with Escape, returning focus to the expansion control.

@@ -261,7 +261,14 @@ async function runToken(tok) {
     const toolCallId = "call-" + kind + "-" + Math.floor(Math.random() * 100000);
     const content =
       kind === "edit"
-        ? [{ type: "diff", path: "/w/file.rs", oldText: "old line\n", newText: "new line\n" }]
+        ? [
+            {
+              type: "diff",
+              path: "/w/file.rs",
+              oldText: "fn unchanged() {}\nold line\n// unchanged tail\n",
+              newText: "fn unchanged() {}\nnew line\n// unchanged tail\n",
+            },
+          ]
         : [{ type: "content", content: { type: "text", text: "done" } }];
     notify({
       sessionUpdate: "tool_call",
