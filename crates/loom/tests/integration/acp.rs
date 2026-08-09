@@ -885,9 +885,9 @@ async fn tool_call_live_then_journaled() {
         .as_array()
         .unwrap();
     assert!(
-        content
-            .iter()
-            .any(|c| c["type"] == "diff" && c["new"] == "new line\n"),
+        content.iter().any(|c| c["type"] == "diff"
+            && c["old"] == "fn unchanged() {}\nold line\n// unchanged tail\n"
+            && c["new"] == "fn unchanged() {}\nnew line\n// unchanged tail\n"),
         "the diff content survived: {content:?}"
     );
 
