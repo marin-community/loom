@@ -884,9 +884,9 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
+        weaver_core::spawn_boxed(Box::pin(async move {
             axum::serve(listener, app).await.unwrap();
-        });
+        }));
         format!("http://{addr}")
     }
 

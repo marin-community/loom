@@ -481,7 +481,7 @@ pub async fn spawn_title_generation(
     };
     mark_title_status(&db, &session.id, "running").await?;
 
-    tokio::spawn(async move {
+    weaver_core::spawn_boxed(Box::pin(async move {
         let _claim = claim;
         let status = match generate_title(&db, &acp, &session, &branch, &fence).await {
             Ok(status) => status,
@@ -506,7 +506,7 @@ pub async fn spawn_title_generation(
                 "title_generation": status,
             }),
         );
-    });
+    }));
     Ok(())
 }
 
@@ -947,12 +947,12 @@ pub async fn ensure_cue(
     let acp = acp.clone();
     let session = session.clone();
     let branch = branch.clone();
-    tokio::spawn(async move {
+    weaver_core::spawn_boxed(Box::pin(async move {
         let _claim = claim;
         if let Err(error) = generate_cue(&db, &acp, &session, &branch, force).await {
             tracing::warn!(session = %session.id, %error, "resumption cue generation failed");
         }
-    });
+    }));
     Ok(generating)
 }
 

@@ -193,7 +193,7 @@ pub(super) async fn github_webhook(
             "github-unauthorized",
             &format!("{slug_str}#{number} (@{author})"),
         );
-        tokio::spawn(async move {
+        weaver_core::spawn_boxed(Box::pin(async move {
             let body = format!(
                 "Hi @{author} — thanks for the ping. You're not on this loom instance's \
                  access list yet, so I can't pick this up. Ask an operator to grant you \
@@ -215,7 +215,7 @@ pub(super) async fn github_webhook(
                     );
                 }
             }
-        });
+        }));
         return ok();
     }
 
@@ -238,7 +238,7 @@ pub(super) async fn github_webhook(
         "github-trigger",
         &format!("{}#{number} (@{author})", slug.slug()),
     );
-    tokio::spawn(async move {
+    weaver_core::spawn_boxed(Box::pin(async move {
         match handle_trigger(st, headers, slug, event, author, phrase).await {
             Ok(Some(id)) => {
                 crate::tasks::registry().finish(task_id, "done", &format!("session {id}"))
@@ -248,7 +248,7 @@ pub(super) async fn github_webhook(
             }
             Err(e) => crate::tasks::registry().finish(task_id, "error", &e),
         }
-    });
+    }));
     ok()
 }
 
@@ -540,10 +540,10 @@ async fn handle_trigger(
             // the new card doesn't sit bare until the next status write. A
             // fresh launch has no trail yet — the reply already is the card.
             if already_wired {
-                tokio::spawn(crate::github::sync_status_comment(
+                weaver_core::spawn_boxed(Box::pin(crate::github::sync_status_comment(
                     st.clone(),
                     created.branch.id.clone(),
-                ));
+                )));
             }
         }
         Err(e) => {

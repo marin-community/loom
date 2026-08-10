@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use serde_json::json;
 use weaver_api::{HandoffReq, LaunchOverrides, LaunchSelection, ResolvedLaunchView};
 use weaver_core::branch::{self as branch_mod, Branch};
+use weaver_core::BoxFut;
 
 use crate::session::{self as session_mod, Session};
 use crate::{agent, backend, custom_agents, events, runtime, AppState};
@@ -357,7 +358,17 @@ async fn legacy_handoff_plan(
 
 /// Replace the provider behind an idle ACP work session while preserving Loom's
 /// stable session/branch/worktree identity and canonical journal.
-pub async fn handoff_session(
+/// Boxed to keep this state machine's codegen in `loom-launch` — see the note
+/// on [`crate::provision::create`].
+pub fn handoff_session(
+    st: &AppState,
+    initial_session: Session,
+    req: HandoffReq,
+) -> BoxFut<'_, Result<(Session, Branch)>> {
+    Box::pin(handoff_session_inner(st, initial_session, req))
+}
+
+async fn handoff_session_inner(
     st: &AppState,
     initial_session: Session,
     req: HandoffReq,

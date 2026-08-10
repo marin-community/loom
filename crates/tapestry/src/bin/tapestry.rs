@@ -46,7 +46,7 @@ usage:
 #[cfg(target_os = "linux")]
 fn reap_orphans() {
     use tokio::signal::unix::{signal, SignalKind};
-    tokio::spawn(async {
+    weaver_core::spawn_boxed(Box::pin(async {
         let Ok(mut sigchld) = signal(SignalKind::child()) else {
             tracing::warn!("cannot watch SIGCHLD; orphaned children may linger as zombies");
             return;
@@ -64,7 +64,7 @@ fn reap_orphans() {
                 }
             }
         }
-    });
+    }));
 }
 
 #[tokio::main]

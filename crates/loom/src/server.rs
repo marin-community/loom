@@ -482,24 +482,27 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
         Ok(_) => tracing::debug!("machine-local token ready"),
         Err(e) => tracing::warn!("could not prepare the machine-local token: {e}"),
     }
-    tokio::spawn(monitor::run(state.clone()));
-    tokio::spawn(repair_acp_sessions_loop(state.clone()));
-    tokio::spawn(session_manager::run(state.db.clone(), state.acp.clone()));
-    tokio::spawn(crate::review_delivery::run(state.clone()));
+    weaver_core::spawn_boxed(Box::pin(monitor::run(state.clone())));
+    weaver_core::spawn_boxed(Box::pin(repair_acp_sessions_loop(state.clone())));
+    weaver_core::spawn_boxed(Box::pin(session_manager::run(
+        state.db.clone(),
+        state.acp.clone(),
+    )));
+    weaver_core::spawn_boxed(Box::pin(crate::review_delivery::run(state.clone())));
     // The GitHub poller is always spawned; it self-gates on the `github.poll`
     // setting and on `gh` being available, so it idles cheaply when GitHub
     // integration is off or unavailable.
-    tokio::spawn(github::poll(state.clone()));
+    weaver_core::spawn_boxed(Box::pin(github::poll(state.clone())));
     // The Watch engine (timer + dispatcher). Always spawned; it self-gates
     // on the `watch.enabled` master switch, which is on by default, so a
     // default loom runs it. Turning the switch off idles it cheaply.
-    tokio::spawn(watch::run(state.clone()));
+    weaver_core::spawn_boxed(Box::pin(watch::run(state.clone())));
     // Retire embedded code-server instances that have gone idle.
-    tokio::spawn(crate::ide::reap_loop(state.editor_state()));
+    weaver_core::spawn_boxed(Box::pin(crate::ide::reap_loop(state.editor_state())));
     // The Slack Socket Mode client. Always spawned; it self-gates on token
     // presence and the `slack.enabled` switch, so an unconfigured loom idles
     // here cheaply.
-    tokio::spawn(crate::slack::run(state.clone()));
+    weaver_core::spawn_boxed(Box::pin(crate::slack::run(state.clone())));
     tracing::debug!(
         "background tasks spawned (monitor, ACP repair, session reconciler, review delivery, github poll, watch, ide reaper, slack)"
     );
