@@ -8,6 +8,7 @@ use weaver_api::{CreateReq, LaunchOverrides, LaunchSelection, ResolvedLaunchView
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::{Branch, TitleProvenance};
 use weaver_core::tags;
+use weaver_core::BoxFut;
 
 use crate::auth::{Grant, Principal};
 use crate::runtime::{apply_user_github_token, layer_launch_environment, set_env};
@@ -429,7 +430,16 @@ fn create_selection(req: &CreateReq) -> Result<LaunchSelection> {
     Ok(selection.clone())
 }
 
-pub async fn create(st: AppState, req: CreateReq, actor: Actor) -> Result<Provisioned> {
+/// Boxed so this future's state machine is codegen'd here, in `loom-launch`,
+/// rather than re-instantiated in whichever crate ends up polling it. An
+/// `async fn` body is emitted where it is awaited, and every caller of this one
+/// is itself an `async fn`, so the whole chain otherwise bubbles up into the
+/// root `loom` crate — 62k lines of LLVM IR on every `loom` rebuild.
+pub fn create(st: AppState, req: CreateReq, actor: Actor) -> BoxFut<'static, Result<Provisioned>> {
+    Box::pin(create_inner(st, req, actor))
+}
+
+async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Provisioned> {
     let created_by = actor.display_creator();
     let origin = actor.origin();
     tracing::info!(

@@ -229,16 +229,16 @@ async fn run_pty(cfg: SupervisorConfig) -> Result<()> {
         .with_context(|| format!("binding control socket {}", socket.display()))?;
     {
         let cmd_tx = cmd_tx.clone();
-        tokio::spawn(async move {
+        weaver_core::spawn_boxed(Box::pin(async move {
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
                         let cmd_tx = cmd_tx.clone();
-                        tokio::spawn(async move {
+                        weaver_core::spawn_boxed(Box::pin(async move {
                             if let Err(e) = handle_conn(stream, cmd_tx).await {
                                 tracing::debug!(error = %e, "control connection ended");
                             }
-                        });
+                        }));
                     }
                     Err(e) => {
                         tracing::debug!(error = %e, "accept failed");
@@ -246,20 +246,20 @@ async fn run_pty(cfg: SupervisorConfig) -> Result<()> {
                     }
                 }
             }
-        });
+        }));
     }
 
     // Best-effort: a termination signal kills the child and tears down cleanly.
     {
         let cmd_tx = cmd_tx.clone();
-        tokio::spawn(async move {
+        weaver_core::spawn_boxed(Box::pin(async move {
             if let Ok(mut sig) =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             {
                 sig.recv().await;
                 let _ = cmd_tx.send(Cmd::Kill);
             }
-        });
+        }));
     }
 
     // --- core task ---------------------------------------------------------
@@ -775,16 +775,16 @@ mod relay {
             .with_context(|| format!("binding control socket {}", socket.display()))?;
         {
             let cmd_tx = cmd_tx.clone();
-            tokio::spawn(async move {
+            weaver_core::spawn_boxed(Box::pin(async move {
                 loop {
                     match listener.accept().await {
                         Ok((stream, _)) => {
                             let cmd_tx = cmd_tx.clone();
-                            tokio::spawn(async move {
+                            weaver_core::spawn_boxed(Box::pin(async move {
                                 if let Err(e) = handle_conn(stream, cmd_tx).await {
                                     tracing::debug!(error = %e, "relay control connection ended");
                                 }
-                            });
+                            }));
                         }
                         Err(e) => {
                             tracing::debug!(error = %e, "relay accept failed");
@@ -792,20 +792,20 @@ mod relay {
                         }
                     }
                 }
-            });
+            }));
         }
 
         // SIGTERM tears down (kills the child) like the PTY path.
         {
             let cmd_tx = cmd_tx.clone();
-            tokio::spawn(async move {
+            weaver_core::spawn_boxed(Box::pin(async move {
                 if let Ok(mut sig) =
                     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                 {
                     sig.recv().await;
                     let _ = cmd_tx.send(Cmd::Kill);
                 }
-            });
+            }));
         }
 
         // --- core task ----------------------------------------------------
@@ -1029,7 +1029,7 @@ mod relay {
         out_tx: mpsc::Sender<Out>,
         cmd_tx: mpsc::UnboundedSender<Cmd>,
     ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
+        weaver_core::spawn_boxed(Box::pin(async move {
             let mut delivered = true;
             'replay: for path in paths {
                 for (seq, body) in read_records(&path) {
@@ -1047,7 +1047,7 @@ mod relay {
                 through,
                 delivered,
             });
-        })
+        }))
     }
 
     /// Once the child has exited *and* its stdout has drained (`!frame_open`),

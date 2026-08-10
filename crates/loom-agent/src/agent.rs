@@ -15,6 +15,7 @@ use crate::backend;
 use crate::custom_agents::CustomAgent;
 use crate::db::Db;
 use weaver_core::agent::{hooks_json, HookMode};
+use weaver_core::BoxFut;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentChoice {
@@ -1629,7 +1630,19 @@ impl<'a> AgentManager<'a> {
             .await
     }
 
-    async fn run_oneshot_with(
+    /// Boxed to keep this state machine's codegen in `loom-agent` — see the
+    /// note on `loom_launch::provision::create`.
+    fn run_oneshot_with<'f>(
+        &'f self,
+        runtime: &'f str,
+        prompt: &'f str,
+        policy: OneShotPolicy<'f>,
+        timeout: Duration,
+    ) -> BoxFut<'f, Option<String>> {
+        Box::pin(self.run_oneshot_with_inner(runtime, prompt, policy, timeout))
+    }
+
+    async fn run_oneshot_with_inner(
         &self,
         runtime: &str,
         prompt: &str,

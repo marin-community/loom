@@ -18,6 +18,7 @@ use crate::AppState;
 use crate::{backend, events};
 use weaver_core::branch as branch_mod;
 use weaver_core::config as core_config;
+use weaver_core::BoxFut;
 
 const TICK: Duration = Duration::from_millis(1500);
 
@@ -30,7 +31,11 @@ const REAP_EVERY_TICKS: u32 = 60;
 /// reaped — even when its tracking issue has closed.
 const REAP_GRACE_SECS: i64 = 900;
 
-pub async fn run(state: AppState) {
+pub fn run(state: AppState) -> BoxFut<'static, ()> {
+    Box::pin(run_inner(state))
+}
+
+async fn run_inner(state: AppState) {
     let mut screen_hash: HashMap<String, u64> = HashMap::new();
     // The session ids the monitor has already announced `stale` for, so a
     // session that stays quiet is announced once (edge-detected), not every

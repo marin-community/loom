@@ -25,23 +25,7 @@ this repo in Claude Code (or your agent of choice) and tell it to *"set weaver u
 for me — follow the Getting Started steps in the README."* The steps below are
 written for it to run; do them yourself if you'd rather.
 
-1. **Get a Rust toolchain and sccache.** If `cargo` isn't already on the PATH,
-   install it via [rustup](https://rustup.rs):
-
-   ```sh
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   ```
-
-   Weaver keeps Cargo artifacts isolated in each worktree and uses
-   [`sccache`](https://github.com/mozilla/sccache) to reuse compilation results
-   safely across them. Install `sccache` separately and ensure its binary is on
-   the PATH; for example:
-
-   ```sh
-   CARGO_BUILD_RUSTC_WRAPPER= cargo install sccache --locked
-   ```
-
-2. **Build the tooling.** From the repo root:
+1. **Build the tooling.** From the repo root:
 
    ```sh
    cargo build
@@ -49,7 +33,7 @@ written for it to run; do them yourself if you'd rather.
 
    This produces `target/debug/weaver` and `target/debug/loom`.
 
-3. **Put both binaries on the PATH.** Symlink them into a directory already on
+2. **Put both binaries on the PATH.** Symlink them into a directory already on
    `$PATH` (e.g. `~/.local/bin`), so they stay current as you rebuild:
 
    ```sh

@@ -229,9 +229,9 @@ pub async fn run_local_server(
             }),
         );
 
-    tokio::spawn(async move {
+    weaver_core::spawn_boxed(Box::pin(async move {
         let _ = axum::serve(listener, app).await;
-    });
+    }));
 
     match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(Ok(code))) => {
@@ -528,9 +528,9 @@ mod tests {
             axum::Router::new().route("/app-manifests/{code}/conversions", post(mock_conversion));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
+        weaver_core::spawn_boxed(Box::pin(async move {
             axum::serve(listener, app).await.unwrap();
-        });
+        }));
         format!("http://{addr}")
     }
 
@@ -556,9 +556,9 @@ mod tests {
         let app = axum::Router::new().route("/app-manifests/{code}/conversions", post(mock_error));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
+        weaver_core::spawn_boxed(Box::pin(async move {
             axum::serve(listener, app).await.unwrap();
-        });
+        }));
         let base = format!("http://{addr}");
         let client = reqwest::Client::new();
         let err = convert_at(&client, &base, "stale").await.unwrap_err();

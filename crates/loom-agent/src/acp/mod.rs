@@ -899,7 +899,7 @@ impl AcpRegistry {
                 metadata: Arc::new(Mutex::new(AcpMetadata::default())),
             },
         );
-        tokio::spawn(async move {
+        weaver_core::spawn_boxed(Box::pin(async move {
             while let Some(command) = cmd_rx.recv().await {
                 if let Command::NotifyPending { reply } = command {
                     wakes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -914,7 +914,7 @@ impl AcpRegistry {
                     }
                 }
             }
-        });
+        }));
     }
 
     /// Register a prompt probe in place of a real session task.
@@ -937,7 +937,7 @@ impl AcpRegistry {
                 metadata: Arc::new(Mutex::new(AcpMetadata::default())),
             },
         );
-        tokio::spawn(async move {
+        weaver_core::spawn_boxed(Box::pin(async move {
             while let Some(command) = cmd_rx.recv().await {
                 if let Command::Prompt {
                     text, by, reply, ..
@@ -951,7 +951,7 @@ impl AcpRegistry {
                     }));
                 }
             }
-        });
+        }));
     }
 
     /// Remove the session's slot only if it still holds `generation` — a task
@@ -1138,7 +1138,7 @@ async fn start_inner(
         }
     };
 
-    tokio::spawn(async move { task.run(cmd_rx).await });
+    weaver_core::spawn_boxed(Box::pin(async move { task.run(cmd_rx).await }));
     Ok(())
 }
 
@@ -1181,7 +1181,7 @@ pub async fn attach(state: &AcpCtx, session_id: &str) -> Result<()> {
             metadata: task.metadata.clone(),
         },
     );
-    tokio::spawn(async move { task.run(cmd_rx).await });
+    weaver_core::spawn_boxed(Box::pin(async move { task.run(cmd_rx).await }));
     Ok(())
 }
 

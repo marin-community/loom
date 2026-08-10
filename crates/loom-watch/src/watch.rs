@@ -97,9 +97,9 @@ impl Drop for InFlightGuard {
         // Drop runs in a sync context; spawn the async removal. The set is only
         // read at the top of `fire`, so a brief delay before the id clears is
         // harmless (it just keeps a finished round "in flight" for an instant).
-        tokio::spawn(async move {
+        weaver_core::spawn_boxed(Box::pin(async move {
             set.lock().await.remove(&id);
-        });
+        }));
     }
 }
 

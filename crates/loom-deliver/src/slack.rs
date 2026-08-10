@@ -25,6 +25,7 @@ use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde_json::{json, Value};
+use weaver_core::BoxFut;
 use weaver_core::{config, events, tags};
 
 use crate::AppState;
@@ -858,7 +859,11 @@ pub async fn sync_status_message(state: AppState, branch_id: String) {
 
 /// One sync attempt. `true` = done (synced, or nothing to do); `false` = a
 /// transient Slack failure worth retrying.
-async fn sync_status_message_once(state: &AppState, branch_id: &str) -> bool {
+fn sync_status_message_once<'a>(state: &'a AppState, branch_id: &'a str) -> BoxFut<'a, bool> {
+    Box::pin(sync_status_message_once_inner(state, branch_id))
+}
+
+async fn sync_status_message_once_inner(state: &AppState, branch_id: &str) -> bool {
     let wired = match tags::get(&state.db, branch_id, WIRED_TAG).await {
         Ok(Some(tag)) => tag,
         Ok(None) => return true, // unwired — nothing to mirror
@@ -1039,11 +1044,11 @@ pub fn parse_thread_ref(
 /// from; adding a third surface is one line here, not another edit at five call
 /// sites.
 pub fn spawn_status_mirrors(state: AppState, branch_id: String) {
-    tokio::spawn(crate::github::sync_status_comment(
+    weaver_core::spawn_boxed(Box::pin(crate::github::sync_status_comment(
         state.clone(),
         branch_id.clone(),
-    ));
-    tokio::spawn(sync_status_message(state, branch_id));
+    )));
+    weaver_core::spawn_boxed(Box::pin(sync_status_message(state, branch_id)));
 }
 
 // ---------------------------------------------------------------------------
@@ -1249,7 +1254,19 @@ enum Outcome {
 
 /// The launch body: seed context, reuse-or-create the session, wire it, and post
 /// the card. Serialized on [`CREATE_LOCK`].
-async fn launch(
+#[allow(clippy::too_many_arguments)]
+fn launch<'a>(
+    state: &'a AppState,
+    web: &'a SlackWeb,
+    bot: &'a AuthTest,
+    trigger: &'a Trigger,
+    repo: &'a str,
+    instruction: &'a str,
+) -> BoxFut<'a, Result<Outcome>> {
+    Box::pin(launch_inner(state, web, bot, trigger, repo, instruction))
+}
+
+async fn launch_inner(
     state: &AppState,
     web: &SlackWeb,
     bot: &AuthTest,
@@ -1812,12 +1829,12 @@ async fn connect_and_run(state: &AppState) -> Result<String> {
                 };
                 match trigger {
                     Some(trigger) => {
-                        tokio::spawn(handle_trigger(
+                        weaver_core::spawn_boxed(Box::pin(handle_trigger(
                             state.clone(),
                             web.clone(),
                             bot.clone(),
                             trigger,
-                        ));
+                        )));
                     }
                     // Slack delivers every subscribed event type, so this is the
                     // ordinary case for anything that isn't an app_mention.

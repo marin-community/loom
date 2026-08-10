@@ -15,6 +15,7 @@ use crate::events;
 use crate::events::EventBus;
 use crate::session::{self as session_mod, Session};
 use weaver_core::tags;
+use weaver_core::BoxFut;
 
 /// The tag mutations a work-cycle hook implies: `(key, value)` where an empty
 /// value clears the tag (absence is the calm/default state). `working` returns
@@ -34,7 +35,16 @@ pub fn lifecycle_mutations(kind: &str) -> Option<&'static [(&'static str, &'stat
 /// and its branch: lift the status to `running` (idempotent, never overriding a
 /// terminal state) and apply the tag mutations, recording only what actually
 /// changed. Returns the new event watermark.
-pub async fn promote_lifecycle(
+pub fn promote_lifecycle<'a>(
+    db: &'a Db,
+    bus: &'a EventBus,
+    session: &'a Session,
+    kind: &'a str,
+) -> BoxFut<'a, Option<i64>> {
+    Box::pin(promote_lifecycle_inner(db, bus, session, kind))
+}
+
+async fn promote_lifecycle_inner(
     db: &Db,
     bus: &EventBus,
     session: &Session,

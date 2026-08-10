@@ -27,6 +27,7 @@ use crate::{branch as branch_mod, config, events};
 use weaver_core::branch::Branch;
 use weaver_core::github::GithubStatus;
 use weaver_core::tags;
+use weaver_core::BoxFut;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Issue {
@@ -296,7 +297,11 @@ pub async fn sync_status_comment(state: AppState, branch_id: String) {
 /// One sync attempt. `true` means done — synced, or nothing to do (unwired, no
 /// live session, no public base); `false` is a transient GitHub failure worth
 /// retrying.
-async fn sync_status_comment_once(state: &AppState, branch_id: &str) -> bool {
+fn sync_status_comment_once<'a>(state: &'a AppState, branch_id: &'a str) -> BoxFut<'a, bool> {
+    Box::pin(sync_status_comment_once_inner(state, branch_id))
+}
+
+async fn sync_status_comment_once_inner(state: &AppState, branch_id: &str) -> bool {
     let wired = match tags::get(&state.db, branch_id, WIRED_TAG).await {
         Ok(Some(tag)) => tag,
         Ok(None) => return true,

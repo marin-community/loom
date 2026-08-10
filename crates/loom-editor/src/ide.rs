@@ -74,9 +74,9 @@ impl Instance {
         }
         if let Some(dir) = &self.state_dir {
             let dir = dir.clone();
-            tokio::spawn(async move {
+            weaver_core::spawn_boxed(Box::pin(async move {
                 let _ = tokio::fs::remove_dir_all(dir).await;
-            });
+            }));
         }
     }
 }
@@ -344,7 +344,7 @@ async fn wait_for_port(child: &mut Child) -> Result<u16, String> {
 }
 
 fn pump_lines<R: AsyncRead + Unpin + Send + 'static>(reader: R, tx: mpsc::Sender<String>) {
-    tokio::spawn(async move {
+    weaver_core::spawn_boxed(Box::pin(async move {
         let mut lines = BufReader::new(reader).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             tracing::debug!(target: "loom::ide", "{line}");
@@ -352,7 +352,7 @@ fn pump_lines<R: AsyncRead + Unpin + Send + 'static>(reader: R, tx: mpsc::Sender
             // fails fast and we keep looping to drain (not block) the pipe.
             let _ = tx.send(line).await;
         }
-    });
+    }));
 }
 
 /// Pull the port out of a `… HTTP server listening on http://127.0.0.1:34543/`
@@ -524,9 +524,9 @@ async fn proxy_ws(mut req: Request, port: u16, suffix: &str) -> Response {
         Err(_) => return (StatusCode::BAD_GATEWAY, "editor handshake failed").into_response(),
     };
     // Drive the upstream connection (with upgrade support) in the background.
-    tokio::spawn(async move {
+    weaver_core::spawn_boxed(Box::pin(async move {
         let _ = conn.with_upgrades().await;
-    });
+    }));
 
     let Ok(uri) = format!("http://127.0.0.1:{port}{suffix}").parse::<Uri>() else {
         return (StatusCode::BAD_GATEWAY, "bad upstream uri").into_response();
@@ -550,13 +550,13 @@ async fn proxy_ws(mut req: Request, port: u16, suffix: &str) -> Response {
     }
 
     let upstream_on = hyper::upgrade::on(&mut upstream_resp);
-    tokio::spawn(async move {
+    weaver_core::spawn_boxed(Box::pin(async move {
         if let (Ok(client_io), Ok(upstream_io)) = tokio::join!(client_on, upstream_on) {
             let mut client = TokioIo::new(client_io);
             let mut upstream = TokioIo::new(upstream_io);
             let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
         }
-    });
+    }));
 
     // Return the upstream's 101 verbatim (Sec-WebSocket-Accept, Upgrade,
     // Connection) so the browser completes the same handshake code-server made.
