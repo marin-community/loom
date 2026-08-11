@@ -104,7 +104,7 @@ and why; you don't hand-edit `.env` itself.
 |---|---|---|
 | `LOOM_DOMAIN` | **yes** | Public domain Caddy serves and gets a cert for (e.g. `loom.team.dev`); `localhost` for local testing. Also seeded as `auth.base_url`. |
 | `LOOM_OWNER_GITHUB` | **yes** | GitHub login seeded as the first approved user on a fresh database — the only account that can sign in until it approves others. Approved users are also who may drive the `@loom` trigger; add more in **Settings → Approved users**. |
-| `GH_TOKEN` | **yes** | GitHub token loom uses to clone private repos, push branches, and reply to `@loom` comments. |
+| `GH_TOKEN` | **yes** | GitHub token loom uses to clone private repos, push branches, and reply to `@loom` requests. |
 | `LOOM_GITHUB_WEBHOOK_SECRET` | for `@loom` | Shared secret for the inbound webhook; must match the secret on the GitHub webhook. Until set, the webhook rejects every delivery. |
 | `LOOM_SLACK_APP_TOKEN` / `LOOM_SLACK_BOT_TOKEN` | for `/marinbot` | App-level and bot OAuth tokens for the Slack Socket Mode trigger. Both unset (the default) leaves it off. See [docs/slack-trigger.md](../docs/slack-trigger.md). |
 | `ANTHROPIC_API_KEY` | for Claude | API key for the Claude agents. Alternatively log in interactively (see [first-run](#agent-authentication)). |
@@ -332,9 +332,10 @@ GitHub mutations through Loom's server-side tool endpoint.
 
 ## Wire the `@loom` GitHub trigger
 
-Commenting **`@loom work on this`** on an issue launches a session. If you ran
-`loom setup github-app` above, the App *is* the webhook — GitHub delivers
-events to any repo it's installed on with no separate webhook to add:
+Opening or editing an issue whose body adds **`@loom work on this`**, or creating
+or editing a comment to add it, launches a session. If you ran `loom setup
+github-app` above, the App *is* the webhook — GitHub delivers events to any repo
+it's installed on with no separate webhook to add:
 
 1. **Install the App** on each repo (or org) loom should act on:
    `https://github.com/apps/<app-slug>/installations/new` (printed at the end
@@ -357,7 +358,8 @@ Without the App (the classic path), instead:
    - **Payload URL** — `https://<LOOM_DOMAIN>/api/github/webhook`
    - **Content type** — `application/json`
    - **Secret** — the same value as `LOOM_GITHUB_WEBHOOK_SECRET`
-   - **Events** — *Let me select individual events* → **Issue comments** only
+   - **Events** — *Let me select individual events* → **Issues** and **Issue
+     comments**
 
 Full behaviour, authorization rules, and hardening notes:
 [docs/github-trigger.md](../docs/github-trigger.md).
