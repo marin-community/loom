@@ -597,12 +597,11 @@ async fn issue_body_without_mention_is_ignored() {
     assert!(fake.comments.lock().unwrap().is_empty());
 }
 
-/// Adding the trigger phrase in either an issue-body edit or a comment edit
-/// launches through the same path as a newly created request. The editor, not
-/// the original author, owns the resulting session.
+/// Adding the trigger phrase in an issue-body edit launches through the same
+/// path as a newly opened issue.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn edits_that_introduce_the_mention_create_sessions() {
+async fn issue_edit_that_introduces_the_mention_creates_a_session() {
     let (ts, fake) = boot().await;
     let _remotes = prepare_repo(&ts).await;
 
@@ -618,6 +617,26 @@ async fn edits_that_introduce_the_mention_create_sessions() {
     .await;
     assert_eq!(resp.status(), 200);
 
+    wait_for_sessions(&ts, 1).await;
+    wait_for_comments(&fake, 1).await;
+    let sessions = ts.client.get("/api/sessions").await.unwrap();
+    let sessions = sessions.as_array().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["created_by"].as_str(), Some("rjpower"));
+    let goal = sessions[0]["branch"]["goal"].as_str().unwrap();
+    assert_eq!(goal.matches(issue_request).count(), 1);
+    assert!(goal.contains("via its body, edited by @rjpower"));
+}
+
+/// Adding the trigger phrase in a comment edit launches through the same path
+/// as a newly created comment. The editor, not the original author, owns the
+/// resulting session.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn comment_edit_that_introduces_the_mention_creates_a_session() {
+    let (ts, fake) = boot().await;
+    let _remotes = prepare_repo(&ts).await;
+
     let comment_request = "follow-up details\n\n@loom work on this";
     let body = edited_comment_event("rjpower", 46, "follow-up details", comment_request);
     let resp = post_event(
@@ -630,26 +649,15 @@ async fn edits_that_introduce_the_mention_create_sessions() {
     .await;
     assert_eq!(resp.status(), 200);
 
-    wait_for_sessions(&ts, 2).await;
-    wait_for_comments(&fake, 2).await;
+    wait_for_sessions(&ts, 1).await;
+    wait_for_comments(&fake, 1).await;
     let sessions = ts.client.get("/api/sessions").await.unwrap();
     let sessions = sessions.as_array().unwrap();
-    assert_eq!(sessions.len(), 2);
-    assert!(sessions
-        .iter()
-        .all(|session| session["created_by"].as_str() == Some("rjpower")));
-
-    let goals = sessions
-        .iter()
-        .map(|session| session["branch"]["goal"].as_str().unwrap())
-        .collect::<Vec<_>>();
-    assert!(goals.iter().any(|goal| {
-        goal.matches(issue_request).count() == 1
-            && goal.contains("via its body, edited by @rjpower")
-    }));
-    assert!(goals.iter().any(|goal| {
-        goal.contains(comment_request) && goal.contains("via an edited comment by @rjpower")
-    }));
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["created_by"].as_str(), Some("rjpower"));
+    let goal = sessions[0]["branch"]["goal"].as_str().unwrap();
+    assert!(goal.contains(comment_request));
+    assert!(goal.contains("via an edited comment by @rjpower"));
 }
 
 /// An edit that leaves an existing trigger phrase in place is not a new
