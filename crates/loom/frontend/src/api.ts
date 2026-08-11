@@ -227,6 +227,7 @@ import type {
   CustomAgent,
   CustomAgentInput,
   ManagedRepo,
+  RepoRevisionValidation,
   Thread,
   NewThreadBody,
   Comment,
@@ -287,6 +288,12 @@ export const listRepos = () => get('/repos') as Promise<ManagedRepo[]>;
 /** Register a repo (a GitHub `owner/name` slug or clone URL) in the managed
  *  store / allowlist (`POST /api/repos`). Returns the stored mapping. */
 export const registerRepo = (repo: string) => post('/repos', { repo }) as Promise<ManagedRepo>;
+
+/** Check that a proposed worktree base resolves to a commit in a local repo. */
+export const validateRepoRevision = (cwd: string, revision: string) => {
+  const params = new URLSearchParams({ cwd, revision });
+  return get(`/repos/revisions/validate?${params}`) as Promise<RepoRevisionValidation>;
+};
 
 // --- Your GitHub token (per-user) ------------------------------------------
 

@@ -999,6 +999,7 @@ pub fn router(state: AppState) -> Router {
         .route("/repos", get(list_repos).post(register_repo))
         .route("/repos/recent", get(recent_repos))
         .route("/repos/branches", get(repo_branches))
+        .route("/repos/revisions/validate", get(validate_repo_revision))
         .route(
             "/repos/issues",
             get(list_repo_issues).post(create_repo_issue),

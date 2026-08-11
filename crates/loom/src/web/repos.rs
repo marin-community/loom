@@ -744,3 +744,34 @@ pub(super) async fn repo_branches(
     });
     Ok(Json(out))
 }
+
+#[derive(Debug, Deserialize)]
+pub(super) struct RevisionValidationQuery {
+    cwd: String,
+    revision: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct RevisionValidation {
+    valid: bool,
+    repo_root: String,
+    message: Option<String>,
+}
+
+/// Check whether a worktree fork point resolves without modifying the repo.
+pub(super) async fn validate_repo_revision(
+    Query(q): Query<RevisionValidationQuery>,
+) -> ApiResult<Json<RevisionValidation>> {
+    let cwd = PathBuf::from(&q.cwd);
+    let repo_root = git::repo_root(&cwd)
+        .await
+        .map_err(|e| AppError::bad_request(e.to_string()))?;
+    let revision = q.revision.trim();
+    let valid = !revision.is_empty() && git::revision_exists(&repo_root, revision).await;
+    let message = (!valid).then(|| git::missing_revision_message(&repo_root, revision));
+    Ok(Json(RevisionValidation {
+        valid,
+        repo_root: repo_root.display().to_string(),
+        message,
+    }))
+}

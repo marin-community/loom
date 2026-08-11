@@ -848,6 +848,11 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
         (existing_branch.to_string(), work_dir)
     } else {
         // Create `weaver/<slug>` with a unique suffix.
+        if !git::revision_exists(&repo_root, &base).await {
+            return Err(ProvisionError::invalid(git::missing_revision_message(
+                &repo_root, &base,
+            )));
+        }
         let explicit = req.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
         let base_slug = branch_mod::slugify(explicit.unwrap_or(title.as_str()));
         tracing::debug!(base_slug = %base_slug, base = %base, "creating new branch for session");

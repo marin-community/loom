@@ -373,6 +373,27 @@ async fn attach_to_existing_branch() {
         "main should be listed as current, got {arr:?}"
     );
 
+    let valid_base = client
+        .get(&format!(
+            "/api/repos/revisions/validate?cwd={cwd}&revision=main"
+        ))
+        .await
+        .unwrap();
+    assert_eq!(valid_base["valid"], true);
+    assert_eq!(valid_base["message"], serde_json::Value::Null);
+
+    let missing_base = client
+        .get(&format!(
+            "/api/repos/revisions/validate?cwd={cwd}&revision=agent/missing-upstream-worktree"
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing_base["valid"], false);
+    assert!(missing_base["message"]
+        .as_str()
+        .unwrap()
+        .contains("was not found in repository"));
+
     // A branch with no worktree gets a fresh .worktrees/<slug>.
     sh(&repo, "git", &["branch", "feature/x", "main"]);
     let attached = client

@@ -974,6 +974,13 @@ export interface ManagedRepo {
   created_at: string;
 }
 
+/** Result of checking a proposed worktree fork point in a local repository. */
+export interface RepoRevisionValidation {
+  valid: boolean;
+  repo_root: string;
+  message: string | null;
+}
+
 /** One per-repo environment variable's metadata (`/api/repos/env`). Mirrors
  *  loom's `repo_env::RepoEnvVar`. The value is **write-only**: it is set via PUT
  *  but never returned (these hold per-repo secrets), so only the name and last

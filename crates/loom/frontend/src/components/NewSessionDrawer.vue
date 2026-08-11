@@ -11,6 +11,7 @@ import {
   post,
   registerRepo,
   resolveSessionLaunch,
+  validateRepoRevision,
 } from '../api';
 import type {
   AgentMetadata,
@@ -87,6 +88,10 @@ const branchActiveOption = ref(-1);
 const branches = ref<RepoBranch[]>([]);
 const branchesError = ref('');
 let branchesReqId = 0;
+const baseValidationError = ref('');
+const validatingBase = ref(false);
+let baseValidationReqId = 0;
+let baseValidationTimer: ReturnType<typeof setTimeout> | undefined;
 
 function slugify(s: string): string {
   return s
@@ -298,6 +303,35 @@ watch([repo, branchMode], ([, mode]) => {
   if (mode === 'existing') loadBranches();
 });
 
+function scheduleBaseValidation() {
+  if (baseValidationTimer) clearTimeout(baseValidationTimer);
+  const request = ++baseValidationReqId;
+  baseValidationError.value = '';
+  const cwd = repo.value.trim();
+  const revision = base.value.trim();
+  if (branchMode.value !== 'new' || !cwd || !revision || looksLikeRemoteRepo(cwd)) {
+    validatingBase.value = false;
+    return;
+  }
+  validatingBase.value = true;
+  baseValidationTimer = setTimeout(async () => {
+    baseValidationTimer = undefined;
+    try {
+      const result = await validateRepoRevision(cwd, revision);
+      if (request === baseValidationReqId && !result.valid) {
+        baseValidationError.value =
+          result.message ?? 'The selected base revision could not be validated.';
+      }
+    } catch (cause) {
+      if (request === baseValidationReqId) baseValidationError.value = (cause as Error).message;
+    } finally {
+      if (request === baseValidationReqId) validatingBase.value = false;
+    }
+  }, 180);
+}
+
+watch([repo, base, branchMode], scheduleBaseValidation, { flush: 'sync' });
+
 function resetForm() {
   repo.value = '';
   title.value = '';
@@ -318,6 +352,13 @@ function resetForm() {
   error.value = '';
   resolveError.value = '';
   branchesError.value = '';
+  baseValidationError.value = '';
+  validatingBase.value = false;
+  ++baseValidationReqId;
+  if (baseValidationTimer) {
+    clearTimeout(baseValidationTimer);
+    baseValidationTimer = undefined;
+  }
   repoError.value = '';
   scratchError.value = '';
   ++resolveRequest;
@@ -652,6 +693,8 @@ const createBlockReason = computed(() => {
     return 'Add a task title or goal before creating the session.';
   if (branchMode.value === 'existing' && !existingBranch.value.trim())
     return 'Choose the existing branch to reuse.';
+  if (validatingBase.value) return 'Checking that the base revision exists in this repository.';
+  if (baseValidationError.value) return baseValidationError.value;
   if (scratchError.value) return scratchError.value;
   if (repoRegistrations.value > 0) return 'Wait for repository registration to finish.';
   if (cloneBusy.value) return 'Wait for the new profile to finish saving.';
@@ -877,6 +920,17 @@ onActivated(() => void refreshLaunchData());
                 <p class="mt-1 text-xs text-faint">
                   Leave blank to fork from a freshly-fetched
                   <code>origin/&lt;default branch&gt;</code>.
+                </p>
+                <p v-if="validatingBase" class="mt-1 text-xs text-faint" aria-live="polite">
+                  Checking base revision…
+                </p>
+                <p
+                  v-else-if="baseValidationError"
+                  class="mt-1 text-xs text-block"
+                  role="alert"
+                  data-testid="base-validation-error"
+                >
+                  {{ baseValidationError }}
                 </p>
               </div>
             </div>
