@@ -320,7 +320,7 @@ function scheduleBaseValidation() {
       const result = await validateRepoRevision(cwd, revision);
       if (request === baseValidationReqId && !result.valid) {
         baseValidationError.value =
-          result.message ?? `Base revision '${revision}' was not found in this repository.`;
+          result.message ?? 'The selected base revision could not be validated.';
       }
     } catch (cause) {
       if (request === baseValidationReqId) baseValidationError.value = (cause as Error).message;

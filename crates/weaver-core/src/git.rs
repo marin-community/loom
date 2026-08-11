@@ -197,9 +197,6 @@ async fn has_remote(dir: &Path, name: &str) -> bool {
 }
 
 /// Whether `rev` resolves to a commit in this repo.
-///
-/// This is public so launch surfaces can validate a user-supplied fork point
-/// before attempting to create a worktree.
 pub async fn revision_exists(dir: &Path, rev: &str) -> bool {
     git(
         dir,
@@ -212,6 +209,13 @@ pub async fn revision_exists(dir: &Path, rev: &str) -> bool {
     )
     .await
     .is_ok()
+}
+
+pub fn missing_revision_message(dir: &Path, rev: &str) -> String {
+    format!(
+        "Base revision '{rev}' was not found in repository '{}'. Choose a branch, remote-tracking branch, tag, or commit available there; if it exists in another clone, use that repository instead.",
+        dir.display()
+    )
 }
 
 /// The default branch on `origin` (e.g. `main`), resolved locally and cheaply:

@@ -758,9 +758,7 @@ pub(super) struct RevisionValidation {
     message: Option<String>,
 }
 
-/// Validate a user-entered worktree fork point without creating a branch or
-/// worktree. The creation drawer uses this while the base field is editable;
-/// provisioning repeats the check to keep the mutation boundary authoritative.
+/// Check whether a worktree fork point resolves without modifying the repo.
 pub(super) async fn validate_repo_revision(
     Query(q): Query<RevisionValidationQuery>,
 ) -> ApiResult<Json<RevisionValidation>> {
@@ -770,12 +768,7 @@ pub(super) async fn validate_repo_revision(
         .map_err(|e| AppError::bad_request(e.to_string()))?;
     let revision = q.revision.trim();
     let valid = !revision.is_empty() && git::revision_exists(&repo_root, revision).await;
-    let message = (!valid).then(|| {
-        format!(
-            "Base revision '{revision}' was not found in repository '{}'. Choose a branch, remote-tracking branch, tag, or commit that exists in this repository.",
-            repo_root.display()
-        )
-    });
+    let message = (!valid).then(|| git::missing_revision_message(&repo_root, revision));
     Ok(Json(RevisionValidation {
         valid,
         repo_root: repo_root.display().to_string(),

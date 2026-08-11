@@ -849,9 +849,8 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
     } else {
         // Create `weaver/<slug>` with a unique suffix.
         if !git::revision_exists(&repo_root, &base).await {
-            return Err(ProvisionError::invalid(format!(
-                "base revision '{base}' was not found in repository '{}'; choose a branch, remote-tracking branch, tag, or commit that exists in this repository",
-                repo_root.display()
+            return Err(ProvisionError::invalid(git::missing_revision_message(
+                &repo_root, &base,
             )));
         }
         let explicit = req.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
