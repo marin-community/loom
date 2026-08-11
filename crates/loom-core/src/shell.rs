@@ -5,11 +5,13 @@
 //!
 //! * The **operator scratch shell** ([`SHELL_SESSION`]): a single persistent
 //!   shell, not tied to any branch or worktree, running in the container user's
-//!   `$HOME`. Its purpose is one-time operator setup that would otherwise need
-//!   `docker exec -it weaver …` — most concretely `gcloud auth login`, whose
-//!   credentials land in the `CLOUDSDK_CONFIG` volume and so survive recreates
-//!   (see the Dockerfile / docker-compose.yml). Spawned lazily by [`ensure`],
-//!   reset with [`restart`].
+//!   `$HOME`. It always runs beside the Loom server, bypassing the Docker session
+//!   runner, so operators can inspect the control-plane container and its sibling
+//!   session containers through the Docker socket. It also handles one-time
+//!   setup that would otherwise need `docker exec -it loom …` — most concretely
+//!   `gcloud auth login`, whose credentials land in the `CLOUDSDK_CONFIG` volume
+//!   and so survive recreates (see the Dockerfile / docker-compose.yml). Spawned
+//!   lazily by [`ensure`], reset with [`restart`].
 //!
 //! * Per-session **debug shells** ([`ensure_debug`]): one or more login shells
 //!   in the session agent's runner placement (the same container with the
@@ -54,7 +56,7 @@ fn shell_cwd() -> PathBuf {
 /// [`agent_env`] vars, and (for a per-session debug shell) the session's
 /// `WEAVER_BRANCH`. The script just `exec`s the login shell via
 /// [`agent::bare_shell_script`] (no inner agent command); the env is delivered
-/// out of band by [`backend::new_session`], not `export`-ed into the script, so
+/// out of band by the [`backend`] launch helpers, not `export`-ed into the script, so
 /// secrets stay off argv. This is a plain shell, not an agent, so it does not go
 /// through the agent launch path.
 async fn shell_script(st: &Ctx, branch_id: Option<&str>) -> (String, Vec<(String, String)>) {
@@ -94,15 +96,7 @@ pub async fn ensure(st: &Ctx) -> Result<()> {
     let (script, env) = shell_script(st, None).await;
     let cwd = shell_cwd();
     tracing::info!(session = SHELL_SESSION, cwd = %cwd.display(), "spawning operator scratch shell");
-    backend::new_session(
-        SHELL_SESSION,
-        &cwd,
-        &script,
-        &env_refs(&env),
-        false,
-        backend::memory_max_gb(&st.db).await,
-    )
-    .await
+    backend::new_session_on_host(SHELL_SESSION, &cwd, &script, &env_refs(&env), false).await
 }
 
 /// Reset the scratch shell: kill the current supervisor (best-effort) and bring

@@ -36,16 +36,15 @@ async fn connect_session_shell(addr: &std::net::SocketAddr, id: &str, idx: u32) 
 async fn await_shell_ready(term: &mut TermWs, marker: &str) {
     let cmd = format!("echo {marker}$((6 * 7))\n");
     let want = format!("{marker}42");
+    let mut output = String::new();
     for _ in 0..15 {
         send_input(term, &cmd).await;
-        if drain_until(term, &want, Duration::from_secs(1))
-            .await
-            .contains(&want)
-        {
+        output = drain_until(term, &want, Duration::from_secs(1)).await;
+        if output.contains(&want) {
             return;
         }
     }
-    panic!("scratch shell never came up");
+    panic!("scratch shell never came up; terminal output:\n{output}");
 }
 
 #[serial]
