@@ -3,8 +3,8 @@
 //! Build the test image with `HOST_UID=$(id -u)` and `HOST_GID=$(id -g)`, then
 //! run `cargo test -p loom --test docker_runner -- --ignored`. The regular suite
 //! stays Docker-free. This smoke covers placement, launcher death, shared socket
-//! access, colocating a second supervisor, and a callback over the configured
-//! sibling network.
+//! access, colocating a second supervisor, keeping the operator shell on the
+//! launcher host, and a callback over the configured sibling network.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -85,6 +85,21 @@ fn docker_runner_child() {
             supervisor_bin: None,
         };
         loom::runner::spawn(&options, 1).await.unwrap();
+
+        let host_session = format!("{session}-host-shell");
+        let host_options = tapestry::LaunchOptions {
+            name: &host_session,
+            cwd: &root,
+            script: "printf 'host-shell-ready host=%s\\n' \"$(cat /etc/hostname)\"; sleep 60",
+            env: &[],
+            env_clear: false,
+            cols: 80,
+            rows: 24,
+            mode: tapestry::Mode::Pty,
+            segment_max_bytes: None,
+            supervisor_bin: None,
+        };
+        loom::runner::spawn_on_host(&host_options).await.unwrap();
     });
 }
 
@@ -165,6 +180,16 @@ fn docker_runner_supervisor_outlives_its_launcher() {
         assert!(owner_screen.contains("runner-ready"));
         assert!(owner_screen.contains("200"));
 
+        let host_session = format!("{session}-host-shell");
+        let mut host_screen = String::new();
+        for _ in 0..200 {
+            host_screen = loom::backend::capture(&host_session, 0).await.unwrap();
+            if host_screen.contains("host-shell-ready") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
         let colocated = format!("{session}-shell");
         let options = tapestry::LaunchOptions {
             name: &colocated,
@@ -200,12 +225,24 @@ fn docker_runner_supervisor_outlives_its_launcher() {
             .nth(1)
             .and_then(|tail| tail.split_whitespace().next())
             .expect("shell should print its container hostname");
+        let host_shell_host = host_screen
+            .split("host-shell-ready host=")
+            .nth(1)
+            .and_then(|tail| tail.split_whitespace().next())
+            .expect("host shell should print the launcher's hostname");
         assert_eq!(
             colocated_host, owner_host,
             "colocated supervisor should run in the owner's container"
         );
+        assert_ne!(
+            host_shell_host, owner_host,
+            "host supervisor should bypass the session container"
+        );
 
         loom::backend::kill_session_and_wait(&colocated)
+            .await
+            .unwrap();
+        loom::backend::kill_session_and_wait(&host_session)
             .await
             .unwrap();
         loom::backend::kill_session_and_wait(&session)

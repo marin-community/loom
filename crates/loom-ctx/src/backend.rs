@@ -122,7 +122,31 @@ pub async fn new_session(
     env_clear: bool,
     memory_max_gb: u64,
 ) -> Result<()> {
-    new_session_with_placement(name, cwd, script, env, env_clear, memory_max_gb, None).await
+    new_session_with_placement(
+        name,
+        cwd,
+        script,
+        env,
+        env_clear,
+        memory_max_gb,
+        SessionPlacement::Configured,
+    )
+    .await
+}
+
+/// Create a detached PTY session directly beside the Loom server process.
+///
+/// This intentionally bypasses the configured runner and its per-session
+/// memory cgroup. It is reserved for the operator scratch shell, whose purpose
+/// is to inspect and administer the Loom control-plane host/container itself.
+pub async fn new_session_on_host(
+    name: &str,
+    cwd: &std::path::Path,
+    script: &str,
+    env: &[(&str, &str)],
+    env_clear: bool,
+) -> Result<()> {
+    new_session_with_placement(name, cwd, script, env, env_clear, 0, SessionPlacement::Host).await
 }
 
 /// Create a detached PTY session in the same runner placement as `owner`.
@@ -146,9 +170,15 @@ pub async fn new_session_colocated(
         env,
         env_clear,
         memory_max_gb,
-        Some(owner),
+        SessionPlacement::Colocated(owner),
     )
     .await
+}
+
+enum SessionPlacement<'a> {
+    Configured,
+    Host,
+    Colocated(&'a str),
 }
 
 async fn new_session_with_placement(
@@ -158,7 +188,7 @@ async fn new_session_with_placement(
     env: &[(&str, &str)],
     env_clear: bool,
     memory_max_gb: u64,
-    owner: Option<&str>,
+    placement: SessionPlacement<'_>,
 ) -> Result<()> {
     tracing::info!(session = %name, cwd = %cwd.display(), memory_max_gb, "spawning terminal session");
     let script = match memory_max_gb {
@@ -178,9 +208,12 @@ async fn new_session_with_placement(
         segment_max_bytes: None,
         supervisor_bin: supervisor_bin.as_deref(),
     };
-    let result = match owner {
-        Some(owner) => runner::spawn_colocated(&options, memory_max_gb, owner).await,
-        None => runner::spawn(&options, memory_max_gb).await,
+    let result = match placement {
+        SessionPlacement::Configured => runner::spawn(&options, memory_max_gb).await,
+        SessionPlacement::Host => runner::spawn_on_host(&options).await,
+        SessionPlacement::Colocated(owner) => {
+            runner::spawn_colocated(&options, memory_max_gb, owner).await
+        }
     };
     match &result {
         Ok(()) => tracing::info!(session = %name, "terminal session spawned"),

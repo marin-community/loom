@@ -333,6 +333,7 @@ route truth, including internal proxy and compatibility paths.
 | `GET /api/scratch/limits`; `GET POST DELETE /api/sessions/{id}/scratch` | shared Scratch contract and live list/drop/remove: 20 files, 25 MiB each, 50 MiB decoded total; accepted dotfiles count, while `.gitignore` is reserved |
 | `GET /api/sessions/{id}/files?q=…` | bounded worktree resource search for ACP `@file` completion; the old browser file editor routes are gone |
 | `GET /api/sessions/{id}/ide-info`; `ANY /api/sessions/{id}/ide[/…]` | availability probe and authenticated same-origin HTTP/WebSocket proxy for the optional code-server side panel |
+| `GET /api/shell/terminal`; `POST /api/shell/restart` | open or reset the global operator shell; it runs beside the Loom server rather than through the configured session runner |
 | `GET /api/sessions/{id}/shells`; `DELETE /api/sessions/{id}/shell/{idx}`; `GET /api/sessions/{id}/shell/{idx}/terminal` | list, close, or open per-session debug shells through WebSocket |
 | `GET /api/sessions/{id}/artifacts` | list the branch's [artifacts](artifacts.md) plus repo-shared ones |
 | `GET PUT /api/sessions/{id}/artifacts/{name}` | read content + projected refs (`rev=N` for a revision) / write a user edit as a new revision |
@@ -540,6 +541,11 @@ Details → Advanced, not as the primary file or work surface.
   `done`/`error` sessions remain owners, and the monitor handles the
   inverse mismatch by marking a session row with no supervisor `orphaned`.
   See [Session lifecycle](session-lifecycle.md).
+- **Shell placement follows purpose:** with the Docker runner, each agent owns a
+  sibling session container and its per-session debug shells are colocated
+  there. The global operator Shell is the deliberate exception: its supervisor
+  runs beside `loom server run`, giving operators the control-plane container's
+  process/filesystem view and its Docker-socket view of sibling sessions.
 
 ## Status & tags
 

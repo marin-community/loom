@@ -3,10 +3,12 @@ import { ref } from 'vue';
 import AgentTerminal from '../components/AgentTerminal.vue';
 import { restartShell } from '../api';
 
-// The operator scratch shell: one persistent login shell running inside the
-// container, attached over the same terminal bridge agent sessions use. It's
-// for one-time setup that would otherwise need `docker exec` — most usefully
-// `gcloud auth login`, whose credentials persist in the gcloud config volume.
+// The operator scratch shell: one persistent login shell running beside the
+// Loom server, attached over the same terminal bridge agent sessions use. In a
+// Docker deployment this is the control-plane container rather than an isolated
+// session container, so it can inspect the deployment through the Docker socket.
+// It is also useful for one-time setup such as `gcloud auth login`, whose
+// credentials persist in the gcloud config volume.
 //
 // AgentTerminal is keyed so "Restart" (which kills + respawns the supervisor)
 // forces a fresh socket: bumping the key remounts the component, reconnecting
@@ -37,9 +39,9 @@ async function restart() {
       <div class="min-w-0">
         <h1 class="text-sm font-semibold text-fg">Shell</h1>
         <p class="text-xs text-muted">
-          A login shell inside the container — for one-time setup like
-          <code class="rounded bg-code px-1 py-0.5 text-[11px]">gcloud auth login</code>. It
-          persists across restarts.
+          A login shell beside the Loom server — inspect the deployment or run setup like
+          <code class="rounded bg-code px-1 py-0.5 text-[11px]">gcloud auth login</code>. Setup
+          state persists across restarts.
         </p>
       </div>
       <button

@@ -584,6 +584,17 @@ pub async fn spawn(opts: &tapestry::LaunchOptions<'_>, memory_max_gb: u64) -> Re
         .await
 }
 
+/// Start a supervisor directly on the Loom host, bypassing the configured
+/// session placement backend.
+///
+/// The operator scratch shell uses this escape hatch so a Docker-backed Loom
+/// exposes the control-plane container itself rather than creating another
+/// isolated session container. Agent and per-session shell placement must keep
+/// using [`spawn`] or [`spawn_colocated`].
+pub async fn spawn_on_host(opts: &tapestry::LaunchOptions<'_>) -> Result<()> {
+    ProcessRunner.start(opts, 0, None).await
+}
+
 /// Start a supervisor in the same placement container as `owner`. Local-process
 /// placement has no container boundary, so this is equivalent to [`spawn`].
 pub async fn spawn_colocated(

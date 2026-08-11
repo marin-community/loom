@@ -58,7 +58,8 @@ services:
       # container. Auxiliary supervisors such as its debug shells are colocated
       # there. The containers share the durable home/tool volumes and control
       # socket; recreating this control-plane service therefore leaves live
-      # sessions up.
+      # sessions up. The global operator Shell deliberately stays in this
+      # control-plane container so it can inspect the deployment as a whole.
       LOOM_RUNNER: docker
       LOOM_SESSION_IMAGE: ${LOOM_IMAGE:-loom:latest}
       LOOM_SESSION_HOME_VOLUME: loom_loom_home
