@@ -322,11 +322,13 @@ export interface SessionGroupOrder {
 export type SessionSearchStatus =
   'created' | 'running' | 'orphaned' | 'done' | 'error' | 'archived';
 export type SessionSearchAttention = 'needs' | 'ok' | 'attention' | 'blocked';
+export type SessionCreatorFilter = 'mine' | 'ops' | 'mine-and-ops' | 'other-users';
 export interface SessionSearchOptions {
   history?: boolean;
   archivedOnly?: boolean;
   status?: SessionSearchStatus;
   attention?: SessionSearchAttention;
+  creator?: SessionCreatorFilter;
 }
 
 export type AutomationRunStatus =

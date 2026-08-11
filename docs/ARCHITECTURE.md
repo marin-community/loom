@@ -714,7 +714,13 @@ the stage and suppresses lifecycle actions until completion. Transition claims
 are atomic across overlapping server generations, and startup reconciles a
 marker left by a process exit before normal supervisor inventory runs.
 
-**Automation lifecycle.** A `class = automation` session — every session not
+**Retention and automation lifecycle.** Ordinary interactive sessions inherit a
+ten-day idle archive policy (`864000` seconds); a profile override is stamped
+onto the session at launch, and an explicit `0` disables that TTL. The monitor
+uses durable `last_activity_at`, falls back to `created_at` for untouched work,
+and can archive completed/error rows as well as live ones once they are old.
+
+A `class = automation` session — every session not
 launched interactively by a human, excluding a watch's own warm sessions —
 carries a turn cap (`automation.turn_cap`, default `100`, `0` disables)
 counted by `sessions.turn_count`. Exceeding the cap raises a loud `blocked`

@@ -178,6 +178,9 @@ impl Client {
         if let Some(attention) = options.attention {
             query.push(format!("attention={attention}"));
         }
+        if let Some(creator) = options.creator {
+            query.push(format!("creator={creator}"));
+        }
         self.get_typed(&format!("/api/sessions/search?{}", query.join("&")))
             .await
     }

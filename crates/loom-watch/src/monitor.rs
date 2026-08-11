@@ -190,8 +190,8 @@ async fn run_inner(state: AppState) {
         screen_hash.retain(|k, _| alive.contains(k));
         stale_seen.retain(|k| alive.contains(k));
 
-        // 3. Retention: reap finished / long-idle automation sessions and
-        //    inactive Slack conversations, on a slower cadence than the tick.
+        // 3. Retention: reap long-idle ordinary sessions, automation work, and
+        //    Slack conversations on a slower cadence than the tick.
         reap_tick += 1;
         if reap_tick >= REAP_EVERY_TICKS {
             reap_tick = 0;
@@ -213,13 +213,13 @@ pub enum ReapReason {
     IdleTtl,
 }
 
-/// Whether the reaper may consider `session` at all: automation-class or
-/// Slack-origin, not a warm (watch-managed) session — those are exempt
-/// infrastructure — and in a non-terminal status.
+/// Whether the reaper may consider `session` at all. Warm (watch-managed)
+/// sessions are exempt infrastructure and archived rows are already gone from
+/// the active fleet; every other stable session may carry an idle TTL.
 fn reap_candidate(session: &Session) -> bool {
-    (session.class == "automation" || session.origin == "slack")
-        && session.managed_by.is_none()
-        && matches!(session.status.as_str(), "created" | "running" | "orphaned")
+    session.managed_by.is_none()
+        && session.status != "archived"
+        && session.lifecycle_transition.is_none()
 }
 
 fn retention_issue_id(session: &Session) -> Option<i64> {
@@ -613,17 +613,27 @@ mod tests {
         inflight.acp_inflight = Some("{}".to_string());
         assert_eq!(reap_decision(&inflight, true, ttl, now), None);
 
-        // Not a candidate: an ordinary interactive session, warm
-        // (watch-managed), or already in a terminal status.
+        // Ordinary interactive sessions use the same TTL path. A closed issue
+        // is never passed for them by `reap_sessions`, but their age alone is
+        // enough once their resolved policy has the ten-day default.
         let mut interactive = idle.clone();
         interactive.class = "interactive".to_string();
-        assert_eq!(reap_decision(&interactive, true, ttl, now), None);
+        assert_eq!(
+            reap_decision(&interactive, false, ttl, now),
+            Some(ReapReason::IdleTtl)
+        );
+
+        // Not a candidate: warm (watch-managed), already archived, or in the
+        // middle of another lifecycle transition.
         let mut warm = idle.clone();
         warm.managed_by = Some("w1".to_string());
         assert_eq!(reap_decision(&warm, true, ttl, now), None);
         let mut archived = idle.clone();
         archived.status = "archived".to_string();
         assert_eq!(reap_decision(&archived, true, ttl, now), None);
+        let mut transitioning = idle.clone();
+        transitioning.lifecycle_transition = Some("archiving".to_string());
+        assert_eq!(reap_decision(&transitioning, true, ttl, now), None);
     }
 
     #[test]

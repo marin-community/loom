@@ -407,6 +407,15 @@ wire_enum!(SessionSearchAttention {
     Blocked => "blocked",
 });
 
+// Viewer-relative creator scopes for fleet indexes. `ops` is the durable
+// automation class, independent of where an operator later moves the row.
+wire_enum!(SessionCreatorFilter {
+    Mine => "mine",
+    Ops => "ops",
+    MineAndOps => "mine-and-ops",
+    OtherUsers => "other-users",
+});
+
 /// Typed filters for `GET /api/sessions/search`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchSessionsOptions {
@@ -420,6 +429,8 @@ pub struct SearchSessionsOptions {
     pub status: Option<SessionSearchStatus>,
     #[serde(default)]
     pub attention: Option<SessionSearchAttention>,
+    #[serde(default)]
+    pub creator: Option<SessionCreatorFilter>,
 }
 
 /// One session's canonical position in the shared Spaces → Groups layout.

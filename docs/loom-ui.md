@@ -20,7 +20,9 @@ The rail has five stable destinations: **Sessions**, **Issues**, **Watch**,
 **Shell**, and **Settings**. Session Artifacts and Changes are not global
 destinations; they live together under that session's Review surface.
 
-Sessions is organized as shared **Spaces → Groups → Sessions**. A session has
+Sessions is organized as shared **Spaces → Groups → Sessions**. **Later** is a
+top-level space ahead of the provenance spaces, keeping deferred work out of
+each Inbox while preserving one canonical placement. A session has
 one canonical placement and one unqualified task label. A group row shows that
 label; cross-group smart views qualify it as `Group / Task`. Attention, All, and
 History are views over the same placement rather than separate ownership models.
@@ -32,9 +34,11 @@ separate Automations destination.
 GitHub and Slack triggers land in their respective Inbox spaces. Delegated
 sessions inherit their parent's placement.
 
-Search, moves, ordering, collapse preferences, and placement defaults all use
-the layout REST API. Selecting a row opens the session without changing its
-group, and returning to the workbench restores the current view.
+Search, creator scope, moves, ordering, collapse preferences, and placement
+defaults all use the session/layout REST APIs. Creator scope can show everyone,
+the signed-in operator, Ops work, their union, or other users. Selecting a row
+opens the session without changing its group, and returning to the workbench
+restores the current view.
 
 The shell polls a compact summary of active sessions. It fetches archived
 summaries only when History opens, and fetches full goal, launch, policy, and

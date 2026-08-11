@@ -185,6 +185,9 @@ export interface WeaverFixture {
   /** Mark a seeded session as engine-managed infrastructure in the worker's
    *  private database. Normal fleet inventory must hide it. */
   setManaged(id: string, managedBy?: string): Promise<void>;
+  /** Change creator attribution in the worker-private database so team-view
+   *  filters can be exercised without a second browser login flow. */
+  setCreator(id: string, username: string): Promise<void>;
   /** Flip a session's status by writing a hook event row via `weaver hook`. */
   hook(session: Session, event: "working" | "waiting" | "idle"): Promise<void>;
   /** Declare the agent's status (level + message) via `weaver status`. It
@@ -295,18 +298,22 @@ async function deleteAllSessions(baseUrl: string) {
   }
 }
 
+function quoteSqlite(value: string) {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+function runPrivateSql(dbPath: string, sql: string) {
+  execFileSync("sqlite3", [dbPath, `PRAGMA busy_timeout=5000; ${sql}`], {
+    stdio: "pipe",
+  });
+}
+
 /** Automation launch reservations are durable and intentionally have no
  *  product delete endpoint. Test workers own a private sqlite database, so
  *  clear that audit table directly between tests to keep run-only failures
  *  from leaking into later count assertions. */
 function deleteAllAutomationRuns(dbPath: string) {
-  execFileSync(
-    "sqlite3",
-    [dbPath, "PRAGMA busy_timeout=5000; DELETE FROM automation_runs;"],
-    {
-      stdio: "pipe",
-    },
-  );
+  runPrivateSql(dbPath, "DELETE FROM automation_runs;");
 }
 
 /** Delete every watch on a server, best-effort — watches aren't tied
@@ -646,14 +653,16 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       },
 
       async setManaged(id, managedBy = "watch-e2e") {
-        const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
-        execFileSync(
-          "sqlite3",
-          [
-            childEnv.WEAVER_DB!,
-            `PRAGMA busy_timeout=5000; UPDATE sessions SET managed_by = ${quote(managedBy)} WHERE id = ${quote(id)};`,
-          ],
-          { stdio: "pipe" },
+        runPrivateSql(
+          childEnv.WEAVER_DB!,
+          `UPDATE sessions SET managed_by = ${quoteSqlite(managedBy)} WHERE id = ${quoteSqlite(id)};`,
+        );
+      },
+
+      async setCreator(id, username) {
+        runPrivateSql(
+          childEnv.WEAVER_DB!,
+          `UPDATE sessions SET created_by = ${quoteSqlite(username)}, creator_kind = 'user', creator_subject = ${quoteSqlite(username)} WHERE id = ${quoteSqlite(id)};`,
         );
       },
 

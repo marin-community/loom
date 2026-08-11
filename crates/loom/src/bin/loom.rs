@@ -14,7 +14,7 @@ use weaver_api::{
     CreateSessionSpaceReq, DeleteSessionGroupReq, DeleteSessionSpaceReq, IssueAction,
     IssueActionsReq, MoveSessionsReq, ReorderSessionLayoutReq, RestoreSessionGroupsReq,
     ReviewAnchorDto, ReviewAnchorKindDto, ReviewSubjectKindDto, SearchSessionsOptions,
-    SessionGroupPreferenceReq, SessionLayoutItemKind, SessionLayoutView,
+    SessionCreatorFilter, SessionGroupPreferenceReq, SessionLayoutItemKind, SessionLayoutView,
     SessionPlacementSelectorKind, SessionSearchAttention, SessionSearchStatus,
     SetSessionPlacementDefaultReq, SubmitReviewReq, UpdateReviewCommentReq, UpdateReviewReq,
     UpdateSessionGroupReq, UpdateSessionSpaceReq,
@@ -511,6 +511,9 @@ enum SessionCmd {
         /// Filter the resolved attention state.
         #[arg(long)]
         attention: Option<SessionSearchAttention>,
+        /// Filter by who launched work: mine, ops, mine-and-ops, or other-users.
+        #[arg(long)]
+        creator: Option<SessionCreatorFilter>,
     },
     /// Read or edit the durable Spaces → Groups → Sessions workbench layout.
     Layout {
@@ -1300,7 +1303,7 @@ async fn run() -> Result<()> {
         Cmd::Setup { cmd } => run_setup(cmd).await,
         Cmd::Config { cmd } => run_config(cmd).await,
         Cmd::Launch(opts) => cmd_launch(opts.into()).await,
-        Cmd::Ps => cmd_ps(false, false, false, None, None, None).await,
+        Cmd::Ps => cmd_ps(PsOptions::default()).await,
         Cmd::Attach { session } => cmd_attach(session).await,
         Cmd::Open => cmd_open().await,
         Cmd::Completions { shell } => {
@@ -1669,12 +1672,23 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
         }
         SessionCmd::Ls {
             archived,
-            automation,
+            automation: _,
             managed,
             search,
             status,
             attention,
-        } => cmd_ps(archived, automation, managed, search, status, attention).await,
+            creator,
+        } => {
+            cmd_ps(PsOptions {
+                archived,
+                managed,
+                search,
+                status,
+                attention,
+                creator,
+            })
+            .await
+        }
         SessionCmd::Layout { cmd } => run_session_layout(cmd).await,
         SessionCmd::Rename { session, title } => cmd_session_rename(session, title.join(" ")).await,
         SessionCmd::RegenerateTitle { session } => cmd_session_regenerate_title(session).await,
@@ -4121,14 +4135,25 @@ async fn cmd_session_preview(key: String, lines: usize) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_ps(
+#[derive(Default)]
+struct PsOptions {
     archived: bool,
-    _automation: bool,
     managed: bool,
     search: Option<String>,
     status: Option<SessionSearchStatus>,
     attention: Option<SessionSearchAttention>,
-) -> Result<()> {
+    creator: Option<SessionCreatorFilter>,
+}
+
+async fn cmd_ps(options: PsOptions) -> Result<()> {
+    let PsOptions {
+        archived,
+        managed,
+        search,
+        status,
+        attention,
+        creator,
+    } = options;
     let client = client::default()?;
     // The compatibility GET omits automation by default; this fleet inventory
     // explicitly opts into successful automation work.
@@ -4148,8 +4173,13 @@ async fn cmd_ps(
         if let Some(search) = search {
             query.push(format!("q={}", encode_query(search)));
         }
+        if let Some(creator) = creator {
+            query.push(format!("creator={creator}"));
+        }
     }
-    let list = if !managed && (search.is_some() || status.is_some() || attention.is_some()) {
+    let list = if !managed
+        && (search.is_some() || status.is_some() || attention.is_some() || creator.is_some())
+    {
         serde_json::to_value(
             client
                 .search_sessions(&SearchSessionsOptions {
@@ -4158,6 +4188,7 @@ async fn cmd_ps(
                     archived_only: false,
                     status,
                     attention,
+                    creator,
                 })
                 .await?,
         )?

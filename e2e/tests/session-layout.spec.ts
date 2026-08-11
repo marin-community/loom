@@ -118,6 +118,57 @@ async function createFailedRun(baseUrl: string) {
 }
 
 test.describe("durable session workbench", () => {
+  test.afterEach(async ({ page }) => {
+    await page.unrouteAll({ behavior: "ignoreErrors" });
+  });
+
+  test("creator scope keeps mine and Ops while hiding other users", async ({
+    page,
+    weaver,
+  }) => {
+    const mine = await weaver.seedSession({
+      goal: "My interactive work",
+      name: "mine-task",
+    });
+    const other = await weaver.seedSession({
+      goal: "Another operator's work",
+      name: "other-task",
+    });
+    await weaver.setCreator(other.id, "other-operator");
+    const ops = await seedAutomationSession(weaver.baseUrl, weaver.repoPath);
+    await createFailedRun(weaver.baseUrl);
+
+    await page.goto(weaver.baseUrl);
+    const spaces = page.locator(
+      '[data-testid="space-tabs-scroll"] [data-space-id]',
+    );
+    await expect(spaces.first()).toContainText("Later");
+
+    await page.getByTestId("creator-filter").selectOption("mine-and-ops");
+    await expect(page).toHaveURL(/creator=mine-and-ops/);
+    await expect(page.locator(`[data-session-id="${mine.id}"]`)).toBeVisible();
+    await expect(page.locator(`[data-session-id="${ops.id}"]`)).toBeVisible();
+    await expect(page.locator(`[data-session-id="${other.id}"]`)).toHaveCount(
+      0,
+    );
+
+    await page.reload();
+    await expect(page.getByTestId("creator-filter")).toHaveValue(
+      "mine-and-ops",
+    );
+    await page.getByTestId("creator-filter").selectOption("mine");
+    await page.getByTestId("attention-view").click();
+    await expect(page.getByTestId("automation-run-only")).toContainText(
+      "Launch failed",
+    );
+    await page.getByTestId("creator-filter").selectOption("other-users");
+    await expect(page.getByTestId("automation-run-only")).toHaveCount(0);
+    await page.getByTestId("all-view").click();
+    await expect(page.locator(`[data-session-id="${mine.id}"]`)).toHaveCount(0);
+    await expect(page.locator(`[data-session-id="${ops.id}"]`)).toHaveCount(0);
+    await expect(page.locator(`[data-session-id="${other.id}"]`)).toBeVisible();
+  });
+
   test("terminal mailbox commands navigate rows without stealing text input", async ({
     page,
     weaver,

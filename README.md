@@ -268,11 +268,12 @@ The optional `mcp/history/self@v1` capability is a thin self-only facade over
 those routes. See [Session history and search](docs/session-history.md) for the
 record, cursor, source, and authorization contract.
 
-Once a branch's PR merges, loom archives the session automatically — tearing
-down its terminal and worktree while keeping the branch and its weaver history,
-the same as the Archive button. To keep one session until you archive it
-yourself, choose **Disable auto-archive** from that session's **Details** popover, or
-set its quiet opt-out label:
+Ordinary sessions are archived after ten days without activity by default, and
+a merged PR is archived immediately — both tear down the terminal and worktree
+while keeping the branch and its weaver history, the same as the Archive button.
+Profiles can override the idle interval (an explicit `0` disables that TTL). To
+keep one session until you archive it yourself, choose **Disable auto-archive**
+from that session's **Details** popover, or set its quiet opt-out label:
 
 ```sh
 weaver tag set auto-archive disabled

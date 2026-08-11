@@ -612,6 +612,10 @@ pub const DEFAULT_AUTOMATION_TURN_CAP: i64 = 100;
 /// still archives the session.
 pub const DEFAULT_AUTOMATION_IDLE_ARCHIVE_SECS: i64 = 28800;
 
+/// Idle TTL after which the retention reaper archives an ordinary interactive
+/// session (10 days). A profile may explicitly set 0 to disable the TTL.
+pub const DEFAULT_INTERACTIVE_IDLE_ARCHIVE_SECS: i64 = 864000;
+
 /// Idle TTL after which the retention reaper archives a Slack-origin session
 /// (24 hours). 0 disables the TTL trigger.
 pub const DEFAULT_SLACK_IDLE_ARCHIVE_SECS: i64 = 86400;

@@ -95,6 +95,7 @@ export const listSessionSummaries = (
     query?: string;
     status?: SessionSearchOptions['status'];
     attention?: SessionSearchOptions['attention'];
+    creator?: SessionSearchOptions['creator'];
   } = {},
   signal?: AbortSignal,
 ) => {
@@ -105,6 +106,7 @@ export const listSessionSummaries = (
   if (opts.query) params.set('q', opts.query);
   if (opts.status) params.set('status', opts.status);
   if (opts.attention) params.set('attention', opts.attention);
+  if (opts.creator) params.set('creator', opts.creator);
   const qs = params.toString();
   return request(`/sessions/summary${qs ? `?${qs}` : ''}`, { signal }) as Promise<SessionSummary[]>;
 };
