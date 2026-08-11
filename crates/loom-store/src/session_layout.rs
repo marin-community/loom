@@ -1086,6 +1086,7 @@ mod tests {
         seed_placement(&db, "a", "group-user-inbox", 0).await;
         seed_placement(&db, "b", "group-user-inbox", 1).await;
         seed_placement(&db, "c", "group-github-inbox", 0).await;
+        let initial_revision = get_layout(&db, "operator").await.unwrap().revision;
 
         let moved = move_sessions(
             &db,
@@ -1094,12 +1095,12 @@ mod tests {
                 session_ids: vec!["b".to_string(), "a".to_string()],
                 destination_group_id: "group-github-inbox".to_string(),
                 before_session_id: Some("c".to_string()),
-                expected_revision: 1,
+                expected_revision: initial_revision,
             },
         )
         .await
         .unwrap();
-        assert_eq!(moved.revision, 2);
+        assert_eq!(moved.revision, initial_revision + 1);
         assert_eq!(order(&moved, "group-github-inbox"), ["b", "a", "c"]);
         assert!(matches!(
             move_sessions(
@@ -1109,7 +1110,7 @@ mod tests {
                     session_ids: vec!["a".to_string()],
                     destination_group_id: "group-user-inbox".to_string(),
                     before_session_id: None,
-                    expected_revision: 1,
+                    expected_revision: initial_revision,
                 },
             )
             .await,
@@ -1136,14 +1137,14 @@ mod tests {
                     session_ids: vec!["c".to_string()],
                 },
             ],
-            expected_revision: 2,
+            expected_revision: moved.revision,
         };
         assert!(matches!(
             restore_groups(&db, "operator", &restore).await,
             Err(MutationError::Internal(_))
         ));
         let unchanged = get_layout(&db, "operator").await.unwrap();
-        assert_eq!(unchanged.revision, 2);
+        assert_eq!(unchanged.revision, moved.revision);
         assert_eq!(order(&unchanged, "group-github-inbox"), ["b", "a", "c"]);
 
         sqlx::query("DROP TRIGGER fail_second_restore")
@@ -1151,7 +1152,7 @@ mod tests {
             .await
             .unwrap();
         let restored = restore_groups(&db, "operator", &restore).await.unwrap();
-        assert_eq!(restored.revision, 3);
+        assert_eq!(restored.revision, moved.revision + 1);
         assert_eq!(order(&restored, "group-user-inbox"), ["a", "b"]);
         assert_eq!(order(&restored, "group-github-inbox"), ["c"]);
     }
@@ -1159,13 +1160,14 @@ mod tests {
     #[tokio::test]
     async fn cross_space_group_moves_preflight_both_collision_kinds() {
         let db = crate::db::connect_in_memory().await.unwrap();
+        let initial_revision = get_layout(&db, "operator").await.unwrap().revision;
         let user_review = create_group(
             &db,
             "operator",
             &CreateSessionGroupReq {
                 space_id: "space-user".to_string(),
                 name: "Review".to_string(),
-                expected_revision: 1,
+                expected_revision: initial_revision,
             },
         )
         .await

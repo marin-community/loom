@@ -162,7 +162,10 @@ fn normalized_selection(selection: &LaunchSelection) -> LaunchSelection {
 
 async fn policy_defaults(db: &Db, class: &str) -> (i64, i64) {
     if class != "automation" {
-        return (0, 0);
+        return (
+            weaver_core::config::DEFAULT_INTERACTIVE_IDLE_ARCHIVE_SECS,
+            0,
+        );
     }
     let idle = weaver_core::config::get(db, "automation.idle_archive_secs")
         .await
@@ -540,6 +543,11 @@ mod tests {
         assert_eq!(resolved.view.provenance.model, "agent_default");
         assert_eq!(resolved.view.provenance.effort, "agent_default");
         assert_eq!(resolved.view.provenance.protocol, "agent_default");
+        assert_eq!(
+            resolved.view.policy.idle_archive_secs,
+            Some(weaver_core::config::DEFAULT_INTERACTIVE_IDLE_ARCHIVE_SECS)
+        );
+        assert_eq!(resolved.view.provenance.idle_archive_secs, "policy_default");
     }
 
     #[tokio::test]

@@ -2,13 +2,16 @@
 import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import type {
+  AutomationRun,
   Session,
+  SessionCreatorFilter,
   SessionGroup,
   SessionSearchAttention,
   SessionSearchStatus,
   SessionSummary,
   SessionSpace,
 } from '../types';
+import { me } from '../auth';
 import AutomationRunRow from '../components/AutomationRunRow.vue';
 import ConfirmDialog from '../components/ConfirmDialog.vue';
 import SessionMailboxPreview from '../components/SessionMailboxPreview.vue';
@@ -55,10 +58,6 @@ const liveSessions = computed(() =>
 const historySessions = computed(() =>
   sessions.value.filter((session) => session.status === 'archived'),
 );
-const attentionSessions = computed(() =>
-  liveSessions.value.filter((session) => effectiveAttention(session).level !== 'ok'),
-);
-
 const view = computed<WorkbenchView>(() => {
   if (route.query.history === 'true') return 'history';
   if (route.query.view === 'attention') return 'attention';
@@ -106,30 +105,38 @@ const SEARCH_STATUSES = new Set<SessionSearchStatus>([
   'archived',
 ]);
 const SEARCH_ATTENTION = new Set<SessionSearchAttention>(['needs', 'ok', 'attention', 'blocked']);
+function enumFromQuery<T extends string>(value: unknown, allowed: Set<T>): T | undefined {
+  return typeof value === 'string' && allowed.has(value as T) ? (value as T) : undefined;
+}
 function statusFromQuery(value: unknown): SessionSearchStatus | '' {
-  return typeof value === 'string' && SEARCH_STATUSES.has(value as SessionSearchStatus)
-    ? (value as SessionSearchStatus)
-    : '';
+  return enumFromQuery(value, SEARCH_STATUSES) ?? '';
 }
 function attentionFromQuery(value: unknown): SessionSearchAttention | '' {
-  return typeof value === 'string' && SEARCH_ATTENTION.has(value as SessionSearchAttention)
-    ? (value as SessionSearchAttention)
-    : '';
+  return enumFromQuery(value, SEARCH_ATTENTION) ?? '';
 }
 const SESSION_SORTS = new Set<SessionSort>(['manual', 'name', 'activity', 'created']);
+const CREATOR_FILTERS = new Set<SessionCreatorFilter>([
+  'mine',
+  'ops',
+  'mine-and-ops',
+  'other-users',
+]);
 function sortFromQuery(value: unknown): SessionSort {
-  return typeof value === 'string' && SESSION_SORTS.has(value as SessionSort)
-    ? (value as SessionSort)
-    : 'manual';
+  return enumFromQuery(value, SESSION_SORTS) ?? 'manual';
+}
+function creatorFromQuery(value: unknown): SessionCreatorFilter | '' {
+  return enumFromQuery(value, CREATOR_FILTERS) ?? '';
 }
 const statusFilter = ref<SessionSearchStatus | ''>(statusFromQuery(route.query.status));
 const attentionFilter = ref<SessionSearchAttention | ''>(attentionFromQuery(route.query.attention));
+const creatorFilter = ref<SessionCreatorFilter | ''>(creatorFromQuery(route.query.creator));
 const sessionSort = ref<SessionSort>(sortFromQuery(route.query.sort));
 watch(
-  () => [route.query.status, route.query.attention, route.query.sort],
-  ([status, attention, sort]) => {
+  () => [route.query.status, route.query.attention, route.query.creator, route.query.sort],
+  ([status, attention, creator, sort]) => {
     statusFilter.value = statusFromQuery(status);
     attentionFilter.value = attentionFromQuery(attention);
+    creatorFilter.value = creatorFromQuery(creator);
     sessionSort.value = sortFromQuery(sort);
   },
 );
@@ -139,6 +146,7 @@ function updateFilters() {
       ...route.query,
       status: statusFilter.value || undefined,
       attention: attentionFilter.value || undefined,
+      creator: creatorFilter.value || undefined,
     },
   });
 }
@@ -198,6 +206,7 @@ function queueSearch(clearResults: boolean) {
           automation: true,
           status: statusFilter.value || undefined,
           attention: attentionFilter.value || undefined,
+          creator: creatorFilter.value || undefined,
         },
         controller.signal,
       );
@@ -215,7 +224,15 @@ function queueSearch(clearResults: boolean) {
   }, 160);
 }
 watch(
-  [searchText, includeHistory, statusFilter, attentionFilter, () => view.value, () => route.path],
+  [
+    searchText,
+    includeHistory,
+    statusFilter,
+    attentionFilter,
+    creatorFilter,
+    () => view.value,
+    () => route.path,
+  ],
   () => queueSearch(true),
   { flush: 'sync' },
 );
@@ -227,6 +244,7 @@ onActivated(() => {
 });
 
 function matchesFilters(session: SessionSummary): boolean {
+  if (!matchesCreator(session)) return false;
   if (statusFilter.value && session.status !== statusFilter.value) return false;
   const attention = effectiveAttention(session).level;
   if (attentionFilter.value === 'needs' && attention === 'ok') return false;
@@ -236,16 +254,42 @@ function matchesFilters(session: SessionSummary): boolean {
   return true;
 }
 
+const creatorScopedLiveSessions = computed(() => liveSessions.value.filter(matchesCreator));
+const creatorScopedHistorySessions = computed(() => historySessions.value.filter(matchesCreator));
+const creatorScopedAttentionSessions = computed(() =>
+  creatorScopedLiveSessions.value.filter((session) => effectiveAttention(session).level !== 'ok'),
+);
+function matchesCreator(session: SessionSummary): boolean {
+  const mine = session.created_by === me.username;
+  const ops = session.class === 'automation';
+  const otherUser = !!session.created_by && session.created_by !== me.username;
+  return matchesCreatorScope(mine, ops, otherUser);
+}
+function matchesRunCreator(run: AutomationRun): boolean {
+  const mine = run.actor_subject === me.username;
+  const otherUser = !!run.actor_subject && run.actor_subject !== me.username;
+  return matchesCreatorScope(mine, true, otherUser);
+}
+function matchesCreatorScope(mine: boolean, ops: boolean, otherUser: boolean): boolean {
+  if (creatorFilter.value === 'mine') return mine;
+  if (creatorFilter.value === 'ops') return ops;
+  if (creatorFilter.value === 'mine-and-ops') return mine || ops;
+  if (creatorFilter.value === 'other-users') return otherUser && !ops;
+  return true;
+}
+
 const baseSessions = computed(() => {
   if (searchResults.value) {
     const current = new Map(sessions.value.map((session) => [session.id, session]));
     return searchResults.value.map((result) => current.get(result.id) ?? result);
   }
-  if (view.value === 'history') return historySessions.value;
-  if (view.value === 'attention') return attentionSessions.value;
-  if (view.value === 'all') return liveSessions.value;
+  if (view.value === 'history') return creatorScopedHistorySessions.value;
+  if (view.value === 'attention') return creatorScopedAttentionSessions.value;
+  if (view.value === 'all') return creatorScopedLiveSessions.value;
   const spaceId = activeSpace.value?.id;
-  return liveSessions.value.filter((session) => session.placement?.space_id === spaceId);
+  return creatorScopedLiveSessions.value.filter(
+    (session) => session.placement?.space_id === spaceId,
+  );
 });
 const visibleSessions = computed(() => baseSessions.value.filter(matchesFilters));
 const visibleById = computed(
@@ -461,6 +505,9 @@ const provisioningRuns = computed(() =>
 const historicalRuns = computed(() =>
   unmatchedRuns.value.filter((run) => unmatchedRunProjection(run) === 'history'),
 );
+const visibleInterventionRuns = computed(() => interventionRuns.value.filter(matchesRunCreator));
+const visibleProvisioningRuns = computed(() => provisioningRuns.value.filter(matchesRunCreator));
+const visibleHistoricalRuns = computed(() => historicalRuns.value.filter(matchesRunCreator));
 const showInterventions = computed(
   () =>
     view.value === 'attention' ||
@@ -468,8 +515,8 @@ const showInterventions = computed(
 );
 const operationalRuns = computed(() =>
   view.value === 'attention'
-    ? interventionRuns.value
-    : [...interventionRuns.value, ...provisioningRuns.value].sort((left, right) =>
+    ? visibleInterventionRuns.value
+    : [...visibleInterventionRuns.value, ...visibleProvisioningRuns.value].sort((left, right) =>
         right.updated_at.localeCompare(left.updated_at),
       ),
 );
@@ -1138,6 +1185,19 @@ function scrollSpaces(direction: number) {
         <option value="ok">Calm</option>
       </select>
       <select
+        v-model="creatorFilter"
+        aria-label="Filter by creator"
+        data-testid="creator-filter"
+        class="rounded border border-line bg-input px-2 py-1.5 text-xs"
+        @change="updateFilters"
+      >
+        <option value="">Everyone</option>
+        <option value="mine-and-ops">Mine + Ops</option>
+        <option value="mine">Mine</option>
+        <option value="ops">Ops</option>
+        <option value="other-users">Other users</option>
+      </select>
+      <select
         v-model="sessionSort"
         aria-label="Sort sessions"
         data-testid="session-sort"
@@ -1188,7 +1248,7 @@ function scrollSpaces(direction: number) {
         >
           Attention
           <span class="font-mono text-2xs">{{
-            attentionSessions.length + interventionRuns.length
+            creatorScopedAttentionSessions.length + visibleInterventionRuns.length
           }}</span>
         </router-link>
         <router-link
@@ -1206,7 +1266,11 @@ function scrollSpaces(direction: number) {
         >
           {{ space.name }}
           <span class="font-mono text-2xs">
-            {{ liveSessions.filter((session) => session.placement?.space_id === space.id).length }}
+            {{
+              creatorScopedLiveSessions.filter(
+                (session) => session.placement?.space_id === space.id,
+              ).length
+            }}
           </span>
         </router-link>
         <router-link
@@ -1216,7 +1280,7 @@ function scrollSpaces(direction: number) {
           :class="view === 'all' ? 'bg-accent text-accent-fg' : 'text-muted hover:bg-subtle'"
           class="flex shrink-0 items-center gap-1.5 px-2 py-1 text-xs font-medium"
         >
-          All <span class="font-mono text-2xs">{{ liveSessions.length }}</span>
+          All <span class="font-mono text-2xs">{{ creatorScopedLiveSessions.length }}</span>
         </router-link>
         <router-link
           :to="{ path: '/', query: viewQuery('history') }"
@@ -1227,7 +1291,7 @@ function scrollSpaces(direction: number) {
         >
           History
           <span class="font-mono text-2xs">{{
-            historySessions.length + historicalRuns.length
+            creatorScopedHistorySessions.length + visibleHistoricalRuns.length
           }}</span>
         </router-link>
       </nav>
@@ -1610,13 +1674,13 @@ function scrollSpaces(direction: number) {
           </ul>
         </section>
 
-        <section v-if="view === 'history' && historicalRuns.length" class="mt-4">
+        <section v-if="view === 'history' && visibleHistoricalRuns.length" class="mt-4">
           <h2 class="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">
             Automation run history
           </h2>
           <ul data-testid="automation-run-history" class="rounded border border-line bg-surface">
             <AutomationRunRow
-              v-for="run in historicalRuns"
+              v-for="run in visibleHistoricalRuns"
               :key="run.id"
               :run="run"
               projection="history"
@@ -1630,7 +1694,7 @@ function scrollSpaces(direction: number) {
           v-if="
             (view !== 'space' || searchResults !== null) &&
             !smartSessions.length &&
-            !(view === 'history' && historicalRuns.length) &&
+            !(view === 'history' && visibleHistoricalRuns.length) &&
             !(showInterventions && operationalRuns.length)
           "
           class="rounded border border-dashed border-line p-6 text-center"

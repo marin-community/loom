@@ -292,6 +292,36 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
         .unwrap();
     let beta_id = beta["id"].as_str().unwrap().to_string();
 
+    let ops = client
+        .post(
+            "/api/sessions",
+            json!({
+                "goal": "automated ops work",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+                "name": "ops-work",
+                "class": "automation"
+            }),
+        )
+        .await
+        .unwrap();
+    let ops_id = ops["id"].as_str().unwrap().to_string();
+    sqlx::query(
+        "UPDATE sessions
+         SET created_by = CASE id WHEN ? THEN 'other-user' ELSE 'ops-service' END,
+             creator_kind = CASE id WHEN ? THEN 'user' ELSE 'automation' END,
+             creator_subject = CASE id WHEN ? THEN 'other-user' ELSE 'ops-service' END
+         WHERE id IN (?, ?)",
+    )
+    .bind(&beta_id)
+    .bind(&beta_id)
+    .bind(&beta_id)
+    .bind(&beta_id)
+    .bind(&ops_id)
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+
     // Archive beta — it leaves the active fleet.
     client
         .post(&format!("/api/sessions/{beta_id}/archive"), json!({}))
@@ -371,6 +401,33 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
     );
     assert!(compact_hit[0]["branch"].get("goal").is_none());
 
+    // Creator scope is viewer-relative and composes with active/history and
+    // automation inventory. Ops means the durable automation class, while
+    // other-users excludes both the caller and Ops work.
+    for (creator, expected) in [
+        ("mine", vec![alpha_id.as_str()]),
+        ("ops", vec![ops_id.as_str()]),
+        ("mine-and-ops", vec![alpha_id.as_str(), ops_id.as_str()]),
+        ("other-users", vec![beta_id.as_str()]),
+    ] {
+        let scoped = client
+            .get(&format!(
+                "/api/sessions/summary?archived=true&creator={creator}"
+            ))
+            .await
+            .unwrap();
+        let mut ids: Vec<&str> = scoped
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|session| session["id"].as_str().unwrap())
+            .collect();
+        ids.sort_unstable();
+        let mut expected = expected;
+        expected.sort_unstable();
+        assert_eq!(ids, expected, "creator={creator}");
+    }
+
     // An archived session is excluded from a default search, included when asked.
     let beta_hidden = client.get("/api/sessions?q=beta").await.unwrap();
     assert!(
@@ -435,6 +492,10 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
         .unwrap();
     client
         .delete(&format!("/api/sessions/{beta_id}"))
+        .await
+        .unwrap();
+    client
+        .delete(&format!("/api/sessions/{ops_id}"))
         .await
         .unwrap();
 }

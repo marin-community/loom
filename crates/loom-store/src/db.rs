@@ -110,6 +110,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "slack-alert-routes",
         include_str!("../migrations/0020_slack_alert_routes.sql"),
     ),
+    (
+        21,
+        "later-space-retention",
+        include_str!("../migrations/0021_later_space_retention.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -381,8 +386,8 @@ mod tests {
                 .fetch_one(&db)
                 .await
                 .unwrap();
-        assert_eq!(spaces, 4);
-        assert_eq!(revision, 1);
+        assert_eq!(spaces, 5);
+        assert_eq!(revision, 2);
 
         let columns = table_columns(&db, "sessions").await.unwrap();
         for expected in [
@@ -739,13 +744,13 @@ mod tests {
         LOOM_STREAM.apply_pending(&db).await.unwrap();
 
         for (session, expected) in [
-            ("user", "group-user-later"),
-            ("github", "group-github-later"),
-            ("ops", "group-ops-later"),
+            ("user", "group-later-inbox"),
+            ("github", "group-later-inbox"),
+            ("ops", "group-later-inbox"),
             ("slack", "group-slack-inbox"),
             ("parent", "group-github-inbox"),
             ("child", "group-github-inbox"),
-            ("parked-child", "group-github-later"),
+            ("parked-child", "group-later-inbox"),
         ] {
             let group: String =
                 sqlx::query_scalar("SELECT group_id FROM session_placements WHERE session_id = ?")
@@ -770,12 +775,26 @@ mod tests {
         assert_eq!(inbox_order, ["newest", "manual", "oldest"]);
         let later_order: Vec<String> = sqlx::query_scalar(
             "SELECT session_id FROM session_placements
-             WHERE group_id = 'group-user-later' ORDER BY rank",
+             WHERE group_id = 'group-later-inbox' ORDER BY rank",
         )
         .fetch_all(&db)
         .await
         .unwrap();
-        assert_eq!(later_order, ["parked-recent", "user"]);
+        // Consolidation keeps the legacy space/group/session ordering stable
+        // as the per-origin Later queues become one destination.
+        assert_eq!(
+            later_order,
+            ["parked-recent", "user", "parked-child", "github", "ops"]
+        );
+        let inherited_idle_archive: i64 =
+            sqlx::query_scalar("SELECT policy_idle_archive_secs FROM sessions WHERE id = 'user'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            inherited_idle_archive,
+            weaver_core::config::DEFAULT_INTERACTIVE_IDLE_ARCHIVE_SECS
+        );
         let defaults: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_placement_defaults")
             .fetch_one(&db)
             .await
@@ -786,7 +805,7 @@ mod tests {
                 .fetch_one(&db)
                 .await
                 .unwrap();
-        assert_eq!(revision, 1);
+        assert_eq!(revision, 2);
         let versions: Vec<i64> =
             sqlx::query_scalar("SELECT version FROM loom_schema_migrations ORDER BY version")
                 .fetch_all(&db)

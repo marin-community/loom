@@ -24,8 +24,9 @@ use crate::session::{self as session_mod, Session};
 use crate::{agent, backend, config, custom_agents, db, events, git, github, repo};
 use weaver_api::{
     CreateReq, EnsureResumptionCueReq, HandoffReq, HistoryPageView, PatchSessionReq,
-    ResumptionCueView, SearchSessionsOptions, SendReq, SessionSearchAttention, SessionSearchStatus,
-    SessionSummaryView, SessionView, SetTagsReq, SetTitleGenerationReq, TagReq,
+    ResumptionCueView, SearchSessionsOptions, SendReq, SessionCreatorFilter,
+    SessionSearchAttention, SessionSearchStatus, SessionSummaryView, SessionView, SetTagsReq,
+    SetTitleGenerationReq, TagReq,
 };
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::{Branch, TitleProvenance, TitleUpdate};
@@ -69,8 +70,9 @@ pub(super) struct ListSessionsQuery {
     /// History as disjoint views.
     #[serde(default)]
     archived: bool,
-    /// Compatibility filter for automation-class sessions. Omission retains
-    /// the historical interactive-only inventory; fleet workbenches opt in.
+    /// Compatibility filter for automation-class sessions. With no creator
+    /// scope, omission retains the historical interactive-only inventory;
+    /// explicit creator scopes select the classes they name directly.
     #[serde(default)]
     automation: Option<bool>,
     /// Include engine-managed warm sessions. This is an operator inventory
@@ -82,6 +84,9 @@ pub(super) struct ListSessionsQuery {
     /// and goal (`loom session ls --search auth`). Absent/blank matches everything.
     #[serde(default)]
     q: Option<String>,
+    /// Viewer-relative creator scope (`mine`, `ops`, their union, or other users).
+    #[serde(default)]
+    creator: Option<SessionCreatorFilter>,
 }
 
 pub(super) async fn list_sessions(
@@ -105,6 +110,8 @@ pub(super) async fn list_sessions(
             search: q.q.as_deref(),
             status: None,
             attention: None,
+            creator: q.creator,
+            viewer: &principal.username,
         },
     )
     .await
@@ -130,12 +137,15 @@ pub(super) struct ListSessionSummariesQuery {
     status: Option<SessionSearchStatus>,
     #[serde(default)]
     attention: Option<SessionSearchAttention>,
+    #[serde(default)]
+    creator: Option<SessionCreatorFilter>,
 }
 
 /// Compact polling/search contract for indexes. Full session context remains on
 /// `GET /api/sessions/{id}` and is fetched only when a row or page discloses it.
 pub(super) async fn list_session_summaries(
     State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Query(q): Query<ListSessionSummariesQuery>,
 ) -> ApiResult<Json<Vec<SessionSummaryView>>> {
     collect_session_summaries(
@@ -147,6 +157,8 @@ pub(super) async fn list_session_summaries(
             search: q.q.as_deref(),
             status: q.status,
             attention: q.attention,
+            creator: q.creator,
+            viewer: &principal.username,
         },
     )
     .await
@@ -158,6 +170,7 @@ pub(super) async fn list_session_summaries(
 /// result set; `archived_only=true` is the disjoint History projection.
 pub(super) async fn search_sessions(
     State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Query(q): Query<SearchSessionsOptions>,
 ) -> ApiResult<Json<Vec<SessionView>>> {
     collect_sessions(
@@ -170,6 +183,8 @@ pub(super) async fn search_sessions(
             search: Some(&q.query),
             status: q.status,
             attention: q.attention,
+            creator: q.creator,
+            viewer: &principal.username,
         },
     )
     .await
@@ -354,6 +369,8 @@ struct SessionCollectionFilter<'a> {
     search: Option<&'a str>,
     status: Option<SessionSearchStatus>,
     attention: Option<SessionSearchAttention>,
+    creator: Option<SessionCreatorFilter>,
+    viewer: &'a str,
 }
 
 fn search_needle(filter: &SessionCollectionFilter<'_>) -> Option<String> {
@@ -370,10 +387,23 @@ fn session_in_collection(
     filter: &SessionCollectionFilter<'_>,
     managed: bool,
 ) -> bool {
+    let mine = session.created_by.as_deref() == Some(filter.viewer);
+    let ops = session.class == "automation";
+    let other_user = session
+        .created_by
+        .as_deref()
+        .is_some_and(|creator| creator != filter.viewer);
+    let creator_matches = filter.creator.is_none_or(|creator| match creator {
+        SessionCreatorFilter::Mine => mine,
+        SessionCreatorFilter::Ops => ops,
+        SessionCreatorFilter::MineAndOps => mine || ops,
+        SessionCreatorFilter::OtherUsers => other_user && !ops,
+    });
     (managed || !warm.contains(&session.id))
         && (filter.archived || session.status != "archived")
         && (!filter.archived_only || session.status == "archived")
-        && (filter.automation || session.class != "automation")
+        && (filter.automation || filter.creator.is_some() || session.class != "automation")
+        && creator_matches
 }
 
 fn view_matches_filters(
