@@ -3,9 +3,11 @@
 //! weaver history, and clears the attention tag.
 
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::json;
 use serial_test::serial;
+use tokio::io::AsyncWriteExt;
 
 use loom::backend;
 
@@ -79,6 +81,67 @@ async fn archive_captures_the_conversation_log() {
     let iris: serde_json::Value = serde_json::from_str(&raw_json).unwrap();
     assert_eq!(iris["source"], "claude");
     assert_eq!(iris["messages"].as_array().unwrap().len(), 2);
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archive_survives_request_disconnect() {
+    let ts = TestServer::start().await;
+    let created = ts
+        .client
+        .post(
+            "/api/sessions",
+            json!({ "goal": "archive after disconnect", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let work_dir = created["work_dir"].as_str().unwrap().to_string();
+
+    // A raw connection lets the test close the transport without waiting for a
+    // response, matching a browser navigation or reverse-proxy disconnect.
+    let mut connection = tokio::net::TcpStream::connect(ts.addr).await.unwrap();
+    let request = format!(
+        "POST /api/sessions/{id}/archive HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",
+        ts.addr
+    );
+    connection.write_all(request.as_bytes()).await.unwrap();
+    connection.flush().await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let session = loom::session::get(&ts.state.db, &id)
+                .await
+                .unwrap()
+                .unwrap();
+            if session.lifecycle_transition.as_deref() == Some("archiving") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("archive should start");
+
+    drop(connection);
+
+    let archived = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let session = loom::session::get(&ts.state.db, &id)
+                .await
+                .unwrap()
+                .unwrap();
+            if session.status == "archived" {
+                break session;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("archive should finish after its request disconnects");
+
+    assert!(archived.lifecycle_transition.is_none());
+    assert!(!Path::new(&work_dir).exists());
 }
 
 #[serial]

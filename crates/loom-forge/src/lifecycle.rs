@@ -14,6 +14,7 @@
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
+use tokio::sync::oneshot;
 
 /// Why a lifecycle operation refused, when the reason is the caller's to fix.
 ///
@@ -132,15 +133,29 @@ pub async fn auto_archive(
 
 /// Manual archive entry point. Refresh after acquiring the lifecycle lock so a
 /// request queued behind adoption/recovery acts on the completed state rather
-/// than the stale row it resolved before waiting.
+/// than the stale row it resolved before waiting. The operation runs in a
+/// server-owned task because dropping an HTTP request future must not cancel
+/// teardown after its durable transition has been recorded.
 pub async fn archive(st: &AppState, session: &Session, _branch: &Branch) -> Result<Vec<String>> {
-    let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
-    let Some((current_session, current_branch)) =
-        session_mod::with_branch(&st.db, &session.id).await?
-    else {
-        return Err(anyhow!("session not found"));
-    };
-    archive_locked(st, &current_session, &current_branch).await
+    let st = st.clone();
+    let session_id = session.id.clone();
+    let (result_tx, result_rx) = oneshot::channel();
+    weaver_core::spawn_boxed(Box::pin(async move {
+        let result = async {
+            let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
+            let Some((current_session, current_branch)) =
+                session_mod::with_branch(&st.db, &session_id).await?
+            else {
+                return Err(anyhow!("session not found"));
+            };
+            archive_locked(&st, &current_session, &current_branch).await
+        }
+        .await;
+        let _ = result_tx.send(result);
+    }));
+    result_rx
+        .await
+        .map_err(|_| anyhow!("archive task stopped before reporting its result"))?
 }
 
 pub fn require_no_transition(session: &Session) -> Result<()> {
