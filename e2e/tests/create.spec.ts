@@ -103,6 +103,29 @@ test.describe('creating a session via the UI form', () => {
     await expect(page.getByTestId('action-open-editor')).toBeVisible();
   });
 
+  test('rejects a missing base revision while the creation form remains editable', async ({
+    page,
+    weaver,
+  }) => {
+    await page.goto(`${weaver.baseUrl}/sessions/new`);
+    await page.getByPlaceholder(repoPlaceholder).fill(weaver.repoPath);
+    await page.getByPlaceholder('Add a /health endpoint').fill('Fork from upstream work');
+    await page.getByText('Advanced branch controls').click();
+
+    const base = page.locator('#launch-base-branch');
+    await base.fill('agent/missing-upstream-worktree');
+    await expect(page.getByTestId('base-validation-error')).toContainText(
+      'was not found in repository',
+    );
+    await expect(page.getByTestId('create-session')).toBeDisabled();
+    await expect(base).toBeEditable();
+    await expect(page).toHaveURL(`${weaver.baseUrl}/sessions/new`);
+
+    await base.fill('main');
+    await expect(page.getByTestId('base-validation-error')).toBeHidden();
+    await expect(page.getByTestId('create-session')).toBeEnabled();
+  });
+
   test('refreshes added, edited, and deleted profiles without losing the cached draft', async ({
     page,
     weaver,

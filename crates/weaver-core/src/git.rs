@@ -197,7 +197,10 @@ async fn has_remote(dir: &Path, name: &str) -> bool {
 }
 
 /// Whether `rev` resolves to a commit in this repo.
-async fn commit_exists(dir: &Path, rev: &str) -> bool {
+///
+/// This is public so launch surfaces can validate a user-supplied fork point
+/// before attempting to create a worktree.
+pub async fn revision_exists(dir: &Path, rev: &str) -> bool {
     git(
         dir,
         &[
@@ -230,7 +233,7 @@ async fn origin_default_branch(dir: &Path) -> Option<String> {
         }
     }
     for cand in ["main", "master"] {
-        if commit_exists(dir, &format!("origin/{cand}")).await {
+        if revision_exists(dir, &format!("origin/{cand}")).await {
             tracing::debug!(dir = %dir.display(), default_branch = cand, "resolved origin default branch by probing candidates");
             return Some(cand.to_string());
         }
@@ -263,7 +266,7 @@ pub async fn default_base(dir: &Path) -> Result<String> {
         let fetch_result = git(dir, &["fetch", "origin", &default]).await;
         tracing::debug!(dir = %dir.display(), branch = %default, ok = fetch_result.is_ok(), "fetch of default branch completed");
         let remote_ref = format!("origin/{default}");
-        if commit_exists(dir, &remote_ref).await {
+        if revision_exists(dir, &remote_ref).await {
             tracing::debug!(dir = %dir.display(), base = %remote_ref, "using fresh origin default as launch base");
             return Ok(remote_ref);
         }
@@ -779,7 +782,7 @@ mod tests {
         // commit is now reachable via origin.
         clone(&bare_url, &dest, None).await.unwrap();
         assert!(
-            commit_exists(&dest, &second).await,
+            revision_exists(&dest, &second).await,
             "fetch pulled the new remote commit into the existing clone"
         );
     }
