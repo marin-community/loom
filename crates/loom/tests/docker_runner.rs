@@ -61,6 +61,18 @@ fn configure(root: &Path, session: &str) {
     std::env::set_var(SESSION_ENV, session);
 }
 
+async fn wait_for_screen(session: &str, markers: &[&str]) -> String {
+    let mut screen = String::new();
+    for _ in 0..200 {
+        screen = loom::backend::capture(session, 0).await.unwrap();
+        if markers.iter().all(|marker| screen.contains(marker)) {
+            return screen;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("{session} never printed {markers:?}; terminal output:\n{screen}");
+}
+
 #[test]
 #[serial]
 fn docker_runner_child() {
@@ -169,26 +181,10 @@ fn docker_runner_supervisor_outlives_its_launcher() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
         assert!(tapestry::Client::is_alive(&session).await);
-        let mut owner_screen = String::new();
-        for _ in 0..200 {
-            owner_screen = loom::backend::capture(&session, 0).await.unwrap();
-            if owner_screen.contains("runner-ready") && owner_screen.contains("200") {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        assert!(owner_screen.contains("runner-ready"));
-        assert!(owner_screen.contains("200"));
+        let owner_screen = wait_for_screen(&session, &["runner-ready", "200"]).await;
 
         let host_session = format!("{session}-host-shell");
-        let mut host_screen = String::new();
-        for _ in 0..200 {
-            host_screen = loom::backend::capture(&host_session, 0).await.unwrap();
-            if host_screen.contains("host-shell-ready") {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
+        let host_screen = wait_for_screen(&host_session, &["host-shell-ready"]).await;
 
         let colocated = format!("{session}-shell");
         let options = tapestry::LaunchOptions {
@@ -207,14 +203,7 @@ fn docker_runner_supervisor_outlives_its_launcher() {
             .await
             .unwrap();
 
-        let mut shell_screen = String::new();
-        for _ in 0..200 {
-            shell_screen = loom::backend::capture(&colocated, 0).await.unwrap();
-            if shell_screen.contains("shell-ready") {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
+        let shell_screen = wait_for_screen(&colocated, &["shell-ready"]).await;
         let owner_host = owner_screen
             .split("owner-host=")
             .nth(1)
