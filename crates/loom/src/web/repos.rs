@@ -81,7 +81,7 @@ pub(super) async fn register_repo(
 /// `X-GitHub-Delivery` GUID is malformed (**400** — without it idempotency is
 /// impossible), and a failure to record the delivery is transient (**5xx**, so
 /// GitHub *should* retry). Every *business-logic* outcome — a non-trigger
-/// comment, a replay, an unauthorized commenter, a non-allowlisted repo, a
+/// request, a replay, an unauthorized requester, a non-allowlisted repo, a
 /// rate-limited repo — returns **200**, so GitHub does not retry a delivery we
 /// deliberately ignored.
 pub(super) async fn github_webhook(
@@ -132,32 +132,32 @@ pub(super) async fn github_webhook(
         }
     }
 
-    // 3. Filter to issue_comment / created. Other events (incl. the setup `ping`)
-    //    and edited/deleted comments are acknowledged and ignored.
-    if headers.get("x-github-event").and_then(|v| v.to_str().ok()) != Some("issue_comment") {
-        return ok();
-    }
-    let event = match github_trigger::IssueCommentEvent::parse(&body) {
-        Ok(e) => e,
+    // 3. Normalize newly created comments and newly opened issues. Other event
+    //    kinds and actions (including edits, deletes, and setup pings) are
+    //    acknowledged and ignored.
+    let event_kind = headers
+        .get("x-github-event")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    let event = match github_trigger::TriggerEvent::parse(event_kind, &body) {
+        Ok(Some(event)) => event,
+        Ok(None) => return ok(),
         Err(e) => {
-            tracing::warn!(error = %e, "github webhook: unparseable issue_comment payload");
+            tracing::warn!(event = event_kind, error = %e, "github webhook: unparseable payload");
             return ok();
         }
     };
-    if event.action != "created" {
-        return ok();
-    }
 
-    // 4. Ignore the bot's own comments (no self-trigger loop), then require the
-    //    fixed command prefix.
-    let author = event.comment.user.login.trim().to_string();
+    // 4. Ignore the bot's own requests (no self-trigger loop), then require the
+    //    configured trigger phrase.
+    let author = event.author().trim().to_string();
     if let Some(bot) = github_trigger::bot_login(&st.db).await {
         if author.eq_ignore_ascii_case(&bot) {
             return ok();
         }
     }
     let phrase = github_trigger::trigger_phrase(&st.db).await;
-    if !github_trigger::is_trigger(&event.comment.body, &phrase) {
+    if !github_trigger::is_trigger(event.request_body(), &phrase) {
         return ok();
     }
 
@@ -171,22 +171,22 @@ pub(super) async fn github_webhook(
         }
     };
 
-    // 5. Rate-limit per repo BEFORE the (costly) authorization API call, so a
-    //    comment flood cannot fan out into unbounded GitHub calls and launches.
+    // 5. Rate-limit per repo BEFORE authorization, so a request flood cannot
+    //    fan out into unbounded launches and replies.
     if !st.trigger.check_rate_limit(&slug.slug()) {
         tracing::warn!(repo = %slug.slug(), "github webhook: per-repo rate limit hit, dropping");
         return ok();
     }
 
-    // 6. Authorize the commenter (the untrusted boundary): they must be an
+    // 6. Authorize the requester (the untrusted boundary): they must be an
     //    approved loom user — the same allowlist that gates signing in to the app.
     //    Repo write access is *not* itself a grant. Unauthorized → reply once with
     //    a friendly "request access" note instead of a silent drop, so a would-be
     //    user knows to ask rather than assume loom is broken. The per-repo rate
-    //    limit above bounds this against a comment flood; the reply is spawned (a
+    //    limit above bounds this against a trigger flood; the reply is spawned (a
     //    comment post is a round-trip) and tracked so the attempt shows on Debug.
     if !github_trigger::authorize(&st.db, &author).await {
-        tracing::info!(login = %author, repo = %slug.slug(), "github webhook: commenter not authorized; replying with access info");
+        tracing::info!(login = %author, repo = %slug.slug(), "github webhook: requester not authorized; replying with access info");
         let number = event.issue.number;
         let slug_str = slug.slug();
         let task_id = crate::tasks::registry().start(
@@ -262,7 +262,7 @@ async fn handle_trigger(
     st: AppState,
     headers: HeaderMap,
     slug: repo::RepoSlug,
-    event: github_trigger::IssueCommentEvent,
+    event: github_trigger::TriggerEvent,
     author: String,
     phrase: String,
 ) -> Result<Option<String>, String> {
@@ -275,7 +275,7 @@ async fn handle_trigger(
         app.ensure_installed_repo_registered(&slug).await;
     }
 
-    // Resolve the commenter to their loom user (proven to exist by `authorize`).
+    // Resolve the requester to their loom user (proven to exist by `authorize`).
     // Attributing the launch to them makes their personal GitHub token the
     // session's `GH_TOKEN` — so its push / `gh` act as them — while preserving
     // any credential supplied by the selected profile when no personal token
@@ -334,18 +334,19 @@ async fn handle_trigger(
     }
 
     // 9. If an active session already owns the target branch, forward the new
-    //    comment into it rather than spawning a duplicate — unless its terminal is
+    //    request into it rather than spawning a duplicate — unless its terminal is
     //    unreachable, in which case retire it and fall through to a fresh launch
-    //    (below) so the comment isn't dropped.
+    //    (below) so the request isn't dropped.
     if let Some(branch) = target_branch.as_deref() {
         if let Ok(Some(b)) = branch_mod::find_by_repo_branch(&st.db, &repo_root_str, branch).await {
             if let Ok(Some(sess)) = session_mod::active_for_branch(&st.db, &b.id).await {
-                if forward_comment_to_session(
+                if forward_trigger_to_session(
                     &sess,
                     &author,
                     is_pr,
                     number,
-                    &event.comment.body,
+                    event.request_body(),
+                    event.source(),
                     &phrase,
                 )
                 .await
@@ -355,7 +356,7 @@ async fn handle_trigger(
                         &st.bus,
                         &b.id,
                         "nudge",
-                        serde_json::json!({ "by": format!("github ({author})"), "text": event.comment.body }),
+                        serde_json::json!({ "by": format!("github ({author})"), "text": event.request_body() }),
                     )
                     .await
                     .ok();
@@ -366,16 +367,18 @@ async fn handle_trigger(
                     // can't land (no comment id, or an App installation that
                     // predates the reactions permission grant) — feedback that
                     // the note reached the session matters more than quiet.
-                    let reacted = event.comment.id > 0
-                        && st
-                            .trigger
+                    let reacted = if let Some(comment_id) = event.comment_id() {
+                        st.trigger
                             .gh()
-                            .react_to_comment(&slug.slug(), event.comment.id, "eyes")
+                            .react_to_comment(&slug.slug(), comment_id, "eyes")
                             .await
                             .map_err(|e| {
-                                tracing::warn!(error = %e, repo = %slug.slug(), "github webhook: reacting to forwarded comment failed");
+                                tracing::warn!(error = %e, repo = %slug.slug(), "github webhook: reacting to forwarded request failed");
                             })
-                            .is_ok();
+                            .is_ok()
+                    } else {
+                        false
+                    };
                     if !reacted {
                         let base = public_base(&st, &headers).await;
                         let reply = format!(
@@ -391,7 +394,7 @@ async fn handle_trigger(
                             tracing::warn!(error = %e, repo = %slug.slug(), "github webhook: posting forward-ack failed");
                         }
                     }
-                    tracing::info!(session = %sess.id, repo = %slug.slug(), number, "github webhook: forwarded comment to active session");
+                    tracing::info!(session = %sess.id, repo = %slug.slug(), number, "github webhook: forwarded request to active session");
                     return Ok(None);
                 }
                 // The session is active in the DB but its terminal is unreachable —
@@ -399,7 +402,7 @@ async fn handle_trigger(
                 // monitor hasn't marked yet). Archive it — the shared teardown
                 // captures its chatlog and frees the branch slot (archived no
                 // longer counts as active) — then fall through to launch a fresh
-                // session: the trigger goal already carries this comment and the
+                // session: the trigger goal already carries this request and the
                 // dead session's commits are on the branch, so nothing is dropped.
                 // The fresh launch re-provisions the branch's worktree (see
                 // `existing_branch`).
@@ -577,14 +580,13 @@ async fn handle_trigger(
     Ok(Some(created.session.id))
 }
 
-/// Build the opening goal for a trigger-launched session: the issue/PR title and
-/// body, the triggering comment, and instructions to choose answer or change
-/// mode before replying on the thread with `gh`.
+/// Build the opening goal for a trigger-launched session from its thread context
+/// and the request that matched the trigger phrase.
 fn trigger_goal(
     repo: &str,
     is_pr: bool,
     number: i64,
-    event: &github_trigger::IssueCommentEvent,
+    event: &github_trigger::TriggerEvent,
     author: &str,
 ) -> String {
     let (kind, title_kind, url) = if is_pr {
@@ -614,33 +616,43 @@ fn trigger_goal(
     };
     let comment_cmd = if is_pr { "pr" } else { "issue" };
     let respond = format!(
-        "- First choose the response mode from the triggering comment and thread context. Questions, walkthroughs, evaluations, explanations, and review requests are *answer mode*. Explicit requests to implement, fix, change files, or update/open a pull request are *change mode*.\n\
+        "- First choose the response mode from the triggering request and thread context. Questions, walkthroughs, evaluations, explanations, and review requests are *answer mode*. Explicit requests to implement, fix, change files, or update/open a pull request are *change mode*.\n\
          - In answer mode, investigate as needed and post a concise, self-contained answer on this thread. Do not edit the repository, create design/research documents, commit, or open a pull request unless the user explicitly asks for a change.\n\
          - In change mode, {change_work}\n\
          - If the request is ambiguous and a direct answer can satisfy it, use answer mode rather than requiring a follow-up or manufacturing a change.\n\
          - Your `weaver status` messages are mirrored onto this thread (loom edits its \"On it\" comment into a live status trail), so progress reporting is automatic. For a short answer, avoid narrating every lookup.\n\
          - Post the final answer or completed result on the thread: `gh {comment_cmd} comment {number} --repo {repo} --body \"…\"`."
     );
+    let (introduction, trigger_context) = match event.source() {
+        github_trigger::TriggerSource::Comment => (
+            format!("You've been tagged into GitHub {kind} #{number} of {repo} ({url}) via a comment."),
+            format!(
+                "\n\n## Triggering comment (from @{author})\n{}",
+                event.request_body().trim()
+            ),
+        ),
+        github_trigger::TriggerSource::IssueBody => (
+            format!(
+                "You've been tagged into GitHub {kind} #{number} of {repo} ({url}) via its body, opened by @{author}."
+            ),
+            String::new(),
+        ),
+    };
     format!(
-        "You've been tagged into GitHub {kind} #{number} of {repo} ({url}) via a comment.\n\n\
-         ## {title_kind}\n{}\n\n{body}\n\n\
-         ## Triggering comment (from @{author})\n{}\n\n\
-         ## How to respond\n{respond}",
+        "{introduction}\n\n## {title_kind}\n{}\n\n{body}{trigger_context}\n\n## How to respond\n{respond}",
         event.issue.title.trim(),
-        event.comment.body.trim(),
     )
 }
 
-/// Inject a "new comment" note into an already-running session's terminal so a
-/// follow-up @loom comment continues the existing thread instead of forking a new
-/// session. Returns whether the note was delivered (best-effort: a dead terminal
-/// — e.g. an orphaned session — logs and returns `false`).
-async fn forward_comment_to_session(
+/// Inject a new GitHub trigger into an already-running session's terminal so the
+/// thread continues in one session. Returns whether the note was delivered.
+async fn forward_trigger_to_session(
     session: &Session,
     author: &str,
     is_pr: bool,
     number: i64,
-    comment: &str,
+    request: &str,
+    source: github_trigger::TriggerSource,
     phrase: &str,
 ) -> bool {
     let (thread, cmd) = if is_pr {
@@ -648,17 +660,21 @@ async fn forward_comment_to_session(
     } else {
         ("issue", "issue")
     };
+    let source = match source {
+        github_trigger::TriggerSource::Comment => "comment",
+        github_trigger::TriggerSource::IssueBody => "request in the issue body",
+    };
     let note = format!(
-        "New {phrase} comment from @{author} on {thread} #{number}:\n\n{}\n\n\
+        "New {phrase} {source} from @{author} on {thread} #{number}:\n\n{}\n\n\
          (Reply on the thread with `gh {cmd} comment {number} --body \"…\"` if a response is warranted.)",
-        comment.trim(),
+        request.trim(),
     );
     if let Err(e) = backend::paste(&session.term_session, &note).await {
-        tracing::warn!(session = %session.id, error = %e, "github webhook: forwarding comment to session failed");
+        tracing::warn!(session = %session.id, error = %e, "github webhook: forwarding request to session failed");
         return false;
     }
     if let Err(e) = backend::send_enter(&session.term_session).await {
-        tracing::warn!(session = %session.id, error = %e, "github webhook: submitting forwarded comment failed");
+        tracing::warn!(session = %session.id, error = %e, "github webhook: submitting forwarded request failed");
     }
     true
 }

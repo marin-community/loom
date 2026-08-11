@@ -1,8 +1,8 @@
-//! The inbound GitHub trigger end-to-end over HTTP: a signed `issue_comment`
-//! delivery to `POST /api/github/webhook` turns `@loom work on this` into a
-//! session and replies with its URL. The security boundary is exercised here —
-//! a bad/missing signature is a hard 401, a replay is a no-op, a non-trigger or
-//! unauthorized comment launches nothing.
+//! The inbound GitHub trigger end-to-end over HTTP: a signed `issue_comment` or
+//! `issues` delivery to `POST /api/github/webhook` turns `@loom work on this`
+//! into a session and replies with its URL. The security boundary is exercised
+//! here — a bad/missing signature is a hard 401, a replay is a no-op, and a
+//! non-trigger or unauthorized request launches nothing.
 //!
 //! No network and no real `gh`: the clone source is a *local bare repo* and the
 //! GitHub gateway (permission check + reply) is a recording fake installed into
@@ -209,6 +209,18 @@ fn trigger_body_pr(login: &str, number: i64, comment: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+/// The raw JSON body of an `issues` event carrying an issue body from `login`.
+fn issue_body_event(action: &str, login: &str, number: i64, issue_body: &str) -> Vec<u8> {
+    json!({
+        "action": action,
+        "issue": {"number": number, "title": "Make it faster", "body": issue_body},
+        "repository": {"full_name": "acme/widgets"},
+        "sender": {"login": login}
+    })
+    .to_string()
+    .into_bytes()
+}
+
 /// POST a delivery to the webhook. `sig` is sent as `X-Hub-Signature-256` when
 /// `Some`; the body bytes are sent verbatim (so a caller-computed signature over
 /// the same bytes stays valid).
@@ -218,9 +230,19 @@ async fn post(
     sig: Option<String>,
     body: &[u8],
 ) -> reqwest::Response {
+    post_event(ts, "issue_comment", delivery, sig, body).await
+}
+
+async fn post_event(
+    ts: &TestServer,
+    event: &str,
+    delivery: &str,
+    sig: Option<String>,
+    body: &[u8],
+) -> reqwest::Response {
     let mut req = reqwest::Client::new()
         .post(format!("http://{}/api/github/webhook", ts.addr))
-        .header("X-GitHub-Event", "issue_comment")
+        .header("X-GitHub-Event", event)
         .header("X-GitHub-Delivery", delivery)
         .header("Content-Type", "application/json")
         .body(body.to_vec());
@@ -473,6 +495,86 @@ async fn happy_path_creates_session_and_replies() {
         .delete(&format!("/api/sessions/{id}"))
         .await
         .unwrap();
+}
+
+/// An `issues.opened` delivery may carry the request in the issue body instead
+/// of a follow-up comment. It enters the same launch path without duplicating
+/// the issue body in the generated goal.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_body_mention_creates_session_and_replies() {
+    let (ts, fake) = boot().await;
+    let _remotes = prepare_repo(&ts).await;
+
+    let request = "@loom work on this from the issue body";
+    let body = issue_body_event("opened", "rjpower", 43, request);
+    let resp = post_event(
+        &ts,
+        "issues",
+        "d-issue-opened",
+        Some(sign(SECRET, &body)),
+        &body,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    wait_for_sessions(&ts, 1).await;
+    let sessions = ts.client.get("/api/sessions").await.unwrap();
+    let session = &sessions.as_array().unwrap()[0];
+    let id = session["id"].as_str().unwrap();
+    assert_eq!(session["created_by"].as_str(), Some("rjpower"));
+    let goal = session["branch"]["goal"].as_str().unwrap();
+    assert_eq!(
+        goal.matches(request).count(),
+        1,
+        "the issue body should appear once in the goal: {goal}"
+    );
+    assert!(
+        goal.contains("via its body"),
+        "the goal identifies the trigger source: {goal}"
+    );
+    assert!(!goal.contains("Triggering comment"));
+
+    wait_for_comments(&fake, 1).await;
+    let comments = fake.comments.lock().unwrap().clone();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0].0, "acme/widgets");
+    assert_eq!(comments[0].1, 43);
+    assert!(comments[0].2.contains(&format!("/s/{id}")));
+}
+
+/// Only a newly opened issue with a real prose mention is a body trigger.
+/// Ordinary issue bodies and later edits remain no-ops.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_body_without_mention_and_issue_edits_are_ignored() {
+    let (ts, fake) = boot().await;
+    let _remotes = prepare_repo(&ts).await;
+
+    let body = issue_body_event("opened", "rjpower", 44, "please make this faster");
+    let resp = post_event(
+        &ts,
+        "issues",
+        "d-issue-no-mention",
+        Some(sign(SECRET, &body)),
+        &body,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    let body = issue_body_event("edited", "rjpower", 45, "@loom added after opening");
+    let resp = post_event(
+        &ts,
+        "issues",
+        "d-issue-edited",
+        Some(sign(SECRET, &body)),
+        &body,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    assert_eq!(session_count(&ts).await, 0);
+    assert!(fake.comments.lock().unwrap().is_empty());
 }
 
 /// An issue trigger wires the branch to the thread (the `github` tag) and
