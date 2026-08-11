@@ -75,8 +75,8 @@ pub struct ManifestInput<'a> {
 /// hand-registration steps in `docs/github-trigger.md` "Create the App":
 /// webhook URL + secret placeholder (GitHub mints the secret itself and
 /// returns it in the conversion — no `hook_attributes.secret` needed),
-/// Issues/Contents write + Metadata read, subscribed to `issue_comment`, and
-/// (new here) `callback_urls` so the App's own client id/secret also serves
+/// Issues/Contents write + Metadata read, subscribed to `issue_comment` and
+/// `issues`, plus `callback_urls` so the App's own client id/secret also serves
 /// loom's "Sign in with GitHub" login — the same `/login/oauth/authorize` and
 /// `/login/oauth/access_token` endpoints [`crate::auth::github_oauth`] already
 /// speaks work unchanged for a GitHub App's user-to-server OAuth.
@@ -89,7 +89,7 @@ pub fn manifest_json(input: &ManifestInput) -> Value {
         "redirect_url": input.redirect_url,
         "callback_urls": [format!("{base}/api/auth/github/callback")],
         "public": false,
-        "default_events": ["issue_comment"],
+        "default_events": ["issue_comment", "issues"],
         "default_permissions": {
             "issues": "write",
             "contents": "write",
@@ -351,7 +351,10 @@ mod tests {
             "https://loom.acme.dev/api/auth/github/callback"
         );
         assert_eq!(m["public"], false);
-        assert_eq!(m["default_events"][0], "issue_comment");
+        assert_eq!(
+            m["default_events"],
+            serde_json::json!(["issue_comment", "issues"])
+        );
         assert_eq!(m["default_permissions"]["issues"], "write");
         assert_eq!(m["default_permissions"]["contents"], "write");
         assert_eq!(m["default_permissions"]["metadata"], "read");
