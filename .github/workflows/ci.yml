@@ -147,7 +147,8 @@ jobs:
       - name: Verify session survival outside the launcher
         env:
           LOOM_DOCKER_TEST_IMAGE: loom-ci:${{ github.sha }}
-        run: >-
-          cargo test -p loom --test docker_runner
-          docker_runner_supervisor_outlives_its_launcher
-          --locked -- --ignored --exact
+        run: |
+          cargo build -p tapestry --locked
+          cargo test -p loom --test docker_runner \
+            docker_runner_supervisor_outlives_its_launcher \
+            --locked -- --ignored --exact

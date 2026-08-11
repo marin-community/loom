@@ -1,10 +1,11 @@
 //! Manual container-runner lifecycle test.
 //!
 //! Build the test image with `HOST_UID=$(id -u)` and `HOST_GID=$(id -g)`, then
-//! run `cargo test -p loom --test docker_runner -- --ignored`. The regular suite
-//! stays Docker-free. This smoke covers placement, launcher death, shared socket
-//! access, colocating a second supervisor, keeping the operator shell on the
-//! launcher host, and a callback over the configured sibling network.
+//! run `cargo build -p tapestry && cargo test -p loom --test docker_runner --
+//! --ignored`. The regular suite stays Docker-free. This smoke covers placement,
+//! launcher death, shared socket access, colocating a second supervisor, keeping
+//! the operator shell on the launcher host, and a callback over the configured
+//! sibling network.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -61,6 +62,15 @@ fn configure(root: &Path, session: &str) {
     std::env::set_var(SESSION_ENV, session);
 }
 
+fn tapestry_bin() -> PathBuf {
+    std::env::current_exe()
+        .unwrap()
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .join("tapestry")
+}
+
 async fn wait_for_screen(session: &str, markers: &[&str]) -> String {
     let mut screen = String::new();
     for _ in 0..200 {
@@ -99,6 +109,12 @@ fn docker_runner_child() {
         loom::runner::spawn(&options, 1).await.unwrap();
 
         let host_session = format!("{session}-host-shell");
+        let supervisor_bin = tapestry_bin();
+        assert!(
+            supervisor_bin.is_file(),
+            "tapestry binary missing at {}; run `cargo build -p tapestry` first",
+            supervisor_bin.display()
+        );
         let host_options = tapestry::LaunchOptions {
             name: &host_session,
             cwd: &root,
@@ -109,7 +125,7 @@ fn docker_runner_child() {
             rows: 24,
             mode: tapestry::Mode::Pty,
             segment_max_bytes: None,
-            supervisor_bin: None,
+            supervisor_bin: Some(&supervisor_bin),
         };
         loom::runner::spawn_on_host(&host_options).await.unwrap();
     });
