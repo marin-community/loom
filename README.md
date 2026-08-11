@@ -293,9 +293,10 @@ Polling is a quiet no-op for repositories without a GitHub remote, or wherever
 
 ### Trigger sessions from issues
 
-Include **`@loom`** in a new GitHub issue body or comment it on an issue or PR,
-and loom launches a session against that repo, seeded from the issue, then
-replies with a link to it. GitHub delivers the request to
+Include **`@loom`** in a GitHub issue body or issue/PR comment when creating it,
+or add the mention later by editing the body, and loom launches a session
+against that repo, seeded from the issue, then replies with a link to it. GitHub
+delivers the request to
 `POST /api/github/webhook`, which verifies the delivery's HMAC signature and
 authorizes the requester against the **approved-user allowlist** (the same
 people who can sign in to loom — repo write access is not itself a grant). Set

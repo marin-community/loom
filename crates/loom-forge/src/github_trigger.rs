@@ -9,10 +9,10 @@
 //!    rejected before its body is even parsed.
 //! 2. **Dedupe** on the `X-GitHub-Delivery` GUID ([`record_delivery`]) so a
 //!    replayed or GitHub-retried delivery never launches a second session.
-//! 3. **Filter** to `issue_comment`/`created` and `issues`/`opened`, ignoring the
-//!    bot's own events.
+//! 3. **Filter** to new or body-edited `issue_comment` and `issues` events,
+//!    ignoring the bot's own events.
 //! 4. **Match** the trigger phrase ([`is_trigger`]) — a standalone mention
-//!    anywhere in the request prose, quotes and code excluded.
+//!    newly introduced into the request prose, quotes and code excluded.
 //! 5. **Authorize the requester** ([`authorize`]) against loom's approved-user
 //!    allowlist. Anyone else is ignored after an access-info reply; a per-repo
 //!    rate limit blunts spam.
@@ -263,8 +263,8 @@ fn closing_run(chars: &[char], from: usize, run: usize) -> Option<usize> {
     None
 }
 
-/// A normalized trigger request from a newly opened issue or a newly created
-/// issue/PR comment.
+/// A normalized trigger request from a new or edited issue body or issue/PR
+/// comment.
 #[derive(Debug)]
 pub struct TriggerEvent {
     pub issue: IssuePayload,
@@ -275,6 +275,7 @@ pub struct TriggerEvent {
 #[derive(Debug)]
 struct TriggerRequest {
     body: String,
+    previous_body: Option<String>,
     user: UserPayload,
     comment_id: Option<i64>,
     source: TriggerSource,
@@ -282,8 +283,10 @@ struct TriggerRequest {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TriggerSource {
-    Comment,
-    IssueBody,
+    CommentCreated,
+    CommentEdited,
+    IssueOpened,
+    IssueEdited,
 }
 
 /// The raw `issue_comment` webhook payload, narrowed to fields used here.
@@ -293,6 +296,9 @@ struct IssueCommentEvent {
     issue: IssuePayload,
     comment: CommentPayload,
     repository: RepoPayload,
+    sender: UserPayload,
+    #[serde(default)]
+    changes: Option<ChangesPayload>,
 }
 
 /// The raw `issues` webhook payload, narrowed to fields used here.
@@ -302,6 +308,20 @@ struct IssuesEvent {
     issue: IssuePayload,
     repository: RepoPayload,
     sender: UserPayload,
+    #[serde(default)]
+    changes: Option<ChangesPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChangesPayload {
+    #[serde(default)]
+    body: Option<BodyChangePayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BodyChangePayload {
+    #[serde(default)]
+    from: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -357,35 +377,55 @@ impl TriggerEvent {
             "issue_comment" => {
                 let event: IssueCommentEvent =
                     serde_json::from_slice(body).context("parsing issue_comment payload")?;
-                if event.action != "created" {
-                    return Ok(None);
-                }
+                let (source, previous_body, user) = match event.action.as_str() {
+                    "created" => (TriggerSource::CommentCreated, None, event.comment.user),
+                    "edited" => {
+                        let Some(previous_body) = previous_body(event.changes) else {
+                            return Ok(None);
+                        };
+                        (
+                            TriggerSource::CommentEdited,
+                            Some(previous_body),
+                            event.sender,
+                        )
+                    }
+                    _ => return Ok(None),
+                };
                 Ok(Some(Self {
                     issue: event.issue,
                     repository: event.repository,
                     request: TriggerRequest {
                         body: event.comment.body,
-                        user: event.comment.user,
+                        previous_body,
+                        user,
                         comment_id: (event.comment.id > 0).then_some(event.comment.id),
-                        source: TriggerSource::Comment,
+                        source,
                     },
                 }))
             }
             "issues" => {
                 let event: IssuesEvent =
                     serde_json::from_slice(body).context("parsing issues payload")?;
-                if event.action != "opened" {
-                    return Ok(None);
-                }
+                let (source, previous_body) = match event.action.as_str() {
+                    "opened" => (TriggerSource::IssueOpened, None),
+                    "edited" => {
+                        let Some(previous_body) = previous_body(event.changes) else {
+                            return Ok(None);
+                        };
+                        (TriggerSource::IssueEdited, Some(previous_body))
+                    }
+                    _ => return Ok(None),
+                };
                 let request_body = event.issue.body.clone().unwrap_or_default();
                 Ok(Some(Self {
                     issue: event.issue,
                     repository: event.repository,
                     request: TriggerRequest {
                         body: request_body,
+                        previous_body,
                         user: event.sender,
                         comment_id: None,
-                        source: TriggerSource::IssueBody,
+                        source,
                     },
                 }))
             }
@@ -409,6 +449,17 @@ impl TriggerEvent {
         self.request.source
     }
 
+    /// Whether this delivery introduces `phrase` into request prose that did
+    /// not already contain a matching trigger.
+    pub fn introduces_trigger(&self, phrase: &str) -> bool {
+        is_trigger(&self.request.body, phrase)
+            && !self
+                .request
+                .previous_body
+                .as_deref()
+                .is_some_and(|body| is_trigger(body, phrase))
+    }
+
     /// The seed text for the session goal: the issue title, plus its body when
     /// present.
     pub fn goal_seed(&self) -> String {
@@ -417,6 +468,10 @@ impl TriggerEvent {
             _ => self.issue.title.clone(),
         }
     }
+}
+
+fn previous_body(changes: Option<ChangesPayload>) -> Option<String> {
+    changes?.body.map(|change| change.from.unwrap_or_default())
 }
 
 // ---------------------------------------------------------------------------
@@ -845,14 +900,16 @@ mod tests {
             "action": "created",
             "issue": {"number": 7, "title": "Fix the bug", "body": "It crashes"},
             "comment": {"id": 17, "body": "@loom work on this", "user": {"login": "alice"}},
-            "repository": {"full_name": "acme/widgets"}
+            "repository": {"full_name": "acme/widgets"},
+            "sender": {"login": "alice"}
         }"#;
         let ev = TriggerEvent::parse("issue_comment", raw).unwrap().unwrap();
         assert_eq!(ev.issue.number, 7);
         assert_eq!(ev.author(), "alice");
         assert_eq!(ev.request_body(), "@loom work on this");
         assert_eq!(ev.comment_id(), Some(17));
-        assert_eq!(ev.source(), TriggerSource::Comment);
+        assert_eq!(ev.source(), TriggerSource::CommentCreated);
+        assert!(ev.introduces_trigger("@loom"));
         assert_eq!(ev.repository.full_name, "acme/widgets");
         assert_eq!(ev.goal_seed(), "Fix the bug\n\nIt crashes");
 
@@ -867,21 +924,74 @@ mod tests {
         assert_eq!(ev.author(), "bob");
         assert_eq!(ev.request_body(), "please @loom fix this");
         assert_eq!(ev.comment_id(), None);
-        assert_eq!(ev.source(), TriggerSource::IssueBody);
+        assert_eq!(ev.source(), TriggerSource::IssueOpened);
+        assert!(ev.introduces_trigger("@loom"));
         assert_eq!(ev.goal_seed(), "Body trigger\n\nplease @loom fix this");
+
+        let raw = br#"{
+            "action": "edited",
+            "changes": {"body": {"from": "more details"}},
+            "issue": {"number": 9, "title": "Edited comment", "body": "Issue context"},
+            "comment": {
+                "id": 18,
+                "body": "more details\n\n@loom fix this",
+                "user": {"login": "original-author"}
+            },
+            "repository": {"full_name": "acme/widgets"},
+            "sender": {"login": "comment-editor"}
+        }"#;
+        let ev = TriggerEvent::parse("issue_comment", raw).unwrap().unwrap();
+        assert_eq!(ev.issue.number, 9);
+        assert_eq!(ev.author(), "comment-editor");
+        assert_eq!(ev.request_body(), "more details\n\n@loom fix this");
+        assert_eq!(ev.comment_id(), Some(18));
+        assert_eq!(ev.source(), TriggerSource::CommentEdited);
+        assert!(ev.introduces_trigger("@loom"));
+
+        let raw = br#"{
+            "action": "edited",
+            "changes": {"body": {"from": "more details"}},
+            "issue": {"number": 10, "title": "Edited issue", "body": "more details\n\n@loom fix this"},
+            "repository": {"full_name": "acme/widgets"},
+            "sender": {"login": "issue-editor"}
+        }"#;
+        let ev = TriggerEvent::parse("issues", raw).unwrap().unwrap();
+        assert_eq!(ev.issue.number, 10);
+        assert_eq!(ev.author(), "issue-editor");
+        assert_eq!(ev.request_body(), "more details\n\n@loom fix this");
+        assert_eq!(ev.comment_id(), None);
+        assert_eq!(ev.source(), TriggerSource::IssueEdited);
+        assert!(ev.introduces_trigger("@loom"));
+    }
+
+    #[test]
+    fn edited_request_does_not_retrigger_an_existing_mention() {
+        let raw = br#"{
+            "action": "edited",
+            "changes": {"body": {"from": "@loom fix this"}},
+            "issue": {"number": 9, "title": "Edited comment", "body": "Issue context"},
+            "comment": {
+                "id": 18,
+                "body": "@loom fix this with more detail",
+                "user": {"login": "original-author"}
+            },
+            "repository": {"full_name": "acme/widgets"},
+            "sender": {"login": "comment-editor"}
+        }"#;
+        let ev = TriggerEvent::parse("issue_comment", raw).unwrap().unwrap();
+        assert!(!ev.introduces_trigger("@loom"));
     }
 
     #[test]
     fn parse_ignores_unsupported_events_and_actions() {
-        let edited_issue = br#"{
+        let title_edit = br#"{
             "action": "edited",
+            "changes": {"title": {"from": "Old title"}},
             "issue": {"number": 8, "title": "Body trigger", "body": "@loom fix this"},
             "repository": {"full_name": "acme/widgets"},
             "sender": {"login": "bob"}
         }"#;
-        assert!(TriggerEvent::parse("issues", edited_issue)
-            .unwrap()
-            .is_none());
+        assert!(TriggerEvent::parse("issues", title_edit).unwrap().is_none());
         assert!(TriggerEvent::parse("pull_request", b"not json")
             .unwrap()
             .is_none());

@@ -332,10 +332,10 @@ GitHub mutations through Loom's server-side tool endpoint.
 
 ## Wire the `@loom` GitHub trigger
 
-Opening an issue whose body includes **`@loom work on this`**, or posting that
-as a comment, launches a session. If you ran `loom setup github-app` above, the
-App *is* the webhook — GitHub delivers events to any repo it's installed on
-with no separate webhook to add:
+Opening or editing an issue whose body adds **`@loom work on this`**, or creating
+or editing a comment to add it, launches a session. If you ran `loom setup
+github-app` above, the App *is* the webhook — GitHub delivers events to any repo
+it's installed on with no separate webhook to add:
 
 1. **Install the App** on each repo (or org) loom should act on:
    `https://github.com/apps/<app-slug>/installations/new` (printed at the end

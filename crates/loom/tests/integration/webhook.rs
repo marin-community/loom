@@ -185,7 +185,8 @@ fn trigger_body_with_id(login: &str, number: i64, comment: &str, comment_id: i64
         "action": "created",
         "issue": {"number": number, "title": "Make it faster", "body": "perf please"},
         "comment": {"id": comment_id, "body": comment, "user": {"login": login}},
-        "repository": {"full_name": "acme/widgets"}
+        "repository": {"full_name": "acme/widgets"},
+        "sender": {"login": login}
     })
     .to_string()
     .into_bytes()
@@ -203,19 +204,50 @@ fn trigger_body_pr(login: &str, number: i64, comment: &str) -> Vec<u8> {
             "pull_request": {"url": "https://api.github.com/repos/acme/widgets/pulls/7"}
         },
         "comment": {"body": comment, "user": {"login": login}},
-        "repository": {"full_name": "acme/widgets"}
+        "repository": {"full_name": "acme/widgets"},
+        "sender": {"login": login}
     })
     .to_string()
     .into_bytes()
 }
 
-/// The raw JSON body of an `issues` event carrying an issue body from `login`.
-fn issue_body_event(action: &str, login: &str, number: i64, issue_body: &str) -> Vec<u8> {
+/// The raw JSON body of an `issues.opened` event carrying an issue body from
+/// `login`.
+fn opened_issue_body_event(login: &str, number: i64, issue_body: &str) -> Vec<u8> {
     json!({
-        "action": action,
+        "action": "opened",
         "issue": {"number": number, "title": "Make it faster", "body": issue_body},
         "repository": {"full_name": "acme/widgets"},
         "sender": {"login": login}
+    })
+    .to_string()
+    .into_bytes()
+}
+
+fn edited_issue_body_event(editor: &str, number: i64, previous: &str, current: &str) -> Vec<u8> {
+    json!({
+        "action": "edited",
+        "changes": {"body": {"from": previous}},
+        "issue": {"number": number, "title": "Make it faster", "body": current},
+        "repository": {"full_name": "acme/widgets"},
+        "sender": {"login": editor}
+    })
+    .to_string()
+    .into_bytes()
+}
+
+fn edited_comment_event(editor: &str, number: i64, previous: &str, current: &str) -> Vec<u8> {
+    json!({
+        "action": "edited",
+        "changes": {"body": {"from": previous}},
+        "issue": {"number": number, "title": "Make it faster", "body": "perf please"},
+        "comment": {
+            "id": 2001,
+            "body": current,
+            "user": {"login": "original-author"}
+        },
+        "repository": {"full_name": "acme/widgets"},
+        "sender": {"login": editor}
     })
     .to_string()
     .into_bytes()
@@ -507,7 +539,7 @@ async fn issue_body_mention_creates_session_and_replies() {
     let _remotes = prepare_repo(&ts).await;
 
     let request = "@loom work on this from the issue body";
-    let body = issue_body_event("opened", "rjpower", 43, request);
+    let body = opened_issue_body_event("rjpower", 43, request);
     let resp = post_event(
         &ts,
         "issues",
@@ -543,15 +575,14 @@ async fn issue_body_mention_creates_session_and_replies() {
     assert!(comments[0].2.contains(&format!("/s/{id}")));
 }
 
-/// Only a newly opened issue with a real prose mention is a body trigger.
-/// Ordinary issue bodies and later edits remain no-ops.
+/// A newly opened issue without a prose mention remains a no-op.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn issue_body_without_mention_and_issue_edits_are_ignored() {
+async fn issue_body_without_mention_is_ignored() {
     let (ts, fake) = boot().await;
     let _remotes = prepare_repo(&ts).await;
 
-    let body = issue_body_event("opened", "rjpower", 44, "please make this faster");
+    let body = opened_issue_body_event("rjpower", 44, "please make this faster");
     let resp = post_event(
         &ts,
         "issues",
@@ -562,11 +593,99 @@ async fn issue_body_without_mention_and_issue_edits_are_ignored() {
     .await;
     assert_eq!(resp.status(), 200);
 
-    let body = issue_body_event("edited", "rjpower", 45, "@loom added after opening");
+    assert_eq!(session_count(&ts).await, 0);
+    assert!(fake.comments.lock().unwrap().is_empty());
+}
+
+/// Adding the trigger phrase in either an issue-body edit or a comment edit
+/// launches through the same path as a newly created request. The editor, not
+/// the original author, owns the resulting session.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn edits_that_introduce_the_mention_create_sessions() {
+    let (ts, fake) = boot().await;
+    let _remotes = prepare_repo(&ts).await;
+
+    let issue_request = "please make this faster\n\n@loom work on this";
+    let body = edited_issue_body_event("rjpower", 45, "please make this faster", issue_request);
     let resp = post_event(
         &ts,
         "issues",
-        "d-issue-edited",
+        "d-issue-edited-add-mention",
+        Some(sign(SECRET, &body)),
+        &body,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    let comment_request = "follow-up details\n\n@loom work on this";
+    let body = edited_comment_event("rjpower", 46, "follow-up details", comment_request);
+    let resp = post_event(
+        &ts,
+        "issue_comment",
+        "d-comment-edited-add-mention",
+        Some(sign(SECRET, &body)),
+        &body,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    wait_for_sessions(&ts, 2).await;
+    wait_for_comments(&fake, 2).await;
+    let sessions = ts.client.get("/api/sessions").await.unwrap();
+    let sessions = sessions.as_array().unwrap();
+    assert_eq!(sessions.len(), 2);
+    assert!(sessions
+        .iter()
+        .all(|session| session["created_by"].as_str() == Some("rjpower")));
+
+    let goals = sessions
+        .iter()
+        .map(|session| session["branch"]["goal"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(goals.iter().any(|goal| {
+        goal.matches(issue_request).count() == 1
+            && goal.contains("via its body, edited by @rjpower")
+    }));
+    assert!(goals.iter().any(|goal| {
+        goal.contains(comment_request) && goal.contains("via an edited comment by @rjpower")
+    }));
+}
+
+/// An edit that leaves an existing trigger phrase in place is not a new
+/// request, even if other prose changed around it.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn edits_that_retain_the_mention_are_ignored() {
+    let (ts, fake) = boot().await;
+    let _remotes = prepare_repo(&ts).await;
+
+    let body = edited_issue_body_event(
+        "rjpower",
+        47,
+        "@loom work on this",
+        "@loom work on this with more detail",
+    );
+    let resp = post_event(
+        &ts,
+        "issues",
+        "d-issue-edited-retain-mention",
+        Some(sign(SECRET, &body)),
+        &body,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    let body = edited_comment_event(
+        "rjpower",
+        48,
+        "@loom work on this",
+        "@loom work on this with more detail",
+    );
+    let resp = post_event(
+        &ts,
+        "issue_comment",
+        "d-comment-edited-retain-mention",
         Some(sign(SECRET, &body)),
         &body,
     )

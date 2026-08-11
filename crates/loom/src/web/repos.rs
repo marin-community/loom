@@ -132,9 +132,8 @@ pub(super) async fn github_webhook(
         }
     }
 
-    // 3. Normalize newly created comments and newly opened issues. Other event
-    //    kinds and actions (including edits, deletes, and setup pings) are
-    //    acknowledged and ignored.
+    // 3. Normalize new requests and body edits. Other event kinds and actions
+    //    (including deletes and setup pings) are acknowledged and ignored.
     let event_kind = headers
         .get("x-github-event")
         .and_then(|v| v.to_str().ok())
@@ -157,7 +156,7 @@ pub(super) async fn github_webhook(
         }
     }
     let phrase = github_trigger::trigger_phrase(&st.db).await;
-    if !github_trigger::is_trigger(event.request_body(), &phrase) {
+    if !event.introduces_trigger(&phrase) {
         return ok();
     }
 
@@ -624,16 +623,31 @@ fn trigger_goal(
          - Post the final answer or completed result on the thread: `gh {comment_cmd} comment {number} --repo {repo} --body \"…\"`."
     );
     let (introduction, trigger_context) = match event.source() {
-        github_trigger::TriggerSource::Comment => (
+        github_trigger::TriggerSource::CommentCreated => (
             format!("You've been tagged into GitHub {kind} #{number} of {repo} ({url}) via a comment."),
             format!(
                 "\n\n## Triggering comment (from @{author})\n{}",
                 event.request_body().trim()
             ),
         ),
-        github_trigger::TriggerSource::IssueBody => (
+        github_trigger::TriggerSource::CommentEdited => (
+            format!(
+                "You've been tagged into GitHub {kind} #{number} of {repo} ({url}) via an edited comment by @{author}."
+            ),
+            format!(
+                "\n\n## Triggering edited comment\n{}",
+                event.request_body().trim()
+            ),
+        ),
+        github_trigger::TriggerSource::IssueOpened => (
             format!(
                 "You've been tagged into GitHub {kind} #{number} of {repo} ({url}) via its body, opened by @{author}."
+            ),
+            String::new(),
+        ),
+        github_trigger::TriggerSource::IssueEdited => (
+            format!(
+                "You've been tagged into GitHub {kind} #{number} of {repo} ({url}) via its body, edited by @{author}."
             ),
             String::new(),
         ),
@@ -661,8 +675,10 @@ async fn forward_trigger_to_session(
         ("issue", "issue")
     };
     let source = match source {
-        github_trigger::TriggerSource::Comment => "comment",
-        github_trigger::TriggerSource::IssueBody => "request in the issue body",
+        github_trigger::TriggerSource::CommentCreated => "comment",
+        github_trigger::TriggerSource::CommentEdited => "edited comment",
+        github_trigger::TriggerSource::IssueOpened => "request in the issue body",
+        github_trigger::TriggerSource::IssueEdited => "edited request in the issue body",
     };
     let note = format!(
         "New {phrase} {source} from @{author} on {thread} #{number}:\n\n{}\n\n\
