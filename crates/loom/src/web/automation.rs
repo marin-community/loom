@@ -278,7 +278,7 @@ async fn prompt_channel_run(
         .clone()
         .expect("channel runs require a goal");
     if let Err(error) = handle
-        .prompt(goal.clone(), Some(by.clone()), false, Vec::new())
+        .prompt(goal.clone(), Some(by.clone()), Vec::new())
         .await
     {
         crate::runs::waiting(&st.db, &run.id).await.ok();

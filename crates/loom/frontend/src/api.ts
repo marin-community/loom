@@ -577,29 +577,20 @@ export const getSessionChat = (id: string, before?: { turn: number; seq: number 
 };
 
 /** Send a user message to an ACP session. Returns 202 with
- *  `{ queued, steered, turn }`: a live turn is steered when the adapter supports
- *  it, with the durable next-turn queue retained as the fallback. */
-export const promptSession = (
-  id: string,
-  text: string,
-  by?: string,
-  forceSteer = false,
-  files: string[] = [],
-) =>
+ *  `{ queued, turn }`: a live turn keeps the message in the durable next-turn
+ *  queue. */
+export const promptSession = (id: string, text: string, by?: string, files: string[] = []) =>
   post(`/sessions/${id}/prompt`, {
     text,
     by,
-    force_steer: forceSteer,
     files,
   }) as Promise<PromptAck>;
 
-/** Send all durable next-turn feedback now: steer when the adapter advertises
- * support, otherwise stop the live turn and start one normal queued turn. */
+/** Send all durable next-turn feedback now, stopping a live turn first. */
 export const forceQueuedSession = (id: string, by?: string) =>
   post(`/sessions/${id}/prompt`, {
     text: '',
     by,
-    force_steer: true,
     force_queued: true,
     files: [],
   }) as Promise<PromptAck>;

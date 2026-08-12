@@ -42,9 +42,6 @@ let sessionId = null;
 let sessionCounter = 0;
 let cancelled = false;
 const steeringSupported = process.env.FAKE_ACP_STEERING === "1";
-const forceSteeringNewTurn = process.env.FAKE_ACP_STEERING_FORCE_NEW_TURN === "1";
-const brokenSteeringBoundary = process.env.FAKE_ACP_STEERING_BOUNDARY_ERROR === "1";
-const steeringDelayMs = Number(process.env.FAKE_ACP_STEERING_DELAY_MS || "0");
 const agentName = process.env.FAKE_ACP_AGENT_NAME || "fake-acp-agent";
 const agentVersion = process.env.FAKE_ACP_AGENT_VERSION || "1.0.0";
 const loadPermission = process.env.FAKE_ACP_LOAD_PERMISSION || "";
@@ -57,13 +54,9 @@ const summaryOutput =
   process.env.FAKE_ACP_SUMMARY_OUTPUT_B64 === undefined
     ? undefined
     : Buffer.from(process.env.FAKE_ACP_SUMMARY_OUTPUT_B64, "base64").toString("utf8");
-let promptActive = false;
-let activePromptId = null;
 let promptEpoch = 0;
 let promptResources = [];
 let poisoned = false;
-const steeringQueue = [];
-let deferredSteering = null;
 const pending = new Map(); // our request id -> resolver awaiting the client's response
 
 function send(obj) {
@@ -71,13 +64,6 @@ function send(obj) {
 }
 function respond(id, result) {
   send({ jsonrpc: JSONRPC, id, result });
-}
-function rejectMethod(id, method) {
-  send({
-    jsonrpc: JSONRPC,
-    id,
-    error: { code: -32601, message: `Method not found: ${method}`, data: { method } },
-  });
 }
 function notify(update) {
   send({ jsonrpc: JSONRPC, method: "session/update", params: { sessionId, update } });
@@ -331,16 +317,8 @@ async function runToken(tok) {
 
 async function handlePrompt(id, params) {
   const epoch = ++promptEpoch;
-  activePromptId = id;
   cancelled = false;
-  promptActive = true;
   promptResources = (params.prompt || []).filter((b) => b.type === "resource_link");
-  if (steeringSupported) {
-    notify({
-      sessionUpdate: "session_info_update",
-      _meta: { codex: { threadStatus: { type: "active" } } },
-    });
-  }
   // The script is the prompt's first paragraph only. A real launch prompt
   // appends orientation prose (the entrance note, which echoes the session
   // title — i.e. the script itself) after a blank line; parsing past it would
@@ -351,7 +329,6 @@ async function handlePrompt(id, params) {
     .split("\n\n")[0];
   if (text === "poison") poisoned = true;
   if (poisoned) {
-    promptActive = false;
     if (id !== null) {
       send({
         jsonrpc: JSONRPC,
@@ -365,7 +342,6 @@ async function handlePrompt(id, params) {
     if (fixedOutput.length > 0) {
       notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: fixedOutput } });
     }
-    promptActive = false;
     if (id !== null) respond(id, { stopReason: "end_turn" });
     return;
   }
@@ -376,7 +352,6 @@ async function handlePrompt(id, params) {
         content: { type: "text", text: summaryOutput },
       });
     }
-    promptActive = false;
     if (id !== null) respond(id, { stopReason: "end_turn" });
     return;
   }
@@ -384,68 +359,11 @@ async function handlePrompt(id, params) {
     if (cancelled) break;
     if (tok.length === 0) continue;
     await runToken(tok);
-    // A broken steering boundary models claude-agent-acp rejecting the owning
-    // prompt while its injected replacement continues on the same SDK stream.
+    // An immediate cancel-and-restart can begin another prompt while this
+    // handler is still unwinding its cancellable sleep.
     if (epoch !== promptEpoch) return;
-    while (steeringQueue.length > 0 && !cancelled) {
-      const steering = steeringQueue.shift();
-      for (const steeringToken of steering.split("|")) {
-        if (steeringToken.length > 0) await runToken(steeringToken);
-      }
-    }
   }
-  promptActive = false;
-  activePromptId = null;
   if (id !== null) respond(id, { stopReason: cancelled ? "cancelled" : "end_turn" });
-  if (steeringSupported) {
-    notify({
-      sessionUpdate: "session_info_update",
-      _meta: { codex: { threadStatus: { type: "idle" } } },
-    });
-  }
-  if (deferredSteering !== null) {
-    const next = deferredSteering;
-    deferredSteering = null;
-    void handlePrompt(null, next.params);
-    respond(next.id, { outcome: "startedNewTurn" });
-  }
-}
-
-async function handleSteering(id, params) {
-  if (steeringDelayMs > 0) await sleep(steeringDelayMs);
-  const text = (params.prompt || []).map((b) => b.text || "").join("");
-  if (!promptActive || forceSteeringNewTurn) {
-    if (promptActive) {
-      deferredSteering = { id, params };
-    } else {
-      void handlePrompt(null, params);
-      respond(id, { outcome: "startedNewTurn" });
-    }
-    return;
-  }
-  notify({ sessionUpdate: "user_message_chunk", content: { type: "text", text } });
-  if (brokenSteeringBoundary) {
-    respond(id, { outcome: "injected" });
-    const interrupted = activePromptId;
-    ++promptEpoch;
-    promptActive = false;
-    activePromptId = null;
-    if (interrupted !== null) {
-      send({
-        jsonrpc: JSONRPC,
-        id: interrupted,
-        error: {
-          code: -32603,
-          message:
-            "Internal error: [ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null",
-        },
-      });
-    }
-    void handlePrompt(null, params);
-    return;
-  }
-  steeringQueue.push(text);
-  respond(id, { outcome: "injected" });
 }
 
 function handleMessage(msg) {
@@ -498,10 +416,6 @@ function handleMessage(msg) {
       break;
     case "session/prompt":
       void handlePrompt(msg.id, msg.params);
-      break;
-    case "_session/steering":
-      if (steeringSupported) void handleSteering(msg.id, msg.params);
-      else rejectMethod(msg.id, msg.method);
       break;
     case "session/cancel":
       cancelled = true;

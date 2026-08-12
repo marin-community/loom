@@ -505,13 +505,10 @@ fn preferred_mode(modes: &[Value]) -> Option<String> {
     })
 }
 
-/// How a prompt was accepted plus the turn it belongs to — the `POST /prompt`
-/// 202 body. `steered` is true only when the adapter injected it into the
-/// already-running turn; unsupported adapters retain the durable queue.
-#[derive(Debug, Clone, Serialize)]
+/// Whether a prompt was queued or started, plus the turn it belongs to.
+#[derive(Debug, Clone)]
 pub struct PromptAck {
     pub queued: bool,
-    pub steered: bool,
     pub turn: Option<i64>,
 }
 
@@ -544,27 +541,6 @@ pub struct AcpMetadata {
     pub commands: Vec<Value>,
     pub config_options: Vec<Value>,
     pub modes: Vec<Value>,
-    /// Whether the adapter advertised a steering extension whose turn lifecycle
-    /// loom can safely own. The browser uses this observed, normalized capability
-    /// instead of optimistically probing a private method that may not exist.
-    pub steering_supported: bool,
-}
-
-const CLAUDE_AGENT_ACP: &str = "@agentclientprotocol/claude-agent-acp";
-
-/// Normalize the private steering capability to the lifecycle contract loom
-/// requires. claude-agent-acp through 0.66 can acknowledge an injected steer,
-/// reject the owning `session/prompt`, then stream the steered answer after the
-/// turn has ended (upstream issue #934). The adapter does not yet advertise a
-/// capability that distinguishes a fixed lifecycle, so keep its messages on
-/// loom's durable next-turn queue meanwhile. Other adapters retain their
-/// advertised behavior.
-fn reliable_steering(init: &wire::InitializeResult) -> bool {
-    init.meta.steering.supported
-        && init
-            .agent_info
-            .as_ref()
-            .is_none_or(|agent| agent.name != CLAUDE_AGENT_ACP)
 }
 
 /// A live session's control surface, held in the [`AcpRegistry`]: send commands
@@ -588,27 +564,20 @@ impl AcpHandle {
         self.metadata.lock().unwrap().clone()
     }
 
-    /// Send a user message: dispatched as a `session/prompt` when idle, steered
-    /// into a live turn when the adapter advertises support, or appended to the
-    /// durable queue otherwise.
+    /// Send a user message: dispatched as a `session/prompt` when idle or
+    /// appended to the durable next-turn queue while the agent is working.
     pub async fn prompt(
         &self,
         text: String,
         by: Option<String>,
-        force_steer: bool,
         resources: Vec<Value>,
     ) -> Result<PromptAck> {
-        let delivery = if force_steer {
-            PromptDelivery::ForceSteer
-        } else {
-            PromptDelivery::Queue
-        };
-        self.send_prompt(text, by, delivery, resources).await
+        self.send_prompt(text, by, PromptDelivery::Queue, resources)
+            .await
     }
 
     /// Deliver a cross-session send without leaving it behind a live turn:
-    /// steer when the adapter supports it, otherwise cancel the current turn
-    /// and start the message normally.
+    /// cancel the current turn and start the message normally.
     pub async fn send_now(
         &self,
         text: String,
@@ -641,10 +610,9 @@ impl AcpHandle {
             .map_err(|_| anyhow!("acp task dropped the reply"))?
     }
 
-    /// Send the current durable next-turn queue now: promote it when the adapter
-    /// advertises steering, otherwise cancel the live turn and start it normally.
-    /// The task reads the queue itself so the browser cannot accidentally send
-    /// stale or partial text.
+    /// Send the current durable next-turn queue now, cancelling a live turn
+    /// first when necessary. The task reads the queue itself so the browser
+    /// cannot accidentally send stale or partial text.
     pub async fn force_pending(&self, by: Option<String>) -> Result<PromptAck> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -906,7 +874,6 @@ impl AcpRegistry {
                     if acknowledge {
                         let _ = reply.send(Ok(PromptAck {
                             queued: false,
-                            steered: false,
                             turn: Some(0),
                         }));
                     } else {
@@ -946,7 +913,6 @@ impl AcpRegistry {
                     let _ = prompts.send((text, by));
                     let _ = reply.send(Ok(PromptAck {
                         queued: false,
-                        steered: false,
                         turn: Some(0),
                     }));
                 }
@@ -1193,9 +1159,7 @@ pub async fn attach(state: &AcpCtx, session_id: &str) -> Result<()> {
 enum PromptDelivery {
     /// Preserve the conversation composer's queue-first behavior.
     Queue,
-    /// Require the adapter's steering extension and surface rejection.
-    ForceSteer,
-    /// Cross-session control: steer, or cancel and restart as a fallback.
+    /// Cross-session control: cancel and restart immediately.
     Immediate,
 }
 
@@ -1398,23 +1362,6 @@ struct PendingPerm {
     frame_seq: u64,
 }
 
-/// A `_session/steering` request waiting for the adapter's acceptance response.
-struct PendingSteer {
-    text: String,
-    by: Option<String>,
-    turn: i64,
-    delivery: PromptDelivery,
-    /// Exact durable queue prefix promoted by this request. Consumed only after
-    /// the adapter accepts steering, preserving messages appended behind it.
-    promoted_queue: Option<String>,
-    resources: Vec<Value>,
-    /// Forced and immediate delivery wait for the adapter's final answer. An
-    /// ordinary composer prompt is acknowledged as durably queued before
-    /// steering starts, so it carries no waiting HTTP reply and cannot lock the
-    /// composer behind a private RPC.
-    reply: Option<oneshot::Sender<Result<PromptAck>>>,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TurnEndSource {
     MatchingPromptResponse,
@@ -1476,15 +1423,9 @@ struct Task {
     pending_config: HashMap<u64, oneshot::Sender<Result<AcpMetadata>>>,
     #[allow(dead_code)]
     load_session_cap: bool,
-    /// codex-acp advertises this experimental extension in
-    /// `_meta.steering.supported`; other adapters keep queue semantics.
-    steering_cap: bool,
-    pending_steers: HashMap<u64, PendingSteer>,
-    /// A turn started internally by the steering extension after the previous
-    /// turn raced to completion. It has no `session/prompt` response id, so its
-    /// end is taken from codex-acp's `session_info_update` idle edge.
+    /// A recovered adapter-owned turn with no prompt response id. Normal turns
+    /// are closed by their prompt response instead.
     external_turn: bool,
-    pending_external: Option<PendingSteer>,
     /// A cancelled turn may be followed by the adapter's presentation-only
     /// "Conversation interrupted" prose after the next turn has already begun.
     /// Consume that one notice rather than journaling it under the wrong turn.
@@ -1557,10 +1498,7 @@ impl Task {
             pending_mode: HashMap::new(),
             pending_config: HashMap::new(),
             load_session_cap: false,
-            steering_cap: false,
-            pending_steers: HashMap::new(),
             external_turn: false,
-            pending_external: None,
             pending_interrupt_notice_through: None,
             suppress_journal: false,
             highest_seq: 0,
@@ -1616,7 +1554,6 @@ impl Task {
         let turns_dispatched = if max_seq < 0 { 0 } else { current_turn + 1 };
 
         let metadata = Self::load_persisted_metadata(&state.db, &session.id).await?;
-        let steering_cap = metadata.steering_supported;
         Ok(Self {
             db: state.db.clone(),
             bus: state.bus.clone(),
@@ -1646,10 +1583,7 @@ impl Task {
             pending_mode: HashMap::new(),
             pending_config: HashMap::new(),
             load_session_cap: false,
-            steering_cap,
-            pending_steers: HashMap::new(),
             external_turn,
-            pending_external: None,
             pending_interrupt_notice_through: None,
             suppress_journal: false,
             highest_seq: session.acp_ack_seq.max(0) as u64,
@@ -1824,17 +1758,6 @@ impl Task {
         let res = res.ok_or_else(|| anyhow!("initialize failed: {err:?}"))?;
         if let Ok(init) = serde_json::from_value::<wire::InitializeResult>(res) {
             self.load_session_cap = init.agent_capabilities.load_session;
-            self.steering_cap = reliable_steering(&init);
-            if init.meta.steering.supported && !self.steering_cap {
-                let agent = init.agent_info.as_ref();
-                tracing::warn!(
-                    session = %self.session_id,
-                    agent = agent.map(|info| info.name.as_str()).unwrap_or("unknown"),
-                    version = agent.map(|info| info.version.as_str()).unwrap_or("unknown"),
-                    "ignoring ACP steering capability with unsafe prompt ownership"
-                );
-            }
-            self.metadata.lock().unwrap().steering_supported = self.steering_cap;
         }
 
         match &launch.new_or_load {
@@ -2385,11 +2308,6 @@ impl Task {
         let Some(id) = inc.id.as_ref().and_then(Value::as_u64) else {
             return;
         };
-        if let Some(pending) = self.pending_steers.remove(&id) {
-            self.on_steering_response(pending, inc.result, inc.error)
-                .await;
-            return;
-        }
         if let Some(pending) = self.pending_mode.remove(&id) {
             let result = if let Some(error) = inc.error {
                 Err(anyhow!("session/set_mode failed: {error}"))
@@ -2551,6 +2469,7 @@ impl Task {
         // client that reacts to the event sees a consistent `live_turn`.
         self.turn_live = false;
         self.inflight_prompt = None;
+        self.external_turn = false;
         self.effective_mode = None;
         let _ = session::set_inflight(&self.db, &self.session_id, None).await;
         self.emit(
@@ -2566,21 +2485,6 @@ impl Task {
         // turn feedback they have not seen acknowledged into another running
         // turn; leave the durable queue visible until they explicitly send it.
         if stop == "cancelled" {
-            return;
-        }
-
-        // The steering extension may have raced this boundary and started the
-        // user's message as a fresh adapter-owned turn. Adopt it before the
-        // ordinary durable queue so prompts retain their arrival order.
-        if let Some(pending) = self.pending_external.take() {
-            self.begin_external_turn(pending).await;
-            return;
-        }
-
-        // A steering request can finish just after the original prompt. Let its
-        // response decide whether the adapter already started the next turn
-        // before dispatching any later, durably queued message.
-        if !self.pending_steers.is_empty() {
             return;
         }
 
@@ -2717,144 +2621,6 @@ impl Task {
         }
     }
 
-    async fn on_steering_response(
-        &mut self,
-        pending: PendingSteer,
-        result: Option<Value>,
-        error: Option<Value>,
-    ) {
-        let outcome = result
-            .and_then(|v| serde_json::from_value::<wire::SteeringResult>(v).ok())
-            .map(|r| r.outcome);
-        match (outcome, error) {
-            (Some(wire::SteeringOutcome::Injected), None) => {
-                self.consume_promoted_queue(&pending).await;
-                // A steer belongs to the live turn rather than opening another
-                // item in the turn index. Journal it only after the adapter has
-                // accepted it; a rejected extension falls back without leaving
-                // a phantom message in the transcript.
-                self.current_turn = pending.turn;
-                // The steering response is ordered after everything the adapter
-                // emitted before accepting the user's message. Commit any prose
-                // already visible over SSE before assigning the prompt its
-                // journal sequence, or a later buffer flush moves that earlier
-                // response below the user's follow-up on refresh.
-                self.flush_buf().await;
-                let by = pending.by.map(Value::from).unwrap_or(Value::Null);
-                self.journal_block(
-                    kind::USER_MESSAGE,
-                    json!({
-                        "text": pending.text,
-                        "by": by,
-                        "steered": true,
-                        "resources": pending.resources,
-                    }),
-                )
-                .await;
-                if let Some(reply) = pending.reply {
-                    let _ = reply.send(Ok(PromptAck {
-                        queued: false,
-                        steered: true,
-                        turn: Some(pending.turn),
-                    }));
-                }
-                if !self.turn_live {
-                    self.dispatch_pending_prompt().await;
-                }
-            }
-            (Some(wire::SteeringOutcome::StartedNewTurn), None) => {
-                self.consume_promoted_queue(&pending).await;
-                if self.turn_live {
-                    // codex-acp waits for its old prompt to settle before taking
-                    // this branch. Keep the request until loom consumes that
-                    // prompt response, then adopt the already-started turn.
-                    self.pending_external = Some(pending);
-                } else {
-                    self.begin_external_turn(pending).await;
-                }
-            }
-            (outcome, error) => {
-                tracing::warn!(
-                    session = %self.session_id,
-                    ?outcome,
-                    ?error,
-                    "steering failed"
-                );
-                match pending.delivery {
-                    PromptDelivery::Queue => self.fallback_prompt(pending).await,
-                    PromptDelivery::ForceSteer => {
-                        let detail = error
-                            .map(|e| e.to_string())
-                            .unwrap_or_else(|| format!("adapter returned {outcome:?}"));
-                        if let Some(reply) = pending.reply {
-                            let _ =
-                                reply.send(Err(anyhow!("adapter rejected forced steer: {detail}")));
-                        }
-                    }
-                    PromptDelivery::Immediate => {
-                        let result = self
-                            .restart_prompt(pending.text, pending.by, pending.resources)
-                            .await;
-                        if let Some(reply) = pending.reply {
-                            let _ = reply.send(result);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    async fn consume_promoted_queue(&self, pending: &PendingSteer) {
-        let Some(promoted) = pending.promoted_queue.as_deref() else {
-            return;
-        };
-        if let Err(error) =
-            session::consume_pending_prompt(&self.db, &self.session_id, promoted).await
-        {
-            // The adapter has already accepted the feedback, so continue the
-            // turn and make the durability failure loud. A healthy database
-            // preserves any messages appended behind the promoted prefix.
-            tracing::error!(
-                session = %self.session_id,
-                %error,
-                "steered queued feedback but could not consume its durable copy"
-            );
-        } else {
-            match session::read_pending_prompt(&self.db, &self.session_id).await {
-                Ok(remaining) => {
-                    self.emit_queue((!remaining.trim().is_empty()).then_some(remaining.as_str()));
-                }
-                Err(error) => tracing::error!(
-                    session = %self.session_id,
-                    %error,
-                    "consumed steered feedback but could not refresh the queue view"
-                ),
-            }
-        }
-    }
-
-    async fn fallback_prompt(&mut self, pending: PendingSteer) {
-        let ack = if pending.promoted_queue.is_some() {
-            if self.turn_live {
-                Ok(PromptAck {
-                    queued: true,
-                    steered: false,
-                    turn: Some(self.current_turn),
-                })
-            } else {
-                self.start_pending_prompt(pending.by).await
-            }
-        } else if self.turn_live {
-            self.queue_prompt(&pending.text, &pending.resources).await
-        } else {
-            self.start_prompt(pending.text, pending.by, pending.resources)
-                .await
-        };
-        if let Some(reply) = pending.reply {
-            let _ = reply.send(ack);
-        }
-    }
-
     async fn restart_prompt(
         &mut self,
         text: String,
@@ -2868,27 +2634,13 @@ impl Task {
     }
 
     async fn queue_prompt(&self, text: &str, resources: &[Value]) -> Result<PromptAck> {
-        self.queue_prompt_with_value(text, resources)
-            .await
-            .map(|(ack, _)| ack)
-    }
-
-    async fn queue_prompt_with_value(
-        &self,
-        text: &str,
-        resources: &[Value],
-    ) -> Result<(PromptAck, String)> {
         let queued = queued_prompt_text(text, resources);
         let pending = session::append_pending_prompt(&self.db, &self.session_id, &queued).await?;
         self.emit_queue(Some(&pending));
-        Ok((
-            PromptAck {
-                queued: true,
-                steered: false,
-                turn: Some(self.current_turn),
-            },
-            pending,
-        ))
+        Ok(PromptAck {
+            queued: true,
+            turn: Some(self.current_turn),
+        })
     }
 
     async fn start_pending_prompt(&mut self, by: Option<String>) -> Result<PromptAck> {
@@ -2913,69 +2665,8 @@ impl Task {
         self.start_turn(text, by, resources).await?;
         Ok(PromptAck {
             queued: false,
-            steered: false,
             turn: Some(self.current_turn),
         })
-    }
-
-    async fn begin_external_turn(&mut self, pending: PendingSteer) {
-        let turn = if self.turns_dispatched > 0 {
-            self.current_turn + 1
-        } else {
-            self.current_turn
-        };
-        self.effective_mode = self.current_mode.clone();
-        let inflight = json!({
-            "turn": turn,
-            "external": true,
-            "mode": self.effective_mode,
-        })
-        .to_string();
-        let persisted = session::set_inflight(&self.db, &self.session_id, Some(&inflight)).await;
-        if let Err(e) = persisted {
-            if let Some(reply) = pending.reply {
-                let _ = reply.send(Err(e));
-            }
-            return;
-        }
-        self.current_turn = turn;
-        if self
-            .pending_interrupt_notice_through
-            .is_some_and(|through| self.current_turn > through)
-        {
-            self.pending_interrupt_notice_through = None;
-        }
-        self.next_seq = 0;
-        self.turns_dispatched += 1;
-        self.turn_live = true;
-        self.external_turn = true;
-        self.emit(
-            "turn",
-            json!({
-                "turn": self.current_turn,
-                "state": "started",
-                "effective_mode": self.effective_mode,
-            }),
-        );
-        let by = pending.by.map(Value::from).unwrap_or(Value::Null);
-        self.journal_block(
-            kind::USER_MESSAGE,
-            json!({
-                "text": pending.text,
-                "by": by,
-                "steered": false,
-                "resources": pending.resources,
-            }),
-        )
-        .await;
-        crate::status::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "working").await;
-        if let Some(reply) = pending.reply {
-            let _ = reply.send(Ok(PromptAck {
-                queued: false,
-                steered: false,
-                turn: Some(self.current_turn),
-            }));
-        }
     }
 
     async fn start_turn(
@@ -3363,16 +3054,6 @@ impl Task {
             // turn and its direct successor so unrelated future prose is never
             // mistaken for adapter chrome if this adapter emits no notice.
             self.pending_interrupt_notice_through = Some(self.current_turn + 1);
-            for (_, pending) in self.pending_steers.drain() {
-                if let Some(reply) = pending.reply {
-                    let _ = reply.send(Err(anyhow!("turn was cancelled")));
-                }
-            }
-            if let Some(pending) = self.pending_external.take() {
-                if let Some(reply) = pending.reply {
-                    let _ = reply.send(Err(anyhow!("turn was cancelled")));
-                }
-            }
             // Cancellation is a client-owned boundary. Some adapters do not
             // answer the cancelled prompt, so settle loom's journal and
             // lifecycle immediately after the notification lands.
@@ -3407,160 +3088,55 @@ impl Task {
                 resources,
                 reply,
             } => {
-                if self.turn_live {
-                    if self.steering_cap
-                        && self.pending_steers.is_empty()
-                        && self.pending_external.is_none()
-                    {
-                        let id = self.next_id();
-                        let request = wire::request_line(
-                            id,
-                            method::SESSION_STEERING,
-                            wire::steering_params(&self.acp_session_id, &text, &resources),
-                        );
-                        if delivery != PromptDelivery::Queue {
-                            // Explicit steering reports the adapter's real answer
-                            // and does not also leave a queued copy behind if the
-                            // private extension is rejected.
-                            match self.stream.write(&request).await {
-                                Ok(()) => {
-                                    self.pending_steers.insert(
-                                        id,
-                                        PendingSteer {
-                                            text,
-                                            by,
-                                            turn: self.current_turn,
-                                            delivery,
-                                            promoted_queue: None,
-                                            resources,
-                                            reply: Some(reply),
-                                        },
-                                    );
-                                }
-                                Err(error) => {
-                                    let result = if delivery == PromptDelivery::Immediate {
-                                        self.restart_prompt(text, by, resources).await
-                                    } else {
-                                        Err(error)
-                                    };
-                                    let _ = reply.send(result);
-                                }
-                            }
+                match delivery {
+                    PromptDelivery::Queue => {
+                        let ack = if self.turn_live {
+                            // A failed queue write must surface — a 202 that
+                            // silently dropped the prompt would be worse than an
+                            // error.
+                            self.queue_prompt(&text, &resources).await
                         } else {
-                            // Durability and the HTTP acknowledgement come before
-                            // the private steering RPC. If the adapter hangs,
-                            // rejects, or disappears, the message remains visibly
-                            // queued and the browser can keep accepting feedback.
-                            match self.queue_prompt_with_value(&text, &resources).await {
-                                Ok((queued_ack, promoted_queue)) => {
-                                    match self.stream.write(&request).await {
-                                        Ok(()) => {
-                                            let _ = reply.send(Ok(queued_ack));
-                                            self.pending_steers.insert(
-                                                id,
-                                                PendingSteer {
-                                                    text,
-                                                    by,
-                                                    turn: self.current_turn,
-                                                    delivery,
-                                                    promoted_queue: Some(promoted_queue),
-                                                    resources,
-                                                    reply: None,
-                                                },
-                                            );
-                                        }
-                                        Err(error) => {
-                                            tracing::warn!(session = %self.session_id, %error,
-                                                "steering write failed; feedback remains queued");
-                                            let _ = reply.send(Ok(queued_ack));
-                                        }
+                            match session::read_pending_prompt(&self.db, &self.session_id).await {
+                                Ok(pending) if !pending.trim().is_empty() => {
+                                    // A stopped turn can leave earlier feedback
+                                    // waiting. Append the new input and send the
+                                    // whole backlog in arrival order.
+                                    match self.queue_prompt(&text, &resources).await {
+                                        Ok(_) => self.start_pending_prompt(by).await,
+                                        Err(error) => Err(error),
                                     }
                                 }
-                                Err(error) => {
-                                    let _ = reply.send(Err(error));
-                                }
+                                Ok(_) => self.start_prompt(text, by, resources).await,
+                                Err(error) => Err(error),
                             }
-                        }
-                    } else {
-                        match delivery {
-                            PromptDelivery::Queue => {
-                                // A failed queue write must surface — a 202 that
-                                // silently dropped the prompt would be worse
-                                // than an error.
-                                let ack = self.queue_prompt(&text, &resources).await;
-                                let _ = reply.send(ack);
-                            }
-                            PromptDelivery::ForceSteer => {
-                                let message = if self.steering_cap {
-                                    "another steer is still pending; retry when it settles"
-                                } else {
-                                    "this agent does not support steering; queue the feedback or stop and send it"
-                                };
-                                let _ = reply.send(Err(anyhow!(message)));
-                            }
-                            PromptDelivery::Immediate => {
-                                let ack = self.restart_prompt(text, by, resources).await;
-                                let _ = reply.send(ack);
-                            }
-                        }
+                        };
+                        let _ = reply.send(ack);
                     }
-                } else {
-                    let ack = self.start_prompt(text, by, resources).await;
-                    let _ = reply.send(ack);
+                    PromptDelivery::Immediate => {
+                        let ack = self.restart_prompt(text, by, resources).await;
+                        let _ = reply.send(ack);
+                    }
                 }
             }
             Command::ForcePending { by, reply } => {
-                if !self.pending_steers.is_empty() || self.pending_external.is_some() {
-                    let _ = reply.send(Err(anyhow!(
-                        "another steer is still pending; retry when it settles"
-                    )));
-                } else {
-                    let queued =
-                        match session::read_pending_prompt(&self.db, &self.session_id).await {
-                            Ok(queued) => queued,
-                            Err(error) => {
-                                let _ = reply.send(Err(error));
-                                return;
-                            }
-                        };
-                    if queued.trim().is_empty() {
-                        let _ = reply.send(Err(anyhow!("there is no queued feedback to send")));
-                    } else if !self.turn_live {
-                        let result = self.start_pending_prompt(by).await;
-                        let _ = reply.send(result);
-                    } else if !self.steering_cap {
-                        let result = match self.cancel_live_turn().await {
-                            Ok(()) => self.start_pending_prompt(by).await,
-                            Err(error) => Err(error),
-                        };
-                        let _ = reply.send(result);
-                    } else {
-                        let id = self.next_id();
-                        let request = wire::request_line(
-                            id,
-                            method::SESSION_STEERING,
-                            wire::steering_params(&self.acp_session_id, &queued, &[]),
-                        );
-                        match self.stream.write(&request).await {
-                            Ok(()) => {
-                                self.pending_steers.insert(
-                                    id,
-                                    PendingSteer {
-                                        text: queued.clone(),
-                                        by,
-                                        turn: self.current_turn,
-                                        delivery: PromptDelivery::ForceSteer,
-                                        promoted_queue: Some(queued),
-                                        resources: Vec::new(),
-                                        reply: Some(reply),
-                                    },
-                                );
-                            }
-                            Err(error) => {
-                                let _ = reply.send(Err(error));
-                            }
-                        }
+                let queued = match session::read_pending_prompt(&self.db, &self.session_id).await {
+                    Ok(queued) => queued,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return;
                     }
+                };
+                if queued.trim().is_empty() {
+                    let _ = reply.send(Err(anyhow!("there is no queued feedback to send")));
+                } else if !self.turn_live {
+                    let result = self.start_pending_prompt(by).await;
+                    let _ = reply.send(result);
+                } else {
+                    let result = match self.cancel_live_turn().await {
+                        Ok(()) => self.start_pending_prompt(by).await,
+                        Err(error) => Err(error),
+                    };
+                    let _ = reply.send(result);
                 }
             }
             Command::NotifyPending { reply } => {
@@ -3570,13 +3146,11 @@ impl Task {
                 if self.turn_live {
                     let _ = reply.send(Ok(PromptAck {
                         queued: true,
-                        steered: false,
                         turn: Some(self.current_turn),
                     }));
                 } else if self.dispatch_review_inbox().await {
                     let _ = reply.send(Ok(PromptAck {
                         queued: false,
-                        steered: false,
                         turn: Some(self.current_turn),
                     }));
                 } else {
@@ -3586,25 +3160,15 @@ impl Task {
                 }
             }
             Command::RetractPending { reply } => {
-                // A steering RPC may already have handed this text to the
-                // adapter even though its durable fallback is still visible.
-                // Once that request is in flight, claiming the text is editable
-                // would be a lie: the eventual response can consume or run it.
-                if !self.pending_steers.is_empty() || self.pending_external.is_some() {
-                    let _ = reply.send(Err(anyhow!(
-                        "queued feedback is already being steered; wait for it to settle"
-                    )));
-                } else {
-                    let result = session::take_pending_prompt(&self.db, &self.session_id)
-                        .await
-                        .and_then(|pending| {
-                            pending.ok_or_else(|| anyhow!("there is no queued feedback to edit"))
-                        });
-                    if result.is_ok() {
-                        self.emit_queue(None);
-                    }
-                    let _ = reply.send(result);
+                let result = session::take_pending_prompt(&self.db, &self.session_id)
+                    .await
+                    .and_then(|pending| {
+                        pending.ok_or_else(|| anyhow!("there is no queued feedback to edit"))
+                    });
+                if result.is_ok() {
+                    self.emit_queue(None);
                 }
+                let _ = reply.send(result);
             }
             Command::Cancel { reply } => {
                 let _ = reply.send(self.cancel_live_turn().await);

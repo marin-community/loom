@@ -60,7 +60,7 @@ async function launchAcpSession(
       name: 'acp-fake',
       label: 'ACP fake',
       setup: '',
-      launch: `FAKE_ACP_STEERING=1 node ${FAKE_AGENT}`,
+      launch: `node ${FAKE_AGENT}`,
       resume: '',
       reports_status: false,
       protocol: 'acp',

@@ -353,12 +353,12 @@ route truth, including internal proxy and compatibility paths.
 | `GET /api/sessions/{id}/history` | a bounded newest-tail page of provider-neutral records in chronological display order; `before`, `limit`, and `kinds` own backward pagination/filtering |
 | `GET /api/sessions/{id}/history/search` | case-insensitive literal `q` search over the same session-scoped records and cursor/filter contract |
 | `GET /api/sessions/{id}/terminal` | WebSocket: xterm.js ⇄ the session's tapestry PTY (the interaction surface) |
-| `POST /api/sessions/{id}/send` | deliver `{text}` to the agent (`submit`, default true, follows terminal input with Enter); for an `acp` session a live turn is steered when supported, otherwise cancelled and immediately replaced by a new turn, keeping the same `nudge` audit |
+| `POST /api/sessions/{id}/send` | deliver `{text}` to the agent (`submit`, default true, follows terminal input with Enter); for an `acp` session a live turn is cancelled and immediately replaced by a new turn, keeping the same `nudge` audit |
 | `POST /api/sessions/{id}/interrupt` | stop the current turn — a break (Escape) to the terminal for a `terminal` session, `session/cancel` for an `acp` one |
 | `GET /api/sessions/{id}/preview?lines=N` | capture the screen as `{screen}`; `lines` adds scrollback above the visible screen (for an `acp` session, `{screen}` is the last `lines` journal blocks rendered as compact text) |
 | `GET /api/sessions/{id}/chat` | The newest 200 blocks of the ACP session's DB-backed journal, `older_cursor`, live-turn state, pending prompt, effective mode, and durable composer metadata (the last provider-advertised controls remain after provider exit/restart); pass the cursor as `before_turn` + `before_seq` to page backward |
 | `GET /api/sessions/{id}/chat/stream` | SSE tail of the live journal: `block` (a committed block), `delta` (a streaming message/thought chunk), `tool` (a live tool-call update), `turn` (started / ended), `resync` (the bounded live buffer overran; reload the durable snapshot) |
-| `POST /api/sessions/{id}/prompt` | `{text}` → 202 `{queued, steered, turn}` — dispatch a user message as a `session/prompt`; a live turn uses a lifecycle-safe advertised steering extension, with the durable next-turn queue as fallback |
+| `POST /api/sessions/{id}/prompt` | `{text}` → 202 `{queued, turn}` — dispatch a user message as a `session/prompt`; while a turn is live, append it to the durable next-turn queue |
 | `DELETE /api/sessions/{id}/prompt` | atomically retract unseen next-turn feedback and return `{text}` for editing; 409 when the current ACP state has no queue available to retract |
 | `POST /api/sessions/{id}/permissions/{request_id}` | `{option_id}` → answer an open permission request (200 / 404 unknown / 409 already resolved) |
 | `PUT /api/sessions/{id}/mode` | `{mode_id}` → change the ACP session's permission mode (`session/set_mode`), journaled as a `mode_change` |
@@ -484,8 +484,8 @@ let an agent or script type into, interrupt, or read back a child session
 uniformly. For a `terminal` session each requires a live terminal (else 409). An
 `acp` session has no PTY, so the same verbs map onto the protocol — keeping the
 CLI (`loom session {send,interrupt,preview}`) and its `nudge` audit uniform across
-backends: `send` delegates to the prompt path (steered when supported, otherwise
-cancelled and restarted with the message), `interrupt` is a `session/cancel`,
+backends: `send` cancels a live turn and starts the message as a normal prompt,
+`interrupt` is a `session/cancel`,
 and `preview` renders the last journal blocks as compact plain text instead of
 a vt100 screen capture.
 
