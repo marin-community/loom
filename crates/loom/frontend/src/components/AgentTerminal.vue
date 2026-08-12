@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, onMounted, onActivated, onUnmounted, nextTick } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
@@ -376,6 +376,10 @@ onMounted(async () => {
   document.addEventListener('visibilitychange', onVisible);
   connect();
 });
+
+// Session pages stay warm while the operator jumps around the fleet. Returning
+// to one should show what the agent is doing now, not an old scrollback position.
+onActivated(() => term?.scrollToBottom());
 
 onUnmounted(() => {
   disposed = true;

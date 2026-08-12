@@ -423,4 +423,49 @@ test.describe('session detail view', () => {
       timeout: 20_000,
     });
   });
+
+  test('returns to the end of terminal scrollback after leaving a session', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({
+      goal: 'Keep the latest output in view',
+      name: 'term-return',
+    });
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await expect(page.getByTestId('term-status')).toHaveCount(0, { timeout: 20_000 });
+
+    const sent = await fetch(`${weaver.baseUrl}/api/sessions/${s.id}/send`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'seq 1 200', submit: true }),
+    });
+    expect(sent.ok).toBe(true);
+
+    // xterm 6 uses a model-backed custom scrollbar rather than native
+    // scrollTop. Its slider position is the rendered view of that model.
+    const scrollable = page.locator('.xterm-scrollable-element');
+    const scrollbar = scrollable.locator('> .scrollbar.vertical');
+    const slider = scrollbar.locator('> .slider');
+    const sliderPosition = () =>
+      slider.evaluate((element) => ({
+        top: (element as HTMLElement).offsetTop,
+        max:
+          (element.parentElement as HTMLElement).clientHeight -
+          (element as HTMLElement).offsetHeight,
+      }));
+    await expect(scrollbar).toHaveClass(/visible/);
+
+    await scrollable.hover();
+    await page.mouse.wheel(0, -10_000);
+    await expect.poll(async () => (await sliderPosition()).top).toBeLessThan(10);
+
+    await page.locator('[data-rail="sessions"]').click();
+    await page.goBack();
+    await expect(page).toHaveURL(`${weaver.baseUrl}/s/${s.id}`);
+    await expect.poll(async () => {
+      const { top, max } = await sliderPosition();
+      return max - top;
+    }).toBeLessThan(10);
+  });
 });
