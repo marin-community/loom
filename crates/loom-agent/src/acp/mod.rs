@@ -1365,6 +1365,7 @@ struct PendingPerm {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TurnEndSource {
     MatchingPromptResponse,
+    UserCancellation,
     Synthetic,
 }
 
@@ -1374,6 +1375,7 @@ impl TurnEndSource {
             Self::MatchingPromptResponse => {
                 crate::review_inbox::ReviewClaimSettlement::MatchingPromptResponse
             }
+            Self::UserCancellation => crate::review_inbox::ReviewClaimSettlement::UserCancelled,
             Self::Synthetic => crate::review_inbox::ReviewClaimSettlement::Abandoned,
         }
     }
@@ -1430,6 +1432,11 @@ struct Task {
     /// "Conversation interrupted" prose after the next turn has already begun.
     /// Consume that one notice rather than journaling it under the wrong turn.
     pending_interrupt_notice_through: Option<i64>,
+    /// A successful user Stop prevents every automatic source (the ordinary
+    /// queue and protected review notifier) from opening another turn. An
+    /// explicit prompt/force-send clears the latch. The newest durable
+    /// `turn_end(cancelled)` restores it when this task is re-adopted.
+    automatic_dispatch_paused: bool,
     /// Latched for the duration of a `session/load` replay: the adapter re-streams
     /// the whole conversation as `session/update` notifications, but we already
     /// hold it in the journal, so journal writes are suppressed (and the seq
@@ -1500,6 +1507,7 @@ impl Task {
             load_session_cap: false,
             external_turn: false,
             pending_interrupt_notice_through: None,
+            automatic_dispatch_paused: false,
             suppress_journal: false,
             highest_seq: 0,
             acked: 0,
@@ -1548,6 +1556,11 @@ impl Task {
             .and_then(Value::as_str)
             .map(str::to_string);
         let current_turn = live_turn.unwrap_or(max_turn);
+        let automatic_dispatch_paused = live_turn.is_none()
+            && chat::latest_stop_reason(&state.db, &session.id)
+                .await?
+                .as_deref()
+                == Some("cancelled");
         // The journal always holds at least this turn's `user_message`, so
         // `max_seq + 1` continues the turn without colliding.
         let next_seq = max_seq + 1;
@@ -1585,6 +1598,7 @@ impl Task {
             load_session_cap: false,
             external_turn,
             pending_interrupt_notice_through: None,
+            automatic_dispatch_paused,
             suppress_journal: false,
             highest_seq: session.acp_ack_seq.max(0) as u64,
             acked: session.acp_ack_seq.max(0) as u64,
@@ -2419,9 +2433,11 @@ impl Task {
         error: Option<Value>,
         source: TurnEndSource,
     ) {
-        // A synthetic cancellation is not an acknowledgement from the adapter.
-        // Release before making the task idle so the immutable prompt can retry
-        // or rehome, and never let synthetic settlement consume the claim.
+        // A provider-synthesized turn end is not an acknowledgement from the
+        // adapter. Release before making the task idle so the immutable prompt
+        // can retry or rehome. A user cancellation is different: the protected
+        // prompt is already durably journaled and Stop is authoritative, so it
+        // consumes that delivery instead of replaying it into another turn.
         let settlement = source.review_claim_settlement();
         if settlement == crate::review_inbox::ReviewClaimSettlement::Abandoned {
             self.settle_inflight_review(settlement, "synthetic turn settlement")
@@ -2457,9 +2473,13 @@ impl Task {
             self.journal_block(kind::TURN_END, json!({ "stop_reason": stop }))
                 .await;
         }
-        if settlement == crate::review_inbox::ReviewClaimSettlement::MatchingPromptResponse {
-            self.settle_inflight_review(settlement, "matching ACP prompt response")
-                .await;
+        if settlement != crate::review_inbox::ReviewClaimSettlement::Abandoned {
+            let reason = match source {
+                TurnEndSource::MatchingPromptResponse => "matching ACP prompt response",
+                TurnEndSource::UserCancellation => "authoritative user cancellation",
+                TurnEndSource::Synthetic => unreachable!("abandoned settlements run above"),
+            };
+            self.settle_inflight_review(settlement, reason).await;
         }
         self.finish_turn_state(turn, &stop).await;
     }
@@ -2492,6 +2512,9 @@ impl Task {
     }
 
     async fn dispatch_review_inbox(&mut self) -> bool {
+        if self.automatic_dispatch_paused {
+            return false;
+        }
         if self.refuse_if_turn_capped().await.is_err() {
             return false;
         }
@@ -2584,6 +2607,9 @@ impl Task {
         // handoff has re-let the session; letting it drain the queue would lose
         // the prompt against its dead relay.
         if !self.registry.is_current(&self.session_id, self.generation) {
+            return;
+        }
+        if self.automatic_dispatch_paused {
             return;
         }
         // Submitted review feedback is immutable and gets its own turn. It is
@@ -3049,6 +3075,7 @@ impl Task {
             ))
             .await;
         if result.is_ok() && self.turn_live {
+            self.automatic_dispatch_paused = true;
             // The adapter notice belongs to the cancelled turn even when it
             // arrives after an immediate restart. Bound suppression to that
             // turn and its direct successor so unrelated future prose is never
@@ -3061,7 +3088,7 @@ impl Task {
                 self.current_turn,
                 Some(json!({ "stopReason": "cancelled" })),
                 None,
-                TurnEndSource::Synthetic,
+                TurnEndSource::UserCancellation,
             )
             .await;
         }
@@ -3077,6 +3104,12 @@ impl Task {
                 .await;
         }
         result
+    }
+
+    fn resume_automatic_dispatch_on<T>(&mut self, explicit_send: &Result<T>) {
+        if explicit_send.is_ok() {
+            self.automatic_dispatch_paused = false;
+        }
     }
 
     async fn on_command(&mut self, cmd: Command) {
@@ -3110,10 +3143,12 @@ impl Task {
                                 Err(error) => Err(error),
                             }
                         };
+                        self.resume_automatic_dispatch_on(&ack);
                         let _ = reply.send(ack);
                     }
                     PromptDelivery::Immediate => {
                         let ack = self.restart_prompt(text, by, resources).await;
+                        self.resume_automatic_dispatch_on(&ack);
                         let _ = reply.send(ack);
                     }
                 }
@@ -3130,12 +3165,14 @@ impl Task {
                     let _ = reply.send(Err(anyhow!("there is no queued feedback to send")));
                 } else if !self.turn_live {
                     let result = self.start_pending_prompt(by).await;
+                    self.resume_automatic_dispatch_on(&result);
                     let _ = reply.send(result);
                 } else {
                     let result = match self.cancel_live_turn().await {
                         Ok(()) => self.start_pending_prompt(by).await,
                         Err(error) => Err(error),
                     };
+                    self.resume_automatic_dispatch_on(&result);
                     let _ = reply.send(result);
                 }
             }
@@ -3143,7 +3180,7 @@ impl Task {
                 // Submitted review feedback lives in the protected inbox, not
                 // the user-editable pending prompt. A live task picks it up at
                 // its next turn boundary; an idle task can start it now.
-                if self.turn_live {
+                if self.turn_live || self.automatic_dispatch_paused {
                     let _ = reply.send(Ok(PromptAck {
                         queued: true,
                         turn: Some(self.current_turn),
