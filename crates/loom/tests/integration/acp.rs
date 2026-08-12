@@ -1957,6 +1957,180 @@ async fn next_prompt_preserves_feedback_queued_before_an_interrupt() {
     }));
 }
 
+async fn insert_protected_review(
+    ts: &TestServer,
+    session_id: &str,
+    delivery_key: &str,
+    payload: &str,
+) {
+    let session = ts.client.get_session(session_id).await.unwrap();
+    let inserted = sqlx::query(
+        "INSERT INTO reviews
+            (repo_root, branch_id, session_id, subject_kind, subject_id,
+             subject_key, subject_label, subject_version, status, created_by,
+             delivery_state, delivery_key)
+         VALUES (?, ?, ?, 'artifact', ?, 'design', 'design', '1',
+                 'submitted', 'alice', 'delivered', ?)",
+    )
+    .bind(&session.branch.repo_root)
+    .bind(&session.branch.id)
+    .bind(session_id)
+    .bind(delivery_key)
+    .bind(delivery_key)
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO review_conversation_inbox
+            (delivery_key, review_id, branch_id, preferred_session_id, payload)
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(delivery_key)
+    .bind(inserted.last_insert_rowid())
+    .bind(&session.branch.id)
+    .bind(session_id)
+    .bind(payload)
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+}
+
+/// A protected review has crossed its durable delivery boundary before its
+/// turn becomes visible. Stopping that turn acknowledges the delivery instead
+/// of putting the same immutable message back into the retry lane.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupting_a_review_turn_does_not_redeliver_it() {
+    let ts = TestServer::start().await;
+    let id = "acp-stop-review";
+    let delivery_key = "review:stop-once";
+    let payload = "wait:3000|say:must-not-complete";
+    start_new(&ts, id, None, None).await;
+    insert_protected_review(&ts, id, delivery_key, payload).await;
+
+    ts.state
+        .acp
+        .get(id)
+        .unwrap()
+        .notify_pending()
+        .await
+        .unwrap();
+    poll_chat(&ts, id, Duration::from_secs(5), |blocks| {
+        blocks
+            .iter()
+            .any(|block| block["kind"] == "user_message" && block["payload"]["text"] == payload)
+    })
+    .await;
+    ts.client
+        .post(&format!("/api/sessions/{id}/interrupt"), json!({}))
+        .await
+        .unwrap();
+
+    // Exercise both the direct wake and the same sweep that found the live
+    // incident. Neither may turn the consumed item back into work.
+    loom::review_delivery::drain(&ts.state).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let chat = ts
+        .client
+        .get(&format!("/api/sessions/{id}/chat"))
+        .await
+        .unwrap();
+    assert_eq!(chat["live_turn"], Value::Null);
+    assert_eq!(
+        chat["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|block| {
+                block["kind"] == "user_message" && block["payload"]["text"] == payload
+            })
+            .count(),
+        1
+    );
+    let state: String =
+        sqlx::query_scalar("SELECT state FROM review_conversation_inbox WHERE delivery_key = ?")
+            .bind(delivery_key)
+            .fetch_one(&ts.state.db)
+            .await
+            .unwrap();
+    assert_eq!(state, "consumed");
+}
+
+/// Stop also fences protected feedback that was queued behind some other turn.
+/// Background notifications leave it queued until a new explicit user send
+/// clears the stop boundary.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupt_pauses_automatic_review_dispatch_until_an_explicit_send() {
+    let ts = TestServer::start().await;
+    let id = "acp-stop-review-queue";
+    let delivery_key = "review:queued-at-stop";
+    let payload = "wait:3000|say:review-finished";
+    start_new(&ts, id, None, None).await;
+    ts.client
+        .post(
+            &format!("/api/sessions/{id}/prompt"),
+            json!({ "text": "wait:3000|say:original-finished" }),
+        )
+        .await
+        .unwrap();
+    insert_protected_review(&ts, id, delivery_key, payload).await;
+    let queued = ts
+        .state
+        .acp
+        .get(id)
+        .unwrap()
+        .notify_pending()
+        .await
+        .unwrap();
+    assert!(queued.queued);
+
+    ts.client
+        .post(&format!("/api/sessions/{id}/interrupt"), json!({}))
+        .await
+        .unwrap();
+    assert!(ts.state.acp.stop(id), "the stopped task was registered");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    acp::attach(&ts.state.acp_ctx(), id)
+        .await
+        .expect("the stopped runtime can be re-adopted");
+    loom::review_delivery::drain(&ts.state).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let stopped = ts
+        .client
+        .get(&format!("/api/sessions/{id}/chat"))
+        .await
+        .unwrap();
+    assert_eq!(stopped["live_turn"], Value::Null);
+    assert_eq!(
+        stopped["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|block| block["kind"] == "user_message")
+            .count(),
+        1,
+        "a background review wake must not continue after Stop"
+    );
+
+    ts.client
+        .post(
+            &format!("/api/sessions/{id}/prompt"),
+            json!({ "text": "say:resume" }),
+        )
+        .await
+        .unwrap();
+    let resumed = poll_chat(&ts, id, Duration::from_secs(5), |blocks| {
+        blocks
+            .iter()
+            .any(|block| block["kind"] == "user_message" && block["payload"]["text"] == payload)
+    })
+    .await;
+    assert!(resumed["blocks"].as_array().unwrap().iter().any(|block| {
+        block["kind"] == "user_message" && block["payload"]["text"] == "say:resume"
+    }));
+}
+
 /// The `/chat` routes reject a terminal-backend session with 409.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

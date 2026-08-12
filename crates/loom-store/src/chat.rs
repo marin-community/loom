@@ -706,6 +706,22 @@ pub async fn has_turn_end(db: &Db, session_id: &str, turn: i64) -> Result<bool> 
     Ok(n > 0)
 }
 
+/// The stop reason on the newest completed turn, used when re-adopting an ACP
+/// runtime so a user-owned Stop boundary survives the loom process that
+/// recorded it.
+pub async fn latest_stop_reason(db: &Db, session_id: &str) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT json_extract(payload, '$.stop_reason')
+         FROM chat_blocks
+         WHERE session_id = ? AND kind = 'turn_end'
+         ORDER BY turn DESC, seq DESC
+         LIMIT 1",
+    )
+    .bind(session_id)
+    .fetch_optional(db)
+    .await?)
+}
+
 /// Close a turn abandoned by a vanished ACP task. The opening user block is
 /// already durable before `acp_inflight` is written; this supplies the missing
 /// terminal boundary before a replacement provider starts.

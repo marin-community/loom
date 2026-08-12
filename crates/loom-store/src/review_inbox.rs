@@ -36,6 +36,7 @@ pub enum ReviewTurnStartOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReviewClaimSettlement {
     MatchingPromptResponse,
+    UserCancelled,
     Abandoned,
 }
 
@@ -337,7 +338,7 @@ pub async fn settle_review_inbox_claim(
     settlement: ReviewClaimSettlement,
 ) -> Result<bool> {
     match settlement {
-        ReviewClaimSettlement::MatchingPromptResponse => {
+        ReviewClaimSettlement::MatchingPromptResponse | ReviewClaimSettlement::UserCancelled => {
             consume_review_inbox(db, delivery_key, claim_token, session_id).await
         }
         ReviewClaimSettlement::Abandoned => {
