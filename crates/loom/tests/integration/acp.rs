@@ -1409,7 +1409,6 @@ async fn advertised_private_steering_still_uses_the_durable_queue() {
         .await
         .unwrap();
     assert_eq!(first["queued"], false);
-    assert_eq!(first["steered"], false);
 
     let second = ts
         .client
@@ -1420,7 +1419,6 @@ async fn advertised_private_steering_still_uses_the_durable_queue() {
         .await
         .unwrap();
     assert_eq!(second["queued"], true);
-    assert_eq!(second["steered"], false, "response: {second}");
     assert_eq!(second["turn"], 0);
 
     let queued = session_mod::get(&ts.state.db, "acp-ignore-steering")
@@ -1443,12 +1441,7 @@ async fn advertised_private_steering_still_uses_the_durable_queue() {
         block["turn"] == 1
             && block["kind"] == "user_message"
             && block["payload"]["text"] == "say:second"
-            && !block["payload"]["steered"].as_bool().unwrap_or(false)
     }));
-    assert!(
-        chat["metadata"].get("steering_supported").is_none(),
-        "the removed private capability must not be exposed to the browser"
-    );
 }
 
 /// Sending the durable queue now cancels the current turn and starts one normal
@@ -1485,7 +1478,6 @@ async fn prompt_stops_and_sends_the_durable_queue() {
         .await
         .unwrap();
     assert_eq!(sent["queued"], false);
-    assert_eq!(sent["steered"], false, "response: {sent}");
 
     let session = session_mod::get(&ts.state.db, "acp-stop-and-send")
         .await
@@ -1534,7 +1526,6 @@ async fn session_send_restarts_a_live_turn() {
         .await
         .unwrap();
     assert_eq!(sent["queued"], false, "response: {sent}");
-    assert_eq!(sent["steered"], false, "response: {sent}");
     assert_eq!(sent["turn"], 1, "the replacement opens the next turn");
 
     let chat = poll_chat(&ts, "acp-send-restart", Duration::from_secs(10), |blocks| {
@@ -1949,7 +1940,6 @@ async fn next_prompt_preserves_feedback_queued_before_an_interrupt() {
         .await
         .unwrap();
     assert_eq!(sent["queued"], false);
-    assert_eq!(sent["steered"], false);
 
     let chat = poll_chat(&ts, "acp-stop-queue", Duration::from_secs(10), |blocks| {
         blocks.iter().any(|block| {

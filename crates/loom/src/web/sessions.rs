@@ -1785,7 +1785,6 @@ pub(super) async fn send_session(
             "sent": true,
             "submitted": true,
             "queued": ack.queued,
-            "steered": false,
             "turn": ack.turn,
         })));
     }
@@ -2135,8 +2134,7 @@ async fn prompt_resources(work_dir: &str, files: &[String]) -> ApiResult<Vec<Val
 
 /// Send a user message to an ACP session: dispatched as a `session/prompt` when
 /// idle or appended to the durable queue while a turn is live. Returns 202
-/// `{ queued, steered: false, turn }`. Every send records a `nudge` event (the
-/// audit rule).
+/// `{ queued, turn }`. Every send records a `nudge` event (the audit rule).
 pub(super) async fn prompt_session(
     State(st): State<AppState>,
     Path(key): Path<String>,
@@ -2173,7 +2171,6 @@ pub(super) async fn prompt_session(
         StatusCode::ACCEPTED,
         Json(json!({
             "queued": ack.queued,
-            "steered": false,
             "turn": ack.turn,
         })),
     ))

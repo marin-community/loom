@@ -577,8 +577,8 @@ export const getSessionChat = (id: string, before?: { turn: number; seq: number 
 };
 
 /** Send a user message to an ACP session. Returns 202 with
- *  `{ queued, steered: false, turn }`: a live turn keeps the message in the
- *  durable next-turn queue. */
+ *  `{ queued, turn }`: a live turn keeps the message in the durable next-turn
+ *  queue. */
 export const promptSession = (id: string, text: string, by?: string, files: string[] = []) =>
   post(`/sessions/${id}/prompt`, {
     text,

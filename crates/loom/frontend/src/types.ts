@@ -571,11 +571,9 @@ export interface SseQueue {
 }
 
 /** `POST /sessions/{id}/prompt` 202 body: whether the message queued behind a
- *  live turn or started normally, plus the turn it belongs to. `steered` stays
- *  in the compatibility response and is always false. */
+ *  live turn or started normally, plus the turn it belongs to. */
 export interface PromptAck {
   queued: boolean;
-  steered: boolean;
   turn: number | null;
 }
 
