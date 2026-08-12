@@ -48,7 +48,6 @@ async function defineFakeAcpAgent(
   weaver: WeaverFixture,
   name: string,
   label: string,
-  steering = false,
 ): Promise<void> {
   const res = await fetch(`${weaver.baseUrl}/api/agents/custom`, {
     method: 'POST',
@@ -57,7 +56,7 @@ async function defineFakeAcpAgent(
       name,
       label,
       setup: '',
-      launch: `${steering ? 'FAKE_ACP_STEERING=1 ' : ''}node ${FAKE_AGENT}`,
+      launch: `node ${FAKE_AGENT}`,
       resume: '',
       reports_status: false,
       protocol: 'acp',
@@ -73,14 +72,14 @@ async function defineFakeAcpAgent(
  *  brought it up as `protocol='acp'`, else null (the acp axis isn't wired yet). */
 async function launchAcpSession(
   weaver: WeaverFixture,
-  opts: { goal: string; mode?: string; name?: string; steering?: boolean },
+  opts: { goal: string; mode?: string; name?: string },
 ): Promise<Session | null> {
   // The fake adapter is launched by the custom agent's `launch` command. The
   // `protocol` axis marks it ACP rather than a PTY TUI (added by the lifecycle
   // phase; ignored by the current backend, which is exactly why the probe below
   // detects support).
-  const agent = opts.steering === false ? 'acp-fake-no-steer' : 'acp-fake';
-  await defineFakeAcpAgent(weaver, agent, 'ACP fake', opts.steering !== false);
+  const agent = 'acp-fake';
+  await defineFakeAcpAgent(weaver, agent, 'ACP fake');
 
   const res = await fetch(`${weaver.baseUrl}/api/sessions`, {
     method: 'POST',
@@ -104,7 +103,7 @@ async function launchAcpSession(
 async function openAcp(
   page: Page,
   weaver: WeaverFixture,
-  opts: { goal: string; mode?: string; name?: string; steering?: boolean },
+  opts: { goal: string; mode?: string; name?: string },
 ): Promise<Session> {
   const s = await launchAcpSession(weaver, opts);
   test.skip(s === null, SKIP_MSG);
@@ -463,7 +462,6 @@ test.describe('acp conversation', () => {
             commands: [],
             config_options: [],
             modes: [],
-            steering_supported: false,
           },
         },
       });
@@ -602,7 +600,6 @@ test.describe('acp conversation', () => {
     await openAcp(page, weaver, {
       goal: 'say:ready',
       name: 'acp-stop-settles',
-      steering: false,
     });
     const input = page.getByTestId('acp-composer-input');
     await input.fill('wait:5000|say:unreached');
@@ -674,23 +671,6 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('acp-recover')).toBeHidden();
   });
 
-  test('force steer is offered only when the agent advertises it', async ({ page, weaver }) => {
-    await openAcp(page, weaver, {
-      goal: 'say:ready',
-      name: 'acp-force-ui',
-      steering: false,
-    });
-    const input = page.getByTestId('acp-composer-input');
-    await input.fill('wait:2500|say:first turn done');
-    await page.getByTestId('acp-composer-send').click();
-    await expect(page.getByTestId('acp-working')).toBeVisible({
-      timeout: 15_000,
-    });
-
-    await input.fill('say:feedback now');
-    await expect(page.getByTestId('acp-composer-force-steer')).toBeHidden();
-  });
-
   test('ordinary feedback says when the running agent has not seen it yet', async ({
     page,
     weaver,
@@ -698,7 +678,6 @@ test.describe('acp conversation', () => {
     await openAcp(page, weaver, {
       goal: 'say:ready',
       name: 'acp-queue-ui',
-      steering: false,
     });
     const input = page.getByTestId('acp-composer-input');
     await input.fill('wait:5000|say:first turn done');
@@ -741,7 +720,6 @@ test.describe('acp conversation', () => {
     await openAcp(page, weaver, {
       goal: 'say:ready',
       name: 'acp-edit-queue-ui',
-      steering: false,
     });
     const input = page.getByTestId('acp-composer-input');
     // Keep the turn live comfortably beyond parallel-run scheduling jitter so
@@ -823,36 +801,6 @@ test.describe('acp conversation', () => {
       page.getByTestId('acp-conversation').getByText('scratch/long-notes.txt', { exact: true }),
     ).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('acp-attachment-pill')).toHaveCount(0);
-  });
-
-  test('the composer steers a prompt into a live turn', async ({ page, weaver }) => {
-    await openAcp(page, weaver, { goal: 'say:ready' });
-    const input = page.getByTestId('acp-composer-input');
-
-    // A first prompt that stays in flight (the `wait`).
-    await input.fill('wait:1500|say:first turn done');
-    await page.getByTestId('acp-composer-send').click();
-    await expect(page.getByTestId('acp-working')).toBeVisible({
-      timeout: 15_000,
-    });
-    await expect(page.getByTestId('acp-composer-force-steer')).toBeVisible();
-
-    // A second prompt sent mid-turn is injected into the active turn.
-    await input.fill('say:second turn');
-    await page.getByTestId('acp-composer-send').click();
-    await expect(page.getByTestId('acp-steered').filter({ hasText: /^steered turn/ })).toBeVisible({
-      timeout: 15_000,
-    });
-
-    // The steer is handled before that same turn ends.
-    await expect(
-      page.getByTestId('acp-conversation').getByText('second turnfirst turn done', { exact: true }),
-    ).toBeVisible({ timeout: 20_000 });
-    // One rule for the launch goal and one for this interaction: the steer did
-    // not create a third turn.
-    await expect(page.getByTestId('acp-turn-rule')).toHaveCount(2, {
-      timeout: 20_000,
-    });
   });
 
   test('discovers slash commands from the agent and forwards them', async ({ page, weaver }) => {

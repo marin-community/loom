@@ -453,8 +453,8 @@ enum SessionCmd {
         #[arg(long)]
         lifecycle_only: bool,
     },
-    /// Deliver a message to a session now. ACP sessions steer a supported live
-    /// turn, or stop it and start the message as a new turn.
+    /// Deliver a message to a session now. ACP sessions stop a live turn and
+    /// start the message as a new turn.
     Send {
         /// Session key: id, branch id, branch name, or `repo:branch`.
         session: String,

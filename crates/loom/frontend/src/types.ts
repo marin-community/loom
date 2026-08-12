@@ -443,8 +443,6 @@ export interface AcpMetadata {
   commands: AcpCommand[];
   config_options: AcpConfigOption[];
   modes: AcpMode[];
-  /** Adapter-advertised support for the private steering extension. */
-  steering_supported: boolean;
 }
 
 // -- block payloads (by kind) --
@@ -572,8 +570,9 @@ export interface SseQueue {
   pending_prompt: string | null;
 }
 
-/** `POST /sessions/{id}/prompt` 202 body: whether the message steered the live
- *  turn, queued behind it, or started normally, plus the turn it belongs to. */
+/** `POST /sessions/{id}/prompt` 202 body: whether the message queued behind a
+ *  live turn or started normally, plus the turn it belongs to. `steered` stays
+ *  in the compatibility response and is always false. */
 export interface PromptAck {
   queued: boolean;
   steered: boolean;

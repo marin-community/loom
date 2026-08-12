@@ -1489,12 +1489,7 @@ async fn forward_acp_followup(
         .get(session_id)
         .ok_or_else(|| anyhow!("session has no live ACP task"))?;
     handle
-        .prompt(
-            prompt.to_string(),
-            Some("slack".to_string()),
-            false,
-            Vec::new(),
-        )
+        .prompt(prompt.to_string(), Some("slack".to_string()), Vec::new())
         .await
         .context("sending follow-up to ACP conversation")?;
     Ok(())

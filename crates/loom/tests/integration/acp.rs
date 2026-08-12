@@ -395,7 +395,6 @@ async fn composer_metadata_and_config_options_round_trip() {
     start_new(&ts, "acp-meta", None, None).await;
 
     let metadata = poll_metadata(&ts, "acp-meta", Duration::from_secs(5)).await;
-    assert_eq!(metadata["steering_supported"], false);
     let commands = metadata["commands"].as_array().unwrap();
     assert!(commands.iter().any(|command| command["name"] == "resume"));
     assert!(commands.iter().any(|command| {
@@ -1385,42 +1384,38 @@ async fn queue_consume_failure_does_not_dispatch_or_replay() {
     );
 }
 
-/// 4b. A steering-capable adapter durably queues a mid-turn prompt, acknowledges
-/// it immediately, then consumes the queue after the adapter accepts injection.
+/// Adapter-specific private steering must not bypass the durable queue. The
+/// incident behind this regression had codex-acp acknowledge and display two
+/// steers that Codex never added to its conversation history.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn prompt_steers_a_live_turn_when_advertised() {
+async fn advertised_private_steering_still_uses_the_durable_queue() {
     let ts = TestServer::start().await;
     start_new_with_env(
         &ts,
-        "acp-steer",
+        "acp-ignore-steering",
         None,
         None,
         vec![("FAKE_ACP_STEERING".to_string(), "1".to_string())],
     )
     .await;
 
-    let initial = ts.client.get("/api/sessions/acp-steer/chat").await.unwrap();
-    assert_eq!(initial["metadata"]["steering_supported"], true);
-
     let first = ts
         .client
         .post(
-            "/api/sessions/acp-steer/prompt",
-            json!({ "text": "wait:1500|say:first" }),
+            "/api/sessions/acp-ignore-steering/prompt",
+            json!({ "text": "wait:500|say:first" }),
         )
         .await
         .unwrap();
     assert_eq!(first["queued"], false);
     assert_eq!(first["steered"], false);
 
-    // Relay writes are ordered: the fake marks the first prompt active before
-    // it receives this steering request.
     let second = ts
         .client
         .post(
-            "/api/sessions/acp-steer/prompt",
-            json!({ "text": "say:changed course" }),
+            "/api/sessions/acp-ignore-steering/prompt",
+            json!({ "text": "say:second" }),
         )
         .await
         .unwrap();
@@ -1428,88 +1423,15 @@ async fn prompt_steers_a_live_turn_when_advertised() {
     assert_eq!(second["steered"], false, "response: {second}");
     assert_eq!(second["turn"], 0);
 
-    let chat = poll_chat(&ts, "acp-steer", Duration::from_secs(10), |blocks| {
-        count_kind(blocks, "turn_end") >= 1
-            && blocks.iter().any(|b| {
-                b["kind"] == "agent_message" && b["payload"]["text"] == "changed coursefirst"
-            })
-    })
-    .await;
-    let blocks = chat["blocks"].as_array().unwrap();
-    assert_eq!(count_kind(blocks, "turn_end"), 1);
-    assert!(blocks.iter().any(|b| {
-        b["kind"] == "user_message"
-            && b["turn"] == 0
-            && b["payload"]["text"] == "say:changed course"
-            && b["payload"]["steered"] == true
-    }));
-    let session = session_mod::get(&ts.state.db, "acp-steer")
+    let queued = session_mod::get(&ts.state.db, "acp-ignore-steering")
         .await
         .unwrap()
         .unwrap();
-    assert!(
-        session.pending_prompt.as_deref().unwrap_or("").is_empty(),
-        "a successful steer consumes its durable queue copy"
-    );
-}
-
-/// claude-agent-acp can acknowledge `injected`, reject the owning prompt with
-/// an interrupted-result diagnostic, then stream the steered answer outside any
-/// prompt lifecycle (upstream #934). Until that adapter advertises a reliable
-/// ownership contract, loom must ignore its private capability and use the
-/// durable next-turn queue.
-#[serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn claude_adapter_queues_around_the_broken_steering_boundary() {
-    let ts = TestServer::start().await;
-    start_new_with_env(
-        &ts,
-        "acp-claude-steer-boundary",
-        None,
-        None,
-        vec![
-            ("FAKE_ACP_STEERING".to_string(), "1".to_string()),
-            (
-                "FAKE_ACP_STEERING_BOUNDARY_ERROR".to_string(),
-                "1".to_string(),
-            ),
-            (
-                "FAKE_ACP_AGENT_NAME".to_string(),
-                "@agentclientprotocol/claude-agent-acp".to_string(),
-            ),
-            ("FAKE_ACP_AGENT_VERSION".to_string(), "0.66.0".to_string()),
-        ],
-    )
-    .await;
-
-    let initial = ts
-        .client
-        .get("/api/sessions/acp-claude-steer-boundary/chat")
-        .await
-        .unwrap();
-    assert_eq!(initial["metadata"]["steering_supported"], false);
-
-    ts.client
-        .post(
-            "/api/sessions/acp-claude-steer-boundary/prompt",
-            json!({ "text": "wait:300|say:first" }),
-        )
-        .await
-        .unwrap();
-    let queued = ts
-        .client
-        .post(
-            "/api/sessions/acp-claude-steer-boundary/prompt",
-            json!({ "text": "say:second" }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(queued["queued"], true);
-    assert_eq!(queued["steered"], false);
+    assert_eq!(queued.pending_prompt.as_deref(), Some("say:second"));
 
     let chat = poll_chat_state(
         &ts,
-        "acp-claude-steer-boundary",
+        "acp-ignore-steering",
         Duration::from_secs(10),
         |chat| {
             chat["live_turn"].is_null()
@@ -1517,90 +1439,29 @@ async fn claude_adapter_queues_around_the_broken_steering_boundary() {
         },
     )
     .await;
-    let blocks = chat["blocks"].as_array().unwrap();
-    assert!(blocks.iter().all(|block| {
-        block["kind"] != "turn_end" || block["payload"]["stop_reason"] == "end_turn"
-    }));
-    assert!(blocks.iter().any(|block| {
+    assert!(chat["blocks"].as_array().unwrap().iter().any(|block| {
         block["turn"] == 1
             && block["kind"] == "user_message"
             && block["payload"]["text"] == "say:second"
             && !block["payload"]["steered"].as_bool().unwrap_or(false)
     }));
-    assert!(blocks.iter().any(|block| {
-        block["turn"] == 1
-            && block["kind"] == "agent_message"
-            && block["payload"]["text"] == "second"
-    }));
+    assert!(
+        chat["metadata"].get("steering_supported").is_none(),
+        "the removed private capability must not be exposed to the browser"
+    );
 }
 
-/// Ordinary sends must not hold the HTTP response (and browser composer) behind
-/// a delayed private steering RPC. The queue is the immediate durable receipt;
-/// adapter acceptance later promotes it into the live turn.
+/// Sending the durable queue now cancels the current turn and starts one normal
+/// prompt with the combined feedback.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn prompt_ack_does_not_wait_for_steering() {
+async fn prompt_stops_and_sends_the_durable_queue() {
     let ts = TestServer::start().await;
-    start_new_with_env(
-        &ts,
-        "acp-steer-delay",
-        None,
-        None,
-        vec![
-            ("FAKE_ACP_STEERING".to_string(), "1".to_string()),
-            ("FAKE_ACP_STEERING_DELAY_MS".to_string(), "1000".to_string()),
-        ],
-    )
-    .await;
-    ts.client
-        .post(
-            "/api/sessions/acp-steer-delay/prompt",
-            json!({ "text": "wait:1800|say:first" }),
-        )
-        .await
-        .unwrap();
-
-    let ack = tokio::time::timeout(
-        Duration::from_millis(300),
-        ts.client.post(
-            "/api/sessions/acp-steer-delay/prompt",
-            json!({ "text": "say:feedback" }),
-        ),
-    )
-    .await
-    .expect("the send acknowledgement must not wait for steering")
-    .unwrap();
-    assert_eq!(ack["queued"], true);
-    let queued = ts
-        .client
-        .get("/api/sessions/acp-steer-delay/chat")
-        .await
-        .unwrap();
-    assert_eq!(queued["pending_prompt"], "say:feedback");
-
-    poll_chat_state(&ts, "acp-steer-delay", Duration::from_secs(10), |chat| {
-        chat["pending_prompt"].is_null()
-            && chat["blocks"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|b| b["kind"] == "user_message" && b["payload"]["steered"] == true)
-    })
-    .await;
-}
-
-/// An adapter that does not advertise steering must never be probed with the
-/// private extension. Sending its durable queue now cancels the current turn
-/// and starts one normal prompt with the combined feedback.
-#[serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn prompt_stops_and_sends_queue_without_steering_capability() {
-    let ts = TestServer::start().await;
-    start_new(&ts, "acp-force-steer", None, None).await;
+    start_new(&ts, "acp-stop-and-send", None, None).await;
 
     ts.client
         .post(
-            "/api/sessions/acp-force-steer/prompt",
+            "/api/sessions/acp-stop-and-send/prompt",
             json!({ "text": "wait:1200|say:first" }),
         )
         .await
@@ -1608,7 +1469,7 @@ async fn prompt_stops_and_sends_queue_without_steering_capability() {
     let queued = ts
         .client
         .post(
-            "/api/sessions/acp-force-steer/prompt",
+            "/api/sessions/acp-stop-and-send/prompt",
             json!({ "text": "say:feedback" }),
         )
         .await
@@ -1618,7 +1479,7 @@ async fn prompt_stops_and_sends_queue_without_steering_capability() {
     let sent = ts
         .client
         .post(
-            "/api/sessions/acp-force-steer/prompt",
+            "/api/sessions/acp-stop-and-send/prompt",
             json!({ "text": "", "force_queued": true }),
         )
         .await
@@ -1626,17 +1487,22 @@ async fn prompt_stops_and_sends_queue_without_steering_capability() {
     assert_eq!(sent["queued"], false);
     assert_eq!(sent["steered"], false, "response: {sent}");
 
-    let session = session_mod::get(&ts.state.db, "acp-force-steer")
+    let session = session_mod::get(&ts.state.db, "acp-stop-and-send")
         .await
         .unwrap()
         .unwrap();
     assert!(session.pending_prompt.as_deref().unwrap_or("").is_empty());
 
-    let chat = poll_chat(&ts, "acp-force-steer", Duration::from_secs(10), |blocks| {
-        blocks
-            .iter()
-            .any(|block| block["kind"] == "agent_message" && block["payload"]["text"] == "feedback")
-    })
+    let chat = poll_chat(
+        &ts,
+        "acp-stop-and-send",
+        Duration::from_secs(10),
+        |blocks| {
+            blocks.iter().any(|block| {
+                block["kind"] == "agent_message" && block["payload"]["text"] == "feedback"
+            })
+        },
+    )
     .await;
     assert!(chat["blocks"].as_array().unwrap().iter().any(|block| {
         block["kind"] == "turn_end" && block["payload"]["stop_reason"] == "cancelled"
@@ -1644,11 +1510,11 @@ async fn prompt_stops_and_sends_queue_without_steering_capability() {
 }
 
 /// Cross-session `/send` is control-plane input, not ordinary composer
-/// feedback. Without steering support it must cancel a live turn and start the
-/// message immediately instead of leaving it in the durable next-turn queue.
+/// feedback. It cancels a live turn and starts the message immediately instead
+/// of leaving it in the durable next-turn queue.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn session_send_restarts_a_live_turn_without_steering() {
+async fn session_send_restarts_a_live_turn() {
     let ts = TestServer::start().await;
     start_new(&ts, "acp-send-restart", None, None).await;
 
@@ -1691,131 +1557,6 @@ async fn session_send_restarts_a_live_turn_without_steering() {
     }));
 }
 
-/// A steering-capable ACP adapter receives cross-session `/send` input in the
-/// live turn, preserving its work while still avoiding the next-turn queue.
-#[serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn session_send_steers_a_live_turn_when_supported() {
-    let ts = TestServer::start().await;
-    start_new_with_env(
-        &ts,
-        "acp-send-steer",
-        None,
-        None,
-        vec![("FAKE_ACP_STEERING".to_string(), "1".to_string())],
-    )
-    .await;
-
-    ts.client
-        .post(
-            "/api/sessions/acp-send-steer/prompt",
-            json!({ "text": "wait:1200|say:first" }),
-        )
-        .await
-        .unwrap();
-    let sent = ts
-        .client
-        .post(
-            "/api/sessions/acp-send-steer/send",
-            json!({ "text": "say:changed course" }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(sent["queued"], false, "response: {sent}");
-    assert_eq!(sent["steered"], true, "response: {sent}");
-    assert_eq!(sent["turn"], 0);
-
-    let chat = poll_chat(&ts, "acp-send-steer", Duration::from_secs(10), |blocks| {
-        count_kind(blocks, "turn_end") == 1
-            && blocks.iter().any(|block| {
-                block["kind"] == "agent_message"
-                    && block["payload"]["text"] == "changed coursefirst"
-            })
-    })
-    .await;
-    assert!(chat["pending_prompt"].is_null());
-    let blocks = chat["blocks"].as_array().unwrap();
-    assert_eq!(count_kind(blocks, "turn_end"), 1);
-    assert!(blocks.iter().any(|block| {
-        block["turn"] == 0
-            && block["kind"] == "user_message"
-            && block["payload"]["text"] == "say:changed course"
-            && block["payload"]["steered"] == true
-    }));
-}
-
-/// Prose observed before the adapter accepts a steer must remain before that
-/// user prompt in the durable journal. The prose is still only an in-memory
-/// consolidation buffer when the steering response arrives, which used to let
-/// the prompt take the earlier sequence number and jump above the response on
-/// refresh.
-#[serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn steered_prompt_follows_already_streamed_agent_prose() {
-    let ts = TestServer::start().await;
-    start_new_with_env(
-        &ts,
-        "acp-steer-order",
-        None,
-        None,
-        vec![("FAKE_ACP_STEERING".to_string(), "1".to_string())],
-    )
-    .await;
-    let mut events = ts.state.acp.get("acp-steer-order").unwrap().subscribe();
-
-    ts.client
-        .post(
-            "/api/sessions/acp-steer-order/prompt",
-            json!({ "text": "say:BEFORE|wait:1000|say:AFTER" }),
-        )
-        .await
-        .unwrap();
-    let streamed = drain_events(&mut events, Duration::from_secs(5), |event| {
-        event.event == "delta" && event.data["text"] == "ORE"
-    })
-    .await;
-    assert!(
-        streamed
-            .iter()
-            .any(|event| event.event == "delta" && event.data["text"] == "ORE"),
-        "the pre-steer response never streamed: {streamed:?}"
-    );
-
-    let sent = ts
-        .client
-        .post(
-            "/api/sessions/acp-steer-order/send",
-            json!({ "text": "say:STEER" }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(sent["steered"], true, "response: {sent}");
-
-    let chat = poll_chat(&ts, "acp-steer-order", Duration::from_secs(10), |blocks| {
-        count_kind(blocks, "turn_end") == 1
-    })
-    .await;
-    let authored: Vec<(&str, &str)> = chat["blocks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|block| {
-            let kind = block["kind"].as_str()?;
-            matches!(kind, "user_message" | "agent_message")
-                .then(|| (kind, block["payload"]["text"].as_str().unwrap_or("")))
-        })
-        .collect();
-    assert_eq!(
-        authored,
-        vec![
-            ("user_message", "say:BEFORE|wait:1000|say:AFTER"),
-            ("agent_message", "BEFORE"),
-            ("user_message", "say:STEER"),
-            ("agent_message", "STEERAFTER"),
-        ]
-    );
-}
-
 /// Composer-selected files are resolved inside the worktree and forwarded as
 /// ACP resource_link blocks, not left as adapter-specific `@file` prose.
 #[serial]
@@ -1848,66 +1589,6 @@ async fn prompt_forwards_validated_file_resources() {
     .await;
     assert!(chat["blocks"].as_array().unwrap().iter().any(|b| {
         b["kind"] == "user_message" && b["payload"]["resources"][0]["name"] == "context.txt"
-    }));
-}
-
-/// 4c. If a turn ends during injection, codex-acp starts the message itself and
-/// reports `startedNewTurn`; loom adopts and closes that adapter-owned turn.
-#[serial]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn prompt_adopts_a_turn_started_by_steering() {
-    let ts = TestServer::start().await;
-    start_new_with_env(
-        &ts,
-        "acp-steer-race",
-        None,
-        None,
-        vec![
-            ("FAKE_ACP_STEERING".to_string(), "1".to_string()),
-            (
-                "FAKE_ACP_STEERING_FORCE_NEW_TURN".to_string(),
-                "1".to_string(),
-            ),
-        ],
-    )
-    .await;
-
-    ts.client
-        .post(
-            "/api/sessions/acp-steer-race/prompt",
-            json!({ "text": "wait:300|say:first" }),
-        )
-        .await
-        .unwrap();
-    // Relay writes are ordered, so the forced steering race is deterministic
-    // without a wall-clock delay.
-    let second = ts
-        .client
-        .post(
-            "/api/sessions/acp-steer-race/prompt",
-            json!({ "text": "wait:100|say:second" }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(second["queued"], true);
-    assert_eq!(second["steered"], false);
-    assert_eq!(second["turn"], 0);
-
-    let chat = poll_chat_state(&ts, "acp-steer-race", Duration::from_secs(10), |chat| {
-        chat["live_turn"].is_null()
-            && count_kind(chat["blocks"].as_array().unwrap(), "turn_end") == 2
-    })
-    .await;
-    assert_eq!(chat["live_turn"], Value::Null);
-    let blocks = chat["blocks"].as_array().unwrap();
-    assert!(blocks.iter().any(|b| {
-        b["kind"] == "user_message"
-            && b["turn"] == 1
-            && b["payload"]["text"] == "wait:100|say:second"
-            && b["payload"]["steered"] == false
-    }));
-    assert!(blocks.iter().any(|b| {
-        b["kind"] == "agent_message" && b["turn"] == 1 && b["payload"]["text"] == "second"
     }));
 }
 
@@ -2219,7 +1900,7 @@ async fn interrupt_notice_does_not_leak_below_the_restarted_turn() {
 /// the idle state.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn interrupt_leaves_queued_feedback_idle_until_sent() {
+async fn next_prompt_preserves_feedback_queued_before_an_interrupt() {
     let ts = TestServer::start().await;
     start_new(&ts, "acp-stop-queue", None, None).await;
 
@@ -2263,7 +1944,7 @@ async fn interrupt_leaves_queued_feedback_idle_until_sent() {
         .client
         .post(
             "/api/sessions/acp-stop-queue/prompt",
-            json!({ "text": "", "force_queued": true }),
+            json!({ "text": "say:continue" }),
         )
         .await
         .unwrap();
@@ -2282,7 +1963,7 @@ async fn interrupt_leaves_queued_feedback_idle_until_sent() {
     assert!(chat["blocks"].as_array().unwrap().iter().any(|block| {
         block["kind"] == "user_message"
             && block["turn"] == 1
-            && block["payload"]["text"] == "say:after stop"
+            && block["payload"]["text"] == "say:after stop\n\nsay:continue"
     }));
 }
 

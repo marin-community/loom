@@ -102,10 +102,8 @@ const emptyMetadata = (): AcpMetadata => ({
   commands: [],
   config_options: [],
   modes: [],
-  steering_supported: false,
 });
 const metadata = ref<AcpMetadata>(emptyMetadata());
-const steeringSupported = computed(() => metadata.value.steering_supported);
 
 // The live mode, seeded from the session and advanced by `mode_change` blocks or
 // a local set — so the composer chip reads true without a refetch.
@@ -444,7 +442,7 @@ async function onAttachmentPick(event: Event) {
   }
 }
 
-async function submitPrompt(forceSteer = false) {
+async function submitPrompt() {
   if (!draft.value.trim() || sending.value || editingQueued.value || uploadingAttachment.value)
     return;
   const local = localCommand(draft.value);
@@ -466,7 +464,7 @@ async function submitPrompt(forceSteer = false) {
   optimistic.value.push(pending);
   autoFollow();
   try {
-    await promptSession(id.value, text, undefined, forceSteer, [...selectedFiles.value]);
+    await promptSession(id.value, text, undefined, [...selectedFiles.value]);
     const index = optimistic.value.findIndex((o) => o.key === pending.key);
     if (index >= 0) optimistic.value.splice(index, 1);
     draft.value = '';
@@ -1648,14 +1646,12 @@ function goTo(anchor: string) {
                     :disabled="sending || editingQueued"
                     :title="
                       turnLive
-                        ? steeringSupported
-                          ? 'Inject all queued feedback into the running turn now'
-                          : 'Stop the running turn and send all queued feedback as the next turn'
+                        ? 'Stop the running turn and send all queued feedback as the next turn'
                         : 'Start a new turn with all queued feedback'
                     "
                     @click="forceQueued"
                   >
-                    {{ turnLive ? (steeringSupported ? 'Force now' : 'Stop & send') : 'Send now' }}
+                    {{ turnLive ? 'Stop & send' : 'Send now' }}
                   </button>
                 </span>
               </header>
@@ -1744,7 +1740,7 @@ function goTo(anchor: string) {
       v-if="composerVisible"
       class="acp-composer"
       data-testid="acp-composer"
-      @submit.prevent="submitPrompt(false)"
+      @submit.prevent="submitPrompt()"
     >
       <p
         v-if="sendError"
@@ -1951,17 +1947,6 @@ function goTo(anchor: string) {
         <div class="acp-composer-right">
           <AgentUsage v-if="model.usage" :usage="model.usage" />
           <span class="acp-send-hint">Enter to send · Shift+Enter for a new line</span>
-          <button
-            v-if="turnLive && steeringSupported"
-            type="button"
-            class="btn-secondary px-3 py-1 text-xs"
-            data-testid="acp-composer-force-steer"
-            :disabled="sending || editingQueued || uploadingAttachment || !draft.trim()"
-            title="Inject this feedback into the running turn"
-            @click="submitPrompt(true)"
-          >
-            Force steer
-          </button>
           <button
             v-if="turnLive"
             type="button"

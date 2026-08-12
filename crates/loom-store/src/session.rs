@@ -1402,28 +1402,6 @@ pub async fn take_pending_prompt(db: &Db, id: &str) -> Result<Option<String>> {
     Ok(Some(pending))
 }
 
-/// Remove a promoted prefix from the durable queue without dropping messages
-/// appended behind it while the steering request was in flight.
-pub async fn consume_pending_prompt(db: &Db, id: &str, promoted: &str) -> Result<()> {
-    let current = read_pending_prompt(db, id).await?;
-    // Canonically '' (never NULL) when the whole queue was promoted — the column
-    // is `NOT NULL DEFAULT ''` on long-lived databases.
-    let remaining: &str = if current == promoted {
-        ""
-    } else if let Some(rest) = current.strip_prefix(promoted) {
-        rest.strip_prefix("\n\n")
-            .ok_or_else(|| anyhow!("queued prompt changed while it was being steered"))?
-    } else {
-        bail!("queued prompt changed while it was being steered");
-    };
-    sqlx::query("UPDATE sessions SET pending_prompt = ? WHERE id = ?")
-        .bind(remaining)
-        .bind(id)
-        .execute(db)
-        .await?;
-    Ok(())
-}
-
 pub async fn delete(db: &Db, id: &str) -> Result<Option<i64>> {
     let mut tx = weaver_core::db::begin_immediate(db).await?;
     let had_placement: bool = sqlx::query_scalar(
@@ -1935,21 +1913,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn consuming_a_promoted_prompt_preserves_later_queue_entries() {
-        let db = crate::db::connect_in_memory().await.unwrap();
-        let branch = branch_id(&db, "weaver/queue").await;
-        insert(&db, &new_session("queue", &branch, None))
-            .await
-            .unwrap();
-        append_pending_prompt(&db, "queue", "first").await.unwrap();
-        append_pending_prompt(&db, "queue", "second").await.unwrap();
-
-        consume_pending_prompt(&db, "queue", "first").await.unwrap();
-
-        assert_eq!(read_pending_prompt(&db, "queue").await.unwrap(), "second");
-    }
-
-    #[tokio::test]
     async fn handoff_replaces_profile_and_clears_provider_state() {
         let db = crate::db::connect_in_memory().await.unwrap();
         let branch = branch_id(&db, "weaver/handoff").await;
@@ -2089,11 +2052,6 @@ mod tests {
             Some(""),
             "cleared to '', not NULL"
         );
-
-        // consume of the whole queue and a full handoff must clear the same way.
-        append_pending_prompt(&db, "drain", "again").await.unwrap();
-        consume_pending_prompt(&db, "drain", "again").await.unwrap();
-        assert_eq!(read_pending_prompt(&db, "drain").await.unwrap(), "");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

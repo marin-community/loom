@@ -1762,9 +1762,9 @@ pub(super) async fn send_session(
     Json(req): Json<SendReq>,
 ) -> ApiResult<Json<Value>> {
     let (session, branch) = require_session(&st.db, &key).await?;
-    // A cross-session send must not sit behind an ACP turn indefinitely. Steer
-    // a supported live turn; otherwise cancel it and immediately start this
-    // message as a fresh turn, while keeping the same `nudge` audit.
+    // A cross-session send must not sit behind an ACP turn indefinitely. Cancel
+    // a live turn and immediately start this message as a fresh turn, while
+    // keeping the same `nudge` audit.
     if session.protocol == "acp" {
         let handle = require_acp_task(&st, &session)?;
         let by = author_or_manual(req.by.as_deref());
@@ -1785,7 +1785,7 @@ pub(super) async fn send_session(
             "sent": true,
             "submitted": true,
             "queued": ack.queued,
-            "steered": ack.steered,
+            "steered": false,
             "turn": ack.turn,
         })));
     }
@@ -1874,7 +1874,7 @@ pub(super) async fn preview_session(
 //
 // The conversation-first surface for ACP sessions: the journaled transcript
 // (`/chat`), its live delta stream (`/chat/stream`), and the drive routes a
-// person or watch uses — a steering/queueing send (`/prompt`), a
+// person or watch uses — a durable queueing send (`/prompt`), a
 // permission answer (`/permissions/{request_id}`), and a mode change (`/mode`).
 // ---------------------------------------------------------------------------
 
@@ -2018,8 +2018,6 @@ pub(super) struct PromptBody {
     pub text: String,
     #[serde(default)]
     pub by: Option<String>,
-    #[serde(default)]
-    pub force_steer: bool,
     /// Promote the server's durable next-turn queue instead of sending `text`.
     /// This keeps the action race-free when the browser is showing queued copy.
     #[serde(default)]
@@ -2136,9 +2134,9 @@ async fn prompt_resources(work_dir: &str, files: &[String]) -> ApiResult<Vec<Val
 }
 
 /// Send a user message to an ACP session: dispatched as a `session/prompt` when
-/// idle, steered into a live turn when supported, or appended to the durable
-/// queue otherwise. Returns 202 `{ queued, steered, turn }`. Every send records
-/// a `nudge` event (the audit rule).
+/// idle or appended to the durable queue while a turn is live. Returns 202
+/// `{ queued, steered: false, turn }`. Every send records a `nudge` event (the
+/// audit rule).
 pub(super) async fn prompt_session(
     State(st): State<AppState>,
     Path(key): Path<String>,
@@ -2158,12 +2156,7 @@ pub(super) async fn prompt_session(
     } else {
         let resources = prompt_resources(&session.work_dir, &req.files).await?;
         handle
-            .prompt(
-                req.text.clone(),
-                Some(by.clone()),
-                req.force_steer,
-                resources,
-            )
+            .prompt(req.text.clone(), Some(by.clone()), resources)
             .await
     }
     .map_err(|e| AppError::conflict(e.to_string()))?;
@@ -2180,7 +2173,7 @@ pub(super) async fn prompt_session(
         StatusCode::ACCEPTED,
         Json(json!({
             "queued": ack.queued,
-            "steered": ack.steered,
+            "steered": false,
             "turn": ack.turn,
         })),
     ))
@@ -2188,7 +2181,7 @@ pub(super) async fn prompt_session(
 
 /// Pull unseen next-turn feedback back out of the durable queue for editing.
 /// The ACP task owns the consume so this action is serialized with automatic
-/// dispatch at a turn boundary and with steering responses.
+/// dispatch at a turn boundary.
 pub(super) async fn retract_queued_prompt(
     State(st): State<AppState>,
     Path(key): Path<String>,
