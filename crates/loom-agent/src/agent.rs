@@ -317,14 +317,15 @@ pub async fn initial_status(_db: &Db, _runtime: &str) -> &'static str {
     "running"
 }
 
-/// Check that `model` is one of `metadata`'s offered choices (blank is always
-/// allowed — it means the agent's own default). A key-free reason on mismatch.
+/// Check that `model` is one of `metadata`'s offered choices, or any explicit
+/// model name when the agent accepts raw values. Blank always means the agent's
+/// own default. A key-free reason on mismatch.
 pub fn validate_model(metadata: &AgentMetadata, model: &str) -> Result<(), String> {
     let model = model.trim();
     if model.is_empty() {
         return Ok(());
     }
-    if metadata.models.iter().any(|choice| choice.id == model) {
+    if metadata.accepts_raw_model || metadata.models.iter().any(|choice| choice.id == model) {
         Ok(())
     } else {
         Err(format!("unknown model '{model}' for {}", metadata.kind))
@@ -514,7 +515,7 @@ impl AgentType for ClaudeAgentType {
             label: "Claude".to_string(),
             models: AgentChoice::list(MODEL_CHOICES),
             efforts: AgentChoice::list(EFFORT_CHOICES),
-            accepts_raw_model: false,
+            accepts_raw_model: true,
             supports_hooks: true,
             builtin: true,
             supports_acp: true,
@@ -1973,6 +1974,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("low", "Low"), ("ultra", "Ultra")]
         );
+    }
+
+    #[test]
+    fn claude_accepts_versioned_model_names() {
+        let metadata = CLAUDE_AGENT_TYPE.metadata();
+
+        assert!(validate_model(&metadata, "claude-opus-4-8").is_ok());
     }
 
     fn custom_agent(name: &str, setup: &str, launch: &str, resume: &str) -> CustomAgent {
