@@ -3106,6 +3106,12 @@ impl Task {
         result
     }
 
+    fn resume_automatic_dispatch_on<T>(&mut self, explicit_send: &Result<T>) {
+        if explicit_send.is_ok() {
+            self.automatic_dispatch_paused = false;
+        }
+    }
+
     async fn on_command(&mut self, cmd: Command) {
         match cmd {
             Command::Prompt {
@@ -3137,16 +3143,12 @@ impl Task {
                                 Err(error) => Err(error),
                             }
                         };
-                        if ack.is_ok() {
-                            self.automatic_dispatch_paused = false;
-                        }
+                        self.resume_automatic_dispatch_on(&ack);
                         let _ = reply.send(ack);
                     }
                     PromptDelivery::Immediate => {
                         let ack = self.restart_prompt(text, by, resources).await;
-                        if ack.is_ok() {
-                            self.automatic_dispatch_paused = false;
-                        }
+                        self.resume_automatic_dispatch_on(&ack);
                         let _ = reply.send(ack);
                     }
                 }
@@ -3163,18 +3165,14 @@ impl Task {
                     let _ = reply.send(Err(anyhow!("there is no queued feedback to send")));
                 } else if !self.turn_live {
                     let result = self.start_pending_prompt(by).await;
-                    if result.is_ok() {
-                        self.automatic_dispatch_paused = false;
-                    }
+                    self.resume_automatic_dispatch_on(&result);
                     let _ = reply.send(result);
                 } else {
                     let result = match self.cancel_live_turn().await {
                         Ok(()) => self.start_pending_prompt(by).await,
                         Err(error) => Err(error),
                     };
-                    if result.is_ok() {
-                        self.automatic_dispatch_paused = false;
-                    }
+                    self.resume_automatic_dispatch_on(&result);
                     let _ = reply.send(result);
                 }
             }

@@ -2029,7 +2029,6 @@ async fn interrupting_a_review_turn_does_not_redeliver_it() {
     // Exercise both the direct wake and the same sweep that found the live
     // incident. Neither may turn the consumed item back into work.
     loom::review_delivery::drain(&ts.state).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(250)).await;
     let chat = ts
         .client
         .get(&format!("/api/sessions/{id}/chat"))
@@ -2095,7 +2094,6 @@ async fn interrupt_pauses_automatic_review_dispatch_until_an_explicit_send() {
         .await
         .expect("the stopped runtime can be re-adopted");
     loom::review_delivery::drain(&ts.state).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(250)).await;
     let stopped = ts
         .client
         .get(&format!("/api/sessions/{id}/chat"))

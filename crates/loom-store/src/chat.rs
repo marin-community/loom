@@ -713,11 +713,12 @@ pub async fn latest_stop_reason(db: &Db, session_id: &str) -> Result<Option<Stri
     Ok(sqlx::query_scalar(
         "SELECT json_extract(payload, '$.stop_reason')
          FROM chat_blocks
-         WHERE session_id = ? AND kind = 'turn_end'
+         WHERE session_id = ? AND kind = ?
          ORDER BY turn DESC, seq DESC
          LIMIT 1",
     )
     .bind(session_id)
+    .bind(kind::TURN_END)
     .fetch_optional(db)
     .await?)
 }
