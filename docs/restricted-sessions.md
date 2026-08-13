@@ -24,7 +24,7 @@ rather than falling back to a broader credential. An App-less deployment can
 configure a least-privilege CI identity as the profile's write-only `GH_TOKEN`.
 Personal user tokens remain exclusive to ordinary interactive sessions. The
 stock policy lives in
-`crates/loom/profiles/github_comment.json`, not in a schema migration. Loom
+`crates/loom-policy/profiles/github_comment/profile.json`, not in a schema migration. Loom
 seeds a missing stock profile through normal validation and does not overwrite
 later operator edits. Custom profiles use the same REST/CLI/UI or
 deployment-reconciliation contract; loading policy implicitly from a managed

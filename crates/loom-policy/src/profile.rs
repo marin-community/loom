@@ -18,11 +18,37 @@ pub use crate::profile_data::{
 
 const STOCK_PROFILES: &[(&str, &str)] = &[
     (
-        "github_comment.json",
-        include_str!("../profiles/github_comment.json"),
+        "github_comment/profile.json",
+        include_str!("../profiles/github_comment/profile.json"),
     ),
-    ("watch.json", include_str!("../profiles/watch.json")),
+    (
+        "watch/profile.json",
+        include_str!("../profiles/watch/profile.json"),
+    ),
 ];
+
+#[derive(Deserialize)]
+struct OriginProfileStarter {
+    name: String,
+    description: String,
+}
+
+const ORIGIN_PROFILE_STARTERS: &[(&str, &str, &str)] = &[
+    (
+        "github/profile.json",
+        include_str!("../profiles/github/profile.json"),
+        include_str!("../profiles/github/instructions.md"),
+    ),
+    (
+        "slack/profile.json",
+        include_str!("../profiles/slack/profile.json"),
+        include_str!("../profiles/slack/instructions.md"),
+    ),
+];
+
+const DEFAULT_PROFILE_INSTRUCTIONS: &str = include_str!("../profiles/default/instructions.md");
+
+const MAX_PROFILE_INSTRUCTIONS_BYTES: usize = 64 * 1024;
 
 fn is_restricted_mcp_tool_set(rule: &str) -> bool {
     crate::mcp::is_tool_set(rule)
@@ -96,6 +122,12 @@ async fn validate_input(
     }
     if !matches!(input.prelude.trim(), "weaver" | "none") {
         bail!("profile prelude must be 'weaver' or 'none'");
+    }
+    if input.instructions.len() > MAX_PROFILE_INSTRUCTIONS_BYTES {
+        bail!(
+            "profile instructions must be at most {} bytes",
+            MAX_PROFILE_INSTRUCTIONS_BYTES
+        );
     }
     if input.allowed_tools.len() > 64
         || input.allowed_tools.iter().any(|rule| {
@@ -272,6 +304,7 @@ async fn normalized_input(
         max_concurrent: input.max_concurrent,
         turn_budget: input.turn_budget,
         prelude: input.prelude.trim().to_string(),
+        instructions: input.instructions.trim().to_string(),
         restricted: input.restricted,
         allowed_tools: input.allowed_tools.clone(),
         mcp_access: input.mcp_access.clone(),
@@ -311,7 +344,7 @@ pub async fn create(db: &Db, input: &ProfileInput) -> Result<CreateProfileOutcom
              description = ?, agent_kind = ?, model = ?, effort = ?, protocol = ?,
              mode = ?, class = ?, strict = ?, env_clear = ?, ambient_allowlist = ?,
              idle_archive_secs = ?, max_concurrent = ?, turn_budget = ?, prelude = ?,
-             restricted = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
+             instructions = ?, restricted = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
              retired = 0, lifetime = lifetime + 1,
              revision = revision + 1, updated_at = ?
              WHERE name = ? AND retired = 1",
@@ -330,6 +363,7 @@ pub async fn create(db: &Db, input: &ProfileInput) -> Result<CreateProfileOutcom
         .bind(normalized.max_concurrent)
         .bind(normalized.turn_budget)
         .bind(&normalized.prelude)
+        .bind(&normalized.instructions)
         .bind(normalized.restricted)
         .bind(&allowed_tools)
         .bind(&mcp_access)
@@ -349,9 +383,9 @@ pub async fn create(db: &Db, input: &ProfileInput) -> Result<CreateProfileOutcom
             "INSERT INTO profiles
              (name, description, agent_kind, model, effort, protocol, mode, class,
               strict, env_clear, ambient_allowlist, idle_archive_secs, max_concurrent,
-              turn_budget, revision, created_at, updated_at, prelude, restricted,
+              turn_budget, revision, created_at, updated_at, prelude, instructions, restricted,
               allowed_tools, mcp_access, mcp_policy)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(name)
         .bind(&normalized.description)
@@ -370,6 +404,7 @@ pub async fn create(db: &Db, input: &ProfileInput) -> Result<CreateProfileOutcom
         .bind(&now)
         .bind(&now)
         .bind(&normalized.prelude)
+        .bind(&normalized.instructions)
         .bind(normalized.restricted)
         .bind(&allowed_tools)
         .bind(&mcp_access)
@@ -429,9 +464,9 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
         "INSERT INTO profiles
          (name, description, agent_kind, model, effort, protocol, mode, class,
           strict, env_clear, ambient_allowlist, idle_archive_secs, max_concurrent,
-          turn_budget, revision, created_at, updated_at, prelude, restricted,
+          turn_budget, revision, created_at, updated_at, prelude, instructions, restricted,
           allowed_tools, mcp_access, mcp_policy)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
           description=excluded.description, agent_kind=excluded.agent_kind,
           model=excluded.model, effort=excluded.effort, protocol=excluded.protocol,
@@ -439,7 +474,8 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
           env_clear=excluded.env_clear, ambient_allowlist=excluded.ambient_allowlist,
           idle_archive_secs=excluded.idle_archive_secs,
           max_concurrent=excluded.max_concurrent, turn_budget=excluded.turn_budget,
-          prelude=excluded.prelude, restricted=excluded.restricted,
+          prelude=excluded.prelude, instructions=excluded.instructions,
+          restricted=excluded.restricted,
           allowed_tools=excluded.allowed_tools, mcp_access=excluded.mcp_access,
           mcp_policy=excluded.mcp_policy, retired=0,
           lifetime=CASE
@@ -465,6 +501,7 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
     .bind(&now)
     .bind(&now)
     .bind(&normalized.prelude)
+    .bind(&normalized.instructions)
     .bind(normalized.restricted)
     .bind(allowed_tools)
     .bind(mcp_access)
@@ -559,7 +596,7 @@ pub async fn update_expected(
          description = ?, agent_kind = ?, model = ?, effort = ?, protocol = ?,
          mode = ?, class = ?, strict = ?, env_clear = ?, ambient_allowlist = ?,
          idle_archive_secs = ?, max_concurrent = ?, turn_budget = ?, prelude = ?,
-         restricted = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
+         instructions = ?, restricted = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
          retired = 0, revision = revision + 1, updated_at = ?
          WHERE name = ? AND revision = ?",
     )
@@ -577,6 +614,7 @@ pub async fn update_expected(
     .bind(normalized.max_concurrent)
     .bind(normalized.turn_budget)
     .bind(&normalized.prelude)
+    .bind(&normalized.instructions)
     .bind(normalized.restricted)
     .bind(allowed_tools)
     .bind(mcp_access)
@@ -700,7 +738,7 @@ pub async fn create_clone_prepared(
              description = ?, agent_kind = ?, model = ?, effort = ?, protocol = ?,
              mode = ?, class = ?, strict = ?, env_clear = ?, ambient_allowlist = ?,
              idle_archive_secs = ?, max_concurrent = ?, turn_budget = ?, prelude = ?,
-             restricted = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
+             instructions = ?, restricted = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
              retired = 0, lifetime = lifetime + 1,
              revision = revision + 1, updated_at = ?
              WHERE name = ? AND retired = 1",
@@ -719,6 +757,7 @@ pub async fn create_clone_prepared(
         .bind(normalized.max_concurrent)
         .bind(normalized.turn_budget)
         .bind(&normalized.prelude)
+        .bind(&normalized.instructions)
         .bind(normalized.restricted)
         .bind(&allowed_tools)
         .bind(&mcp_access)
@@ -736,9 +775,9 @@ pub async fn create_clone_prepared(
             "INSERT INTO profiles
              (name, description, agent_kind, model, effort, protocol, mode, class,
               strict, env_clear, ambient_allowlist, idle_archive_secs, max_concurrent,
-              turn_budget, revision, created_at, updated_at, prelude, restricted,
+              turn_budget, revision, created_at, updated_at, prelude, instructions, restricted,
               allowed_tools, mcp_access, mcp_policy)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(target_name)
         .bind(&normalized.description)
@@ -757,6 +796,7 @@ pub async fn create_clone_prepared(
         .bind(&now)
         .bind(&now)
         .bind(&normalized.prelude)
+        .bind(&normalized.instructions)
         .bind(normalized.restricted)
         .bind(allowed_tools)
         .bind(mcp_access)
@@ -1012,6 +1052,30 @@ pub async fn seed_stock_profiles(db: &Db) -> Result<()> {
                 .with_context(|| format!("seeding stock profile {source}"))?;
         }
     }
+    let mut default = get(db, DEFAULT_PROFILE)
+        .await?
+        .ok_or_else(|| anyhow!("default profile is unavailable while seeding origin starters"))?;
+    if default.revision == 1 && default.instructions.trim().is_empty() {
+        let mut input = default.as_input()?;
+        input.instructions = DEFAULT_PROFILE_INSTRUCTIONS.trim().to_string();
+        default = upsert(db, &input)
+            .await
+            .context("seeding default profile instructions")?;
+    }
+    for (source, manifest, instructions) in ORIGIN_PROFILE_STARTERS {
+        let starter: OriginProfileStarter = serde_json::from_str(manifest)
+            .with_context(|| format!("parsing origin profile starter {source}"))?;
+        if get_including_retired(db, &starter.name).await?.is_some() {
+            continue;
+        }
+        let mut input = default.as_input()?;
+        input.name = starter.name.clone();
+        input.description = starter.description;
+        input.instructions = instructions.trim().to_string();
+        upsert(db, &input)
+            .await
+            .with_context(|| format!("seeding origin profile starter {source}"))?;
+    }
     Ok(())
 }
 
@@ -1056,6 +1120,7 @@ pub async fn normalize_default(db: &Db) -> Result<()> {
         max_concurrent: current.max_concurrent,
         turn_budget: current.turn_budget,
         prelude: current.prelude.clone(),
+        instructions: current.instructions.clone(),
         restricted: current.restricted,
         allowed_tools: current.allowed_tool_rules().unwrap_or_default(),
         mcp_access: current.mcp_access().unwrap_or_default(),
@@ -1159,6 +1224,38 @@ mod tests {
         assert_eq!(watch.mode, "plan");
         assert!(watch.is_automation_safe());
         assert!(!watch.restricted);
+        let default = get(&db, DEFAULT_PROFILE).await.unwrap().unwrap();
+        assert_eq!(
+            default.instructions,
+            DEFAULT_PROFILE_INSTRUCTIONS.trim().to_string()
+        );
+        for (name, instructions) in [
+            ("github", include_str!("../profiles/github/instructions.md")),
+            ("slack", include_str!("../profiles/slack/instructions.md")),
+        ] {
+            let starter = get(&db, name).await.unwrap().unwrap();
+            assert_eq!(starter.agent_kind, default.agent_kind);
+            assert_eq!(starter.model, default.model);
+            assert_eq!(starter.effort, default.effort);
+            assert_eq!(starter.protocol, default.protocol);
+            assert_eq!(starter.mode, default.mode);
+            assert_eq!(starter.mcp_access, default.mcp_access);
+            assert_eq!(starter.instructions, instructions.trim());
+        }
+
+        let mut cleared_default = default.as_input().unwrap();
+        cleared_default.instructions.clear();
+        upsert(&db, &cleared_default).await.unwrap();
+        seed_stock_profiles(&db).await.unwrap();
+        assert!(
+            get(&db, DEFAULT_PROFILE)
+                .await
+                .unwrap()
+                .unwrap()
+                .instructions
+                .is_empty(),
+            "an operator-cleared starter remains empty after restart seeding"
+        );
 
         let mut edited = stock.as_input().unwrap();
         edited.description = "operator-edited description".to_string();

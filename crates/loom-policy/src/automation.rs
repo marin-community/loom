@@ -657,6 +657,7 @@ mod tests {
                 max_concurrent: 1,
                 turn_budget: Some(10),
                 prelude: "weaver".to_string(),
+                instructions: String::new(),
                 restricted: false,
                 allowed_tools: vec![],
                 mcp_access: weaver_api::McpAccess::default(),

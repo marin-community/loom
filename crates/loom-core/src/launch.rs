@@ -406,6 +406,7 @@ pub async fn resolve(
             idle_archive_secs: Some(idle_archive_secs),
             turn_budget: Some(turn_budget),
             prelude: profile.prelude.clone(),
+            instructions: profile.instructions.clone(),
             runtime_permissions: runtime_permissions.clone(),
             mcp_policy: SessionMcpPolicyView::from(&mcp_policy),
         },

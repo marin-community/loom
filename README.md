@@ -94,6 +94,19 @@ it; an explicit handoff can replace it with a newly resolved snapshot. New
 Session exposes the same profile picker, editable launch fields, save-as-new
 composition, and bounded Scratch drop target as the CLI.
 
+A profile may also carry organization-owned opening instructions. Loom appends
+them for every origin that selects the profile: user and delegated launches,
+Slack and GitHub triggers, watches, and authenticated automation. This keeps
+workflow and response conventions in deployment configuration while Loom's
+own prompt supplies only Weaver mechanics and transport context.
+
+Loom seeds lightweight instructions for an untouched `default` profile and
+editable `slack` and `github` starters from the same runtime posture. Their
+reviewed source lives under `crates/loom-policy/profiles/<name>/`; trigger
+settings continue to select `default` for compatibility until an operator
+explicitly selects an origin profile. Deployment configuration can manage and
+select those profiles together.
+
 `poll` reads lifecycle and attention, `wait` blocks until completion or human
 attention, `send` delivers immediate control input, and `interrupt` stops the
 current turn. For ACP, immediate control input steers a supported live turn and
@@ -404,7 +417,8 @@ genuinely remote callers need to present a token or log in.
 
 General settings and named launch profiles have separate ownership. Settings
 control the server and shared services. Profiles control agent selection,
-runtime policy, capacity, environment posture, and MCP access. Edit both in
+runtime policy, capacity, environment posture, MCP access, and opening
+instructions. Edit both in
 Settings or use the operator CLI:
 
 ```sh
