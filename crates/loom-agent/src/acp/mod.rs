@@ -3225,12 +3225,7 @@ impl Task {
             .await;
         if result.is_ok() && self.turn_live {
             self.automatic_dispatch_paused = true;
-            for (_, pending) in self.pending_steers.drain() {
-                let _ = pending.reply.send(Err(anyhow!("turn was cancelled")));
-            }
-            if let Some(pending) = self.pending_external.take() {
-                let _ = pending.reply.send(Err(anyhow!("turn was cancelled")));
-            }
+            self.fail_pending_steers("turn was cancelled");
             // The adapter notice belongs to the cancelled turn even when it
             // arrives after an immediate restart. Bound suppression to that
             // turn and its direct successor so unrelated future prose is never
@@ -3264,6 +3259,15 @@ impl Task {
     fn resume_automatic_dispatch_on<T>(&mut self, explicit_send: &Result<T>) {
         if explicit_send.is_ok() {
             self.automatic_dispatch_paused = false;
+        }
+    }
+
+    fn fail_pending_steers(&mut self, reason: &'static str) {
+        for (_, pending) in self.pending_steers.drain() {
+            let _ = pending.reply.send(Err(anyhow!(reason)));
+        }
+        if let Some(pending) = self.pending_external.take() {
+            let _ = pending.reply.send(Err(anyhow!(reason)));
         }
     }
 
@@ -3465,12 +3469,7 @@ impl Task {
 
     async fn on_exit(&mut self, status: Option<i32>) {
         tracing::warn!(session = %self.session_id, ?status, "acp agent exited");
-        for (_, pending) in self.pending_steers.drain() {
-            let _ = pending.reply.send(Err(anyhow!("acp agent exited")));
-        }
-        if let Some(pending) = self.pending_external.take() {
-            let _ = pending.reply.send(Err(anyhow!("acp agent exited")));
-        }
+        self.fail_pending_steers("acp agent exited");
         self.settle_inflight_review(
             crate::review_inbox::ReviewClaimSettlement::Abandoned,
             "ACP process exit",
