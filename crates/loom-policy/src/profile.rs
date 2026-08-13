@@ -100,7 +100,10 @@ async fn validate_input(
         bail!("profile prelude must be 'weaver' or 'none'");
     }
     if input.instructions.len() > MAX_PROFILE_INSTRUCTIONS_BYTES {
-        bail!("profile instructions must be at most 65536 bytes");
+        bail!(
+            "profile instructions must be at most {} bytes",
+            MAX_PROFILE_INSTRUCTIONS_BYTES
+        );
     }
     if input.allowed_tools.len() > 64
         || input.allowed_tools.iter().any(|rule| {
