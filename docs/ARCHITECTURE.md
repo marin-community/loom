@@ -484,7 +484,8 @@ let an agent or script type into, interrupt, or read back a child session
 uniformly. For a `terminal` session each requires a live terminal (else 409). An
 `acp` session has no PTY, so the same verbs map onto the protocol — keeping the
 CLI (`loom session {send,interrupt,preview}`) and its `nudge` audit uniform across
-backends: `send` cancels a live turn and starts the message as a normal prompt,
+backends: `send` steers a supported live turn, otherwise cancels it and starts
+the message as a normal prompt,
 `interrupt` is a `session/cancel`,
 and `preview` renders the last journal blocks as compact plain text instead of
 a vt100 screen capture.

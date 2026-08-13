@@ -462,6 +462,7 @@ test.describe('acp conversation', () => {
             commands: [],
             config_options: [],
             modes: [],
+            steering_supported: false,
           },
         },
       });

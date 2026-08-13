@@ -541,6 +541,8 @@ pub struct AcpMetadata {
     pub commands: Vec<Value>,
     pub config_options: Vec<Value>,
     pub modes: Vec<Value>,
+    /// Whether this adapter accepts injected input during a live turn.
+    pub steering_supported: bool,
 }
 
 /// A live session's control surface, held in the [`AcpRegistry`]: send commands
@@ -576,8 +578,8 @@ impl AcpHandle {
             .await
     }
 
-    /// Deliver a cross-session send without leaving it behind a live turn:
-    /// cancel the current turn and start the message normally.
+    /// Deliver injected input without leaving it behind a live turn: steer when
+    /// supported, otherwise cancel the current turn and start normally.
     pub async fn send_now(
         &self,
         text: String,
@@ -1362,6 +1364,15 @@ struct PendingPerm {
     frame_seq: u64,
 }
 
+/// An automated message waiting for the adapter's steering response.
+struct PendingSteer {
+    text: String,
+    by: Option<String>,
+    turn: i64,
+    resources: Vec<Value>,
+    reply: oneshot::Sender<Result<PromptAck>>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TurnEndSource {
     MatchingPromptResponse,
@@ -1425,9 +1436,13 @@ struct Task {
     pending_config: HashMap<u64, oneshot::Sender<Result<AcpMetadata>>>,
     #[allow(dead_code)]
     load_session_cap: bool,
+    steering_cap: bool,
+    pending_steers: HashMap<u64, PendingSteer>,
     /// A recovered adapter-owned turn with no prompt response id. Normal turns
     /// are closed by their prompt response instead.
     external_turn: bool,
+    /// A steer that raced the old turn boundary and was accepted as a new turn.
+    pending_external: Option<PendingSteer>,
     /// A cancelled turn may be followed by the adapter's presentation-only
     /// "Conversation interrupted" prose after the next turn has already begun.
     /// Consume that one notice rather than journaling it under the wrong turn.
@@ -1505,7 +1520,10 @@ impl Task {
             pending_mode: HashMap::new(),
             pending_config: HashMap::new(),
             load_session_cap: false,
+            steering_cap: false,
+            pending_steers: HashMap::new(),
             external_turn: false,
+            pending_external: None,
             pending_interrupt_notice_through: None,
             automatic_dispatch_paused: false,
             suppress_journal: false,
@@ -1567,6 +1585,7 @@ impl Task {
         let turns_dispatched = if max_seq < 0 { 0 } else { current_turn + 1 };
 
         let metadata = Self::load_persisted_metadata(&state.db, &session.id).await?;
+        let steering_cap = metadata.steering_supported;
         Ok(Self {
             db: state.db.clone(),
             bus: state.bus.clone(),
@@ -1596,7 +1615,10 @@ impl Task {
             pending_mode: HashMap::new(),
             pending_config: HashMap::new(),
             load_session_cap: false,
+            steering_cap,
+            pending_steers: HashMap::new(),
             external_turn,
+            pending_external: None,
             pending_interrupt_notice_through: None,
             automatic_dispatch_paused,
             suppress_journal: false,
@@ -1772,6 +1794,8 @@ impl Task {
         let res = res.ok_or_else(|| anyhow!("initialize failed: {err:?}"))?;
         if let Ok(init) = serde_json::from_value::<wire::InitializeResult>(res) {
             self.load_session_cap = init.agent_capabilities.load_session;
+            self.steering_cap = init.meta.steering.supported;
+            self.metadata.lock().unwrap().steering_supported = self.steering_cap;
         }
 
         match &launch.new_or_load {
@@ -2322,6 +2346,11 @@ impl Task {
         let Some(id) = inc.id.as_ref().and_then(Value::as_u64) else {
             return;
         };
+        if let Some(pending) = self.pending_steers.remove(&id) {
+            self.on_steering_response(pending, inc.result, inc.error)
+                .await;
+            return;
+        }
         if let Some(pending) = self.pending_mode.remove(&id) {
             let result = if let Some(error) = inc.error {
                 Err(anyhow!("session/set_mode failed: {error}"))
@@ -2508,6 +2537,18 @@ impl Task {
             return;
         }
 
+        // Steering can race the old prompt's response. If the adapter already
+        // opened the injected message as a new turn, adopt it before ordinary
+        // queued composer feedback. Otherwise let the steering response decide
+        // whether to inject or fall back before dispatching that queue.
+        if let Some(pending) = self.pending_external.take() {
+            self.begin_external_turn(pending).await;
+            return;
+        }
+        if !self.pending_steers.is_empty() {
+            return;
+        }
+
         self.dispatch_pending_prompt().await;
     }
 
@@ -2647,6 +2688,65 @@ impl Task {
         }
     }
 
+    async fn on_steering_response(
+        &mut self,
+        pending: PendingSteer,
+        result: Option<Value>,
+        error: Option<Value>,
+    ) {
+        let outcome = result
+            .and_then(|value| serde_json::from_value::<wire::SteeringResult>(value).ok())
+            .map(|result| result.outcome);
+        match (outcome, error) {
+            (Some(wire::SteeringOutcome::Injected), None) => {
+                // The adapter accepted this as input to the current turn. Flush
+                // earlier streamed prose before assigning the injected message
+                // its durable sequence.
+                self.current_turn = pending.turn;
+                self.flush_buf().await;
+                let by = pending.by.map(Value::from).unwrap_or(Value::Null);
+                self.journal_block(
+                    kind::USER_MESSAGE,
+                    json!({
+                        "text": pending.text,
+                        "by": by,
+                        "steered": true,
+                        "resources": pending.resources,
+                    }),
+                )
+                .await;
+                self.automatic_dispatch_paused = false;
+                let _ = pending.reply.send(Ok(PromptAck {
+                    queued: false,
+                    turn: Some(pending.turn),
+                }));
+                if !self.turn_live {
+                    self.dispatch_pending_prompt().await;
+                }
+            }
+            (Some(wire::SteeringOutcome::StartedNewTurn), None) => {
+                if self.turn_live {
+                    self.pending_external = Some(pending);
+                } else {
+                    self.begin_external_turn(pending).await;
+                }
+            }
+            (outcome, error) => {
+                tracing::warn!(
+                    session = %self.session_id,
+                    ?outcome,
+                    ?error,
+                    "steering failed; restarting the turn"
+                );
+                let result = self
+                    .restart_prompt(pending.text, pending.by, pending.resources)
+                    .await;
+                self.resume_automatic_dispatch_on(&result);
+                let _ = pending.reply.send(result);
+            }
+        }
+    }
+
     async fn restart_prompt(
         &mut self,
         text: String,
@@ -2693,6 +2793,55 @@ impl Task {
             queued: false,
             turn: Some(self.current_turn),
         })
+    }
+
+    async fn begin_external_turn(&mut self, pending: PendingSteer) {
+        let turn = if self.turns_dispatched > 0 {
+            self.current_turn + 1
+        } else {
+            self.current_turn
+        };
+        self.effective_mode = self.current_mode.clone();
+        let inflight = json!({
+            "turn": turn,
+            "external": true,
+            "mode": self.effective_mode,
+        })
+        .to_string();
+        if let Err(error) = session::set_inflight(&self.db, &self.session_id, Some(&inflight)).await
+        {
+            let _ = pending.reply.send(Err(error));
+            return;
+        }
+        self.current_turn = turn;
+        self.next_seq = 0;
+        self.turns_dispatched += 1;
+        self.turn_live = true;
+        self.external_turn = true;
+        self.automatic_dispatch_paused = false;
+        self.emit(
+            "turn",
+            json!({
+                "turn": turn,
+                "state": "started",
+                "effective_mode": self.effective_mode,
+            }),
+        );
+        let by = pending.by.map(Value::from).unwrap_or(Value::Null);
+        self.journal_block(
+            kind::USER_MESSAGE,
+            json!({
+                "text": pending.text,
+                "by": by,
+                "resources": pending.resources,
+            }),
+        )
+        .await;
+        crate::status::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "working").await;
+        let _ = pending.reply.send(Ok(PromptAck {
+            queued: false,
+            turn: Some(turn),
+        }));
     }
 
     async fn start_turn(
@@ -3076,6 +3225,12 @@ impl Task {
             .await;
         if result.is_ok() && self.turn_live {
             self.automatic_dispatch_paused = true;
+            for (_, pending) in self.pending_steers.drain() {
+                let _ = pending.reply.send(Err(anyhow!("turn was cancelled")));
+            }
+            if let Some(pending) = self.pending_external.take() {
+                let _ = pending.reply.send(Err(anyhow!("turn was cancelled")));
+            }
             // The adapter notice belongs to the cancelled turn even when it
             // arrives after an immediate restart. Bound suppression to that
             // turn and its direct successor so unrelated future prose is never
@@ -3147,9 +3302,41 @@ impl Task {
                         let _ = reply.send(ack);
                     }
                     PromptDelivery::Immediate => {
-                        let ack = self.restart_prompt(text, by, resources).await;
-                        self.resume_automatic_dispatch_on(&ack);
-                        let _ = reply.send(ack);
+                        if self.turn_live
+                            && self.steering_cap
+                            && self.pending_steers.is_empty()
+                            && self.pending_external.is_none()
+                        {
+                            let id = self.next_id();
+                            let request = wire::request_line(
+                                id,
+                                method::SESSION_STEERING,
+                                wire::steering_params(&self.acp_session_id, &text, &resources),
+                            );
+                            match self.stream.write(&request).await {
+                                Ok(()) => {
+                                    self.pending_steers.insert(
+                                        id,
+                                        PendingSteer {
+                                            text,
+                                            by,
+                                            turn: self.current_turn,
+                                            resources,
+                                            reply,
+                                        },
+                                    );
+                                }
+                                Err(_) => {
+                                    let ack = self.restart_prompt(text, by, resources).await;
+                                    self.resume_automatic_dispatch_on(&ack);
+                                    let _ = reply.send(ack);
+                                }
+                            }
+                        } else {
+                            let ack = self.restart_prompt(text, by, resources).await;
+                            self.resume_automatic_dispatch_on(&ack);
+                            let _ = reply.send(ack);
+                        }
                     }
                 }
             }
@@ -3278,6 +3465,12 @@ impl Task {
 
     async fn on_exit(&mut self, status: Option<i32>) {
         tracing::warn!(session = %self.session_id, ?status, "acp agent exited");
+        for (_, pending) in self.pending_steers.drain() {
+            let _ = pending.reply.send(Err(anyhow!("acp agent exited")));
+        }
+        if let Some(pending) = self.pending_external.take() {
+            let _ = pending.reply.send(Err(anyhow!("acp agent exited")));
+        }
         self.settle_inflight_review(
             crate::review_inbox::ReviewClaimSettlement::Abandoned,
             "ACP process exit",
