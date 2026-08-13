@@ -1,0 +1,1 @@
+ALTER TABLE profiles ADD COLUMN instructions TEXT NOT NULL DEFAULT '';

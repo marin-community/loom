@@ -1017,6 +1017,7 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
         let launch_prompt = build_launch_prompt(
             &goal,
             &launch_profile.prelude,
+            &launch_profile.instructions,
             &entrance,
             scratch.as_deref(),
         );
@@ -1383,7 +1384,13 @@ fn entrance_note(tracking_issue: Option<i64>) -> String {
 /// The user's goal is always the opening user message: making an agent fetch it
 /// through `weaver summary` on turn one adds latency and duplicates the goal in
 /// context. `none` deliberately omits all Weaver orientation.
-fn build_launch_prompt(goal: &str, prelude: &str, entrance: &str, scratch: Option<&str>) -> String {
+fn build_launch_prompt(
+    goal: &str,
+    prelude: &str,
+    instructions: &str,
+    entrance: &str,
+    scratch: Option<&str>,
+) -> String {
     let mut parts = Vec::new();
     if !goal.is_empty() {
         parts.push(goal);
@@ -1391,10 +1398,19 @@ fn build_launch_prompt(goal: &str, prelude: &str, entrance: &str, scratch: Optio
             parts.push(entrance);
         }
     }
+    let profile_instructions = profile_instructions_section(instructions);
+    if let Some(instructions) = profile_instructions.as_deref() {
+        parts.push(instructions);
+    }
     if let Some(scratch) = scratch {
         parts.push(scratch);
     }
     parts.join("\n\n")
+}
+
+pub(crate) fn profile_instructions_section(instructions: &str) -> Option<String> {
+    let instructions = instructions.trim();
+    (!instructions.is_empty()).then(|| format!("## Profile instructions\n\n{instructions}"))
 }
 
 /// Adopt the explicit work item attached to a launch, if any.
@@ -1612,10 +1628,35 @@ mod tests {
     fn restricted_prelude_delivers_the_caller_goal_without_weaver_orientation() {
         let goal = "Rewrite only the issue body.\nBody hash: abc123";
         let entrance = "weaver session metadata";
-        assert_eq!(build_launch_prompt(goal, "none", entrance, None), goal);
+        assert_eq!(build_launch_prompt(goal, "none", "", entrance, None), goal);
         assert_eq!(
-            build_launch_prompt(goal, "weaver", entrance, None),
+            build_launch_prompt(goal, "weaver", "", entrance, None),
             format!("{goal}\n\n{entrance}")
+        );
+    }
+
+    #[test]
+    fn profile_instructions_apply_with_or_without_the_weaver_prelude() {
+        let expected = "do the work\n\n## Profile instructions\n\nUse the organization workflow.";
+        assert_eq!(
+            build_launch_prompt(
+                "do the work",
+                "none",
+                "Use the organization workflow.",
+                "unused",
+                None,
+            ),
+            expected
+        );
+        assert_eq!(
+            build_launch_prompt(
+                "do the work",
+                "weaver",
+                "Use the organization workflow.",
+                "Weaver context.",
+                None,
+            ),
+            format!("do the work\n\nWeaver context.\n\n## Profile instructions\n\nUse the organization workflow.")
         );
     }
 }

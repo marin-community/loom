@@ -1273,6 +1273,7 @@ export interface Profile {
   max_concurrent: number;
   turn_budget: number | null;
   prelude: 'weaver' | 'none';
+  instructions: string;
   restricted: boolean;
   runtime_permissions: string[];
   mcp_access: McpAccess;
@@ -1346,6 +1347,7 @@ export interface ResolvedLaunchPolicy {
   idle_archive_secs: number | null;
   turn_budget: number | null;
   prelude: string;
+  instructions: string;
   runtime_permissions: string[];
   mcp_policy: SessionMcpPolicy;
 }

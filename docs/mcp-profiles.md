@@ -14,6 +14,10 @@ final boundary.
   explicit group list. Saving the profile resolves enabled registry content and
   pins the exact identities, digests, custom revisions, and tool surface to that
   profile revision.
+- **A profile owns deployment instructions.** Its optional multiline
+  `instructions` are appended to the first prompt for every origin selecting
+  that profile. They are visible through the profile API and Settings UI and
+  should contain organization workflow and response conventions, never secrets.
 - **A session owns launch history.** Launch copies the resolved profile and MCP
   policy into the concrete snapshot stamped for that runtime launch. Recovery,
   adoption, and an unchanged profile do not re-resolve the current registry;

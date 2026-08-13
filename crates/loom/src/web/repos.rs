@@ -438,10 +438,17 @@ async fn handle_trigger(
         Some(b) => git::branch_exists(&repo_root, b).await,
         None => false,
     };
+    let profile = weaver_core::config::get_or(
+        &st.db,
+        "github.profile",
+        weaver_core::config::DEFAULT_GITHUB_PROFILE,
+    )
+    .await;
     let mut req = CreateReq {
         repo: Some(slug.slug()),
         title: Some(event.issue.title.clone()),
         goal: Some(trigger_goal(&slug.slug(), is_pr, number, &event, &author)),
+        profile: Some(profile),
         // Record the thread on the tracking issue too (issues only — a PR
         // number in the issue link would read as the wrong thing), so the
         // weaver ledger and the `github` wiring tag agree from birth.
@@ -608,19 +615,11 @@ fn trigger_goal(
         .map(str::trim)
         .filter(|b| !b.is_empty())
         .unwrap_or("(no description)");
-    let change_work = if is_pr {
-        format!("This worktree is checked out on the PR's own branch — commit and `git push` here to update pull request #{number} directly.")
-    } else {
-        "Do the work on this branch and open a pull request against the default branch when it is ready.".to_string()
-    };
     let comment_cmd = if is_pr { "pr" } else { "issue" };
     let respond = format!(
-        "- First choose the response mode from the triggering request and thread context. Questions, walkthroughs, evaluations, explanations, and review requests are *answer mode*. Explicit requests to implement, fix, change files, or update/open a pull request are *change mode*.\n\
-         - In answer mode, investigate as needed and post a concise, self-contained answer on this thread. Do not edit the repository, create design/research documents, commit, or open a pull request unless the user explicitly asks for a change.\n\
-         - In change mode, {change_work}\n\
-         - If the request is ambiguous and a direct answer can satisfy it, use answer mode rather than requiring a follow-up or manufacturing a change.\n\
-         - Your `weaver status` messages are mirrored onto this thread (loom edits its \"On it\" comment into a live status trail), so progress reporting is automatic. For a short answer, avoid narrating every lookup.\n\
-         - Post the final answer or completed result on the thread: `gh {comment_cmd} comment {number} --repo {repo} --body \"…\"`."
+        "- Post the final answer or completed result on the thread: `gh {comment_cmd} comment {number} --repo {repo} --body \"…\"`.\n\
+         - Your `weaver status` messages are mirrored onto this thread. When you create or update a pull request or issue, or otherwise reach a terminal outcome, replace any transient progress such as `waiting` with a final status that names the outcome and includes its URL when available. Use `attention` when a person needs to review or act; otherwise use `ok`.\n\
+         - Do not leave the thread with only the editable status card: the final GitHub comment must be self-contained."
     );
     let (introduction, trigger_context) = match event.source() {
         github_trigger::TriggerSource::CommentCreated => (

@@ -26,6 +26,8 @@ pub struct Profile {
     pub max_concurrent: i64,
     pub turn_budget: Option<i64>,
     pub prelude: String,
+    /// Organization-owned instructions appended to the opening prompt.
+    pub instructions: String,
     pub restricted: bool,
     /// JSON array in storage; parsed through [`Profile::allowed_tool_rules`].
     pub allowed_tools: String,
@@ -81,6 +83,7 @@ impl Profile {
             max_concurrent: self.max_concurrent,
             turn_budget: self.turn_budget,
             prelude: self.prelude.clone(),
+            instructions: self.instructions.clone(),
             restricted: self.restricted,
             allowed_tools: self.allowed_tool_rules()?,
             mcp_access: self.mcp_access()?,
@@ -118,6 +121,8 @@ pub struct ProfileInput {
     pub turn_budget: Option<i64>,
     #[serde(default = "default_prelude")]
     pub prelude: String,
+    #[serde(default)]
+    pub instructions: String,
     #[serde(default)]
     pub restricted: bool,
     #[serde(default, alias = "runtime_permissions")]

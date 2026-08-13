@@ -57,10 +57,9 @@ order:
    PR from a fork, whose head loom can't push to, falls back to a fresh branch.)
 7. **Reuses or creates.** If an active session already owns that branch, the new
    request is forwarded into it (a nudge in its terminal) rather than launching a
-   duplicate. Otherwise loom creates the session, seeded with the issue/PR title,
-   body, and the triggering comment when applicable, plus a primer on how to
-   respond — push to the PR branch (or open a PR for an issue) and reply on the
-   thread with `gh`.
+   duplicate. Otherwise loom creates the session with `github.profile` (default
+   `default`), seeded with the issue/PR title, body, and triggering comment when
+   applicable, plus the fixed thread reply and terminal-status contract.
 8. **Replies** on the thread with the session URL. A forwarded comment is
    acknowledged with a 👀 **reaction** on the triggering comment instead — seen,
    passed along, no ack comment accumulating on an active thread. When the
@@ -104,12 +103,11 @@ the documents the agent has published (the dashboard's artifact viewer). The
 agent still posts real comments when it needs a person — a question, a design
 review, the result — and those do notify.
 
-The triggering request determines whether the session should answer or change
-the repository. Questions, walkthroughs, evaluations, explanations, and review
-requests receive a concise answer on the issue or PR with no repository edits.
-Explicit implementation/fix/PR requests use the branch workflow. If a direct
-answer can satisfy ambiguous wording, the agent answers first rather than
-manufacturing a change.
+Loom does not prescribe whether the trigger should answer, change the
+repository, open a pull request, or follow a particular CI workflow. Those
+organization conventions come from the selected profile's `instructions` and
+the repository. The fixed trigger prompt only requires a self-contained thread
+reply and a terminal status that replaces intermediate progress.
 
 The mirroring works on any session, not just triggered ones: `weaver tag set
 github owner/name#123` wires a session by hand (the card appears on its next

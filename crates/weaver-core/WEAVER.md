@@ -146,27 +146,6 @@ moved on since it was set.
   terminal TUI. State the question as text, set `weaver status attention
   "<the question>"`, and continue on your best safe assumption when possible.
 
-## Choose the task mode
-
-A session is a place to do useful work, not proof that the user requested a
-repository change. Choose the mode from the launch request and its conversation
-context before selecting a workflow:
-
-- **Answer mode** — questions, explanations, walkthroughs, evaluations, and
-  review requests. Investigate as deeply as needed, but return a self-contained
-  answer in the originating conversation. Do not edit the repository, create
-  design documents, commit, or open a pull request unless the user explicitly
-  asks for a change. An artifact may hold genuinely useful supporting detail;
-  link it from the answer rather than substituting it for the answer.
-- **Change mode** — explicit requests to implement, fix, write, update, or open
-  a pull request. Make the change, test it, and follow the repository's landing
-  workflow.
-
-When the wording is ambiguous and a direct answer can satisfy it, answer first
-and leave implementation for an explicit follow-up. Do not ask a question just
-to choose a more elaborate workflow when the requested analysis can stand on
-its own.
-
 ## Your environment
 
 Shared deploys run your session inside loom's own container image, which is
@@ -199,9 +178,6 @@ A session often comes from a GitHub thread — an `@loom` mention on an issue or
 PR, or a goal that names one. The people who care about the work are on that
 thread; they don't read this terminal.
 
-- **Choose answer or change mode from the triggering comment.** Being on an
-  issue or PR does not by itself authorize repository edits. Answer questions
-  on the thread; only update code or open a PR when the request asks for it.
 - **Your status is public there.** A session wired to a thread (the `github`
   tag — `weaver summary` shows the wiring) has its `weaver status` trail
   mirrored onto loom's "On it" comment, edited in place as a live status card.
@@ -213,64 +189,23 @@ thread; they don't read this terminal.
   (comment edits notify no one; a real comment does), and raise
   `weaver status attention "<question>"` so the dashboard agrees. Then
   continue on your best assumption rather than idling.
-- **Read the whole thread first** — `gh issue view <n> --comments`. Your goal
-  is a paraphrase of it; the deciding constraint is usually three comments
-  down.
-- **Close the issue through the PR** — `Fixes #<n>` in the body; don't
-  `gh issue close` by hand.
 - **Say which board a number belongs to.** Weaver issues and GitHub issues
   number separately; on a GitHub thread `#12` is theirs, so describe weaver
   work rather than citing its number.
 
-## Designing before you build
-
-This section applies to change-mode work. When an implementation turns on
-research or a tradeoff — an architecture choice, a migration, an API contract,
-anything expensive to reverse — write the design down and have it reviewed
-before building. A request to explain or evaluate an idea remains answer mode;
-researching that answer does not require publishing a design. Skip design work
-for quick fixes, renames, doc tweaks, and review comments: no tradeoff, no
-review, just write the code.
-
-1. `weaver artifact write design <file>` — record the reasoning, rejected
-   alternatives, and open questions. Name it `design` (`plan` is the
-   issue-referencing task-list convention). Stay `ok` while the draft itself
-   needs no user action.
-2. Apply the repository's review policy proportionately to reversibility and
-   risk. Use a code-grounded peer review when the decision is expensive to
-   reverse; do not create a fixed reviewer ceremony for routine work.
-3. Incorporate findings with judgment, record important rejections, and revise
-   the artifact. Then raise `attention` with its URL. If the session came from a
-   GitHub thread, put the durable design or a public link there—a reader cannot
-   open a loopback dashboard URL.
-
 ## Finishing work
 
-In answer mode, reply in the originating conversation with the conclusion and
-the evidence that matters, then append a concise typed `result` to the session
-channel. A branch, artifact, commit, or pull request is not required.
+Follow the selected profile's instructions and the repository's `AGENTS.md` for
+the task and landing workflow. Loom itself does not decide whether a request
+needs a repository change, pull request, design review, or particular test
+suite.
 
-In change mode, you are on a dedicated branch in your own worktree; integrating
-it back is yours to drive.
-
-- **Commit** with a clear message; keep the worktree clean.
-- **Run the project's checks** — formatters, linters, tests (see the repo's
-  `AGENTS.md`) — and make them pass first.
-- **Open a pull request** (`gh pr create`) rather than merging yourself,
-  unless told otherwise.
-- **Link the PR to this session** — put `$(loom session url)` in the body so a
-  reviewer can reach the goal, status trail, and designs behind the diff. Only
-  the server knows loom's public address — `$WEAVER_API` is a loopback URL
-  that resolves to nothing on a reviewer's machine.
-- **Drive the PR to green — opening it starts integration, it doesn't finish
-  it.** Watch CI (`gh pr checks <N> --watch`), fix failures, and push on the
-  same branch. Once green, address review comments already present. Do not poll
-  or wait for future reviews. Local green is not CI green; keep status honest
-  while you wait (`weaver status ok "waiting on CI"`).
-- Once CI is green and present comments are addressed: `weaver status
-  attention "ready for review"` (the message doubles as your summary), append
-  `weaver channel send --kind result "<PR and outcome>"`, and file only durable
-  backlog follow-ups with `weaver issue add`.
+When the requested outcome is complete, make the last `weaver status` describe
+that outcome rather than an intermediate wait. Include a pull request, issue,
+or artifact URL when one was created, and use `attention` when a person needs
+to review or act. Append a concise typed result with `weaver channel send
+--kind result "<outcome>"` so callers can wait on completion without parsing
+terminal output.
 
 When a session is finished with, the user may **archive** it from the
 dashboard: the terminal and worktree go, the branch and weaver history stay.

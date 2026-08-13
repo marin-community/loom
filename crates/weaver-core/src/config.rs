@@ -33,10 +33,14 @@ pub const DEFAULT_GITHUB_ARCHIVE_ON_MERGE: bool = true;
 /// The phrase an `issue_comment` must begin with to trigger a loom session via
 /// the GitHub webhook. Fixed (not free-text) in v1 to shrink the abuse surface.
 pub const DEFAULT_GITHUB_TRIGGER_PHRASE: &str = "@loom";
+/// Named launch profile selected by GitHub-triggered sessions.
+pub const DEFAULT_GITHUB_PROFILE: &str = "default";
 /// Reasoning effort for Slack-origin sessions. Slack conversations usually
 /// expect a prompt answer, so they use a cheaper/faster tier than long-form
 /// workspace sessions by default.
 pub const DEFAULT_SLACK_EFFORT: &str = "high";
+/// Named launch profile selected by Slack-triggered sessions.
+pub const DEFAULT_SLACK_PROFILE: &str = "default";
 /// Sentinel that leaves a Slack-origin session's profile effort unchanged.
 pub const SLACK_AGENT_DEFAULT_EFFORT: &str = "agent-default";
 /// Whether Slack status cards include this session's progress trail.
@@ -182,6 +186,17 @@ pub const REGISTRY: &[SettingSpec] = &[
         options: &[],
     },
     SettingSpec {
+        key: "github.profile",
+        label: "GitHub session profile",
+        description: "Named launch profile for sessions created by the GitHub \
+            trigger. Profile instructions, runtime, tools, and policy are \
+            applied together. The profile must exist when a trigger launches.",
+        kind: SettingKind::String,
+        default: DEFAULT_GITHUB_PROFILE,
+        group: "GitHub",
+        options: &[],
+    },
+    SettingSpec {
         key: "slack.enabled",
         label: "Slack integration",
         description: "Master switch for the Slack Socket Mode integration. loom \
@@ -222,6 +237,17 @@ pub const REGISTRY: &[SettingSpec] = &[
             replies asking for one.",
         kind: SettingKind::String,
         default: "",
+        group: "Slack",
+        options: &[],
+    },
+    SettingSpec {
+        key: "slack.profile",
+        label: "Slack session profile",
+        description: "Named launch profile for sessions created from Slack. \
+            Profile instructions, runtime, tools, and policy are applied \
+            together. The profile must exist when a trigger launches.",
+        kind: SettingKind::String,
+        default: DEFAULT_SLACK_PROFILE,
         group: "Slack",
         options: &[],
     },
@@ -283,11 +309,11 @@ pub const REGISTRY: &[SettingSpec] = &[
     },
     SettingSpec {
         key: "slack.prompt_instructions",
-        label: "Additional Slack instructions",
-        description: "Organization-specific instructions appended to every \
-            Slack launch prompt. Use this to tune response style and workflow \
-            without copying Loom's maintained response contract. Never put \
-            secrets here.",
+        label: "Legacy Slack instructions",
+        description: "Compatibility overlay appended only to Slack launch \
+            prompts. New deployments should put organization workflow and \
+            response conventions on the profile selected by `slack.profile`, \
+            which also works for other launch origins. Never put secrets here.",
         kind: SettingKind::Text,
         default: "",
         group: "Slack",

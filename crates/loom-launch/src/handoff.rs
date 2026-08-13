@@ -196,6 +196,7 @@ struct HandoffPlan {
     idle_archive_secs: Option<i64>,
     turn_budget: i64,
     prelude: String,
+    instructions: String,
     restricted: bool,
     strict: bool,
     allowed_tools: String,
@@ -326,6 +327,15 @@ async fn legacy_handoff_plan(
     let profile_environment = crate::profile::env_pairs(&st.db, &session.profile)
         .await
         .map_err(|error| HandoffError::bad_request(error.to_string()))?;
+    let instructions = if session.launch_snapshot.trim().is_empty() {
+        String::new()
+    } else {
+        crate::launch::deserialize_snapshot(&session.launch_snapshot)
+            .map_err(|error| HandoffError::bad_request(error.to_string()))?
+            .view
+            .policy
+            .instructions
+    };
     Ok(HandoffPlan {
         target: target.to_string(),
         model: model.clone(),
@@ -339,6 +349,7 @@ async fn legacy_handoff_plan(
         idle_archive_secs: session.policy_idle_archive_secs,
         turn_budget: session.policy_turn_budget,
         prelude: session.policy_prelude.clone(),
+        instructions,
         restricted: session.policy_restricted,
         strict: session.policy_strict,
         allowed_tools: session.policy_allowed_tools.clone(),
@@ -468,6 +479,7 @@ async fn handoff_session_inner(
             idle_archive_secs: resolved.view.policy.idle_archive_secs,
             turn_budget: resolved.view.policy.turn_budget.unwrap_or(0),
             prelude: resolved.profile.prelude.clone(),
+            instructions: resolved.profile.instructions.clone(),
             restricted: resolved.profile.restricted,
             strict: resolved.profile.strict,
             allowed_tools: serde_json::to_string(&resolved.runtime_permissions)
@@ -655,11 +667,16 @@ async fn handoff_session_inner(
             HANDOFF_SUMMARY_TIMEOUT,
         )
         .await;
-    launch.goal = Some(crate::chat::handoff_prompt(
+    let mut handoff_prompt = crate::chat::handoff_prompt(
         &current_goal,
         digest.text.as_deref(),
         &context.recent_dialogue,
-    ));
+    );
+    if let Some(instructions) = crate::provision::profile_instructions_section(&plan.instructions) {
+        handoff_prompt.push_str("\n\n");
+        handoff_prompt.push_str(&instructions);
+    }
+    launch.goal = Some(handoff_prompt);
     // The source may emit its final idle lifecycle edge while acknowledging
     // preflight. It is quiesced now, so fence provider replacement against this
     // post-handshake generation rather than the route's earlier snapshot.

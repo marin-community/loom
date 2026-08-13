@@ -115,6 +115,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "later-space-retention",
         include_str!("../migrations/0021_later_space_retention.sql"),
     ),
+    (
+        22,
+        "profile-instructions",
+        include_str!("../migrations/0022_profile_instructions.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -361,6 +366,9 @@ mod tests {
         let profile_columns = table_columns(&db, "profiles").await.unwrap();
         assert!(profile_columns.iter().any(|column| column == "retired"));
         assert!(profile_columns.iter().any(|column| column == "lifetime"));
+        assert!(profile_columns
+            .iter()
+            .any(|column| column == "instructions"));
         assert!(!table_columns(&db, "session_spaces")
             .await
             .unwrap()

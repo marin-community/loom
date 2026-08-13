@@ -602,6 +602,10 @@ pub struct ProfileView {
     pub turn_budget: Option<i64>,
     #[serde(default = "default_prelude")]
     pub prelude: String,
+    /// Organization-owned instructions appended to this profile's opening
+    /// prompt for every launch origin.
+    #[serde(default)]
+    pub instructions: String,
     #[serde(default)]
     pub restricted: bool,
     #[serde(default)]
@@ -879,6 +883,8 @@ pub struct ResolvedLaunchPolicyView {
     pub idle_archive_secs: Option<i64>,
     pub turn_budget: Option<i64>,
     pub prelude: String,
+    #[serde(default)]
+    pub instructions: String,
     pub runtime_permissions: Vec<String>,
     pub mcp_policy: SessionMcpPolicyView,
 }
@@ -999,6 +1005,10 @@ pub struct ProfileReq {
     pub turn_budget: Option<i64>,
     #[serde(default = "default_prelude")]
     pub prelude: String,
+    /// Organization-owned instructions appended to this profile's opening
+    /// prompt for every launch origin.
+    #[serde(default)]
+    pub instructions: String,
     #[serde(default)]
     pub restricted: bool,
     /// Provider-specific fallback permissions. New integrations should use

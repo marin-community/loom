@@ -36,10 +36,26 @@ settings:
     Prefer a concise answer in the thread.
     Link a pull request only when the request asks for a change.
 
-profiles: []
+profiles:
+  - profile:
+      name: slack
+      description: Slack conversation workflow
+      agent_kind: codex
+      protocol: acp
+      instructions: |
+        Follow the organization's repository and landing conventions.
+    env: []
 federations: []
 prune: true
 ```
+
+Profiles may include multiline `instructions`. This is the preferred home for
+organization workflow and response conventions because the same profile works
+for user, delegated, GitHub, Slack, watch, and authenticated automation
+launches. Slack and GitHub choose their trigger profiles with `slack.profile`
+and `github.profile`; both default to `default`. Infrastructure code may read a
+checked-in `AGENTS.md` into this manifest field, but Loom receives and exposes
+the effective text rather than reading a deployment checkout at runtime.
 
 Apply it through the authenticated local CLI:
 
@@ -85,9 +101,9 @@ New global behavior follows one route:
    exposes the key to deployment manifests, the REST settings API, and the
    Settings UI.
 
-Prefer typed switches and enums for policy. For prose customization, prefer an
-additive instruction field over replacing Loom's maintained prompt wholesale;
-this lets releases improve the base contract without forcing every deployment
-to copy it. Templates should expose a small documented placeholder set and
-retain a safe built-in fallback. Configuration is operator-controlled input,
-not a secret store.
+Prefer typed switches and enums for policy. For prose customization, use
+profile `instructions` rather than adding an origin-specific setting. This
+keeps the text beside its runtime and tool policy and covers new launch origins
+without expanding the global setting registry. Templates should expose a small
+documented placeholder set and retain a safe built-in fallback. Configuration
+is operator-controlled input, not a secret store.

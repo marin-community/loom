@@ -770,6 +770,7 @@ async fn deployment_reconcile_rest_journey() {
                 "env_clear": true,
                 "max_concurrent": 1,
                 "turn_budget": 20,
+                "instructions": "Follow the deployment-owned incident workflow.",
                 "mcp_access": {"mode": "groups", "groups": ["messaging"]}
             },
             "env": [{
@@ -811,6 +812,10 @@ async fn deployment_reconcile_rest_journey() {
         .unwrap();
     assert_eq!(status_setting["value"], "false");
     assert_eq!(first["profiles"][0]["revision"], 2);
+    assert_eq!(
+        first["profiles"][0]["instructions"],
+        "Follow the deployment-owned incident workflow."
+    );
     assert_eq!(
         first["profiles"][0]["mcp_access"],
         json!({"mode": "groups", "groups": ["messaging"]})

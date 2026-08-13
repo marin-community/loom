@@ -144,6 +144,23 @@ watch(
       />
     </div>
 
+    <div class="grid min-w-0 gap-1 sm:col-span-2">
+      <label class="text-xs" :for="`${uid}-instructions`">Opening instructions</label>
+      <textarea
+        :id="`${uid}-instructions`"
+        v-model="draft.instructions"
+        data-testid="profile-instructions"
+        rows="8"
+        :disabled="disabled"
+        placeholder="Organization workflow and response conventions for sessions using this profile"
+        class="min-w-0 rounded bg-input px-2 py-1.5 font-mono text-xs"
+      />
+      <p class="text-xs text-muted">
+        Appended to the first prompt for user, Slack, GitHub, delegated, and automation launches. Do
+        not put secrets here.
+      </p>
+    </div>
+
     <div class="grid min-w-0 gap-1">
       <label class="text-xs" :for="`${uid}-model`">Model</label>
       <input

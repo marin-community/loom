@@ -1387,11 +1387,16 @@ async fn launch_inner(
         .await
         .unwrap_or_default();
     let goal = slack_goal(repo, trigger, instruction, &history, &prompt_instructions);
+    let profile = config::get_or(&state.db, "slack.profile", config::DEFAULT_SLACK_PROFILE)
+        .await
+        .trim()
+        .to_string();
     let branch_exists = crate::git::branch_exists(&repo_root, &branch_ref).await;
     let mut req = weaver_api::dto::CreateReq {
         repo: Some(repo.to_string()),
         goal: Some(goal),
-        effort: slack_launch_effort(&state.db).await?,
+        profile: Some(profile.clone()),
+        effort: slack_launch_effort(&state.db, &profile).await?,
         ..Default::default()
     };
     if branch_exists || existing.is_some() {
@@ -1582,17 +1587,14 @@ fn slack_goal(
          ## Request (from <@{user}>)\n{instruction}\n\n\
          ## Conversation context\n{history}\n\n\
          ## How to respond\n\
-         - First choose the response mode from the request and conversation. Questions, walkthroughs, evaluations, explanations, and review requests are *answer mode*. Explicit requests to implement, fix, change files, or open a pull request are *change mode*.\n\
-         - In answer mode, investigate as needed and reply with a self-contained answer, normally one to three short paragraphs. Do not edit the repository, create design/research documents, commit, open a pull request, or invoke a change workflow unless the user explicitly asks for a change. A Weaver artifact may hold genuinely useful supporting detail, but link it from the Slack answer instead of replacing the answer with it.\n\
-         - In change mode, do the work on this branch and open a pull request against the default branch when it is ready.\n\
-         - If the request is ambiguous and a direct answer can satisfy it, use answer mode. Do not require a follow-up merely to choose a more elaborate workflow.\n\
          - Finish by replying on this Slack thread with the answer or completed result. Prefer the built-in `slack_reply` MCP tool; if it is unavailable, POST to `$WEAVER_API/api/branches/$WEAVER_BRANCH/slack/reply` with `{{\"text\": \"…\"}}` and your `LOOM_TOKEN`.\n\
-         - Your `weaver status` messages and the built-in `status_update` MCP tool are mirrored onto the Slack thread. For a short answer, avoid narrating every lookup; use status updates only when they add useful progress context.",
+         - Your `weaver status` messages and the built-in `status_update` MCP tool are mirrored onto the Slack thread. When you create a pull request or issue, or otherwise reach a terminal outcome, replace any transient progress such as `waiting` with a final status that names the outcome and includes its URL when available. Use `attention` when a person needs to review or act; otherwise use `ok`.\n\
+         - Do not leave the thread with only a progress card: the final Slack reply must be self-contained.",
         channel = trigger.channel_id,
         user = trigger.user_id,
     );
     if !prompt_instructions.trim().is_empty() {
-        goal.push_str("\n\n## Organization instructions\n");
+        goal.push_str("\n\n## Additional deployment instructions\n");
         goal.push_str(prompt_instructions.trim());
     }
     goal
@@ -1600,7 +1602,7 @@ fn slack_goal(
 
 /// Resolve the Slack-specific effort override without making an otherwise valid
 /// locked or custom default profile unlaunchable.
-async fn slack_launch_effort(db: &Db) -> Result<Option<String>> {
+async fn slack_launch_effort(db: &Db, profile_name: &str) -> Result<Option<String>> {
     let effort = config::get_or(db, "slack.effort", config::DEFAULT_SLACK_EFFORT)
         .await
         .trim()
@@ -1608,7 +1610,7 @@ async fn slack_launch_effort(db: &Db) -> Result<Option<String>> {
     if effort == config::SLACK_AGENT_DEFAULT_EFFORT {
         return Ok(None);
     }
-    let Some(profile) = crate::profile::get(db, crate::profile::DEFAULT_PROFILE).await? else {
+    let Some(profile) = crate::profile::get(db, profile_name).await? else {
         return Ok(None);
     };
     if profile.strict {
@@ -2195,7 +2197,10 @@ mod tests {
     async fn slack_effort_defaults_high_and_can_inherit_the_profile() {
         let db = crate::db::connect_in_memory().await.unwrap();
         assert_eq!(
-            slack_launch_effort(&db).await.unwrap().as_deref(),
+            slack_launch_effort(&db, crate::profile::DEFAULT_PROFILE)
+                .await
+                .unwrap()
+                .as_deref(),
             Some("high")
         );
 
@@ -2208,7 +2213,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(slack_launch_effort(&db).await.unwrap(), None);
+        assert_eq!(
+            slack_launch_effort(&db, crate::profile::DEFAULT_PROFILE)
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -2370,6 +2380,6 @@ mod tests {
             "Use our incident template.",
         );
         assert!(goal.contains("## How to respond"));
-        assert!(goal.ends_with("## Organization instructions\nUse our incident template."));
+        assert!(goal.ends_with("## Additional deployment instructions\nUse our incident template."));
     }
 }

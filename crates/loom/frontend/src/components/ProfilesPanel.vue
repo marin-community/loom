@@ -84,6 +84,7 @@ function add() {
     max_concurrent: 0,
     turn_budget: null,
     prelude: 'weaver',
+    instructions: '',
     restricted: false,
     runtime_permissions: [],
     mcp_access: { mode: 'none', groups: [] },

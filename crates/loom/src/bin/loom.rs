@@ -1120,6 +1120,9 @@ struct ProfileAddOpts {
     /// Prelude injected before the task: `weaver` or `none`.
     #[arg(long, default_value = "weaver")]
     prelude: String,
+    /// Markdown instructions appended to the opening prompt.
+    #[arg(long)]
+    instructions_file: Option<String>,
     /// Apply Loom's restricted automation security posture.
     #[arg(long)]
     restricted: bool,
@@ -2290,6 +2293,11 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
     let client = client::default()?;
     match cmd {
         ProfileCmd::Add(opts) => {
+            let instructions = match opts.instructions_file.as_deref() {
+                Some(path) => std::fs::read_to_string(path)
+                    .with_context(|| format!("reading profile instructions {path}"))?,
+                None => String::new(),
+            };
             let profile = client
                 .create_profile(&weaver_api::ProfileReq {
                     name: opts.name,
@@ -2307,6 +2315,7 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
                     max_concurrent: opts.max_concurrent,
                     turn_budget: opts.turn_budget,
                     prelude: opts.prelude,
+                    instructions,
                     restricted: opts.restricted,
                     runtime_permissions: opts.runtime_permission,
                     mcp_access: parse_mcp_access(&opts.mcp)?,

@@ -86,10 +86,13 @@ recreate-on-drop behavior as the GitHub card.
 Artifact links are off by default: the thread should receive a self-contained
 answer, and an internal design document is rarely useful conversation context.
 `slack.status_artifacts` can opt a deployment back in. The progress trail,
-header template, and additional launch instructions are likewise registered
-settings (`slack.status_updates`, `slack.status_header_template`, and
-`slack.prompt_instructions`), configurable through both the runtime Settings
-API and a deployment manifest. See [Configuration policy](configuration.md).
+header template, and trigger profile are registered settings
+(`slack.status_updates`, `slack.status_header_template`, and `slack.profile`),
+configurable through both the runtime Settings API and a deployment manifest.
+Organization instructions belong on the selected profile, where the same
+mechanism also covers GitHub, user, delegated, and automation sessions. The
+older `slack.prompt_instructions` remains as an additive compatibility overlay.
+See [Configuration policy](configuration.md).
 
 Where a trigger anchors differs by shape: a **slash command's payload carries
 no thread reference at all**, so it can only start a new thread — loom posts
@@ -99,13 +102,11 @@ An **`@marinbot` mention** continues whatever thread it was typed in
 level. Either way, the card is edited in place — edits don't renotify — so a
 busy thread's status trail never spams the channel.
 
-The launch prompt distinguishes conversational answers from repository
-changes. A question, walkthrough, evaluation, explanation, or review request
-is answered directly in the Slack thread without repository edits or a pull
-request. An explicit implementation/fix/PR request uses the branch workflow.
-When either interpretation could work, loom asks the agent to answer first.
-Supporting detail may live in a Weaver artifact, but the thread still receives
-a self-contained answer.
+The launch prompt supplies Slack context, the fixed reply route, and the final
+status contract. It does not choose an organization's answer/change, landing,
+review, or CI workflow; those conventions come from the selected profile and
+the target repository. The agent must replace intermediate progress with a
+terminal status and post a self-contained reply in the thread.
 
 ## Who can trigger
 
@@ -191,10 +192,10 @@ Do not create standalone Slack-token secrets that the deployment never reads.
 discarding the tokens — use it to pause the integration without losing
 configuration. It, along with `slack.allowed_users`, `slack.default_repo`, and
 `slack.idle_archive_secs`, lives in **Settings → Slack**. Presentation and
-prompt settings live there as well. `slack.effort` defaults Slack-origin
-sessions to `high` reasoning effort for a faster conversational response;
-`agent-default` preserves the selected profile's effort, and locked or
-incompatible profiles fall back automatically.
+profile-selection settings live there as well. `slack.profile` defaults to
+`default`; `slack.effort` defaults Slack-origin sessions to `high` reasoning
+effort, while `agent-default` preserves the selected profile's effort. Locked
+or incompatible profiles fall back automatically.
 
 ## Diagnosing it
 
