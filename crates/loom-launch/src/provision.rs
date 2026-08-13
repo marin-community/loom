@@ -799,7 +799,7 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
     // branch>` so new work starts from the latest mainline, not the launching
     // checkout's (possibly stale) current branch. `default_base` degrades to the
     // current branch on a remote-less repo.
-    let base = match req.base.clone() {
+    let mut base = match req.base.clone() {
         Some(b) => b,
         None => git::default_base(&repo_root).await?,
     };
@@ -847,11 +847,17 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
         };
         (existing_branch.to_string(), work_dir)
     } else {
-        // Create `weaver/<slug>` with a unique suffix.
-        if !git::revision_exists(&repo_root, &base).await {
-            return Err(ProvisionError::invalid(git::missing_revision_message(
-                &repo_root, &base,
-            )));
+        // Create `weaver/<slug>` with a unique suffix. Resolve the base against
+        // origin too — fetching on demand — so a branch that exists on the remote
+        // but not yet in this checkout is a valid fork point; the recorded base
+        // then names the ref actually forked from (e.g. `origin/<name>`).
+        match git::resolve_base(&repo_root, &base).await {
+            Some(resolved) => base = resolved,
+            None => {
+                return Err(ProvisionError::invalid(git::missing_revision_message(
+                    &repo_root, &base,
+                )));
+            }
         }
         let explicit = req.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
         let base_slug = branch_mod::slugify(explicit.unwrap_or(title.as_str()));
