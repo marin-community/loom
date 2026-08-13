@@ -56,9 +56,11 @@ launches. Slack and GitHub choose their trigger profiles with `slack.profile`
 and `github.profile`; both default to `default`. Infrastructure code may read a
 checked-in `AGENTS.md` into this manifest field, but Loom receives and exposes
 the effective text rather than reading a deployment checkout at runtime.
-Loom also seeds editable `slack` and `github` starter profiles from the current
-generic default, with empty instructions. They are opt-in so an upgrade does not
-silently change the environment or runtime used by existing triggers.
+Loom also seeds lightweight instructions for an untouched `default` profile and
+editable `slack` and `github` starters from its runtime posture. The reviewed
+starter text lives under `crates/loom-policy/profiles/<name>/instructions.md`.
+The origin profiles are opt-in so an upgrade does not silently change the
+environment or runtime used by existing triggers.
 
 Apply it through the authenticated local CLI:
 

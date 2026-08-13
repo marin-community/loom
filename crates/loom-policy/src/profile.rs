@@ -18,22 +18,35 @@ pub use crate::profile_data::{
 
 const STOCK_PROFILES: &[(&str, &str)] = &[
     (
-        "github_comment.json",
-        include_str!("../profiles/github_comment.json"),
+        "github_comment/profile.json",
+        include_str!("../profiles/github_comment/profile.json"),
     ),
-    ("watch.json", include_str!("../profiles/watch.json")),
+    (
+        "watch/profile.json",
+        include_str!("../profiles/watch/profile.json"),
+    ),
 ];
 
-const ORIGIN_PROFILE_STARTERS: &[(&str, &str)] = &[
+#[derive(Deserialize)]
+struct OriginProfileStarter {
+    name: String,
+    description: String,
+}
+
+const ORIGIN_PROFILE_STARTERS: &[(&str, &str, &str)] = &[
     (
-        "github",
-        "Starter profile for GitHub-triggered interactive sessions",
+        "github/profile.json",
+        include_str!("../profiles/github/profile.json"),
+        include_str!("../profiles/github/instructions.md"),
     ),
     (
-        "slack",
-        "Starter profile for Slack-triggered interactive sessions",
+        "slack/profile.json",
+        include_str!("../profiles/slack/profile.json"),
+        include_str!("../profiles/slack/instructions.md"),
     ),
 ];
+
+const DEFAULT_PROFILE_INSTRUCTIONS: &str = include_str!("../profiles/default/instructions.md");
 
 const MAX_PROFILE_INSTRUCTIONS_BYTES: usize = 64 * 1024;
 
@@ -1039,20 +1052,29 @@ pub async fn seed_stock_profiles(db: &Db) -> Result<()> {
                 .with_context(|| format!("seeding stock profile {source}"))?;
         }
     }
-    let default = get(db, DEFAULT_PROFILE)
+    let mut default = get(db, DEFAULT_PROFILE)
         .await?
         .ok_or_else(|| anyhow!("default profile is unavailable while seeding origin starters"))?;
-    for (name, description) in ORIGIN_PROFILE_STARTERS {
-        if get_including_retired(db, name).await?.is_some() {
+    if default.revision == 1 && default.instructions.trim().is_empty() {
+        let mut input = default.as_input()?;
+        input.instructions = DEFAULT_PROFILE_INSTRUCTIONS.trim().to_string();
+        default = upsert(db, &input)
+            .await
+            .context("seeding default profile instructions")?;
+    }
+    for (source, manifest, instructions) in ORIGIN_PROFILE_STARTERS {
+        let starter: OriginProfileStarter = serde_json::from_str(manifest)
+            .with_context(|| format!("parsing origin profile starter {source}"))?;
+        if get_including_retired(db, &starter.name).await?.is_some() {
             continue;
         }
         let mut input = default.as_input()?;
-        input.name = (*name).to_string();
-        input.description = (*description).to_string();
-        input.instructions.clear();
+        input.name = starter.name.clone();
+        input.description = starter.description;
+        input.instructions = instructions.trim().to_string();
         upsert(db, &input)
             .await
-            .with_context(|| format!("seeding origin profile starter {name}"))?;
+            .with_context(|| format!("seeding origin profile starter {source}"))?;
     }
     Ok(())
 }
@@ -1203,7 +1225,14 @@ mod tests {
         assert!(watch.is_automation_safe());
         assert!(!watch.restricted);
         let default = get(&db, DEFAULT_PROFILE).await.unwrap().unwrap();
-        for name in ["github", "slack"] {
+        assert_eq!(
+            default.instructions,
+            DEFAULT_PROFILE_INSTRUCTIONS.trim().to_string()
+        );
+        for (name, instructions) in [
+            ("github", include_str!("../profiles/github/instructions.md")),
+            ("slack", include_str!("../profiles/slack/instructions.md")),
+        ] {
             let starter = get(&db, name).await.unwrap().unwrap();
             assert_eq!(starter.agent_kind, default.agent_kind);
             assert_eq!(starter.model, default.model);
@@ -1211,8 +1240,22 @@ mod tests {
             assert_eq!(starter.protocol, default.protocol);
             assert_eq!(starter.mode, default.mode);
             assert_eq!(starter.mcp_access, default.mcp_access);
-            assert!(starter.instructions.is_empty());
+            assert_eq!(starter.instructions, instructions.trim());
         }
+
+        let mut cleared_default = default.as_input().unwrap();
+        cleared_default.instructions.clear();
+        upsert(&db, &cleared_default).await.unwrap();
+        seed_stock_profiles(&db).await.unwrap();
+        assert!(
+            get(&db, DEFAULT_PROFILE)
+                .await
+                .unwrap()
+                .unwrap()
+                .instructions
+                .is_empty(),
+            "an operator-cleared starter remains empty after restart seeding"
+        );
 
         let mut edited = stock.as_input().unwrap();
         edited.description = "operator-edited description".to_string();
