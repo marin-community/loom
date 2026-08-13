@@ -100,6 +100,12 @@ Slack and GitHub triggers, watches, and authenticated automation. This keeps
 workflow and response conventions in deployment configuration while Loom's
 own prompt supplies only Weaver mechanics and transport context.
 
+Loom seeds editable `slack` and `github` starter profiles from the generic
+`default` profile without organization instructions. Trigger settings continue
+to select `default` for compatibility until an operator explicitly selects an
+origin profile; deployment configuration can manage and select those profiles
+together.
+
 `poll` reads lifecycle and attention, `wait` blocks until completion or human
 attention, `send` delivers immediate control input, and `interrupt` stops the
 current turn. For ACP, immediate control input steers a supported live turn and

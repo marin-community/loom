@@ -108,6 +108,9 @@ repository, open a pull request, or follow a particular CI workflow. Those
 organization conventions come from the selected profile's `instructions` and
 the repository. The fixed trigger prompt only requires a self-contained thread
 reply and a terminal status that replaces intermediate progress.
+An editable stock `github` profile is available as a starter, but is not
+selected automatically so upgrades preserve the existing `default` profile's
+environment and runtime behavior.
 
 The mirroring works on any session, not just triggered ones: `weaver tag set
 github owner/name#123` wires a session by hand (the card appears on its next

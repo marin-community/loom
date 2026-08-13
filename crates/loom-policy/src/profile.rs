@@ -24,6 +24,17 @@ const STOCK_PROFILES: &[(&str, &str)] = &[
     ("watch.json", include_str!("../profiles/watch.json")),
 ];
 
+const ORIGIN_PROFILE_STARTERS: &[(&str, &str)] = &[
+    (
+        "github",
+        "Starter profile for GitHub-triggered interactive sessions",
+    ),
+    (
+        "slack",
+        "Starter profile for Slack-triggered interactive sessions",
+    ),
+];
+
 const MAX_PROFILE_INSTRUCTIONS_BYTES: usize = 64 * 1024;
 
 fn is_restricted_mcp_tool_set(rule: &str) -> bool {
@@ -1028,6 +1039,21 @@ pub async fn seed_stock_profiles(db: &Db) -> Result<()> {
                 .with_context(|| format!("seeding stock profile {source}"))?;
         }
     }
+    let default = get(db, DEFAULT_PROFILE)
+        .await?
+        .ok_or_else(|| anyhow!("default profile is unavailable while seeding origin starters"))?;
+    for (name, description) in ORIGIN_PROFILE_STARTERS {
+        if get_including_retired(db, name).await?.is_some() {
+            continue;
+        }
+        let mut input = default.as_input()?;
+        input.name = (*name).to_string();
+        input.description = (*description).to_string();
+        input.instructions.clear();
+        upsert(db, &input)
+            .await
+            .with_context(|| format!("seeding origin profile starter {name}"))?;
+    }
     Ok(())
 }
 
@@ -1176,6 +1202,17 @@ mod tests {
         assert_eq!(watch.mode, "plan");
         assert!(watch.is_automation_safe());
         assert!(!watch.restricted);
+        let default = get(&db, DEFAULT_PROFILE).await.unwrap().unwrap();
+        for name in ["github", "slack"] {
+            let starter = get(&db, name).await.unwrap().unwrap();
+            assert_eq!(starter.agent_kind, default.agent_kind);
+            assert_eq!(starter.model, default.model);
+            assert_eq!(starter.effort, default.effort);
+            assert_eq!(starter.protocol, default.protocol);
+            assert_eq!(starter.mode, default.mode);
+            assert_eq!(starter.mcp_access, default.mcp_access);
+            assert!(starter.instructions.is_empty());
+        }
 
         let mut edited = stock.as_input().unwrap();
         edited.description = "operator-edited description".to_string();

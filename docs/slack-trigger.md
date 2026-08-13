@@ -94,6 +94,10 @@ mechanism also covers GitHub, user, delegated, and automation sessions. The
 older `slack.prompt_instructions` remains as an additive compatibility overlay.
 See [Configuration policy](configuration.md).
 
+Loom seeds an editable `slack` starter profile from the generic default with no
+organization instructions. It remains opt-in so existing installations keep
+their current profile environment and runtime until an operator selects it.
+
 Where a trigger anchors differs by shape: a **slash command's payload carries
 no thread reference at all**, so it can only start a new thread — loom posts
 a placeholder card first and that message's own `ts` becomes the thread root.
