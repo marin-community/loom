@@ -572,8 +572,8 @@ impl Client {
     }
 
     /// Type a message into a session's agent pane, submitting it by default
-    /// (`POST /api/sessions/{key}/send`). For ACP, this cancels a live turn and
-    /// starts the message as a normal turn.
+    /// (`POST /api/sessions/{key}/send`). For ACP, this steers a supported live
+    /// turn and otherwise cancels it before starting a normal turn.
     pub async fn nudge(&self, key: &str, req: &SendReq) -> Result<Value> {
         let body = serde_json::to_value(req)?;
         self.post(&format!("/api/sessions/{}/send", Self::seg(key)), body)

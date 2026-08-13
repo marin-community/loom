@@ -96,9 +96,10 @@ composition, and bounded Scratch drop target as the CLI.
 
 `poll` reads lifecycle and attention, `wait` blocks until completion or human
 attention, `send` delivers immediate control input, and `interrupt` stops the
-current turn. For ACP, immediate control input cancels and restarts, while the
-conversation composer durably queues feedback behind a live turn. Session
-commands accept an id, branch id, branch name, or `repo:branch`.
+current turn. For ACP, immediate control input steers a supported live turn and
+otherwise cancels and restarts; the conversation composer durably queues
+feedback behind a live turn. Session commands accept an id, branch id, branch
+name, or `repo:branch`.
 
 The session title is one canonical, unqualified task label; fleet views add its
 Group only when they need a qualified `Group / Task` name. Loom records whether
@@ -251,8 +252,8 @@ composer with its **Edit** action or ArrowUp from an empty composer, or sent
 immediately with **Stop & send**. The live status names visible
 thinking, writing, or tool activity and reports how long it has been since the
 agent produced an observable update; quiet time is not guessed to mean stuck.
-Cross-session `loom session send` is immediate control input instead: it cancels
-a live turn and starts the message as a new one.
+Cross-session `loom session send` is immediate control input instead: it steers
+a supported live turn, or cancels that turn and starts the message as a new one.
 
 Whenever a session is archived — by the Archive button or automatically on merge
 — loom first captures that conversation to disk: it finds the agent's transcript

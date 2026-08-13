@@ -1548,6 +1548,60 @@ async fn session_send_restarts_a_live_turn() {
     }));
 }
 
+/// Automated `/send` input uses the adapter's steering extension when it is
+/// available, keeping the agent's current work alive instead of cancelling it.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_send_steers_a_supported_live_turn() {
+    let ts = TestServer::start().await;
+    start_new_with_env(
+        &ts,
+        "acp-send-steer",
+        None,
+        None,
+        vec![("FAKE_ACP_STEERING".to_string(), "1".to_string())],
+    )
+    .await;
+
+    ts.client
+        .post(
+            "/api/sessions/acp-send-steer/prompt",
+            json!({ "text": "wait:1200|say:first" }),
+        )
+        .await
+        .unwrap();
+    let sent = ts
+        .client
+        .post(
+            "/api/sessions/acp-send-steer/send",
+            json!({ "text": "say:injected" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent["queued"], false, "response: {sent}");
+    assert_eq!(sent["turn"], 0, "steering stays in the live turn");
+
+    let chat = poll_chat(&ts, "acp-send-steer", Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|block| {
+            block["kind"] == "agent_message"
+                && block["payload"]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("injected"))
+        })
+    })
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert!(blocks.iter().any(|block| {
+        block["turn"] == 0
+            && block["kind"] == "user_message"
+            && block["payload"]["text"] == "say:injected"
+            && block["payload"]["steered"] == true
+    }));
+    assert!(!blocks.iter().any(|block| {
+        block["kind"] == "turn_end" && block["payload"]["stop_reason"] == "cancelled"
+    }));
+}
+
 /// Composer-selected files are resolved inside the worktree and forwarded as
 /// ACP resource_link blocks, not left as adapter-specific `@file` prose.
 #[serial]

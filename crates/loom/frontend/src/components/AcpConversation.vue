@@ -102,6 +102,7 @@ const emptyMetadata = (): AcpMetadata => ({
   commands: [],
   config_options: [],
   modes: [],
+  steering_supported: false,
 });
 const metadata = ref<AcpMetadata>(emptyMetadata());
 

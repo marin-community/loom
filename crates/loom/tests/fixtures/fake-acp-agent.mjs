@@ -54,6 +54,8 @@ const summaryOutput =
   process.env.FAKE_ACP_SUMMARY_OUTPUT_B64 === undefined
     ? undefined
     : Buffer.from(process.env.FAKE_ACP_SUMMARY_OUTPUT_B64, "base64").toString("utf8");
+let promptActive = false;
+const steeringQueue = [];
 let promptEpoch = 0;
 let promptResources = [];
 let poisoned = false;
@@ -64,6 +66,13 @@ function send(obj) {
 }
 function respond(id, result) {
   send({ jsonrpc: JSONRPC, id, result });
+}
+function rejectMethod(id, method) {
+  send({
+    jsonrpc: JSONRPC,
+    id,
+    error: { code: -32601, message: `Method not found: ${method}` },
+  });
 }
 function notify(update) {
   send({ jsonrpc: JSONRPC, method: "session/update", params: { sessionId, update } });
@@ -318,6 +327,7 @@ async function runToken(tok) {
 async function handlePrompt(id, params) {
   const epoch = ++promptEpoch;
   cancelled = false;
+  promptActive = true;
   promptResources = (params.prompt || []).filter((b) => b.type === "resource_link");
   // The script is the prompt's first paragraph only. A real launch prompt
   // appends orientation prose (the entrance note, which echoes the session
@@ -362,8 +372,26 @@ async function handlePrompt(id, params) {
     // An immediate cancel-and-restart can begin another prompt while this
     // handler is still unwinding its cancellable sleep.
     if (epoch !== promptEpoch) return;
+    while (steeringQueue.length > 0 && !cancelled) {
+      const steering = steeringQueue.shift();
+      for (const steeringToken of steering.split("|")) {
+        if (steeringToken.length > 0) await runToken(steeringToken);
+      }
+    }
   }
+  promptActive = false;
   if (id !== null) respond(id, { stopReason: cancelled ? "cancelled" : "end_turn" });
+}
+
+function handleSteering(id, params) {
+  const text = (params.prompt || []).map((block) => block.text || "").join("");
+  if (!promptActive) {
+    void handlePrompt(null, params);
+    respond(id, { outcome: "startedNewTurn" });
+    return;
+  }
+  steeringQueue.push(text);
+  respond(id, { outcome: "injected" });
 }
 
 function handleMessage(msg) {
@@ -416,6 +444,10 @@ function handleMessage(msg) {
       break;
     case "session/prompt":
       void handlePrompt(msg.id, msg.params);
+      break;
+    case "_session/steering":
+      if (steeringSupported) handleSteering(msg.id, msg.params);
+      else rejectMethod(msg.id, msg.method);
       break;
     case "session/cancel":
       cancelled = true;

@@ -443,6 +443,7 @@ export interface AcpMetadata {
   commands: AcpCommand[];
   config_options: AcpConfigOption[];
   modes: AcpMode[];
+  steering_supported: boolean;
 }
 
 // -- block payloads (by kind) --
