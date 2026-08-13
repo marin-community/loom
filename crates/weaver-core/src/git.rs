@@ -218,6 +218,45 @@ pub fn missing_revision_message(dir: &Path, rev: &str) -> String {
     )
 }
 
+/// Resolve a user-supplied base revision to a ref `git worktree add` can fork
+/// from, consulting `origin` when the revision is not already present locally.
+///
+/// A bare branch name resolves only local heads, tags, and SHAs; a branch that
+/// lives on the remote is reachable as `origin/<name>`, and only once it has
+/// been fetched. Tries, in order:
+///   1. the revision as given — a local head, tag, SHA, or explicit `origin/…`,
+///   2. the existing `origin/<name>` tracking ref (no network),
+///   3. `origin/<name>` after `git fetch origin <name>` (one round trip).
+///
+/// Returns the ref that resolves (the input, or `origin/<name>`), or `None` when
+/// it resolves nowhere — including after asking `origin`. A failed fetch
+/// (offline, or no such branch) is non-fatal and simply yields `None`.
+pub async fn resolve_base(dir: &Path, rev: &str) -> Option<String> {
+    if rev.is_empty() {
+        return None;
+    }
+    if revision_exists(dir, rev).await {
+        return Some(rev.to_string());
+    }
+    // A branch on origin is reachable as `origin/<name>`; accept a bare name or
+    // an `origin/…`-qualified one typed before the branch was fetched. A leading
+    // `-` is never a valid branch and must never reach `git fetch` as an option.
+    let branch = rev.strip_prefix("origin/").unwrap_or(rev);
+    if branch.is_empty() || branch.starts_with('-') || !has_remote(dir, "origin").await {
+        return None;
+    }
+    let remote_ref = format!("origin/{branch}");
+    if revision_exists(dir, &remote_ref).await {
+        return Some(remote_ref);
+    }
+    tracing::info!(dir = %dir.display(), branch, "base absent locally; fetching it from origin");
+    let fetched = git(dir, &["fetch", "origin", branch]).await;
+    tracing::debug!(dir = %dir.display(), branch, ok = fetched.is_ok(), "origin fetch for base completed");
+    revision_exists(dir, &remote_ref)
+        .await
+        .then_some(remote_ref)
+}
+
 /// The default branch on `origin` (e.g. `main`), resolved locally and cheaply:
 /// the recorded `origin/HEAD` symref, else a probe of the usual names against
 /// the existing remote-tracking refs. `None` when none of those resolve (a
@@ -825,6 +864,80 @@ mod tests {
         run(dir, &["remote", "set-head", "origin", "main"]).await;
 
         assert_eq!(default_base(dir).await.unwrap(), "origin/main");
+    }
+
+    /// A base that exists only on `origin` — never fetched into this checkout —
+    /// resolves by fetching on demand, yielding the `origin/<name>` tracking ref
+    /// that a launch forks from.
+    #[tokio::test]
+    async fn resolve_base_fetches_remote_only_branch() {
+        let remote = tempfile::tempdir().unwrap();
+        run(remote.path(), &["init", "-q", "--bare", "-b", "main"]).await;
+        let remote_url = remote.path().to_string_lossy().to_string();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        run(dir, &["init", "-q", "-b", "main"]).await;
+        run(dir, &["config", "user.email", "t@t.t"]).await;
+        run(dir, &["config", "user.name", "t"]).await;
+        commit(dir, "T0").await;
+        run(dir, &["remote", "add", "origin", &remote_url]).await;
+        run(dir, &["push", "-q", "origin", "main"]).await;
+
+        // Publish a branch to origin, then forget it locally: drop the local head
+        // and its tracking ref so only the remote knows `feature/remote-only`.
+        run(dir, &["branch", "feature/remote-only", "main"]).await;
+        run(dir, &["push", "-q", "origin", "feature/remote-only"]).await;
+        run(dir, &["branch", "-D", "feature/remote-only"]).await;
+        let _ = git(
+            dir,
+            &[
+                "update-ref",
+                "-d",
+                "refs/remotes/origin/feature/remote-only",
+            ],
+        )
+        .await;
+        assert!(
+            !revision_exists(dir, "feature/remote-only").await,
+            "precondition: branch is not resolvable locally"
+        );
+        assert!(
+            !revision_exists(dir, "origin/feature/remote-only").await,
+            "precondition: no stale tracking ref"
+        );
+
+        assert_eq!(
+            resolve_base(dir, "feature/remote-only").await,
+            Some("origin/feature/remote-only".to_string()),
+            "resolve_base should fetch the remote branch and return its tracking ref"
+        );
+        assert!(
+            revision_exists(dir, "origin/feature/remote-only").await,
+            "the fetch should have materialized the tracking ref"
+        );
+    }
+
+    /// A local ref resolves to itself without a fetch; a name absent locally and
+    /// on the remote resolves to `None`, and a leading `-` never reaches `fetch`.
+    #[tokio::test]
+    async fn resolve_base_local_and_unknown() {
+        let remote = tempfile::tempdir().unwrap();
+        run(remote.path(), &["init", "-q", "--bare", "-b", "main"]).await;
+        let remote_url = remote.path().to_string_lossy().to_string();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        run(dir, &["init", "-q", "-b", "main"]).await;
+        run(dir, &["config", "user.email", "t@t.t"]).await;
+        run(dir, &["config", "user.name", "t"]).await;
+        commit(dir, "T0").await;
+        run(dir, &["remote", "add", "origin", &remote_url]).await;
+        run(dir, &["push", "-q", "origin", "main"]).await;
+
+        assert_eq!(resolve_base(dir, "main").await, Some("main".to_string()));
+        assert_eq!(resolve_base(dir, "no-such-branch").await, None);
+        assert_eq!(resolve_base(dir, "--upload-pack=touch").await, None);
     }
 
     /// `DiffBase::Uncommitted` scopes to working-tree changes vs `HEAD`, ignoring

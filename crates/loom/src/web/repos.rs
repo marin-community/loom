@@ -757,7 +757,10 @@ pub(super) struct RevisionValidation {
     message: Option<String>,
 }
 
-/// Check whether a worktree fork point resolves without modifying the repo.
+/// Check whether a worktree fork point resolves, matching what a launch would
+/// fork from: a branch that exists on `origin` but not yet locally validates,
+/// fetching it on demand. This may refresh `origin/*` tracking refs; it never
+/// touches local branches or the working tree.
 pub(super) async fn validate_repo_revision(
     Query(q): Query<RevisionValidationQuery>,
 ) -> ApiResult<Json<RevisionValidation>> {
@@ -766,7 +769,7 @@ pub(super) async fn validate_repo_revision(
         .await
         .map_err(|e| AppError::bad_request(e.to_string()))?;
     let revision = q.revision.trim();
-    let valid = !revision.is_empty() && git::revision_exists(&repo_root, revision).await;
+    let valid = git::resolve_base(&repo_root, revision).await.is_some();
     let message = (!valid).then(|| git::missing_revision_message(&repo_root, revision));
     Ok(Json(RevisionValidation {
         valid,
