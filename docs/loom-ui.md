@@ -66,10 +66,11 @@ An ACP session leads with **Conversation**, followed by **Shells** and
 **Review**. A terminal-backed session leads with **Agent**, followed by
 **Conversation** and **Review**. There is no Overview tab.
 
-Conversation is the durable operator/agent exchange. Mid-turn feedback queues
-for the next turn; **Stop & send** cancels the current turn when the feedback
-needs to run immediately. Unseen queued text can be retracted into the composer
-for editing without rewriting already-dispatched history. Permission requests
+Conversation is the durable operator/agent exchange. Mid-turn composer feedback
+steers adapters that support live input; otherwise it stops the current turn and
+starts the feedback as the next turn. Unseen text queued by another client can
+still be retracted into the composer for editing without rewriting
+already-dispatched history, or promoted with **Stop & send**. Permission requests
 and runtime controls stay in
 the conversation that produced them; elapsed quiet time is evidence, not an
 automatic “stuck” verdict.
