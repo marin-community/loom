@@ -169,8 +169,8 @@ async fn session_creation_waits_for_the_repository_launch_gate() {
         .unwrap();
 }
 
-/// A real agent launch needs either the launching user's GitHub token or a
-/// default GH_TOKEN source. Without one, reject before provisioning anything.
+/// A real agent launch needs a user token, a profile token, or an allowlisted
+/// GitHub App credential. Without one, reject before provisioning anything.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_agent_without_github_token_is_rejected_before_provisioning() {
@@ -191,7 +191,7 @@ async fn real_agent_without_github_token_is_rejected_before_provisioning() {
         .unwrap_err()
         .to_string();
     assert!(
-        err.contains("server returned 428") && err.contains("No GitHub token configured"),
+        err.contains("server returned 428") && err.contains("No GitHub credential configured"),
         "unexpected error: {err}"
     );
 
