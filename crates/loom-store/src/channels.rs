@@ -824,12 +824,24 @@ mod tests {
         .unwrap();
         assert_eq!(posted.id, replay.id, "idempotent replay appends once");
 
-        create_delivery(&db, &posted.id, "slack:origin", "slack_thread", None)
-            .await
-            .unwrap();
-        finish_delivery(&db, &posted.id, "slack:origin", None, Some("1786.1234"))
-            .await
-            .unwrap();
+        create_delivery(
+            &db,
+            &posted.id,
+            weaver_api::CHANNEL_SLACK_ORIGIN_BINDING_ID,
+            "slack_thread",
+            None,
+        )
+        .await
+        .unwrap();
+        finish_delivery(
+            &db,
+            &posted.id,
+            weaver_api::CHANNEL_SLACK_ORIGIN_BINDING_ID,
+            None,
+            Some("1786.1234"),
+        )
+        .await
+        .unwrap();
         let delivered = refresh_message(&db, &posted.id).await.unwrap();
         assert_eq!(delivered.deliveries.len(), 1);
         assert_eq!(delivered.deliveries[0].binding_kind, "slack_thread");

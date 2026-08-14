@@ -262,7 +262,6 @@ async fn channel_result_delivers_once_to_the_bound_slack_origin() {
         .delete(&format!("/api/sessions/{}", created.id))
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     weaver_core::config::apply(&ts.state.db, &[("slack.bot_token".to_string(), None)])
         .await
         .unwrap();

@@ -28,32 +28,16 @@ pub(super) const ADAPTER: Adapter = Adapter {
     serve: serve_boxed,
 };
 
-fn permission_rule(tool: &str) -> Option<String> {
-    TOOL_NAMES
-        .contains(&tool)
-        .then(|| format!("mcp__{SERVER_NAME}__{tool}"))
-}
-
 fn is_permission_rule(rule: &str) -> bool {
-    TOOL_NAMES
-        .iter()
-        .any(|tool| permission_rule(tool).as_deref() == Some(rule))
+    super::is_builtin_permission_rule(SERVER_NAME, &TOOL_NAMES, rule)
 }
 
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    CAPABILITY_SETS
-        .iter()
-        .find(|set| set.name == name)
-        .map(|set| {
-            set.tools
-                .iter()
-                .map(|tool| permission_rule(tool).expect("registered context tool"))
-                .collect()
-        })
+    super::expand_builtin_tool_set(SERVER_NAME, &TOOL_NAMES, CAPABILITY_SETS, name)
 }
 
 fn server_config() -> Value {
-    json!({ "type": "stdio", "command": "loom", "args": ["mcp", "serve", "context"] })
+    super::builtin_server_config("context")
 }
 
 fn tools() -> Value {

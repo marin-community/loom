@@ -52,6 +52,62 @@ pub(crate) struct CapabilitySet {
     pub tools: &'static [&'static str],
 }
 
+pub(crate) fn builtin_permission_rule(
+    server_name: &str,
+    tool_names: &[&str],
+    tool: &str,
+) -> Option<String> {
+    tool_names
+        .contains(&tool)
+        .then(|| format!("mcp__{server_name}__{tool}"))
+}
+
+pub(crate) fn is_builtin_permission_rule(
+    server_name: &str,
+    tool_names: &[&str],
+    rule: &str,
+) -> bool {
+    tool_names
+        .iter()
+        .any(|tool| builtin_permission_rule(server_name, tool_names, tool).as_deref() == Some(rule))
+}
+
+pub(crate) fn expand_builtin_tool_set(
+    server_name: &str,
+    tool_names: &[&str],
+    capability_sets: &[CapabilitySet],
+    name: &str,
+) -> Option<Vec<String>> {
+    capability_sets
+        .iter()
+        .find(|set| set.name == name)
+        .map(|set| {
+            set.tools
+                .iter()
+                .map(|tool| {
+                    builtin_permission_rule(server_name, tool_names, tool)
+                        .expect("capability set references a registered tool")
+                })
+                .collect()
+        })
+}
+
+pub(crate) fn builtin_server_config(adapter: &str) -> Value {
+    json!({ "type": "stdio", "command": "loom", "args": ["mcp", "serve", adapter] })
+}
+
+pub(crate) fn string_argument<'a>(arguments: &'a Value, key: &str) -> Result<Option<&'a str>> {
+    match arguments.get(key) {
+        Some(value) => Ok(Some(
+            value
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .with_context(|| format!("{key} must be a non-empty string"))?,
+        )),
+        None => Ok(None),
+    }
+}
+
 const ADAPTERS: &[Adapter] = &[
     github::ADAPTER,
     context::ADAPTER,

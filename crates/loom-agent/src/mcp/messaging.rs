@@ -110,7 +110,7 @@ fn tools() -> Value {
                     "idempotency_key": {
                         "type": "string",
                         "minLength": 1,
-                        "maxLength": 255,
+                        "maxLength": weaver_api::CHANNEL_IDEMPOTENCY_KEY_MAX_LEN,
                         "description": "For the session's origin thread, retry safely with the same key."
                     },
                     "thread": {

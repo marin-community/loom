@@ -38,32 +38,16 @@ pub(super) const ADAPTER: Adapter = Adapter {
     serve: serve_boxed,
 };
 
-fn permission_rule(tool: &str) -> Option<String> {
-    TOOL_NAMES
-        .contains(&tool)
-        .then(|| format!("mcp__{SERVER_NAME}__{tool}"))
-}
-
 fn is_permission_rule(rule: &str) -> bool {
-    TOOL_NAMES
-        .iter()
-        .any(|tool| permission_rule(tool).as_deref() == Some(rule))
+    super::is_builtin_permission_rule(SERVER_NAME, &TOOL_NAMES, rule)
 }
 
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    CAPABILITY_SETS
-        .iter()
-        .find(|set| set.name == name)
-        .map(|set| {
-            set.tools
-                .iter()
-                .map(|tool| permission_rule(tool).expect("registered session tool"))
-                .collect()
-        })
+    super::expand_builtin_tool_set(SERVER_NAME, &TOOL_NAMES, CAPABILITY_SETS, name)
 }
 
 fn server_config() -> Value {
-    json!({ "type": "stdio", "command": "loom", "args": ["mcp", "serve", "session"] })
+    super::builtin_server_config("session")
 }
 
 fn session_property() -> Value {
@@ -121,27 +105,15 @@ fn tools() -> Value {
     ])
 }
 
-fn string<'a>(arguments: &'a Value, key: &str) -> Result<Option<&'a str>> {
-    match arguments.get(key) {
-        Some(value) => Ok(Some(
-            value
-                .as_str()
-                .filter(|value| !value.trim().is_empty())
-                .with_context(|| format!("{key} must be a non-empty string"))?,
-        )),
-        None => Ok(None),
-    }
-}
-
 async fn resolve_session(client: &weaver_api::Client, arguments: &Value) -> Result<String> {
-    match string(arguments, "session")? {
+    match super::string_argument(arguments, "session")? {
         Some(session) if session != "self" => Ok(session.to_string()),
         _ => Ok(client.self_context().await?.session_id),
     }
 }
 
 fn history_args(arguments: &Value) -> Result<(Option<&str>, Option<usize>, Vec<String>)> {
-    let before = string(arguments, "before")?;
+    let before = super::string_argument(arguments, "before")?;
     let limit = arguments
         .get("limit")
         .map(|value| {
@@ -194,7 +166,8 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
             super::structured_result(&format!("session {id}"), &session)
         }
         "status" => {
-            let level = string(&arguments, "level")?.context("status requires level")?;
+            let level =
+                super::string_argument(&arguments, "level")?.context("status requires level")?;
             if !matches!(level, "ok" | "attention" | "blocked") {
                 bail!("level must be 'ok', 'attention', or 'blocked'");
             }
@@ -221,7 +194,8 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
                     .get_session_history(&id, before, limit, &kinds)
                     .await?
             } else {
-                let query = string(&arguments, "q")?.context("search requires q")?;
+                let query =
+                    super::string_argument(&arguments, "q")?.context("search requires q")?;
                 client
                     .search_session_history(&id, query, before, limit, &kinds)
                     .await?

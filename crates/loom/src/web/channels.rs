@@ -120,8 +120,14 @@ pub(super) async fn list_channel_messages(
     Query(query): Query<ListMessagesQuery>,
 ) -> ApiResult<Json<Vec<ChannelMessageView>>> {
     require_channel(&st, &id).await?;
-    if query.limit.is_some_and(|limit| !(1..=500).contains(&limit)) {
-        return Err(AppError::bad_request("limit must be between 1 and 500"));
+    if query
+        .limit
+        .is_some_and(|limit| !(1..=weaver_api::CHANNEL_MESSAGE_LIMIT_MAX).contains(&limit))
+    {
+        return Err(AppError::bad_request(format!(
+            "limit must be between 1 and {}",
+            weaver_api::CHANNEL_MESSAGE_LIMIT_MAX
+        )));
     }
     let mut messages = channels::messages(&st.db, &id, query.after.max(0)).await?;
     if let Some(limit) = query.limit {
@@ -148,22 +154,7 @@ pub(super) async fn create_channel_message(
     let author = principal_subject(&principal);
     let (inserted, message) = append_and_deliver(&st, &id, &channel, &author, &req).await?;
 
-    if inserted {
-        events::record_system(
-            &st.db,
-            &st.bus,
-            "channel_message",
-            json!({
-                "channel_id": id,
-                "message_id": message.id,
-                "kind": message.kind,
-                "urgency": message.urgency,
-                "by": author.id,
-            }),
-        )
-        .await
-        .ok();
-    }
+    record_channel_message_event(&st, &id, &author, &message, inserted).await;
     Ok((
         if inserted {
             StatusCode::CREATED
@@ -172,6 +163,32 @@ pub(super) async fn create_channel_message(
         },
         Json(message),
     ))
+}
+
+pub(super) async fn record_channel_message_event(
+    st: &AppState,
+    channel_id: &str,
+    author: &Subject,
+    message: &ChannelMessageView,
+    inserted: bool,
+) {
+    if !inserted {
+        return;
+    }
+    events::record_system(
+        &st.db,
+        &st.bus,
+        "channel_message",
+        json!({
+            "channel_id": channel_id,
+            "message_id": message.id,
+            "kind": message.kind,
+            "urgency": message.urgency,
+            "by": author.id,
+        }),
+    )
+    .await
+    .ok();
 }
 
 pub(super) async fn append_and_deliver(
@@ -192,7 +209,12 @@ pub(super) async fn append_and_deliver(
     validate_text("body", body, 1, MAX_BODY_LEN)?;
     let idempotency_key = req.idempotency_key.as_deref().map(str::trim);
     if let Some(key) = idempotency_key {
-        validate_text("idempotency_key", key, 1, 255)?;
+        validate_text(
+            "idempotency_key",
+            key,
+            1,
+            weaver_api::CHANNEL_IDEMPOTENCY_KEY_MAX_LEN,
+        )?;
     }
     if let Some(reply_to) = req.reply_to.as_deref() {
         let belongs: bool = sqlx::query_scalar(
@@ -235,7 +257,7 @@ pub(super) async fn append_and_deliver(
             if author.kind == SubjectKind::Session && author.id == target {
                 continue;
             }
-            let binding_id = format!("session:{target}");
+            let binding_id = weaver_api::channel_session_binding_id(&target);
             channels::create_delivery(&st.db, &message_id, &binding_id, "session", Some(&target))
                 .await?;
             if channels::delivery_succeeded(&st.db, &message_id, &binding_id).await? {
@@ -289,7 +311,7 @@ async fn channel_bindings(
         .await?
         .into_iter()
         .map(|target| ChannelBindingView {
-            id: format!("session:{target}"),
+            id: weaver_api::channel_session_binding_id(&target),
             kind: "session".to_string(),
             label: if channel.session_id.as_deref() == Some(target.as_str()) {
                 "this session".to_string()
@@ -301,7 +323,7 @@ async fn channel_bindings(
         .collect::<Vec<_>>();
     if origin_slack_target(st, channel).await?.is_some() {
         bindings.push(ChannelBindingView {
-            id: "slack:origin".to_string(),
+            id: weaver_api::CHANNEL_SLACK_ORIGIN_BINDING_ID.to_string(),
             kind: "slack_thread".to_string(),
             label: "origin Slack thread".to_string(),
             target_session_id: None,
@@ -333,7 +355,7 @@ async fn deliver_to_origin_slack(
     let Some((slack_channel, root)) = origin_slack_target(st, channel).await? else {
         return Ok(());
     };
-    const BINDING_ID: &str = "slack:origin";
+    const BINDING_ID: &str = weaver_api::CHANNEL_SLACK_ORIGIN_BINDING_ID;
     channels::create_delivery(&st.db, message_id, BINDING_ID, "slack_thread", None).await?;
     if channels::delivery_succeeded(&st.db, message_id, BINDING_ID).await? {
         return Ok(());

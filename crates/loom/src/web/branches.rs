@@ -294,26 +294,18 @@ pub(super) async fn slack_reply(
         let (inserted, message) =
             super::channels::append_and_deliver(&st, &channel_id, &channel, &author, &request)
                 .await?;
-        if inserted {
-            events::record_system(
-                &st.db,
-                &st.bus,
-                "channel_message",
-                json!({
-                    "channel_id": channel_id,
-                    "message_id": message.id,
-                    "kind": message.kind,
-                    "urgency": message.urgency,
-                    "by": author.id,
-                }),
-            )
-            .await
-            .ok();
-        }
+        super::channels::record_channel_message_event(
+            &st,
+            &channel_id,
+            &author,
+            &message,
+            inserted,
+        )
+        .await;
         let delivery = message
             .deliveries
             .iter()
-            .find(|delivery| delivery.binding_id == "slack:origin")
+            .find(|delivery| delivery.binding_id == weaver_api::CHANNEL_SLACK_ORIGIN_BINDING_ID)
             .ok_or_else(|| AppError::bad_request("this branch is not wired to a Slack thread"))?;
         if delivery.state == "failed" {
             return Err(AppError::new(
@@ -332,20 +324,17 @@ pub(super) async fn slack_reply(
         })));
     }
 
-    let (channel, root) = match req.thread.as_ref() {
-        Some(target) => {
-            let (channel, thread_ts) =
-                crate::slack::parse_thread_ref(target).map_err(AppError::bad_request)?;
-            if !crate::slack_routes::allows(&st.db, &branch.id, &channel, &thread_ts).await? {
-                return Err(AppError::new(
-                    StatusCode::FORBIDDEN,
-                    "this session holds no Slack route for that thread",
-                ));
-            }
-            (channel, thread_ts)
-        }
-        None => unreachable!("origin replies return through the channel path above"),
-    };
+    let target = req
+        .thread
+        .as_ref()
+        .ok_or_else(|| AppError::bad_request("thread is required"))?;
+    let (channel, root) = crate::slack::parse_thread_ref(target).map_err(AppError::bad_request)?;
+    if !crate::slack_routes::allows(&st.db, &branch.id, &channel, &root).await? {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "this session holds no Slack route for that thread",
+        ));
+    }
     let web = crate::slack::SlackWeb::from_db(&st.db)
         .await
         .ok_or_else(|| AppError::bad_request("Slack is not configured on this server"))?;

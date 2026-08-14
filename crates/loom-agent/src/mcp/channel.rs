@@ -48,32 +48,16 @@ pub(super) const ADAPTER: Adapter = Adapter {
     serve: serve_boxed,
 };
 
-fn permission_rule(tool: &str) -> Option<String> {
-    TOOL_NAMES
-        .contains(&tool)
-        .then(|| format!("mcp__{SERVER_NAME}__{tool}"))
-}
-
 fn is_permission_rule(rule: &str) -> bool {
-    TOOL_NAMES
-        .iter()
-        .any(|tool| permission_rule(tool).as_deref() == Some(rule))
+    super::is_builtin_permission_rule(SERVER_NAME, &TOOL_NAMES, rule)
 }
 
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    CAPABILITY_SETS
-        .iter()
-        .find(|set| set.name == name)
-        .map(|set| {
-            set.tools
-                .iter()
-                .map(|tool| permission_rule(tool).expect("registered channel tool"))
-                .collect()
-        })
+    super::expand_builtin_tool_set(SERVER_NAME, &TOOL_NAMES, CAPABILITY_SETS, name)
 }
 
 fn server_config() -> Value {
-    json!({ "type": "stdio", "command": "loom", "args": ["mcp", "serve", "channel"] })
+    super::builtin_server_config("channel")
 }
 
 fn channel_property() -> Value {
@@ -110,7 +94,7 @@ fn tools() -> Value {
                 "properties": {
                     "channel": channel_property(),
                     "after": { "type": "integer", "minimum": 0, "default": 0 },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": weaver_api::CHANNEL_MESSAGE_LIMIT_MAX, "default": 100 },
                     "kinds": { "type": "array", "uniqueItems": true, "items": {
                         "type": "string", "enum": ["goal", "message", "status", "result", "system"]
                     }}
@@ -129,7 +113,7 @@ fn tools() -> Value {
                     "urgency": { "type": "string", "enum": ["normal", "attention", "blocked"], "default": "normal" },
                     "payload": {},
                     "reply_to": { "type": "string", "minLength": 1 },
-                    "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 255 }
+                    "idempotency_key": { "type": "string", "minLength": 1, "maxLength": weaver_api::CHANNEL_IDEMPOTENCY_KEY_MAX_LEN }
                 },
                 "required": ["body"]
             }
@@ -192,20 +176,8 @@ fn object(arguments: &Value) -> Result<&Map<String, Value>> {
         .context("channel tool arguments must be an object")
 }
 
-fn string<'a>(arguments: &'a Value, key: &str) -> Result<Option<&'a str>> {
-    match arguments.get(key) {
-        Some(value) => Ok(Some(
-            value
-                .as_str()
-                .filter(|value| !value.trim().is_empty())
-                .with_context(|| format!("{key} must be a non-empty string"))?,
-        )),
-        None => Ok(None),
-    }
-}
-
 async fn resolve_channel(client: &weaver_api::Client, arguments: &Value) -> Result<String> {
-    match string(arguments, "channel")? {
+    match super::string_argument(arguments, "channel")? {
         Some(channel) if channel != "self" => Ok(channel.to_string()),
         _ => Ok(client.self_context().await?.channel_id),
     }
@@ -256,8 +228,11 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
                 .get("limit")
                 .and_then(Value::as_u64)
                 .unwrap_or(100);
-            if !(1..=500).contains(&limit) {
-                bail!("limit must be between 1 and 500");
+            if !(1..=weaver_api::CHANNEL_MESSAGE_LIMIT_MAX as u64).contains(&limit) {
+                bail!(
+                    "limit must be between 1 and {}",
+                    weaver_api::CHANNEL_MESSAGE_LIMIT_MAX
+                );
             }
             let kinds = arguments
                 .get("kinds")
@@ -271,7 +246,9 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
                 })
                 .transpose()?
                 .unwrap_or_default();
-            let fetched = client.channel_messages_bounded(&id, after, 500).await?;
+            let fetched = client
+                .channel_messages_bounded(&id, after, weaver_api::CHANNEL_MESSAGE_LIMIT_MAX)
+                .await?;
             let scanned_cursor = fetched.last().map(|message| message.seq).unwrap_or(after);
             let messages = fetched
                 .into_iter()
@@ -287,10 +264,12 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
         }
         "send" => {
             let id = resolve_channel(&client, &arguments).await?;
-            let body = string(&arguments, "body")?.context("send requires body")?;
+            let body = super::string_argument(&arguments, "body")?.context("send requires body")?;
             let request = CreateChannelMessageReq {
-                kind: string(&arguments, "kind")?.unwrap_or("message").to_string(),
-                urgency: string(&arguments, "urgency")?
+                kind: super::string_argument(&arguments, "kind")?
+                    .unwrap_or("message")
+                    .to_string(),
+                urgency: super::string_argument(&arguments, "urgency")?
                     .unwrap_or("normal")
                     .to_string(),
                 body: body.to_string(),
@@ -298,8 +277,9 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
                     .get("payload")
                     .cloned()
                     .unwrap_or_else(|| json!({})),
-                reply_to: string(&arguments, "reply_to")?.map(str::to_string),
-                idempotency_key: string(&arguments, "idempotency_key")?.map(str::to_string),
+                reply_to: super::string_argument(&arguments, "reply_to")?.map(str::to_string),
+                idempotency_key: super::string_argument(&arguments, "idempotency_key")?
+                    .map(str::to_string),
             };
             let message = client.send_channel_message(&id, &request).await?;
             super::structured_result(
@@ -327,7 +307,7 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
             if cursor < 0 {
                 bail!("after must be non-negative");
             }
-            let kind = string(&arguments, "kind")?;
+            let kind = super::string_argument(&arguments, "kind")?;
             let urgent = arguments
                 .get("urgent")
                 .and_then(Value::as_bool)
@@ -341,7 +321,9 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
             }
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout);
             loop {
-                let messages = client.channel_messages_bounded(&id, cursor, 500).await?;
+                let messages = client
+                    .channel_messages_bounded(&id, cursor, weaver_api::CHANNEL_MESSAGE_LIMIT_MAX)
+                    .await?;
                 if let Some(last) = messages.last() {
                     cursor = last.seq;
                 }
@@ -377,7 +359,7 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
             )
         }
         "open" => {
-            let name = string(&arguments, "name")?.context("open requires name")?;
+            let name = super::string_argument(&arguments, "name")?.context("open requires name")?;
             let topic = arguments
                 .get("topic")
                 .map(|value| value.as_str().context("topic must be a string"))
@@ -395,8 +377,8 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
         }
         "subscribe" => {
             let id = resolve_channel(&client, &arguments).await?;
-            let mode = string(&arguments, "mode")?.unwrap_or("observe");
-            let session = string(&arguments, "session")?;
+            let mode = super::string_argument(&arguments, "mode")?.unwrap_or("observe");
+            let session = super::string_argument(&arguments, "session")?;
             let value = client.set_channel_subscription(&id, mode, session).await?;
             super::structured_result(
                 &format!("subscribed to channel {id} in {mode} mode"),

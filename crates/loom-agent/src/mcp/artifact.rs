@@ -41,32 +41,16 @@ pub(super) const ADAPTER: Adapter = Adapter {
     serve: serve_boxed,
 };
 
-fn permission_rule(tool: &str) -> Option<String> {
-    TOOL_NAMES
-        .contains(&tool)
-        .then(|| format!("mcp__{SERVER_NAME}__{tool}"))
-}
-
 fn is_permission_rule(rule: &str) -> bool {
-    TOOL_NAMES
-        .iter()
-        .any(|tool| permission_rule(tool).as_deref() == Some(rule))
+    super::is_builtin_permission_rule(SERVER_NAME, &TOOL_NAMES, rule)
 }
 
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    CAPABILITY_SETS
-        .iter()
-        .find(|set| set.name == name)
-        .map(|set| {
-            set.tools
-                .iter()
-                .map(|tool| permission_rule(tool).expect("registered artifact tool"))
-                .collect()
-        })
+    super::expand_builtin_tool_set(SERVER_NAME, &TOOL_NAMES, CAPABILITY_SETS, name)
 }
 
 fn server_config() -> Value {
-    json!({ "type": "stdio", "command": "loom", "args": ["mcp", "serve", "artifact"] })
+    super::builtin_server_config("artifact")
 }
 
 fn name_property() -> Value {
@@ -149,20 +133,8 @@ fn tools() -> Value {
     ])
 }
 
-fn string<'a>(arguments: &'a Value, key: &str) -> Result<Option<&'a str>> {
-    match arguments.get(key) {
-        Some(value) => Ok(Some(
-            value
-                .as_str()
-                .filter(|value| !value.trim().is_empty())
-                .with_context(|| format!("{key} must be a non-empty string"))?,
-        )),
-        None => Ok(None),
-    }
-}
-
 fn repo_scope(arguments: &Value) -> Result<bool> {
-    match string(arguments, "scope")?.unwrap_or("branch") {
+    match super::string_argument(arguments, "scope")?.unwrap_or("branch") {
         "branch" => Ok(false),
         "repo" => Ok(true),
         value => bail!("scope must be 'branch' or 'repo', got '{value}'"),
@@ -202,7 +174,8 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
             super::structured_result(&format!("{} artifact(s)", items.len()), &items)
         }
         "get" => {
-            let artifact_name = string(&arguments, "name")?.context("get requires name")?;
+            let artifact_name =
+                super::string_argument(&arguments, "name")?.context("get requires name")?;
             let rev = arguments
                 .get("rev")
                 .map(|value| {
@@ -218,7 +191,8 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
             super::structured_result(&format!("artifact {artifact_name}"), &value)
         }
         "write" => {
-            let artifact_name = string(&arguments, "name")?.context("write requires name")?;
+            let artifact_name =
+                super::string_argument(&arguments, "name")?.context("write requires name")?;
             let content = arguments
                 .get("content")
                 .and_then(Value::as_str)
@@ -247,7 +221,7 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
                                     .map(str::to_string)
                             })
                             .transpose()?,
-                        kind: string(&arguments, "kind")?.map(str::to_string),
+                        kind: super::string_argument(&arguments, "kind")?.map(str::to_string),
                         author: None,
                         repo: repo_scope(&arguments)?,
                         base_rev,
@@ -263,7 +237,8 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
             )
         }
         "delete" => {
-            let artifact_name = string(&arguments, "name")?.context("delete requires name")?;
+            let artifact_name =
+                super::string_argument(&arguments, "name")?.context("delete requires name")?;
             let repo = repo_scope(&arguments)?;
             let artifact = client
                 .get_branch_artifact(&branch, artifact_name, None, repo)
@@ -277,7 +252,8 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
             )
         }
         "history" => {
-            let artifact_name = string(&arguments, "name")?.context("history requires name")?;
+            let artifact_name =
+                super::string_argument(&arguments, "name")?.context("history requires name")?;
             let artifact = client
                 .get_branch_artifact(&branch, artifact_name, None, repo_scope(&arguments)?)
                 .await?;
@@ -290,7 +266,8 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
             )
         }
         "threads" => {
-            let artifact_name = string(&arguments, "name")?.context("threads requires name")?;
+            let artifact_name =
+                super::string_argument(&arguments, "name")?.context("threads requires name")?;
             let all = arguments
                 .get("all")
                 .and_then(Value::as_bool)
@@ -305,8 +282,10 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
             )
         }
         "comment" => {
-            let artifact_name = string(&arguments, "name")?.context("comment requires name")?;
-            let body = string(&arguments, "body")?.context("comment requires body")?;
+            let artifact_name =
+                super::string_argument(&arguments, "name")?.context("comment requires name")?;
+            let body =
+                super::string_argument(&arguments, "body")?.context("comment requires body")?;
             if let Some(thread_id) = arguments.get("thread_id").and_then(Value::as_i64) {
                 if thread_id <= 0 {
                     bail!("thread_id must be positive");
@@ -316,7 +295,7 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
                     .await?;
                 super::structured_result(&format!("commented on thread {thread_id}"), &comment)
             } else {
-                let quote = string(&arguments, "quote")?
+                let quote = super::string_argument(&arguments, "quote")?
                     .context("comment requires quote when thread_id is omitted")?;
                 let base_rev = match arguments.get("base_rev") {
                     Some(value) => value.as_i64().context("base_rev must be an integer")?,
@@ -356,7 +335,8 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
             }
         }
         "resolve" => {
-            let artifact_name = string(&arguments, "name")?.context("resolve requires name")?;
+            let artifact_name =
+                super::string_argument(&arguments, "name")?.context("resolve requires name")?;
             let thread_id = arguments
                 .get("thread_id")
                 .and_then(Value::as_i64)

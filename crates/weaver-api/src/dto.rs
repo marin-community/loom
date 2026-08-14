@@ -2079,6 +2079,13 @@ pub struct ProgramView {
 pub const CHANNEL_DEFAULT_MESSAGE_KIND: &str = "message";
 pub const CHANNEL_DEFAULT_URGENCY: &str = "normal";
 pub const CHANNEL_DEFAULT_SUBSCRIPTION_MODE: &str = "observe";
+pub const CHANNEL_MESSAGE_LIMIT_MAX: usize = 500;
+pub const CHANNEL_IDEMPOTENCY_KEY_MAX_LEN: usize = 255;
+pub const CHANNEL_SLACK_ORIGIN_BINDING_ID: &str = "slack:origin";
+
+pub fn channel_session_binding_id(session_id: &str) -> String {
+    format!("session:{session_id}")
+}
 
 /// One durable communication context. A session channel uses its owning
 /// session id as `id`; custom channels have an independent id.
