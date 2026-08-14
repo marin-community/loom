@@ -18,13 +18,13 @@ use crate::dto::{
     CreateReviewReq, CreateSessionGroupReq, CreateSessionSpaceReq, CreateTokenReq, CreateWatchReq,
     CreatedTokenView, CustomMcpReq, CustomMcpView, DeleteSessionGroupReq, DeleteSessionSpaceReq,
     DeploymentReq, DeploymentView, DiagnosticsView, EffectiveProfileView, EnsureResumptionCueReq,
-    ExpectedReviewRevisionReq, FederationReq, FederationView, HandoffReq, HistoryPageView,
-    IssueActionsReq, IssueActionsResult, IssueView, McpRegistryView, MoveSessionsReq,
-    NewCommentBody, NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq, ProfileProbeView,
-    ProfileReq, ProfileView, PutProfileEnvReq, ReadinessView, ReorderSessionLayoutReq,
-    ResolveLaunchReq, ResolveReviewCommentReq, ResolvedLaunchView, RestoreSessionGroupsReq,
-    ResumptionCueView, ReviewCommentDto, ReviewDto, RunReq, RunView, RunWatchReq,
-    ScratchLimitsView, SearchSessionsOptions, SendReq, SessionGroupPreferenceReq,
+    ExpectedReviewRevisionReq, FederationReq, FederationView, GithubTokenView, HandoffReq,
+    HistoryPageView, IssueActionsReq, IssueActionsResult, IssueView, McpRegistryView,
+    MoveSessionsReq, NewCommentBody, NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq,
+    ProfileProbeView, ProfileReq, ProfileView, PutProfileEnvReq, ReadinessView,
+    ReorderSessionLayoutReq, ResolveLaunchReq, ResolveReviewCommentReq, ResolvedLaunchView,
+    RestoreSessionGroupsReq, ResumptionCueView, ReviewCommentDto, ReviewDto, RunReq, RunView,
+    RunWatchReq, ScratchLimitsView, SearchSessionsOptions, SendReq, SessionGroupPreferenceReq,
     SessionLayoutView, SessionPlacementSelectorKind, SessionView, SetChannelReadMarkerReq,
     SetChannelSubscriptionReq, SetSessionPlacementDefaultReq, SetTagsReq, SetTitleGenerationReq,
     SettingsEnvelope, SubmitReviewReq, TagReq, ThreadDto, TokenView, UpdateReviewCommentReq,
@@ -156,6 +156,15 @@ impl Client {
     }
 
     // -- Sessions ---------------------------------------------------------
+
+    pub async fn github_token(&self, session_id: &str) -> Result<GithubTokenView> {
+        self.send_typed::<Value, GithubTokenView>(
+            Method::POST,
+            &format!("/api/sessions/{}/github-token", Self::seg(session_id)),
+            None,
+        )
+        .await
+    }
 
     /// List active non-automation sessions (`GET /api/sessions`).
     pub async fn list_sessions(&self) -> Result<Vec<SessionView>> {

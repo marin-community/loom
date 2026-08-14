@@ -2317,6 +2317,7 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
                     prelude: opts.prelude,
                     instructions,
                     restricted: opts.restricted,
+                    github_repositories: Vec::new(),
                     runtime_permissions: opts.runtime_permission,
                     mcp_access: parse_mcp_access(&opts.mcp)?,
                     expected_revision: None,

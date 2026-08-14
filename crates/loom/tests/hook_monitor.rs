@@ -276,6 +276,7 @@ async fn seed_classed_session(
             turn_budget: if class == "automation" { 1 } else { 0 },
             prelude: "weaver".to_string(),
             restricted: false,
+            github_repositories: "[]".to_string(),
             allowed_tools: "[]".to_string(),
             mcp_access: r#"{"selection":{"mode":"none","groups":[]},"capability_sets":[]}"#
                 .to_string(),

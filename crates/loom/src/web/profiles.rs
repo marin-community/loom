@@ -31,6 +31,7 @@ pub(super) fn input(req: ProfileReq, name: String) -> ProfileInput {
         prelude: req.prelude,
         instructions: req.instructions,
         restricted: req.restricted,
+        github_repositories: req.github_repositories,
         allowed_tools: req.runtime_permissions,
         mcp_access: req.mcp_access,
     }
@@ -53,6 +54,9 @@ pub(super) async fn view(st: &AppState, profile: Profile) -> ApiResult<ProfileVi
     let runtime_permissions = profile
         .allowed_tool_rules()
         .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let github_repositories = profile
+        .github_repositories()
+        .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let mcp_access = profile
         .mcp_access()
         .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -74,6 +78,7 @@ pub(super) async fn view(st: &AppState, profile: Profile) -> ApiResult<ProfileVi
         prelude: profile.prelude,
         instructions: profile.instructions,
         restricted: profile.restricted,
+        github_repositories,
         runtime_permissions,
         mcp_access,
         lifetime: profile.lifetime,

@@ -29,6 +29,8 @@ pub struct Profile {
     /// Organization-owned instructions appended to the opening prompt.
     pub instructions: String,
     pub restricted: bool,
+    /// JSON array in storage; parsed through [`Profile::github_repositories`].
+    pub github_repositories: String,
     /// JSON array in storage; parsed through [`Profile::allowed_tool_rules`].
     pub allowed_tools: String,
     /// Provider-neutral MCP selection JSON.
@@ -58,6 +60,11 @@ impl Profile {
         serde_json::from_str(&self.allowed_tools).context("invalid profile allowed tools")
     }
 
+    pub fn github_repositories(&self) -> Result<Vec<String>> {
+        serde_json::from_str(&self.github_repositories)
+            .context("invalid profile GitHub repository allowlist")
+    }
+
     pub fn mcp_access(&self) -> Result<weaver_api::McpAccess> {
         serde_json::from_str(&self.mcp_access).context("invalid profile MCP access")
     }
@@ -85,6 +92,7 @@ impl Profile {
             prelude: self.prelude.clone(),
             instructions: self.instructions.clone(),
             restricted: self.restricted,
+            github_repositories: self.github_repositories()?,
             allowed_tools: self.allowed_tool_rules()?,
             mcp_access: self.mcp_access()?,
         })
@@ -125,6 +133,8 @@ pub struct ProfileInput {
     pub instructions: String,
     #[serde(default)]
     pub restricted: bool,
+    #[serde(default)]
+    pub github_repositories: Vec<String>,
     #[serde(default, alias = "runtime_permissions")]
     pub allowed_tools: Vec<String>,
     #[serde(default)]

@@ -407,6 +407,7 @@ pub async fn resolve(
             turn_budget: Some(turn_budget),
             prelude: profile.prelude.clone(),
             instructions: profile.instructions.clone(),
+            github_repositories: profile.github_repositories()?,
             runtime_permissions: runtime_permissions.clone(),
             mcp_policy: SessionMcpPolicyView::from(&mcp_policy),
         },

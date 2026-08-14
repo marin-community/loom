@@ -62,6 +62,29 @@ starter text lives under `crates/loom-policy/profiles/<name>/instructions.md`.
 The origin profiles are opt-in so an upgrade does not silently change the
 environment or runtime used by existing triggers.
 
+A strict, environment-cleared automation profile may declare
+`github_repositories`. Inside sessions launched from that profile, `git` and
+`gh` transparently request a short-lived GitHub App installation token from
+Loom. Loom stamps the repository list on the session and limits the token to
+those repositories with contents, issues, and pull-request write access. It
+does not grant Actions or workflow-file access. The configured GitHub App must
+be installed on every listed repository, and all entries must use one owner.
+
+```yaml
+profiles:
+  - profile:
+      name: external-update
+      agent_kind: codex
+      protocol: acp
+      class: automation
+      strict: true
+      env_clear: true
+      github_repositories:
+        - marin-community/marin
+        - marin-community/vllm
+    env: []
+```
+
 Apply it through the authenticated local CLI:
 
 ```sh

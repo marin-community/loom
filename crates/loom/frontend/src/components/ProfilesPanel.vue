@@ -31,6 +31,7 @@ function editable(profile: Profile): ProfileInput {
     ...input,
     expected_revision: profile.revision,
     ambient_allowlist: [...input.ambient_allowlist],
+    github_repositories: [...input.github_repositories],
     runtime_permissions: [...input.runtime_permissions],
     mcp_access: { ...input.mcp_access, groups: [...input.mcp_access.groups] },
   };
@@ -86,6 +87,7 @@ function add() {
     prelude: 'weaver',
     instructions: '',
     restricted: false,
+    github_repositories: [],
     runtime_permissions: [],
     mcp_access: { mode: 'none', groups: [] },
   };

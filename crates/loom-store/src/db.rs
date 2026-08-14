@@ -120,6 +120,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "profile-instructions",
         include_str!("../migrations/0022_profile_instructions.sql"),
     ),
+    (
+        23,
+        "profile-github-repositories",
+        include_str!("../migrations/0023_profile_github_repositories.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);

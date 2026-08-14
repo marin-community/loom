@@ -15,7 +15,7 @@
 //!    App can't be driven by a stranger's install (complementing the managed-repo
 //!    table from #95).
 //! 3. **Exchange the JWT for an installation access token**
-//!    (`POST /app/installations/{id}/access_tokens`), **cached per installation
+//!    (`POST /app/installations/{id}/access_tokens`), **cached by exact scope
 //!    with its expiry** and refreshed once stale ([`GithubApp::installation_token`]).
 //!
 //! [`GithubApp`] implements the [`GithubApi`] gateway the trigger calls for the
@@ -107,6 +107,12 @@ struct CachedToken {
     expires_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum TokenScope {
+    Installation(i64),
+    Repositories(Vec<String>),
+}
+
 impl CachedToken {
     /// Whether this token is still safe to use at `now` (with a refresh margin).
     fn is_fresh(&self, now: DateTime<Utc>) -> bool {
@@ -165,8 +171,8 @@ pub struct GithubApp {
     http: reqwest::Client,
     /// REST base (no trailing slash). `https://api.github.com` in production.
     api_base: String,
-    /// Per-installation token cache, keyed by installation id.
-    tokens: Mutex<HashMap<i64, CachedToken>>,
+    /// Installation tokens cached by their exact repository scope.
+    tokens: Mutex<HashMap<TokenScope, CachedToken>>,
     /// The ambient-`GH_TOKEN` gateway used when the App is not configured.
     fallback: Arc<dyn GithubApi>,
 }
@@ -265,11 +271,14 @@ impl GithubApp {
     /// expiry. The cached-token fast path holds the lock only briefly and never
     /// across the network call.
     pub async fn installation_token(&self, installation_id: i64) -> Result<String> {
-        if let Some(token) = self.cached_token(installation_id) {
+        let scope = TokenScope::Installation(installation_id);
+        if let Some(token) = self.cached_token(&scope) {
             return Ok(token);
         }
         let jwt = self.current_jwt().await?;
-        let fresh = self.fetch_installation_token(&jwt, installation_id).await?;
+        let fresh = self
+            .fetch_installation_token(&jwt, installation_id, &[])
+            .await?;
         tracing::info!(
             installation = installation_id,
             expires_at = %fresh.expires_at,
@@ -279,15 +288,15 @@ impl GithubApp {
         self.tokens
             .lock()
             .expect("token cache mutex poisoned")
-            .insert(installation_id, fresh);
+            .insert(scope, fresh);
         Ok(token)
     }
 
     /// The cached token for `installation_id`, if one is present and still fresh.
-    fn cached_token(&self, installation_id: i64) -> Option<String> {
+    fn cached_token(&self, scope: &TokenScope) -> Option<String> {
         let now = Utc::now();
         let map = self.tokens.lock().expect("token cache mutex poisoned");
-        map.get(&installation_id)
+        map.get(scope)
             .filter(|t| t.is_fresh(now))
             .map(|t| t.token.clone())
     }
@@ -298,17 +307,29 @@ impl GithubApp {
         &self,
         jwt: &str,
         installation_id: i64,
+        repositories: &[String],
     ) -> Result<CachedToken> {
         let url = format!(
-            "{}/app/installations/{installation_id}/access_tokens",
-            self.api_base
+            "{}/app/installations/{}/access_tokens",
+            self.api_base, installation_id
         );
-        let resp = self
+        let mut request = self
             .http
             .post(&url)
             .header(reqwest::header::ACCEPT, GH_ACCEPT)
             .header("X-GitHub-Api-Version", GH_API_VERSION)
-            .bearer_auth(jwt)
+            .bearer_auth(jwt);
+        if !repositories.is_empty() {
+            request = request.json(&serde_json::json!({
+                "repositories": repositories,
+                "permissions": {
+                    "contents": "write",
+                    "issues": "write",
+                    "pull_requests": "write"
+                }
+            }));
+        }
+        let resp = request
             .send()
             .await
             .context("requesting an installation access token")?;
@@ -332,6 +353,49 @@ impl GithubApp {
     pub async fn token_for_repo(&self, owner: &str, name: &str) -> Result<String> {
         let installation_id = self.installation_id(owner, name).await?;
         self.installation_token(installation_id).await
+    }
+
+    /// Mint a token constrained to the named repositories and the fixed
+    /// contents/issues/pull-requests write policy used by automation profiles.
+    pub async fn token_for_repositories(&self, repositories: &[String]) -> Result<String> {
+        if repositories.is_empty() {
+            bail!("GitHub repository allowlist is empty");
+        }
+        let mut slugs = repositories
+            .iter()
+            .map(|repository| crate::repo::parse_slug(repository).map_err(anyhow::Error::msg))
+            .collect::<Result<Vec<_>>>()?;
+        slugs.sort_by_key(crate::repo::RepoSlug::slug);
+        slugs.dedup();
+        let owner = slugs[0].owner.clone();
+        if slugs.iter().any(|slug| slug.owner != owner) {
+            bail!("GitHub repository allowlist must use one owner");
+        }
+        let scope =
+            TokenScope::Repositories(slugs.iter().map(crate::repo::RepoSlug::slug).collect());
+        if let Some(token) = self.cached_token(&scope) {
+            return Ok(token);
+        }
+        let installation_id = self
+            .installation_id(&slugs[0].owner, &slugs[0].name)
+            .await?;
+        for slug in &slugs[1..] {
+            let candidate = self.installation_id(&slug.owner, &slug.name).await?;
+            if candidate != installation_id {
+                bail!("GitHub repositories do not share one App installation");
+            }
+        }
+        let names = slugs.into_iter().map(|slug| slug.name).collect::<Vec<_>>();
+        let jwt = self.current_jwt().await?;
+        let fresh = self
+            .fetch_installation_token(&jwt, installation_id, &names)
+            .await?;
+        let token = fresh.token.clone();
+        self.tokens
+            .lock()
+            .expect("token cache mutex poisoned")
+            .insert(scope, fresh);
+        Ok(token)
     }
 
     async fn issue_json(&self, owner: &str, name: &str, number: i64) -> Result<serde_json::Value> {
@@ -650,6 +714,7 @@ pub mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use axum::body::Bytes;
     use axum::extract::{Json, Path, State};
     use axum::http::{HeaderMap, StatusCode};
     use axum::routing::{get, patch, post};
@@ -753,6 +818,8 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     /// the expiry it stamps on them, and the comments it received.
     struct MockState {
         token_mints: AtomicUsize,
+        installation_lookups: AtomicUsize,
+        token_requests: Mutex<Vec<Value>>,
         /// Offset from now stamped as the token's `expires_at` (seconds). Negative
         /// → already expired, to exercise refresh.
         expiry_offset_secs: i64,
@@ -766,6 +833,8 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         fn new(expiry_offset_secs: i64) -> Arc<Self> {
             Arc::new(Self {
                 token_mints: AtomicUsize::new(0),
+                installation_lookups: AtomicUsize::new(0),
+                token_requests: Mutex::new(Vec::new()),
                 expiry_offset_secs,
                 comments: Mutex::new(Vec::new()),
                 updates: Mutex::new(Vec::new()),
@@ -782,15 +851,22 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     /// comment a human deleted.
     const MOCK_DELETED_COMMENT_ID: i64 = 404_404;
 
-    async fn mock_access_tokens(State(s): State<Arc<MockState>>) -> Json<Value> {
+    async fn mock_access_tokens(State(s): State<Arc<MockState>>, body: Bytes) -> Json<Value> {
         s.token_mints.fetch_add(1, Ordering::SeqCst);
+        s.token_requests.lock().unwrap().push(if body.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&body).unwrap()
+        });
         let exp = Utc::now() + Duration::seconds(s.expiry_offset_secs);
         Json(json!({ "token": MOCK_INSTALLATION_TOKEN, "expires_at": exp.to_rfc3339() }))
     }
 
     async fn mock_installation(
+        State(s): State<Arc<MockState>>,
         Path((owner, _name)): Path<(String, String)>,
     ) -> Result<Json<Value>, StatusCode> {
+        s.installation_lookups.fetch_add(1, Ordering::SeqCst);
         // Simulate "the App is not installed on this repo" for a sentinel owner.
         if owner == "uninstalled" {
             return Err(StatusCode::NOT_FOUND);
@@ -996,6 +1072,34 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
             mock.token_mints.load(Ordering::SeqCst),
             1,
             "the second call reused the cached token"
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_token_is_downscoped_and_cached_by_allowlist() {
+        let mock = MockState::new(3600);
+        let base = spawn_mock(mock.clone()).await;
+        let app = configured_app(base, Arc::new(RecordingFallback::default())).await;
+        let repositories = vec![
+            "marin-community/marin".to_string(),
+            "marin-community/vllm".to_string(),
+        ];
+
+        app.token_for_repositories(&repositories).await.unwrap();
+        app.token_for_repositories(&repositories).await.unwrap();
+
+        assert_eq!(mock.token_mints.load(Ordering::SeqCst), 1);
+        assert_eq!(mock.installation_lookups.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            mock.token_requests.lock().unwrap().as_slice(),
+            &[json!({
+                "repositories": ["marin", "vllm"],
+                "permissions": {
+                    "contents": "write",
+                    "issues": "write",
+                    "pull_requests": "write"
+                }
+            })]
         );
     }
 

@@ -199,6 +199,7 @@ struct HandoffPlan {
     instructions: String,
     restricted: bool,
     strict: bool,
+    github_repositories: String,
     allowed_tools: String,
     mcp_access: String,
     launch_snapshot: String,
@@ -352,6 +353,7 @@ async fn legacy_handoff_plan(
         instructions,
         restricted: session.policy_restricted,
         strict: session.policy_strict,
+        github_repositories: session.policy_github_repositories.clone(),
         allowed_tools: session.policy_allowed_tools.clone(),
         mcp_access: session.policy_mcp_access.clone(),
         launch_snapshot: legacy_handoff_snapshot(
@@ -482,6 +484,7 @@ async fn handoff_session_inner(
             instructions: resolved.profile.instructions.clone(),
             restricted: resolved.profile.restricted,
             strict: resolved.profile.strict,
+            github_repositories: resolved.profile.github_repositories.clone(),
             allowed_tools: serde_json::to_string(&resolved.runtime_permissions)
                 .map_err(|error| HandoffError::bad_request(error.to_string()))?,
             mcp_access: serde_json::to_string(&resolved.mcp_policy)
@@ -523,6 +526,7 @@ async fn handoff_session_inner(
         turn_budget: plan.turn_budget,
         prelude: plan.prelude.clone(),
         restricted: plan.restricted,
+        github_repositories: plan.github_repositories.clone(),
         allowed_tools: plan.allowed_tools.clone(),
         mcp_access: plan.mcp_access.clone(),
         launch_snapshot: plan.launch_snapshot.clone(),
@@ -623,6 +627,7 @@ async fn handoff_session_inner(
     )
     .await?;
     runtime::set_env(&mut extra_env, "LOOM_TOKEN", staged_token.value.clone());
+    runtime::set_env(&mut extra_env, "LOOM_SESSION_ID", session.id.clone());
     let mut launch = match agent::build_acp_launch(
         &st.db,
         &agent::AcpLaunchSpec {

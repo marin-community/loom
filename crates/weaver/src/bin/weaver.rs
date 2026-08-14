@@ -121,6 +121,9 @@ enum Cmd {
         #[arg(long)]
         event: String,
     },
+    /// Print a refreshable GitHub App token for the current session.
+    #[command(hide = true)]
+    GithubToken,
     /// Get or list configuration. Settings are written by operators via
     /// `loom config set` or the settings pane — not from here.
     Config {
@@ -469,6 +472,7 @@ async fn run() -> Result<()> {
         Cmd::Log { limit } => cmd_log(limit).await,
         Cmd::Chatlog { file, json } => cmd_chatlog(file, json),
         Cmd::Hook { event } => cmd_hook(event).await,
+        Cmd::GithubToken => cmd_github_token().await,
         Cmd::Config { cmd } => cmd_config(cmd).await,
         Cmd::Completions { shell } => {
             let mut cmd = Cli::command();
@@ -518,6 +522,14 @@ fn channel_key(explicit: Option<String>) -> Result<String> {
         bail!("no channel selected and $LOOM_SESSION_ID is not set — pass --channel <id>");
     }
     Ok(key.to_string())
+}
+
+async fn cmd_github_token() -> Result<()> {
+    let session_id =
+        std::env::var("LOOM_SESSION_ID").map_err(|_| anyhow!("$LOOM_SESSION_ID is not set"))?;
+    let credential = client().github_token(&session_id).await?;
+    println!("{}", credential.token);
+    Ok(())
 }
 
 /// The resolved attention level for a branch: the `attention` tag's value, or

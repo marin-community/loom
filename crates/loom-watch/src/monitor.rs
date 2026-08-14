@@ -518,6 +518,7 @@ mod tests {
             policy_turn_budget: 0,
             policy_prelude: "weaver".to_string(),
             policy_restricted: false,
+            policy_github_repositories: "[]".to_string(),
             policy_allowed_tools: "[]".to_string(),
             policy_mcp_access: r#"{"selection":{"mode":"none","groups":[]},"capability_sets":[]}"#
                 .to_string(),
