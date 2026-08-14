@@ -510,7 +510,7 @@ async fn summary_orients_an_agent_on_the_branch() {
     assert!(out.contains("pick up #1"), "summary: {out}");
     // Every section advertises the command that drills into it.
     for hint in [
-        "(weaver artifact show goal)",
+        "(weaver artifact get goal)",
         "(weaver status)",
         "(weaver issue ls)",
         "weaver artifact",
