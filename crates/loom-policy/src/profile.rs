@@ -49,6 +49,20 @@ const ORIGIN_PROFILE_STARTERS: &[(&str, &str, &str)] = &[
 const DEFAULT_PROFILE_INSTRUCTIONS: &str = include_str!("../profiles/default/instructions.md");
 
 const MAX_PROFILE_INSTRUCTIONS_BYTES: usize = 64 * 1024;
+const MAX_GITHUB_REPOSITORIES: usize = 64;
+
+fn valid_github_repository(value: &str) -> bool {
+    let mut parts = value.split('/');
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    };
+    matches!((parts.next(), parts.next(), parts.next()), (Some(owner), Some(name), None) if valid_part(owner) && valid_part(name))
+}
 
 fn is_restricted_mcp_tool_set(rule: &str) -> bool {
     crate::mcp::is_tool_set(rule)
@@ -128,6 +142,36 @@ async fn validate_input(
             "profile instructions must be at most {} bytes",
             MAX_PROFILE_INSTRUCTIONS_BYTES
         );
+    }
+    if input.github_repositories.len() > MAX_GITHUB_REPOSITORIES
+        || input
+            .github_repositories
+            .iter()
+            .any(|repository| !valid_github_repository(repository))
+    {
+        bail!("GitHub repositories must be clean owner/name identifiers (maximum {MAX_GITHUB_REPOSITORIES})");
+    }
+    if input
+        .github_repositories
+        .first()
+        .and_then(|repository| repository.split_once('/'))
+        .is_some_and(|(owner, _)| {
+            input.github_repositories.iter().any(|repository| {
+                repository
+                    .split_once('/')
+                    .is_none_or(|(candidate, _)| candidate != owner)
+            })
+        })
+    {
+        bail!("GitHub repositories must use one owner");
+    }
+    if !input.github_repositories.is_empty()
+        && !(input.strict
+            && input.env_clear
+            && input.class.trim() == "automation"
+            && !input.restricted)
+    {
+        bail!("GitHub repository credentials require a strict env-cleared automation profile");
     }
     if input.allowed_tools.len() > 64
         || input.allowed_tools.iter().any(|rule| {
@@ -288,6 +332,9 @@ async fn normalized_input(
 ) -> Result<(ProfileInput, weaver_api::McpPolicySnapshot)> {
     let name = input.name.trim();
     let (protocol, mode, mcp_policy) = validate_input(db, input).await?;
+    let mut github_repositories = input.github_repositories.clone();
+    github_repositories.sort();
+    github_repositories.dedup();
     let normalized = ProfileInput {
         name: name.to_string(),
         description: input.description.trim().to_string(),
@@ -306,6 +353,7 @@ async fn normalized_input(
         prelude: input.prelude.trim().to_string(),
         instructions: input.instructions.trim().to_string(),
         restricted: input.restricted,
+        github_repositories,
         allowed_tools: input.allowed_tools.clone(),
         mcp_access: input.mcp_access.clone(),
     };
@@ -324,6 +372,7 @@ pub async fn create(db: &Db, input: &ProfileInput) -> Result<CreateProfileOutcom
     let (normalized, mcp_policy) = normalized_input(db, input).await?;
     let name = normalized.name.as_str();
     let ambient = serde_json::to_string(&normalized.ambient_allowlist)?;
+    let github_repositories = serde_json::to_string(&normalized.github_repositories)?;
     let allowed_tools = serde_json::to_string(&normalized.allowed_tools)?;
     let mcp_access = serde_json::to_string(&normalized.mcp_access)?;
     let mcp_policy_json = serde_json::to_string(&mcp_policy)?;
@@ -344,7 +393,7 @@ pub async fn create(db: &Db, input: &ProfileInput) -> Result<CreateProfileOutcom
              description = ?, agent_kind = ?, model = ?, effort = ?, protocol = ?,
              mode = ?, class = ?, strict = ?, env_clear = ?, ambient_allowlist = ?,
              idle_archive_secs = ?, max_concurrent = ?, turn_budget = ?, prelude = ?,
-             instructions = ?, restricted = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
+             instructions = ?, restricted = ?, github_repositories = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
              retired = 0, lifetime = lifetime + 1,
              revision = revision + 1, updated_at = ?
              WHERE name = ? AND retired = 1",
@@ -365,6 +414,7 @@ pub async fn create(db: &Db, input: &ProfileInput) -> Result<CreateProfileOutcom
         .bind(&normalized.prelude)
         .bind(&normalized.instructions)
         .bind(normalized.restricted)
+        .bind(&github_repositories)
         .bind(&allowed_tools)
         .bind(&mcp_access)
         .bind(&mcp_policy_json)
@@ -384,8 +434,8 @@ pub async fn create(db: &Db, input: &ProfileInput) -> Result<CreateProfileOutcom
              (name, description, agent_kind, model, effort, protocol, mode, class,
               strict, env_clear, ambient_allowlist, idle_archive_secs, max_concurrent,
               turn_budget, revision, created_at, updated_at, prelude, instructions, restricted,
-              allowed_tools, mcp_access, mcp_policy)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)",
+              github_repositories, allowed_tools, mcp_access, mcp_policy)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(name)
         .bind(&normalized.description)
@@ -406,6 +456,7 @@ pub async fn create(db: &Db, input: &ProfileInput) -> Result<CreateProfileOutcom
         .bind(&normalized.prelude)
         .bind(&normalized.instructions)
         .bind(normalized.restricted)
+        .bind(&github_repositories)
         .bind(&allowed_tools)
         .bind(&mcp_access)
         .bind(&mcp_policy_json)
@@ -425,6 +476,7 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
     let (normalized, mcp_policy) = normalized_input(db, input).await?;
     let name = normalized.name.as_str();
     let ambient = serde_json::to_string(&normalized.ambient_allowlist)?;
+    let github_repositories = serde_json::to_string(&normalized.github_repositories)?;
     let allowed_tools = serde_json::to_string(&normalized.allowed_tools)?;
     let mcp_access = serde_json::to_string(&normalized.mcp_access)?;
     let mcp_policy_json = serde_json::to_string(&mcp_policy)?;
@@ -448,7 +500,11 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
                 || normalized.class != "automation"
                 || (existing.restricted && !normalized.restricted)
                 || widens_restricted_tools
-                || widens_allowlist(&existing.ambient_names()?, &normalized.ambient_allowlist))
+                || widens_allowlist(&existing.ambient_names()?, &normalized.ambient_allowlist)
+                || widens_allowlist(
+                    &existing.github_repositories()?,
+                    &normalized.github_repositories,
+                ))
         {
             bail!("cannot weaken a profile referenced by automation sessions");
         }
@@ -465,8 +521,8 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
          (name, description, agent_kind, model, effort, protocol, mode, class,
           strict, env_clear, ambient_allowlist, idle_archive_secs, max_concurrent,
           turn_budget, revision, created_at, updated_at, prelude, instructions, restricted,
-          allowed_tools, mcp_access, mcp_policy)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+          github_repositories, allowed_tools, mcp_access, mcp_policy)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
           description=excluded.description, agent_kind=excluded.agent_kind,
           model=excluded.model, effort=excluded.effort, protocol=excluded.protocol,
@@ -476,6 +532,7 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
           max_concurrent=excluded.max_concurrent, turn_budget=excluded.turn_budget,
           prelude=excluded.prelude, instructions=excluded.instructions,
           restricted=excluded.restricted,
+          github_repositories=excluded.github_repositories,
           allowed_tools=excluded.allowed_tools, mcp_access=excluded.mcp_access,
           mcp_policy=excluded.mcp_policy, retired=0,
           lifetime=CASE
@@ -503,6 +560,7 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
     .bind(&normalized.prelude)
     .bind(&normalized.instructions)
     .bind(normalized.restricted)
+    .bind(github_repositories)
     .bind(allowed_tools)
     .bind(mcp_access)
     .bind(mcp_policy_json)
@@ -543,6 +601,7 @@ pub async fn update_expected(
     let (normalized, mcp_policy) = normalized_input(db, input).await?;
     let name = normalized.name.as_str();
     let ambient = serde_json::to_string(&normalized.ambient_allowlist)?;
+    let github_repositories = serde_json::to_string(&normalized.github_repositories)?;
     let allowed_tools = serde_json::to_string(&normalized.allowed_tools)?;
     let mcp_access = serde_json::to_string(&normalized.mcp_access)?;
     let mcp_policy_json = serde_json::to_string(&mcp_policy)?;
@@ -587,7 +646,11 @@ pub async fn update_expected(
             || normalized.class != "automation"
             || (existing.restricted && !normalized.restricted)
             || widens_restricted_tools
-            || widens_allowlist(&existing.ambient_names()?, &normalized.ambient_allowlist))
+            || widens_allowlist(&existing.ambient_names()?, &normalized.ambient_allowlist)
+            || widens_allowlist(
+                &existing.github_repositories()?,
+                &normalized.github_repositories,
+            ))
     {
         bail!("cannot weaken a profile referenced by automation sessions");
     }
@@ -596,7 +659,7 @@ pub async fn update_expected(
          description = ?, agent_kind = ?, model = ?, effort = ?, protocol = ?,
          mode = ?, class = ?, strict = ?, env_clear = ?, ambient_allowlist = ?,
          idle_archive_secs = ?, max_concurrent = ?, turn_budget = ?, prelude = ?,
-         instructions = ?, restricted = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
+         instructions = ?, restricted = ?, github_repositories = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
          retired = 0, revision = revision + 1, updated_at = ?
          WHERE name = ? AND revision = ?",
     )
@@ -616,6 +679,7 @@ pub async fn update_expected(
     .bind(&normalized.prelude)
     .bind(&normalized.instructions)
     .bind(normalized.restricted)
+    .bind(github_repositories)
     .bind(allowed_tools)
     .bind(mcp_access)
     .bind(mcp_policy_json)
@@ -703,6 +767,7 @@ pub async fn create_clone_prepared(
     }
     let target_name = normalized.name.as_str();
     let ambient = serde_json::to_string(&normalized.ambient_allowlist)?;
+    let github_repositories = serde_json::to_string(&normalized.github_repositories)?;
     let allowed_tools = serde_json::to_string(&normalized.allowed_tools)?;
     let mcp_access = serde_json::to_string(&normalized.mcp_access)?;
     let now = now_iso();
@@ -738,7 +803,7 @@ pub async fn create_clone_prepared(
              description = ?, agent_kind = ?, model = ?, effort = ?, protocol = ?,
              mode = ?, class = ?, strict = ?, env_clear = ?, ambient_allowlist = ?,
              idle_archive_secs = ?, max_concurrent = ?, turn_budget = ?, prelude = ?,
-             instructions = ?, restricted = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
+             instructions = ?, restricted = ?, github_repositories = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
              retired = 0, lifetime = lifetime + 1,
              revision = revision + 1, updated_at = ?
              WHERE name = ? AND retired = 1",
@@ -759,6 +824,7 @@ pub async fn create_clone_prepared(
         .bind(&normalized.prelude)
         .bind(&normalized.instructions)
         .bind(normalized.restricted)
+        .bind(&github_repositories)
         .bind(&allowed_tools)
         .bind(&mcp_access)
         .bind(serde_json::to_string(&current_mcp_policy)?)
@@ -776,8 +842,8 @@ pub async fn create_clone_prepared(
              (name, description, agent_kind, model, effort, protocol, mode, class,
               strict, env_clear, ambient_allowlist, idle_archive_secs, max_concurrent,
               turn_budget, revision, created_at, updated_at, prelude, instructions, restricted,
-              allowed_tools, mcp_access, mcp_policy)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)",
+              github_repositories, allowed_tools, mcp_access, mcp_policy)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(target_name)
         .bind(&normalized.description)
@@ -798,6 +864,7 @@ pub async fn create_clone_prepared(
         .bind(&normalized.prelude)
         .bind(&normalized.instructions)
         .bind(normalized.restricted)
+        .bind(github_repositories)
         .bind(allowed_tools)
         .bind(mcp_access)
         .bind(serde_json::to_string(&current_mcp_policy)?)
@@ -1122,6 +1189,7 @@ pub async fn normalize_default(db: &Db) -> Result<()> {
         prelude: current.prelude.clone(),
         instructions: current.instructions.clone(),
         restricted: current.restricted,
+        github_repositories: current.github_repositories().unwrap_or_default(),
         allowed_tools: current.allowed_tool_rules().unwrap_or_default(),
         mcp_access: current.mcp_access().unwrap_or_default(),
     };
@@ -1209,6 +1277,42 @@ mod tests {
 
         input.mcp_access.groups = vec!["github".to_string()];
         input.protocol = "terminal".to_string();
+        assert!(upsert(&db, &input).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn github_credentials_require_a_safe_profile_and_canonical_repositories() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let mut input = get(&db, DEFAULT_PROFILE)
+            .await
+            .unwrap()
+            .unwrap()
+            .as_input()
+            .unwrap();
+        input.github_repositories = vec!["marin-community/marin".to_string()];
+        assert!(upsert(&db, &input).await.is_err());
+
+        input.class = "automation".to_string();
+        input.strict = true;
+        input.env_clear = true;
+        input.github_repositories = vec![
+            "marin-community/vllm".to_string(),
+            "marin-community/marin".to_string(),
+            "marin-community/vllm".to_string(),
+        ];
+        let saved = upsert(&db, &input).await.unwrap();
+        assert_eq!(
+            saved.github_repositories().unwrap(),
+            ["marin-community/marin", "marin-community/vllm"]
+        );
+
+        input.github_repositories = vec!["https://github.com/marin-community/marin".to_string()];
+        assert!(upsert(&db, &input).await.is_err());
+
+        input.github_repositories = vec![
+            "marin-community/marin".to_string(),
+            "other/vllm".to_string(),
+        ];
         assert!(upsert(&db, &input).await.is_err());
     }
 

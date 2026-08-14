@@ -659,6 +659,7 @@ mod tests {
                 prelude: "weaver".to_string(),
                 instructions: String::new(),
                 restricted: false,
+                github_repositories: vec![],
                 allowed_tools: vec![],
                 mcp_access: weaver_api::McpAccess::default(),
             },

@@ -120,6 +120,7 @@ pub struct Session {
     pub policy_turn_budget: i64,
     pub policy_prelude: String,
     pub policy_restricted: bool,
+    pub policy_github_repositories: String,
     pub policy_allowed_tools: String,
     pub policy_mcp_access: String,
     /// Canonical source-redacted launch resolution JSON. Empty only for rows
@@ -156,7 +157,7 @@ const SESSION_COLUMNS: &str = "\
     class, turn_count, tracking_issue_id, profile, launch_mode, profile_revision, \
     profile_lifetime, policy_strict, policy_env_clear, policy_ambient_allowlist, \
     policy_idle_archive_secs, policy_turn_budget, policy_prelude, policy_restricted, \
-    policy_allowed_tools, policy_mcp_access, launch_snapshot, creator_kind, creator_subject, \
+    policy_github_repositories, policy_allowed_tools, policy_mcp_access, launch_snapshot, creator_kind, creator_subject, \
     parent_session_id, automation_run_id, mutation_revision";
 
 fn select_sessions(suffix: &str) -> String {
@@ -232,6 +233,7 @@ pub struct SessionLaunchPolicy {
     pub turn_budget: i64,
     pub prelude: String,
     pub restricted: bool,
+    pub github_repositories: String,
     pub allowed_tools: String,
     pub mcp_access: String,
     pub launch_snapshot: String,
@@ -258,6 +260,7 @@ pub struct SessionHandoffPolicy {
     pub turn_budget: i64,
     pub prelude: String,
     pub restricted: bool,
+    pub github_repositories: String,
     pub allowed_tools: String,
     pub mcp_access: String,
     pub launch_snapshot: String,
@@ -286,6 +289,7 @@ impl SessionLaunchPolicy {
             turn_budget: 0,
             prelude: "weaver".to_string(),
             restricted: false,
+            github_repositories: "[]".to_string(),
             allowed_tools: "[]".to_string(),
             mcp_access: r#"{"selection":{"mode":"none","groups":[]},"capability_sets":[]}"#
                 .to_string(),
@@ -562,10 +566,10 @@ pub(crate) async fn insert_with_layout_revision(
           profile, launch_mode, profile_revision, profile_lifetime, policy_strict,
           policy_env_clear,
           policy_ambient_allowlist, policy_idle_archive_secs, policy_turn_budget,
-          policy_prelude, policy_restricted, policy_allowed_tools, policy_mcp_access,
+          policy_prelude, policy_restricted, policy_github_repositories, policy_allowed_tools, policy_mcp_access,
           launch_snapshot, creator_kind, creator_subject, parent_session_id, automation_run_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&s.id)
     .bind(&s.branch_id)
@@ -596,6 +600,7 @@ pub(crate) async fn insert_with_layout_revision(
     .bind(policy.turn_budget)
     .bind(&policy.prelude)
     .bind(policy.restricted)
+    .bind(&policy.github_repositories)
     .bind(&policy.allowed_tools)
     .bind(&policy.mcp_access)
     .bind(&policy.launch_snapshot)
@@ -1284,7 +1289,7 @@ pub async fn prepare_handoff(
              profile_lifetime = ?, policy_strict = ?, policy_env_clear = ?,
              policy_ambient_allowlist = ?,
              policy_idle_archive_secs = ?, policy_turn_budget = ?,
-             policy_prelude = ?, policy_restricted = ?,
+             policy_prelude = ?, policy_restricted = ?, policy_github_repositories = ?,
              policy_allowed_tools = ?, policy_mcp_access = ?,
              launch_snapshot = ?,
              mutation_revision = mutation_revision + 1
@@ -1305,6 +1310,7 @@ pub async fn prepare_handoff(
     .bind(policy.turn_budget)
     .bind(&policy.prelude)
     .bind(policy.restricted)
+    .bind(&policy.github_repositories)
     .bind(&policy.allowed_tools)
     .bind(&policy.mcp_access)
     .bind(&policy.launch_snapshot)
@@ -1947,6 +1953,7 @@ mod tests {
             turn_budget: 0,
             prelude: "weaver".to_string(),
             restricted: false,
+            github_repositories: "[]".to_string(),
             allowed_tools: "[]".to_string(),
             mcp_access: r#"{"selection":{"mode":"none","groups":[]},"capability_sets":[]}"#
                 .to_string(),
@@ -2002,6 +2009,7 @@ mod tests {
             turn_budget: 0,
             prelude: "none".to_string(),
             restricted: false,
+            github_repositories: "[]".to_string(),
             allowed_tools: "[]".to_string(),
             mcp_access: r#"{"selection":{"mode":"none","groups":[]},"capability_sets":[]}"#
                 .to_string(),

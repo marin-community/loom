@@ -1275,6 +1275,7 @@ export interface Profile {
   prelude: 'weaver' | 'none';
   instructions: string;
   restricted: boolean;
+  github_repositories: string[];
   runtime_permissions: string[];
   mcp_access: McpAccess;
   lifetime: number;
@@ -1348,6 +1349,7 @@ export interface ResolvedLaunchPolicy {
   turn_budget: number | null;
   prelude: string;
   instructions: string;
+  github_repositories: string[];
   runtime_permissions: string[];
   mcp_policy: SessionMcpPolicy;
 }

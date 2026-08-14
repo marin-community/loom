@@ -740,9 +740,9 @@ async fn start_terminal(
 ) -> Result<AgentInstance> {
     let loom_exe = std::env::current_exe().ok();
     let weaver_dir = loom_exe.as_deref().and_then(Path::parent);
-    // The session environment loom injects (WEAVER_API/WEAVER_BRANCH/LOOM_TOKEN +
-    // operator vars) — the same set the ACP relay launch delivers (see
-    // [`session_env`] / [`build_acp_launch`]).
+    // The session environment loom injects (WEAVER_API/WEAVER_BRANCH, session
+    // credentials, and operator vars) — the same set the ACP relay launch
+    // delivers (see [`session_env`] / [`build_acp_launch`]).
     let env_owned = session_env(ctx.server_addr, ctx.branch_id, ctx.extra_env);
     let env: Vec<(&str, &str)> = env_owned
         .iter()
@@ -790,8 +790,8 @@ pub fn read_local_token() -> Option<String> {
 
 /// The session environment loom injects into an agent process — the same set for
 /// the terminal (PTY) and ACP (relay) backends. `extra_env` carries the freshly
-/// minted session-bound `LOOM_TOKEN`; the machine-local admin token is never
-/// injected into an agent.
+/// minted session-bound `LOOM_TOKEN` and `LOOM_SESSION_ID`; the machine-local
+/// admin token is never injected into an agent.
 pub fn session_env(
     server_addr: &str,
     branch_id: &str,
@@ -984,7 +984,7 @@ pub async fn build_acp_launch(
     };
 
     let mut env = session_env(spec.server_addr, spec.branch_id, spec.extra_env);
-    env.push(("LOOM_SESSION_ID".to_string(), spec.session_id.to_string()));
+    push_env_default(&mut env, "LOOM_SESSION_ID", spec.session_id);
     if spec.restricted {
         // GitHub mutations are performed by Loom's server-side restricted tool
         // endpoint. The adapter and model never receive the credential.

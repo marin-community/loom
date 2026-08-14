@@ -89,6 +89,7 @@ watch(
   () => draft.value.restricted,
   (restricted) => {
     if (!restricted) return;
+    draft.value.github_repositories = [];
     if (draft.value.mcp_access.mode === 'all') {
       draft.value.mcp_access = { mode: 'none', groups: [] };
       return;
@@ -327,6 +328,25 @@ watch(
         @input="
           draft.ambient_allowlist = ($event.target as HTMLInputElement).value
             .split(',')
+            .map((value) => value.trim())
+            .filter(Boolean)
+        "
+      />
+    </div>
+
+    <div class="grid min-w-0 gap-1 sm:col-span-2">
+      <label class="text-xs" :for="`${uid}-github-repositories`">
+        GitHub App repositories (owner/name, one per line)
+      </label>
+      <textarea
+        :id="`${uid}-github-repositories`"
+        :value="draft.github_repositories.join('\n')"
+        :disabled="disabled || draft.restricted"
+        rows="3"
+        class="min-w-0 rounded bg-input px-2 py-1.5 font-mono"
+        @input="
+          draft.github_repositories = ($event.target as HTMLTextAreaElement).value
+            .split('\n')
             .map((value) => value.trim())
             .filter(Boolean)
         "

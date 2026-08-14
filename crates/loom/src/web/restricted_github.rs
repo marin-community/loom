@@ -10,11 +10,13 @@ use std::process::Stdio;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    Json,
+    Extension, Json,
 };
 use serde::Deserialize;
 use tokio::process::Command;
-use weaver_api::{RestrictedGithubToolReq, RestrictedGithubToolView};
+use weaver_api::{GithubTokenView, RestrictedGithubToolReq, RestrictedGithubToolView};
+
+use crate::auth::{Grant, Principal};
 
 use super::{ApiResult, AppError, AppState};
 
@@ -26,6 +28,51 @@ struct ToolArguments {
     body: Option<String>,
     #[serde(default)]
     title: Option<String>,
+}
+
+fn principal_owns_session(principal: &Principal, id: &str) -> bool {
+    matches!(&principal.grant, Grant::Session { session_id, .. } if session_id == id)
+}
+
+pub(super) async fn github_token(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Extension(principal): Extension<Principal>,
+) -> ApiResult<Json<GithubTokenView>> {
+    if !principal_owns_session(&principal, &id) {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "only the session itself may request its GitHub credential",
+        ));
+    }
+    let session = crate::session::get(&st.db, &id)
+        .await?
+        .ok_or_else(|| AppError::not_found("session"))?;
+    let repositories: Vec<String> = serde_json::from_str(&session.policy_github_repositories)
+        .map_err(|error| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    if repositories.is_empty() {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "session profile has no GitHub repository credential",
+        ));
+    }
+    let app = st.trigger.app().ok_or_else(|| {
+        AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GitHub App credential is unavailable",
+        )
+    })?;
+    if !app.is_configured().await {
+        return Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GitHub App credential is unavailable",
+        ));
+    }
+    let token = app
+        .token_for_repositories(&repositories)
+        .await
+        .map_err(|error| AppError::new(StatusCode::BAD_GATEWAY, error.to_string()))?;
+    Ok(Json(GithubTokenView { token }))
 }
 
 async fn restricted_github_token(
@@ -249,7 +296,40 @@ mod tests {
     use axum::http::StatusCode;
     use serde_json::json;
 
-    use super::{restricted_github_token, validate_arguments};
+    use super::{principal_owns_session, restricted_github_token, validate_arguments};
+    use crate::auth::{AuthVia, Grant, Principal};
+
+    fn principal(grant: Grant) -> Principal {
+        Principal {
+            username: "test".to_string(),
+            github_login: None,
+            via: AuthVia::Token,
+            grant,
+            automation_context: None,
+        }
+    }
+
+    #[test]
+    fn github_token_is_available_only_to_the_exact_session_principal() {
+        assert!(principal_owns_session(
+            &principal(Grant::Session {
+                session_id: "session-1".to_string(),
+                branch_id: "branch-1".to_string(),
+            }),
+            "session-1"
+        ));
+        assert!(!principal_owns_session(
+            &principal(Grant::Session {
+                session_id: "parent".to_string(),
+                branch_id: "branch-1".to_string(),
+            }),
+            "child"
+        ));
+        assert!(!principal_owns_session(
+            &principal(Grant::Admin),
+            "session-1"
+        ));
+    }
 
     #[test]
     fn only_the_fixed_mcp_tools_map_to_permissions() {

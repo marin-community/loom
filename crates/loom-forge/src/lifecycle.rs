@@ -100,6 +100,7 @@ pub async fn rotate_session_token(
     )
     .await?;
     set_env(env, "LOOM_TOKEN", token);
+    set_env(env, "LOOM_SESSION_ID", session.id.clone());
     Ok(())
 }
 
@@ -503,6 +504,7 @@ pub async fn create_warm_session(
             turn_budget: resolved.view.policy.turn_budget.unwrap_or(0),
             prelude: launch_profile.prelude.clone(),
             restricted: launch_profile.restricted,
+            github_repositories: launch_profile.github_repositories.clone(),
             allowed_tools: stamped_allowed_tools.clone(),
             mcp_access: stamped_mcp_access,
             launch_snapshot,
@@ -516,6 +518,7 @@ pub async fn create_warm_session(
     let session_token =
         crate::auth::create_session_token(&st.db, None, &session_id, &branch.id).await?;
     set_env(&mut extra_env, "LOOM_TOKEN", session_token);
+    set_env(&mut extra_env, "LOOM_SESSION_ID", session_id.clone());
     tracing::info!(watch = %watch.id, session = %session_id, agent = %agent, protocol = %protocol, work_dir = %work_dir.display(), "launching warm session agent");
     let launch_result = if protocol == "acp" {
         match agent::build_acp_launch(

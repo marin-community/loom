@@ -609,6 +609,8 @@ pub struct ProfileView {
     #[serde(default)]
     pub restricted: bool,
     #[serde(default)]
+    pub github_repositories: Vec<String>,
+    #[serde(default)]
     pub runtime_permissions: Vec<String>,
     #[serde(default)]
     pub mcp_access: McpAccess,
@@ -885,6 +887,8 @@ pub struct ResolvedLaunchPolicyView {
     pub prelude: String,
     #[serde(default)]
     pub instructions: String,
+    #[serde(default)]
+    pub github_repositories: Vec<String>,
     pub runtime_permissions: Vec<String>,
     pub mcp_policy: SessionMcpPolicyView,
 }
@@ -1011,6 +1015,9 @@ pub struct ProfileReq {
     pub instructions: String,
     #[serde(default)]
     pub restricted: bool,
+    /// Repositories for which Loom may broker a short-lived GitHub App token.
+    #[serde(default)]
+    pub github_repositories: Vec<String>,
     /// Provider-specific fallback permissions. New integrations should use
     /// `mcp_access`; `allowed_tools` remains a read-compatible input alias.
     #[serde(default, alias = "allowed_tools")]
@@ -1021,6 +1028,12 @@ pub struct ProfileReq {
     /// interactive editors always send the revision they loaded.
     #[serde(default)]
     pub expected_revision: Option<i64>,
+}
+
+/// A short-lived GitHub App installation token brokered for one session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GithubTokenView {
+    pub token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

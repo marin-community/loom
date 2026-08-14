@@ -972,6 +972,7 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
         turn_budget: resolved.view.policy.turn_budget.unwrap_or(0),
         prelude: launch_profile.prelude.clone(),
         restricted: launch_profile.restricted,
+        github_repositories: launch_profile.github_repositories.clone(),
         allowed_tools: stamped_allowed_tools.clone(),
         mcp_access: stamped_mcp_access,
         launch_snapshot,
@@ -1193,6 +1194,7 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
         crate::auth::create_session_token(&st.db, created_by.as_deref(), &session_id, &branch.id)
             .await?;
     set_env(&mut extra_env, "LOOM_TOKEN", session_token);
+    set_env(&mut extra_env, "LOOM_SESSION_ID", session_id.clone());
     let session = if protocol == "acp" {
         // The ACP path inserts the row *first* — `acp::start` binds a relay to it
         // and reads it back — then brings up the headless adapter over the relay.
