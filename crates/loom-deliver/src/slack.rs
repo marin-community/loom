@@ -1620,7 +1620,7 @@ fn slack_goal(
          ## Request (from <@{user}>)\n{instruction}\n\n\
          ## {history_heading}\n{history_note}\n\n{history}\n\n\
          ## How to respond\n\
-         - Finish by replying on this Slack thread with the answer or completed result. Prefer the built-in `slack_reply` MCP tool; if it is unavailable, POST to `$WEAVER_API/api/branches/$WEAVER_BRANCH/slack/reply` with `{{\"text\": \"…\"}}` and your `LOOM_TOKEN`.\n\
+         - Finish by sending a `result` to your own Loom channel; its origin binding delivers the same durable item to this Slack thread. Prefer the built-in `loom_channel.send` tool with `channel: \"self\"` and `kind: \"result\"`. The existing `slack_reply` tool and `$WEAVER_API/api/branches/$WEAVER_BRANCH/slack/reply` route remain compatibility facades over that channel path.\n\
          - Your `weaver status` messages and the built-in `status_update` MCP tool are mirrored onto the Slack thread. When you create a pull request or issue, or otherwise reach a terminal outcome, replace any transient progress such as `waiting` with a final status that names the outcome and includes its URL when available. Use `attention` when a person needs to review or act; otherwise use `ok`.\n\
          - Do not leave the thread with only a progress card: the final Slack reply must be self-contained.",
         channel = trigger.channel_id,

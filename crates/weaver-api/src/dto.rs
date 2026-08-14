@@ -2079,6 +2079,13 @@ pub struct ProgramView {
 pub const CHANNEL_DEFAULT_MESSAGE_KIND: &str = "message";
 pub const CHANNEL_DEFAULT_URGENCY: &str = "normal";
 pub const CHANNEL_DEFAULT_SUBSCRIPTION_MODE: &str = "observe";
+pub const CHANNEL_MESSAGE_LIMIT_MAX: usize = 500;
+pub const CHANNEL_IDEMPOTENCY_KEY_MAX_LEN: usize = 255;
+pub const CHANNEL_SLACK_ORIGIN_BINDING_ID: &str = "slack:origin";
+
+pub fn channel_session_binding_id(session_id: &str) -> String {
+    format!("session:{session_id}")
+}
 
 /// One durable communication context. A session channel uses its owning
 /// session id as `id`; custom channels have an independent id.
@@ -2104,6 +2111,18 @@ pub struct ChannelView {
     pub last_message: Option<ChannelMessageView>,
 }
 
+/// One server-owned destination bound to a durable channel. Agents address the
+/// Loom channel; the daemon owns provider coordinates and reports delivery per
+/// binding without exposing credentials.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChannelBindingView {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    #[serde(default)]
+    pub target_session_id: Option<String>,
+}
+
 /// One append-only item in a channel's monotonically sequenced history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelMessageView {
@@ -2122,14 +2141,41 @@ pub struct ChannelMessageView {
     pub deliveries: Vec<ChannelDeliveryView>,
 }
 
-/// Runtime acceptance state for delivery of one channel message to a session.
+/// Attempt and outcome for delivery of one channel message to one binding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelDeliveryView {
-    pub target_session_id: String,
+    /// Stable identity within the channel, for example `session:<id>` or
+    /// `slack:origin`.
+    pub binding_id: String,
+    /// `session`, `slack_thread`, or a future transport kind.
+    pub binding_kind: String,
+    #[serde(default)]
+    pub target_session_id: Option<String>,
     pub state: String,
     pub attempts: i64,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub external_id: Option<String>,
     pub updated_at: String,
+}
+
+/// Caller-relative bootstrap context used by in-session tools. REST resources
+/// remain canonically id-addressed; this view resolves `self` once.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelfContextView {
+    pub session_id: String,
+    pub branch_id: String,
+    pub repo_root: String,
+    pub channel_id: String,
+    pub session_url: String,
+    pub links: SelfContextLinks,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelfContextLinks {
+    pub channel: String,
+    pub artifacts: String,
+    pub session: String,
 }
 
 /// The authenticated caller's subscription to a channel.
@@ -2684,6 +2730,10 @@ pub struct ArtifactUpsertReq {
     /// branch's own copy.
     #[serde(default)]
     pub repo: bool,
+    /// Reject the write when the currently resolved artifact has advanced past
+    /// the revision the caller edited. `None` preserves force-write behavior.
+    #[serde(default)]
+    pub base_rev: Option<i64>,
 }
 
 /// Body for `POST /api/branches/{id}/status`: set the agent's attention level

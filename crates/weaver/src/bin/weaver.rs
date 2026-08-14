@@ -137,10 +137,16 @@ enum Cmd {
 #[derive(Subcommand)]
 enum ChannelCmd {
     /// List visible open channels and their unread state.
+    #[command(name = "list", visible_alias = "ls")]
     Ls {
         /// Include archived channels.
         #[arg(long)]
         all: bool,
+    },
+    /// Get channel metadata and its server-owned delivery bindings.
+    Get {
+        /// Channel id, or `self`; defaults to this session's channel.
+        channel: Option<String>,
     },
     /// Open a custom channel alongside the current session channel.
     Open {
@@ -170,6 +176,9 @@ enum ChannelCmd {
         kind: String,
         #[arg(long, default_value = weaver_api::CHANNEL_DEFAULT_URGENCY)]
         urgency: String,
+        /// Retry-safe key scoped to the channel.
+        #[arg(long)]
+        idempotency_key: Option<String>,
     },
     /// Set how this session follows a channel.
     Subscribe {
@@ -330,9 +339,13 @@ enum ArtifactCmd {
         /// to the current branch.
         #[arg(long)]
         repo: bool,
+        /// Reject the write unless this is still the latest revision (0 guards creation).
+        #[arg(long)]
+        base_rev: Option<i64>,
     },
     /// List artifacts: this branch's plus the repo-shared ones. `--repo` lists
     /// every artifact in the repo, all scopes.
+    #[command(name = "list", visible_alias = "ls")]
     Ls {
         /// List every artifact in the repo, regardless of scope.
         #[arg(long)]
@@ -340,6 +353,7 @@ enum ArtifactCmd {
     },
     /// Show an artifact's content (latest revision by default). `--meta` prints
     /// the envelope (id, name, kind, title, scope, latest rev, timestamps).
+    #[command(name = "get", visible_alias = "show")]
     Show {
         name: String,
         /// Show a specific revision instead of the latest.
@@ -352,11 +366,19 @@ enum ArtifactCmd {
     /// Remove an artifact and its entire revision history. Resolves the name
     /// branch-scoped first, then repo-shared (what `show` would display); pass
     /// `--repo` to target the repo-shared one when a branch copy shadows it.
+    #[command(name = "delete", visible_alias = "rm")]
     Rm {
         /// The artifact name to remove.
         name: String,
         /// Remove the repo-shared artifact of this name, not the branch-scoped
         /// one.
+        #[arg(long)]
+        repo: bool,
+    },
+    /// List immutable revision metadata, newest first.
+    History {
+        name: String,
+        /// Read the repo-shared artifact rather than a branch copy.
         #[arg(long)]
         repo: bool,
     },
@@ -512,7 +534,7 @@ fn branch_key() -> Result<String> {
 fn channel_key(explicit: Option<String>) -> Result<String> {
     if let Some(value) = explicit {
         let value = value.trim();
-        if !value.is_empty() {
+        if !value.is_empty() && value != "self" {
             return Ok(value.to_string());
         }
     }
@@ -661,7 +683,7 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
     } else {
         "(none set)".to_string()
     };
-    let _ = writeln!(out, "Goal:    {goal}  (weaver artifact show goal)");
+    let _ = writeln!(out, "Goal:    {goal}  (weaver artifact get goal)");
 
     let attention = attention_of(b);
     let status = if b.description.is_empty() {
@@ -738,13 +760,17 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
         [a] => {
             let _ = writeln!(
                 out,
-                "Artifacts: {} [rev {}]  (weaver artifact show {})",
+                "Artifacts: {} [rev {}]  (weaver artifact get {})",
                 a.name, a.rev, a.name
             );
         }
         many => {
             let names = many.iter().map(|a| a.name.as_str()).collect::<Vec<_>>();
-            let _ = writeln!(out, "Artifacts: {}  (weaver artifact ls)", names.join(", "));
+            let _ = writeln!(
+                out,
+                "Artifacts: {}  (weaver artifact list)",
+                names.join(", ")
+            );
         }
     }
 
@@ -1190,6 +1216,25 @@ async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
                 }
             }
         }
+        ChannelCmd::Get { channel } => {
+            let id = channel_key(channel)?;
+            let channel = client.get_channel(&id).await?;
+            println!("id:      {}", channel.id);
+            println!("kind:    {}", channel.kind);
+            println!("name:    {}", channel.name);
+            println!("state:   {}", channel.state);
+            if !channel.topic.is_empty() {
+                println!("topic:   {}", channel.topic);
+            }
+            let bindings = client.channel_bindings(&id).await?;
+            println!("bindings:");
+            if bindings.is_empty() {
+                println!("  (none)");
+            }
+            for binding in bindings {
+                println!("  {}  {}  {}", binding.id, binding.kind, binding.label);
+            }
+        }
         ChannelCmd::Open { name, topic } => {
             let name = name.join(" ");
             if name.trim().is_empty() {
@@ -1227,6 +1272,7 @@ async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
             channel,
             kind,
             urgency,
+            idempotency_key,
         } => {
             let id = channel_key(channel)?;
             let body = text.join(" ");
@@ -1242,7 +1288,7 @@ async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
                         body,
                         payload: json!({}),
                         reply_to: None,
-                        idempotency_key: None,
+                        idempotency_key,
                     },
                 )
                 .await?;
@@ -1347,7 +1393,7 @@ fn print_channel_messages(messages: &[weaver_api::ChannelMessageView]) {
                 .unwrap_or_default();
             println!(
                 "       delivery {} → {}{}",
-                delivery.target_session_id, delivery.state, error
+                delivery.binding_id, delivery.state, error
             );
         }
     }
@@ -1714,6 +1760,7 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
             title,
             kind,
             repo,
+            base_rev,
         } => {
             let raw = read_bytes_or_stdin(file.as_deref())?;
             // An image becomes an `image` artifact backed by a base64 data URI;
@@ -1746,6 +1793,7 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
                 kind: Some(kind),
                 author: None,
                 repo,
+                base_rev,
             };
             let view = client
                 .write_branch_artifact(&key, name.trim(), &req)
@@ -1820,7 +1868,9 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
             let a = client
                 .get_branch_artifact(&key, name.trim(), None, repo)
                 .await
-                .map_err(|_| anyhow!("no artifact '{}' — see `weaver artifact ls`", name.trim()))?;
+                .map_err(|_| {
+                    anyhow!("no artifact '{}' — see `weaver artifact list`", name.trim())
+                })?;
             client
                 .delete_branch_artifact(&key, name.trim(), repo)
                 .await?;
@@ -1829,6 +1879,17 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
                 None => "repo-shared".to_string(),
             };
             println!("deleted {} ({scope}, was rev {})", a.meta.name, a.meta.rev);
+        }
+        ArtifactCmd::History { name, repo } => {
+            let artifact = client
+                .get_branch_artifact(&key, name.trim(), None, repo)
+                .await?;
+            for version in artifact.versions {
+                println!(
+                    "rev {}  {}  {}",
+                    version.rev, version.created_at, version.author
+                );
+            }
         }
         ArtifactCmd::Comment {
             name,

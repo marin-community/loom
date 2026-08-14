@@ -107,6 +107,12 @@ fn tools() -> Value {
                 "additionalProperties": false,
                 "properties": {
                     "text": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                    "idempotency_key": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": weaver_api::CHANNEL_IDEMPOTENCY_KEY_MAX_LEN,
+                        "description": "For the session's origin thread, retry safely with the same key."
+                    },
                     "thread": {
                         "type": "object",
                         "additionalProperties": false,
@@ -171,7 +177,10 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
             if let Some(thread) = arguments.get("thread") {
                 body["thread"] = thread.clone();
             }
-            client
+            if let Some(key) = arguments.get("idempotency_key") {
+                body["idempotency_key"] = key.clone();
+            }
+            let posted = client
                 .post(
                     &format!(
                         "/api/branches/{}/slack/reply",
@@ -183,12 +192,13 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
                     body,
                 )
                 .await?;
-            "message posted to the session Slack thread".to_string()
+            return super::structured_result("message posted to the session Slack thread", &posted);
         }
         _ => unreachable!(),
     };
     Ok(json!({
         "content": [{ "type": "text", "text": text }],
+        "structuredContent": { "message": text },
         "isError": false
     }))
 }

@@ -48,10 +48,13 @@ struct MessageRow {
 
 #[derive(Debug, Clone, FromRow)]
 struct DeliveryRow {
-    target_session_id: String,
+    binding_id: String,
+    binding_kind: String,
+    target_session_id: Option<String>,
     state: String,
     attempts: i64,
     last_error: Option<String>,
+    external_id: Option<String>,
     updated_at: String,
 }
 
@@ -68,6 +71,7 @@ struct SubscriptionRow {
 
 #[derive(Debug, Clone)]
 pub struct ChannelAccess {
+    pub branch_id: Option<String>,
     pub session_id: Option<String>,
     pub state: String,
     pub created_by_kind: String,
@@ -171,13 +175,14 @@ pub async fn get(db: &Db, id: &str, subject: &Subject) -> Result<Option<ChannelV
 
 pub async fn access(db: &Db, id: &str) -> Result<Option<ChannelAccess>> {
     let row = sqlx::query(
-        "SELECT session_id, state, created_by_kind, created_by
+        "SELECT branch_id, session_id, state, created_by_kind, created_by
          FROM channels WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(db)
     .await?;
     Ok(row.map(|row| ChannelAccess {
+        branch_id: row.get("branch_id"),
         session_id: row.get("session_id"),
         state: row.get("state"),
         created_by_kind: row.get("created_by_kind"),
@@ -315,18 +320,22 @@ pub async fn messages(db: &Db, channel_id: &str, after: i64) -> Result<Vec<Chann
 
 async fn message_view(db: &Db, row: MessageRow) -> Result<ChannelMessageView> {
     let deliveries = sqlx::query_as::<_, DeliveryRow>(
-        "SELECT target_session_id, state, attempts, last_error, updated_at
-         FROM channel_deliveries WHERE message_id = ? ORDER BY target_session_id",
+        "SELECT binding_id, binding_kind, target_session_id, state, attempts,
+                last_error, external_id, updated_at
+         FROM channel_deliveries WHERE message_id = ? ORDER BY binding_id",
     )
     .bind(&row.id)
     .fetch_all(db)
     .await?
     .into_iter()
     .map(|delivery| ChannelDeliveryView {
+        binding_id: delivery.binding_id,
+        binding_kind: delivery.binding_kind,
         target_session_id: delivery.target_session_id,
         state: delivery.state,
         attempts: delivery.attempts,
         last_error: delivery.last_error,
+        external_id: delivery.external_id,
         updated_at: delivery.updated_at,
     })
     .collect();
@@ -497,16 +506,24 @@ fn subscription_view(row: SubscriptionRow) -> ChannelSubscriptionView {
     }
 }
 
-pub async fn create_delivery(db: &Db, message_id: &str, session_id: &str) -> Result<()> {
+pub async fn create_delivery(
+    db: &Db,
+    message_id: &str,
+    binding_id: &str,
+    binding_kind: &str,
+    target_session_id: Option<&str>,
+) -> Result<()> {
     let now = now_iso();
     sqlx::query(
         "INSERT INTO channel_deliveries
-         (message_id, target_session_id, state, attempts, updated_at)
-         VALUES (?, ?, 'queued', 0, ?)
-         ON CONFLICT(message_id, target_session_id) DO NOTHING",
+         (message_id, binding_id, binding_kind, target_session_id, state, attempts, updated_at)
+         VALUES (?, ?, ?, ?, 'queued', 0, ?)
+         ON CONFLICT(message_id, binding_id) DO NOTHING",
     )
     .bind(message_id)
-    .bind(session_id)
+    .bind(binding_id)
+    .bind(binding_kind)
+    .bind(target_session_id)
     .bind(now)
     .execute(db)
     .await?;
@@ -516,14 +533,15 @@ pub async fn create_delivery(db: &Db, message_id: &str, session_id: &str) -> Res
 pub async fn finish_delivery(
     db: &Db,
     message_id: &str,
-    session_id: &str,
+    binding_id: &str,
     error: Option<&str>,
+    external_id: Option<&str>,
 ) -> Result<()> {
     let now = now_iso();
     sqlx::query(
         "UPDATE channel_deliveries
-         SET state = ?, attempts = attempts + 1, last_error = ?, updated_at = ?
-         WHERE message_id = ? AND target_session_id = ?",
+         SET state = ?, attempts = attempts + 1, last_error = ?, external_id = ?, updated_at = ?
+         WHERE message_id = ? AND binding_id = ?",
     )
     .bind(if error.is_some() {
         "failed"
@@ -531,12 +549,32 @@ pub async fn finish_delivery(
         "delivered"
     })
     .bind(error)
+    .bind(external_id)
     .bind(now)
     .bind(message_id)
-    .bind(session_id)
+    .bind(binding_id)
     .execute(db)
     .await?;
     Ok(())
+}
+
+pub async fn delivery_succeeded(db: &Db, message_id: &str, binding_id: &str) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM channel_deliveries
+         WHERE message_id = ? AND binding_id = ? AND state = 'delivered')",
+    )
+    .bind(message_id)
+    .bind(binding_id)
+    .fetch_one(db)
+    .await?)
+}
+
+pub async fn refresh_message(db: &Db, message_id: &str) -> Result<ChannelMessageView> {
+    let row = sqlx::query_as::<_, MessageRow>("SELECT * FROM channel_messages WHERE id = ?")
+        .bind(message_id)
+        .fetch_one(db)
+        .await?;
+    message_view(db, row).await
 }
 
 pub async fn delivery_targets(db: &Db, channel_id: &str) -> Result<Vec<String>> {
@@ -785,6 +823,33 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(posted.id, replay.id, "idempotent replay appends once");
+
+        create_delivery(
+            &db,
+            &posted.id,
+            weaver_api::CHANNEL_SLACK_ORIGIN_BINDING_ID,
+            "slack_thread",
+            None,
+        )
+        .await
+        .unwrap();
+        finish_delivery(
+            &db,
+            &posted.id,
+            weaver_api::CHANNEL_SLACK_ORIGIN_BINDING_ID,
+            None,
+            Some("1786.1234"),
+        )
+        .await
+        .unwrap();
+        let delivered = refresh_message(&db, &posted.id).await.unwrap();
+        assert_eq!(delivered.deliveries.len(), 1);
+        assert_eq!(delivered.deliveries[0].binding_kind, "slack_thread");
+        assert_eq!(delivered.deliveries[0].target_session_id, None);
+        assert_eq!(
+            delivered.deliveries[0].external_id.as_deref(),
+            Some("1786.1234")
+        );
 
         let subscription = mark_read(&db, "session-1", &owner, None).await.unwrap();
         assert_eq!(subscription.mode, SubscriptionMode::Deliver.as_str());

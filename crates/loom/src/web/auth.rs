@@ -175,6 +175,9 @@ pub(super) async fn grant_allows(
             session_id,
             branch_id,
         } => {
+            if *method == axum::http::Method::GET && path == "/self" {
+                return true;
+            }
             if *method == axum::http::Method::POST && path == "/sessions" {
                 return true;
             }

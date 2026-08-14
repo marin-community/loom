@@ -12,23 +12,24 @@ use serde_json::Value;
 
 use crate::dto::{
     AddReviewCommentReq, AnchorDto, ArtifactMeta, ArtifactUpsertReq, ArtifactView,
-    AutomationTokenReq, AutomationTokenView, BranchStatusReq, BranchView, ChannelMessageView,
-    ChannelSubscriptionView, ChannelView, CloneProfileReq, CommentDto, CreateChannelMessageReq,
-    CreateChannelReq, CreateEventReq, CreateIssueReq, CreateRepoIssueReq, CreateReq,
-    CreateReviewReq, CreateSessionGroupReq, CreateSessionSpaceReq, CreateTokenReq, CreateWatchReq,
-    CreatedTokenView, CustomMcpReq, CustomMcpView, DeleteSessionGroupReq, DeleteSessionSpaceReq,
-    DeploymentReq, DeploymentView, DiagnosticsView, EffectiveProfileView, EnsureResumptionCueReq,
-    ExpectedReviewRevisionReq, FederationReq, FederationView, GithubTokenView, HandoffReq,
-    HistoryPageView, IssueActionsReq, IssueActionsResult, IssueView, McpRegistryView,
-    MoveSessionsReq, NewCommentBody, NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq,
-    ProfileProbeView, ProfileReq, ProfileView, PutProfileEnvReq, ReadinessView,
-    ReorderSessionLayoutReq, ResolveLaunchReq, ResolveReviewCommentReq, ResolvedLaunchView,
-    RestoreSessionGroupsReq, ResumptionCueView, ReviewCommentDto, ReviewDto, RunReq, RunView,
-    RunWatchReq, ScratchLimitsView, SearchSessionsOptions, SendReq, SessionGroupPreferenceReq,
-    SessionLayoutView, SessionPlacementSelectorKind, SessionView, SetChannelReadMarkerReq,
-    SetChannelSubscriptionReq, SetSessionPlacementDefaultReq, SetTagsReq, SetTitleGenerationReq,
-    SettingsEnvelope, SubmitReviewReq, TagReq, ThreadDto, TokenView, UpdateReviewCommentReq,
-    UpdateReviewReq, UpdateSessionGroupReq, UpdateSessionSpaceReq, WatchView,
+    AutomationTokenReq, AutomationTokenView, BranchStatusReq, BranchView, ChannelBindingView,
+    ChannelMessageView, ChannelSubscriptionView, ChannelView, CloneProfileReq, CommentDto,
+    CreateChannelMessageReq, CreateChannelReq, CreateEventReq, CreateIssueReq, CreateRepoIssueReq,
+    CreateReq, CreateReviewReq, CreateSessionGroupReq, CreateSessionSpaceReq, CreateTokenReq,
+    CreateWatchReq, CreatedTokenView, CustomMcpReq, CustomMcpView, DeleteSessionGroupReq,
+    DeleteSessionSpaceReq, DeploymentReq, DeploymentView, DiagnosticsView, EffectiveProfileView,
+    EnsureResumptionCueReq, ExpectedReviewRevisionReq, FederationReq, FederationView,
+    GithubTokenView, HandoffReq, HistoryPageView, IssueActionsReq, IssueActionsResult, IssueView,
+    McpRegistryView, MoveSessionsReq, NewCommentBody, NewThreadBody, PatchIssueReq,
+    PatchSessionReq, PatchWatchReq, ProfileProbeView, ProfileReq, ProfileView, PutProfileEnvReq,
+    ReadinessView, ReorderSessionLayoutReq, ResolveLaunchReq, ResolveReviewCommentReq,
+    ResolvedLaunchView, RestoreSessionGroupsReq, ResumptionCueView, ReviewCommentDto, ReviewDto,
+    RunReq, RunView, RunWatchReq, ScratchLimitsView, SearchSessionsOptions, SelfContextView,
+    SendReq, SessionGroupPreferenceReq, SessionLayoutView, SessionPlacementSelectorKind,
+    SessionView, SetChannelReadMarkerReq, SetChannelSubscriptionReq, SetSessionPlacementDefaultReq,
+    SetTagsReq, SetTitleGenerationReq, SettingsEnvelope, SubmitReviewReq, TagReq, ThreadDto,
+    TokenView, UpdateReviewCommentReq, UpdateReviewReq, UpdateSessionGroupReq,
+    UpdateSessionSpaceReq, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -156,6 +157,10 @@ impl Client {
     }
 
     // -- Sessions ---------------------------------------------------------
+
+    pub async fn self_context(&self) -> Result<SelfContextView> {
+        self.get_typed("/api/self").await
+    }
 
     pub async fn github_token(&self, session_id: &str) -> Result<GithubTokenView> {
         self.send_typed::<Value, GithubTokenView>(
@@ -646,9 +651,28 @@ impl Client {
             .await
     }
 
+    pub async fn channel_bindings(&self, id: &str) -> Result<Vec<ChannelBindingView>> {
+        self.get_typed(&format!("/api/channels/{}/bindings", Self::seg(id)))
+            .await
+    }
+
     pub async fn channel_messages(&self, id: &str, after: i64) -> Result<Vec<ChannelMessageView>> {
         self.get_typed(&format!(
             "/api/channels/{}/messages?after={}",
+            Self::seg(id),
+            after.max(0)
+        ))
+        .await
+    }
+
+    pub async fn channel_messages_bounded(
+        &self,
+        id: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<ChannelMessageView>> {
+        self.get_typed(&format!(
+            "/api/channels/{}/messages?after={}&limit={limit}",
             Self::seg(id),
             after.max(0)
         ))

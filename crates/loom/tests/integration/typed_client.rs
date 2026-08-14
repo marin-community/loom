@@ -8,8 +8,9 @@
 
 use serial_test::serial;
 
-use serde_json::{Map, Value};
-use weaver_api::{CreateReq, SettingKind, SettingSource};
+use serde_json::{json, Map, Value};
+use std::sync::{Arc, Mutex};
+use weaver_api::{CreateChannelMessageReq, CreateReq, SettingKind, SettingSource};
 
 use crate::fixtures::TestServer;
 
@@ -63,6 +64,52 @@ async fn typed_create_list_get_and_mark() {
     assert_eq!(opening[0].kind, "goal");
     assert_eq!(opening[0].body, "typed client round-trip");
 
+    // Session credentials can bootstrap every resource-shaped tool from one
+    // caller-relative context, then inspect the same channel's bindings.
+    let session_token =
+        loom::auth::create_session_token(&ts.state.db, Some("rjpower"), &id, &created.branch.id)
+            .await
+            .unwrap();
+    let session_client =
+        weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(session_token));
+    let context = session_client.self_context().await.unwrap();
+    assert_eq!(context.session_id, id);
+    assert_eq!(context.branch_id, created.branch.id);
+    assert_eq!(context.channel_id, id);
+    assert_eq!(context.links.channel, format!("/api/channels/{id}"));
+    let bindings = session_client.channel_bindings(&id).await.unwrap();
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].id, format!("session:{id}"));
+    assert_eq!(bindings[0].label, "this session");
+
+    // Retrying an append with the same key returns the original durable item.
+    let result_request = CreateChannelMessageReq {
+        kind: "result".to_string(),
+        urgency: "normal".to_string(),
+        body: "done once".to_string(),
+        payload: serde_json::json!({}),
+        reply_to: None,
+        idempotency_key: Some("typed-result-once".to_string()),
+    };
+    let first = session_client
+        .send_channel_message(&id, &result_request)
+        .await
+        .unwrap();
+    let retry = session_client
+        .send_channel_message(&id, &result_request)
+        .await
+        .unwrap();
+    assert_eq!(retry.id, first.id);
+    assert_eq!(retry.seq, first.seq);
+    assert_eq!(
+        session_client
+            .channel_messages_bounded(&id, 0, 1)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
     // Typed list: the new session is the only one.
     let sessions = client.list_sessions().await.unwrap();
     assert_eq!(sessions.len(), 1);
@@ -107,13 +154,119 @@ async fn typed_create_list_get_and_mark() {
         .set_branch_status(&created.branch.id, "attention", "review the boundary")
         .await
         .unwrap();
-    let status = client.channel_messages(&id, 1).await.unwrap();
+    let status = client.channel_messages(&id, first.seq).await.unwrap();
     assert_eq!(status.len(), 1);
     assert_eq!(status[0].kind, "status");
     assert_eq!(status[0].urgency, "attention");
     assert_eq!(status[0].body, "review the boundary");
 
     client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn channel_result_delivers_once_to_the_bound_slack_origin() {
+    let delivered = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let slack_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let slack_addr = slack_listener.local_addr().unwrap();
+    let slack_app = axum::Router::new()
+        .route(
+            "/chat.postMessage",
+            axum::routing::post(
+                |axum::extract::State(delivered): axum::extract::State<Arc<Mutex<Vec<Value>>>>,
+                 axum::Json(body): axum::Json<Value>| async move {
+                    delivered.lock().unwrap().push(body);
+                    axum::Json(json!({ "ok": true, "ts": "1786.1234" }))
+                },
+            ),
+        )
+        .with_state(delivered.clone());
+    let slack_task = tokio::spawn(async move {
+        axum::serve(slack_listener, slack_app).await.unwrap();
+    });
+    std::env::set_var("LOOM_SLACK_API_BASE", format!("http://{slack_addr}"));
+
+    let ts = TestServer::start().await;
+    let created = ts
+        .client
+        .create_session(&CreateReq {
+            cwd: ts.cwd(),
+            goal: Some("deliver one canonical result".to_string()),
+            agent: Some("shell".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[("slack.bot_token".to_string(), Some("xoxb-test".to_string()))],
+    )
+    .await
+    .unwrap();
+    weaver_core::tags::set(
+        &ts.state.db,
+        &created.branch.id,
+        loom::slack::WIRED_TAG,
+        "T123/C123/1700000000.000001",
+        "",
+        "test",
+    )
+    .await
+    .unwrap();
+    let token = loom::auth::create_session_token(
+        &ts.state.db,
+        Some("rjpower"),
+        &created.id,
+        &created.branch.id,
+    )
+    .await
+    .unwrap();
+    let client = weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(token));
+    let request = CreateChannelMessageReq {
+        kind: "result".to_string(),
+        urgency: "normal".to_string(),
+        body: "the canonical answer".to_string(),
+        payload: json!({}),
+        reply_to: None,
+        idempotency_key: Some("answer-once".to_string()),
+    };
+    let message = client
+        .send_channel_message(&created.id, &request)
+        .await
+        .unwrap();
+    assert_eq!(message.deliveries.len(), 1);
+    assert_eq!(message.deliveries[0].binding_id, "slack:origin");
+    assert_eq!(message.deliveries[0].state, "delivered");
+    assert_eq!(
+        message.deliveries[0].external_id.as_deref(),
+        Some("1786.1234")
+    );
+
+    // The legacy facade retries the same canonical item instead of posting a
+    // second Slack reply after an ambiguous client-side failure.
+    let retry = client
+        .post(
+            &format!("/api/branches/{}/slack/reply", created.branch.id),
+            json!({ "text": "the canonical answer", "idempotency_key": "answer-once" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry["message_id"], message.id);
+    assert_eq!(delivered.lock().unwrap().len(), 1);
+    let posted = delivered.lock().unwrap()[0].clone();
+    assert_eq!(posted["channel"], "C123");
+    assert_eq!(posted["thread_ts"], "1700000000.000001");
+    assert_eq!(posted["text"], "the canonical answer");
+
+    ts.client
+        .delete(&format!("/api/sessions/{}", created.id))
+        .await
+        .unwrap();
+    weaver_core::config::apply(&ts.state.db, &[("slack.bot_token".to_string(), None)])
+        .await
+        .unwrap();
+    std::env::remove_var("LOOM_SLACK_API_BASE");
+    slack_task.abort();
 }
 
 /// Both settings methods share one rich typed envelope. Registry metadata must

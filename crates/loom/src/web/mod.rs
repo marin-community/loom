@@ -88,6 +88,7 @@ mod repos;
 mod restricted_github;
 mod reviews;
 mod scratch;
+mod self_context;
 mod session_layout;
 pub(crate) mod sessions;
 mod settings;
@@ -115,6 +116,7 @@ use repos::*;
 use restricted_github::*;
 use reviews::*;
 use scratch::*;
+use self_context::*;
 use session_layout::*;
 use sessions::*;
 use settings::*;
@@ -757,6 +759,7 @@ pub fn router(state: AppState) -> Router {
                 .post(create_session)
                 .layer(DefaultBodyLimit::max(MAX_SESSION_CREATE_BODY_BYTES)),
         )
+        .route("/self", get(get_self_context))
         .route("/session-launches/resolve", post(resolve_session_launch))
         .route("/scratch/limits", get(scratch_limits))
         .route("/sessions/summary", get(list_session_summaries))
@@ -900,6 +903,7 @@ pub fn router(state: AppState) -> Router {
         // Durable user/agent communication contexts.
         .route("/channels", get(list_channels).post(create_channel))
         .route("/channels/{id}", get(get_channel).delete(archive_channel))
+        .route("/channels/{id}/bindings", get(list_channel_bindings))
         .route(
             "/channels/{id}/messages",
             get(list_channel_messages).post(create_channel_message),

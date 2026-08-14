@@ -296,12 +296,14 @@ route truth, including internal proxy and compatibility paths.
 | `GET /api/health` / `GET /api/health/live` | public, process-only liveness probes (`/api/health` is the compatibility alias) |
 | `GET /api/ready` | public structured readiness: database access plus core and loom migration versions; optional future remote runner degradation will be reported without failing the whole API |
 | `GET /metrics` | public OpenMetrics scrape derived from durable session/profile/run/migration state; labels are bounded operational dimensions and never contain session/branch/path/user/token/error values (deployments normally restrict this at the public edge) |
+| `GET /api/self` | session-credential bootstrap context: the caller's session, branch, repository root, default channel, dashboard URL, and canonical REST links |
 | `GET /api/diagnostics` | admin-only redacted counts, profile capacity, automation failures/staleness, orphan/error inventory, migration state, and non-secret federation metadata; backs Settings → Diagnostics |
 | `GET /api/events?topics=…` | every live stream the caller names, multiplexed onto one SSE connection — the browser holds 6 per origin, so the SPA subscribes here rather than opening one EventSource per view. Topics are `layout`, `logs`, `session:{id}`, `chat:{id}`; each frame is the default `message` event carrying `{topic, event, data}`, where `event` is the name the single-stream route below uses. Every topic is authorized against the route it stands in for, so this widens no credential; an unresolvable topic reports one `error` frame on its own topic and leaves the rest streaming |
 | `POST /api/session-launches/resolve` | resolve a canonical profile selection plus one-launch overrides into concrete selectors, provenance, policy, capacity, validation, and profile/resolver revisions without provisioning |
 | `GET /api/sessions` / `POST /api/sessions` | list / create sessions (list takes `archived` — default `false` — `automation` — default `false` — and admin-only `managed` — default `false`; canonical create requires both revisions from resolve and returns 409 plus a fresh preview on drift/admission change; flattened selectors remain compatible; valid Scratch input is decoded before provisioning; visible creates atomically assign configured origin/profile placement and a same-id default channel while managed warm infrastructure has no placement or layout revision effect; create stamps `resolved_launch`; `tracking_issue` is present only for an explicit claimed/imported work item) |
 | `GET POST /api/channels`; `GET DELETE /api/channels/{id}` | list/create communication contexts, inspect one, or archive a custom channel; session channels follow their session lifecycle |
-| `GET POST /api/channels/{id}/messages` | read the ordered append-only stream or append a typed goal/message/status/result/system item; an external ordinary message to a session channel also receives a runtime delivery receipt |
+| `GET /api/channels/{id}/bindings` | inspect server-owned runtime and origin-delivery destinations without exposing provider credentials or raw routing authority |
+| `GET POST /api/channels/{id}/messages` | read the ordered append-only stream (`after`, optional bounded `limit`) or append a typed goal/message/status/result/system item; appends accept an idempotency key and return durable per-binding receipts, including external ids and failures; a session-authored message/result on a Slack-origin channel is delivered back to its bound thread |
 | `PUT /api/channels/{id}/{subscription,read-marker}` | set the caller's observe/deliver mode or monotonic read-through sequence |
 | `GET /api/sessions/summary` | compact fleet row projection for polling and search; accepts `archived`, `archived_only`, `automation`, `q`, `status`, and `attention`, searches goal text server-side without returning goals, and omits launch/MCP/title-generation/runtime detail retained by `GET /api/sessions/{id}` |
 | `GET /api/sessions/search` | case-insensitive fleet search across qualified placement, title/prompt, repo/branch, issue/PR, tags, status, profile, and provenance; optional widening `history`, archived-only `archived_only`, `status`, and `attention` filters |
@@ -701,8 +703,10 @@ Agent recall uses the related
 [normalized history/search contract](session-history.md). ACP records come
 directly from `chat_blocks`; terminal records reuse the fingerprint-cached Iris
 normalizer on read and the archived `chat.json` fallback. The trusted
-`mcp/history/self@v1` adapter resolves only its own `LOOM_SESSION_ID` and calls
-these REST routes, so it adds no parallel data model or authorization path.
+`loom_session.history` and `loom_session.search` tools call these REST routes;
+the older `mcp/history/self@v1` adapter remains compatible. Both resolve the
+caller through session-scoped context, so neither adds a parallel data model or
+authorization path.
 
 Orphan detection is independent: if the session's supervisor is no longer alive,
 the session becomes `orphaned` and is eligible for `loom adopt`.
@@ -939,6 +943,11 @@ revision. Launch validates availability, copies the capability
 identities/digests and custom source revisions into
 `sessions.policy_mcp_access`, and gives every ACP runtime native `mcpServers`
 descriptors whose subprocess tool surfaces are filtered to the stamped rules.
+Built-in adapters are grouped by resource: `loom_context`, `loom_channel`,
+`loom_artifact`, and `loom_session`, alongside the compatibility history,
+messaging, and fixed-repository GitHub adapters. Resource tools return concise
+text plus machine-readable MCP `structuredContent`; their DTOs are the same
+ones used by the REST client and CLI.
 Neither an unchanged profile nor recovery re-resolves the current registry.
 Custom definitions live under
 absolute identities such as `/engineering/search/docs`; their first segment is

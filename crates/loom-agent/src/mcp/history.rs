@@ -199,13 +199,10 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
         }
         _ => unreachable!(),
     };
-    Ok(json!({
-        "content": [{
-            "type": "text",
-            "text": serde_json::to_string_pretty(&page)?
-        }],
-        "isError": false
-    }))
+    super::structured_result(
+        &format!("{} normalized history record(s)", page.records.len()),
+        &page,
+    )
 }
 
 fn result(id: &Value, value: Value) -> Value {

@@ -125,6 +125,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "profile-github-repositories",
         include_str!("../migrations/0023_profile_github_repositories.sql"),
     ),
+    (
+        24,
+        "channel-delivery-bindings",
+        include_str!("../migrations/0024_channel_delivery_bindings.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -452,6 +457,18 @@ mod tests {
                 "missing GitHub freshness column {expected}"
             );
         }
+        let delivery_columns = table_columns(&db, "channel_deliveries").await.unwrap();
+        for expected in [
+            "binding_id",
+            "binding_kind",
+            "target_session_id",
+            "external_id",
+        ] {
+            assert!(
+                delivery_columns.iter().any(|column| column == expected),
+                "missing channel delivery column {expected}"
+            );
+        }
 
         insert_branch(&db, "t1").await;
         sqlx::query(
@@ -462,6 +479,70 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn v23_delivery_rows_gain_stable_binding_identity() {
+        let db = core_connect_in_memory().await.unwrap();
+        migrate_through(&db, 23).await;
+        insert_branch(&db, "delivery-branch").await;
+        sqlx::query(
+            "INSERT INTO sessions (id, branch_id, work_dir, term_session, status)
+             VALUES ('delivery-session', 'delivery-branch', '/w', 'term', 'running')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO channels
+             (id, kind, repo_root, branch_id, session_id, name, topic, state,
+              created_by_kind, created_by, created_at)
+             VALUES ('delivery-session', 'session', '/r', 'delivery-branch',
+                     'delivery-session', 'delivery', '', 'open', 'user', 'owner',
+                     '2026-01-01T00:00:00.000Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO channel_messages
+             (id, channel_id, seq, kind, urgency, author_kind, author_id, body,
+              payload, created_at)
+             VALUES ('delivery-message', 'delivery-session', 1, 'message', 'normal',
+                     'user', 'owner', 'hello', '{}', '2026-01-01T00:00:00.000Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO channel_deliveries
+             (message_id, target_session_id, state, attempts, updated_at)
+             VALUES ('delivery-message', 'delivery-session', 'delivered', 1,
+                     '2026-01-01T00:00:00.000Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        LOOM_STREAM.apply_pending(&db).await.unwrap();
+        let row = sqlx::query(
+            "SELECT binding_id, binding_kind, target_session_id, state, external_id
+             FROM channel_deliveries WHERE message_id = 'delivery-message'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<String, _>("binding_id"),
+            "session:delivery-session"
+        );
+        assert_eq!(row.get::<String, _>("binding_kind"), "session");
+        assert_eq!(
+            row.get::<String, _>("target_session_id"),
+            "delivery-session"
+        );
+        assert_eq!(row.get::<String, _>("state"), "delivered");
+        assert_eq!(row.get::<Option<String>, _>("external_id"), None);
     }
 
     #[tokio::test]

@@ -8,19 +8,26 @@
 
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
-use serde_json::{Map, Value};
+use serde::Serialize;
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use sqlx::FromRow;
 use std::{collections::HashSet, future::Future, pin::Pin};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use weaver_api::{
     CustomMcpSnapshot, CustomMcpView, McpAdapterView, McpCapabilitySetView, McpRegistryView,
 };
 
+pub(crate) mod artifact;
+pub(crate) mod channel;
+pub(crate) mod context;
 pub mod github;
 pub(crate) mod history;
 pub(crate) mod messaging;
+pub(crate) mod session;
 
 type ServeFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+pub(crate) type ToolFuture = Pin<Box<dyn Future<Output = Result<Value>> + Send>>;
 
 pub(crate) struct Adapter {
     name: &'static str,
@@ -45,7 +52,71 @@ pub(crate) struct CapabilitySet {
     pub tools: &'static [&'static str],
 }
 
-const ADAPTERS: &[Adapter] = &[github::ADAPTER, history::ADAPTER, messaging::ADAPTER];
+pub(crate) fn builtin_permission_rule(
+    server_name: &str,
+    tool_names: &[&str],
+    tool: &str,
+) -> Option<String> {
+    tool_names
+        .contains(&tool)
+        .then(|| format!("mcp__{server_name}__{tool}"))
+}
+
+pub(crate) fn is_builtin_permission_rule(
+    server_name: &str,
+    tool_names: &[&str],
+    rule: &str,
+) -> bool {
+    tool_names
+        .iter()
+        .any(|tool| builtin_permission_rule(server_name, tool_names, tool).as_deref() == Some(rule))
+}
+
+pub(crate) fn expand_builtin_tool_set(
+    server_name: &str,
+    tool_names: &[&str],
+    capability_sets: &[CapabilitySet],
+    name: &str,
+) -> Option<Vec<String>> {
+    capability_sets
+        .iter()
+        .find(|set| set.name == name)
+        .map(|set| {
+            set.tools
+                .iter()
+                .map(|tool| {
+                    builtin_permission_rule(server_name, tool_names, tool)
+                        .expect("capability set references a registered tool")
+                })
+                .collect()
+        })
+}
+
+pub(crate) fn builtin_server_config(adapter: &str) -> Value {
+    json!({ "type": "stdio", "command": "loom", "args": ["mcp", "serve", adapter] })
+}
+
+pub(crate) fn string_argument<'a>(arguments: &'a Value, key: &str) -> Result<Option<&'a str>> {
+    match arguments.get(key) {
+        Some(value) => Ok(Some(
+            value
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .with_context(|| format!("{key} must be a non-empty string"))?,
+        )),
+        None => Ok(None),
+    }
+}
+
+const ADAPTERS: &[Adapter] = &[
+    github::ADAPTER,
+    context::ADAPTER,
+    channel::ADAPTER,
+    artifact::ADAPTER,
+    session::ADAPTER,
+    history::ADAPTER,
+    messaging::ADAPTER,
+];
 pub(crate) const ALLOWED_TOOLS_ENV: &str = "LOOM_MCP_ALLOWED_TOOLS";
 const BUILTIN_RUNTIME_ENV: [&str; 4] = [
     "WEAVER_API",
@@ -449,6 +520,105 @@ pub fn runtime_tools(tools: Value) -> Value {
             .cloned()
             .collect(),
     )
+}
+
+/// Build the scoped REST client shared by Loom's resource-shaped adapters.
+pub(crate) fn runtime_client(adapter: &str) -> Result<weaver_api::Client> {
+    let token = weaver_api::endpoint::token_from_env()
+        .with_context(|| format!("{adapter} MCP is missing its session-scoped LOOM_TOKEN"))?;
+    Ok(weaver_api::Client::new(weaver_api::endpoint::base_url()).with_token(Some(token)))
+}
+
+/// MCP results expose the typed value directly while retaining a compact text
+/// projection for clients that do not consume `structuredContent` yet.
+pub(crate) fn structured_result<T: Serialize>(summary: &str, value: &T) -> Result<Value> {
+    let value = serde_json::to_value(value)?;
+    let structured = if value.is_object() {
+        value
+    } else {
+        json!({ "items": value })
+    };
+    Ok(json!({
+        "content": [{ "type": "text", "text": summary }],
+        "structuredContent": structured,
+        "isError": false
+    }))
+}
+
+/// Shared JSON-RPC stdio loop for the resource adapters. Domain modules own
+/// only their schemas and REST projection; framing stays consistent.
+pub(crate) async fn serve_stdio(
+    server_name: &'static str,
+    tools: fn() -> Value,
+    call_tool: fn(&str, Value) -> ToolFuture,
+) -> Result<()> {
+    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    let mut stdout = tokio::io::stdout();
+    while let Some(line) = lines.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let request: Value = serde_json::from_str(&line)
+            .map_err(|error| anyhow::anyhow!("invalid MCP request: {error}"))?;
+        let Some(id) = request.get("id").cloned() else {
+            continue;
+        };
+        let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+        let response = match method {
+            "initialize" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": request.pointer("/params/protocolVersion")
+                        .and_then(Value::as_str).unwrap_or("2024-11-05"),
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": server_name, "version": env!("CARGO_PKG_VERSION") }
+                }
+            }),
+            "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
+            "tools/list" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "tools": runtime_tools(tools()) }
+            }),
+            "tools/call" => {
+                let name = request.pointer("/params/name").and_then(Value::as_str);
+                let arguments = request
+                    .pointer("/params/arguments")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                match name {
+                    Some(name) => match call_tool(name, arguments).await {
+                        Ok(value) => json!({ "jsonrpc": "2.0", "id": id, "result": value }),
+                        Err(error) => json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "content": [{ "type": "text", "text": format!("{error:#}") }],
+                                "isError": true
+                            }
+                        }),
+                    },
+                    None => json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32602, "message": "tools/call requires params.name" }
+                    }),
+                }
+            }
+            _ => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": -32601, "message": format!("method not found: {method}") }
+            }),
+        };
+        stdout
+            .write_all(serde_json::to_string(&response)?.as_bytes())
+            .await?;
+        stdout.write_all(b"\n").await?;
+        stdout.flush().await?;
+    }
+    Ok(())
 }
 
 pub(crate) fn server_configs_for_snapshot(
