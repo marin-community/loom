@@ -571,8 +571,8 @@ export interface SseQueue {
   pending_prompt: string | null;
 }
 
-/** `POST /sessions/{id}/prompt` 202 body: whether the message queued behind a
- *  live turn or started normally, plus the turn it belongs to. */
+/** `POST /sessions/{id}/prompt` 202 body: whether the message queued, plus the
+ *  turn it belongs to. */
 export interface PromptAck {
   queued: boolean;
   turn: number | null;

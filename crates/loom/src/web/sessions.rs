@@ -2017,6 +2017,10 @@ pub(super) struct PromptBody {
     pub text: String,
     #[serde(default)]
     pub by: Option<String>,
+    /// Deliver this user message immediately: steer a supported live turn, or
+    /// cancel and replace an unsteerable one.
+    #[serde(default)]
+    pub send_now: bool,
     /// Promote the server's durable next-turn queue instead of sending `text`.
     /// This keeps the action race-free when the browser is showing queued copy.
     #[serde(default)]
@@ -2132,9 +2136,11 @@ async fn prompt_resources(work_dir: &str, files: &[String]) -> ApiResult<Vec<Val
     Ok(out)
 }
 
-/// Send a user message to an ACP session: dispatched as a `session/prompt` when
-/// idle or appended to the durable queue while a turn is live. Returns 202
-/// `{ queued, turn }`. Every send records a `nudge` event (the audit rule).
+/// Send a user message to an ACP session. A normal request is dispatched when
+/// idle or appended to the durable queue while a turn is live; `send_now`
+/// instead steers a supported live turn or cancels and replaces an unsteerable
+/// one. Returns 202 `{ queued, turn }`. Every send records a `nudge` event (the
+/// audit rule).
 pub(super) async fn prompt_session(
     State(st): State<AppState>,
     Path(key): Path<String>,
@@ -2153,9 +2159,15 @@ pub(super) async fn prompt_session(
         handle.force_pending(Some(by.clone())).await
     } else {
         let resources = prompt_resources(&session.work_dir, &req.files).await?;
-        handle
-            .prompt(req.text.clone(), Some(by.clone()), resources)
-            .await
+        if req.send_now {
+            handle
+                .send_now(req.text.clone(), Some(by.clone()), resources)
+                .await
+        } else {
+            handle
+                .prompt(req.text.clone(), Some(by.clone()), resources)
+                .await
+        }
     }
     .map_err(|e| AppError::conflict(e.to_string()))?;
     events::record(
@@ -2163,7 +2175,12 @@ pub(super) async fn prompt_session(
         &st.bus,
         &branch.id,
         "nudge",
-        json!({ "by": by, "text": audit_text, "promoted_queue": req.force_queued }),
+        json!({
+            "by": by,
+            "text": audit_text,
+            "send_now": req.send_now,
+            "promoted_queue": req.force_queued,
+        }),
     )
     .await
     .ok();

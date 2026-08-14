@@ -1501,6 +1501,53 @@ async fn prompt_stops_and_sends_the_durable_queue() {
     }));
 }
 
+/// The conversation composer requests immediate delivery by default. Without
+/// steering support, that is one atomic stop-and-replace operation rather than
+/// a queue write followed by a second promotion request.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prompt_send_now_restarts_an_unsteerable_live_turn() {
+    let ts = TestServer::start().await;
+    start_new(&ts, "acp-prompt-now", None, None).await;
+
+    ts.client
+        .post(
+            "/api/sessions/acp-prompt-now/prompt",
+            json!({ "text": "wait:1200|say:stale" }),
+        )
+        .await
+        .unwrap();
+    let sent = ts
+        .client
+        .post(
+            "/api/sessions/acp-prompt-now/prompt",
+            json!({ "text": "say:replacement", "send_now": true }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent["queued"], false, "response: {sent}");
+    assert_eq!(sent["turn"], 1, "the replacement opens the next turn");
+
+    let chat = poll_chat(&ts, "acp-prompt-now", Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|block| {
+            block["kind"] == "agent_message" && block["payload"]["text"] == "replacement"
+        })
+    })
+    .await;
+    assert!(chat["pending_prompt"].is_null());
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert!(blocks.iter().any(|block| {
+        block["turn"] == 0
+            && block["kind"] == "turn_end"
+            && block["payload"]["stop_reason"] == "cancelled"
+    }));
+    assert!(blocks.iter().any(|block| {
+        block["turn"] == 1
+            && block["kind"] == "user_message"
+            && block["payload"]["text"] == "say:replacement"
+    }));
+}
+
 /// Cross-session `/send` is control-plane input, not ordinary composer
 /// feedback. It cancels a live turn and starts the message immediately instead
 /// of leaving it in the durable next-turn queue.

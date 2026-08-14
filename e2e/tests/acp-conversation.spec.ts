@@ -113,6 +113,18 @@ async function openAcp(
   return s!;
 }
 
+/** Exercise the durable queue contract directly. The conversation composer is
+ * immediate by default, but queued feedback from another client remains an
+ * editable, promotable part of the UI. */
+async function queueAcpPrompt(weaver: WeaverFixture, session: Session, text: string): Promise<void> {
+  const res = await fetch(`${weaver.baseUrl}/api/sessions/${session.id}/prompt`, {
+    method: 'POST',
+    headers: HEADERS,
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) throw new Error(`queueing ACP prompt failed: ${await res.text()}`);
+}
+
 test.describe('acp conversation', () => {
   test('opens the first worktree shell from the keyboard', async ({ page, weaver }) => {
     await openAcp(page, weaver, {
@@ -598,7 +610,7 @@ test.describe('acp conversation', () => {
     page,
     weaver,
   }) => {
-    await openAcp(page, weaver, {
+    const session = await openAcp(page, weaver, {
       goal: 'say:ready',
       name: 'acp-stop-settles',
     });
@@ -608,9 +620,7 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('acp-working')).toBeVisible({
       timeout: 15_000,
     });
-
-    await input.fill('say:after stop');
-    await page.getByTestId('acp-composer-send').click();
+    await queueAcpPrompt(weaver, session, 'say:after stop');
     await expect(page.getByTestId('acp-queued')).toHaveText('queued · agent hasn’t seen this yet');
 
     await page.getByTestId('acp-composer-stop').click();
@@ -672,7 +682,7 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('acp-recover')).toBeHidden();
   });
 
-  test('ordinary feedback says when the running agent has not seen it yet', async ({
+  test('composer stops and sends when the running agent cannot steer', async ({
     page,
     weaver,
   }) => {
@@ -689,28 +699,10 @@ test.describe('acp conversation', () => {
 
     await input.fill('say:queued feedback');
     await page.getByTestId('acp-composer-send').click();
-    await expect(page.getByTestId('acp-queued')).toHaveText('queued · agent hasn’t seen this yet');
-    await input.fill('say:and another thought');
-    await page.getByTestId('acp-composer-send').click();
-    await expect(page.getByTestId('acp-pending')).toHaveCount(1);
-    await expect(page.getByTestId('acp-pending')).toContainText('queued feedback');
-    await expect(page.getByTestId('acp-pending')).toContainText('and another thought');
-    await page.reload();
-    await expect(page.getByTestId('acp-queued')).toHaveText('queued · agent hasn’t seen this yet');
-    const forceNow = page.getByTestId('acp-force-queued').last();
-    await expect(forceNow).toBeEnabled();
-    await expect(forceNow).toHaveText('Stop & send');
-    await page.screenshot({
-      path: test.info().outputPath('acp-queued-feedback.png'),
-    });
-    await forceNow.click();
-
     await expect(page.getByTestId('acp-queued')).toBeHidden();
+    await expect(page.getByTestId('acp-turn-rule').filter({ hasText: 'cancelled' })).toHaveCount(1);
     await expect(
       page.getByTestId('acp-conversation').getByText('queued feedback', { exact: true }),
-    ).toBeVisible({ timeout: 20_000 });
-    await expect(
-      page.getByTestId('acp-conversation').getByText('say:and another thought', { exact: true }),
     ).toBeVisible({ timeout: 20_000 });
   });
 
@@ -718,7 +710,7 @@ test.describe('acp conversation', () => {
     page,
     weaver,
   }) => {
-    await openAcp(page, weaver, {
+    const session = await openAcp(page, weaver, {
       goal: 'say:ready',
       name: 'acp-edit-queue-ui',
     });
@@ -730,9 +722,7 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('acp-working')).toBeVisible({
       timeout: 15_000,
     });
-
-    await input.fill('say:before edit');
-    await page.getByTestId('acp-composer-send').click();
+    await queueAcpPrompt(weaver, session, 'say:before edit');
     const editQueued = page.getByTestId('acp-edit-queued');
     await expect(editQueued).toBeEnabled();
 
@@ -743,8 +733,8 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('acp-pending')).toBeHidden();
     await expect(input).toHaveValue('say:before edit');
 
-    await input.fill('say:after edit');
-    await page.getByTestId('acp-composer-send').click();
+    await input.fill('');
+    await queueAcpPrompt(weaver, session, 'say:after edit');
     const pending = page.getByTestId('acp-pending');
     await expect(pending).toContainText('say:after edit');
     await expect(pending).not.toContainText('say:before edit');
