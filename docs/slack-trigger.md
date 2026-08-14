@@ -54,9 +54,10 @@ frame it receives, in order:
    slash command — rather than launched again. If the recorded session is
    unreachable, loom archives it and relaunches on the kept branch so the
    request is not dropped. Otherwise loom clones/resolves the repo, pulls
-   conversation history to seed the session goal (the thread's replies for a
-   mention, the channel's recent messages for a slash command, capped at 40
-   messages), and creates the session on a stable `slack-<hash>` branch derived
+   conversation history to seed the session goal (up to 40 replies for a
+   mention inside a thread; for a top-level mention or slash command, up to 10
+   preceding channel messages explicitly labeled as potentially unrelated),
+   and creates the session on a stable `slack-<hash>` branch derived
    from the thread identity, so a later trigger on the same thread finds the
    same branch.
 7. **Wires and replies.** The branch is tagged with the thread's identity (the
