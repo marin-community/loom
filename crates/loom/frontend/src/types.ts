@@ -17,11 +17,21 @@ export interface Tag {
 }
 
 export interface ChannelDelivery {
-  target_session_id: string;
+  binding_id: string;
+  binding_kind: string;
+  target_session_id: string | null;
   state: 'queued' | 'delivered' | 'failed';
   attempts: number;
   last_error: string | null;
+  external_id: string | null;
   updated_at: string;
+}
+
+export interface ChannelBinding {
+  id: string;
+  kind: string;
+  label: string;
+  target_session_id: string | null;
 }
 
 export interface ChannelMessage {

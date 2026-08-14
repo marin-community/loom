@@ -78,7 +78,15 @@ async fn run_filtered_adapter(adapter: &str, tools: &[&str]) -> Vec<Value> {
 
 #[tokio::test]
 async fn every_builtin_speaks_mcp_stdio() {
-    for (adapter, expected_tools) in [("github", 6), ("history", 2), ("messaging", 2)] {
+    for (adapter, expected_tools) in [
+        ("github", 6),
+        ("context", 1),
+        ("channel", 8),
+        ("artifact", 8),
+        ("session", 4),
+        ("history", 2),
+        ("messaging", 2),
+    ] {
         let (values, status) = run_adapter(adapter).await;
         assert!(status.success(), "{adapter} did not exit cleanly");
         assert_eq!(values.len(), 4, "{adapter} replied to a notification");
@@ -357,9 +365,7 @@ async fn history_tools_resolve_self_and_call_the_rest_contract() {
             serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
         assert_eq!(response["id"], id);
         assert_eq!(response["result"]["isError"], false, "{response}");
-        let page: Value =
-            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
-                .unwrap();
+        let page = &response["result"]["structuredContent"];
         assert_eq!(page["source"], "acp");
         assert_eq!(page["records"][0]["content"], "the searchable answer");
     }

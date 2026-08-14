@@ -34,9 +34,25 @@ name Loom integrations.
 
 Builtins are trusted code shipped with Loom. Their content digest covers the
 adapter identity, capability metadata, ordered tools, and advertised schemas.
-Builtins provide fixed-repository GitHub operations, fixed-thread messaging,
-durable status, and normalized self-history without placing service credentials
-in the agent environment.
+Builtins provide resource-shaped context, channel, artifact, and session
+families, plus compatible fixed-repository GitHub, fixed-thread messaging, and
+self-history adapters. They call Loom's typed REST client and return
+machine-readable `structuredContent`; service credentials and provider routing
+remain in the server.
+
+The resource families use consistent verbs:
+
+```text
+loom_context.get
+loom_channel.list|get|read|send|wait|ack|open|subscribe
+loom_artifact.list|get|write|delete|history|threads|comment|resolve
+loom_session.get|status|history|search
+```
+
+`channel: "self"` and `session: "self"` resolve through `GET /api/self`.
+Artifact writes are create-or-append operations and may supply `base_rev` for
+optimistic concurrency. Channel sends may supply `idempotency_key` and return
+one receipt per runtime or external binding.
 
 Custom definitions are administrator-authored Python MCP servers stored as
 immutable sqlite revisions under absolute identities such as

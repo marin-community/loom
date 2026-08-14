@@ -57,9 +57,10 @@ The agent-facing commands are:
 
 ```sh
 weaver artifact write <name> [<file>]  # stdin with -
-weaver artifact ls [--repo]
-weaver artifact show <name> [--rev N]
-weaver artifact rm <name> [--repo]
+weaver artifact list [--repo]                 # alias: ls
+weaver artifact get <name> [--rev N]          # alias: show
+weaver artifact history <name> [--repo]
+weaver artifact delete <name> [--repo]        # alias: rm
 ```
 
 Session **Review → Artifacts** lists branch and shared documents, renders a

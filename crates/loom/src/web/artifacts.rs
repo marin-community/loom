@@ -390,7 +390,17 @@ pub(super) async fn write_branch_artifact(
     Json(body): Json<ArtifactUpsertReq>,
 ) -> ApiResult<Json<ArtifactView>> {
     let branch = require_branch(&st.db, &key).await?;
-    let existing = artifact::get(&st.db, &branch.repo_root, &branch.id, &name).await?;
+    let existing = if body.repo {
+        artifact::get_shared(&st.db, &branch.repo_root, &name).await?
+    } else {
+        artifact::get(&st.db, &branch.repo_root, &branch.id, &name).await?
+    };
+    if let Some(base_rev) = body.base_rev {
+        let latest = existing.as_ref().map_or(0, |artifact| artifact.rev);
+        if base_rev != latest {
+            return Err(AppError::conflict("stale").with_fields(json!({ "latest": latest })));
+        }
+    }
     let kind = body
         .kind
         .clone()
@@ -567,6 +577,7 @@ mod tests {
                 kind: None,
                 author: None,
                 repo: false,
+                base_rev: None,
             }),
         )
         .await
@@ -580,7 +591,7 @@ mod tests {
         // author to `agent` (the CLI's writer) — not the session route's
         // hardcoded `user`.
         let view = write_branch_artifact(
-            State(st),
+            State(st.clone()),
             Path((branch.id.clone(), "plan".to_string())),
             Json(ArtifactUpsertReq {
                 content: "v2".to_string(),
@@ -588,6 +599,7 @@ mod tests {
                 kind: None,
                 author: None,
                 repo: false,
+                base_rev: Some(1),
             }),
         )
         .await
@@ -597,5 +609,22 @@ mod tests {
         assert_eq!(view.meta.rev, 2);
         assert_eq!(view.meta.title, "The Plan", "title carries over unset");
         assert_eq!(view.versions[0].author, "agent");
+
+        let stale = write_branch_artifact(
+            State(st),
+            Path((branch.id, "plan".to_string())),
+            Json(ArtifactUpsertReq {
+                content: "stale edit".to_string(),
+                title: None,
+                kind: None,
+                author: None,
+                repo: false,
+                base_rev: Some(1),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(stale.status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(stale.fields.unwrap()["latest"], 2);
     }
 }

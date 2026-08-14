@@ -6,8 +6,9 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use weaver_api::{
-    ChannelMessageView, ChannelSubscriptionView, ChannelView, CreateChannelMessageReq,
-    CreateChannelReq, SendReq, SetChannelReadMarkerReq, SetChannelSubscriptionReq,
+    ChannelBindingView, ChannelMessageView, ChannelSubscriptionView, ChannelView,
+    CreateChannelMessageReq, CreateChannelReq, SendReq, SetChannelReadMarkerReq,
+    SetChannelSubscriptionReq,
 };
 
 use crate::{
@@ -32,6 +33,7 @@ pub(super) struct ListChannelsQuery {
 pub(super) struct ListMessagesQuery {
     #[serde(default)]
     after: i64,
+    limit: Option<usize>,
 }
 
 pub(super) fn principal_subject(principal: &Principal) -> Subject {
@@ -118,9 +120,22 @@ pub(super) async fn list_channel_messages(
     Query(query): Query<ListMessagesQuery>,
 ) -> ApiResult<Json<Vec<ChannelMessageView>>> {
     require_channel(&st, &id).await?;
-    Ok(Json(
-        channels::messages(&st.db, &id, query.after.max(0)).await?,
-    ))
+    if query.limit.is_some_and(|limit| !(1..=500).contains(&limit)) {
+        return Err(AppError::bad_request("limit must be between 1 and 500"));
+    }
+    let mut messages = channels::messages(&st.db, &id, query.after.max(0)).await?;
+    if let Some(limit) = query.limit {
+        messages.truncate(limit);
+    }
+    Ok(Json(messages))
+}
+
+pub(super) async fn list_channel_bindings(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Vec<ChannelBindingView>>> {
+    let channel = require_channel(&st, &id).await?;
+    Ok(Json(channel_bindings(&st, &id, &channel).await?))
 }
 
 pub(super) async fn create_channel_message(
@@ -130,79 +145,8 @@ pub(super) async fn create_channel_message(
     Json(req): Json<CreateChannelMessageReq>,
 ) -> ApiResult<(StatusCode, Json<ChannelMessageView>)> {
     let channel = require_channel(&st, &id).await?;
-    if channel.state != channels::OPEN_STATE {
-        return Err(AppError::conflict("channel is archived"));
-    }
-    let kind = MessageKind::parse(&req.kind)
-        .ok_or_else(|| AppError::bad_request("unknown channel message kind"))?;
-    let urgency = Urgency::parse(&req.urgency)
-        .ok_or_else(|| AppError::bad_request("unknown channel message urgency"))?;
-    let body = req.body.trim();
-    validate_text("body", body, 1, MAX_BODY_LEN)?;
-    if let Some(reply_to) = req.reply_to.as_deref() {
-        let belongs: bool = sqlx::query_scalar(
-            "SELECT EXISTS(
-               SELECT 1 FROM channel_messages WHERE id = ? AND channel_id = ?
-             )",
-        )
-        .bind(reply_to)
-        .bind(&id)
-        .fetch_one(&st.db)
-        .await?;
-        if !belongs {
-            return Err(AppError::bad_request(
-                "reply_to must identify a message in this channel",
-            ));
-        }
-    }
     let author = principal_subject(&principal);
-    let outcome = channels::append_with_outcome(
-        &st.db,
-        &id,
-        NewMessage {
-            kind,
-            urgency,
-            author: &author,
-            body,
-            payload: &req.payload,
-            reply_to: req.reply_to.as_deref(),
-            idempotency_key: req.idempotency_key.as_deref(),
-        },
-    )
-    .await?;
-    let inserted = outcome.inserted;
-    let mut message = outcome.message;
-
-    // Session channels are durable inboxes; custom channels become inboxes for
-    // agents that explicitly subscribe in `deliver` mode. Only ordinary
-    // conversation reaches runtimes, and an agent never prompts itself.
-    if inserted && kind == MessageKind::Message {
-        for target in channels::delivery_targets(&st.db, &id).await? {
-            if author.kind == SubjectKind::Session && author.id == target {
-                continue;
-            }
-            channels::create_delivery(&st.db, &message.id, &target).await?;
-            let delivery_error = super::sessions::send_session(
-                State(st.clone()),
-                Path(target.clone()),
-                Json(SendReq {
-                    text: body.to_string(),
-                    submit: true,
-                    by: Some(format!("channel:{}", author.id)),
-                }),
-            )
-            .await
-            .err()
-            .map(|error| error.message().to_string());
-            channels::finish_delivery(&st.db, &message.id, &target, delivery_error.as_deref())
-                .await?;
-        }
-        message = channels::messages(&st.db, &id, message.seq - 1)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| AppError::not_found("channel message"))?;
-    }
+    let (inserted, message) = append_and_deliver(&st, &id, &channel, &author, &req).await?;
 
     if inserted {
         events::record_system(
@@ -228,6 +172,199 @@ pub(super) async fn create_channel_message(
         },
         Json(message),
     ))
+}
+
+pub(super) async fn append_and_deliver(
+    st: &AppState,
+    id: &str,
+    channel: &channels::ChannelAccess,
+    author: &Subject,
+    req: &CreateChannelMessageReq,
+) -> ApiResult<(bool, ChannelMessageView)> {
+    if channel.state != channels::OPEN_STATE {
+        return Err(AppError::conflict("channel is archived"));
+    }
+    let kind = MessageKind::parse(&req.kind)
+        .ok_or_else(|| AppError::bad_request("unknown channel message kind"))?;
+    let urgency = Urgency::parse(&req.urgency)
+        .ok_or_else(|| AppError::bad_request("unknown channel message urgency"))?;
+    let body = req.body.trim();
+    validate_text("body", body, 1, MAX_BODY_LEN)?;
+    let idempotency_key = req.idempotency_key.as_deref().map(str::trim);
+    if let Some(key) = idempotency_key {
+        validate_text("idempotency_key", key, 1, 255)?;
+    }
+    if let Some(reply_to) = req.reply_to.as_deref() {
+        let belongs: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+               SELECT 1 FROM channel_messages WHERE id = ? AND channel_id = ?
+             )",
+        )
+        .bind(reply_to)
+        .bind(id)
+        .fetch_one(&st.db)
+        .await?;
+        if !belongs {
+            return Err(AppError::bad_request(
+                "reply_to must identify a message in this channel",
+            ));
+        }
+    }
+    let outcome = channels::append_with_outcome(
+        &st.db,
+        id,
+        NewMessage {
+            kind,
+            urgency,
+            author,
+            body,
+            payload: &req.payload,
+            reply_to: req.reply_to.as_deref(),
+            idempotency_key,
+        },
+    )
+    .await?;
+    let inserted = outcome.inserted;
+    let message_id = outcome.message.id;
+
+    // Session channels are durable inboxes; custom channels become inboxes for
+    // agents that explicitly subscribe in `deliver` mode. Only ordinary
+    // conversation reaches runtimes, and an agent never prompts itself.
+    if kind == MessageKind::Message {
+        for target in channels::delivery_targets(&st.db, id).await? {
+            if author.kind == SubjectKind::Session && author.id == target {
+                continue;
+            }
+            let binding_id = format!("session:{target}");
+            channels::create_delivery(&st.db, &message_id, &binding_id, "session", Some(&target))
+                .await?;
+            if channels::delivery_succeeded(&st.db, &message_id, &binding_id).await? {
+                continue;
+            }
+            let delivery_error = super::sessions::send_session(
+                State(st.clone()),
+                Path(target.clone()),
+                Json(SendReq {
+                    text: body.to_string(),
+                    submit: true,
+                    by: Some(format!("channel:{}", author.id)),
+                }),
+            )
+            .await
+            .err()
+            .map(|error| error.message().to_string());
+            channels::finish_delivery(
+                &st.db,
+                &message_id,
+                &binding_id,
+                delivery_error.as_deref(),
+                None,
+            )
+            .await?;
+        }
+    }
+
+    // A session-authored message or result on its own channel is the canonical
+    // reply stream. A Slack-origin binding fans it out while the durable channel
+    // item and idempotency key remain the source of truth.
+    if matches!(kind, MessageKind::Message | MessageKind::Result)
+        && author.kind == SubjectKind::Session
+        && channel.session_id.as_deref() == Some(author.id.as_str())
+    {
+        deliver_to_origin_slack(st, channel, &message_id, body).await?;
+    }
+
+    Ok((
+        inserted,
+        channels::refresh_message(&st.db, &message_id).await?,
+    ))
+}
+
+async fn channel_bindings(
+    st: &AppState,
+    id: &str,
+    channel: &channels::ChannelAccess,
+) -> ApiResult<Vec<ChannelBindingView>> {
+    let mut bindings = channels::delivery_targets(&st.db, id)
+        .await?
+        .into_iter()
+        .map(|target| ChannelBindingView {
+            id: format!("session:{target}"),
+            kind: "session".to_string(),
+            label: if channel.session_id.as_deref() == Some(target.as_str()) {
+                "this session".to_string()
+            } else {
+                target.clone()
+            },
+            target_session_id: Some(target),
+        })
+        .collect::<Vec<_>>();
+    if origin_slack_target(st, channel).await?.is_some() {
+        bindings.push(ChannelBindingView {
+            id: "slack:origin".to_string(),
+            kind: "slack_thread".to_string(),
+            label: "origin Slack thread".to_string(),
+            target_session_id: None,
+        });
+    }
+    Ok(bindings)
+}
+
+async fn origin_slack_target(
+    st: &AppState,
+    channel: &channels::ChannelAccess,
+) -> ApiResult<Option<(String, String)>> {
+    let Some(branch_id) = channel.branch_id.as_deref() else {
+        return Ok(None);
+    };
+    let Some(wired) = weaver_core::tags::get(&st.db, branch_id, crate::slack::WIRED_TAG).await?
+    else {
+        return Ok(None);
+    };
+    Ok(crate::slack::parse_wiring(&wired.value).map(|(_, channel, root)| (channel, root)))
+}
+
+async fn deliver_to_origin_slack(
+    st: &AppState,
+    channel: &channels::ChannelAccess,
+    message_id: &str,
+    body: &str,
+) -> ApiResult<()> {
+    let Some((slack_channel, root)) = origin_slack_target(st, channel).await? else {
+        return Ok(());
+    };
+    const BINDING_ID: &str = "slack:origin";
+    channels::create_delivery(&st.db, message_id, BINDING_ID, "slack_thread", None).await?;
+    if channels::delivery_succeeded(&st.db, message_id, BINDING_ID).await? {
+        return Ok(());
+    }
+    let Some(web) = crate::slack::SlackWeb::from_db(&st.db).await else {
+        channels::finish_delivery(
+            &st.db,
+            message_id,
+            BINDING_ID,
+            Some("Slack is not configured on this server"),
+            None,
+        )
+        .await?;
+        return Ok(());
+    };
+    match web.post_message(&slack_channel, Some(&root), body).await {
+        Ok(ts) => {
+            channels::finish_delivery(&st.db, message_id, BINDING_ID, None, Some(&ts)).await?
+        }
+        Err(error) => {
+            channels::finish_delivery(
+                &st.db,
+                message_id,
+                BINDING_ID,
+                Some(&error.to_string()),
+                None,
+            )
+            .await?
+        }
+    }
+    Ok(())
 }
 
 pub(super) async fn set_channel_subscription(

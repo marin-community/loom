@@ -4,7 +4,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use weaver_api::{BranchStatusReq, BranchView, CreateEventReq, TagReq};
+use weaver_api::{BranchStatusReq, BranchView, CreateChannelMessageReq, CreateEventReq, TagReq};
 use weaver_core::branch::{TitleProvenance, TitleUpdate};
 use weaver_core::{branch as branch_mod, config, tags};
 
@@ -251,6 +251,8 @@ pub(super) struct SlackReplyReq {
     pub text: String,
     #[serde(default)]
     pub thread: Option<weaver_api::SlackThreadRef>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 pub(super) async fn slack_reply(
@@ -263,6 +265,73 @@ pub(super) async fn slack_reply(
     if text.is_empty() {
         return Err(AppError::bad_request("text is required"));
     }
+    if req.thread.is_none() {
+        // Preserve the compatibility route while making the session channel the
+        // canonical reply record and delivery bus. The branch wiring is checked
+        // before appending, matching this endpoint's historical failure shape.
+        let wired = tags::get(&st.db, &branch.id, crate::slack::WIRED_TAG)
+            .await?
+            .ok_or_else(|| AppError::bad_request("this branch is not wired to a Slack thread"))?;
+        if crate::slack::parse_wiring(&wired.value).is_none() {
+            return Err(AppError::bad_request("malformed slack wiring tag"));
+        }
+        let channel_id = crate::channels::session_channel_for_branch(&st.db, &branch.id)
+            .await?
+            .ok_or_else(|| AppError::bad_request("this branch has no open session channel"))?;
+        let channel = crate::channels::access(&st.db, &channel_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("channel"))?;
+        let author =
+            crate::channels::Subject::new(crate::channels::SubjectKind::Session, &channel_id);
+        let request = CreateChannelMessageReq {
+            kind: "result".to_string(),
+            urgency: "normal".to_string(),
+            body: text.to_string(),
+            payload: json!({ "compatibility_source": "slack_reply" }),
+            reply_to: None,
+            idempotency_key: req.idempotency_key,
+        };
+        let (inserted, message) =
+            super::channels::append_and_deliver(&st, &channel_id, &channel, &author, &request)
+                .await?;
+        if inserted {
+            events::record_system(
+                &st.db,
+                &st.bus,
+                "channel_message",
+                json!({
+                    "channel_id": channel_id,
+                    "message_id": message.id,
+                    "kind": message.kind,
+                    "urgency": message.urgency,
+                    "by": author.id,
+                }),
+            )
+            .await
+            .ok();
+        }
+        let delivery = message
+            .deliveries
+            .iter()
+            .find(|delivery| delivery.binding_id == "slack:origin")
+            .ok_or_else(|| AppError::bad_request("this branch is not wired to a Slack thread"))?;
+        if delivery.state == "failed" {
+            return Err(AppError::new(
+                StatusCode::BAD_GATEWAY,
+                delivery
+                    .last_error
+                    .clone()
+                    .unwrap_or_else(|| "Slack delivery failed".to_string()),
+            ));
+        }
+        return Ok(Json(json!({
+            "posted": delivery.state == "delivered",
+            "ts": delivery.external_id,
+            "message_id": message.id,
+            "delivery": delivery,
+        })));
+    }
+
     let (channel, root) = match req.thread.as_ref() {
         Some(target) => {
             let (channel, thread_ts) =
@@ -275,16 +344,7 @@ pub(super) async fn slack_reply(
             }
             (channel, thread_ts)
         }
-        None => {
-            let wired = tags::get(&st.db, &branch.id, crate::slack::WIRED_TAG)
-                .await?
-                .ok_or_else(|| {
-                    AppError::bad_request("this branch is not wired to a Slack thread")
-                })?;
-            let (_team, channel, root) = crate::slack::parse_wiring(&wired.value)
-                .ok_or_else(|| AppError::bad_request("malformed slack wiring tag"))?;
-            (channel, root)
-        }
+        None => unreachable!("origin replies return through the channel path above"),
     };
     let web = crate::slack::SlackWeb::from_db(&st.db)
         .await

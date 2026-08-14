@@ -151,9 +151,12 @@ running inside, which is how an agent links a PR back to the work behind it.
 
 Channels are the default coordination surface. Every session is created with a
 same-id channel whose opening goal records its charter. Messages are append-only,
-read markers are per participant, and runtime delivery is recorded separately.
+read markers are per participant, and delivery is recorded per server-owned
+binding. A Slack-origin session binds its own channel to that thread, so one
+idempotent `result` append is both the canonical outcome and the external reply.
 The dashboard's Channels pane is a dense split mailbox; `weaver channel
-read|send|wait|ack` exposes the same REST model to agents.
+list|get|read|send|wait|ack` exposes the same REST model to agents (`ls` remains
+an alias for `list`).
 
 Issues remain intentional repository backlog or external mappings.
 `source_branch` records provenance;
@@ -280,9 +283,10 @@ log for a live session on the command line.
 Agents can page or literally search that same normalized history through
 session-scoped REST. ACP reads its durable journal; terminal agents normalize
 their native transcript on read and use the archived Iris capture as fallback.
-The optional `mcp/history/self@v1` capability is a thin self-only facade over
-those routes. See [Session history and search](docs/session-history.md) for the
-record, cursor, source, and authorization contract.
+The `loom_session.history|search` tools are thin structured facades over those
+routes; `mcp/history/self@v1` remains compatible. See
+[Session history and search](docs/session-history.md) for the record, cursor,
+source, and authorization contract.
 
 Ordinary sessions are archived after ten days without activity by default, and
 a merged PR is archived immediately — both tear down the terminal and worktree

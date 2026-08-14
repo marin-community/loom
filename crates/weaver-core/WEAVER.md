@@ -22,14 +22,15 @@ weaver replays it for you automatically.
 
 - `weaver summary` — the catch-up: goal, status, artifacts, open discussion,
   outstanding tasks, and what to do next.
-- `weaver artifact show goal` — the task this branch was created for. Update it
+- `weaver artifact get goal` — the task this branch was created for. Update it
   with `weaver artifact write goal <file|->` as your understanding evolves.
 - `weaver status <level> "<message>"` — your single status channel; see
   "Signalling your status".
 - `weaver channel read` — read this session's durable goal, messages, and
   status/result history. `weaver channel send "<message>" --channel <id>`
   talks to another visible session; `wait --channel <id>` blocks for its next
-  response. `ls`, `ack`, and `subscribe` round out the mailbox.
+  response. `list`, `get`, `ack`, and `subscribe` round out the mailbox (`ls`
+  remains an alias).
 - `weaver issue add "<title>"` — deliberately create a backlog/work item.
   Issues are for durable work that can outlive a session or map to GitHub, not
   the ordinary way sessions communicate. `--repo` leaves one unclaimed.
@@ -39,7 +40,9 @@ weaver replays it for you automatically.
   path can be passed directly — the CLI snapshots and embeds its bytes, so do
   not hand-roll base64 and the dashboard never depends on that local path.
   Markdown can reuse it as `![Result](artifact:<image-name>)`.
-  `weaver artifact ls` / `show <name> [--rev N]` / `rm <name>` round it out.
+  `weaver artifact list` / `get <name> [--rev N]` / `history <name>` /
+  `delete <name>` round it out (`ls`, `show`, and `rm` remain aliases). Supply
+  `--base-rev N` on a write when editing content you previously read.
 - `weaver tag set|rm|ls` — free-form quiet tags on the branch; `weaver log` —
   the event trail; `weaver readme` — this guide, back on demand.
 
@@ -64,7 +67,9 @@ reading your terminal:
 - When the delegated outcome is complete, append a concise typed result with
   `weaver channel send --kind result "<outcome / PR>"`; a parent waiting on
   `weaver channel wait --channel <id> --kind result` wakes without an
-  issue-close protocol.
+  issue-close protocol. On a Slack-origin session, that same durable result is
+  delivered to the bound Slack thread; `--idempotency-key <key>` makes a retry
+  return the original item and receipt rather than post twice.
 - Viewing the session or channel advances that viewer's read marker. Delivery
   receipts are separate: "read" never pretends the runtime accepted a prompt.
 - If this launch explicitly claimed a Weaver/GitHub issue, that legacy work

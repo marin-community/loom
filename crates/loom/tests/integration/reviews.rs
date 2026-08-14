@@ -60,6 +60,7 @@ async fn seed_artifact(ts: &TestServer, session: &weaver_api::SessionView) {
                 kind: Some("markdown".to_string()),
                 author: Some("agent".to_string()),
                 repo: false,
+                base_rev: None,
             },
         )
         .await
@@ -260,6 +261,7 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
                 kind: None,
                 author: Some("agent".to_string()),
                 repo: false,
+                base_rev: None,
             },
         )
         .await
@@ -422,6 +424,7 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
                 kind: None,
                 author: Some("agent".to_string()),
                 repo: false,
+                base_rev: None,
             },
         )
         .await
