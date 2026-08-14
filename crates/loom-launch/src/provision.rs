@@ -637,12 +637,26 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
     tracing::debug!(repo_root = %repo_root.display(), "loaded repo config");
 
     // A GitHub App token is repository-scoped. A managed slug gives both the
-    // preflight and issue seeding an exact installation target; a local path
-    // must keep using an explicitly supplied session credential.
+    // preflight and issue seeding an exact installation target; local paths
+    // resolve their registered identity or origin without contacting GitHub.
     let managed_slug = req
         .repo
         .as_deref()
         .and_then(|repo| crate::repo::parse_slug(repo).ok());
+    let current_github_repo = match managed_slug.as_ref() {
+        Some(repo) => Some(repo.slug()),
+        None => repo::github_slug_for_root(&st.db, &repo_root).await?,
+    };
+    let configured_github_repositories = launch_profile
+        .github_repositories()
+        .map_err(|error| ProvisionError::invalid(error.to_string()))?;
+    let session_github_repositories = crate::runtime::session_github_repositories(
+        &class,
+        &configured_github_repositories,
+        current_github_repo.as_deref(),
+    );
+    let stamped_github_repositories = serde_json::to_string(&session_github_repositories)
+        .map_err(|error| ProvisionError::invalid(error.to_string()))?;
     let runtime = agent.clone();
     tracing::debug!(agent = %agent, runtime = %runtime, "resolved agent runtime");
     // The resolved launch environment: selected profile < per-repo repo_env <
@@ -674,7 +688,9 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
     apply_user_github_token(&st.db, &mut extra_env, created_by.as_deref()).await;
 
     tracing::debug!(model = %model, effort = %effort, protocol = %protocol, "resolved and validated model/effort/protocol");
-    let restricted_github_app = if launch_profile.restricted && managed_slug.is_some() {
+    let github_app = if (!session_github_repositories.is_empty())
+        || (launch_profile.restricted && managed_slug.is_some())
+    {
         st.trigger.app()
     } else {
         None
@@ -684,7 +700,7 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
         &extra_env,
         created_by.as_deref(),
         &runtime,
-        restricted_github_app,
+        github_app,
     )
     .await?
     {
@@ -972,7 +988,7 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
         turn_budget: resolved.view.policy.turn_budget.unwrap_or(0),
         prelude: launch_profile.prelude.clone(),
         restricted: launch_profile.restricted,
-        github_repositories: launch_profile.github_repositories.clone(),
+        github_repositories: stamped_github_repositories,
         allowed_tools: stamped_allowed_tools.clone(),
         mcp_access: stamped_mcp_access,
         launch_snapshot,

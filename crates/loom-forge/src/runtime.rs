@@ -2,7 +2,7 @@
 
 use crate::Db;
 
-pub const MISSING_GITHUB_TOKEN_MESSAGE: &str = "No GitHub token configured. Add your personal GitHub token in Settings > Account, or configure a write-only GH_TOKEN on the selected profile.";
+pub const MISSING_GITHUB_TOKEN_MESSAGE: &str = "No GitHub credential configured. Add your personal GitHub token in Settings > Account, allowlist this repository for the selected profile's GitHub App credential, or configure a write-only GH_TOKEN on the profile.";
 
 /// External lifecycle work (terminal supervisors + git worktrees) cannot share
 /// a SQLite transaction. Serialize those operations process-wide, then use
@@ -112,6 +112,24 @@ pub fn set_env(env: &mut Vec<(String, String)>, name: &str, value: String) {
     }
 }
 
+/// Resolve a profile's App-token allowlist into the repositories stamped on
+/// one session. Automation profiles intentionally retain their complete list
+/// for cross-repository work. Interactive sessions receive only their current
+/// repository, and only when the profile explicitly allowlists it.
+pub fn session_github_repositories(
+    class: &str,
+    configured: &[String],
+    current_repo: Option<&str>,
+) -> Vec<String> {
+    if class != "interactive" {
+        return configured.to_vec();
+    }
+    current_repo
+        .filter(|repo| configured.iter().any(|candidate| candidate == repo))
+        .map(|repo| vec![repo.to_string()])
+        .unwrap_or_default()
+}
+
 fn env_has_key(env: &[(String, String)], name: &str) -> bool {
     env.iter().any(|(key, _)| key == name)
 }
@@ -132,7 +150,7 @@ pub async fn github_token_available(
     env: &[(String, String)],
     created_by: Option<&str>,
     runtime: &str,
-    restricted_github_app: Option<&crate::github_app::GithubApp>,
+    github_app: Option<&crate::github_app::GithubApp>,
 ) -> anyhow::Result<bool> {
     if crate::agent::builtin_agent_type(runtime).is_none() {
         return Ok(true);
@@ -155,7 +173,7 @@ pub async fn github_token_available(
     {
         return Ok(true);
     }
-    if let Some(app) = restricted_github_app {
+    if let Some(app) = github_app {
         if app.is_configured().await {
             return Ok(true);
         }
@@ -280,6 +298,28 @@ mod tests {
         let mut producer = Vec::new();
         apply_user_github_token(&db, &mut producer, None).await;
         assert!(producer.is_empty());
+    }
+
+    #[test]
+    fn interactive_github_credentials_are_scoped_to_the_current_repository() {
+        let configured = vec![
+            "Open-Athena/marinmirror".to_string(),
+            "marin-community/marin".to_string(),
+        ];
+        assert_eq!(
+            session_github_repositories("interactive", &configured, Some("marin-community/marin")),
+            ["marin-community/marin"]
+        );
+        assert!(session_github_repositories(
+            "interactive",
+            &configured,
+            Some("marin-community/loom")
+        )
+        .is_empty());
+        assert_eq!(
+            session_github_repositories("automation", &configured, None),
+            configured
+        );
     }
 
     #[serial_test::serial]

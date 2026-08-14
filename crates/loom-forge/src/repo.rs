@@ -241,6 +241,30 @@ pub async fn is_allowlisted(db: &Db, repo_root: &Path) -> Result<bool> {
     Ok(allowed)
 }
 
+/// Resolve the GitHub slug for a repository without requiring GitHub
+/// credentials. Managed clones use their registered identity; local checkouts
+/// fall back to parsing the configured `origin` URL.
+pub async fn github_slug_for_root(db: &Db, repo_root: &Path) -> Result<Option<String>> {
+    let target = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    if let Some(slug) = list_registered(db)
+        .await?
+        .into_iter()
+        .find_map(|registered| {
+            let path = PathBuf::from(&registered.path);
+            (path.canonicalize().unwrap_or(path) == target).then_some(registered.slug)
+        })
+    {
+        return Ok(Some(slug));
+    }
+    let remote = match git::remote_url(repo_root, "origin").await {
+        Ok(remote) => remote,
+        Err(_) => return Ok(None),
+    };
+    Ok(parse_slug(&remote).ok().map(|slug| slug.slug()))
+}
+
 /// How a managed-repo resolution can fail, so the web layer maps each cause to
 /// the right HTTP status.
 #[derive(Debug)]
@@ -395,6 +419,30 @@ mod tests {
 
         // A dot is legal inside a name (e.g. `repo.js`).
         assert_eq!(parse_slug("acme/repo.js").unwrap().name, "repo.js");
+    }
+
+    #[tokio::test]
+    async fn resolves_a_local_checkout_slug_without_github_credentials() {
+        let db = connect_in_memory().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q", "-b", "main"]).await;
+        run_git(
+            dir.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:marin-community/marin.git",
+            ],
+        )
+        .await;
+        assert_eq!(
+            github_slug_for_root(&db, dir.path())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("marin-community/marin")
+        );
     }
 
     #[test]

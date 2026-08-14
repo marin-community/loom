@@ -196,6 +196,11 @@ async fn has_remote(dir: &Path, name: &str) -> bool {
     present
 }
 
+/// The configured URL for one git remote, without contacting the remote.
+pub async fn remote_url(dir: &Path, name: &str) -> Result<String> {
+    git(dir, &["remote", "get-url", name]).await
+}
+
 /// Whether `rev` resolves to a commit in this repo.
 pub async fn revision_exists(dir: &Path, rev: &str) -> bool {
     git(
