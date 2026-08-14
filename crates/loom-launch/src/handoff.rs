@@ -9,7 +9,7 @@ use weaver_core::branch::{self as branch_mod, Branch};
 use weaver_core::BoxFut;
 
 use crate::session::{self as session_mod, Session};
-use crate::{agent, backend, custom_agents, events, runtime, AppState};
+use crate::{agent, backend, custom_agents, events, repo, runtime, AppState};
 
 const HANDOFF_SUMMARY_CHARS: usize = 32 * 1024;
 const HANDOFF_RECENT_MESSAGES: usize = 8;
@@ -188,6 +188,7 @@ struct HandoffPlan {
     model: String,
     effort: String,
     mode: String,
+    class: String,
     profile: String,
     profile_revision: i64,
     profile_lifetime: i64,
@@ -342,6 +343,7 @@ async fn legacy_handoff_plan(
         model: model.clone(),
         effort: effort.clone(),
         mode: mode.clone(),
+        class: session.class.clone(),
         profile: session.profile.clone(),
         profile_revision: session.profile_revision,
         profile_lifetime: session.profile_lifetime,
@@ -432,7 +434,7 @@ async fn handoff_session_inner(
         .to_string();
     let _profile_permit = st.launch_gate.acquire_profile(&permit_profile).await;
     let _resolver_permit = st.launch_gate.acquire_resolver().await;
-    let plan = if let Some(selection) = selection {
+    let mut plan = if let Some(selection) = selection {
         let resolved = match resolve_handoff_selection(st, &session, &selection).await {
             Ok(resolved) => resolved,
             Err(HandoffError::BadRequest(message)) if req.expected_resolver_revision.is_some() => {
@@ -473,6 +475,7 @@ async fn handoff_session_inner(
             model: resolved.view.model.clone(),
             effort: resolved.view.effort.clone(),
             mode: resolved.view.mode.clone(),
+            class: resolved.view.class.clone(),
             profile: resolved.profile.name.clone(),
             profile_revision: resolved.profile.revision,
             profile_lifetime: resolved.profile.lifetime,
@@ -511,6 +514,19 @@ async fn handoff_session_inner(
             "handoff target matches the current runtime profile",
         ));
     }
+    // Resolve every fallible launch input before quiescing the current task.
+    let repo_root = PathBuf::from(&branch.repo_root);
+    let configured_github_repositories: Vec<String> =
+        serde_json::from_str(&plan.github_repositories)
+            .map_err(|error| HandoffError::bad_request(error.to_string()))?;
+    let current_github_repo = repo::github_slug_for_root(&st.db, &repo_root).await?;
+    let session_github_repositories = runtime::session_github_repositories(
+        &plan.class,
+        &configured_github_repositories,
+        current_github_repo.as_deref(),
+    );
+    plan.github_repositories = serde_json::to_string(&session_github_repositories)
+        .map_err(|error| HandoffError::bad_request(error.to_string()))?;
     let handoff_policy = session_mod::SessionHandoffPolicy {
         agent_kind: target.clone(),
         model: model.clone(),
@@ -531,9 +547,6 @@ async fn handoff_session_inner(
         mcp_access: plan.mcp_access.clone(),
         launch_snapshot: plan.launch_snapshot.clone(),
     };
-
-    // Resolve every fallible launch input before quiescing the current task.
-    let repo_root = PathBuf::from(&branch.repo_root);
     let work_dir = PathBuf::from(&session.work_dir);
     if !work_dir.exists() {
         return Err(HandoffError::bad_request(format!(
@@ -558,14 +571,15 @@ async fn handoff_session_inner(
         extra_env = crate::profile::cleared_environment(extra_env, &allowlist);
     }
     runtime::apply_user_github_token(&st.db, &mut extra_env, session.created_by.as_deref()).await;
-    // Restricted sessions return before this handoff path, so an App credential
-    // cannot be relevant here.
+    let github_app = (!session_github_repositories.is_empty())
+        .then(|| st.trigger.app())
+        .flatten();
     if !runtime::github_token_available(
         &st.db,
         &extra_env,
         session.created_by.as_deref(),
         &target,
-        None,
+        github_app,
     )
     .await?
     {

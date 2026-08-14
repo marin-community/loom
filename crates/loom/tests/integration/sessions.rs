@@ -21,6 +21,12 @@ impl EnvVarGuard {
         std::env::remove_var(name);
         Self { name, value }
     }
+
+    fn set(name: &'static str, new_value: &str) -> Self {
+        let value = std::env::var_os(name);
+        std::env::set_var(name, new_value);
+        Self { name, value }
+    }
 }
 
 impl Drop for EnvVarGuard {
@@ -163,8 +169,8 @@ async fn session_creation_waits_for_the_repository_launch_gate() {
         .unwrap();
 }
 
-/// A real agent launch needs either the launching user's GitHub token or a
-/// default GH_TOKEN source. Without one, reject before provisioning anything.
+/// A real agent launch needs a user token, a profile token, or an allowlisted
+/// GitHub App credential. Without one, reject before provisioning anything.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_agent_without_github_token_is_rejected_before_provisioning() {
@@ -185,7 +191,7 @@ async fn real_agent_without_github_token_is_rejected_before_provisioning() {
         .unwrap_err()
         .to_string();
     assert!(
-        err.contains("server returned 428") && err.contains("No GitHub token configured"),
+        err.contains("server returned 428") && err.contains("No GitHub credential configured"),
         "unexpected error: {err}"
     );
 
@@ -198,6 +204,79 @@ async fn real_agent_without_github_token_is_rejected_before_provisioning() {
         !ts.repo_path().join(".worktrees").exists(),
         "rejected launch should not create a worktree directory"
     );
+}
+
+/// An interactive profile can use the configured GitHub App as its default
+/// credential while stamping only the current allowlisted repository.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_profile_brokers_its_current_github_repository() {
+    let _ambient = EnvVarGuard::unset("GH_TOKEN");
+    let _adapter = EnvVarGuard::set(
+        "WEAVER_CODEX_ACP_CMD",
+        &crate::fixtures::fake_acp_agent_cmd(),
+    );
+    let ts = TestServer::start().await;
+    let repo_root = ts.repo_path().canonicalize().unwrap();
+    loom::repo::register(
+        &ts.state.db,
+        "marin-community/marin",
+        "https://github.com/marin-community/marin.git",
+        &repo_root.to_string_lossy(),
+    )
+    .await
+    .unwrap();
+    let mut profile = loom::profile::get(&ts.state.db, loom::profile::DEFAULT_PROFILE)
+        .await
+        .unwrap()
+        .unwrap()
+        .as_input()
+        .unwrap();
+    profile.github_repositories = vec![
+        "Open-Athena/marinmirror".to_string(),
+        "marin-community/marin".to_string(),
+    ];
+    loom::profile::upsert(&ts.state.db, &profile).await.unwrap();
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[
+            (
+                loom::github_app::APP_ID_KEY.to_string(),
+                Some("123456".to_string()),
+            ),
+            (
+                loom::github_app::APP_PRIVATE_KEY_KEY.to_string(),
+                Some("configured-for-preflight".to_string()),
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let session = ts
+        .client
+        .post(
+            "/api/sessions",
+            json!({
+                "goal": "use brokered credentials",
+                "cwd": ts.cwd(),
+                "agent": "codex",
+            }),
+        )
+        .await
+        .unwrap();
+    let id = session["id"].as_str().unwrap();
+    let repositories: String =
+        sqlx::query_scalar("SELECT policy_github_repositories FROM sessions WHERE id = ?")
+            .bind(id)
+            .fetch_one(&ts.state.db)
+            .await
+            .unwrap();
+    assert_eq!(repositories, r#"["marin-community/marin"]"#);
+    ts.client
+        .delete(&format!("/api/sessions/{id}"))
+        .await
+        .unwrap();
 }
 
 /// With an `origin` remote present, a launch that doesn't pin `--base` forks the

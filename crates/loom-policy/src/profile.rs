@@ -151,27 +151,28 @@ async fn validate_input(
     {
         bail!("GitHub repositories must be clean owner/name identifiers (maximum {MAX_GITHUB_REPOSITORIES})");
     }
-    if input
-        .github_repositories
-        .first()
-        .and_then(|repository| repository.split_once('/'))
-        .is_some_and(|(owner, _)| {
-            input.github_repositories.iter().any(|repository| {
-                repository
-                    .split_once('/')
-                    .is_none_or(|(candidate, _)| candidate != owner)
+    if input.class.trim() == "automation"
+        && input
+            .github_repositories
+            .first()
+            .and_then(|repository| repository.split_once('/'))
+            .is_some_and(|(owner, _)| {
+                input.github_repositories.iter().any(|repository| {
+                    repository
+                        .split_once('/')
+                        .is_none_or(|(candidate, _)| candidate != owner)
+                })
             })
-        })
     {
-        bail!("GitHub repositories must use one owner");
+        bail!("automation-profile GitHub repositories must use one owner");
     }
     if !input.github_repositories.is_empty()
-        && !(input.strict
-            && input.env_clear
-            && input.class.trim() == "automation"
-            && !input.restricted)
+        && input.class.trim() == "automation"
+        && !(input.strict && input.env_clear && !input.restricted)
     {
-        bail!("GitHub repository credentials require a strict env-cleared automation profile");
+        bail!(
+            "automation-profile GitHub repository credentials require a strict env-cleared non-restricted profile"
+        );
     }
     if input.allowed_tools.len() > 64
         || input.allowed_tools.iter().any(|rule| {
@@ -1281,7 +1282,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn github_credentials_require_a_safe_profile_and_canonical_repositories() {
+    async fn github_credentials_are_scoped_by_profile_class() {
         let db = crate::db::connect_in_memory().await.unwrap();
         let mut input = get(&db, DEFAULT_PROFILE)
             .await
@@ -1289,10 +1290,18 @@ mod tests {
             .unwrap()
             .as_input()
             .unwrap();
-        input.github_repositories = vec!["marin-community/marin".to_string()];
-        assert!(upsert(&db, &input).await.is_err());
+        input.github_repositories = vec![
+            "Open-Athena/marinmirror".to_string(),
+            "marin-community/marin".to_string(),
+        ];
+        let interactive = upsert(&db, &input).await.unwrap();
+        assert_eq!(
+            interactive.github_repositories().unwrap(),
+            ["Open-Athena/marinmirror", "marin-community/marin"]
+        );
 
         input.class = "automation".to_string();
+        assert!(upsert(&db, &input).await.is_err());
         input.strict = true;
         input.env_clear = true;
         input.github_repositories = vec![

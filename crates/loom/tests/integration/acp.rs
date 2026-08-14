@@ -2679,6 +2679,14 @@ async fn handoff_replaces_provider_and_continues_the_journal() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn canonical_handoff_selects_a_strict_profile_and_rejects_class_mismatch() {
     let ts = TestServer::start().await;
+    loom::repo::register(
+        &ts.state.db,
+        "marin-community/marin",
+        "https://github.com/marin-community/marin.git",
+        &ts.repo_path().canonicalize().unwrap().to_string_lossy(),
+    )
+    .await
+    .unwrap();
     seed_acp_agent(&ts, "canonical-a").await;
     seed_acp_agent(&ts, "canonical-b").await;
     for (name, agent, class) in [
@@ -2700,6 +2708,11 @@ async fn canonical_handoff_selects_a_strict_profile_and_rejects_class_mismatch()
                     "env_clear": class == "automation",
                     "max_concurrent": 2,
                     "prelude": "weaver",
+                    "github_repositories": if class == "interactive" {
+                        json!(["Open-Athena/marinmirror", "marin-community/marin"])
+                    } else {
+                        json!([])
+                    },
                     "mcp_access": { "mode": "none", "groups": [] }
                 }),
             )
@@ -2780,6 +2793,13 @@ async fn canonical_handoff_selects_a_strict_profile_and_rejects_class_mismatch()
         handed["profile_revision"], preview["profile_revision"],
         "the reviewed strict target revision is stamped"
     );
+    let github_repositories: String =
+        sqlx::query_scalar("SELECT policy_github_repositories FROM sessions WHERE id = ?")
+            .bind(id)
+            .fetch_one(&ts.state.db)
+            .await
+            .unwrap();
+    assert_eq!(github_repositories, r#"["marin-community/marin"]"#);
 }
 
 #[serial]

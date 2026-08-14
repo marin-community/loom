@@ -221,6 +221,16 @@ pub async fn get_registered(db: &Db, slug: &str) -> Result<Option<ManagedRepo>> 
     Ok(row)
 }
 
+async fn registered_for_root(db: &Db, repo_root: &Path) -> Result<Option<ManagedRepo>> {
+    let target = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    Ok(list_registered(db).await?.into_iter().find(|registered| {
+        let path = PathBuf::from(&registered.path);
+        path.canonicalize().unwrap_or(path) == target
+    }))
+}
+
 /// Whether `repo_root` is an allowlisted (registered) managed repo — the gate
 /// that decides whether a session's committed `.weaver/config.toml` `[setup]`
 /// script may run. A registered repo's stored `path` is the managed clone
@@ -230,15 +240,23 @@ pub async fn get_registered(db: &Db, slug: &str) -> Result<Option<ManagedRepo>> 
 /// allowlisted, and its setup script is never executed (the design's privileged
 /// code-execution boundary, §6.4).
 pub async fn is_allowlisted(db: &Db, repo_root: &Path) -> Result<bool> {
-    let target = repo_root
-        .canonicalize()
-        .unwrap_or_else(|_| repo_root.to_path_buf());
-    let allowed = list_registered(db).await?.into_iter().any(|registered| {
-        let path = PathBuf::from(&registered.path);
-        path.canonicalize().unwrap_or(path) == target
-    });
+    let allowed = registered_for_root(db, repo_root).await?.is_some();
     tracing::debug!(repo = %repo_root.display(), allowed, "checked repo allowlist");
     Ok(allowed)
+}
+
+/// Resolve the GitHub slug for a repository without requiring GitHub
+/// credentials. Managed clones use their registered identity; local checkouts
+/// fall back to parsing the configured `origin` URL.
+pub async fn github_slug_for_root(db: &Db, repo_root: &Path) -> Result<Option<String>> {
+    if let Some(registered) = registered_for_root(db, repo_root).await? {
+        return Ok(Some(registered.slug));
+    }
+    let remote = match git::remote_url(repo_root, "origin").await {
+        Ok(remote) => remote,
+        Err(_) => return Ok(None),
+    };
+    Ok(parse_slug(&remote).ok().map(|slug| slug.slug()))
 }
 
 /// How a managed-repo resolution can fail, so the web layer maps each cause to
@@ -395,6 +413,30 @@ mod tests {
 
         // A dot is legal inside a name (e.g. `repo.js`).
         assert_eq!(parse_slug("acme/repo.js").unwrap().name, "repo.js");
+    }
+
+    #[tokio::test]
+    async fn resolves_a_local_checkout_slug_without_github_credentials() {
+        let db = connect_in_memory().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q", "-b", "main"]).await;
+        run_git(
+            dir.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:marin-community/marin.git",
+            ],
+        )
+        .await;
+        assert_eq!(
+            github_slug_for_root(&db, dir.path())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("marin-community/marin")
+        );
     }
 
     #[test]
