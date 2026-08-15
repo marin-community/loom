@@ -6,6 +6,7 @@ import type { CustomAgent, SettingsEnvelope, SettingView } from '../types';
 import ToggleSwitch from '../components/ToggleSwitch.vue';
 import TokensPanel from '../components/TokensPanel.vue';
 import AccountPanel from '../components/AccountPanel.vue';
+import GithubConnectionPanel from '../components/GithubConnectionPanel.vue';
 import SlackPanel from '../components/SlackPanel.vue';
 import EnvPanel from '../components/EnvPanel.vue';
 import LogsPanel from '../components/LogsPanel.vue';
@@ -53,8 +54,7 @@ const categories: CategoryItem[] = [
     label: 'Connections',
     groups: ['GitHub', 'Slack'],
     summary:
-      'GitHub and Slack integrations: PR polling, merge archiving, issue-comment and ' +
-      '`/marinbot` launch triggers, and their connection state.',
+      'Deployment-owned GitHub and Slack integrations, trigger behavior, and connection state.',
   },
   {
     id: 'watches',
@@ -70,14 +70,15 @@ const categories: CategoryItem[] = [
   },
   {
     id: 'environment',
-    label: 'Environment',
-    summary: 'Readable environment variables exported into future default-profile sessions.',
+    label: 'Session environment',
+    summary:
+      'Readable, non-secret environment variables exported into future default-profile sessions.',
   },
   {
     id: 'access',
     label: 'Access',
     groups: ['Authentication'],
-    summary: 'Identity, approved users, browser authentication, GitHub App, and API tokens.',
+    summary: 'Personal identity, approved users, browser authentication, and API tokens.',
   },
   {
     id: 'diagnostics',
@@ -323,6 +324,7 @@ onMounted(load);
             <CustomAgentsPanel :agents="customAgents" @reload="reloadAgents" />
           </template>
           <AccountPanel v-if="category === 'access'" />
+          <GithubConnectionPanel v-if="category === 'github'" />
           <TokensPanel v-if="category === 'access'" />
           <AppearancePanel v-if="category === 'workspace'" />
           <SlackPanel v-if="category === 'github'" />

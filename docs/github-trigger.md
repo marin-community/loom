@@ -76,7 +76,7 @@ handler mid-clone. Each launch is tracked on **Settings → Debug** (running / d
 The reply (step 8) reaches GitHub through the [GitHub App](#the-github-app) when
 one is configured — with a short-lived, per-installation token — and otherwise
 through the `gh` CLI's ambient `GH_TOKEN`. The **session itself** acts as the
-requester: its `GH_TOKEN` is that user's personal token (**Settings → Account**),
+requester: its `GH_TOKEN` is that user's personal token (**Settings → Access**),
 falling back to its selected profile when they have none — so its pushes and
 `gh` replies use the configured session identity. Separately, the poll loop
 posts a one-time back-link comment (`Working on this in loom: {base}/s/{id}`) on

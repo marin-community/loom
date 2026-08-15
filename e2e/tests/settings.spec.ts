@@ -193,6 +193,9 @@ for line in sys.stdin:
       page.getByRole("button", { name: "Access", exact: true }),
     ).toBeVisible();
     await expect(
+      page.getByRole("button", { name: "Session environment", exact: true }),
+    ).toBeVisible();
+    await expect(
       page.getByRole("button", { name: "Editor", exact: true }),
     ).toHaveCount(0);
     await expect(
@@ -208,6 +211,21 @@ for line in sys.stdin:
       page.getByRole("button", { name: "Account", exact: true }),
     ).toHaveCount(0);
     await expect(page.locator('[data-rail="chat"]')).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Access", exact: true }).click();
+    await expect(page.getByText("Your GitHub token", { exact: true })).toBeVisible();
+    await expect(page.getByText("Loom GitHub App", { exact: true })).toHaveCount(0);
+    const createToken = page.getByRole("link", { name: "Create one" });
+    await expect(createToken).toHaveAttribute("href", /contents=write/);
+    await expect(createToken).toHaveAttribute("href", /issues=write/);
+    await expect(createToken).toHaveAttribute("href", /pull_requests=write/);
+
+    await page.getByRole("button", { name: "Connections", exact: true }).click();
+    await expect(page.getByTestId("github-connection-panel")).toBeVisible();
+    await expect(page.getByText("Loom GitHub App", { exact: true })).toBeVisible();
+    await expect(page.getByText("Your GitHub token", { exact: true })).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Agents", exact: true }).click();
     expect(
       await page.getByTestId("metadata-settings").evaluate((section) => ({
         settingsVisible: [

@@ -867,7 +867,7 @@ identity is authenticated by GitHub but rejected by loom. A user may have a
 equal — there is no role hierarchy, matching the single-operator scale.
 
 **GitHub OAuth** is configured per-deploy: register an OAuth app and set its id
-and secret via Settings → Account or the `LOOM_GITHUB_CLIENT_ID` /
+and secret via Settings → Connections or the `LOOM_GITHUB_CLIENT_ID` /
 `LOOM_GITHUB_CLIENT_SECRET` env vars. The callback is
 `<base>/api/auth/github/callback`, where `<base>` is the `auth.base_url` setting
 or, unset, `{X-Forwarded-Proto|http}://{Host}`. The login route sets a short

@@ -105,7 +105,7 @@ const add = () =>
 <template>
   <div>
     <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-1.5">
-      Default profile environment
+      Default profile non-secret environment
     </h2>
     <p class="mb-3 text-xs text-faint">
       Variables exported into new sessions that use the default profile. Other profiles use their

@@ -410,7 +410,7 @@ TLS-terminating reverse proxy. Access is then gated three ways:
 
 To configure **GitHub sign-in**: register an OAuth app on GitHub with the
 callback `https://loom.example.com/api/auth/github/callback`, then paste its
-client id and secret into Settings → Account (or set `LOOM_GITHUB_CLIENT_ID` /
+client id and secret into Settings → Connections (or set `LOOM_GITHUB_CLIENT_ID` /
 `LOOM_GITHUB_CLIENT_SECRET`).
 
 Behind a **same-host reverse proxy** the proxy's forwarded requests appear to

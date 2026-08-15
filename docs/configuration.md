@@ -1,5 +1,38 @@
 # Configuration policy
 
+## Configuration ownership
+
+Choose the configuration surface from who owns the value and how widely it
+should apply:
+
+| Owner | Configure in | Use for |
+|---|---|---|
+| User | **Settings → Access** | Personal sign-in, password, and the personal GitHub token exported into that user's future interactive sessions |
+| Session profile | **Settings → Agents → Profiles** or a deployment manifest | Agent/model policy, instructions, GitHub repository allowlists, and write-only session secrets |
+| Deployment | **Settings → Connections** for status or manual setup; deployment IaC for the production source | The Loom GitHub App, Slack App, federations, and machine-wide credentials or files |
+| Repository | `.weaver/config.toml`, `WEAVER.md`, and `AGENTS.md` | Non-secret repository setup, environment, and workflow instructions |
+
+**Settings → Session environment** is the readable, non-secret environment on
+the `default` profile. Other profiles keep their write-only environment beside
+their launch policy under **Agents**. Do not put personal tokens or deployment
+credentials in repository configuration.
+
+An ordinary interactive session selects GitHub access in this order: the
+launching user's personal token, an explicit `GH_TOKEN` from the resolved
+session environment (normally its profile), then a short-lived GitHub App token
+when the profile allowlists the current repository. The first two are exported
+as `GH_TOKEN` because `git` and `gh` expect that name; the App fallback remains
+repository-scoped and short-lived. See [Restricted GitHub
+sessions](restricted-sessions.md#github-credential-policy) for automation's
+different boundary.
+
+Files under a shared session home are deployment resources, not environment
+variables. An operator deployment may materialize them from its secret backend,
+but every session sharing that home can read them. Per-profile files require
+isolated session homes or mounts.
+
+## Registered setting precedence
+
 Loom resolves every registered setting through one explicit precedence chain:
 
 | Precedence | Source | Owned by | How to change it |
@@ -15,7 +48,7 @@ default reveals the built-in. `GET /api/settings` reports the effective
 `value`, its `source`, and any `deployment_value`; the Settings UI shows the
 same provenance.
 
-This policy applies only to registered, non-secret global settings. Secrets
+This precedence applies only to registered, non-secret global settings. Secrets
 stay in the environment, profile secret references, or the credential-specific
 store and are never returned by the settings API. Per-repository setup,
 environment, and agent defaults belong in committed `.weaver/config.toml`; a
