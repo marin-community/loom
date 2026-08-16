@@ -323,9 +323,11 @@ impl GithubApp {
             request = request.json(&serde_json::json!({
                 "repositories": repositories,
                 "permissions": {
+                    "actions": "write",
                     "contents": "write",
                     "issues": "write",
-                    "pull_requests": "write"
+                    "pull_requests": "write",
+                    "workflows": "write"
                 }
             }));
         }
@@ -355,8 +357,8 @@ impl GithubApp {
         self.installation_token(installation_id).await
     }
 
-    /// Mint a token constrained to the named repositories and the fixed
-    /// contents/issues/pull-requests write policy used by automation profiles.
+    /// Mint a token constrained to the named repositories and the fixed write
+    /// policy used by session profiles, including Actions and workflow files.
     pub async fn token_for_repositories(&self, repositories: &[String]) -> Result<String> {
         if repositories.is_empty() {
             bail!("GitHub repository allowlist is empty");
@@ -1095,9 +1097,11 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
             &[json!({
                 "repositories": ["marin", "vllm"],
                 "permissions": {
+                    "actions": "write",
                     "contents": "write",
                     "issues": "write",
-                    "pull_requests": "write"
+                    "pull_requests": "write",
+                    "workflows": "write"
                 }
             })]
         );

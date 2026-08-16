@@ -91,9 +91,12 @@ pub fn manifest_json(input: &ManifestInput) -> Value {
         "public": false,
         "default_events": ["issue_comment", "issues"],
         "default_permissions": {
-            "issues": "write",
+            "actions": "write",
             "contents": "write",
-            "metadata": "read"
+            "issues": "write",
+            "metadata": "read",
+            "pull_requests": "write",
+            "workflows": "write"
         }
     })
 }
@@ -355,9 +358,17 @@ mod tests {
             m["default_events"],
             serde_json::json!(["issue_comment", "issues"])
         );
-        assert_eq!(m["default_permissions"]["issues"], "write");
-        assert_eq!(m["default_permissions"]["contents"], "write");
-        assert_eq!(m["default_permissions"]["metadata"], "read");
+        assert_eq!(
+            m["default_permissions"],
+            serde_json::json!({
+                "actions": "write",
+                "contents": "write",
+                "issues": "write",
+                "metadata": "read",
+                "pull_requests": "write",
+                "workflows": "write"
+            })
+        );
     }
 
     #[test]
