@@ -383,15 +383,19 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
 
       // Per-worker env: every spawned process (loom + weaver hooks) sees the same
       // WEAVER_HOME / WEAVER_DB so they share one database. The private WEAVER_HOME
-      // also scopes the tapestry control sockets (`$WEAVER_HOME/sock`), so a
-      // worker's terminals never collide with another worker's or the user's real
-      // sessions. WEAVER_TAPESTRY_BIN points loom at the sibling supervisor binary
-      // built alongside it.
+      // also scopes the Tapestry control sockets, so a worker's terminals never
+      // collide with another worker's or the user's real sessions. Set both the
+      // socket directory and local runner explicitly because a suite launched
+      // inside Loom inherits the production container's placement variables.
+      // WEAVER_TAPESTRY_BIN points loom at the sibling supervisor binary built
+      // alongside it.
       const childEnv: NodeJS.ProcessEnv = {
         ...process.env,
         WEAVER_HOME: weaverHome,
         WEAVER_DB: dbPath,
+        WEAVER_TAPESTRY_DIR: join(weaverHome, "sock"),
         WEAVER_TAPESTRY_BIN: join(CARGO_TARGET_DIR, "debug", "tapestry"),
+        LOOM_RUNNER: "local",
         RUST_LOG: "loom=warn,weaver_core=warn",
         // Seed an operator: loom refuses to boot with no owner configured, and
         // loopback trust authenticates every test request as this primary user

@@ -1392,6 +1392,15 @@ impl TurnEndSource {
     }
 }
 
+#[derive(Debug)]
+enum TaskStopReason {
+    AgentExit,
+    CommandChannelClosed,
+    Handoff,
+    JournalFailure,
+    RelayClosed,
+}
+
 struct Task {
     db: Db,
     /// The loom event bus — used to drive the turn-boundary status/idle lifecycle
@@ -1403,7 +1412,6 @@ struct Task {
     generation: u64,
     session_id: String,
     branch_id: String,
-    #[allow(dead_code)]
     relay_name: String,
     acp_session_id: String,
     events_tx: broadcast::Sender<SseEvent>,
@@ -2008,7 +2016,7 @@ impl Task {
         // Consume interval's immediate first tick; the handshake already
         // flushed everything safe before the main loop starts.
         ack_tick.tick().await;
-        loop {
+        let stop_reason = loop {
             tokio::select! {
                 ev = self.stream.recv() => match ev {
                     Some(RelayEvent::Frame { seq, payload }) => {
@@ -2019,14 +2027,14 @@ impl Task {
                             Err(e) => tracing::warn!(session = %self.session_id, error = %e, "unparseable acp frame"),
                         }
                         if self.journal_replay_needed() {
-                            break;
+                            break TaskStopReason::JournalFailure;
                         }
                     }
                     Some(RelayEvent::Exit { status }) => {
                         self.on_exit(status).await;
-                        break;
+                        break TaskStopReason::AgentExit;
                     }
-                    None => break,
+                    None => break TaskStopReason::RelayClosed,
                 },
                 cmd = cmd_rx.recv() => match cmd {
                     Some(Command::PrepareHandoff { reply }) => {
@@ -2039,7 +2047,7 @@ impl Task {
                             match chat::list(&self.db, &self.session_id).await {
                                 Ok(snapshot) => {
                                     handoff_reply = Some((reply, snapshot));
-                                    break;
+                                    break TaskStopReason::Handoff;
                                 }
                                 Err(error) => {
                                     let _ = reply.send(Err(error));
@@ -2050,10 +2058,10 @@ impl Task {
                     Some(c) => {
                         self.on_command(c).await;
                         if self.journal_replay_needed() {
-                            break;
+                            break TaskStopReason::JournalFailure;
                         }
                     }
-                    None => break,
+                    None => break TaskStopReason::CommandChannelClosed,
                 },
                 _ = ack_tick.tick() => {
                     if let Err(e) = self.maybe_ack().await {
@@ -2061,12 +2069,17 @@ impl Task {
                     }
                 },
             }
-        }
+        };
         self.registry.remove_own(&self.session_id, self.generation);
         if let Some((reply, snapshot)) = handoff_reply {
             let _ = reply.send(Ok(snapshot));
         }
-        tracing::info!(session = %self.session_id, "acp task stopped");
+        tracing::info!(
+            session = %self.session_id,
+            relay = %self.relay_name,
+            reason = ?stop_reason,
+            "acp task stopped"
+        );
     }
 
     fn journal_replay_needed(&self) -> bool {

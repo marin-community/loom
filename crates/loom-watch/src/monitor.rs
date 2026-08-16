@@ -21,6 +21,7 @@ use weaver_core::config as core_config;
 use weaver_core::BoxFut;
 
 const TICK: Duration = Duration::from_millis(1500);
+const RUNTIME_START_GRACE_SECS: i64 = 10;
 
 /// The retention reaper runs at most once every this many monitor ticks
 /// (~90s at the 1.5s tick) — archiving is heavyweight next to the per-tick work.
@@ -131,6 +132,9 @@ async fn run_inner(state: AppState) {
                     last_event,
                 )
                 .await;
+            }
+            if runtime_starting(session, now) {
+                continue;
             }
             if !backend::has_session(&session.term_session).await {
                 if session.status == "orphaned" {
@@ -399,6 +403,11 @@ fn parse_iso(ts: &str) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
+fn runtime_starting(session: &Session, now: DateTime<Utc>) -> bool {
+    parse_iso(&session.created_at)
+        .is_some_and(|created_at| (now - created_at).num_seconds() < RUNTIME_START_GRACE_SECS)
+}
+
 /// Reflect a Claude lifecycle hook (`working` / `waiting` / `idle`) onto the
 /// active session and its branch, broadcasting only what actually changed.
 /// Returns the new event watermark (it records its own bus events). `None` when
@@ -469,7 +478,7 @@ fn normalize_screen(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_stale, normalize_screen, Session};
+    use super::{is_stale, normalize_screen, runtime_starting, Session};
     use chrono::{Duration, Utc};
     use weaver_core::tags;
 
@@ -554,6 +563,18 @@ mod tests {
         // An unparseable timestamp is treated as not stale rather than panicking.
         let bad = session_with_activity(Some("not-a-time"), "also-bad");
         assert!(!is_stale(&bad, 0, now));
+    }
+
+    #[test]
+    fn orphan_detection_waits_for_runtime_startup() {
+        let now = Utc::now();
+        let iso = |time: chrono::DateTime<Utc>| time.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+
+        let starting = session_with_activity(None, &iso(now - Duration::seconds(2)));
+        assert!(runtime_starting(&starting, now));
+
+        let missing = session_with_activity(None, &iso(now - Duration::seconds(11)));
+        assert!(!runtime_starting(&missing, now));
     }
 
     #[test]

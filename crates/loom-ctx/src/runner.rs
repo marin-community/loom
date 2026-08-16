@@ -32,7 +32,6 @@ const SESSION_NAME_LABEL: &str = "dev.loom.session";
 const SESSION_CONTAINER_PREFIX: &str = "loom-session-";
 const CONTAINER_HOME: &str = "/home/app";
 const CONTAINER_WEAVER_HOME: &str = "/home/app/.weaver";
-const CONTAINER_SOCKET_DIR: &str = "/home/app/.weaver/sock";
 const CONTAINER_SESSION_SLUG_LENGTH: usize = 48;
 const CONTAINER_SESSION_HASH_LENGTH: usize = 12;
 const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
@@ -141,20 +140,7 @@ impl ContainerRunner {
         match self.docker.remove_container(container, Some(options)).await {
             Ok(()) => Ok(()),
             Err(error) if docker_not_found(&error) => Ok(()),
-            Err(error) if docker_conflict(&error) => {
-                for _ in 0..40 {
-                    match self.docker.inspect_container(container, None).await {
-                        Err(inspect_error) if docker_not_found(&inspect_error) => return Ok(()),
-                        Err(inspect_error) => {
-                            return Err(inspect_error).with_context(|| {
-                                format!("checking removal of session container {container}")
-                            })
-                        }
-                        Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
-                    }
-                }
-                Err(error).with_context(|| format!("removing session container {container}"))
-            }
+            Err(error) if docker_removal_in_progress(&error) => Ok(()),
             Err(error) => {
                 Err(error).with_context(|| format!("removing session container {container}"))
             }
@@ -236,7 +222,6 @@ impl ContainerRunner {
             stdin_once: Some(false),
             env: Some(vec![
                 format!("WEAVER_HOME={CONTAINER_WEAVER_HOME}"),
-                format!("WEAVER_TAPESTRY_DIR={CONTAINER_SOCKET_DIR}"),
                 "RUST_BACKTRACE=1".to_string(),
             ]),
             cmd: Some(vec![
@@ -633,13 +618,15 @@ fn docker_not_found(error: &DockerError) -> bool {
     )
 }
 
-fn docker_conflict(error: &DockerError) -> bool {
+fn docker_removal_in_progress(error: &DockerError) -> bool {
     matches!(
         error,
         DockerError::DockerResponseServerError {
             status_code: 409,
-            ..
-        }
+            message,
+        } if message == "removal already in progress"
+            || (message.contains("removal of container")
+                && message.contains("is already in progress"))
     )
 }
 
@@ -766,6 +753,7 @@ mod tests {
             .contains(&"/var/run/docker.sock:/var/run/docker.sock".to_string()));
 
         let rendered = serde_json::to_string(&body).unwrap();
+        assert!(!rendered.contains("WEAVER_TAPESTRY_DIR"));
         assert!(!rendered.contains("super-secret"));
         assert!(!rendered.contains("API_TOKEN"));
         assert!(!rendered.contains("agent --secret"));
@@ -806,7 +794,7 @@ mod tests {
     }
 
     #[test]
-    fn only_docker_404_is_absence() {
+    fn recognizes_idempotent_docker_removal_responses() {
         assert!(docker_not_found(&DockerError::DockerResponseServerError {
             status_code: 404,
             message: "missing".to_string(),
@@ -816,13 +804,29 @@ mod tests {
             message: "daemon failed".to_string(),
         }));
         assert!(!docker_not_found(&DockerError::RequestTimeoutError));
-        assert!(docker_conflict(&DockerError::DockerResponseServerError {
-            status_code: 409,
-            message: "removal already in progress".to_string(),
-        }));
-        assert!(!docker_conflict(&DockerError::DockerResponseServerError {
-            status_code: 500,
-            message: "daemon failed".to_string(),
-        }));
+        assert!(docker_removal_in_progress(
+            &DockerError::DockerResponseServerError {
+                status_code: 409,
+                message: "removal of container abc is already in progress".to_string(),
+            }
+        ));
+        assert!(docker_removal_in_progress(
+            &DockerError::DockerResponseServerError {
+                status_code: 409,
+                message: "removal already in progress".to_string(),
+            }
+        ));
+        assert!(!docker_removal_in_progress(
+            &DockerError::DockerResponseServerError {
+                status_code: 409,
+                message: "container is running".to_string(),
+            }
+        ));
+        assert!(!docker_removal_in_progress(
+            &DockerError::DockerResponseServerError {
+                status_code: 500,
+                message: "removal already in progress".to_string(),
+            }
+        ));
     }
 }
