@@ -7,7 +7,6 @@ pub mod github_trigger;
 pub mod lifecycle;
 pub mod repo;
 pub mod runtime;
-pub mod user_token;
 
 pub use loom_editor::Ctx;
 pub use loom_editor::{
@@ -15,7 +14,7 @@ pub use loom_editor::{
     client_context, ctx, custom_agents, custom_mcp, db, envfile, history, ide, launch, launch_gate,
     links, logs, loom_config, mcp, paths, profile, profile_data, repo_env, review_inbox, runner,
     runs, scratch, session, session_layout, session_manager, shell, slack_routes, status, terminal,
-    EditorState,
+    user_token, EditorState,
 };
 
 /// Shared process state consumed by runtime services and the REST adapter.

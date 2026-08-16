@@ -34,7 +34,7 @@ use weaver_core::branch::Branch;
 use crate::agent;
 use crate::backend;
 use crate::session::Session;
-use crate::{agent_env, Ctx};
+use crate::{agent_env, user_token, Ctx};
 
 /// The fixed supervisor name for the operator scratch shell. Distinct from any
 /// agent session's `term_session` (those are random ids), so it never collides.
@@ -54,12 +54,17 @@ fn shell_cwd() -> PathBuf {
 /// The env is the operator surface an agent session gets — `WEAVER_API` +
 /// `LOOM_TOKEN` so the in-place `weaver`/`loom` CLIs work, the operator-managed
 /// [`agent_env`] vars, and (for a per-session debug shell) the session's
-/// `WEAVER_BRANCH`. The script just `exec`s the login shell via
+/// `WEAVER_BRANCH` and launching user's GitHub credential. The script just
+/// `exec`s the login shell via
 /// [`agent::bare_shell_script`] (no inner agent command); the env is delivered
 /// out of band by the [`backend`] launch helpers, not `export`-ed into the script, so
 /// secrets stay off argv. This is a plain shell, not an agent, so it does not go
 /// through the agent launch path.
-async fn shell_script(st: &Ctx, branch_id: Option<&str>) -> (String, Vec<(String, String)>) {
+async fn shell_script(
+    st: &Ctx,
+    branch_id: Option<&str>,
+    created_by: Option<&str>,
+) -> (String, Vec<(String, String)>) {
     let api_url = format!("http://{}", st.addr);
     let local_token = agent::read_local_token();
     let extra = agent_env::pairs(&st.db).await.unwrap_or_default();
@@ -74,6 +79,7 @@ async fn shell_script(st: &Ctx, branch_id: Option<&str>) -> (String, Vec<(String
         env.push(("LOOM_TOKEN".to_string(), token));
     }
     env.extend(extra);
+    user_token::apply_user_github_token(&st.db, &mut env, created_by).await;
 
     let loom_exe = std::env::current_exe().ok();
     let weaver_dir = loom_exe.as_deref().and_then(Path::parent);
@@ -93,7 +99,7 @@ pub async fn ensure(st: &Ctx) -> Result<()> {
     if backend::has_session(SHELL_SESSION).await {
         return Ok(());
     }
-    let (script, env) = shell_script(st, None).await;
+    let (script, env) = shell_script(st, None, None).await;
     let cwd = shell_cwd();
     tracing::info!(session = SHELL_SESSION, cwd = %cwd.display(), "spawning operator scratch shell");
     backend::new_session_on_host(SHELL_SESSION, &cwd, &script, &env_refs(&env), false).await
@@ -147,7 +153,12 @@ pub async fn ensure_debug(
     if backend::has_session(&name).await {
         return Ok(name);
     }
-    let (script, env) = shell_script(st, Some(&branch.id)).await;
+    let created_by = if session.policy_restricted {
+        None
+    } else {
+        session.created_by.as_deref()
+    };
+    let (script, env) = shell_script(st, Some(&branch.id), created_by).await;
     let cwd = PathBuf::from(&session.work_dir);
     tracing::info!(session = %name, cwd = %cwd.display(), "spawning session debug shell");
     backend::new_session_colocated(
@@ -203,5 +214,31 @@ pub async fn kill_debug_all(session_id: &str) {
             count = killed,
             "session debug shells killed"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn debug_shell_uses_the_launching_users_github_token() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        sqlx::query("INSERT INTO users (username) VALUES ('alice')")
+            .execute(&db)
+            .await
+            .unwrap();
+        user_token::set(&db, "alice", "alice-token").await.unwrap();
+        let st = Ctx {
+            db,
+            bus: weaver_core::events::EventBus::new(),
+            addr: "127.0.0.1:9000".to_string(),
+        };
+
+        let (_, env) = shell_script(&st, Some("branch-1"), Some("alice")).await;
+
+        assert!(env
+            .iter()
+            .any(|(name, value)| name == "GH_TOKEN" && value == "alice-token"));
     }
 }

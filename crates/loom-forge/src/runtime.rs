@@ -86,23 +86,7 @@ pub async fn launch_environment(
     layer_launch_environment(db, repo_root, cfg, profile_name, env, strict, restricted).await
 }
 
-pub async fn apply_user_github_token(
-    db: &Db,
-    env: &mut Vec<(String, String)>,
-    created_by: Option<&str>,
-) {
-    let Some(username) = created_by else { return };
-    match crate::user_token::get(db, username).await {
-        Ok(Some(token)) if !token.trim().is_empty() => {
-            set_env(env, "GH_TOKEN", token);
-            tracing::info!(%username, "applied user github token as GH_TOKEN");
-        }
-        Ok(_) => {
-            tracing::debug!(%username, "no personal github token on file, retaining session GH_TOKEN")
-        }
-        Err(error) => tracing::warn!(%username, "failed to load user github token: {error}"),
-    }
-}
+pub use crate::user_token::apply_user_github_token;
 
 pub fn set_env(env: &mut Vec<(String, String)>, name: &str, value: String) {
     if let Some(slot) = env.iter_mut().find(|(key, _)| key == name) {
