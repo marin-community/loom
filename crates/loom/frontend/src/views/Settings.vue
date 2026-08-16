@@ -127,16 +127,15 @@ watch(
   (q) => (category.value = categoryFromQuery(q)),
 );
 
-watch(
-  () => me.role,
-  () => {
-    const next = categoryFromQuery(route.query.tab);
-    category.value = next;
-    if (next === 'account' && route.query.tab) {
-      router.replace({ query: { ...route.query, tab: undefined } });
-    }
-  },
-);
+function syncCategoryAccess() {
+  const next = categoryFromQuery(route.query.tab);
+  category.value = next;
+  if (next === 'account' && route.query.tab) {
+    router.replace({ query: { ...route.query, tab: undefined } });
+  }
+}
+
+watch(() => me.role, syncCategoryAccess);
 
 function setCategory(next: Category) {
   category.value = next;
@@ -297,11 +296,7 @@ function durationOptions(s: SettingView): { label: string; value: string }[] {
 }
 
 onMounted(() => {
-  const next = categoryFromQuery(route.query.tab);
-  category.value = next;
-  if (next === 'account' && route.query.tab && route.query.tab !== 'account') {
-    router.replace({ query: { ...route.query, tab: undefined } });
-  }
+  syncCategoryAccess();
   load();
 });
 </script>
