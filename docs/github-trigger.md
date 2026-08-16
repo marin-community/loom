@@ -277,9 +277,12 @@ Apps → New GitHub App**:
   the same `auth.base_url` names) and the **Secret** to the value you put in
   `LOOM_GITHUB_WEBHOOK_SECRET`.
 - **Repository permissions:**
+  - **Actions** — Read & write (inspect and operate workflow runs).
   - **Issues** — Read & write (read the comment, post the reply).
   - **Contents** — Read & write (clone the repo, and push the work branch).
   - **Metadata** — Read-only (mandatory; granted automatically).
+  - **Pull requests** — Read & write (open and update pull requests).
+  - **Workflows** — Read & write (push changes under `.github/workflows`).
 - **Subscribe to events** — **Issues** and **Issue comment**.
 - After creating it, **generate a private key** (downloads a `.pem`) and note the
   **App ID**.

@@ -68,9 +68,9 @@ installation token from Loom. Interactive profiles use the list as an
 allowlist and stamp only the session's current repository. Strict,
 environment-cleared automation profiles retain the complete list for reviewed
 cross-repository workflows, so their entries must use one owner. Tokens grant
-contents, issues, and pull-request write access, but not Actions or workflow
-file access. The configured GitHub App must be installed on every listed
-repository.
+write access to repository contents, issues, pull requests, Actions, and
+workflow files. The configured GitHub App must have those permissions and be
+installed on every listed repository.
 
 ```yaml
 profiles:
