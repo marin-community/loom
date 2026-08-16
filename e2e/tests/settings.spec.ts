@@ -28,7 +28,7 @@ test.describe("settings · profiles", () => {
     ]);
 
     await agent.selectOption("claude");
-    await model.selectOption(claude.models[0].id);
+    await model.fill(claude.models[0].id);
     await agent.selectOption("codex");
     await expect(model).toHaveValue("");
     await expect(model.locator("option")).toContainText([
@@ -156,6 +156,10 @@ for line in sys.stdin:
     const access = page.getByRole("group", { name: "MCP access" });
     await access.getByRole("radio", { name: "groups" }).check();
     await access.getByLabel("docs").check();
+    await expect(
+      access.getByLabel("docs").locator("..").getByText("1 service · 1 tool"),
+    ).toBeVisible();
+    await expect(access.getByText("New sessions get 1 tool")).toBeVisible();
     await page.getByTestId("profile-save").click();
     await expect(page.getByText("Saved default.")).toBeVisible();
 

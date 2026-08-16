@@ -37,6 +37,42 @@ const mcpGroups = computed(() => {
     .map(([name, builtin]) => ({ name, builtin }))
     .sort((left, right) => left.name.localeCompare(right.name));
 });
+const mcpGroupDetails = computed(() =>
+  mcpGroups.value.map((group) => {
+    const capabilitySets = (props.mcpRegistry?.capability_sets ?? []).filter(
+      (set) => set.group === group.name,
+    );
+    const customServers = (props.mcpRegistry?.custom_servers ?? []).filter(
+      (server) =>
+        server.group === group.name && server.enabled && server.validation_state === 'ready',
+    );
+    const adapters = new Set(capabilitySets.map((set) => set.adapter));
+    const tools = new Set([
+      ...capabilitySets.flatMap((set) => set.tools.map((tool) => `${set.adapter}:${tool}`)),
+      ...customServers.flatMap((server) =>
+        server.tools.map((tool) => `${server.identity}:${tool}`),
+      ),
+    ]);
+    return {
+      ...group,
+      descriptions: capabilitySets.map((set) => set.description),
+      services: adapters.size + customServers.length,
+      tools: tools.size,
+    };
+  }),
+);
+const selectedMcpGroups = computed(() => {
+  if (draft.value.mcp_access.mode === 'none') return [];
+  const available = mcpGroupDetails.value.filter((group) => group.services > 0);
+  if (draft.value.mcp_access.mode === 'all') return available;
+  const selected = new Set(draft.value.mcp_access.groups);
+  return available.filter((group) => selected.has(group.name));
+});
+const selectedMcpSummary = computed(() => ({
+  groups: selectedMcpGroups.value.length,
+  services: selectedMcpGroups.value.reduce((count, group) => count + group.services, 0),
+  tools: selectedMcpGroups.value.reduce((count, group) => count + group.tools, 0),
+}));
 
 function normalizeAgentChoices(metadata = selectedAgent.value) {
   if (!metadata) return;
@@ -353,73 +389,113 @@ watch(
       />
     </div>
 
-    <fieldset class="min-w-0 space-y-2 rounded border border-line p-2 sm:col-span-2">
-      <legend class="px-1 text-xs font-medium">MCP access</legend>
-      <div class="flex flex-wrap gap-1.5" role="radiogroup" aria-label="MCP access mode">
+    <fieldset class="min-w-0 space-y-3 rounded border border-line p-3 sm:col-span-2">
+      <legend class="px-1 text-xs font-medium">
+        <span class="sr-only">MCP access</span><span aria-hidden="true">Loom tools</span>
+      </legend>
+      <p class="text-xs text-muted">
+        Choose which Loom resources and connected services this profile exposes to the agent.
+        Selection is stamped onto each new session.
+      </p>
+      <div class="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="MCP access">
         <label
-          v-for="mcpMode in ['none', 'all', 'groups'] as const"
-          :key="mcpMode"
-          class="inline-flex cursor-pointer items-center"
+          v-for="option in [
+            {
+              value: 'none' as const,
+              title: 'No Loom tools',
+              detail: 'Start no profile-managed tool services.',
+            },
+            {
+              value: 'all' as const,
+              title: 'All available',
+              detail: 'Include every enabled built-in and custom service.',
+            },
+            {
+              value: 'groups' as const,
+              title: 'Choose capabilities',
+              detail: 'Select only the resource families this profile needs.',
+            },
+          ]"
+          :key="option.value"
+          class="flex cursor-pointer gap-2 rounded border p-2"
           :class="{
-            'cursor-not-allowed opacity-50': disabled || (draft.restricted && mcpMode === 'all'),
+            'border-accent bg-accent/10': draft.mcp_access.mode === option.value,
+            'border-line bg-input': draft.mcp_access.mode !== option.value,
+            'cursor-not-allowed opacity-50':
+              disabled || (draft.restricted && option.value === 'all'),
           }"
         >
           <input
             v-model="draft.mcp_access.mode"
             type="radio"
             :name="`${uid}-mcp-mode`"
-            :value="mcpMode"
-            class="mr-1 h-3.5 w-3.5 align-middle"
-            :disabled="disabled || (draft.restricted && mcpMode === 'all')"
+            :value="option.value"
+            :aria-label="option.value"
+            class="mt-0.5 h-3.5 w-3.5"
+            :disabled="disabled || (draft.restricted && option.value === 'all')"
             @change="
               draft.mcp_access = {
-                mode: mcpMode,
-                groups: mcpMode === 'groups' ? draft.mcp_access.groups : [],
+                mode: option.value,
+                groups: option.value === 'groups' ? draft.mcp_access.groups : [],
               }
             "
           />
-          <span
-            class="rounded border px-2.5 py-1 text-xs capitalize"
-            :class="
-              draft.mcp_access.mode === mcpMode
-                ? 'border-accent bg-accent text-accent-fg'
-                : 'border-line bg-input text-muted'
-            "
-          >
-            {{ mcpMode }}
+          <span class="grid gap-0.5">
+            <span class="text-xs font-medium text-fg">{{ option.title }}</span>
+            <span class="text-2xs text-muted">{{ option.detail }}</span>
           </span>
         </label>
       </div>
-      <div v-if="draft.mcp_access.mode === 'groups'" class="flex flex-wrap gap-2">
+      <div v-if="draft.mcp_access.mode === 'groups'" class="grid gap-2 sm:grid-cols-2">
         <label
-          v-for="group in mcpGroups"
+          v-for="group in mcpGroupDetails"
           :key="group.name"
-          class="flex items-center gap-1 text-xs"
-          :class="{ 'opacity-50': draft.restricted && !group.builtin }"
+          class="flex gap-2 rounded border border-line bg-input p-2 text-xs"
+          :class="{ 'cursor-not-allowed opacity-50': draft.restricted && !group.builtin }"
         >
           <input
             type="checkbox"
             :checked="draft.mcp_access.groups.includes(group.name)"
             :disabled="disabled || (draft.restricted && !group.builtin)"
+            class="mt-0.5"
             @change="
               draft.mcp_access.groups = ($event.target as HTMLInputElement).checked
                 ? [...draft.mcp_access.groups, group.name]
                 : draft.mcp_access.groups.filter((value) => value !== group.name)
             "
           />
-          <code>{{ group.name }}</code>
+          <span class="grid min-w-0 gap-0.5">
+            <span class="flex items-center gap-1.5">
+              <span class="font-medium text-fg">{{ group.name }}</span>
+              <span v-if="!group.builtin" class="meta-chip">custom</span>
+            </span>
+            <span class="text-2xs text-muted">
+              {{ group.services }} {{ group.services === 1 ? 'service' : 'services' }} ·
+              {{ group.tools }} {{ group.tools === 1 ? 'tool' : 'tools' }}
+            </span>
+            <span v-if="group.descriptions.length" class="text-2xs text-faint">
+              {{ group.descriptions.join(' ') }}
+            </span>
+          </span>
         </label>
       </div>
-      <p class="text-xs text-muted">
-        None starts no MCP processes. All includes every enabled builtin and custom MCP. Restricted
-        profiles may select trusted builtins only.
+      <div class="rounded bg-input/60 px-2.5 py-2 text-xs">
+        <template v-if="selectedMcpSummary.tools">
+          New sessions get <strong>{{ selectedMcpSummary.tools }} tools</strong> from
+          {{ selectedMcpSummary.services }}
+          {{ selectedMcpSummary.services === 1 ? 'service' : 'services' }} across
+          {{ selectedMcpSummary.groups }}
+          {{ selectedMcpSummary.groups === 1 ? 'capability' : 'capabilities' }}.
+        </template>
+        <template v-else>No Loom tool services will start for new sessions.</template>
+      </div>
+      <p v-if="draft.restricted" class="text-xs text-muted">
+        Restricted profiles can use explicitly selected trusted built-in capabilities only.
       </p>
     </fieldset>
 
     <div class="grid min-w-0 gap-1 sm:col-span-2">
-      <label class="text-xs" :for="`${uid}-permissions`">
-        Runtime permissions (one provider-specific rule per line)
-      </label>
+      <label class="text-xs" :for="`${uid}-permissions`">Provider permissions</label>
       <textarea
         :id="`${uid}-permissions`"
         :value="draft.runtime_permissions.join('\n')"
@@ -433,16 +509,11 @@ watch(
             .filter(Boolean)
         "
       />
+      <p class="text-2xs text-muted">
+        Native agent permission rules, one per line. Loom tool access is controlled separately
+        above.
+      </p>
     </div>
-    <div v-if="mcpRegistry?.capability_sets.length" class="min-w-0 text-xs sm:col-span-2">
-      <div class="mb-1 font-medium">Available trusted MCP capability sets</div>
-      <ul class="space-y-1 text-muted">
-        <li v-for="set in mcpRegistry.capability_sets" :key="set.name">
-          <code>{{ set.name }}</code> — {{ set.description }}
-        </li>
-      </ul>
-    </div>
-
     <fieldset
       v-if="environment"
       class="min-w-0 space-y-3 rounded border border-line p-2 sm:col-span-2"
