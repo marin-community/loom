@@ -458,11 +458,6 @@ test.describe('session detail view', () => {
     expect(menuBox!.x).toBeGreaterThanOrEqual(0);
     expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(390);
 
-    await page.screenshot({
-      path: test.info().outputPath('mobile-session-scratch.png'),
-      fullPage: false,
-    });
-
     await menu.getByRole('menuitem', { name: `Remove ${names[0]}` }).click();
     await expect(page.getByRole('button', { name: 'Scratch files, 7 attached' })).toBeVisible();
     await page.keyboard.press('Escape');

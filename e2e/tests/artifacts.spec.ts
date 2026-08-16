@@ -331,10 +331,6 @@ test.describe('artifacts surface', () => {
     expect(primaryBox!.width).toBe(390);
     expect(primaryBox!.y).toBeGreaterThan(780);
 
-    await page.screenshot({
-      path: test.info().outputPath('mobile-artifact-split.png'),
-      fullPage: false,
-    });
   });
 
   test('Review routes keep artifacts on the warm session page', async ({

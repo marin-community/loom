@@ -246,7 +246,7 @@ const sessionCommands = computed<Command[]>(() => [
 ]);
 useCommandScope(`session:${props.id}`, 'Session', sessionCommands, 10);
 
-// Pop the artifact out beside the terminal / dock it back into the tab.
+// Open the artifact in the responsive split / dock it back into the tab.
 async function togglePop() {
   await guardedArtifactLayout(() => {
     poppedOut.value = !poppedOut.value;
