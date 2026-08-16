@@ -576,8 +576,8 @@ export const getSessionChat = (id: string, before?: { turn: number; seq: number 
   return get(`/sessions/${id}/chat${query}`) as Promise<ChatSnapshot>;
 };
 
-/** Send a user message to an ACP session now. A supported live turn is steered;
- *  an unsteerable live turn is stopped and replaced. */
+/** Send a user message to an ACP session now. A receptive live turn is steered;
+ *  a turn blocked behind a tool or permission is stopped and replaced. */
 export const promptSession = (id: string, text: string, by?: string, files: string[] = []) =>
   post(`/sessions/${id}/prompt`, {
     text,

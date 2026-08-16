@@ -578,15 +578,27 @@ impl AcpHandle {
             .await
     }
 
-    /// Deliver injected input without leaving it behind a live turn: steer when
-    /// supported, otherwise cancel the current turn and start normally.
-    pub async fn send_now(
+    /// Deliver conversation input now: steer a receptive live turn, otherwise
+    /// cancel the current turn and start normally.
+    pub async fn steer_or_restart(
         &self,
         text: String,
         by: Option<String>,
         resources: Vec<Value>,
     ) -> Result<PromptAck> {
-        self.send_prompt(text, by, PromptDelivery::Immediate, resources)
+        self.send_prompt(text, by, PromptDelivery::SteerOrRestart, resources)
+            .await
+    }
+
+    /// Deliver external control input now by cancelling a live turn and
+    /// starting the message normally.
+    pub async fn stop_and_send(
+        &self,
+        text: String,
+        by: Option<String>,
+        resources: Vec<Value>,
+    ) -> Result<PromptAck> {
+        self.send_prompt(text, by, PromptDelivery::StopAndSend, resources)
             .await
     }
 
@@ -1161,8 +1173,11 @@ pub async fn attach(state: &AcpCtx, session_id: &str) -> Result<()> {
 enum PromptDelivery {
     /// Preserve the conversation composer's queue-first behavior.
     Queue,
+    /// User conversation input: steer a receptive live turn, or cancel and
+    /// restart when the adapter cannot consume a steer immediately.
+    SteerOrRestart,
     /// Cross-session control: cancel and restart immediately.
-    Immediate,
+    StopAndSend,
 }
 
 enum Command {
@@ -1364,7 +1379,7 @@ struct PendingPerm {
     frame_seq: u64,
 }
 
-/// An automated message waiting for the adapter's steering response.
+/// A user-console message waiting for the adapter's steering response.
 struct PendingSteer {
     text: String,
     by: Option<String>,
@@ -2711,7 +2726,9 @@ impl Task {
             .and_then(|value| serde_json::from_value::<wire::SteeringResult>(value).ok())
             .map(|result| result.outcome);
         match (outcome, error) {
-            (Some(wire::SteeringOutcome::Injected), None) => {
+            (Some(wire::SteeringOutcome::Injected), None)
+                if self.tools.is_empty() && self.pending_perms.is_empty() =>
+            {
                 // The adapter accepted this as input to the current turn. Flush
                 // earlier streamed prose before assigning the injected message
                 // its durable sequence.
@@ -2749,7 +2766,7 @@ impl Task {
                     session = %self.session_id,
                     ?outcome,
                     ?error,
-                    "steering failed; restarting the turn"
+                    "steering was unavailable or blocked; restarting the turn"
                 );
                 let result = self
                     .restart_prompt(pending.text, pending.by, pending.resources)
@@ -3318,9 +3335,15 @@ impl Task {
                         self.resume_automatic_dispatch_on(&ack);
                         let _ = reply.send(ack);
                     }
-                    PromptDelivery::Immediate => {
+                    PromptDelivery::SteerOrRestart => {
                         if self.turn_live
                             && self.steering_cap
+                            // Adapters accept the private steering RPC while the
+                            // model is blocked behind a tool or permission, but
+                            // cancellation can then discard that unconsumed
+                            // in-memory steer. Start a durable prompt instead.
+                            && self.tools.is_empty()
+                            && self.pending_perms.is_empty()
                             && self.pending_steers.is_empty()
                             && self.pending_external.is_none()
                         {
@@ -3354,6 +3377,11 @@ impl Task {
                             self.resume_automatic_dispatch_on(&ack);
                             let _ = reply.send(ack);
                         }
+                    }
+                    PromptDelivery::StopAndSend => {
+                        let ack = self.restart_prompt(text, by, resources).await;
+                        self.resume_automatic_dispatch_on(&ack);
+                        let _ = reply.send(ack);
                     }
                 }
             }

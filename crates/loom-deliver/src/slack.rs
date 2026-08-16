@@ -1492,8 +1492,8 @@ fn followup_prompt(trigger: &Trigger, instruction: &str) -> String {
     )
 }
 
-/// Send an ACP follow-up as immediate injected input: steer a supported live
-/// turn, otherwise stop it and start the message as a fresh turn.
+/// Send an external ACP follow-up immediately: stop a live turn and start the
+/// message as a fresh turn.
 async fn forward_acp_followup(
     registry: &crate::acp::AcpRegistry,
     session_id: &str,
@@ -1503,7 +1503,7 @@ async fn forward_acp_followup(
         .get(session_id)
         .ok_or_else(|| anyhow!("session has no live ACP task"))?;
     handle
-        .send_now(prompt.to_string(), Some("slack".to_string()), Vec::new())
+        .stop_and_send(prompt.to_string(), Some("slack".to_string()), Vec::new())
         .await
         .context("sending follow-up to ACP conversation")?;
     Ok(())
