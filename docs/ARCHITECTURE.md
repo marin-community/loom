@@ -767,12 +767,18 @@ a Slack conversation.
 
 When the `gh` CLI is installed and authenticated, loom keeps a per-branch
 pull-request snapshot alongside the session. A second background loop
-(`github::poll`, sibling of the monitor, spawned in `server::serve`) ticks every
-five minutes and, for each active session, runs
-`gh pr list --head <branch> …` from the repo root. `<branch>` is the worktree's live
-HEAD (falling back to loom's stored
-branch identity when the worktree cannot be read), so an agent that switches or
-renames its branch before opening a PR is still discovered. The result — PR
+(`github::poll`, sibling of the monitor, spawned in `server::serve`) runs on
+startup and every minute. It considers only sessions active in the previous ten
+minutes (using creation time until first activity), groups those sessions by
+repository, and sends one aliased GraphQL query per repository: one open-head
+lookup for each live branch, plus exact lookups for explicitly mapped or
+previously open PR numbers. The exact lookups preserve merge/close detection
+after a PR leaves the open set, without returning to one GitHub request per
+session. Quiet sessions remain on their last snapshot and can still use the
+manual refresh endpoint. `<branch>` is the worktree's live HEAD (falling back to
+loom's stored branch identity when the worktree cannot be read), so an agent
+that switches or renames its branch before opening a PR is still discovered.
+The result — PR
 number, URL, state (`OPEN`/`CLOSED`/`MERGED`), draft
 flag, `reviewDecision`, a rolled-up `checks` verdict (`passing`/`failing`/
 `pending`), head SHA/update age, and mergeability — is written to the loom-owned
@@ -783,8 +789,8 @@ The dashboard renders it on the session list and session header; `POST
 
 The loop self-gates and degrades quietly: it is always spawned but does nothing
 while the `github.poll` setting is off, `gh` is missing (probed once, cached via
-`gh_available`), or the repo has no GitHub remote (a per-branch `gh` error that
-is logged at debug and skipped). So it is a no-op on non-GitHub repos rather
+`gh_available`), or the repo has no GitHub remote (the repository batch is
+logged at debug and skipped). So it is a no-op on non-GitHub repos rather
 than a failure.
 
 The session header always renders PR and issue association pills, including an
@@ -807,9 +813,10 @@ settings pane).
 Both settings live in `weaver-core::config::registry()` under the **GitHub**
 group.
 
-`gh`-touching logic lives in `crate::github`: `fetch_pr` (the shell-out +
-JSON parse + check rollup), `refresh` (fetch → store → announce → maybe
-archive, behind both the poller and the refresh endpoint), and `poll` (the
+`gh`-touching logic lives in `crate::github`: `fetch_pr` (the single-PR
+shell-out used by manual refresh), `fetch_pr_batch` (the repository-wide
+background GraphQL request), `apply_refresh_result` / `apply_snapshot` (store →
+announce → maybe archive), and `poll` (the
 loop). The merge-archive decision is split into `apply_snapshot` so it is
 testable without invoking `gh`.
 
