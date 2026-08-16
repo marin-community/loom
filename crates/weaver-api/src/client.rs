@@ -88,10 +88,19 @@ impl Client {
         }
         let resp = req.send().await.map_err(|e| {
             if e.is_connect() {
-                anyhow!(
-                    "cannot reach loom at {} — no active loom session (start the server with `loom server start`, or check $WEAVER_API)",
-                    self.base
-                )
+                let sandbox_hint = std::env::var("CODEX_SANDBOX_NETWORK_DISABLED")
+                    .is_ok_and(|value| value != "0");
+                if sandbox_hint {
+                    anyhow!(
+                        "cannot reach loom at {} — the server may be unavailable (start it with `loom server start`, or check $WEAVER_API), or Codex's network sandbox may have blocked this command; run `weaver` directly (not through `sh -c`/`bash -c`) so its command rule applies",
+                        self.base
+                    )
+                } else {
+                    anyhow!(
+                        "cannot reach loom at {} — no active loom session (start the server with `loom server start`, or check $WEAVER_API)",
+                        self.base
+                    )
+                }
             } else {
                 anyhow!("request to {url} failed: {e}")
             }

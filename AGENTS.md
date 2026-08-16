@@ -93,7 +93,7 @@ when you're ready to land. The rules it enforces:
   more than the local gate (Playwright `e2e/`, CodeQL, a clean-checkout SPA
   build). After pushing, block on `gh pr checks <n> --watch --fail-fast`, fix
   failures until green, and address any comments already present. Only **then**
-  raise `weaver status attention "ready for review"` and hand off to the
+  raise `weaver status set --tag attention --message "ready for review"` and hand off to the
   coordinator/human final reviewer; while CI runs you are `ok`, not done.
 
 ## Conventions

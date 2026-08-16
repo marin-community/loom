@@ -69,8 +69,9 @@ frame it receives, in order:
 The "On it" reply doubles as the thread's live view of the session, exactly
 as the GitHub comment does. At launch the trigger wires the branch to the
 thread — a `slack` tag whose value is `team_id/channel_id/thread_ts` — and
-records the card message's `ts`. From then on, every `weaver status <level>
-"<message>"` the agent writes re-renders that message via `chat.update`:
+records the card message's `ts`. From then on, every `weaver status set --tag
+<level> --message "<message>"` the agent writes re-renders that message via
+`chat.update`:
 
 > On it — <{base}/s/{id}>
 >

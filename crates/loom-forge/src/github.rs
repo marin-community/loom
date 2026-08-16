@@ -173,7 +173,7 @@ pub fn parse_wiring(value: &str) -> Option<(String, i64)> {
 
 /// One rendered bullet of the status trail: the level's dot, the time, the
 /// level name when loud, and the message. Events with nothing to say (a bare
-/// `weaver status ok`) render `None`.
+/// `weaver status set --tag ok`) render `None`.
 fn status_bullet(event: &weaver_core::events::Event) -> Option<String> {
     let value = event.data["value"].as_str().unwrap_or_default();
     let note = event.data["note"].as_str().unwrap_or_default().trim();
@@ -1760,7 +1760,7 @@ mod tests {
                 data: json!({ "key": "idle", "value": "idle", "note": "", "by": "loom" }),
                 created_at: "2026-07-18T21:05:00.000Z".to_string(),
             },
-            // A bare `weaver status ok` (no message) says nothing new.
+            // A status update without a message says nothing new.
             status_event("", "", "agent"),
             status_event("blocked", "build broken", "agent"),
         ];

@@ -178,7 +178,7 @@ Inside a worktree, the compact agent loop is:
 
 ```sh
 weaver summary
-weaver status ok "implementing the API"
+weaver status set --tag ok --message "implementing the API"
 weaver channel read
 weaver artifact write design design.md
 weaver channel send "ready for review"
@@ -200,9 +200,10 @@ the ACP Conversation surface rather than becoming guessed lifecycle state.
 The **attention** axis is the agent's own signal of whether it needs you:
 `ok` (going fine, or blocked on something external like a CI run or PR review),
 `attention` (a question, a decision, "ready for review"), or `blocked` (stuck,
-needs help). Agents set it with `weaver status <level> "<message>"`, which
-records both the level and a one-line current-state message; a bare
-`weaver status <level>` changes the level and keeps the last message. The
+needs help). Agents set it with
+`weaver status set --tag <level> --message "<message>"`, which records both the
+level and a one-line current-state message; omitting `--message` changes the
+level and keeps the last message. `weaver status get` reads the current value. The
 dashboard shows both and lets you filter for sessions that need a human. It
 replaces the old guessed working/waiting/idle indicator, which was often wrong —
 e.g. it read "idle" while the agent was actually waiting on a background

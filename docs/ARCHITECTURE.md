@@ -591,11 +591,19 @@ tracking.
 (the agent runs in a PTY loom drives by keystroke) or `acp` (a headless adapter
 loom drives over the [Agent Client Protocol](https://agentclientprotocol.com)).
 The builtins are `terminal`; a custom agent carries its own `custom_agents.protocol`
-column. A create may **override** to `acp` where the agent allows it (Claude opts
-in; Codex rejects it, as `codex-acp` is a later phase), and the resolved protocol
-is stamped on the `sessions` row at create, immutable thereafter. The row's
+column. A create may **override** to `acp` where the agent allows it (both Claude
+and Codex opt in), and the resolved protocol is stamped on the `sessions` row at
+create, immutable thereafter. The row's
 protocol — not the agent kind — is what every downstream path (launch, lifecycle,
 drive routes, adopt, archive) branches on.
+
+Codex ACP's `agent` mode uses the workspace-write sandbox. Loom sets
+`sandbox_workspace_write.network_access` and enables Codex's network proxy with
+only `127.0.0.1`, `localhost`, and the ContainerRunner's `loom` network alias
+allowed. This lets the injected `$WEAVER_API` remain usable for status,
+artifacts, and channels without opening arbitrary shell-command egress. A plain
+workspace-write `network_access = true` without the proxy would be broader than
+the control-plane requirement.
 
 **Lifecycle** is driven by that protocol. A `terminal` session's lifecycle rides
 Claude Code's hooks, so that path merges a `hooks` block into the worktree's
@@ -642,17 +650,17 @@ loud self-report still wins the badge. We don't try to mechanically separate
 good-enough idle signal, and the status watch upgrades it when warranted (below).
 
 The **`attention` tag** is otherwise the agent's own call, set via `weaver
-status <level> ["<message>"]`. That calls `POST /api/branches/{key}/status`,
+status set --tag <level> [--message "<message>"]`. That calls `POST /api/branches/{key}/status`,
 which writes the tag (and, when a message is given, the `description`) and
 records a `tag` event the monitor re-broadcasts over SSE, atomically in one
 request — `ok` clears the tag, the two loud levels upsert it. The message rides
 the event as its `note`, so the event log carries the full **status trail** —
 the progress log the dashboard's activity feed renders, `weaver log` prints,
 and a GitHub-wired session mirrors publicly (see [GitHub
-integration](#github-integration)). A bare `weaver
-status <level>` changes only the level and keeps the last message. Last write
-wins, so an explicit declaration overrides the hook-inferred default. The
-general `weaver tag set|rm|ls` group writes any key the same way, over the
+integration](#github-integration)). Omitting `--message` changes only the level
+and keeps the last message. Last write wins, so an explicit declaration
+overrides the hook-inferred default. The general `weaver tag set|rm|ls` group
+writes any key the same way, over the
 branch-scoped `PUT`/`DELETE /api/branches/{key}/tags/{key}` routes; the
 session-scoped `PUT`/`DELETE /api/sessions/{id}/tags/{key}` routes serve the
 UI. Watches replace their complete author-scoped set through one

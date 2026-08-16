@@ -680,10 +680,16 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       },
 
       async setStatus(session, level, message) {
-        // `weaver status <level> [message]` writes the branch's `attention`
-        // tag (clearing it on `ok`) and current-state message, appending a typed
-        // channel item and recording a `tag` event.
-        const args = ["status", level, ...(message ? [message] : [])];
+        // `weaver status set` writes the branch's `attention` tag (clearing it
+        // on `ok`) and current-state message, appending a typed channel item and
+        // recording a `tag` event.
+        const args = [
+          "status",
+          "set",
+          "--tag",
+          level,
+          ...(message ? ["--message", message] : []),
+        ];
         execFileSync(WEAVER_BINARY, args, {
           env: { ...childEnv, WEAVER_BRANCH: session.branch.id },
           stdio: "pipe",

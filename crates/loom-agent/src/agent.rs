@@ -1147,7 +1147,11 @@ async fn codex_acp_cmd(db: &Db) -> String {
 /// approval policy. Loom must receive those requests in order to apply its
 /// deterministic one-shot approval policy, so the default reviewer is `user`
 /// (the ACP client) rather than Codex's model reviewer. An explicit reviewer in
-/// `CODEX_CONFIG` wins over that default.
+/// `CODEX_CONFIG` wins over that default. Weaver commands still need to reach
+/// Loom from inside that sandbox, so agent mode also enables Codex's network
+/// proxy with only Loom's known local hostnames allowed. This avoids granting
+/// arbitrary outbound network access just to make the session control plane
+/// usable.
 fn configure_codex_acp(
     env: &mut Vec<(String, String)>,
     model: &str,
@@ -1169,6 +1173,14 @@ fn configure_codex_acp(
         config
             .entry("approvals_reviewer".to_string())
             .or_insert_with(|| json!("user"));
+
+        let sandbox = config
+            .entry("sandbox_workspace_write".to_string())
+            .or_insert_with(|| json!({}));
+        let sandbox = sandbox
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("CODEX_CONFIG.sandbox_workspace_write must be a JSON object"))?;
+        sandbox.insert("network_access".to_string(), json!(true));
     }
     let features = config
         .entry("features".to_string())
@@ -1177,6 +1189,29 @@ fn configure_codex_acp(
         .as_object_mut()
         .ok_or_else(|| anyhow!("CODEX_CONFIG.features must be a JSON object"))?;
     features.insert("apps".to_string(), json!(false));
+    if codex_mode.trim() == CODEX_AGENT_MODE {
+        let proxy = features
+            .entry("network_proxy".to_string())
+            .or_insert_with(|| json!({}));
+        if proxy.is_boolean() {
+            *proxy = json!({});
+        }
+        let proxy = proxy
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("CODEX_CONFIG.features.network_proxy must be a JSON object"))?;
+        proxy.insert("enabled".to_string(), json!(true));
+        let domains = proxy
+            .entry("domains".to_string())
+            .or_insert_with(|| json!({}));
+        let domains = domains.as_object_mut().ok_or_else(|| {
+            anyhow!("CODEX_CONFIG.features.network_proxy.domains must be a JSON object")
+        })?;
+        // Local launches use loopback. ContainerRunner overrides WEAVER_API to
+        // the `loom` Docker-network alias when it delivers the launch spec.
+        for host in ["127.0.0.1", "localhost", "loom"] {
+            domains.insert(host.to_string(), json!("allow"));
+        }
+    }
 
     env.retain(|(name, _)| name != "CODEX_CONFIG");
     env.push((
@@ -2519,8 +2554,16 @@ mod tests {
         .unwrap();
         assert_eq!(config["model"], "operator");
         assert_eq!(config["approvals_reviewer"], "user");
+        assert_eq!(config["sandbox_workspace_write"]["network_access"], true);
         assert_eq!(config["features"]["shell_snapshot"], true);
         assert_eq!(config["features"]["apps"], false);
+        assert_eq!(config["features"]["network_proxy"]["enabled"], true);
+        for host in ["127.0.0.1", "localhost", "loom"] {
+            assert_eq!(
+                config["features"]["network_proxy"]["domains"][host],
+                "allow"
+            );
+        }
     }
 
     #[test]
@@ -2543,6 +2586,14 @@ mod tests {
             assert!(
                 config.get("approvals_reviewer").is_none(),
                 "{mode} must not set a default reviewer"
+            );
+            assert!(
+                config.get("sandbox_workspace_write").is_none(),
+                "{mode} must not change sandbox networking"
+            );
+            assert!(
+                config["features"].get("network_proxy").is_none(),
+                "{mode} must not start the sandbox network proxy"
             );
         }
     }

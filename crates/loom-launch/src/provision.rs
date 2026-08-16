@@ -1396,7 +1396,7 @@ fn entrance_note(tracking_issue: Option<i64>) -> String {
     if let Some(id) = tracking_issue {
         note.push_str(&format!(
             " This session is tracked as weaver issue #{id}: keep `weaver \
-             status <level> \"<message>\"` honest as you work, and run `weaver \
+             status set --tag <level> --message \"<message>\"` honest as you work, and run `weaver \
              issue close {id}` once the task is complete (e.g. the PR is open) \
              so whoever launched you knows you are done."
         ));
