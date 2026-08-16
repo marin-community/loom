@@ -16,9 +16,11 @@ a gap.
 
 ## App shell and workbench
 
-The rail has five stable destinations: **Sessions**, **Issues**, **Watch**,
-**Shell**, and **Settings**. Session Artifacts and Changes are not global
-destinations; they live together under that session's Review surface.
+The rail has stable destinations for **Sessions**, **Channels**, **Issues**,
+**Watch**, **Shell**, and **Settings**. On narrow screens it becomes a bottom
+navigation bar so the work surface keeps the full viewport width. Session
+Artifacts and Changes are not global destinations; they live together under
+that session's Review surface.
 
 Sessions is organized as shared **Spaces → Groups → Sessions**. **Later** is a
 top-level space ahead of the provenance spaces, keeping deferred work out of
@@ -96,9 +98,9 @@ reassociation is an adjacent secondary action, and an empty pill remains a
 discoverable setup action.
 
 **Details** is a popover, not a work tab. It owns task and launch metadata,
-status history, lifecycle actions, handoff, auto-archive policy, and Scratch.
-The embedded editor is an optional **Advanced → Open editor** escape hatch,
-loaded beside the work area only when requested.
+status history, lifecycle actions, handoff, and auto-archive policy. The
+embedded editor is an optional **Advanced → Open editor** escape hatch. Split
+panels open beside the work area on wide screens and below it on narrow ones.
 
 Archive stops the runtime and removes the worktree while preserving the branch,
 conversation, placement, artifacts, and Weaver history. Remove deletes the
@@ -114,8 +116,10 @@ selected issues changes.
 
 Scratch is inbound reference material, kept out of Git. Launch-time and live
 drop targets share the server's file-count, per-file, total-size, and filename
-validation. Each drop target is scoped to its active route so a cached session
-cannot consume files intended for another session.
+validation. A session shows one attachment inline on a wide tab row; larger
+collections, and every collection on a narrow screen, live in a bounded menu.
+Each drop target is scoped to its active route so a cached session cannot
+consume files intended for another session.
 
 ## Confirmation and feedback
 

@@ -93,13 +93,13 @@ const visibleMain = computed(() =>
 
 <template>
   <nav
-    class="flex w-14 shrink-0 flex-col items-stretch border-r border-line bg-rail"
+    class="order-2 flex h-14 w-full shrink-0 flex-row items-stretch border-t border-line bg-rail sm:order-none sm:h-auto sm:w-14 sm:flex-col sm:border-r sm:border-t-0"
     aria-label="Primary"
   >
     <!-- Wordmark — a warp/weft weave glyph; home link to the fleet. -->
     <router-link
       to="/"
-      class="flex h-12 items-center justify-center text-accent"
+      class="hidden h-12 items-center justify-center text-accent sm:flex"
       title="loom — agent sessions"
       aria-label="loom home"
     >
@@ -124,12 +124,12 @@ const visibleMain = computed(() =>
       :title="item.title ?? item.label"
       :data-rail="item.data ?? item.label.toLowerCase()"
       :aria-current="active(item) ? 'page' : undefined"
-      class="relative flex flex-col items-center gap-0.5 py-2.5 transition-colors"
+      class="relative flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 px-0.5 py-1 transition-colors sm:flex-none sm:px-0 sm:py-2.5"
       :class="active(item) ? 'text-fg' : 'text-faint hover:text-muted'"
     >
       <span
         v-if="active(item)"
-        class="absolute inset-y-1.5 left-0 w-0.5 rounded-r bg-accent"
+        class="absolute inset-x-2 top-0 h-0.5 rounded-b bg-accent sm:inset-x-auto sm:inset-y-1.5 sm:left-0 sm:top-auto sm:h-auto sm:w-0.5 sm:rounded-b-none sm:rounded-r"
         aria-hidden="true"
       ></span>
       <svg
@@ -145,14 +145,16 @@ const visibleMain = computed(() =>
       >
         <path v-for="(d, i) in item.paths" :key="i" :d="d" />
       </svg>
-      <span class="text-[10px] leading-3">{{ item.label }}</span>
+      <span class="text-[9px] leading-3 sm:text-[10px]">{{ item.label }}</span>
     </router-link>
 
     <!-- Bottom cluster: theme toggle + settings (the VS Code idiom). -->
-    <div class="mt-auto flex flex-col items-stretch pb-1.5">
+    <div
+      class="flex min-w-0 flex-[2] flex-row items-stretch sm:mt-auto sm:flex-none sm:flex-col sm:pb-1.5"
+    >
       <button
         type="button"
-        class="flex flex-col items-center gap-0.5 py-2.5 text-faint transition-colors hover:text-muted"
+        class="flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 px-0.5 py-1 text-faint transition-colors hover:text-muted sm:flex-none sm:px-0 sm:py-2.5"
         :title="theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'"
         aria-label="Toggle color theme"
         @click="toggleTheme"
@@ -187,18 +189,19 @@ const visibleMain = computed(() =>
         >
           <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
         </svg>
+        <span class="text-[9px] leading-3 sm:hidden">Theme</span>
       </button>
       <router-link
         :to="SETTINGS.to"
         :title="SETTINGS.label"
         data-rail="settings"
         :aria-current="active(SETTINGS) ? 'page' : undefined"
-        class="relative flex flex-col items-center gap-0.5 py-2.5 transition-colors"
+        class="relative flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 px-0.5 py-1 transition-colors sm:flex-none sm:px-0 sm:py-2.5"
         :class="active(SETTINGS) ? 'text-fg' : 'text-faint hover:text-muted'"
       >
         <span
           v-if="active(SETTINGS)"
-          class="absolute inset-y-1.5 left-0 w-0.5 rounded-r bg-accent"
+          class="absolute inset-x-2 top-0 h-0.5 rounded-b bg-accent sm:inset-x-auto sm:inset-y-1.5 sm:left-0 sm:top-auto sm:h-auto sm:w-0.5 sm:rounded-b-none sm:rounded-r"
           aria-hidden="true"
         ></span>
         <svg
@@ -214,6 +217,7 @@ const visibleMain = computed(() =>
         >
           <path v-for="(d, i) in SETTINGS.paths" :key="i" :d="d" />
         </svg>
+        <span class="text-[9px] leading-3 sm:hidden">Settings</span>
       </router-link>
     </div>
   </nav>

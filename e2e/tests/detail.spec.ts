@@ -390,16 +390,90 @@ test.describe('session detail view', () => {
       return dt;
     });
     await page.getByTestId('scratch-dropzone').dispatchEvent('drop', { dataTransfer });
-    await expect(panel.getByText('dropped.txt')).toBeVisible();
+    const scratchMenuButton = panel.getByRole('button', { name: 'Scratch files, 2 attached' });
+    await expect(scratchMenuButton).toBeVisible();
+    await scratchMenuButton.click();
+    const scratchMenu = panel.getByTestId('scratch-menu');
+    await expect(scratchMenu.getByText('dropped.txt')).toBeVisible();
 
     // Both landed server-side in the worktree's scratch/.
     const res = await fetch(`${weaver.baseUrl}/api/sessions/${s.id}/scratch`);
     const listed = ((await res.json()) as { name: string }[]).map((f) => f.name).sort();
     expect(listed).toEqual(['dropped.txt', 'notes.txt']);
 
-    // A chip's ✕ removes that file.
-    await panel.getByRole('button', { name: 'Remove notes.txt' }).click();
+    // The collection menu's ✕ removes that file.
+    await scratchMenu.getByRole('menuitem', { name: 'Remove notes.txt' }).click();
     await expect(panel.getByText('notes.txt')).toHaveCount(0);
+  });
+
+  test('narrow session chrome keeps scratch files and navigation bounded', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({
+      goal: 'Keep a phone-sized workbench usable',
+      name: 'mobile-scratch-task',
+    });
+    const names = Array.from(
+      { length: 8 },
+      (_, index) => `20260816-${String(index + 1).padStart(4, '0')}-monitoring-state.json`,
+    );
+    for (const name of names) {
+      const response = await fetch(
+        `${weaver.baseUrl}/api/sessions/${s.id}/scratch?name=${encodeURIComponent(name)}`,
+        { method: 'POST', body: Buffer.from('{}') },
+      );
+      expect(response.ok, await response.text()).toBe(true);
+    }
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+
+    // Primary navigation becomes a full-width bottom bar, returning the width
+    // that a permanent side rail would otherwise take from the work surface.
+    const primary = page.getByRole('navigation', { name: 'Primary' });
+    const primaryBox = await primary.boundingBox();
+    expect(primaryBox).not.toBeNull();
+    expect(primaryBox!.width).toBe(390);
+    expect(primaryBox!.y).toBeGreaterThan(780);
+    await expect(primary.getByText('Sessions', { exact: true })).toBeVisible();
+    await expect(primary.getByText('Settings', { exact: true })).toBeVisible();
+
+    // A long scratch collection stays one row tall and opens in a bounded,
+    // keyboard-dismissible menu instead of stretching the tabs down the page.
+    const tabs = page.getByTestId('session-tabs');
+    const tabsBox = await tabs.boundingBox();
+    expect(tabsBox).not.toBeNull();
+    expect(tabsBox!.height).toBeLessThan(40);
+    const scratchButton = page.getByRole('button', {
+      name: 'Scratch files, 8 attached',
+    });
+    await expect(scratchButton).toBeVisible();
+    await scratchButton.click();
+    const menu = page.getByTestId('scratch-menu');
+    await expect(menu).toBeVisible();
+    await expect(menu.getByText(names[0], { exact: true })).toBeVisible();
+    const menuBox = await menu.boundingBox();
+    expect(menuBox).not.toBeNull();
+    expect(menuBox!.x).toBeGreaterThanOrEqual(0);
+    expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(390);
+
+    await page.screenshot({
+      path: test.info().outputPath('mobile-session-scratch.png'),
+      fullPage: false,
+    });
+
+    await menu.getByRole('menuitem', { name: `Remove ${names[0]}` }).click();
+    await expect(page.getByRole('button', { name: 'Scratch files, 7 attached' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
+    await expect(
+      page.getByRole('button', { name: 'Scratch files, 7 attached' }),
+    ).toBeFocused();
+
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
   });
 
   test('renders an interactive terminal that connects to the agent', async ({ page, weaver }) => {

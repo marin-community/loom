@@ -576,14 +576,15 @@ onUnmounted(() => {
               </template>
             </template>
 
-            <!-- Pop out beside the terminal / dock back into the tab. -->
+            <!-- Open beside the work area on wide screens or below it on narrow
+                 screens, then dock back into the tab. -->
             <button
               class="rounded border border-line px-1.5 py-1 text-muted hover:bg-subtle hover:text-fg"
               data-testid="artifact-pop"
-              :title="popped ? 'Dock back into the tab' : 'Pop out beside the terminal'"
+              :title="popped ? 'Dock back into the tab' : 'Open in the split panel'"
               @click="togglePop"
             >
-              {{ popped ? '⤡ Dock' : '⤢ Pop out' }}
+              {{ popped ? '⤡ Dock' : '⤢ Split' }}
             </button>
             <!-- Close the rail entirely (popped only) — back to the plain page. -->
             <button

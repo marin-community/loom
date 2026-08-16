@@ -291,6 +291,52 @@ test.describe('artifacts surface', () => {
       .toBeLessThanOrEqual(5);
   });
 
+  test('a narrow split stacks the artifact below the session', async ({ page, weaver }) => {
+    const session = await weaver.seedSession({
+      goal: 'Review an artifact without squeezing the phone layout',
+      name: 'mobile-artifact-split',
+    });
+    await weaver.writeArtifact(session, 'notes', longDoc(), { title: 'Notes' });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/notes`);
+    await page.getByTestId('artifact-pop').click();
+    await expect(page.getByTestId('artifact-rail-close')).toBeVisible();
+
+    const main = page.locator('.session-detail-main');
+    const split = page.locator('.session-split-panel');
+    const [mainBox, splitBox] = await Promise.all([main.boundingBox(), split.boundingBox()]);
+    expect(mainBox).not.toBeNull();
+    expect(splitBox).not.toBeNull();
+    expect(splitBox!.x).toBe(mainBox!.x);
+    expect(splitBox!.width).toBe(mainBox!.width);
+    expect(splitBox!.y).toBeGreaterThanOrEqual(mainBox!.y + mainBox!.height - 1);
+    expect(splitBox!.height).toBeGreaterThan(120);
+
+    const scroll = page.getByTestId('artifact-scroll');
+    await expect(scroll).toBeVisible();
+    expect(
+      await scroll.evaluate((element) => element.scrollHeight > element.clientHeight + 1_000),
+    ).toBe(true);
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+    expect(
+      await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight),
+    ).toBe(true);
+
+    const primary = page.getByRole('navigation', { name: 'Primary' });
+    const primaryBox = await primary.boundingBox();
+    expect(primaryBox).not.toBeNull();
+    expect(primaryBox!.width).toBe(390);
+    expect(primaryBox!.y).toBeGreaterThan(780);
+
+    await page.screenshot({
+      path: test.info().outputPath('mobile-artifact-split.png'),
+      fullPage: false,
+    });
+  });
+
   test('Review routes keep artifacts on the warm session page', async ({
     page,
     weaver,

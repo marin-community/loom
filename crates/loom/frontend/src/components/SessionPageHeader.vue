@@ -479,7 +479,7 @@ async function submitHandoff() {
                   >
                     <span class="block text-xs font-medium">Open editor</span>
                     <span class="block text-2xs text-faint"
-                      >Open the worktree in the side panel.</span
+                      >Open the worktree in a split panel.</span
                     >
                   </button>
                 </details>

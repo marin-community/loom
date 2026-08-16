@@ -260,9 +260,10 @@ async function closeRail() {
   });
 }
 
-// --- Resizable side rails --------------------------------------------------
-// Two on-demand panels pull in from the right: the artifact (popped out) and the
-// embedded editor. Each persists its own width and drags from the right edge.
+// --- Resizable split panels ------------------------------------------------
+// On wide screens two on-demand panels pull in from the right: the artifact
+// (popped out) and embedded editor. Each persists its width and drags from the
+// right edge; the narrow layout stacks them below and hides the drag handles.
 const MIN_PANEL_WIDTH = 360;
 function loadWidth(key: string, fallback: number): number {
   const v = Number(localStorage.getItem(key));
@@ -271,8 +272,8 @@ function loadWidth(key: string, fallback: number): number {
 const artifactWidth = ref(loadWidth('loom.artifactWidth', 620));
 const ideWidth = ref(loadWidth('loom.ideWidth', 760));
 function panelWidth(width: number): { width: string } {
-  // On narrow windows the app rail still needs room; saved desktop widths must
-  // not push the close control or document scroller off-screen.
+  // Saved desktop widths must not push the close control or document scroller
+  // off-screen. The narrow layout overrides this inline width and stacks.
   return { width: `min(${width}px, calc(100vw - 3.5rem))` };
 }
 
@@ -482,13 +483,13 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <!-- A horizontal split fills the workbench main area: the session page (header
-       + tabs + work area) on the left, then any panels pulled in from the right
-       — the popped-out artifact and the embedded editor, each resizable. -->
-  <div v-if="ws" class="flex min-h-0 flex-1 overflow-hidden">
+  <!-- The split fills the workbench main area. Wide screens place on-demand
+       panels to the right; narrow screens stack them below the session so both
+       surfaces retain a useful width. -->
+  <div v-if="ws" class="session-detail-shell flex min-h-0 flex-1 overflow-hidden">
     <!-- Left: the session page. min-w-0 lets it shrink as panels widen;
          AgentTerminal's ResizeObserver re-fits the terminal on the change. -->
-    <div class="flex min-h-0 min-w-0 flex-1 flex-col px-3 py-2 sm:px-5 sm:py-3">
+    <div class="session-detail-main flex min-h-0 min-w-0 flex-1 flex-col px-3 py-2 sm:px-5 sm:py-3">
       <SessionPageHeader
         :ws="ws"
         :events="events"
@@ -578,12 +579,12 @@ onUnmounted(() => {
          tab can stay warm for the instant terminal ⇄ artifacts flip. -->
     <template v-if="railOpen">
       <div
-        class="w-1 shrink-0 cursor-col-resize bg-line hover:bg-accent"
+        class="session-panel-handle w-1 shrink-0 cursor-col-resize bg-line hover:bg-accent"
         title="Drag to resize the artifact panel"
         @mousedown="(e) => startDrag('artifact', e)"
       ></div>
       <section
-        class="flex min-h-0 shrink-0 flex-col overflow-hidden border-l border-line"
+        class="session-split-panel flex min-h-0 shrink-0 flex-col overflow-hidden border-l border-line"
         :style="panelWidth(artifactWidth)"
       >
         <ArtifactsPanel
@@ -605,12 +606,12 @@ onUnmounted(() => {
       <!-- Open: a draggable divider + the editor at the persisted width. -->
       <template v-if="ideOpen">
         <div
-          class="w-1 shrink-0 cursor-col-resize bg-line hover:bg-accent"
+          class="session-panel-handle w-1 shrink-0 cursor-col-resize bg-line hover:bg-accent"
           title="Drag to resize the editor"
           @mousedown="(e) => startDrag('ide', e)"
         ></div>
         <section
-          class="relative flex min-h-0 shrink-0 flex-col overflow-hidden border-l border-line"
+          class="session-split-panel relative flex min-h-0 shrink-0 flex-col overflow-hidden border-l border-line"
           :style="panelWidth(ideWidth)"
         >
           <button
@@ -632,3 +633,32 @@ onUnmounted(() => {
   <p v-else-if="error" class="px-5 py-3 text-sm text-block">{{ error }}</p>
   <p v-else class="px-5 py-3 text-sm text-muted">Loading…</p>
 </template>
+
+<style scoped>
+@media (max-width: 767px) {
+  .session-detail-shell {
+    flex-direction: column;
+    /* Break the content-sized flex loop so a long document scrolls within the
+       split instead of pushing the bottom navigation below the viewport. */
+    height: 0;
+  }
+
+  .session-detail-main {
+    flex: 3 1 0;
+    min-height: 8rem;
+  }
+
+  .session-panel-handle {
+    display: none;
+  }
+
+  .session-split-panel {
+    width: 100% !important;
+    min-height: 8rem;
+    max-height: none;
+    flex: 2 1 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+}
+</style>
