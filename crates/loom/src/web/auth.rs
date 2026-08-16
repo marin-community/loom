@@ -12,7 +12,7 @@ use serde_json::json;
 use sqlx::Row;
 use weaver_api::{
     AddUserReq, AuthMethods, CreateTokenReq, CreatedTokenView, GithubConfigView, LoginReq, MeView,
-    SetGithubConfigReq, SetPasswordReq, TokenView, UserView,
+    SetGithubConfigReq, SetPasswordReq, SetUserRoleReq, TokenView, UserRole, UserView,
 };
 
 use crate::auth::{self, Grant, Principal};
@@ -160,6 +160,7 @@ pub(super) async fn grant_allows(
     }
     match &principal.grant {
         Grant::Admin => true,
+        Grant::User => user_grant_allows(method, path),
         Grant::Automation { subject, .. } => {
             if path == "/runs" || path.starts_with("/runs/") {
                 return true;
@@ -219,6 +220,35 @@ pub(super) async fn grant_allows(
                 )
         }
     }
+}
+
+fn user_grant_allows(method: &axum::http::Method, path: &str) -> bool {
+    if path == "/auth/users"
+        || path.starts_with("/auth/users/")
+        || path == "/auth/github/config"
+        || path == "/auth/automation-token"
+        || path == "/auth/federations"
+        || path.starts_with("/auth/federations/")
+        || path == "/deployment/reconcile"
+        || path == "/shell/terminal"
+        || path == "/shell/restart"
+    {
+        return false;
+    }
+    if matches!(*method, axum::http::Method::GET | axum::http::Method::HEAD) {
+        return true;
+    }
+    !(path == "/settings"
+        || path == "/env"
+        || path.starts_with("/env/")
+        || path == "/profiles"
+        || path.starts_with("/profiles/")
+        || path == "/agents/custom"
+        || path.starts_with("/agents/custom/")
+        || path == "/mcps/custom"
+        || path.starts_with("/mcps/custom/")
+        || path == "/watches"
+        || path.starts_with("/watches/"))
 }
 
 /// Pull the token out of an `Authorization: Bearer <token>` header.
@@ -402,6 +432,7 @@ pub(super) async fn auth_me(
     Json(match principal {
         Some(p) => MeView {
             authenticated: true,
+            role: p.user_role().map(user_role_view),
             username: Some(p.username),
             github_login: p.github_login,
             via: Some(p.via.as_str().to_string()),
@@ -409,6 +440,7 @@ pub(super) async fn auth_me(
         },
         None => MeView {
             authenticated: false,
+            role: None,
             username: None,
             github_login: None,
             via: None,
@@ -534,8 +566,11 @@ fn token_view(info: auth::TokenInfo) -> TokenView {
 }
 
 /// `GET /api/auth/tokens` — the user-managed API tokens.
-pub(super) async fn list_tokens(State(st): State<AppState>) -> ApiResult<Json<Vec<TokenView>>> {
-    let tokens = auth::list_tokens(&st.db).await?;
+pub(super) async fn list_tokens(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> ApiResult<Json<Vec<TokenView>>> {
+    let tokens = auth::list_tokens(&st.db, &principal.username).await?;
     Ok(Json(tokens.into_iter().map(token_view).collect()))
 }
 
@@ -569,10 +604,11 @@ pub(super) async fn create_token(
 /// `DELETE /api/auth/tokens/{id}` — revoke a token.
 pub(super) async fn revoke_token(
     State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    if auth::revoke_token(&st.db, &id).await? {
-        tracing::info!(id = %id, "api token revoked");
+    if auth::revoke_token(&st.db, &principal.username, &id).await? {
+        tracing::info!(username = %principal.username, id = %id, "api token revoked");
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(AppError::not_found("token"))
@@ -650,7 +686,22 @@ fn user_view(u: auth::User) -> UserView {
         username: u.username,
         github_login: u.github_login,
         has_password,
+        role: user_role_view(u.role),
         created_at: u.created_at,
+    }
+}
+
+fn user_role_view(role: auth::UserRole) -> UserRole {
+    match role {
+        auth::UserRole::Admin => UserRole::Admin,
+        auth::UserRole::User => UserRole::User,
+    }
+}
+
+fn user_role_input(role: UserRole) -> auth::UserRole {
+    match role {
+        UserRole::Admin => auth::UserRole::Admin,
+        UserRole::User => auth::UserRole::User,
     }
 }
 
@@ -687,11 +738,34 @@ pub(super) async fn add_user(
             ));
         }
     }
-    auth::add_user(&st.db, username, github, password)
-        .await
-        .map_err(|e| AppError::bad_request(format!("could not add user: {e}")))?;
+    auth::add_user(
+        &st.db,
+        username,
+        github,
+        password,
+        user_role_input(body.role),
+    )
+    .await
+    .map_err(|e| AppError::bad_request(format!("could not add user: {e}")))?;
     tracing::info!(username, "operator added");
     let user = auth::get_user(&st.db, username)
+        .await?
+        .ok_or_else(|| AppError::not_found("user"))?;
+    Ok(Json(user_view(user)))
+}
+
+/// `PUT /api/auth/users/{username}/role` — update one human role. Existing
+/// cookies and personal tokens observe the change on their next request.
+pub(super) async fn set_user_role(
+    State(st): State<AppState>,
+    Path(username): Path<String>,
+    Json(body): Json<SetUserRoleReq>,
+) -> ApiResult<Json<UserView>> {
+    auth::set_user_role(&st.db, &username, user_role_input(body.role))
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    tracing::info!(username, role = ?body.role, "user role updated");
+    let user = auth::get_user(&st.db, &username)
         .await?
         .ok_or_else(|| AppError::not_found("user"))?;
     Ok(Json(user_view(user)))

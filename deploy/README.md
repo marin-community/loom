@@ -299,7 +299,7 @@ To register by hand instead:
 2. Open `https://<LOOM_DOMAIN>` and **Continue with GitHub** as
    `LOOM_OWNER_GITHUB`.
 3. Once in, approve teammates, set a password for password-login, and mint
-   automation tokens under **Settings → Account / Tokens**.
+   automation tokens under **Settings → Access**.
 
 For automation, the `loom` CLI inside the container is already authenticated as
 the owner (via the machine-local token loom injects), so it works without a

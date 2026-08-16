@@ -130,6 +130,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "channel-delivery-bindings",
         include_str!("../migrations/0024_channel_delivery_bindings.sql"),
     ),
+    (
+        25,
+        "user-roles-preferences",
+        include_str!("../migrations/0025_user_roles_preferences.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -321,7 +326,7 @@ async fn seed_owner(pool: &Db) -> Result<()> {
         return Ok(());
     };
     sqlx::query(
-        "INSERT INTO users (username, github_login) VALUES (?, ?)
+        "INSERT INTO users (username, github_login, role) VALUES (?, ?, 'admin')
          ON CONFLICT DO NOTHING",
     )
     .bind(&owner)
@@ -479,6 +484,48 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn role_migration_promotes_existing_users_and_creates_preferences() {
+        let db = core_connect_in_memory().await.unwrap();
+        migrate_through(&db, 24).await;
+        sqlx::query("INSERT INTO users (username, github_login) VALUES ('alice', 'alice-gh')")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        LOOM_STREAM.apply_pending(&db).await.unwrap();
+
+        let role: String = sqlx::query_scalar("SELECT role FROM users WHERE username = 'alice'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(role, "admin");
+        sqlx::query("INSERT INTO users (username) VALUES ('bob')")
+            .execute(&db)
+            .await
+            .unwrap();
+        let new_role: String = sqlx::query_scalar("SELECT role FROM users WHERE username = 'bob'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(new_role, "user");
+        sqlx::query(
+            "INSERT INTO user_preferences (username, key, value)
+             VALUES ('alice', 'terminal.theme', 'light')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let value: String = sqlx::query_scalar(
+            "SELECT value FROM user_preferences
+             WHERE username = 'alice' AND key = 'terminal.theme'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(value, "light");
     }
 
     #[tokio::test]

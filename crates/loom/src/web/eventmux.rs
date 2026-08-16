@@ -175,7 +175,10 @@ pub(super) async fn events_mux(
                 format!("credential grant forbids topic '{name}'"),
             ));
         }
-        streams.insert(name.to_string(), topic_stream(&st, name, topic).await);
+        streams.insert(
+            name.to_string(),
+            topic_stream(&st, &principal, name, topic).await?,
+        );
     }
 
     // Never let the merged stream terminate: an SSE response that ends puts the
@@ -189,9 +192,14 @@ pub(super) async fn events_mux(
 }
 
 /// Build one topic's stream, already framed with its topic name.
-async fn topic_stream(st: &AppState, name: &str, topic: Topic) -> TopicStream {
+async fn topic_stream(
+    st: &AppState,
+    principal: &Principal,
+    name: &str,
+    topic: Topic,
+) -> ApiResult<TopicStream> {
     let owned = name.to_string();
-    match topic {
+    let stream: TopicStream = match topic {
         Topic::Layout => {
             let stream = BroadcastStream::new(st.bus.subscribe()).filter_map(move |result| {
                 let event = result.ok()?;
@@ -203,11 +211,12 @@ async fn topic_stream(st: &AppState, name: &str, topic: Topic) -> TopicStream {
             Box::pin(stream)
         }
         Topic::Logs => {
+            let redactor = super::logview::log_redactor(&st.db, principal).await?;
             let stream =
                 BroadcastStream::new(logs::buffer().subscribe()).filter_map(move |result| {
                     // A lagged subscriber yields Err; skip the gap (the client can
                     // re-snapshot).
-                    let line = result.ok()?;
+                    let line = super::logview::redact_line(&redactor, result.ok()?);
                     Some(frame(&owned, "log", json!(line)))
                 });
             Box::pin(stream)
@@ -215,7 +224,7 @@ async fn topic_stream(st: &AppState, name: &str, topic: Topic) -> TopicStream {
         Topic::Session(key) => {
             let branch = match require_branch(&st.db, &key).await {
                 Ok(branch) => branch,
-                Err(e) => return unresolved(&owned, &e),
+                Err(e) => return Ok(unresolved(&owned, &e)),
             };
             let id = branch.id;
             let stream = BroadcastStream::new(st.bus.subscribe()).filter_map(move |result| {
@@ -231,7 +240,7 @@ async fn topic_stream(st: &AppState, name: &str, topic: Topic) -> TopicStream {
         Topic::Chat(key) => {
             let session = match require_session(&st.db, &key).await {
                 Ok((session, _)) => session,
-                Err(e) => return unresolved(&owned, &e),
+                Err(e) => return Ok(unresolved(&owned, &e)),
             };
             match st.acp.get(&session.id) {
                 Some(handle) => {
@@ -245,7 +254,8 @@ async fn topic_stream(st: &AppState, name: &str, topic: Topic) -> TopicStream {
                 None => Box::pin(tokio_stream::pending()),
             }
         }
-    }
+    };
+    Ok(stream)
 }
 
 /// A topic that could not be resolved reports one `error` frame and then goes

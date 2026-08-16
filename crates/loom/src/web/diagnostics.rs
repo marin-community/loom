@@ -1,4 +1,4 @@
-//! Operational health, Prometheus metrics, and the admin diagnostics snapshot.
+//! Operational health, Prometheus metrics, and the authenticated diagnostics snapshot.
 //!
 //! Everything here is derived from durable control-plane state. Labels are
 //! restricted to bounded operational dimensions; identities, paths, branch and
@@ -427,8 +427,8 @@ pub(super) async fn diagnostics(
     State(st): State<AppState>,
     Extension(principal): Extension<Principal>,
 ) -> ApiResult<Json<DiagnosticsView>> {
-    if !principal.is_admin() {
-        return Err(AppError::new(StatusCode::FORBIDDEN, "admin grant required"));
+    if !principal.is_human() {
+        return Err(AppError::new(StatusCode::FORBIDDEN, "human grant required"));
     }
     Ok(Json(snapshot(&st.db).await?))
 }
@@ -616,7 +616,7 @@ async fn render_metrics(db: &Db, view: &DiagnosticsView) -> Result<String> {
 }
 
 /// Public scrape surface. It contains aggregates only; the richer inventory is
-/// admin-gated at `/api/diagnostics`.
+/// human-gated at `/api/diagnostics`.
 pub(super) async fn metrics(State(st): State<AppState>) -> Response {
     match metric_snapshot(&st.db).await {
         Ok(view) => match render_metrics(&st.db, &view).await {

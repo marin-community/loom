@@ -22,13 +22,13 @@ use crate::session_layout::{self, MutationError};
 
 use super::{ApiResult, AppError, AppState};
 
-fn require_admin(principal: &Principal) -> ApiResult<()> {
-    if principal.is_admin() {
+fn require_human(principal: &Principal) -> ApiResult<()> {
+    if principal.is_human() {
         Ok(())
     } else {
         Err(AppError::new(
             StatusCode::FORBIDDEN,
-            "shared session layout requires an admin credential",
+            "shared session layout requires a human credential",
         ))
     }
 }
@@ -57,7 +57,7 @@ pub(super) async fn get_session_layout(
     State(st): State<AppState>,
     Extension(principal): Extension<Principal>,
 ) -> ApiResult<Json<SessionLayoutView>> {
-    require_admin(&principal)?;
+    require_human(&principal)?;
     Ok(Json(
         session_layout::get_layout(&st.db, &principal.username).await?,
     ))
@@ -68,7 +68,7 @@ pub(super) async fn create_session_space(
     Extension(principal): Extension<Principal>,
     Json(req): Json<CreateSessionSpaceReq>,
 ) -> ApiResult<Json<SessionLayoutView>> {
-    require_admin(&principal)?;
+    require_human(&principal)?;
     let result = session_layout::create_space(&st.db, &principal.username, &req).await;
     mutation_response(&st, &principal.username, result).await
 }
@@ -79,7 +79,7 @@ pub(super) async fn update_session_space(
     Path(id): Path<String>,
     Json(req): Json<UpdateSessionSpaceReq>,
 ) -> ApiResult<Json<SessionLayoutView>> {
-    require_admin(&principal)?;
+    require_human(&principal)?;
     let result = session_layout::update_space(&st.db, &principal.username, &id, &req).await;
     mutation_response(&st, &principal.username, result).await
 }
@@ -90,7 +90,7 @@ pub(super) async fn delete_session_space(
     Path(id): Path<String>,
     Json(req): Json<DeleteSessionSpaceReq>,
 ) -> ApiResult<Json<SessionLayoutView>> {
-    require_admin(&principal)?;
+    require_human(&principal)?;
     let result = session_layout::delete_space(&st.db, &principal.username, &id, &req).await;
     mutation_response(&st, &principal.username, result).await
 }
@@ -100,7 +100,7 @@ pub(super) async fn create_session_group(
     Extension(principal): Extension<Principal>,
     Json(req): Json<CreateSessionGroupReq>,
 ) -> ApiResult<Json<SessionLayoutView>> {
-    require_admin(&principal)?;
+    require_human(&principal)?;
     let result = session_layout::create_group(&st.db, &principal.username, &req).await;
     mutation_response(&st, &principal.username, result).await
 }
@@ -111,7 +111,7 @@ pub(super) async fn update_session_group(
     Path(id): Path<String>,
     Json(req): Json<UpdateSessionGroupReq>,
 ) -> ApiResult<Json<SessionLayoutView>> {
-    require_admin(&principal)?;
+    require_human(&principal)?;
     let result = session_layout::update_group(&st.db, &principal.username, &id, &req).await;
     mutation_response(&st, &principal.username, result).await
 }
@@ -122,7 +122,7 @@ pub(super) async fn delete_session_group(
     Path(id): Path<String>,
     Json(req): Json<DeleteSessionGroupReq>,
 ) -> ApiResult<Json<SessionLayoutView>> {
-    require_admin(&principal)?;
+    require_human(&principal)?;
     let result = session_layout::delete_group(&st.db, &principal.username, &id, &req).await;
     mutation_response(&st, &principal.username, result).await
 }
@@ -132,7 +132,7 @@ pub(super) async fn reorder_session_layout(
     Extension(principal): Extension<Principal>,
     Json(req): Json<ReorderSessionLayoutReq>,
 ) -> ApiResult<Json<SessionLayoutView>> {
-    require_admin(&principal)?;
+    require_human(&principal)?;
     let result = session_layout::reorder(&st.db, &principal.username, &req).await;
     mutation_response(&st, &principal.username, result).await
 }
@@ -142,7 +142,7 @@ pub(super) async fn move_session_layout(
     Extension(principal): Extension<Principal>,
     Json(req): Json<MoveSessionsReq>,
 ) -> ApiResult<Json<SessionLayoutView>> {
-    require_admin(&principal)?;
+    require_human(&principal)?;
     let result = session_layout::move_sessions(&st.db, &principal.username, &req).await;
     mutation_response(&st, &principal.username, result).await
 }
@@ -152,7 +152,7 @@ pub(super) async fn restore_session_layout(
     Extension(principal): Extension<Principal>,
     Json(req): Json<RestoreSessionGroupsReq>,
 ) -> ApiResult<Json<SessionLayoutView>> {
-    require_admin(&principal)?;
+    require_human(&principal)?;
     let result = session_layout::restore_groups(&st.db, &principal.username, &req).await;
     mutation_response(&st, &principal.username, result).await
 }
@@ -163,7 +163,7 @@ pub(super) async fn set_session_group_preference(
     Path(id): Path<String>,
     Json(req): Json<SessionGroupPreferenceReq>,
 ) -> ApiResult<Json<SessionLayoutView>> {
-    require_admin(&principal)?;
+    require_human(&principal)?;
     session_layout::set_preference(&st.db, &principal.username, &id, req.collapsed)
         .await
         .map(Json)
@@ -175,7 +175,7 @@ pub(super) async fn set_session_placement_default(
     Extension(principal): Extension<Principal>,
     Json(req): Json<SetSessionPlacementDefaultReq>,
 ) -> ApiResult<Json<SessionLayoutView>> {
-    require_admin(&principal)?;
+    require_human(&principal)?;
     let result = session_layout::set_default(&st.db, &principal.username, &req).await;
     mutation_response(&st, &principal.username, result).await
 }
@@ -191,7 +191,7 @@ pub(super) async fn delete_session_placement_default(
     Path((kind, value)): Path<(SessionPlacementSelectorKind, String)>,
     Query(query): Query<DeleteDefaultQuery>,
 ) -> ApiResult<Json<SessionLayoutView>> {
-    require_admin(&principal)?;
+    require_human(&principal)?;
     let result = session_layout::delete_default(
         &st.db,
         &principal.username,
@@ -210,7 +210,7 @@ pub(super) async fn session_layout_events(
     State(st): State<AppState>,
     Extension(principal): Extension<Principal>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
-    require_admin(&principal)?;
+    require_human(&principal)?;
     let stream = BroadcastStream::new(st.bus.subscribe()).filter_map(|result| {
         let event = result.ok()?;
         if event.kind != "session_layout" {

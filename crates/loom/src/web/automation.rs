@@ -95,7 +95,7 @@ fn run_identity(
     requested_profile: &str,
 ) -> ApiResult<(String, Vec<String>)> {
     match &principal.grant {
-        Grant::Admin => Ok((
+        Grant::Admin | Grant::User => Ok((
             principal.username.clone(),
             vec![requested_profile.to_string()],
         )),
@@ -492,7 +492,7 @@ pub(super) async fn list_runs(
     Extension(principal): Extension<Principal>,
 ) -> ApiResult<Json<Vec<RunView>>> {
     let subject = match &principal.grant {
-        Grant::Admin => None,
+        Grant::Admin | Grant::User => None,
         Grant::Automation { subject, .. } => Some(subject.as_str()),
         Grant::Session { .. } => {
             return Err(AppError::new(StatusCode::FORBIDDEN, "run access forbidden"))

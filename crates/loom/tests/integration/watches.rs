@@ -928,7 +928,7 @@ async fn rest_watch_lifecycle_and_validation() {
 use loom::builtins::python3_available;
 
 /// A github watch shells out to `gh` (reading PR labels/state); loom must inject
-/// the operator's `GH_TOKEN` (Settings → Environment) into the otherwise
+/// the operator's `GH_TOKEN` (Settings → Agents & profiles) into the otherwise
 /// env-stripped watch subprocess, or every github watch (pr-label, review-wait,
 /// archive-merged) is blind. The explicit inject wins over any ambient value, so
 /// the exact token reaches the process.
@@ -955,7 +955,7 @@ async fn watch_subprocess_receives_operator_gh_token() {
     )
     .await;
 
-    // Set the operator token (Settings → Environment) and fire a manual round.
+    // Set the operator token (Settings → Agents & profiles) and fire a manual round.
     loom::agent_env::set(&state.db, "GH_TOKEN", "ghtok-marker-xyz")
         .await
         .unwrap();

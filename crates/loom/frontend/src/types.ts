@@ -1214,7 +1214,24 @@ export interface SettingsEnvelope {
   settings: SettingView[];
 }
 
+export interface UserPreferenceView {
+  key: string;
+  label: string;
+  description: string;
+  kind: SettingKind;
+  options: string[];
+  value: string;
+  inherited_value: string;
+  is_overridden: boolean;
+}
+
+export interface UserPreferencesEnvelope {
+  preferences: UserPreferenceView[];
+}
+
 // --- Authentication --------------------------------------------------------
+
+export type UserRole = 'admin' | 'user';
 
 /** Which sign-in methods the login screen should offer. Mirrors weaver-api's
  *  `AuthMethods`. */
@@ -1231,6 +1248,7 @@ export interface Me {
   github_login: string | null;
   /** How they authenticated: `loopback` | `token` | `session` | null. */
   via: string | null;
+  role: UserRole | null;
   methods: AuthMethods;
 }
 
@@ -1255,6 +1273,7 @@ export interface User {
   username: string;
   github_login: string | null;
   has_password: boolean;
+  role: UserRole;
   created_at: string;
 }
 

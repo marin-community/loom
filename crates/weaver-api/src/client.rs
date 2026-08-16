@@ -1238,7 +1238,7 @@ impl Client {
         self.get_typed("/api/ready").await
     }
 
-    /// Admin-only redacted operational inventory (`GET /api/diagnostics`).
+    /// Human-readable redacted operational inventory (`GET /api/diagnostics`).
     pub async fn diagnostics(&self) -> Result<DiagnosticsView> {
         self.get_typed("/api/diagnostics").await
     }

@@ -1,10 +1,56 @@
 # Configuration policy
 
+## Configuration ownership
+
+Choose the configuration surface from who owns the value and how widely it
+should apply:
+
+| Owner | Configure in | Use for |
+|---|---|---|
+| User | **Settings → Account** and **Preferences** | Personal sign-in, password, API and GitHub tokens, and terminal appearance |
+| Session profile | **Settings → Agents & profiles** or a deployment manifest | Agent/model policy, instructions, GitHub repository allowlists, shared environment, and write-only session secrets |
+| Deployment | The **Administration** settings; deployment IaC for the production source | Approved users and roles, the Loom GitHub App, Slack App, federations, runtime policy, and machine-wide credentials or files |
+| Repository | `.weaver/config.toml`, `WEAVER.md`, and `AGENTS.md` | Non-secret repository setup, environment, and workflow instructions |
+
+The Administration section is visible only to admins. Users can launch and
+operate sessions, repositories, reviews, per-session shells, and shared layout;
+inspect watch activity, redacted server logs, and diagnostics; and manage their
+own account and preferences. Admins also manage deployment-wide policy,
+integrations, profiles, shared environment, watch definitions and runs, the raw
+operator log, the host scratch shell, and access. Existing users become admins
+when the role migration is applied; newly approved users default to the `user`
+role.
+
+Loopback trust and the machine-local token resolve the primary user's current
+role. Demoting that user while another admin exists therefore removes local
+administrative authority; keep an intentional admin path before doing so.
+
+**Settings → Agents & profiles** contains the readable, non-secret environment
+on the `default` profile. Other profiles keep their write-only environment
+beside their launch policy. Do not put personal tokens or deployment
+credentials in repository configuration.
+
+An ordinary interactive session selects GitHub access in this order: the
+launching user's personal token, an explicit `GH_TOKEN` from the resolved
+session environment (normally its profile), then a short-lived GitHub App token
+when the profile allowlists the current repository. The first two are exported
+as `GH_TOKEN` because `git` and `gh` expect that name; the App fallback remains
+repository-scoped and short-lived. See [Restricted GitHub
+sessions](restricted-sessions.md#github-credential-policy) for automation's
+different boundary.
+
+Files under a shared session home are deployment resources, not environment
+variables. An operator deployment may materialize them from its secret backend,
+but every session sharing that home can read them. Per-profile files require
+isolated session homes or mounts.
+
+## Registered setting precedence
+
 Loom resolves every registered setting through one explicit precedence chain:
 
 | Precedence | Source | Owned by | How to change it |
 |---|---|---|---|
-| 1 | Runtime override | operator | Settings, `PATCH /api/settings`, or `loom config set` |
+| 1 | Runtime override | admin | Administration settings, `PATCH /api/settings`, or `loom config set` |
 | 2 | Deployment default | infrastructure repository | `loom deployment apply` / `POST /api/deployment/reconcile` |
 | 3 | Built-in default | Loom release | `weaver-core::config::REGISTRY` |
 
@@ -15,7 +61,7 @@ default reveals the built-in. `GET /api/settings` reports the effective
 `value`, its `source`, and any `deployment_value`; the Settings UI shows the
 same provenance.
 
-This policy applies only to registered, non-secret global settings. Secrets
+This precedence applies only to registered, non-secret global settings. Secrets
 stay in the environment, profile secret references, or the credential-specific
 store and are never returned by the settings API. Per-repository setup,
 environment, and agent defaults belong in committed `.weaver/config.toml`; a
@@ -110,7 +156,7 @@ Runtime edits take effect without rebuilding a deployment:
 loom config set slack.status_updates false
 ```
 
-The Settings page and `PATCH /api/settings` use the same validation and storage
+The Administration pages and `PATCH /api/settings` use the same validation and storage
 path. Send `null` to clear an override and inherit again:
 
 ```json

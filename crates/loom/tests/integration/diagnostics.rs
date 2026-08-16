@@ -1,4 +1,4 @@
-//! Operational endpoints: public liveness/readiness/metrics and the admin-only,
+//! Operational endpoints: public liveness/readiness/metrics and the human-readable,
 //! redacted diagnostics inventory.
 
 use reqwest::StatusCode;
@@ -65,7 +65,7 @@ async fn seed_operational_state(ts: &TestServer) {
 
 #[tokio::test]
 #[serial]
-async fn diagnostics_are_correct_redacted_and_admin_only() {
+async fn diagnostics_are_correct_redacted_and_human_only() {
     let ts = TestServer::start().await;
     seed_operational_state(&ts).await;
     let http = reqwest::Client::new();

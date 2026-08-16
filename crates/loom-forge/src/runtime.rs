@@ -2,7 +2,7 @@
 
 use crate::Db;
 
-pub const MISSING_GITHUB_TOKEN_MESSAGE: &str = "No GitHub credential configured. Add your personal GitHub token in Settings > Account, allowlist this repository for the selected profile's GitHub App credential, or configure a write-only GH_TOKEN on the profile.";
+pub const MISSING_GITHUB_TOKEN_MESSAGE: &str = "No GitHub credential configured. Add your personal GitHub token in Settings > Access, allowlist this repository for the selected profile's GitHub App credential, or configure a write-only GH_TOKEN on the profile.";
 
 /// External lifecycle work (terminal supervisors + git worktrees) cannot share
 /// a SQLite transaction. Serialize those operations process-wide, then use

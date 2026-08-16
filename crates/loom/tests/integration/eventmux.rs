@@ -220,7 +220,7 @@ async fn session_token_cannot_subscribe_to_another_session() {
         .unwrap();
     assert_eq!(other.status(), StatusCode::FORBIDDEN);
 
-    // Operator-only topics stay operator-only.
+    // Human-only topics stay unavailable to scoped session credentials.
     let logs = http
         .get(events_url(&ts, "logs"))
         .bearer_auth(&token)

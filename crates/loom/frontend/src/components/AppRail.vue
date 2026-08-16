@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useRoute } from 'vue-router';
+import { me } from '../auth';
 import { theme, toggleTheme } from '../theme';
 
 // The workbench nav rail — the app's only chrome besides the status bar
@@ -85,6 +86,9 @@ const SETTINGS: RailItem = {
 };
 
 const active = computed(() => (item: RailItem) => item.match(route.path));
+const visibleMain = computed(() =>
+  MAIN.filter((item) => item.to !== '/shell' || me.role === 'admin'),
+);
 </script>
 
 <template>
@@ -114,7 +118,7 @@ const active = computed(() => (item: RailItem) => item.match(route.path));
     </router-link>
 
     <router-link
-      v-for="item in MAIN"
+      v-for="item in visibleMain"
       :key="item.to"
       :to="item.to"
       :title="item.title ?? item.label"

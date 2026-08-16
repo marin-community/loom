@@ -45,57 +45,59 @@ watch(authed, (ok) => (ok ? startFleetPoll() : stopFleetPoll()), { immediate: tr
 const route = useRoute();
 const router = useRouter();
 const commands = useCommandRegistry();
-const globalCommands = computed<Command[]>(() => [
-  {
-    id: 'global.help',
-    label: 'Show keyboard shortcuts',
-    keys: ['?'],
-    hint: true,
-    run: commands.toggleHelp,
-  },
-  {
-    id: 'global.sessions',
-    label: 'Go to Sessions',
-    keys: ['g s'],
-    run: () => void router.push('/'),
-  },
-  {
-    id: 'global.channels',
-    label: 'Go to Channels',
-    keys: ['g c'],
-    run: () => void router.push('/channels'),
-  },
-  {
-    id: 'global.issues',
-    label: 'Go to backlog',
-    keys: ['g i'],
-    run: () => void router.push('/issues'),
-  },
-  {
-    id: 'global.watches',
-    label: 'Go to Watches',
-    keys: ['g w'],
-    run: () => void router.push('/watches'),
-  },
-  {
-    id: 'global.shell',
-    label: 'Go to Shell',
-    keys: ['g h'],
-    run: () => void router.push('/shell'),
-  },
-  {
-    id: 'global.settings',
-    label: 'Go to Settings',
-    keys: ['g ,'],
-    run: () => void router.push('/settings'),
-  },
-  {
-    id: 'global.new-session',
-    label: 'New session',
-    keys: ['n'],
-    run: () => void router.push('/sessions/new'),
-  },
-]);
+const globalCommands = computed<Command[]>(() =>
+  [
+    {
+      id: 'global.help',
+      label: 'Show keyboard shortcuts',
+      keys: ['?'],
+      hint: true,
+      run: commands.toggleHelp,
+    },
+    {
+      id: 'global.sessions',
+      label: 'Go to Sessions',
+      keys: ['g s'],
+      run: () => void router.push('/'),
+    },
+    {
+      id: 'global.channels',
+      label: 'Go to Channels',
+      keys: ['g c'],
+      run: () => void router.push('/channels'),
+    },
+    {
+      id: 'global.issues',
+      label: 'Go to backlog',
+      keys: ['g i'],
+      run: () => void router.push('/issues'),
+    },
+    {
+      id: 'global.watches',
+      label: 'Go to Watches',
+      keys: ['g w'],
+      run: () => void router.push('/watches'),
+    },
+    {
+      id: 'global.shell',
+      label: 'Go to Shell',
+      keys: ['g h'],
+      run: () => void router.push('/shell'),
+    },
+    {
+      id: 'global.settings',
+      label: 'Go to Settings',
+      keys: ['g ,'],
+      run: () => void router.push('/settings'),
+    },
+    {
+      id: 'global.new-session',
+      label: 'New session',
+      keys: ['n'],
+      run: () => void router.push('/sessions/new'),
+    },
+  ].filter((command) => command.id !== 'global.shell' || me.role === 'admin'),
+);
 useCommandScope('global', 'Global', globalCommands, -100);
 useCommandDispatcher();
 const BASE_TITLE = 'Weaver';

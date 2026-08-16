@@ -569,9 +569,15 @@ mod tests {
             ensure_bootstrap_operator(&db).await.is_err(),
             "no operator must refuse boot"
         );
-        crate::auth::add_user(&db, "alice", Some("alice"), None)
-            .await
-            .unwrap();
+        crate::auth::add_user(
+            &db,
+            "alice",
+            Some("alice"),
+            None,
+            crate::auth::UserRole::Admin,
+        )
+        .await
+        .unwrap();
         assert!(
             ensure_bootstrap_operator(&db).await.is_ok(),
             "a seeded operator must allow boot"

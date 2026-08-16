@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
 import * as api from '../api';
+import { me } from '../auth';
 import { openTopic, type TopicHandle } from '../lib/eventStream';
 import type { Diagnostics, LogLine, ServerStatus, TaskRecord } from '../types';
 
@@ -8,7 +9,8 @@ import type { Diagnostics, LogLine, ServerStatus, TaskRecord } from '../types';
 // that go to stdout / `docker compose logs`, but readable from the browser so an
 // operator can debug a Docker deploy (a failed session recovery, a webhook that
 // got rejected) without shelling into the container. Snapshot on open, then a
-// live SSE tail. Operator-only on the server; server logs can carry secrets.
+// live SSE tail. Admins receive the raw operator log; the server redacts known
+// and credential-shaped secrets before returning these lines to user roles.
 
 // Newest lines live at the end. Cap the client-side list so a long-lived panel
 // can't grow without bound; the server ring buffer holds ~2000 anyway.
@@ -94,8 +96,7 @@ async function loadSnapshot() {
     const [snap, st, diag] = await Promise.all([
       api.getLogs(2000),
       api.getServerStatus(),
-      // Diagnostics require the admin grant. Keep the operator-visible log and
-      // status snapshot useful when that optional request is forbidden or down.
+      // Keep the log and status snapshot useful when diagnostics are down.
       api.getDiagnostics().catch(() => null),
     ]);
     lines.value = snap;
@@ -483,11 +484,18 @@ onUnmounted(() => {
     </section>
 
     <!-- Server logs -->
-    <h2 class="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted">Server logs</h2>
+    <div class="mb-1.5 flex items-center gap-2">
+      <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted">Server logs</h2>
+      <span v-if="me.role === 'user'" class="pill">secrets redacted</span>
+    </div>
     <p class="mb-3 text-xs text-faint">
       The running server's log stream, live. The same lines go to
       <code>docker compose logs</code>; this is a read-only mirror so you can debug from the
-      browser. May contain secrets — visible to approved operators only.
+      browser.
+      <template v-if="me.role === 'user'">
+        Known deployment credentials and token-shaped values are redacted.
+      </template>
+      <template v-else> Administrators see the raw operator stream. </template>
     </p>
 
     <!-- Controls -->

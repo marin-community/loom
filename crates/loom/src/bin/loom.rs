@@ -2639,7 +2639,7 @@ async fn cmd_setup_init() -> Result<()> {
         println!("  '{login}' isn't a valid GitHub login (letters, digits, and hyphens only).");
     };
     if loom::auth::get_user(&db, &owner).await?.is_none() {
-        loom::auth::add_user(&db, &owner, Some(&owner), None)
+        loom::auth::add_user(&db, &owner, Some(&owner), None, loom::auth::UserRole::Admin)
             .await
             .with_context(|| format!("seeding the bootstrap operator '{owner}'"))?;
     }
@@ -3104,15 +3104,21 @@ async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
     // live to the running daemon here, and to loom.toml (`LOOM_OWNER_GITHUB`)
     // below for a fresh DB. Their triggers on any repo the App is installed on
     // auto-register it — so an org install needs no separate owner allowlist.
-    // Add more people in Settings → Approved users.
+    // Add more people in Settings → People & security.
     if loom::auth::get_user(&db, owner_login).await?.is_none() {
-        loom::auth::add_user(&db, owner_login, Some(owner_login), None)
-            .await
-            .context("approving the bootstrap operator")?;
+        loom::auth::add_user(
+            &db,
+            owner_login,
+            Some(owner_login),
+            None,
+            loom::auth::UserRole::Admin,
+        )
+        .await
+        .context("approving the bootstrap operator")?;
     }
     println!(
         "Approved '{owner_login}' — they can sign in and trigger sessions. Add more in \
-         Settings → Approved users."
+         Settings → People & security."
     );
 
     let updates: Vec<(&str, &str)> = vec![
@@ -3220,7 +3226,7 @@ async fn cmd_setup_secrets(opts: SecretsOpts) -> Result<()> {
     println!();
     println!(
         "Stored {} on the default profile — future sessions using that profile get them \
-         (Settings → Environment in the web UI, or `GET /api/env`).",
+         (Settings → Agents & profiles in the web UI, or `GET /api/env`).",
         stored.join(", ")
     );
     println!(

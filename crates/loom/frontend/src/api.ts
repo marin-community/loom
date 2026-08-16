@@ -693,7 +693,16 @@ export const restartShell = () => post('/shell/restart');
 
 // --- Authentication --------------------------------------------------------
 
-import type { Me, Token, CreatedToken, User, GithubConfig, SlackStatus } from './types';
+import type {
+  Me,
+  Token,
+  CreatedToken,
+  User,
+  UserRole,
+  UserPreferencesEnvelope,
+  GithubConfig,
+  SlackStatus,
+} from './types';
 
 /** Who the caller is + which sign-in methods to offer. Never 401s. */
 export const getMe = () => get('/auth/me') as Promise<Me>;
@@ -726,15 +735,32 @@ export const setPassword = (newPassword: string) =>
 export const listUsers = () => get('/auth/users') as Promise<User[]>;
 
 /** Approve a new operator (GitHub login and/or password). */
-export const addUser = (username: string, githubLogin?: string, password?: string) =>
+export const addUser = (
+  username: string,
+  githubLogin: string | undefined,
+  password: string | undefined,
+  role: UserRole,
+) =>
   post('/auth/users', {
     username,
     github_login: githubLogin || null,
     password: password || null,
+    role,
   }) as Promise<User>;
+
+/** Change an approved user's role. */
+export const setUserRole = (username: string, role: UserRole) =>
+  put(`/auth/users/${encodeURIComponent(username)}/role`, { role }) as Promise<User>;
 
 /** Remove an approved operator. */
 export const removeUser = (username: string) => del(`/auth/users/${encodeURIComponent(username)}`);
+
+/** Effective preferences for the signed-in user. */
+export const getPreferences = () => get('/preferences') as Promise<UserPreferencesEnvelope>;
+
+/** Set personal overrides; null clears a key back to its deployment value. */
+export const patchPreferences = (changes: Record<string, string | null>) =>
+  patch('/preferences', changes) as Promise<UserPreferencesEnvelope>;
 
 /** The GitHub App / sign-in config (secret withheld). */
 export const getGithubConfig = () => get('/auth/github/config') as Promise<GithubConfig>;

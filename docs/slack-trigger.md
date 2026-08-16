@@ -179,7 +179,7 @@ Two secrets enable the integration — set **both**, or it stays idle
   It must be the **bot** token, not the user token (`xoxp-…`) issued by the same
   install. A user token authenticates, connects, and passes `auth.test` exactly
   like the bot token — but it resolves to a *person*, so loom posts as them and
-  discards every mention they type as its own. **Settings → Connections** names
+  discards every mention they type as its own. **Settings → Integrations** names
   this outright; `auth.test` returns a `bot_id` only for the bot token, and that
   is what the pane checks.
 
@@ -205,7 +205,7 @@ or incompatible profiles fall back automatically.
 
 ## Diagnosing it
 
-**Settings → Connections** shows the whole trigger path in the order the server
+**Settings → Integrations** shows the whole trigger path in the order the server
 checks it — tokens, switch, connection, identity, who can trigger, repository —
 so a broken link names itself. A live socket is not the same as a working
 integration: the connection can be up while the bot token belongs to a person,

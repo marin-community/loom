@@ -149,7 +149,7 @@ pub struct Actor(ActorKind);
 impl Actor {
     pub fn from_principal(principal: &Principal, delegated: bool) -> Self {
         match &principal.grant {
-            Grant::Admin => Self(ActorKind::Admin {
+            Grant::Admin | Grant::User => Self(ActorKind::Admin {
                 username: principal.username.clone(),
                 delegated,
             }),
