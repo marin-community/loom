@@ -29,7 +29,9 @@ test.describe("settings · profiles", () => {
     ]);
 
     await agent.selectOption("claude");
+    await model.click();
     await model.fill(claude.models[0].id);
+    await page.keyboard.press("Enter");
     await agent.selectOption("codex");
     await expect(model).toHaveValue("");
     await expect(model.locator("option")).toContainText([
