@@ -11,6 +11,7 @@
 //!   archives a session — closing the weaver issues it was working — once its PR
 //!   merges. The snapshot rides along on `BranchView`; the dashboard renders it.
 
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -119,7 +120,8 @@ pub async fn create_pr(work_dir: &Path, base: &str, title: &str, body: &str) -> 
 // has no GitHub remote.
 // ---------------------------------------------------------------------------
 
-const POLL_TICK: Duration = Duration::from_secs(5 * 60);
+const POLL_TICK: Duration = Duration::from_secs(60);
+const ACTIVE_POLL_WINDOW_SECS: i64 = 10 * 60;
 
 /// Branch tag marking that loom has back-linked this branch's PR to its session
 /// (posted the `…/s/{id}` comment). Set by the poll loop's back-link poster or,
@@ -467,6 +469,88 @@ struct PrJson {
     status_check_rollup: Option<Vec<CheckJson>>,
 }
 
+/// GraphQL returns the check rollup as a connection, while `gh pr view --json`
+/// flattens that connection to an array. Keep the public/manual refresh path on
+/// the CLI's stable JSON shape and adapt the batched background response here.
+#[derive(Debug, Deserialize)]
+struct GraphqlCheckRollup {
+    contexts: GraphqlCheckConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphqlCheckConnection {
+    nodes: Vec<CheckJson>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphqlPrJson {
+    number: i64,
+    url: String,
+    state: String,
+    title: String,
+    #[serde(rename = "isDraft", default)]
+    is_draft: bool,
+    #[serde(rename = "reviewDecision", default)]
+    review_decision: Option<String>,
+    #[serde(default)]
+    mergeable: Option<String>,
+    #[serde(rename = "mergedAt", default)]
+    merged_at: Option<String>,
+    #[serde(rename = "headRefOid", default)]
+    head_ref_oid: Option<String>,
+    #[serde(rename = "updatedAt", default)]
+    updated_at: Option<String>,
+    #[serde(rename = "statusCheckRollup", default)]
+    status_check_rollup: Option<GraphqlCheckRollup>,
+}
+
+impl GraphqlPrJson {
+    fn into_status(self) -> GithubStatus {
+        let checks = self
+            .status_check_rollup
+            .map(|rollup| rollup.contexts.nodes)
+            .unwrap_or_default();
+        PrJson {
+            number: self.number,
+            url: self.url,
+            state: self.state,
+            title: self.title,
+            is_draft: self.is_draft,
+            review_decision: self.review_decision,
+            mergeable: self.mergeable,
+            merged_at: self.merged_at,
+            head_ref_oid: self.head_ref_oid,
+            updated_at: self.updated_at,
+            status_check_rollup: Some(checks),
+        }
+        .into_status()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphqlPrConnection {
+    nodes: Vec<GraphqlPrJson>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphqlEnvelope {
+    #[serde(default)]
+    data: Option<GraphqlData>,
+    #[serde(default)]
+    errors: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphqlData {
+    repository: Option<HashMap<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Default)]
+struct BatchSnapshots {
+    by_head: HashMap<String, GithubStatus>,
+    by_number: HashMap<i64, GithubStatus>,
+}
+
 /// One entry in `statusCheckRollup`. The array is a union of GitHub's CheckRun
 /// (carries `status` + `conclusion`) and StatusContext (carries `state`); we
 /// accept whichever fields are present.
@@ -670,6 +754,124 @@ pub async fn fetch_open_pr(
     Ok(rows.pop().map(PrJson::into_status))
 }
 
+/// Fetch every active branch's current open PR plus every previously-known PR
+/// in one GraphQL request. Aliases multiplex the independent branch/number
+/// lookups without downloading a repository's unrelated PRs. Exact-number
+/// lookups keep terminal transitions visible after GitHub removes a merged or
+/// closed PR from the open-head result.
+async fn fetch_pr_batch(
+    repo_root: &Path,
+    slug: &str,
+    heads: &[String],
+    known_numbers: &[i64],
+    token: Option<&str>,
+    host: Option<&str>,
+) -> Result<BatchSnapshots> {
+    let query = build_batch_query(slug, heads, known_numbers)?;
+
+    let mut cmd = Command::new("gh");
+    cmd.args(["api", "graphql", "--raw-field", &format!("query={query}")])
+        .current_dir(repo_root);
+    if let Some(token) = token {
+        cmd.env("GH_TOKEN", token);
+    }
+    if let Some(host) = host {
+        cmd.env("GH_HOST", host);
+    }
+    let out = cmd
+        .output()
+        .await
+        .context("failed to spawn gh (is the GitHub CLI installed?)")?;
+    if !out.status.success() {
+        bail!(
+            "gh api graphql failed for {slug}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    parse_batch_response(&out.stdout, slug, heads, known_numbers)
+}
+
+fn build_batch_query(slug: &str, heads: &[String], known_numbers: &[i64]) -> Result<String> {
+    let parsed = crate::repo::parse_slug(slug).map_err(anyhow::Error::msg)?;
+    let mut selections = String::new();
+    for (index, head) in heads.iter().enumerate() {
+        let head = serde_json::to_string(head).context("encoding branch name for GraphQL")?;
+        selections.push_str(&format!(
+            "branch{index}: pullRequests(first: 1, states: [OPEN], headRefName: {head}) {{ nodes {{ ...PrFields }} }}\n"
+        ));
+    }
+    for (index, number) in known_numbers.iter().enumerate() {
+        selections.push_str(&format!(
+            "known{index}: pullRequest(number: {number}) {{ ...PrFields }}\n"
+        ));
+    }
+    let owner = serde_json::to_string(&parsed.owner).context("encoding repository owner")?;
+    let name = serde_json::to_string(&parsed.name).context("encoding repository name")?;
+    Ok(format!(
+        r#"query {{
+  repository(owner: {owner}, name: {name}) {{
+    {selections}
+  }}
+}}
+fragment PrFields on PullRequest {{
+  number url state title isDraft reviewDecision mergeable mergedAt headRefOid updatedAt
+  statusCheckRollup {{
+    contexts(first: 100) {{
+      nodes {{
+        __typename
+        ... on CheckRun {{ status conclusion }}
+        ... on StatusContext {{ state }}
+      }}
+    }}
+  }}
+}}"#
+    ))
+}
+
+fn parse_batch_response(
+    bytes: &[u8],
+    slug: &str,
+    heads: &[String],
+    known_numbers: &[i64],
+) -> Result<BatchSnapshots> {
+    let envelope: GraphqlEnvelope =
+        serde_json::from_slice(bytes).context("parsing batched GitHub GraphQL response")?;
+    if !envelope.errors.is_empty() {
+        bail!(
+            "GitHub GraphQL query failed for {slug}: {}",
+            serde_json::to_string(&envelope.errors).unwrap_or_default()
+        );
+    }
+    let repository = envelope
+        .data
+        .and_then(|data| data.repository)
+        .ok_or_else(|| anyhow::anyhow!("GitHub repository {slug} was not found"))?;
+
+    let mut snapshots = BatchSnapshots::default();
+    for (index, head) in heads.iter().enumerate() {
+        let Some(value) = repository.get(&format!("branch{index}")) else {
+            continue;
+        };
+        let connection: GraphqlPrConnection =
+            serde_json::from_value(value.clone()).context("parsing batched open-PR result")?;
+        if let Some(pr) = connection.nodes.into_iter().next() {
+            snapshots.by_head.insert(head.clone(), pr.into_status());
+        }
+    }
+    for (index, number) in known_numbers.iter().enumerate() {
+        let Some(value) = repository.get(&format!("known{index}")) else {
+            continue;
+        };
+        if value.is_null() {
+            continue;
+        }
+        let pr: GraphqlPrJson =
+            serde_json::from_value(value.clone()).context("parsing batched known-PR result")?;
+        snapshots.by_number.insert(*number, pr.into_status());
+    }
+    Ok(snapshots)
+}
+
 /// The stored snapshot for a branch, if one has been fetched.
 pub async fn get_status(db: &Db, branch_id: &str) -> Result<Option<GithubStatus>> {
     let row = sqlx::query_as::<_, GithubStatus>(
@@ -820,6 +1022,20 @@ pub async fn refresh(
             None
         }
     };
+    apply_refresh_result(state, session, branch, fetched, archive_on_merge).await
+}
+
+/// Apply the common result of either a one-session CLI lookup or a batched
+/// GraphQL lookup. Automatic discovery must clear a stale snapshot when no PR
+/// remains, while a present snapshot follows the same event/archive path.
+async fn apply_refresh_result(
+    state: &AppState,
+    session: &Session,
+    branch: &Branch,
+    fetched: Option<GithubStatus>,
+    archive_on_merge: bool,
+) -> Result<Option<GithubStatus>> {
+    let previous = get_status(&state.db, &branch.id).await?;
     let snap = match fetched {
         Some(s) => s,
         None => {
@@ -1086,13 +1302,15 @@ async fn close_claimed_issues(
     }
 }
 
-/// Background loop: snapshot every active session's PR on a fixed cadence. A
-/// no-op while `github.poll` is off or `gh` is unavailable, so it is always safe
-/// to spawn. Sibling of the [`crate::monitor`] loop.
+/// Background loop: snapshot active sessions' PRs on a fixed cadence. A no-op
+/// while `github.poll` is off or `gh` is unavailable, so it is always safe to
+/// spawn. Sibling of the [`crate::monitor`] loop.
 pub async fn poll(state: AppState) {
     tracing::info!(tick_s = POLL_TICK.as_secs(), "github poll loop started");
+    let mut ticks = tokio::time::interval(POLL_TICK);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        tokio::time::sleep(POLL_TICK).await;
+        ticks.tick().await;
         if !config::get_bool(&state.db, "github.poll", config::DEFAULT_GITHUB_POLL).await {
             continue;
         }
@@ -1105,6 +1323,59 @@ pub async fn poll(state: AppState) {
     }
 }
 
+#[derive(Debug)]
+struct PollCandidate {
+    session: Session,
+    branch: Branch,
+    head: String,
+    mapping: Option<i64>,
+    previous: Option<GithubStatus>,
+}
+
+/// Background GitHub traffic follows sessions that have moved recently. A
+/// never-touched session uses its creation time, matching the monitor's activity
+/// semantics. A corrupt timestamp stays eligible so bad local data does not
+/// silently disable lifecycle handling forever.
+fn active_for_github_poll(session: &Session, now: chrono::DateTime<chrono::Utc>) -> bool {
+    activity_timestamp_is_recent(
+        session.last_activity_at.as_deref(),
+        &session.created_at,
+        now,
+    )
+}
+
+fn activity_timestamp_is_recent(
+    last_activity_at: Option<&str>,
+    created_at: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let timestamp = last_activity_at.unwrap_or(created_at);
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map(|activity| {
+            activity.with_timezone(&chrono::Utc)
+                >= now - chrono::Duration::seconds(ACTIVE_POLL_WINDOW_SECS)
+        })
+        .unwrap_or(true)
+}
+
+fn snapshot_for_candidate(
+    mapping: Option<i64>,
+    previous: Option<&GithubStatus>,
+    head: &str,
+    snapshots: &BatchSnapshots,
+) -> Option<GithubStatus> {
+    if let Some(number) = mapping {
+        return snapshots.by_number.get(&number).cloned();
+    }
+    if let Some(current) = snapshots.by_head.get(head) {
+        return Some(current.clone());
+    }
+    previous
+        .filter(|pr| pr.pr_state == "OPEN")
+        .and_then(|pr| snapshots.by_number.get(&pr.pr_number))
+        .cloned()
+}
+
 async fn poll_once(state: &AppState) -> Result<()> {
     let archive_on_merge = config::get_bool(
         &state.db,
@@ -1113,17 +1384,94 @@ async fn poll_once(state: &AppState) -> Result<()> {
     )
     .await;
     // One active session per branch (enforced by a unique index), so iterating
-    // sessions visits each candidate branch once. Engine-managed (warm) sessions
-    // are infrastructure with no pull request, so the poller skips them.
+    // sessions visits each candidate branch once. Grouping by repository lets
+    // one GraphQL request multiplex every branch lookup and every exact known-PR
+    // lookup. Engine-managed (warm) sessions are absent from `list_visible`.
+    let mut repositories: BTreeMap<String, Vec<PollCandidate>> = BTreeMap::new();
+    let now = chrono::Utc::now();
     for session in session_mod::list_visible(&state.db).await? {
-        if session_mod::is_terminal(&session.status) {
+        if session_mod::is_terminal(&session.status) || !active_for_github_poll(&session, now) {
             continue;
         }
         let Some(branch) = branch_mod::get(&state.db, &session.branch_id).await? else {
             continue;
         };
-        if let Err(e) = refresh(state, &session, &branch, archive_on_merge).await {
-            tracing::debug!(branch = %branch.branch, error = %e, "github refresh failed");
+        let candidate = PollCandidate {
+            head: discovery_branch(&session, &branch).await,
+            mapping: get_mapping(&state.db, &branch.id).await?,
+            previous: get_status(&state.db, &branch.id).await?,
+            session,
+            branch,
+        };
+        repositories
+            .entry(candidate.branch.repo_root.clone())
+            .or_default()
+            .push(candidate);
+    }
+
+    let token = crate::agent_env::get(&state.db, "GH_TOKEN").await;
+    let host = crate::agent_env::get(&state.db, "GH_HOST").await;
+    for (repo_root, candidates) in repositories {
+        let path = PathBuf::from(&repo_root);
+        let Some(slug) = crate::repo::github_slug_for_root(&state.db, &path).await? else {
+            tracing::debug!(repo = %repo_root, "github batch skipped: repository has no GitHub remote");
+            continue;
+        };
+        let heads: Vec<String> = candidates
+            .iter()
+            .map(|candidate| candidate.head.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let known_numbers: Vec<i64> = candidates
+            .iter()
+            .flat_map(|candidate| {
+                candidate.mapping.into_iter().chain(
+                    candidate
+                        .previous
+                        .as_ref()
+                        .filter(|pr| pr.pr_state == "OPEN")
+                        .map(|pr| pr.pr_number),
+                )
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let snapshots = match fetch_pr_batch(
+            &path,
+            &slug,
+            &heads,
+            &known_numbers,
+            token.as_deref(),
+            host.as_deref(),
+        )
+        .await
+        {
+            Ok(snapshots) => snapshots,
+            Err(e) => {
+                tracing::debug!(repo = %slug, error = %e, "github batch refresh failed");
+                continue;
+            }
+        };
+
+        for candidate in candidates {
+            let fetched = snapshot_for_candidate(
+                candidate.mapping,
+                candidate.previous.as_ref(),
+                &candidate.head,
+                &snapshots,
+            );
+            if let Err(e) = apply_refresh_result(
+                state,
+                &candidate.session,
+                &candidate.branch,
+                fetched,
+                archive_on_merge,
+            )
+            .await
+            {
+                tracing::debug!(branch = %candidate.branch.branch, error = %e, "github refresh failed");
+            }
         }
     }
     Ok(())
@@ -1292,6 +1640,126 @@ mod tests {
             status.head_updated_at.as_deref(),
             Some("2026-08-03T21:42:17Z")
         );
+    }
+
+    #[test]
+    fn batch_query_multiplexes_heads_and_known_numbers() {
+        let query = build_batch_query(
+            "acme/widgets",
+            &["weaver/one".to_string(), "quoted\"branch".to_string()],
+            &[7, 42],
+        )
+        .unwrap();
+        assert!(query.contains(
+            "branch0: pullRequests(first: 1, states: [OPEN], headRefName: \"weaver/one\")"
+        ));
+        assert!(query.contains("headRefName: \"quoted\\\"branch\""));
+        assert!(query.contains("known0: pullRequest(number: 7)"));
+        assert!(query.contains("known1: pullRequest(number: 42)"));
+        assert_eq!(query.matches("repository(owner:").count(), 1);
+    }
+
+    #[test]
+    fn batch_response_indexes_open_heads_and_terminal_known_prs() {
+        let pr = |number: i64, state: &str, checks: &str| {
+            json!({
+                "number": number,
+                "url": format!("https://example/pr/{number}"),
+                "state": state,
+                "title": format!("PR {number}"),
+                "isDraft": false,
+                "reviewDecision": "APPROVED",
+                "mergeable": "MERGEABLE",
+                "mergedAt": (state == "MERGED").then_some("2026-08-16T00:00:00Z"),
+                "headRefOid": format!("head-{number}"),
+                "updatedAt": "2026-08-16T00:00:00Z",
+                "statusCheckRollup": {
+                    "contexts": { "nodes": [{
+                        "__typename": "CheckRun",
+                        "status": "COMPLETED",
+                        "conclusion": checks,
+                    }] }
+                }
+            })
+        };
+        let body = json!({
+            "data": { "repository": {
+                "branch0": { "nodes": [pr(7, "OPEN", "SUCCESS")] },
+                "branch1": { "nodes": [] },
+                "known0": pr(7, "OPEN", "SUCCESS"),
+                "known1": pr(42, "MERGED", "FAILURE"),
+            }}
+        });
+        let heads = ["weaver/one".to_string(), "weaver/two".to_string()];
+        let snapshots = parse_batch_response(
+            &serde_json::to_vec(&body).unwrap(),
+            "acme/widgets",
+            &heads,
+            &[7, 42],
+        )
+        .unwrap();
+
+        assert_eq!(snapshots.by_head["weaver/one"].pr_number, 7);
+        assert!(!snapshots.by_head.contains_key("weaver/two"));
+        assert_eq!(snapshots.by_number[&7].checks.as_deref(), Some("passing"));
+        assert_eq!(snapshots.by_number[&42].pr_state, "MERGED");
+        assert_eq!(snapshots.by_number[&42].checks.as_deref(), Some("failing"));
+    }
+
+    #[test]
+    fn github_poll_only_follows_ten_minutes_of_activity() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-16T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(activity_timestamp_is_recent(
+            Some("2026-08-16T11:50:00Z"),
+            "2026-08-01T00:00:00Z",
+            now,
+        ));
+        assert!(!activity_timestamp_is_recent(
+            Some("2026-08-16T11:49:59Z"),
+            "2026-08-16T11:59:00Z",
+            now,
+        ));
+        assert!(activity_timestamp_is_recent(
+            None,
+            "2026-08-16T11:55:00Z",
+            now,
+        ));
+        assert!(!activity_timestamp_is_recent(
+            None,
+            "2026-08-16T11:00:00Z",
+            now,
+        ));
+        assert!(activity_timestamp_is_recent(
+            Some("corrupt"),
+            "2026-08-16T11:00:00Z",
+            now,
+        ));
+    }
+
+    #[test]
+    fn batch_selection_keeps_known_pr_terminal_transitions() {
+        let previous = snapshot("OPEN");
+        let mut merged = snapshot("MERGED");
+        merged.pr_number = previous.pr_number;
+        let mut snapshots = BatchSnapshots::default();
+        snapshots
+            .by_number
+            .insert(previous.pr_number, merged.clone());
+
+        let selected =
+            snapshot_for_candidate(None, Some(&previous), "weaver/finished", &snapshots).unwrap();
+        assert_eq!(selected.pr_state, "MERGED");
+
+        let mut replacement = snapshot("OPEN");
+        replacement.pr_number = 99;
+        snapshots
+            .by_head
+            .insert("weaver/finished".to_string(), replacement.clone());
+        let selected =
+            snapshot_for_candidate(None, Some(&previous), "weaver/finished", &snapshots).unwrap();
+        assert_eq!(selected.pr_number, 99, "a current open head wins");
     }
 
     // ---- apply_snapshot: storage + archive-on-merge --------------------------

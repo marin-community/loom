@@ -1170,7 +1170,7 @@ pub(super) async fn delete_session_shell(
 /// Refresh a session's GitHub PR snapshot on demand (the dashboard's "refresh"
 /// affordance) and return the updated session. Manual refresh never
 /// auto-archives — that surprise is reserved for the background poller, which
-/// will pick a freshly-merged PR up within a tick.
+/// will pick a freshly-merged PR up within a tick while the session is recent.
 pub(super) async fn refresh_github_session(
     State(st): State<AppState>,
     Path(key): Path<String>,
