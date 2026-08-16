@@ -191,6 +191,16 @@ impl AppError {
     fn not_found(what: &str) -> Self {
         Self::new(StatusCode::NOT_FOUND, format!("{what} not found"))
     }
+    fn internal(message: impl Into<String>, error: impl Into<anyhow::Error>) -> Self {
+        let error = error.into();
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+            details: None,
+            fields: None,
+            source_chain: Some(format!("{error:?}")),
+        }
+    }
     fn with_details(mut self, details: Value) -> Self {
         self.details = Some(details);
         self
@@ -1134,6 +1144,25 @@ pub fn router(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_error_separates_user_message_from_operator_context() {
+        let error = AppError::internal(
+            "Could not finish archiving session abc. Retry in a moment.",
+            anyhow::anyhow!("docker removal failed"),
+        );
+
+        assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            error.message(),
+            "Could not finish archiving session abc. Retry in a moment."
+        );
+        assert!(error
+            .source_chain
+            .as_deref()
+            .unwrap()
+            .contains("docker removal failed"));
+    }
 
     #[test]
     fn is_immutable_asset_matches_rspack_content_hashed_files() {

@@ -1100,7 +1100,15 @@ pub(super) async fn archive_session(
         Err(error) => return Err(error),
     };
     tracing::debug!(key = %key, session = %session.id, "handling archive session request");
-    let warnings = archive(&st, &session, &branch).await?;
+    let warnings = archive(&st, &session, &branch).await.map_err(|error| {
+        AppError::internal(
+            format!(
+                "Could not finish archiving session {}. Its branch and conversation are safe; retry in a moment.",
+                session.id
+            ),
+            error,
+        )
+    })?;
     Ok(Json(json!({
         "archived": true,
         "kind": "session",
