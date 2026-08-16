@@ -374,10 +374,11 @@ TLS-terminating reverse proxy. Access is then gated three ways:
   A fresh install approves exactly one user — whichever GitHub login you set as
   `LOOM_OWNER_GITHUB` before first run. There is no default; leave it unset and
   no owner is seeded, so GitHub sign-in won't work until it's set. Add more
-  users, set your password, and configure GitHub sign-in under **Settings →
-  Account**.
+  users and roles under **Settings → People & security**, set your password
+  under **Settings → Account**, and configure GitHub sign-in under **Settings →
+  Integrations**.
 - **Personal API tokens** for remote CLIs and other trusted clients. Mint one
-  under **Settings → Tokens** or from a locally authenticated CLI:
+  under **Settings → Account** or from a locally authenticated CLI:
 
   ```sh
   loom token add laptop --expires-days 30  # prints the secret once
@@ -410,7 +411,7 @@ TLS-terminating reverse proxy. Access is then gated three ways:
 
 To configure **GitHub sign-in**: register an OAuth app on GitHub with the
 callback `https://loom.example.com/api/auth/github/callback`, then paste its
-client id and secret into Settings → Connections (or set `LOOM_GITHUB_CLIENT_ID` /
+client id and secret into Settings → Integrations (or set `LOOM_GITHUB_CLIENT_ID` /
 `LOOM_GITHUB_CLIENT_SECRET`).
 
 Behind a **same-host reverse proxy** the proxy's forwarded requests appear to

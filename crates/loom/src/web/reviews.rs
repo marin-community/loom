@@ -28,7 +28,7 @@ pub(super) struct ReviewListQuery {
 }
 
 fn require_operator(principal: &Principal) -> ApiResult<()> {
-    if principal.is_admin() {
+    if principal.is_human() {
         Ok(())
     } else {
         Err(AppError::new(
@@ -296,7 +296,7 @@ async fn list_for(
     // Session-scoped agent grants may inspect submitted compatibility feedback,
     // but never inherit their operator owner's private draft merely because the
     // username is the same.
-    let viewer = if principal.is_admin() {
+    let viewer = if principal.is_human() {
         principal.username.as_str()
     } else {
         ""

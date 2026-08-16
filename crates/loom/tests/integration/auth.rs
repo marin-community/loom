@@ -164,6 +164,257 @@ async fn loopback_trust_then_token_local_and_cookie_gate_access() {
 
 #[tokio::test]
 #[serial]
+async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
+    use futures_util::StreamExt;
+    use tracing_subscriber::prelude::*;
+
+    let ts = TestServer::start_api_only().await;
+    let http = reqwest::Client::new();
+    let added: Value = http
+        .post(url(&ts, "/api/auth/users"))
+        .json(&json!({ "username": "alice", "github_login": "alice-gh" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(added["role"], "user");
+    let (user_token, _) = loom::auth::create_token(&ts.state.db, "alice", "alice-api", None)
+        .await
+        .unwrap();
+    let (admin_token, _) = loom::auth::create_token(&ts.state.db, "rjpower", "admin-api", None)
+        .await
+        .unwrap();
+    ts.client
+        .patch("/api/settings", json!({ "auth.trust_loopback": false }))
+        .await
+        .unwrap();
+
+    let me: Value = http
+        .get(url(&ts, "/api/auth/me"))
+        .bearer_auth(&user_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(me["role"], "user");
+
+    const LOG_MARKER: &str = "user-redaction-check-6d93";
+    const LOG_SECRET: &str = "opaque-deployment-credential-4c71";
+    loom::profile::env_set(
+        &ts.state.db,
+        loom::profile::DEFAULT_PROFILE,
+        "REDACTION_TEST_TOKEN",
+        LOG_SECRET,
+    )
+    .await
+    .unwrap();
+    let subscriber = tracing_subscriber::registry().with(loom::logs::layer());
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::warn!("{LOG_MARKER} credential={LOG_SECRET}");
+    });
+
+    let user_logs: Value = http
+        .get(url(&ts, "/api/logs"))
+        .bearer_auth(&user_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let user_log = user_logs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|line| {
+            line["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(LOG_MARKER))
+        })
+        .unwrap();
+    assert!(!user_log["message"].as_str().unwrap().contains(LOG_SECRET));
+
+    let admin_logs: Value = http
+        .get(url(&ts, "/api/logs"))
+        .bearer_auth(&admin_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let admin_log = admin_logs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|line| {
+            line["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(LOG_MARKER))
+        })
+        .unwrap();
+    assert!(admin_log["message"].as_str().unwrap().contains(LOG_SECRET));
+
+    const STREAM_MARKER: &str = "user-stream-redaction-check-1e52";
+    let stream_response = http
+        .get(url(&ts, "/api/events?topics=logs"))
+        .bearer_auth(&user_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stream_response.status(), StatusCode::OK);
+    tracing::subscriber::with_default(
+        tracing_subscriber::registry().with(loom::logs::layer()),
+        || tracing::warn!("{STREAM_MARKER} credential={LOG_SECRET}"),
+    );
+    let mut stream = stream_response.bytes_stream();
+    let mut stream_body = String::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !stream_body.contains(STREAM_MARKER) && tokio::time::Instant::now() < deadline {
+        let remaining = deadline - tokio::time::Instant::now();
+        let Some(chunk) = tokio::time::timeout(remaining, stream.next())
+            .await
+            .unwrap()
+            .transpose()
+            .unwrap()
+        else {
+            break;
+        };
+        stream_body.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    assert!(stream_body.contains(STREAM_MARKER), "{stream_body}");
+    assert!(!stream_body.contains(LOG_SECRET), "{stream_body}");
+
+    for path in [
+        "/api/sessions",
+        "/api/settings",
+        "/api/profiles",
+        "/api/agents",
+        "/api/mcps",
+        "/api/diagnostics",
+        "/api/logs",
+        "/api/status",
+        "/api/tasks",
+        "/api/session-layout",
+        "/api/watches",
+        "/api/watches/programs",
+    ] {
+        let response = http
+            .get(url(&ts, path))
+            .bearer_auth(&user_token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "user GET {path}");
+    }
+
+    let preferences: Value = http
+        .patch(url(&ts, "/api/preferences"))
+        .bearer_auth(&user_token)
+        .json(&json!({ "terminal.theme": "light" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let theme = preferences["preferences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|preference| preference["key"] == "terminal.theme")
+        .unwrap();
+    assert_eq!(theme["value"], "light");
+    assert_eq!(theme["is_overridden"], true);
+
+    let admin_preferences: Value = http
+        .get(url(&ts, "/api/preferences"))
+        .bearer_auth(&admin_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let admin_theme = admin_preferences["preferences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|preference| preference["key"] == "terminal.theme")
+        .unwrap();
+    assert_eq!(admin_theme["value"], "dark");
+    assert_eq!(admin_theme["is_overridden"], false);
+
+    let tokens: Vec<Value> = http
+        .get(url(&ts, "/api/auth/tokens"))
+        .bearer_auth(&user_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0]["name"], "alice-api");
+
+    let forbidden = [
+        (reqwest::Method::PATCH, "/api/settings"),
+        (reqwest::Method::POST, "/api/deployment/reconcile"),
+        (reqwest::Method::GET, "/api/auth/users"),
+        (reqwest::Method::GET, "/api/auth/github/config"),
+        (reqwest::Method::POST, "/api/auth/automation-token"),
+        (reqwest::Method::GET, "/api/auth/federations"),
+        (reqwest::Method::POST, "/api/profiles"),
+        (reqwest::Method::POST, "/api/agents/custom"),
+        (reqwest::Method::POST, "/api/mcps/custom"),
+        (reqwest::Method::PUT, "/api/env/SHARED_VALUE"),
+        (reqwest::Method::GET, "/api/shell/terminal"),
+        (reqwest::Method::POST, "/api/shell/restart"),
+        (reqwest::Method::POST, "/api/watches"),
+        (reqwest::Method::POST, "/api/watches/status/run"),
+    ];
+    for (method, path) in forbidden {
+        let response = http
+            .request(method, url(&ts, path))
+            .bearer_auth(&user_token)
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "user request {path}"
+        );
+    }
+
+    let promoted: Value = http
+        .put(url(&ts, "/api/auth/users/alice/role"))
+        .bearer_auth(&admin_token)
+        .json(&json!({ "role": "admin" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(promoted["role"], "admin");
+    let response = http
+        .patch(url(&ts, "/api/settings"))
+        .bearer_auth(&user_token)
+        .json(&json!({ "terminal.theme": "light" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial]
 async fn absurd_token_expiry_is_a_bad_request_not_a_panic() {
     let ts = TestServer::start().await;
     let response = reqwest::Client::new()

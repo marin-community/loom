@@ -40,7 +40,7 @@ pub(super) fn principal_subject(principal: &Principal) -> Subject {
     match &principal.grant {
         Grant::Session { session_id, .. } => Subject::new(SubjectKind::Session, session_id),
         Grant::Automation { subject, .. } => Subject::new(SubjectKind::Automation, subject),
-        Grant::Admin => Subject::new(SubjectKind::User, &principal.username),
+        Grant::Admin | Grant::User => Subject::new(SubjectKind::User, &principal.username),
     }
 }
 
@@ -413,7 +413,7 @@ pub(super) async fn set_channel_subscription(
                         "a session may subscribe only itself or a descendant",
                     ));
                 }
-            } else if !principal.is_admin() {
+            } else if !principal.is_human() {
                 return Err(AppError::new(
                     StatusCode::FORBIDDEN,
                     "credential may not subscribe another session",
@@ -460,7 +460,7 @@ pub(super) async fn archive_channel(
         ));
     }
     let subject = principal_subject(&principal);
-    if !principal.is_admin()
+    if !principal.is_human()
         && (channel.created_by_kind != subject.kind.as_str() || channel.created_by != subject.id)
     {
         return Err(AppError::new(

@@ -263,10 +263,11 @@ local SQLite.
 - **`server.json`** in `$WEAVER_HOME`: pid + bound addr, written when `loom`
   comes up. The `loom` CLI uses it to find the daemon when `WEAVER_API` is
   unset.
-- **Settings** use runtime rows in `settings`, deployment defaults in
+- **Deployment settings** use runtime rows in `settings`, deployment defaults in
   `deployment_settings`, and immutable defaults declared in
   `weaver-core::config::REGISTRY`; reads resolve in that order. Both binaries
-  use the same helpers. This is the **global** (machine/user) store; see
+  use the same helpers. Personal overrides use `user_preferences`, keyed by
+  username and preference key. See
   [configuration policy](configuration.md). **Per-repo** conventions instead
   live in a committed `.weaver/config.toml` read by
   `weaver-core::repo_config` — distinct from global settings, and resolved
@@ -297,7 +298,7 @@ route truth, including internal proxy and compatibility paths.
 | `GET /api/ready` | public structured readiness: database access plus core and loom migration versions; optional future remote runner degradation will be reported without failing the whole API |
 | `GET /metrics` | public OpenMetrics scrape derived from durable session/profile/run/migration state; labels are bounded operational dimensions and never contain session/branch/path/user/token/error values (deployments normally restrict this at the public edge) |
 | `GET /api/self` | session-credential bootstrap context: the caller's session, branch, repository root, default channel, dashboard URL, and canonical REST links |
-| `GET /api/diagnostics` | admin-only redacted counts, profile capacity, automation failures/staleness, orphan/error inventory, migration state, and non-secret federation metadata; backs Settings → Diagnostics |
+| `GET /api/diagnostics` | human-user redacted counts, profile capacity, automation failures/staleness, orphan/error inventory, migration state, and non-secret federation metadata; backs Settings → Diagnostics |
 | `GET /api/events?topics=…` | every live stream the caller names, multiplexed onto one SSE connection — the browser holds 6 per origin, so the SPA subscribes here rather than opening one EventSource per view. Topics are `layout`, `logs`, `session:{id}`, `chat:{id}`; each frame is the default `message` event carrying `{topic, event, data}`, where `event` is the name the single-stream route below uses. Every topic is authorized against the route it stands in for, so this widens no credential; an unresolvable topic reports one `error` frame on its own topic and leaves the rest streaming |
 | `POST /api/session-launches/resolve` | resolve a canonical profile selection plus one-launch overrides into concrete selectors, provenance, policy, capacity, validation, and profile/resolver revisions without provisioning |
 | `GET /api/sessions` / `POST /api/sessions` | list / create sessions (list takes `archived` — default `false` — `automation` — default `false` — and admin-only `managed` — default `false`; canonical create requires both revisions from resolve and returns 409 plus a fresh preview on drift/admission change; flattened selectors remain compatible; valid Scratch input is decoded before provisioning; visible creates atomically assign configured origin/profile placement and a same-id default channel while managed warm infrastructure has no placement or layout revision effect; create stamps `resolved_launch`; `tracking_issue` is present only for an explicit claimed/imported work item) |
@@ -307,7 +308,7 @@ route truth, including internal proxy and compatibility paths.
 | `PUT /api/channels/{id}/{subscription,read-marker}` | set the caller's observe/deliver mode or monotonic read-through sequence |
 | `GET /api/sessions/summary` | compact fleet row projection for polling and search; accepts `archived`, `archived_only`, `automation`, `q`, `status`, and `attention`, searches goal text server-side without returning goals, and omits launch/MCP/title-generation/runtime detail retained by `GET /api/sessions/{id}` |
 | `GET /api/sessions/search` | case-insensitive fleet search across qualified placement, title/prompt, repo/branch, issue/PR, tags, status, profile, and provenance; optional widening `history`, archived-only `archived_only`, `status`, and `attention` filters |
-| `GET /api/session-layout`; `GET /api/session-layout/events` | admin-only read of the ordered Spaces → Groups → Sessions model plus defaults/revision; SSE is invalidation-only and every membership/layout change emits one so clients reload canonical state |
+| `GET /api/session-layout`; `GET /api/session-layout/events` | human-user read of the ordered Spaces → Groups → Sessions model plus defaults/revision; SSE is invalidation-only and every membership/layout change emits one so clients reload canonical state |
 | `POST PATCH DELETE /api/session-layout/{spaces,groups}[/{id}]` | create/rename/delete spaces and groups; non-empty deletion requires a destination and moves sessions/defaults atomically |
 | `POST /api/session-layout/{moves,reorder,restores}` | atomic session moves, space/group reorder, and complete multi-group restore with an exact `expected_revision`; stale mutations return 409 plus the current layout |
 | `PUT /api/session-layout/groups/{id}/preference` | set the authenticated operator's collapse preference without changing shared layout revision |
@@ -335,7 +336,7 @@ route truth, including internal proxy and compatibility paths.
 | `GET /api/scratch/limits`; `GET POST DELETE /api/sessions/{id}/scratch` | shared Scratch contract and live list/drop/remove: 20 files, 25 MiB each, 50 MiB decoded total; accepted dotfiles count, while `.gitignore` is reserved |
 | `GET /api/sessions/{id}/files?q=…` | bounded worktree resource search for ACP `@file` completion; the old browser file editor routes are gone |
 | `GET /api/sessions/{id}/ide-info`; `ANY /api/sessions/{id}/ide[/…]` | availability probe and authenticated same-origin HTTP/WebSocket proxy for the optional code-server side panel |
-| `GET /api/shell/terminal`; `POST /api/shell/restart` | open or reset the global operator shell; it runs beside the Loom server rather than through the configured session runner |
+| `GET /api/shell/terminal`; `POST /api/shell/restart` | admin-only open or reset of the global operator shell; it runs beside the Loom server, can reach machine credentials, and is distinct from a user's per-session debug shells |
 | `GET /api/sessions/{id}/shells`; `DELETE /api/sessions/{id}/shell/{idx}`; `GET /api/sessions/{id}/shell/{idx}/terminal` | list, close, or open per-session debug shells through WebSocket |
 | `GET /api/sessions/{id}/artifacts` | list the branch's [artifacts](artifacts.md) plus repo-shared ones |
 | `GET PUT /api/sessions/{id}/artifacts/{name}` | read content + projected refs (`rev=N` for a revision) / write a user edit as a new revision |
@@ -373,17 +374,19 @@ route truth, including internal proxy and compatibility paths.
 | `GET POST /api/repos/issues?repo_root=…` | repo-wide board (`scope=repo\|backlog`) / create a backlog item |
 | `GET /api/repos/recent` / `GET /api/repos/branches?cwd=…` | recent repos / branches in a repo |
 | `GET /api/agents` | first-class agent types, their advertised model/effort selectors, and their execution `protocol` (`terminal`\|`acp`) — backs the create-session form and server-side validation |
-| `GET PATCH /api/settings` | settings registry |
-| `GET /api/auth/me` | caller identity + sign-in methods (public; never 401s) |
+| `GET PATCH /api/settings` | deployment settings registry; human-readable, admin-mutable |
+| `GET PATCH /api/preferences` | effective personal preferences and per-user overrides |
+| `GET /api/logs`; `GET /api/logs/stream` | human-user server-log snapshot/tail; admins receive the raw operator stream, while user roles receive known deployment credentials and token-shaped values redacted |
+| `GET /api/auth/me` | caller identity, human role, and sign-in methods (public; never 401s) |
 | `POST /api/auth/login` / `POST /api/auth/logout` | username/password login / drop the session (public) |
 | `GET /api/auth/github/{login,callback}` | the GitHub OAuth dance (public) |
-| `GET POST /api/auth/tokens` / `DELETE /api/auth/tokens/{id}` | list / mint / revoke API tokens |
+| `GET POST /api/auth/tokens` / `DELETE /api/auth/tokens/{id}` | list / mint / revoke the caller's personal API tokens |
 | `POST /api/auth/password` | set the caller's own password |
-| `GET POST /api/auth/users` / `DELETE /api/auth/users/{username}` | the approved-operator allowlist |
-| `GET PUT /api/auth/github/config` | the GitHub OAuth app config (secret write-only) |
-| `GET POST /api/watches` / `GET PATCH DELETE /api/watches/{id}` | watch CRUD (see [Watches](#watches)) |
+| `GET POST /api/auth/users`; `PUT /api/auth/users/{username}/role`; `DELETE /api/auth/users/{username}` | admin-only approved-user and role management |
+| `GET PUT /api/auth/github/config` | admin-only GitHub OAuth app config (secret write-only) |
+| `GET POST /api/watches` / `GET PATCH DELETE /api/watches/{id}` | human-readable, admin-mutable watch definitions (see [Watches](#watches)) |
 | `GET /api/watches/programs` | the builtin program registry: titles, suggested defaults, read-only script sources |
-| `POST /api/watches/{id}/run` / `GET /api/watches/{id}/runs` | fire a round now (`{dry_run}` stubs mutations) / the round-history audit |
+| `POST /api/watches/{id}/run` / `GET /api/watches/{id}/runs` | admin-only fire a round now (`{dry_run}` stubs mutations) / human-readable round-history audit |
 
 Review drafts are REST-private and emit no branch-wide event until submission;
 other tabs refresh the creator's draft when they regain focus. `ReviewDto`
@@ -843,7 +846,7 @@ request to a `Principal` three ways, in order:
   remote `loom` CLI saves with `loom login`, or that an ephemeral client passes
   in `LOOM_TOKEN`. Tokens are random secrets stored only as a SHA-256 hash
   (`api_tokens.token_hash`); the plaintext is shown once at creation. Managed
-  under Settings → Tokens or `loom token`.
+  under Settings → Account or `loom token`.
 - **Session cookie** — the opaque `loom_session` cookie set by a successful
   GitHub or username/password login, stored hashed in `auth_sessions`.
 - **Loopback trust** — a request from `127.0.0.1`/`::1` is taken to be the
@@ -856,18 +859,25 @@ request to a `Principal` three ways, in order:
 A request that resolves to none of these gets `401`; the SPA's router guard
 turns that into the login screen.
 
-**The allowlist.** `users` rows are the approved operators. A fresh database is
+**Users and roles.** `users` rows are approved human users. A fresh database is
 seeded with one owner — whichever GitHub login `LOOM_OWNER_GITHUB` names at
 first run. There is no default: leave it unset and no owner row is seeded at
 all, so GitHub login has no `users` row to match until it's set (fail closed,
 rather than seed a real maintainer login onto an internet-facing deploy).
 GitHub login only succeeds for a login that matches a `users` row; an unknown
 identity is authenticated by GitHub but rejected by loom. A user may have a
-`github_login`, a `password_hash` (argon2), or both. All approved users are
-equal — there is no role hierarchy, matching the single-operator scale.
+`github_login`, a `password_hash` (argon2), or both. The persisted role is
+`admin` or `user`. Both roles operate normal Loom work, use per-session debug
+shells, and read diagnostics, watch activity, and redacted logs. Admins
+additionally change deployment settings, integrations, profiles, federations,
+shared environment, watches, and user access; they can use the host scratch
+shell and read the raw operator log. Existing rows migrate to `admin`, while
+newly approved users default to `user`. Browser sessions and personal tokens
+resolve the current role on every request, so role changes take effect
+immediately.
 
 **GitHub OAuth** is configured per-deploy: register an OAuth app and set its id
-and secret via Settings → Connections or the `LOOM_GITHUB_CLIENT_ID` /
+and secret via Settings → Integrations or the `LOOM_GITHUB_CLIENT_ID` /
 `LOOM_GITHUB_CLIENT_SECRET` env vars. The callback is
 `<base>/api/auth/github/callback`, where `<base>` is the `auth.base_url` setting
 or, unset, `{X-Forwarded-Proto|http}://{Host}`. The login route sets a short

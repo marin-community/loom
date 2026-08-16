@@ -1,14 +1,14 @@
-// Terminal appearance: the single place that turns the `terminal.*` server
-// settings into concrete xterm.js options (palette, font stack, size). Both the
+// Terminal appearance: the single place that turns the signed-in user's
+// effective `terminal.*` preferences into concrete xterm.js options. Both the
 // live terminal (`AgentTerminal.vue`) and the settings preview
 // (`AppearancePanel.vue`) resolve through here, so what the preview shows is
 // exactly what a real terminal renders.
 
 import type { ITheme } from '@xterm/xterm';
 import { get } from '../api';
-import type { SettingsEnvelope, SettingView } from '../types';
+import type { UserPreferencesEnvelope } from '../types';
 
-// Terminal palettes, selected by the `terminal.theme` setting. The dark palette
+// Terminal palettes, selected by the `terminal.theme` preference. The dark palette
 // keeps xterm's own ANSI colours (they already assume a dark terminal) but sits
 // on the UI's recessed-panel tone rather than pure black, so the pane reads as
 // part of the workbench instead of a hole in it. The light palette (Solarized
@@ -46,7 +46,7 @@ export function themeFor(name: string | undefined): ITheme {
   return name === 'light' ? LIGHT_THEME : DARK_THEME;
 }
 
-// Font tokens the `terminal.font` setting stores, mapped to concrete stacks. The
+// Font tokens the `terminal.font` preference stores, mapped to concrete stacks. The
 // bundled faces (imported in main.ts) lead their stack; the platform monospace
 // stack is the last-resort fallback and the whole of the `system` choice.
 export type FontToken = 'plex' | 'jetbrains' | 'system';
@@ -92,13 +92,15 @@ export interface TerminalConfig {
   fontSize: number;
 }
 
-function valueOf(settings: SettingView[], key: string, fallback: string): string {
+type TerminalSetting = { key: string; value: string };
+
+function valueOf(settings: TerminalSetting[], key: string, fallback: string): string {
   return settings.find((s) => s.key === key)?.value?.trim() || fallback;
 }
 
-// Turn a settings snapshot into resolved xterm options. Pure — pass live
-// `/settings` values or in-flight drafts; the preview uses the same path.
-export function resolveTerminalConfig(settings: SettingView[]): TerminalConfig {
+// Turn a preference snapshot into resolved xterm options. Pure — the preview
+// uses the same path as live terminals.
+export function resolveTerminalConfig(settings: TerminalSetting[]): TerminalConfig {
   const themeToken = valueOf(settings, 'terminal.theme', DEFAULT_THEME);
   const fontToken = valueOf(settings, 'terminal.font', DEFAULT_FONT);
   const fontSize = clampFontSize(
@@ -113,20 +115,18 @@ export function resolveTerminalConfig(settings: SettingView[]): TerminalConfig {
   };
 }
 
-// The dark, default-everything config — the safe fallback when `/settings` is
+// The dark, default-everything config — the safe fallback when `/preferences` is
 // slow or unreachable, and the base a live terminal opens with before the fetch
 // lands.
 export function defaultTerminalConfig(): TerminalConfig {
   return resolveTerminalConfig([]);
 }
 
-// Best-effort fetch + resolve of the configured terminal appearance. Any
-// failure (offline, a stale server missing the keys) falls back to the dark
-// defaults.
+// Best-effort fetch + resolve of the signed-in user's terminal preferences.
 export async function fetchTerminalConfig(): Promise<TerminalConfig> {
   try {
-    const res = (await get('/settings')) as SettingsEnvelope;
-    return resolveTerminalConfig(res.settings);
+    const res = (await get('/preferences')) as UserPreferencesEnvelope;
+    return resolveTerminalConfig(res.preferences);
   } catch {
     return defaultTerminalConfig();
   }

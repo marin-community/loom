@@ -135,17 +135,18 @@ test.describe('creating a session via the UI form', () => {
     await page.getByPlaceholder('Add a /health endpoint').fill('Keep this draft');
 
     await page.getByRole('link', { name: 'Manage profiles' }).click();
-    await expect(page).toHaveURL(`${weaver.baseUrl}/settings`);
+    await expect(page).toHaveURL(`${weaver.baseUrl}/settings?tab=agents`);
     const addProfile = page.getByRole('button', { name: '+ Add profile' });
     await expect(page.getByTestId('profile-picker')).toHaveValue('default');
     await addProfile.click();
-    await page.getByLabel('Name', { exact: true }).fill('cached-template');
-    await page.getByLabel('Description', { exact: true }).fill('first revision');
+    const profileEditor = page.getByTestId('profile-editor');
+    await profileEditor.getByLabel('Name', { exact: true }).fill('cached-template');
+    await profileEditor.getByLabel('Description', { exact: true }).fill('first revision');
     await page.getByTestId('profile-agent').selectOption('shell');
-    await page.getByLabel('Protocol', { exact: true }).selectOption('terminal');
+    await profileEditor.getByLabel('Protocol', { exact: true }).selectOption('terminal');
     await page.getByTestId('profile-save').click();
     await expect(page.getByText('Saved cached-template.')).toBeVisible();
-    await page.getByLabel('Description', { exact: true }).fill('second revision');
+    await profileEditor.getByLabel('Description', { exact: true }).fill('second revision');
     await page.getByTestId('profile-save').click();
     await expect(page.getByTestId('profile-summary')).toContainText('r2');
     await page.goBack();

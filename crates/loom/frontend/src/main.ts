@@ -56,7 +56,7 @@ const router = createRouter({
     { path: '/channels/:id', component: Channels, props: true, meta: { title: 'Channels' } },
     { path: '/watches', component: Watches, meta: { title: 'Watches' } },
     { path: '/watches/:id', component: Watches, props: true, meta: { title: 'Watches' } },
-    { path: '/shell', component: Shell, meta: { title: 'Shell' } },
+    { path: '/shell', component: Shell, meta: { title: 'Shell', admin: true } },
     { path: '/settings', component: Settings, meta: { title: 'Settings' } },
   ],
 });
@@ -68,9 +68,11 @@ router.beforeEach(async (to) => {
     return { path: '/sessions/new' };
   }
   if (to.meta.public) return true;
-  if (me.authenticated) return true;
-  if (await loadMe()) return true;
-  return { path: '/login', query: to.fullPath === '/' ? {} : { redirect: to.fullPath } };
+  if (!me.authenticated && !(await loadMe())) {
+    return { path: '/login', query: to.fullPath === '/' ? {} : { redirect: to.fullPath } };
+  }
+  if (to.meta.admin && me.role !== 'admin') return { path: '/' };
+  return true;
 });
 
 // A 401 mid-session (an expired cookie) flips us back to the login screen.

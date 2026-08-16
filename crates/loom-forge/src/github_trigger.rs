@@ -1078,7 +1078,7 @@ mod tests {
         let db = crate::db::connect_in_memory().await.unwrap();
         // An approved loom user (their GitHub login is on the `users` allowlist —
         // the same one that gates sign-in) may trigger, with no GitHub call.
-        auth::add_user(&db, "alice", Some("alice-gh"), None)
+        auth::add_user(&db, "alice", Some("alice-gh"), None, auth::UserRole::Admin)
             .await
             .unwrap();
         assert!(authorize(&db, "alice-gh").await);

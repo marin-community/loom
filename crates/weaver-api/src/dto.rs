@@ -1350,7 +1350,7 @@ pub struct DiagnosticFederation {
     pub updated_at: String,
 }
 
-/// Admin-only operational snapshot returned by `/api/diagnostics`.
+/// Human-readable operational snapshot returned by `/api/diagnostics`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DiagnosticsView {
     pub sessions: Vec<DiagnosticSessionCount>,
@@ -2838,6 +2838,25 @@ pub struct SettingsEnvelope {
     pub settings: Vec<SettingView>,
 }
 
+/// One personal preference with its deployment-wide inherited value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserPreferenceView {
+    pub key: String,
+    pub label: String,
+    pub description: String,
+    pub kind: SettingKind,
+    pub options: Vec<String>,
+    pub value: String,
+    pub inherited_value: String,
+    pub is_overridden: bool,
+}
+
+/// Effective personal preferences returned by `GET` and `PATCH /api/preferences`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UserPreferencesEnvelope {
+    pub preferences: Vec<UserPreferenceView>,
+}
+
 /// Body for `POST /api/watches`. JSON-bearing fields take structured JSON
 /// (`trigger`/`scope`/`params`), which the server serializes into the stored
 /// text columns. Optional fields fall back to the model's defaults.
@@ -2906,6 +2925,15 @@ pub struct RunWatchReq {
 // Authentication
 // ---------------------------------------------------------------------------
 
+wire_enum!(UserRole {
+    Admin => "admin",
+    User => "user",
+});
+
+fn default_user_role() -> UserRole {
+    UserRole::User
+}
+
 /// Which sign-in methods the server currently offers — what the login screen
 /// renders. `password` is always available (any user can be given one);
 /// `github` is true only once an OAuth app is configured.
@@ -2926,6 +2954,8 @@ pub struct MeView {
     pub github_login: Option<String>,
     /// How they authenticated: `loopback` | `token` | `session` | null.
     pub via: Option<String>,
+    /// Persisted human role. Scoped automation/session principals have no role.
+    pub role: Option<UserRole>,
     /// The sign-in methods on offer (for the login screen).
     pub methods: AuthMethods,
 }
@@ -2982,17 +3012,26 @@ pub struct UserView {
     pub username: String,
     pub github_login: Option<String>,
     pub has_password: bool,
+    pub role: UserRole,
     pub created_at: String,
 }
 
 /// Body for `POST /api/auth/users` — approve a new operator.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddUserReq {
     pub username: String,
     #[serde(default)]
     pub github_login: Option<String>,
     #[serde(default)]
     pub password: Option<String>,
+    #[serde(default = "default_user_role")]
+    pub role: UserRole,
+}
+
+/// Body for `PUT /api/auth/users/{username}/role`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetUserRoleReq {
+    pub role: UserRole,
 }
 
 /// `GET /api/auth/github/config` — the GitHub App / sign-in setup, secret

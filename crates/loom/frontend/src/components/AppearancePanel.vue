@@ -3,8 +3,8 @@ import { ref, computed, reactive, onMounted, onUnmounted, watch, nextTick } from
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { get, patch } from '../api';
-import type { SettingsEnvelope, SettingView } from '../types';
+import { getPreferences, patchPreferences } from '../api';
+import type { UserPreferenceView } from '../types';
 import {
   FONT_CHOICES,
   fontStack,
@@ -19,7 +19,8 @@ import {
 // The terminal Appearance pane: theme, font, and size for the in-browser
 // terminal, with a live xterm preview that renders exactly what a real terminal
 // will. Self-contained like the other settings panels — it fetches and patches
-// `/settings` directly rather than routing through the parent's drafts.
+// the personal-preferences API directly rather than routing through the
+// deployment settings drafts.
 
 const THEME_KEY = 'terminal.theme';
 const FONT_KEY = 'terminal.font';
@@ -47,7 +48,7 @@ const SAMPLE = [
   '\x1b[1;32m➜\x1b[0m \x1b[1;36m~/weaver\x1b[0m ',
 ].join('\r\n');
 
-const stored = ref<Record<string, SettingView>>({});
+const stored = ref<Record<string, UserPreferenceView>>({});
 const draft = reactive<Record<string, string>>({
   [THEME_KEY]: 'dark',
   [FONT_KEY]: 'plex',
@@ -67,10 +68,10 @@ let disposed = false;
 const sizeNumber = computed(() => clampFontSize(Number(draft[SIZE_KEY])));
 
 const dirty = computed(() => KEYS.some((k) => draft[k] !== stored.value[k]?.value));
-const allInherited = computed(() => KEYS.every((k) => stored.value[k]?.source !== 'runtime'));
+const allInherited = computed(() => KEYS.every((k) => !stored.value[k]?.is_overridden));
 
-function adopt(settings: SettingView[]) {
-  const byKey: Record<string, SettingView> = {};
+function adopt(settings: UserPreferenceView[]) {
+  const byKey: Record<string, UserPreferenceView> = {};
   for (const s of settings) if (KEYS.includes(s.key)) byKey[s.key] = s;
   stored.value = byKey;
   for (const k of KEYS) if (byKey[k]) draft[k] = byKey[k].value;
@@ -78,8 +79,8 @@ function adopt(settings: SettingView[]) {
 
 async function load() {
   try {
-    const res = (await get('/settings')) as SettingsEnvelope;
-    adopt(res.settings);
+    const res = await getPreferences();
+    adopt(res.preferences);
     error.value = '';
   } catch (e) {
     error.value = (e as Error).message;
@@ -88,8 +89,8 @@ async function load() {
   }
 }
 
-function patchBody(reset: boolean): Record<string, string | null> {
-  return Object.fromEntries(KEYS.map((k) => [k, reset ? null : draft[k]]));
+function patchBody(keys: string[], reset: boolean): Record<string, string | null> {
+  return Object.fromEntries(keys.map((key) => [key, reset ? null : draft[key]]));
 }
 
 async function commit(body: Record<string, string | null>, done: string) {
@@ -97,8 +98,8 @@ async function commit(body: Record<string, string | null>, done: string) {
   error.value = '';
   notice.value = '';
   try {
-    const res = (await patch('/settings', body)) as SettingsEnvelope;
-    adopt(res.settings);
+    const res = await patchPreferences(body);
+    adopt(res.preferences);
     notice.value = done;
   } catch (e) {
     error.value = (e as Error).message;
@@ -111,11 +112,12 @@ async function save() {
   if (!dirty.value) return;
   // Normalise the size to the clamped value we actually apply before saving.
   draft[SIZE_KEY] = String(sizeNumber.value);
-  await commit(patchBody(false), 'Saved terminal appearance.');
+  const changed = KEYS.filter((key) => draft[key] !== stored.value[key]?.value);
+  await commit(patchBody(changed, false), 'Saved your terminal preferences.');
 }
 
 async function resetDefaults() {
-  await commit(patchBody(true), 'Cleared terminal appearance overrides.');
+  await commit(patchBody(KEYS, true), 'Restored deployment terminal defaults.');
 }
 
 function nudgeSize(delta: number) {
@@ -324,10 +326,10 @@ onUnmounted(() => {
         <button
           class="btn-secondary px-3 py-1.5 text-xs disabled:opacity-50"
           :disabled="busy || allInherited || !loaded"
-          title="Clear runtime overrides and inherit deployment or built-in values"
+          title="Clear your overrides and inherit deployment defaults"
           @click="resetDefaults"
         >
-          Clear overrides
+          Use deployment defaults
         </button>
         <span v-if="dirty" class="text-2xs text-faint"
           >Unsaved changes — applies to terminals opened after saving.</span

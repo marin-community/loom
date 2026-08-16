@@ -7,7 +7,7 @@ test.describe('session lifecycle actions', () => {
   }) => {
     await page.setViewportSize({ width: 390, height: 620 });
     await page.goto(`${weaver.baseUrl}/settings`);
-    await page.getByTestId('settings-tab-access').click();
+    await page.getByTestId('settings-category-account').click();
     await page.getByTestId('token-name').fill('narrow-flow');
     await page.getByTestId('token-create').click();
     const revoke = page.getByTestId('token-revoke');

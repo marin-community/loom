@@ -94,10 +94,10 @@ pub(super) async fn list_sessions(
     Extension(principal): Extension<Principal>,
     Query(q): Query<ListSessionsQuery>,
 ) -> ApiResult<Json<Vec<SessionView>>> {
-    if q.managed && !principal.is_admin() {
+    if q.managed && !principal.is_human() {
         return Err(AppError::new(
             StatusCode::FORBIDDEN,
-            "admin grant required to list managed sessions",
+            "human grant required to list managed sessions",
         ));
     }
     collect_sessions(
@@ -570,7 +570,7 @@ pub(super) async fn create_session(
                 "automation credentials create sessions through /api/runs",
             ));
         }
-        crate::auth::Grant::Admin => {}
+        crate::auth::Grant::Admin | crate::auth::Grant::User => {}
     }
     let created = crate::provision::create(st.clone(), req, actor)
         .await

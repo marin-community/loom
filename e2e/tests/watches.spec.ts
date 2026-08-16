@@ -4,6 +4,38 @@ import { test, expect } from '../fixtures/weaver';
 // left (active dot, name, program, outcome), and the selected watch's
 // activity log, script source, and config live in the right pane.
 test.describe('watch panel', () => {
+  test('users can inspect watches without mutation controls', async ({
+    page,
+    weaver,
+  }) => {
+    await weaver.seedWatch({ name: 'status-check' });
+    await page.route('**/api/auth/me', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          authenticated: true,
+          username: 'alice',
+          github_login: 'alice-gh',
+          via: 'token',
+          role: 'user',
+          methods: { password: true, github: false },
+        }),
+      });
+    });
+
+    await page.goto(`${weaver.baseUrl}/watches`);
+    await expect(page.getByTestId('watch-readonly')).toBeVisible();
+    await expect(page.getByTestId('watch-row')).toHaveCount(1);
+    await expect(page.getByTestId('watch-new')).toHaveCount(0);
+    await expect(page.getByTestId('watch-enabled-toggle')).toHaveCount(0);
+    await expect(page.getByTestId('watch-run')).toHaveCount(0);
+    await expect(page.getByTestId('watch-dryrun')).toHaveCount(0);
+
+    await page.getByTestId('watch-tab-config').click();
+    await expect(page.getByTestId('watch-edit')).toHaveCount(0);
+  });
+
   test('shows an empty state when there are no watches', async ({ page, weaver }) => {
     await page.goto(`${weaver.baseUrl}/watches`);
     await expect(page.getByRole('heading', { name: 'Watches' })).toBeVisible();

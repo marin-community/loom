@@ -15,81 +15,93 @@ import McpPanel from '../components/McpPanel.vue';
 import CustomAgentsPanel from '../components/CustomAgentsPanel.vue';
 import AppearancePanel from '../components/AppearancePanel.vue';
 import SettingFieldRow from '../components/SettingFieldRow.vue';
+import UsersPanel from '../components/UsersPanel.vue';
+import { me } from '../auth';
 
 const route = useRoute();
 const router = useRouter();
 
 type Category =
+  | 'account'
+  | 'preferences'
+  | 'diagnostics'
+  | 'people'
   | 'agents'
-  | 'sessions'
-  | 'github'
-  | 'watches'
-  | 'workspace'
-  | 'environment'
-  | 'access'
-  | 'diagnostics';
+  | 'integrations'
+  | 'runtime'
+  | 'automation';
+
+type CategoryScope = 'personal' | 'user' | 'admin';
 
 interface CategoryItem {
   id: Category;
   label: string;
   groups?: string[];
   summary: string;
+  scope: CategoryScope;
 }
 
 const categories: CategoryItem[] = [
   {
-    id: 'agents',
-    label: 'Agents',
-    groups: ['Agents', 'Metadata'],
-    summary: 'Launch profiles, MCP capabilities, custom agents, and bounded metadata assistance.',
+    id: 'account',
+    label: 'Account',
+    summary: 'Your identity, password, personal GitHub credential, and API tokens.',
+    scope: 'personal',
   },
   {
-    id: 'sessions',
-    label: 'Sessions',
-    groups: ['Server', 'Sessions'],
-    summary: 'Server recovery, launch-time behavior, setup budgets, and conversation logs.',
-  },
-  {
-    id: 'github',
-    label: 'Connections',
-    groups: ['GitHub', 'Slack'],
-    summary:
-      'Deployment-owned GitHub and Slack integrations, trigger behavior, and connection state.',
-  },
-  {
-    id: 'watches',
-    label: 'Watches',
-    groups: ['Watch'],
-    summary: 'Fleet watcher defaults and engine-level safety controls.',
-  },
-  {
-    id: 'workspace',
-    label: 'Workspace',
-    groups: ['Editor'],
-    summary: 'Embedded editor behavior plus terminal appearance and typography.',
-  },
-  {
-    id: 'environment',
-    label: 'Session environment',
-    summary:
-      'Readable, non-secret environment variables exported into future default-profile sessions.',
-  },
-  {
-    id: 'access',
-    label: 'Access',
-    groups: ['Authentication'],
-    summary: 'Personal identity, approved users, browser authentication, and API tokens.',
+    id: 'preferences',
+    label: 'Preferences',
+    summary: 'Your terminal appearance, with deployment defaults available at any time.',
+    scope: 'personal',
   },
   {
     id: 'diagnostics',
     label: 'Diagnostics',
+    summary: 'Background tasks, server logs, and build status for debugging this deployment.',
+    scope: 'user',
+  },
+  {
+    id: 'people',
+    label: 'People & security',
+    groups: ['Authentication'],
+    summary: 'Approved users, roles, sign-in policy, and deployment authentication.',
+    scope: 'admin',
+  },
+  {
+    id: 'agents',
+    label: 'Agents & profiles',
+    groups: ['Agents', 'Metadata'],
     summary:
-      'Background tasks, live server logs, and build status for debugging this loom deployment.',
+      'Launch profiles, shared session environment, MCP capabilities, custom agents, and metadata assistance.',
+    scope: 'admin',
+  },
+  {
+    id: 'integrations',
+    label: 'Integrations',
+    groups: ['GitHub', 'Slack'],
+    summary: 'Deployment-owned GitHub and Slack connections and trigger behavior.',
+    scope: 'admin',
+  },
+  {
+    id: 'runtime',
+    label: 'Runtime',
+    groups: ['Server', 'Sessions', 'Editor', 'Appearance'],
+    summary:
+      'Server recovery, session launch behavior, setup budgets, editor defaults, and inherited terminal defaults.',
+    scope: 'admin',
+  },
+  {
+    id: 'automation',
+    label: 'Automation',
+    groups: ['Watch', 'Automation'],
+    summary: 'Watcher defaults, automation credentials, and engine-level safety controls.',
+    scope: 'admin',
   },
 ];
 
 function categoryFromQuery(q: unknown): Category {
-  return categories.some((item) => item.id === q) ? (q as Category) : 'agents';
+  const match = categories.find((item) => item.id === q);
+  return match && (match.scope !== 'admin' || me.role === 'admin') ? match.id : 'account';
 }
 
 const category = ref<Category>(categoryFromQuery(route.query.tab));
@@ -104,17 +116,39 @@ const busy = ref('');
 const currentCategory = computed(
   () => categories.find((item) => item.id === category.value) ?? categories[0],
 );
+const personalCategories = computed(() => categories.filter((item) => item.scope === 'personal'));
+const userCategories = computed(() => categories.filter((item) => item.scope === 'user'));
+const adminCategories = computed(() =>
+  me.role === 'admin' ? categories.filter((item) => item.scope === 'admin') : [],
+);
 
 watch(
   () => route.query.tab,
   (q) => (category.value = categoryFromQuery(q)),
 );
 
+watch(
+  () => me.role,
+  () => {
+    const next = categoryFromQuery(route.query.tab);
+    category.value = next;
+    if (next === 'account' && route.query.tab) {
+      router.replace({ query: { ...route.query, tab: undefined } });
+    }
+  },
+);
+
 function setCategory(next: Category) {
   category.value = next;
   router.replace({
-    query: { ...route.query, tab: next === 'agents' ? undefined : next },
+    query: { ...route.query, tab: next === 'account' ? undefined : next },
   });
+}
+
+function scopeLabel(scope: CategoryScope): string {
+  if (scope === 'admin') return 'Administration';
+  if (scope === 'user') return 'All users';
+  return 'Personal';
 }
 
 const groupedSettings = computed(() => {
@@ -262,7 +296,14 @@ function durationOptions(s: SettingView): { label: string; value: string }[] {
   ];
 }
 
-onMounted(load);
+onMounted(() => {
+  const next = categoryFromQuery(route.query.tab);
+  category.value = next;
+  if (next === 'account' && route.query.tab && route.query.tab !== 'account') {
+    router.replace({ query: { ...route.query, tab: undefined } });
+  }
+  load();
+});
 </script>
 
 <template>
@@ -275,59 +316,67 @@ onMounted(load);
 
     <div class="grid min-h-0 flex-1 gap-4 lg:grid-cols-[13rem_minmax(0,58rem)]">
       <aside class="min-w-0">
-        <div class="overflow-hidden rounded-md border border-line bg-surface">
-          <button
-            v-for="item in categories"
-            :key="item.id"
-            type="button"
-            :data-testid="
-              item.id === 'environment'
-                ? 'settings-tab-env'
-                : item.id === 'access'
-                  ? 'settings-tab-access'
-                  : `settings-category-${item.id}`
-            "
-            class="flex w-full items-center gap-2 border-b border-line border-l-2 px-3 py-2 text-left text-sm last:border-b-0"
-            :class="
-              category === item.id
-                ? 'border-l-accent bg-input font-medium text-fg'
-                : 'border-l-transparent text-muted hover:bg-subtle hover:text-fg'
-            "
-            @click="setCategory(item.id)"
-          >
-            {{ item.label }}
-          </button>
-        </div>
+        <template
+          v-for="section in [
+            { label: 'Personal', items: personalCategories },
+            { label: 'Operations', items: userCategories },
+            { label: 'Administration', items: adminCategories },
+          ]"
+          :key="section.label"
+        >
+          <div v-if="section.items.length" class="mb-4">
+            <p class="mb-1 px-1 text-2xs font-semibold uppercase tracking-wider text-faint">
+              {{ section.label }}
+            </p>
+            <div class="overflow-hidden rounded-md border border-line bg-surface">
+              <button
+                v-for="item in section.items"
+                :key="item.id"
+                type="button"
+                :data-testid="`settings-category-${item.id}`"
+                class="flex w-full items-center gap-2 border-b border-line border-l-2 px-3 py-2 text-left text-sm last:border-b-0"
+                :class="
+                  category === item.id
+                    ? 'border-l-accent bg-input font-medium text-fg'
+                    : 'border-l-transparent text-muted hover:bg-subtle hover:text-fg'
+                "
+                @click="setCategory(item.id)"
+              >
+                {{ item.label }}
+              </button>
+            </div>
+          </div>
+        </template>
       </aside>
 
       <main class="min-w-0">
         <header class="mb-3 border-b border-line pb-2">
           <div class="flex items-center gap-2">
             <h2 class="text-base font-semibold tracking-tight">{{ currentCategory.label }}</h2>
-            <span
-              v-if="currentCategory.groups?.length"
-              class="rounded bg-input px-1.5 py-0.5 font-mono text-2xs text-faint"
-            >
-              {{ currentCategory.groups?.join(' + ') }}
+            <span class="rounded bg-input px-1.5 py-0.5 text-2xs text-faint">
+              {{ scopeLabel(currentCategory.scope) }}
             </span>
           </div>
           <p class="mt-0.5 text-xs text-muted">{{ currentCategory.summary }}</p>
         </header>
 
-        <EnvPanel v-if="category === 'environment'" />
-        <LogsPanel v-else-if="category === 'diagnostics'" />
+        <LogsPanel v-if="category === 'diagnostics'" />
 
         <div v-else class="space-y-3">
           <template v-if="category === 'agents'">
             <ProfilesPanel :key="profilesKey" />
+            <EnvPanel />
             <McpPanel />
             <CustomAgentsPanel :agents="customAgents" @reload="reloadAgents" />
           </template>
-          <AccountPanel v-if="category === 'access'" />
-          <GithubConnectionPanel v-if="category === 'github'" />
-          <TokensPanel v-if="category === 'access'" />
-          <AppearancePanel v-if="category === 'workspace'" />
-          <SlackPanel v-if="category === 'github'" />
+          <template v-if="category === 'account'">
+            <AccountPanel />
+            <TokensPanel />
+          </template>
+          <AppearancePanel v-if="category === 'preferences'" />
+          <UsersPanel v-if="category === 'people'" />
+          <GithubConnectionPanel v-if="category === 'integrations'" />
+          <SlackPanel v-if="category === 'integrations'" />
 
           <section
             v-if="currentSettings.length"
@@ -414,9 +463,7 @@ onMounted(load);
           </section>
 
           <p
-            v-if="
-              !currentSettings.length && !error && category !== 'access' && category !== 'workspace'
-            "
+            v-if="currentCategory.groups?.length && !currentSettings.length && !error"
             class="text-sm text-muted"
           >
             Loading…

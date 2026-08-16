@@ -17,6 +17,7 @@ test.describe("settings · profiles", () => {
     const claude = registry.agents.find((agent) => agent.kind === "claude")!;
     const codex = registry.agents.find((agent) => agent.kind === "codex")!;
     await page.goto(`${weaver.baseUrl}/settings`);
+    await page.getByTestId("settings-category-agents").click();
 
     const agent = page.getByTestId("profile-agent");
     const model = page.getByTestId("profile-model");
@@ -28,7 +29,7 @@ test.describe("settings · profiles", () => {
     ]);
 
     await agent.selectOption("claude");
-    await model.selectOption(claude.models[0].id);
+    await model.fill(claude.models[0].id);
     await agent.selectOption("codex");
     await expect(model).toHaveValue("");
     await expect(model.locator("option")).toContainText([
@@ -67,6 +68,7 @@ test.describe("settings · profiles", () => {
     weaver,
   }) => {
     await page.goto(`${weaver.baseUrl}/settings`);
+    await page.getByTestId("settings-category-agents").click();
     const mode = page.getByTestId("profile-mode");
     await expect(mode).toHaveValue("auto");
     await mode.selectOption("bypassPermissions");
@@ -125,6 +127,7 @@ for line in sys.stdin:
 `;
 
     await page.goto(`${weaver.baseUrl}/settings`);
+    await page.getByTestId("settings-category-agents").click();
     const panel = page.getByTestId("mcp-panel");
     await panel.getByRole("button", { name: "Add custom MCP" }).click();
     await panel.getByLabel("Identity").fill("/docs/search");
@@ -181,51 +184,69 @@ for line in sys.stdin:
     expect(removed.ok).toBe(true);
   });
 
-  test("overlapping settings are consolidated into workspace and access", async ({
+  test("settings separate personal use from deployment administration", async ({
     page,
     weaver,
   }) => {
     await page.goto(`${weaver.baseUrl}/settings`);
     await expect(
-      page.getByRole("button", { name: "Workspace", exact: true }),
-    ).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: "Access", exact: true }),
-    ).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: "Session environment", exact: true }),
-    ).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: "Editor", exact: true }),
-    ).toHaveCount(0);
-    await expect(
-      page.getByRole("button", { name: "Appearance", exact: true }),
-    ).toHaveCount(0);
-    await expect(
-      page.getByRole("button", { name: "Authentication", exact: true }),
-    ).toHaveCount(0);
-    await expect(
-      page.getByRole("button", { name: "Tokens", exact: true }),
-    ).toHaveCount(0);
-    await expect(
       page.getByRole("button", { name: "Account", exact: true }),
-    ).toHaveCount(0);
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Preferences", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Diagnostics", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "People & security", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Agents & profiles", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Integrations", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Runtime", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Automation", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("complementary").getByText("Personal", { exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText("Operations", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("Administration", { exact: true }),
+    ).toBeVisible();
     await expect(page.locator('[data-rail="chat"]')).toHaveCount(0);
 
-    await page.getByRole("button", { name: "Access", exact: true }).click();
-    await expect(page.getByText("Your GitHub token", { exact: true })).toBeVisible();
-    await expect(page.getByText("Loom GitHub App", { exact: true })).toHaveCount(0);
+    await expect(
+      page.getByText("Your GitHub token", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Loom GitHub App", { exact: true }),
+    ).toHaveCount(0);
     const createToken = page.getByRole("link", { name: "Create one" });
     await expect(createToken).toHaveAttribute("href", /contents=write/);
     await expect(createToken).toHaveAttribute("href", /issues=write/);
     await expect(createToken).toHaveAttribute("href", /pull_requests=write/);
 
-    await page.getByRole("button", { name: "Connections", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Integrations", exact: true })
+      .click();
     await expect(page.getByTestId("github-connection-panel")).toBeVisible();
-    await expect(page.getByText("Loom GitHub App", { exact: true })).toBeVisible();
-    await expect(page.getByText("Your GitHub token", { exact: true })).toHaveCount(0);
+    await expect(
+      page.getByText("Loom GitHub App", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Your GitHub token", { exact: true }),
+    ).toHaveCount(0);
 
-    await page.getByRole("button", { name: "Agents", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Agents & profiles", exact: true })
+      .click();
     expect(
       await page.getByTestId("metadata-settings").evaluate((section) => ({
         settingsVisible: [
@@ -241,5 +262,48 @@ for line in sys.stdin:
       settingsVisible: true,
       metadataProfileVisible: false,
     });
+  });
+
+  test("users see personal settings and diagnostics without admin controls", async ({
+    page,
+    weaver,
+  }) => {
+    await page.route("**/api/auth/me", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          authenticated: true,
+          username: "alice",
+          github_login: "alice-gh",
+          via: "token",
+          role: "user",
+          methods: { password: true, github: false },
+        }),
+      });
+    });
+
+    await page.goto(`${weaver.baseUrl}/settings?tab=integrations`);
+    await expect(page).toHaveURL(`${weaver.baseUrl}/settings`);
+    await expect(page.getByTestId("settings-category-account")).toBeVisible();
+    await expect(
+      page.getByTestId("settings-category-preferences"),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("settings-category-diagnostics"),
+    ).toBeVisible();
+    await expect(page.getByText("Administration", { exact: true })).toHaveCount(
+      0,
+    );
+    await expect(page.getByTestId("settings-category-people")).toHaveCount(0);
+    await expect(page.getByTestId("settings-category-agents")).toHaveCount(0);
+    await expect(page.getByText("alice", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("User · via token", { exact: false }),
+    ).toBeVisible();
+    await expect(page.locator('[data-rail="shell"]')).toHaveCount(0);
+
+    await page.goto(`${weaver.baseUrl}/shell`);
+    await expect(page).toHaveURL(`${weaver.baseUrl}/`);
   });
 });

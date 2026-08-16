@@ -1028,7 +1028,7 @@ async fn spawn_script(
     }
     // github watches shell out to `gh` (reading PR labels/state) from this
     // otherwise env-stripped process; hand them the operator's `GH_TOKEN`
-    // (Settings → Environment) so those reads authenticate. Set after the strip so
+    // (Settings → Agents & profiles) so those reads authenticate. Set after the strip so
     // it wins. Nothing else from the agent env leaks in — a watch still reaches the
     // fleet only through the REST API.
     if let Some(token) = crate::agent_env::get(&state.db, "GH_TOKEN").await {

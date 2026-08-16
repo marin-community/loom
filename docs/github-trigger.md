@@ -70,13 +70,13 @@ order:
 Steps 6–8 (clone, create-or-forward, reply) run in a **detached task**: the
 handler returns `200` as soon as the gates pass. Cloning a large repo can outlast
 GitHub's ~10s delivery timeout, and a timed-out delivery would cancel an inline
-handler mid-clone. Each launch is tracked on **Settings → Debug** (running / done
+handler mid-clone. Each launch is tracked on **Settings → Diagnostics** (running / done
 / error, with the outcome), so you can follow it after the `200`.
 
 The reply (step 8) reaches GitHub through the [GitHub App](#the-github-app) when
 one is configured — with a short-lived, per-installation token — and otherwise
 through the `gh` CLI's ambient `GH_TOKEN`. The **session itself** acts as the
-requester: its `GH_TOKEN` is that user's personal token (**Settings → Access**),
+requester: its `GH_TOKEN` is that user's personal token (**Settings → Account**),
 falling back to its selected profile when they have none — so its pushes and
 `gh` replies use the configured session identity. Separately, the poll loop
 posts a one-time back-link comment (`Working on this in loom: {base}/s/{id}`) on
@@ -142,8 +142,9 @@ either. Write access to the repo is **not** by itself a grant, so opening a repo
 to loom never hands the trigger to everyone who can push to it.
 
 The first approved user is seeded from `LOOM_OWNER_GITHUB` on a fresh database.
-Manage the rest in **Settings → Approved users** or over the API (set
-`github_login` so the person can both sign in with GitHub and trigger):
+Manage the rest in **Settings → People & security** or over the API (set
+`github_login` so the person can both sign in with GitHub and trigger; new
+users default to the normal `user` role):
 
 ```sh
 curl -X POST {base}/api/auth/users -H 'Authorization: Bearer $LOOM_TOKEN' \
@@ -337,10 +338,11 @@ gate did it hit?* Work through it in order:
    `scripts/gh_app_deliveries.py` prints the same delivery log from the command
    line (it mints an App JWT from the key in `loom.toml`).
 
-3. **Read the server logs.** The quickest path is **Settings → Debug** in the web
+3. **Read the server logs.** The quickest path is **Settings → Diagnostics** in the web
    UI — a live, filterable mirror of the server's log stream (plus the
    background-task list), so you can watch a delivery land without shelling into
-   the box (handy on the Docker deploy). The
+   the box (handy on the Docker deploy). User-role views redact known deployment
+   credentials and token-shaped values; admins receive the raw operator stream. The
    same lines go to the process stdout, so `docker compose logs -f loom` (or
    `RUST_LOG=loom=debug` for the outbound `gh`/REST calls) works too. Each gate
    logs a distinct line — look for: `signature verification failed` (401, secret

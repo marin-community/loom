@@ -3,11 +3,10 @@ import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import * as api from '../api';
 import { me, doLogout } from '../auth';
-import type { User } from '../types';
 import { confirmAction } from '../lib/confirmation';
 
 // Personal account and access management. Deployment connections such as the
-// Loom GitHub App live in Connections instead.
+// Loom GitHub App lives in Integrations instead.
 const router = useRouter();
 const error = ref('');
 const notice = ref('');
@@ -102,69 +101,12 @@ async function clearMyGithubToken() {
   });
 }
 
-// -- Approved users ---------------------------------------------------------
-const users = ref<User[]>([]);
-const newUser = ref('');
-const newUserGithub = ref('');
-const newUserPassword = ref('');
-
-async function loadUsers() {
-  try {
-    users.value = await api.listUsers();
-  } catch (e) {
-    fail(e);
-  }
-}
-
-async function addUser() {
-  if (!newUser.value.trim()) return;
-  busy.value = true;
-  try {
-    await api.addUser(
-      newUser.value.trim(),
-      newUserGithub.value.trim() || undefined,
-      newUserPassword.value || undefined,
-    );
-    newUser.value = '';
-    newUserGithub.value = '';
-    newUserPassword.value = '';
-    ok('User approved.');
-    await loadUsers();
-  } catch (e) {
-    fail(e);
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function removeUser(u: User) {
-  await confirmAction({
-    title: `Remove approved user "${u.username}"?`,
-    description: 'They will lose dashboard and API access immediately.',
-    confirmLabel: 'Remove user',
-    danger: true,
-    action: async () => {
-      busy.value = true;
-      try {
-        await api.removeUser(u.username);
-        ok('User removed.');
-        await loadUsers();
-      } finally {
-        busy.value = false;
-      }
-    },
-  });
-}
-
 async function logout() {
   await doLogout();
   router.push('/login');
 }
 
-onMounted(() => {
-  loadMyGithubToken();
-  loadUsers();
-});
+onMounted(loadMyGithubToken);
 </script>
 
 <template>
@@ -182,7 +124,7 @@ onMounted(() => {
           <p class="text-sm font-medium">{{ me.username }}</p>
           <p class="text-2xs text-faint">
             <template v-if="me.github_login">GitHub: {{ me.github_login }} · </template>
-            via {{ me.via }}
+            {{ me.role === 'admin' ? 'Admin' : 'User' }} · via {{ me.via }}
           </p>
         </div>
         <button class="btn-secondary px-2.5 py-1 text-xs" @click="logout">Sign out</button>
@@ -274,70 +216,6 @@ onMounted(() => {
             Clear
           </button>
         </div>
-      </div>
-    </section>
-
-    <!-- Approved users -->
-    <section>
-      <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-1.5">
-        Approved users
-      </h2>
-      <p class="text-2xs text-faint mb-1.5">
-        Everyone allowed near loom. An approved user can sign in here, and — if their GitHub login
-        is on file — trigger a session by commenting
-        <code class="font-mono">@loom</code> on a GitHub PR or issue.
-      </p>
-      <div class="overflow-hidden rounded-md border border-line bg-surface">
-        <div
-          v-for="u in users"
-          :key="u.username"
-          class="flex items-center gap-3 border-b border-line px-3 py-2.5 last:border-0"
-        >
-          <div class="min-w-0 flex-1">
-            <p class="truncate text-sm font-medium">{{ u.username }}</p>
-            <p class="text-2xs text-faint">
-              <template v-if="u.github_login">GitHub: {{ u.github_login }}</template>
-              <template v-else>no GitHub login</template>
-              · {{ u.has_password ? 'password set' : 'no password' }}
-            </p>
-          </div>
-          <button
-            v-if="u.username !== me.username"
-            class="btn-secondary px-2.5 py-1 text-xs"
-            :disabled="busy"
-            @click="removeUser(u)"
-          >
-            Remove
-          </button>
-          <span v-else class="text-2xs text-faint">you</span>
-        </div>
-      </div>
-
-      <div class="mt-2 flex flex-wrap items-end gap-2">
-        <input
-          v-model="newUser"
-          placeholder="Username"
-          class="rounded bg-input px-2 py-1 text-sm outline-none focus:ring-1 ring-accent"
-        />
-        <input
-          v-model="newUserGithub"
-          placeholder="GitHub login (optional)"
-          class="rounded bg-input px-2 py-1 text-sm outline-none focus:ring-1 ring-accent"
-        />
-        <input
-          v-model="newUserPassword"
-          type="password"
-          autocomplete="new-password"
-          placeholder="Password (optional)"
-          class="rounded bg-input px-2 py-1 text-sm outline-none focus:ring-1 ring-accent"
-        />
-        <button
-          class="btn-primary px-3 py-1.5 text-xs"
-          :disabled="busy || !newUser.trim()"
-          @click="addUser"
-        >
-          Approve user
-        </button>
       </div>
     </section>
   </div>

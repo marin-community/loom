@@ -44,6 +44,7 @@ import {
   GRANTABLE_CAPABILITIES,
 } from '../lib/watch';
 import { useCommandScope, type Command } from '../lib/commands';
+import { me } from '../auth';
 
 // Named so App.vue's <keep-alive :include> keeps this view warm across nav.
 defineOptions({ name: 'Watches' });
@@ -55,6 +56,7 @@ defineOptions({ name: 'Watches' });
 // every row is a `WatchView`, every control a REST call.
 const props = defineProps<{ id?: string }>();
 const router = useRouter();
+const canManage = computed(() => me.role === 'admin');
 
 const watches = ref<Watch[]>([]);
 const programs = ref<ProgramView[]>([]);
@@ -228,6 +230,7 @@ function adopt(w: Watch) {
 }
 
 async function toggleEnabled(w: Watch) {
+  if (!canManage.value) return;
   busy.value = true;
   error.value = '';
   try {
@@ -240,7 +243,7 @@ async function toggleEnabled(w: Watch) {
 }
 
 async function run(dry: boolean) {
-  if (!selected.value) return;
+  if (!canManage.value || !selected.value) return;
   busy.value = true;
   error.value = '';
   try {
@@ -260,7 +263,7 @@ async function run(dry: boolean) {
 
 async function remove() {
   const w = selected.value;
-  if (!w || isBuiltin(w)) return;
+  if (!canManage.value || !w || isBuiltin(w)) return;
   await confirmAction({
     title: `Delete watch "${w.name}"?`,
     description: 'Its configuration and recorded rounds will be permanently removed.',
@@ -305,6 +308,7 @@ function syncDraft(w: Watch) {
 }
 
 function startEdit() {
+  if (!canManage.value) return;
   if (selected.value) syncDraft(selected.value);
   editing.value = true;
 }
@@ -315,7 +319,7 @@ function cancelEdit() {
 
 async function saveConfig() {
   const w = selected.value;
-  if (!w) return;
+  if (!canManage.value || !w) return;
   busy.value = true;
   error.value = '';
   notice.value = '';
@@ -382,6 +386,7 @@ function resetForm() {
 }
 
 async function openCreate() {
+  if (!canManage.value) return;
   resetForm();
   creatingNew.value = true;
   await nextTick();
@@ -427,7 +432,7 @@ const watchCommands = computed<Command[]>(() => [
     id: 'watches.new',
     label: 'New watch',
     keys: ['n'],
-    enabled: () => !creatingNew.value,
+    enabled: () => canManage.value && !creatingNew.value,
     run: openCreate,
   },
 ]);
@@ -450,7 +455,7 @@ function applyProgramDefaults(programRef: string) {
 }
 
 async function create() {
-  if (!form.name.trim()) return;
+  if (!canManage.value || !form.name.trim()) return;
   creating.value = true;
   error.value = '';
   try {
@@ -567,6 +572,7 @@ onActivated(() => {
         <code>loom watch</code>
       </span>
       <button
+        v-if="canManage"
         type="button"
         data-testid="watch-new"
         class="ml-auto px-2.5 py-1 text-xs font-medium"
@@ -578,6 +584,14 @@ onActivated(() => {
     </div>
 
     <p v-if="error" class="border-b border-line px-5 py-2 text-sm text-block">{{ error }}</p>
+    <p
+      v-if="!canManage"
+      class="border-b border-line bg-surface px-5 py-2 text-xs text-faint"
+      data-testid="watch-readonly"
+    >
+      Watch definitions and runs are managed by administrators. Activity, scripts, and configuration
+      remain visible for debugging.
+    </p>
 
     <div class="flex min-h-0 flex-1">
       <!-- Master: one row per watch. -->
@@ -853,7 +867,7 @@ onActivated(() => {
               >
               <OutcomeBadge :outcome="selected.last_outcome" />
               <div class="ml-auto flex items-center gap-2">
-                <label class="mr-1 flex items-center gap-2 text-xs text-muted">
+                <label v-if="canManage" class="mr-1 flex items-center gap-2 text-xs text-muted">
                   <ToggleSwitch
                     :model-value="selected.enabled"
                     :disabled="busy"
@@ -862,7 +876,11 @@ onActivated(() => {
                   />
                   {{ selected.enabled ? 'Active' : 'Off' }}
                 </label>
+                <span v-else class="mr-1 text-xs text-muted">
+                  {{ selected.enabled ? 'Active' : 'Off' }}
+                </span>
                 <button
+                  v-if="canManage"
                   type="button"
                   data-testid="watch-run"
                   :disabled="busy"
@@ -872,6 +890,7 @@ onActivated(() => {
                   Run now
                 </button>
                 <button
+                  v-if="canManage"
                   type="button"
                   data-testid="watch-dryrun"
                   :disabled="busy"
@@ -1100,7 +1119,7 @@ onActivated(() => {
               <div class="mb-3 flex items-center justify-between">
                 <h3 class="text-2xs font-semibold uppercase tracking-wider text-muted">Config</h3>
                 <button
-                  v-if="!editing"
+                  v-if="canManage && !editing"
                   type="button"
                   data-testid="watch-edit"
                   class="btn-secondary px-2.5 py-1 text-xs font-medium"
@@ -1108,7 +1127,7 @@ onActivated(() => {
                 >
                   Edit
                 </button>
-                <div v-else class="flex gap-2">
+                <div v-else-if="canManage" class="flex gap-2">
                   <button
                     type="button"
                     data-testid="watch-save"
@@ -1250,7 +1269,7 @@ onActivated(() => {
             </section>
 
             <!-- Deletion: custom watches only; builtins re-seed on boot. -->
-            <section v-if="!isBuiltin(selected)" class="mt-5">
+            <section v-if="canManage && !isBuiltin(selected)" class="mt-5">
               <button
                 type="button"
                 data-testid="watch-delete"

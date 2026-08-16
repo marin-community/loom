@@ -54,7 +54,7 @@ onMounted(load);
       <p class="text-xs text-faint">
         Deployment-owned integration for GitHub sign-in, <code class="font-mono">@loom</code>
         triggers, and short-lived repository credentials. Personal GitHub tokens remain under
-        <span class="font-medium">Access</span>.
+        <span class="font-medium">Account</span>.
       </p>
     </div>
     <p v-if="error" class="text-sm text-block">{{ error }}</p>

@@ -40,7 +40,7 @@ both use the same provider-neutral `mcp_access` contract.
 
 | Use case | Primary credential | Fallback |
 | --- | --- | --- |
-| Ordinary interactive session | Launching user's personal token from **Settings → Access** | Explicit session `GH_TOKEN`, then a profile-approved GitHub App token for the current repository |
+| Ordinary interactive session | Launching user's personal token from **Settings → Account** | Explicit session `GH_TOKEN`, then a profile-approved GitHub App token for the current repository |
 | Restricted GitHub tool | Short-lived GitHub App installation token for the session's fixed repository | Profile `GH_TOKEN` only when no App is configured |
 | GitHub Actions calling Loom | GitHub OIDC exchanged for a ten-minute Loom automation token | None |
 

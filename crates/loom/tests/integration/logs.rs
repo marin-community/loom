@@ -1,7 +1,8 @@
-//! The operator log viewer's HTTP surface: `/api/status`, the `/api/logs`
-//! snapshot, and the `/api/logs/stream` tail. The security-critical property is
-//! that all three are operator-only (server logs can carry secrets), so we prove
-//! the shape while loopback-trusted, then lock loopback down and prove they 401.
+//! The human log viewer's HTTP surface: `/api/status`, the `/api/logs`
+//! snapshot, and the `/api/logs/stream` tail. The security-critical properties
+//! are that all three require a human role and user-role messages are redacted.
+//! This suite proves the HTTP shape and auth boundary; redaction is exercised by
+//! the `loom::logs` unit tests.
 //!
 //! (The ring-buffer *capture* is exercised by the `loom::logs` unit tests and the
 //! e2e suite against the real binary, which is where the tracing layer is
@@ -19,7 +20,7 @@ fn url(ts: &TestServer, path: &str) -> String {
 
 #[tokio::test]
 #[serial]
-async fn status_and_logs_are_shaped_and_operator_only() {
+async fn status_and_logs_are_shaped_and_human_only() {
     let ts = TestServer::start().await;
     let http = reqwest::Client::new();
 

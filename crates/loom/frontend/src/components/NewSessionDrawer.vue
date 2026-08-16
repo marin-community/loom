@@ -26,6 +26,7 @@ import type {
 } from '../types';
 import LaunchOverrides from './LaunchOverrides.vue';
 import ScratchPicker from './ScratchPicker.vue';
+import { me } from '../auth';
 
 const emit = defineEmits<{
   close: [];
@@ -1013,7 +1014,8 @@ onActivated(() => void refreshLaunchData());
             <div class="flex items-center justify-between gap-3">
               <label class="text-xs font-medium text-fg" for="launch-profile">Profile</label>
               <RouterLink
-                to="/settings"
+                v-if="me.role === 'admin'"
+                to="/settings?tab=agents"
                 class="text-xs text-accent hover:underline"
                 @click="creating && $event.preventDefault()"
               >
@@ -1081,7 +1083,7 @@ onActivated(() => void refreshLaunchData());
         </p>
 
         <section
-          v-if="hasLaunchChanges && resolved"
+          v-if="me.role === 'admin' && hasLaunchChanges && resolved"
           class="min-w-0 space-y-2 rounded-md border border-line bg-surface p-3"
         >
           <h3 class="text-xs font-medium text-fg">Keep these settings</h3>
@@ -1133,7 +1135,7 @@ onActivated(() => void refreshLaunchData());
             </div>
           </template>
         </section>
-        <p v-if="cloneNotice" class="text-xs text-ok">{{ cloneNotice }}</p>
+        <p v-if="me.role === 'admin' && cloneNotice" class="text-xs text-ok">{{ cloneNotice }}</p>
       </aside>
     </fieldset>
 

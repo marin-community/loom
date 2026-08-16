@@ -19,7 +19,7 @@
 //! * `/api/issues/actions` — validate and atomically mutate a set of issues.
 //! * `/api/health` + `/api/health/live` are process-level liveness;
 //!   `/api/ready` checks the database and migration streams; `/metrics` exposes
-//!   bounded-label OpenMetrics; `/api/diagnostics` is the admin inventory.
+//!   bounded-label OpenMetrics; `/api/diagnostics` is the human-readable inventory.
 //! * `/api/repos/recent`, `/api/repos/branches`, `/api/settings` — unchanged.
 //!
 //! The `/api/hook` endpoint that used to exist is gone — agent hooks now go
@@ -1017,6 +1017,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::put(put_repo_env).delete(delete_repo_env),
         )
         .route("/settings", get(get_settings).patch(patch_settings))
+        .route(
+            "/preferences",
+            get(get_preferences).patch(patch_preferences),
+        )
         .route("/deployment/reconcile", post(reconcile_deployment))
         .route("/mcps", get(list_mcps))
         .route(
@@ -1052,9 +1056,9 @@ pub fn router(state: AppState) -> Router {
         // container, for one-time setup like `gcloud auth login`.
         .route("/shell/terminal", get(crate::terminal::shell_ws))
         .route("/shell/restart", post(restart_shell))
-        // Server logs + background tasks (Settings → Debug) — snapshot + live SSE
-        // tail + build status + the detached trigger-task list. Operator-only:
-        // server logs can carry tokens injected into agents.
+        // Server logs + background tasks (Settings → Diagnostics) — snapshot +
+        // live SSE tail + build status + the detached trigger-task list. These
+        // are available to human users for self-service debugging.
         .route("/logs", get(logs_snapshot))
         .route("/logs/stream", get(logs_stream))
         .route("/status", get(server_status))
@@ -1096,6 +1100,10 @@ pub fn router(state: AppState) -> Router {
                 .delete(delete_github_token),
         )
         .route("/auth/users", get(list_users).post(add_user))
+        .route(
+            "/auth/users/{username}/role",
+            axum::routing::put(set_user_role),
+        )
         .route("/auth/users/{username}", delete(remove_user))
         .route(
             "/auth/github/config",

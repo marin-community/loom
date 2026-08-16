@@ -31,6 +31,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
+use std::collections::HashMap;
 use weaver_core::db::iso_in_days;
 
 use crate::db::{now_iso, Db};
@@ -84,6 +85,7 @@ impl AuthVia {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Grant {
     Admin,
+    User,
     Automation {
         subject: String,
         profiles: Vec<String>,
@@ -107,6 +109,18 @@ pub struct Principal {
 impl Principal {
     pub fn is_admin(&self) -> bool {
         matches!(self.grant, Grant::Admin)
+    }
+
+    pub fn is_human(&self) -> bool {
+        matches!(self.grant, Grant::Admin | Grant::User)
+    }
+
+    pub fn user_role(&self) -> Option<UserRole> {
+        match self.grant {
+            Grant::Admin => Some(UserRole::Admin),
+            Grant::User => Some(UserRole::User),
+            Grant::Automation { .. } | Grant::Session { .. } => None,
+        }
     }
 }
 
@@ -177,12 +191,40 @@ fn verify_password(password: &str, stored: &str) -> bool {
 // Users (the approved-operator allowlist)
 // ---------------------------------------------------------------------------
 
-/// One approved operator.
+/// A persisted human role. Existing rows migrate to `admin`; newly approved
+/// people default to `user`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "lowercase")]
+#[sqlx(type_name = "TEXT", rename_all = "lowercase")]
+pub enum UserRole {
+    Admin,
+    #[default]
+    User,
+}
+
+impl UserRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+            Self::User => "user",
+        }
+    }
+
+    fn grant(self) -> Grant {
+        match self {
+            Self::Admin => Grant::Admin,
+            Self::User => Grant::User,
+        }
+    }
+}
+
+/// One approved Loom user.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct User {
     pub username: String,
     pub github_login: Option<String>,
     pub password_hash: Option<String>,
+    pub role: UserRole,
     pub created_at: String,
 }
 
@@ -195,7 +237,7 @@ impl User {
 
 pub async fn get_user(db: &Db, username: &str) -> Result<Option<User>> {
     let row = sqlx::query_as::<_, User>(
-        "SELECT username, github_login, password_hash, created_at FROM users WHERE username = ?",
+        "SELECT username, github_login, password_hash, role, created_at FROM users WHERE username = ?",
     )
     .bind(username)
     .fetch_optional(db)
@@ -208,7 +250,7 @@ pub async fn get_user(db: &Db, username: &str) -> Result<Option<User>> {
 /// callback runs: an unknown GitHub identity has no row and is rejected.
 pub async fn user_by_github(db: &Db, login: &str) -> Result<Option<User>> {
     let row = sqlx::query_as::<_, User>(
-        "SELECT username, github_login, password_hash, created_at FROM users
+        "SELECT username, github_login, password_hash, role, created_at FROM users
          WHERE github_login IS NOT NULL AND lower(github_login) = lower(?)",
     )
     .bind(login)
@@ -278,7 +320,7 @@ pub async fn commit_identity(db: &Db, username: &str) -> Result<Option<CommitIde
 
 pub async fn list_users(db: &Db) -> Result<Vec<User>> {
     let rows = sqlx::query_as::<_, User>(
-        "SELECT username, github_login, password_hash, created_at FROM users ORDER BY created_at, username",
+        "SELECT username, github_login, password_hash, role, created_at FROM users ORDER BY created_at, username",
     )
     .fetch_all(db)
     .await?;
@@ -302,35 +344,122 @@ pub async fn add_user(
     username: &str,
     github_login: Option<&str>,
     password: Option<&str>,
+    role: UserRole,
 ) -> Result<()> {
     let password_hash = match password {
         Some(p) => Some(hash_password(p)?),
         None => None,
     };
-    sqlx::query("INSERT INTO users (username, github_login, password_hash) VALUES (?, ?, ?)")
-        .bind(username)
-        .bind(github_login)
-        .bind(password_hash)
-        .execute(db)
-        .await
-        .with_context(|| format!("adding user '{username}'"))?;
+    sqlx::query(
+        "INSERT INTO users (username, github_login, password_hash, role) VALUES (?, ?, ?, ?)",
+    )
+    .bind(username)
+    .bind(github_login)
+    .bind(password_hash)
+    .bind(role)
+    .execute(db)
+    .await
+    .with_context(|| format!("adding user '{username}'"))?;
     Ok(())
 }
 
-/// Remove an approved user, refusing to delete the last one (which would lock
-/// everyone out). Returns whether a row was removed.
-pub async fn remove_user(db: &Db, username: &str) -> Result<bool> {
-    let count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM users")
-        .fetch_one(db)
+/// Change one user's human role without allowing the deployment to lose its
+/// last administrator. Browser sessions and personal tokens resolve this row
+/// on every request, so the new grant takes effect immediately.
+pub async fn set_user_role(db: &Db, username: &str, role: UserRole) -> Result<()> {
+    let mut tx = db.begin().await?;
+    let current = sqlx::query_scalar::<_, UserRole>("SELECT role FROM users WHERE username = ?")
+        .bind(username)
+        .fetch_optional(&mut *tx)
         .await?
-        .get("n");
-    if count <= 1 {
-        return Err(anyhow!("cannot remove the only approved user"));
+        .ok_or_else(|| anyhow!("no such user '{username}'"))?;
+    if current == UserRole::Admin && role != UserRole::Admin {
+        let admins =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE role = 'admin'")
+                .fetch_one(&mut *tx)
+                .await?;
+        if admins <= 1 {
+            return Err(anyhow!("cannot demote the only administrator"));
+        }
+    }
+    sqlx::query("UPDATE users SET role = ? WHERE username = ?")
+        .bind(role)
+        .bind(username)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn user_preferences(db: &Db, username: &str) -> Result<HashMap<String, String>> {
+    let rows = sqlx::query("SELECT key, value FROM user_preferences WHERE username = ?")
+        .bind(username)
+        .fetch_all(db)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.get("key"), row.get("value")))
+        .collect())
+}
+
+pub async fn apply_user_preferences(
+    db: &Db,
+    username: &str,
+    changes: &[(String, Option<String>)],
+) -> Result<()> {
+    let mut tx = db.begin().await?;
+    for (key, value) in changes {
+        if let Some(value) = value {
+            sqlx::query(
+                "INSERT INTO user_preferences (username, key, value, updated_at)
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT(username, key) DO UPDATE SET
+                   value = excluded.value,
+                   updated_at = excluded.updated_at",
+            )
+            .bind(username)
+            .bind(key)
+            .bind(value)
+            .bind(now_iso())
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query("DELETE FROM user_preferences WHERE username = ? AND key = ?")
+                .bind(username)
+                .bind(key)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Remove an approved user without allowing the deployment to lose its last
+/// administrator. Returns whether a row was removed.
+pub async fn remove_user(db: &Db, username: &str) -> Result<bool> {
+    let mut tx = db.begin().await?;
+    let Some(role) = sqlx::query_scalar::<_, UserRole>("SELECT role FROM users WHERE username = ?")
+        .bind(username)
+        .fetch_optional(&mut *tx)
+        .await?
+    else {
+        return Ok(false);
+    };
+    if role == UserRole::Admin {
+        let admins =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE role = 'admin'")
+                .fetch_one(&mut *tx)
+                .await?;
+        if admins <= 1 {
+            return Err(anyhow!("cannot remove the only administrator"));
+        }
     }
     let res = sqlx::query("DELETE FROM users WHERE username = ?")
         .bind(username)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -367,7 +496,7 @@ pub async fn verify_login(db: &Db, username: &str, password: &str) -> Result<Opt
             username: user.username,
             github_login: user.github_login,
             via: AuthVia::Session,
-            grant: Grant::Admin,
+            grant: user.role.grant(),
             automation_context: None,
         }))
     } else {
@@ -384,7 +513,7 @@ pub async fn loopback_principal(db: &Db) -> Result<Option<Principal>> {
         username: u.username,
         github_login: u.github_login,
         via: AuthVia::Loopback,
-        grant: Grant::Admin,
+        grant: u.role.grant(),
         automation_context: None,
     }))
 }
@@ -412,7 +541,7 @@ pub async fn create_session(db: &Db, username: &str) -> Result<String> {
 pub async fn lookup_session(db: &Db, cookie: &str) -> Result<Option<Principal>> {
     let hash = sha256_hex(cookie);
     let row = sqlx::query(
-        "SELECT s.username AS username, u.github_login AS github_login
+        "SELECT s.username AS username, u.github_login AS github_login, u.role AS role
          FROM auth_sessions s JOIN users u ON u.username = s.username
          WHERE s.token_hash = ? AND s.expires_at > ?",
     )
@@ -424,7 +553,7 @@ pub async fn lookup_session(db: &Db, cookie: &str) -> Result<Option<Principal>> 
         username: r.get("username"),
         github_login: r.get("github_login"),
         via: AuthVia::Session,
-        grant: Grant::Admin,
+        grant: r.get::<UserRole, _>("role").grant(),
         automation_context: None,
     }))
 }
@@ -530,11 +659,12 @@ async fn get_token(db: &Db, id: &str) -> Result<Option<TokenInfo>> {
 
 /// Every user-managed token (the machine 'local' token is infrastructure and is
 /// omitted), newest first.
-pub async fn list_tokens(db: &Db) -> Result<Vec<TokenInfo>> {
+pub async fn list_tokens(db: &Db, username: &str) -> Result<Vec<TokenInfo>> {
     let rows = sqlx::query_as::<_, TokenInfo>(
         "SELECT id, name, prefix, created_at, last_used_at, expires_at FROM api_tokens
-         WHERE kind = 'pat' ORDER BY created_at DESC",
+         WHERE kind = 'pat' AND username = ? ORDER BY created_at DESC",
     )
+    .bind(username)
     .fetch_all(db)
     .await?;
     Ok(rows)
@@ -542,9 +672,10 @@ pub async fn list_tokens(db: &Db) -> Result<Vec<TokenInfo>> {
 
 /// Revoke a token by id. Refuses the machine 'local' token. Returns whether a
 /// (revocable) row was removed.
-pub async fn revoke_token(db: &Db, id: &str) -> Result<bool> {
-    let res = sqlx::query("DELETE FROM api_tokens WHERE id = ? AND kind = 'pat'")
+pub async fn revoke_token(db: &Db, username: &str, id: &str) -> Result<bool> {
+    let res = sqlx::query("DELETE FROM api_tokens WHERE id = ? AND username = ? AND kind = 'pat'")
         .bind(id)
+        .bind(username)
         .execute(db)
         .await?;
     Ok(res.rows_affected() > 0)
@@ -571,7 +702,7 @@ pub async fn lookup_token(db: &Db, token: &str) -> Result<Option<Principal>> {
     let hash = sha256_hex(token);
     let row = sqlx::query(
         "SELECT t.id AS id, t.username AS username, u.github_login AS github_login,
-                t.grant_json AS grant_json
+                u.role AS role, t.kind AS kind, t.grant_json AS grant_json
          FROM api_tokens t JOIN users u ON u.username = t.username
          WHERE t.token_hash = ? AND (t.expires_at IS NULL OR t.expires_at > ?)
            AND (
@@ -590,12 +721,17 @@ pub async fn lookup_token(db: &Db, token: &str) -> Result<Option<Principal>> {
         return Ok(None);
     };
     let id: String = row.get("id");
-    let grant_json: String = row.get("grant_json");
-    let grant: Grant = match serde_json::from_str(&grant_json) {
-        Ok(grant) => grant,
-        Err(error) => {
-            tracing::warn!(token_id = %id, %error, "rejecting token with invalid grant metadata");
-            return Ok(None);
+    let kind: String = row.get("kind");
+    let grant = if kind == TokenKind::Pat.as_str() || kind == TokenKind::Local.as_str() {
+        row.get::<UserRole, _>("role").grant()
+    } else {
+        let grant_json: String = row.get("grant_json");
+        match serde_json::from_str(&grant_json) {
+            Ok(grant) => grant,
+            Err(error) => {
+                tracing::warn!(token_id = %id, %error, "rejecting token with invalid grant metadata");
+                return Ok(None);
+            }
         }
     };
     let _ = sqlx::query("UPDATE api_tokens SET last_used_at = ? WHERE id = ?")
@@ -1049,7 +1185,9 @@ mod tests {
         let db = connect_in_memory_with_owner("rjpower").await;
         assert_eq!(primary_user(&db).await.unwrap().as_deref(), Some("rjpower"));
         let u = user_by_github(&db, "RJPower").await.unwrap();
-        assert_eq!(u.map(|u| u.username), Some("rjpower".to_string()));
+        let u = u.unwrap();
+        assert_eq!(u.username, "rjpower");
+        assert_eq!(u.role, UserRole::Admin);
     }
 
     #[tokio::test]
@@ -1072,7 +1210,9 @@ mod tests {
         assert_eq!(id.email, "4242+rjpower@users.noreply.github.com");
 
         // A password-only operator has no GitHub identity to attribute to.
-        add_user(&db, "localonly", None, Some("pw")).await.unwrap();
+        add_user(&db, "localonly", None, Some("pw"), UserRole::User)
+            .await
+            .unwrap();
         assert!(commit_identity(&db, "localonly").await.unwrap().is_none());
     }
 
@@ -1089,10 +1229,90 @@ mod tests {
         assert_eq!(p.username, "rjpower");
         assert_eq!(p.via, AuthVia::Token);
 
-        assert_eq!(list_tokens(&db).await.unwrap().len(), 1);
-        assert!(revoke_token(&db, &info.id).await.unwrap());
+        assert_eq!(list_tokens(&db, "rjpower").await.unwrap().len(), 1);
+        assert!(revoke_token(&db, "rjpower", &info.id).await.unwrap());
         assert!(lookup_token(&db, &plain).await.unwrap().is_none());
-        assert!(list_tokens(&db).await.unwrap().is_empty());
+        assert!(list_tokens(&db, "rjpower").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn human_credentials_follow_role_changes_and_tokens_are_private() {
+        let db = connect_in_memory_with_owner("rjpower").await;
+        add_user(
+            &db,
+            "alice",
+            Some("alice-gh"),
+            Some("alice-password"),
+            UserRole::User,
+        )
+        .await
+        .unwrap();
+        let cookie = create_session(&db, "alice").await.unwrap();
+        let (alice_token, alice_info) =
+            create_token(&db, "alice", "alice-cli", None).await.unwrap();
+        let (_, owner_info) = create_token(&db, "rjpower", "owner-cli", None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            lookup_session(&db, &cookie).await.unwrap().unwrap().grant,
+            Grant::User
+        );
+        assert_eq!(
+            lookup_token(&db, &alice_token)
+                .await
+                .unwrap()
+                .unwrap()
+                .grant,
+            Grant::User
+        );
+        assert_eq!(list_tokens(&db, "alice").await.unwrap().len(), 1);
+        assert!(!revoke_token(&db, "alice", &owner_info.id).await.unwrap());
+
+        set_user_role(&db, "alice", UserRole::Admin).await.unwrap();
+        assert_eq!(
+            lookup_session(&db, &cookie).await.unwrap().unwrap().grant,
+            Grant::Admin
+        );
+        assert_eq!(
+            lookup_token(&db, &alice_token)
+                .await
+                .unwrap()
+                .unwrap()
+                .grant,
+            Grant::Admin
+        );
+
+        set_user_role(&db, "rjpower", UserRole::User).await.unwrap();
+        assert!(set_user_role(&db, "alice", UserRole::User).await.is_err());
+        assert!(revoke_token(&db, "alice", &alice_info.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn personal_preferences_apply_and_reset_per_user() {
+        let db = connect_in_memory_with_owner("rjpower").await;
+        add_user(&db, "alice", None, None, UserRole::User)
+            .await
+            .unwrap();
+        apply_user_preferences(
+            &db,
+            "rjpower",
+            &[("terminal.theme".to_string(), Some("light".to_string()))],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            user_preferences(&db, "rjpower").await.unwrap(),
+            HashMap::from([("terminal.theme".to_string(), "light".to_string())])
+        );
+        assert!(user_preferences(&db, "alice").await.unwrap().is_empty());
+
+        apply_user_preferences(&db, "rjpower", &[("terminal.theme".to_string(), None)])
+            .await
+            .unwrap();
+        assert!(user_preferences(&db, "rjpower").await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1136,7 +1356,7 @@ mod tests {
                 branch_id: branch.id,
             }
         );
-        assert_eq!(list_tokens(&db).await.unwrap().len(), 0);
+        assert_eq!(list_tokens(&db, "rjpower").await.unwrap().len(), 0);
         crate::session::set_status(&db, "s1", "archived")
             .await
             .unwrap();
@@ -1170,9 +1390,9 @@ mod tests {
                 .unwrap();
         // Authenticates, but never appears in the user-facing list…
         assert!(lookup_token(&db, &plain).await.unwrap().is_some());
-        assert!(list_tokens(&db).await.unwrap().is_empty());
+        assert!(list_tokens(&db, "rjpower").await.unwrap().is_empty());
         // …and the revoke route can't remove it.
-        assert!(!revoke_token(&db, &info.id).await.unwrap());
+        assert!(!revoke_token(&db, "rjpower", &info.id).await.unwrap());
         assert!(lookup_token(&db, &plain).await.unwrap().is_some());
     }
 
@@ -1208,12 +1428,13 @@ mod tests {
             .unwrap()
             .is_none());
 
-        add_user(&db, "alice", Some("alice-gh"), None)
+        add_user(&db, "alice", Some("alice-gh"), None, UserRole::User)
             .await
             .unwrap();
         assert_eq!(list_users(&db).await.unwrap().len(), 2);
+        assert!(remove_user(&db, "rjpower").await.is_err());
         assert!(remove_user(&db, "alice").await.unwrap());
-        // The last remaining user can't be removed.
+        // The last remaining administrator can't be removed.
         assert!(remove_user(&db, "rjpower").await.is_err());
     }
 
