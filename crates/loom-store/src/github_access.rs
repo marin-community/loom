@@ -7,10 +7,38 @@ use sqlx::Row;
 
 use crate::Db;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    Write,
+    None,
+}
+
+impl Mode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Write => "write",
+            Self::None => "none",
+        }
+    }
+}
+
+impl TryFrom<&str> for Mode {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &str) -> Result<Self> {
+        match value {
+            "write" => Ok(Self::Write),
+            "none" => Ok(Self::None),
+            _ => anyhow::bail!("unknown GitHub access mode '{value}'"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Grant {
     pub repository: String,
-    pub mode: String,
+    pub mode: Mode,
     pub granted_by: String,
     pub granted_at: String,
 }
@@ -23,18 +51,20 @@ pub async fn list(db: &Db, session_id: &str) -> Result<Vec<Grant>> {
     .bind(session_id)
     .fetch_all(db)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(|row| Grant {
-            repository: row.get("repository"),
-            mode: row.get("mode"),
-            granted_by: row.get("granted_by"),
-            granted_at: row.get("granted_at"),
+    rows.into_iter()
+        .map(|row| {
+            let mode = row.get::<String, _>("mode");
+            Ok(Grant {
+                repository: row.get("repository"),
+                mode: Mode::try_from(mode.as_str())?,
+                granted_by: row.get("granted_by"),
+                granted_at: row.get("granted_at"),
+            })
         })
-        .collect())
+        .collect()
 }
 
-pub async fn set(db: &Db, session_id: &str, repository: &str, mode: &str, by: &str) -> Result<()> {
+pub async fn set(db: &Db, session_id: &str, repository: &str, mode: Mode, by: &str) -> Result<()> {
     sqlx::query(
         "INSERT INTO session_github_access
              (session_id, repository, mode, granted_by, granted_at)
@@ -46,7 +76,7 @@ pub async fn set(db: &Db, session_id: &str, repository: &str, mode: &str, by: &s
     )
     .bind(session_id)
     .bind(repository)
-    .bind(mode)
+    .bind(mode.as_str())
     .bind(by)
     .bind(crate::db::now_iso())
     .execute(db)
@@ -94,15 +124,17 @@ mod tests {
         let db = crate::db::connect_in_memory().await.unwrap();
         let session = seed_session(&db).await;
 
-        set(&db, &session, "acme/one", "write", "alice")
+        set(&db, &session, "acme/one", Mode::Write, "alice")
             .await
             .unwrap();
-        set(&db, &session, "acme/one", "none", "bob").await.unwrap();
+        set(&db, &session, "acme/one", Mode::None, "bob")
+            .await
+            .unwrap();
 
         let grants = list(&db, &session).await.unwrap();
         assert_eq!(grants.len(), 1);
         assert_eq!(grants[0].repository, "acme/one");
-        assert_eq!(grants[0].mode, "none");
+        assert_eq!(grants[0].mode, Mode::None);
         assert_eq!(grants[0].granted_by, "bob");
         assert!(!grants[0].granted_at.is_empty());
     }

@@ -33,7 +33,7 @@ pub(super) async fn effective_repositories(
     let mut repositories: Vec<String> = serde_json::from_str(&session.policy_github_repositories)?;
     for grant in crate::github_access::list(db, &session.id).await? {
         repositories.retain(|candidate| candidate != &grant.repository);
-        if grant.mode == "write" {
+        if grant.mode == crate::github_access::Mode::Write {
             repositories.push(grant.repository);
         }
     }
@@ -54,7 +54,7 @@ pub(super) async fn list_github_access(
         .into_iter()
         .map(|grant| SessionGithubAccessView {
             repository: grant.repository,
-            mode: grant.mode,
+            mode: grant.mode.as_str().to_string(),
             granted_by: grant.granted_by,
             granted_at: grant.granted_at,
         })
@@ -73,17 +73,14 @@ pub(super) async fn set_github_access(
     let repository = crate::repo::parse_slug(req.repository.trim())
         .map_err(AppError::bad_request)?
         .slug();
-    let mode = req.mode.trim().to_ascii_lowercase();
-    if !matches!(mode.as_str(), "write" | "none") {
-        return Err(AppError::bad_request(
-            "GitHub access mode must be 'write' or 'none'",
-        ));
-    }
+    let mode_text = req.mode.trim().to_ascii_lowercase();
+    let mode = crate::github_access::Mode::try_from(mode_text.as_str())
+        .map_err(|_| AppError::bad_request("GitHub access mode must be 'write' or 'none'"))?;
 
     // Validate the complete prospective token scope before changing durable
     // access. This catches an uninstalled repo and cross-installation mixes at
     // grant time instead of surprising the agent on its next push.
-    if mode == "write" {
+    if mode == crate::github_access::Mode::Write {
         let mut repositories = effective_repositories(&st.db, &session)
             .await
             .map_err(|error| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
@@ -111,7 +108,7 @@ pub(super) async fn set_github_access(
         })?;
     }
 
-    crate::github_access::set(&st.db, &session.id, &repository, &mode, &principal.username).await?;
+    crate::github_access::set(&st.db, &session.id, &repository, mode, &principal.username).await?;
     let grant = crate::github_access::list(&st.db, &session.id)
         .await?
         .into_iter()
@@ -122,22 +119,25 @@ pub(super) async fn set_github_access(
                 "GitHub access update was not stored",
             )
         })?;
-    crate::events::record(
+    if let Err(error) = crate::events::record(
         &st.db,
         &st.bus,
         &branch.id,
         "github_access",
         json!({
             "repository": grant.repository,
-            "mode": grant.mode,
+            "mode": grant.mode.as_str(),
             "by": grant.granted_by,
         }),
     )
     .await
-    .ok();
+    {
+        tracing::warn!(session = %session.id, %repository, error = %error,
+            "failed to record GitHub access audit event");
+    }
     Ok(Json(SessionGithubAccessView {
         repository: grant.repository,
-        mode: grant.mode,
+        mode: grant.mode.as_str().to_string(),
         granted_by: grant.granted_by,
         granted_at: grant.granted_at,
     }))
@@ -209,12 +209,24 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        crate::github_access::set(&db, "access", "acme/base", "none", "alice")
-            .await
-            .unwrap();
-        crate::github_access::set(&db, "access", "acme/extra", "write", "alice")
-            .await
-            .unwrap();
+        crate::github_access::set(
+            &db,
+            "access",
+            "acme/base",
+            crate::github_access::Mode::None,
+            "alice",
+        )
+        .await
+        .unwrap();
+        crate::github_access::set(
+            &db,
+            "access",
+            "acme/extra",
+            crate::github_access::Mode::Write,
+            "alice",
+        )
+        .await
+        .unwrap();
         let session = crate::session::get(&db, "access").await.unwrap().unwrap();
 
         assert_eq!(
