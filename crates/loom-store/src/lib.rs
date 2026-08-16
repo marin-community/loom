@@ -6,6 +6,7 @@ pub mod channels;
 pub mod chat;
 pub mod chatlog;
 pub mod db;
+pub mod github_access;
 pub mod history;
 pub mod profile_data;
 pub mod repo_env;

@@ -180,6 +180,13 @@ it is already there or one command away:
 
 ## Working a GitHub issue
 
+If `git` or `gh` reports that this session's GitHub App token cannot access a
+repository the task genuinely needs, name the exact `owner/repo` in your status
+or channel message. A human can grant the live session access with
+`loom github access owner/repo --session <session> --mode write`; the next GitHub
+command automatically receives a refreshed token. Do not ask for a broader
+profile or installation-wide token.
+
 A session often comes from a GitHub thread — an `@loom` mention on an issue or
 PR, or a goal that names one. The people who care about the work are on that
 thread; they don't read this terminal.

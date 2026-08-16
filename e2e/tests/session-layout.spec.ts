@@ -392,6 +392,34 @@ test.describe("durable session workbench", () => {
     await expect(row.getByTestId("session-preview")).toContainText(goal);
   });
 
+  test("session details persist a GitHub access override", async ({
+    page,
+    weaver,
+  }) => {
+    const session = await weaver.seedSession({
+      goal: "Adjust repository access",
+      name: "github-access",
+    });
+
+    await page.goto(`${weaver.baseUrl}/s/${session.id}`);
+    await page.getByRole("button", { name: "Details ⋯" }).click();
+    await page
+      .getByLabel("GitHub repository")
+      .fill("marin-community/evalchemy");
+    await page.getByRole("button", { name: "Revoke" }).click();
+
+    const access = page.getByText("marin-community/evalchemy");
+    await expect(access).toBeVisible();
+    await expect(access.locator("xpath=..")).toContainText("none");
+    const response = await fetch(
+      `${weaver.baseUrl}/api/sessions/${session.id}/github-access`,
+    );
+    expect(response.ok).toBe(true);
+    expect(await response.json()).toMatchObject([
+      { repository: "marin-community/evalchemy", mode: "none" },
+    ]);
+  });
+
   test("session sorting keeps delegated work in a named tree", async ({
     page,
     weaver,

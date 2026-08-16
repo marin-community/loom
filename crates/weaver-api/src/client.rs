@@ -25,11 +25,11 @@ use crate::dto::{
     ReadinessView, ReorderSessionLayoutReq, ResolveLaunchReq, ResolveReviewCommentReq,
     ResolvedLaunchView, RestoreSessionGroupsReq, ResumptionCueView, ReviewCommentDto, ReviewDto,
     RunReq, RunView, RunWatchReq, ScratchLimitsView, SearchSessionsOptions, SelfContextView,
-    SendReq, SessionGroupPreferenceReq, SessionLayoutView, SessionPlacementSelectorKind,
-    SessionView, SetChannelReadMarkerReq, SetChannelSubscriptionReq, SetSessionPlacementDefaultReq,
-    SetTagsReq, SetTitleGenerationReq, SettingsEnvelope, SubmitReviewReq, TagReq, ThreadDto,
-    TokenView, UpdateReviewCommentReq, UpdateReviewReq, UpdateSessionGroupReq,
-    UpdateSessionSpaceReq, WatchView,
+    SendReq, SessionGithubAccessView, SessionGroupPreferenceReq, SessionLayoutView,
+    SessionPlacementSelectorKind, SessionView, SetChannelReadMarkerReq, SetChannelSubscriptionReq,
+    SetSessionGithubAccessReq, SetSessionPlacementDefaultReq, SetTagsReq, SetTitleGenerationReq,
+    SettingsEnvelope, SubmitReviewReq, TagReq, ThreadDto, TokenView, UpdateReviewCommentReq,
+    UpdateReviewReq, UpdateSessionGroupReq, UpdateSessionSpaceReq, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -176,6 +176,30 @@ impl Client {
             Method::POST,
             &format!("/api/sessions/{}/github-token", Self::seg(session_id)),
             None,
+        )
+        .await
+    }
+
+    pub async fn session_github_access(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SessionGithubAccessView>> {
+        self.get_typed(&format!(
+            "/api/sessions/{}/github-access",
+            Self::seg(session_id)
+        ))
+        .await
+    }
+
+    pub async fn set_session_github_access(
+        &self,
+        session_id: &str,
+        request: &SetSessionGithubAccessReq,
+    ) -> Result<SessionGithubAccessView> {
+        self.send_typed(
+            Method::PUT,
+            &format!("/api/sessions/{}/github-access", Self::seg(session_id)),
+            Some(request),
         )
         .await
     }

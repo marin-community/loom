@@ -48,7 +48,8 @@ pub(super) async fn github_token(
     let session = crate::session::get(&st.db, &id)
         .await?
         .ok_or_else(|| AppError::not_found("session"))?;
-    let repositories: Vec<String> = serde_json::from_str(&session.policy_github_repositories)
+    let repositories = super::github_access::effective_repositories(&st.db, &session)
+        .await
         .map_err(|error| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     if repositories.is_empty() {
         return Err(AppError::new(
