@@ -232,6 +232,36 @@ test.describe('conversation view', () => {
       .toBe(true);
   });
 
+  test('phone conversation keeps readable prose and a focus-safe composer', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({
+      goal: 'Read and reply on a phone',
+      name: 'mobile-chat',
+    });
+    await weaver.seedConversation(s, demoLog());
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+
+    const primary = page.getByRole('navigation', { name: 'Primary' });
+    await expect(page.getByTestId('conversation')).toBeVisible();
+    await expect(primary.getByRole('button', { name: 'Chat' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+
+    const prose = page.getByTestId('conversation').locator('[data-anchor] .markdown-body').first();
+    await expect(prose).toHaveCSS('font-size', '15px');
+    await expect(page.getByTestId('composer-input')).toHaveCSS('font-size', '16px');
+    const sendBox = await page.getByTestId('composer-send').boundingBox();
+    expect(sendBox).not.toBeNull();
+    expect(sendBox!.height).toBeGreaterThanOrEqual(44);
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+  });
+
   // A live session surfaces a foot-of-chat progress cue: "Working…" while a turn
   // runs, gone once the agent rests — so the operator sees something move after
   // they send. Driven off the same lifecycle SSE edges as the transcript.

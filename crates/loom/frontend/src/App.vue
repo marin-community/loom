@@ -162,9 +162,13 @@ function cacheKey(route: { path: string; params: Record<string, string | string[
 
 <template>
   <router-view v-if="!authed" />
-  <div v-else data-ui="terminal" class="flex h-screen overflow-hidden bg-canvas font-sans text-fg">
+  <div
+    v-else
+    data-ui="terminal"
+    class="flex h-dvh flex-col overflow-hidden bg-canvas font-sans text-fg sm:flex-row"
+  >
     <AppRail />
-    <div class="flex min-w-0 flex-1 flex-col">
+    <div class="flex min-h-0 min-w-0 flex-1 flex-col">
       <main class="flex min-h-0 flex-1 flex-col overflow-auto">
         <router-view v-slot="{ Component, route }">
           <keep-alive :include="CACHED_VIEWS" :max="KEEP_ALIVE_MAX">

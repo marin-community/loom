@@ -390,16 +390,161 @@ test.describe('session detail view', () => {
       return dt;
     });
     await page.getByTestId('scratch-dropzone').dispatchEvent('drop', { dataTransfer });
-    await expect(panel.getByText('dropped.txt')).toBeVisible();
+    const scratchMenuButton = panel.getByRole('button', { name: 'Scratch files, 2 attached' });
+    await expect(scratchMenuButton).toBeVisible();
+    await scratchMenuButton.click();
+    const scratchMenu = panel.getByTestId('scratch-menu');
+    await expect(scratchMenu.getByText('dropped.txt')).toBeVisible();
 
     // Both landed server-side in the worktree's scratch/.
     const res = await fetch(`${weaver.baseUrl}/api/sessions/${s.id}/scratch`);
     const listed = ((await res.json()) as { name: string }[]).map((f) => f.name).sort();
     expect(listed).toEqual(['dropped.txt', 'notes.txt']);
 
-    // A chip's ✕ removes that file.
-    await panel.getByRole('button', { name: 'Remove notes.txt' }).click();
+    // The collection menu's ✕ removes that file.
+    await scratchMenu.getByRole('menuitem', { name: 'Remove notes.txt' }).click();
     await expect(panel.getByText('notes.txt')).toHaveCount(0);
+  });
+
+  test('narrow session chrome keeps scratch files and navigation bounded', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({
+      goal: 'Keep a phone-sized workbench usable',
+      name: 'mobile-scratch-task',
+    });
+    const names = Array.from(
+      { length: 8 },
+      (_, index) => `20260816-${String(index + 1).padStart(4, '0')}-monitoring-state.json`,
+    );
+    for (const name of names) {
+      const response = await fetch(
+        `${weaver.baseUrl}/api/sessions/${s.id}/scratch?name=${encodeURIComponent(name)}`,
+        { method: 'POST', body: Buffer.from('{}') },
+      );
+      expect(response.ok, await response.text()).toBe(true);
+    }
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+
+    // The phone bar keeps only the three durable destinations visible; every
+    // lower-frequency session surface moves behind More.
+    const primary = page.getByRole('navigation', { name: 'Primary' });
+    const primaryBox = await primary.boundingBox();
+    expect(primaryBox).not.toBeNull();
+    expect(primaryBox!.width).toBe(390);
+    expect(primaryBox!.y).toBeGreaterThan(780);
+    for (const label of ['Sessions', 'Chat', 'Artifacts', 'More']) {
+      await expect(primary.getByText(label, { exact: true })).toBeVisible();
+    }
+    await expect(primary.getByText('Agent', { exact: true })).toHaveCount(0);
+    await expect(primary.getByText('Changes', { exact: true })).toHaveCount(0);
+    await expect(primary.getByRole('button', { name: 'Chat' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+
+    // The old top tab row is gone on phones. The compact header leaves the
+    // title and live state visible without duplicating bottom navigation.
+    await expect(page.getByTestId('session-tabs')).toBeHidden();
+    const headerBox = await page.getByTestId('session-header').boundingBox();
+    expect(headerBox).not.toBeNull();
+    expect(headerBox!.height).toBeLessThan(70);
+
+    // Scratch, Details, and global escapes live in one bounded More sheet.
+    const moreButton = primary.getByRole('button', { name: 'More' });
+    await moreButton.click();
+    const more = page.getByTestId('mobile-more-menu');
+    const mobileDetails = more.getByTestId('mobile-session-details');
+    const mobileSettings = more.getByRole('link', { name: 'Settings' });
+    await expect(more.getByTestId('mobile-session-agent')).toBeVisible();
+    await expect(more.getByTestId('mobile-session-changes')).toBeVisible();
+    await expect(mobileDetails).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(mobileSettings).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(mobileDetails).toBeFocused();
+    const scratch = more.getByTestId('mobile-scratch-panel');
+    const scratchButton = scratch.getByRole('button', {
+      name: 'Scratch files, 8 attached',
+    });
+    await expect(scratchButton).toBeVisible();
+    await scratchButton.click();
+    const menu = scratch.getByTestId('scratch-menu');
+    await expect(menu).toBeVisible();
+    await expect(menu.getByText(names[0], { exact: true })).toBeVisible();
+    const menuBox = await menu.boundingBox();
+    expect(menuBox).not.toBeNull();
+    expect(menuBox!.x).toBeGreaterThanOrEqual(0);
+    expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(390);
+
+    await menu.getByRole('menuitem', { name: `Remove ${names[0]}` }).click();
+    await expect(scratch.getByRole('button', { name: 'Scratch files, 7 attached' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
+    await expect(scratch.getByRole('button', { name: 'Scratch files, 7 attached' })).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(more).toHaveCount(0);
+    await expect(moreButton).toBeFocused();
+
+    // Session Details reopens from More as a phone-width bottom sheet.
+    await moreButton.click();
+    await page.getByTestId('mobile-session-details').click();
+    const details = page.getByTestId('details-popover');
+    await expect(details).toBeVisible();
+    const detailsBox = await details.boundingBox();
+    expect(detailsBox).not.toBeNull();
+    expect(detailsBox!.x).toBeGreaterThanOrEqual(0);
+    expect(detailsBox!.x + detailsBox!.width).toBeLessThanOrEqual(390);
+    await page.keyboard.press('Escape');
+
+    // Work-surface switches stay within the warm SessionDetail instance.
+    await primary.getByRole('button', { name: 'Artifacts' }).click();
+    await expect(page).toHaveURL(new RegExp(`/s/${s.id}/artifacts`));
+
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+
+    await primary.getByRole('link', { name: 'Sessions' }).click();
+    await expect(page).toHaveURL(weaver.baseUrl + '/');
+  });
+
+  test('ACP phone navigation keeps Shells in More instead of the primary bar', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({
+      goal: 'Keep a headless session focused on conversation',
+      name: 'mobile-acp-navigation',
+    });
+    await page.route(`**/api/sessions/${s.id}`, async (route) => {
+      const response = await route.fetch();
+      const session = (await response.json()) as Record<string, unknown>;
+      await route.fulfill({ response, json: { ...session, protocol: 'acp' } });
+    });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+
+    const primary = page.getByRole('navigation', { name: 'Primary' });
+    await expect(primary.getByText('Sessions', { exact: true })).toBeVisible();
+    for (const label of ['Chat', 'Artifacts', 'More']) {
+      await expect(primary.getByRole('button', { name: label })).toBeVisible();
+    }
+    await expect(primary.getByRole('button', { name: 'Changes' })).toHaveCount(0);
+    await expect(primary.getByRole('button', { name: 'Shells' })).toHaveCount(0);
+
+    await primary.getByRole('button', { name: 'More' }).click();
+    const shells = page.getByTestId('mobile-session-shells');
+    await expect(shells).toBeVisible();
+    await expect(page.getByTestId('mobile-session-agent')).toHaveCount(0);
+    await expect(page.getByTestId('mobile-session-changes')).toBeVisible();
+    await shells.click();
+    await expect(page.getByTestId('acp-open-shell')).toBeVisible();
+    await expect(primary.getByRole('button', { name: 'More' })).toHaveClass(/text-fg/);
   });
 
   test('renders an interactive terminal that connects to the agent', async ({ page, weaver }) => {

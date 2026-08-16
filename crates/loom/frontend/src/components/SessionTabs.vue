@@ -41,6 +41,7 @@ const tabs = computed(() => (props.protocol === 'acp' ? ACP_TABS : TERMINAL_TABS
   <nav
     class="mb-1.5 flex items-center gap-0.5 border-b border-line pl-0.5 text-xs"
     aria-label="Session surfaces"
+    data-testid="session-tabs"
   >
     <button
       v-for="t in tabs"
@@ -49,7 +50,7 @@ const tabs = computed(() => (props.protocol === 'acp' ? ACP_TABS : TERMINAL_TABS
       role="tab"
       :data-tab="t.key"
       :aria-selected="tab === t.key"
-      class="-mb-px border-b-2 px-2 py-1"
+      class="-mb-px shrink-0 border-b-2 px-1.5 py-1 sm:px-2"
       :class="
         tab === t.key || (t.key === 'review' && artifactsPopped)
           ? 'border-accent text-fg font-medium'
@@ -63,7 +64,7 @@ const tabs = computed(() => (props.protocol === 'acp' ? ACP_TABS : TERMINAL_TABS
       <span
         v-if="t.key === 'review' && artifactsPopped"
         class="ml-1 text-faint"
-        title="Open in the side panel"
+        title="Open in the split panel"
         >⤢</span
       >
     </button>

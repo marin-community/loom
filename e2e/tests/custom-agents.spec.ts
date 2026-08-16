@@ -6,6 +6,9 @@ test.describe("settings · custom agents", () => {
     weaver,
   }) => {
     await page.goto(`${weaver.baseUrl}/settings`);
+    await page
+      .getByRole("button", { name: "Agents & profiles", exact: true })
+      .click();
 
     const panel = page.locator("section").filter({
       has: page.getByRole("heading", { name: "Custom agents" }),

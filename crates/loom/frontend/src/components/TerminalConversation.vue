@@ -542,7 +542,7 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
 
       <button
         type="button"
-        class="btn-secondary shrink-0 px-2 py-0.5 text-xs"
+        class="conversation-refresh btn-secondary shrink-0 px-2 py-0.5 text-xs"
         :disabled="state === 'loading'"
         @click="load()"
       >
@@ -763,12 +763,12 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
           :disabled="sending"
           placeholder="Send a message to the agent…  (Enter to send, Shift+Enter for a newline)"
           data-testid="composer-input"
-          class="max-h-40 w-full flex-1 resize-y rounded bg-input px-2.5 py-2 text-sm outline-none focus:ring-1 ring-accent"
+          class="max-h-40 w-full flex-1 resize-y rounded bg-input px-2.5 py-2 text-base outline-none focus:ring-1 ring-accent sm:text-sm"
           @keydown.enter.exact.prevent="submitPrompt"
         ></textarea>
         <button
           type="submit"
-          class="btn-primary shrink-0 px-3 py-2 text-sm"
+          class="btn-primary min-h-11 shrink-0 px-3 py-2 text-sm sm:min-h-0"
           :disabled="sending || !draft.trim()"
           data-testid="composer-send"
         >
@@ -807,6 +807,18 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
 @media (prefers-reduced-motion: reduce) {
   .agent-glyph.working {
     animation: none;
+  }
+}
+
+@media (max-width: 639px) {
+  .chip {
+    min-height: 1.75rem;
+  }
+  .conversation-refresh {
+    min-height: 1.75rem;
+  }
+  .fold-head {
+    min-height: 2rem;
   }
 }
 

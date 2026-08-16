@@ -58,7 +58,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onOutsidePoint
       role="region"
       aria-label="Session details and actions"
       tabindex="-1"
-      class="absolute right-0 z-20 mt-1 flex max-h-[calc(100vh-7rem)] w-[min(20rem,calc(100vw-2rem))] flex-col overflow-hidden rounded border border-line bg-surface p-1 shadow-lg outline-none"
+      class="session-details-popover absolute right-0 z-20 mt-1 flex max-h-[calc(100vh-7rem)] w-[min(20rem,calc(100vw-2rem))] flex-col overflow-hidden rounded border border-line bg-surface p-1 shadow-lg outline-none"
       @keydown.esc.stop.prevent="close('escape')"
     >
       <div
@@ -140,3 +140,17 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onOutsidePoint
     </div>
   </div>
 </template>
+
+<style scoped>
+@media (max-width: 639px) {
+  .session-details-popover {
+    position: fixed;
+    inset: auto 0.5rem 3.75rem;
+    z-index: 60;
+    width: auto;
+    max-height: calc(100dvh - 4.5rem);
+    margin-top: 0;
+    border-radius: 0.5rem 0.5rem 0 0;
+  }
+}
+</style>

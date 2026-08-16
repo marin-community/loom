@@ -343,7 +343,7 @@ test.describe("staged artifact reviews", () => {
     );
     await page.getByTestId("artifact-pop").click();
     await createStarted.promise;
-    await expect(page.getByTestId("artifact-pop")).toContainText("Pop out");
+    await expect(page.getByTestId("artifact-pop")).toContainText("Split");
     await expect(page.getByTestId("artifact-rail-close")).toHaveCount(0);
     await expect(page.getByTestId("review-layout-barrier")).toBeVisible();
     await expect(page.getByTestId("review-surface")).toHaveAttribute(
@@ -382,7 +382,7 @@ test.describe("staged artifact reviews", () => {
     );
 
     await page.getByTestId("artifact-pop").click();
-    await expect(page.getByTestId("artifact-pop")).toContainText("Pop out");
+    await expect(page.getByTestId("artifact-pop")).toContainText("Split");
     await expect
       .poll(() =>
         page
@@ -428,7 +428,7 @@ test.describe("staged artifact reviews", () => {
     await expect(page.getByTestId("artifact-source-editor")).toHaveCount(0);
     await expect(pendingText).toBeFocused();
     await page.getByTestId("artifact-pop").click();
-    await expect(page.getByTestId("artifact-pop")).toContainText("Pop out");
+    await expect(page.getByTestId("artifact-pop")).toContainText("Split");
     await expect(pendingComposer.getByRole("alert")).toContainText(
       "Add or cancel this pending comment",
     );
@@ -444,7 +444,7 @@ test.describe("staged artifact reviews", () => {
     const commentEdit = commentCard.getByTestId("review-comment-edit");
     await commentEdit.fill("Unsaved existing-comment edit.");
     await page.getByTestId("artifact-pop").click();
-    await expect(page.getByTestId("artifact-pop")).toContainText("Pop out");
+    await expect(page.getByTestId("artifact-pop")).toContainText("Split");
     await expect(commentCard.getByRole("alert")).toContainText("Save or cancel this comment edit");
     await expect(commentEdit).toBeFocused();
 
@@ -489,7 +489,7 @@ test.describe("staged artifact reviews", () => {
     await page.getByTestId("artifact-pop").click();
     await expect(page.getByTestId("artifact-pop")).toContainText("Dock");
     await page.getByTestId("artifact-pop").click();
-    await expect(page.getByTestId("artifact-pop")).toContainText("Pop out");
+    await expect(page.getByTestId("artifact-pop")).toContainText("Split");
 
     const patchStarted = deferred();
     const patchGate = deferred();

@@ -25,6 +25,11 @@ import { cancelSessionBacktrack, completeSessionOpen } from '../lib/workbenchMet
 import { openSessionEvents, type SessionEventsHandle } from '../lib/sessionEvents';
 import { useCommandScope, type Command } from '../lib/commands';
 import { signalChips } from '../lib/sessionState';
+import {
+  clearMobileSessionNavigation,
+  publishMobileSessionNavigation,
+  type MobileSessionSurface,
+} from '../lib/mobileSessionNavigation';
 
 // Named + keyed-by-id in App.vue's <keep-alive> so the page (and its live
 // terminal) stays warm: every `/s/:id…` path (the work tabs and the Artifacts
@@ -83,6 +88,7 @@ const railOpen = computed(() => artifactsActive.value && poppedOut.value);
 const dockedArtifactsRef = ref<InstanceType<typeof ArtifactsPanel> | null>(null);
 const railArtifactsRef = ref<InstanceType<typeof ArtifactsPanel> | null>(null);
 const acpShellsRef = ref<InstanceType<typeof SessionTerminals> | null>(null);
+const headerRef = ref<InstanceType<typeof SessionPageHeader> | null>(null);
 let layoutNavigationAuthorized = false;
 
 function activeArtifactsPanel(): InstanceType<typeof ArtifactsPanel> | null {
@@ -159,6 +165,52 @@ async function selectTab(t: WorkTab) {
     await guardedArtifactLayout(async () => {
       await router.push(`/s/${props.id}`);
     });
+  }
+}
+
+// AppRail owns the phone's bottom edge, but SessionDetail owns the kept-alive
+// panes and guarded artifact navigation. Publish a tiny controller while this
+// cached page is active so the mobile bar can switch surfaces without
+// duplicating session state or tearing down the terminal.
+let pageActive = false;
+function activeMobileSurface(): MobileSessionSurface {
+  if (changesActive.value) return 'changes';
+  if (artifactsActive.value) return 'artifacts';
+  return effectiveLocalTab.value;
+}
+async function selectMobileSurface(surface: MobileSessionSurface) {
+  if (surface === 'artifacts' || surface === 'changes') {
+    await guardedArtifactLayout(async () => {
+      poppedOut.value = false;
+      const path = surface === 'artifacts' ? 'artifacts' : 'changes';
+      if (!route.path.startsWith(`/s/${props.id}/${path}`)) {
+        await router.push(`/s/${props.id}/${path}`);
+      }
+    });
+    return;
+  }
+  await selectTab(surface);
+}
+function publishMobileNavigation() {
+  if (!pageActive || !ws.value) return;
+  publishMobileSessionNavigation({
+    id: props.id,
+    protocol: ws.value.protocol,
+    active: activeMobileSurface(),
+    select: selectMobileSurface,
+    openDetails: () => headerRef.value?.openDetails(),
+  });
+}
+watch([ws, effectiveLocalTab, artifactsActive, changesActive], publishMobileNavigation);
+
+function defaultToMobileConversation() {
+  if (
+    localTab.value === null &&
+    !reviewActive.value &&
+    window.matchMedia('(max-width: 639px)').matches
+  ) {
+    mounted.conversation = true;
+    localTab.value = 'conversation';
   }
 }
 
@@ -246,7 +298,7 @@ const sessionCommands = computed<Command[]>(() => [
 ]);
 useCommandScope(`session:${props.id}`, 'Session', sessionCommands, 10);
 
-// Pop the artifact out beside the terminal / dock it back into the tab.
+// Open the artifact in the responsive split / dock it back into the tab.
 async function togglePop() {
   await guardedArtifactLayout(() => {
     poppedOut.value = !poppedOut.value;
@@ -260,9 +312,10 @@ async function closeRail() {
   });
 }
 
-// --- Resizable side rails --------------------------------------------------
-// Two on-demand panels pull in from the right: the artifact (popped out) and the
-// embedded editor. Each persists its own width and drags from the right edge.
+// --- Resizable split panels ------------------------------------------------
+// On wide screens two on-demand panels pull in from the right: the artifact
+// (popped out) and embedded editor. Each persists its width and drags from the
+// right edge; the narrow layout stacks them below and hides the drag handles.
 const MIN_PANEL_WIDTH = 360;
 function loadWidth(key: string, fallback: number): number {
   const v = Number(localStorage.getItem(key));
@@ -271,8 +324,8 @@ function loadWidth(key: string, fallback: number): number {
 const artifactWidth = ref(loadWidth('loom.artifactWidth', 620));
 const ideWidth = ref(loadWidth('loom.ideWidth', 760));
 function panelWidth(width: number): { width: string } {
-  // On narrow windows the app rail still needs room; saved desktop widths must
-  // not push the close control or document scroller off-screen.
+  // Saved desktop widths must not push the close control or document scroller
+  // off-screen. The narrow layout overrides this inline width and stacks.
   return { width: `min(${width}px, calc(100vw - 3.5rem))` };
 }
 
@@ -411,6 +464,9 @@ function openStream() {
 }
 
 onMounted(() => {
+  defaultToMobileConversation();
+  pageActive = true;
+  publishMobileNavigation();
   requestAnimationFrame(() => completeSessionOpen(props.id));
   acknowledgeAndLoadAll();
   openStream();
@@ -429,6 +485,9 @@ onMounted(() => {
 // regardless. onMounted owns the first open; onActivated reopens + refetches on
 // a *return* (guarded by `source` so the initial mount never double-opens).
 onActivated(() => {
+  defaultToMobileConversation();
+  pageActive = true;
+  publishMobileNavigation();
   if (source) return; // initial mount already loaded + opened the stream
   requestAnimationFrame(() => completeSessionOpen(props.id));
   acknowledgeAndLoadAll();
@@ -474,22 +533,29 @@ onBeforeRouteLeave(async (to) => {
   const staysInSession = to.params.id === props.id && to.path.startsWith(`/s/${props.id}`);
   if (to.path !== '/' && !staysInSession) cancelSessionBacktrack();
 });
-onDeactivated(closeStream);
+onDeactivated(() => {
+  pageActive = false;
+  clearMobileSessionNavigation(props.id);
+  closeStream();
+});
 onUnmounted(() => {
+  pageActive = false;
+  clearMobileSessionNavigation(props.id);
   closeStream();
   stopDrag();
 });
 </script>
 
 <template>
-  <!-- A horizontal split fills the workbench main area: the session page (header
-       + tabs + work area) on the left, then any panels pulled in from the right
-       — the popped-out artifact and the embedded editor, each resizable. -->
-  <div v-if="ws" class="flex min-h-0 flex-1 overflow-hidden">
+  <!-- The split fills the workbench main area. Wide screens place on-demand
+       panels to the right; narrow screens stack them below the session so both
+       surfaces retain a useful width. -->
+  <div v-if="ws" class="session-detail-shell flex min-h-0 flex-1 overflow-hidden">
     <!-- Left: the session page. min-w-0 lets it shrink as panels widen;
          AgentTerminal's ResizeObserver re-fits the terminal on the change. -->
-    <div class="flex min-h-0 min-w-0 flex-1 flex-col px-3 py-2 sm:px-5 sm:py-3">
+    <div class="session-detail-main flex min-h-0 min-w-0 flex-1 flex-col px-3 py-2 sm:px-5 sm:py-3">
       <SessionPageHeader
+        ref="headerRef"
         :ws="ws"
         :events="events"
         :ide-enabled="ideEnabled"
@@ -497,6 +563,7 @@ onUnmounted(() => {
         @open-editor="ideOpen = true"
       />
       <SessionTabs
+        class="hidden sm:flex"
         :tab="workTab"
         :artifacts-popped="railOpen"
         :protocol="ws.protocol"
@@ -540,7 +607,10 @@ onUnmounted(() => {
           v-show="reviewDocked"
           class="flex h-full min-h-0 flex-col"
         >
-          <nav class="flex shrink-0 gap-1 border-b border-line px-2 text-xs" aria-label="Review">
+          <nav
+            class="hidden shrink-0 gap-1 border-b border-line px-2 text-xs sm:flex"
+            aria-label="Review"
+          >
             <router-link
               :to="`/s/${props.id}/artifacts`"
               class="border-b-2 px-2 py-1.5"
@@ -578,12 +648,12 @@ onUnmounted(() => {
          tab can stay warm for the instant terminal ⇄ artifacts flip. -->
     <template v-if="railOpen">
       <div
-        class="w-1 shrink-0 cursor-col-resize bg-line hover:bg-accent"
+        class="session-panel-handle w-1 shrink-0 cursor-col-resize bg-line hover:bg-accent"
         title="Drag to resize the artifact panel"
         @mousedown="(e) => startDrag('artifact', e)"
       ></div>
       <section
-        class="flex min-h-0 shrink-0 flex-col overflow-hidden border-l border-line"
+        class="session-split-panel flex min-h-0 shrink-0 flex-col overflow-hidden border-l border-line"
         :style="panelWidth(artifactWidth)"
       >
         <ArtifactsPanel
@@ -605,12 +675,12 @@ onUnmounted(() => {
       <!-- Open: a draggable divider + the editor at the persisted width. -->
       <template v-if="ideOpen">
         <div
-          class="w-1 shrink-0 cursor-col-resize bg-line hover:bg-accent"
+          class="session-panel-handle w-1 shrink-0 cursor-col-resize bg-line hover:bg-accent"
           title="Drag to resize the editor"
           @mousedown="(e) => startDrag('ide', e)"
         ></div>
         <section
-          class="relative flex min-h-0 shrink-0 flex-col overflow-hidden border-l border-line"
+          class="session-split-panel relative flex min-h-0 shrink-0 flex-col overflow-hidden border-l border-line"
           :style="panelWidth(ideWidth)"
         >
           <button
@@ -632,3 +702,32 @@ onUnmounted(() => {
   <p v-else-if="error" class="px-5 py-3 text-sm text-block">{{ error }}</p>
   <p v-else class="px-5 py-3 text-sm text-muted">Loading…</p>
 </template>
+
+<style scoped>
+@media (max-width: 767px) {
+  .session-detail-shell {
+    flex-direction: column;
+    /* Break the content-sized flex loop so a long document scrolls within the
+       split instead of pushing the bottom navigation below the viewport. */
+    height: 0;
+  }
+
+  .session-detail-main {
+    flex: 3 1 0;
+    min-height: 8rem;
+  }
+
+  .session-panel-handle {
+    display: none;
+  }
+
+  .session-split-panel {
+    width: 100% !important;
+    min-height: 8rem;
+    max-height: none;
+    flex: 2 1 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+}
+</style>

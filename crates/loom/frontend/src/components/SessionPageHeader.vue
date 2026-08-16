@@ -100,6 +100,11 @@ function toggleDetails() {
   else showDetails.value = true;
 }
 
+function openDetails() {
+  showDetails.value = true;
+}
+defineExpose({ openDetails });
+
 function openEditor() {
   closeDetails('action');
   emit('openEditor');
@@ -339,14 +344,15 @@ async function submitHandoff() {
 </script>
 
 <template>
-  <header class="mb-1 py-0.5">
+  <header class="mb-1 py-0.5" data-testid="session-header">
     <!-- Row 1 — location, title, current state, and operational controls. -->
     <div class="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
       <router-link
         :to="fleetHref"
-        class="flex min-h-7 shrink-0 items-center text-sm text-muted hover:text-fg"
-        >{{ fleetLabel }}</router-link
+        class="hidden min-h-7 shrink-0 items-center text-sm text-muted hover:text-fg sm:flex"
       >
+        {{ fleetLabel }}
+      </router-link>
       <input
         v-if="editing"
         ref="inputEl"
@@ -362,7 +368,7 @@ async function submitHandoff() {
         </h1>
         <button
           type="button"
-          class="min-h-7 shrink-0 rounded px-1 text-xs text-faint opacity-0 transition-opacity hover:bg-subtle hover:text-fg focus-visible:opacity-100 group-hover:opacity-100"
+          class="hidden min-h-7 shrink-0 rounded px-1 text-xs text-faint opacity-0 transition-opacity hover:bg-subtle hover:text-fg focus-visible:opacity-100 group-hover:opacity-100 sm:block"
           title="Rename"
           aria-label="Rename session"
           @click="startEdit"
@@ -371,11 +377,15 @@ async function submitHandoff() {
         </button>
       </div>
 
-      <div class="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1.5">
+      <div
+        class="ml-auto flex min-w-0 basis-full flex-wrap items-center justify-end gap-1.5 sm:basis-auto"
+      >
         <!-- An issue/PR is a frequent work destination, not merely metadata.
              Existing associations open directly; their adjacent edit affordance
              and the empty states own configuration. -->
-        <GithubAssociations :ws="ws" @reload="emit('reload')" />
+        <div class="hidden sm:block">
+          <GithubAssociations :ws="ws" @reload="emit('reload')" />
+        </div>
 
         <span
           data-testid="conversation-state"
@@ -385,10 +395,12 @@ async function submitHandoff() {
         >
           {{ conv.glyph }} {{ conv.label }}
         </span>
-        <span v-if="lastActivity" class="text-faint" aria-hidden="true">·</span>
-        <span v-if="lastActivity" class="whitespace-nowrap font-mono text-2xs text-faint">{{
-          lastActivity
-        }}</span>
+        <span v-if="lastActivity" class="hidden text-faint sm:inline" aria-hidden="true">·</span>
+        <span
+          v-if="lastActivity"
+          class="hidden whitespace-nowrap font-mono text-2xs text-faint sm:inline"
+          >{{ lastActivity }}</span
+        >
 
         <!-- The loud signals, inline: the agent's `attention` and a watch's
              `triage`, each a deletable chip. The × clears that tag (calm is its
@@ -426,7 +438,7 @@ async function submitHandoff() {
             type="button"
             :aria-expanded="showDetails"
             aria-controls="session-details-popover"
-            class="min-h-7 rounded px-2 text-xs font-medium text-muted hover:bg-subtle hover:text-fg"
+            class="hidden min-h-7 rounded px-2 text-xs font-medium text-muted hover:bg-subtle hover:text-fg sm:block"
             @click="toggleDetails"
           >
             Details ⋯
@@ -479,7 +491,7 @@ async function submitHandoff() {
                   >
                     <span class="block text-xs font-medium">Open editor</span>
                     <span class="block text-2xs text-faint"
-                      >Open the worktree in the side panel.</span
+                      >Open the worktree in a split panel.</span
                     >
                   </button>
                 </details>
@@ -581,6 +593,9 @@ async function submitHandoff() {
             </template>
             <template #context>
               <div class="space-y-3">
+                <div class="sm:hidden">
+                  <GithubAssociations :ws="ws" @reload="emit('reload')" />
+                </div>
                 <nav class="flex flex-wrap gap-2 text-xs" aria-label="Session resources">
                   <router-link
                     :to="`/s/${ws.id}/artifacts`"
