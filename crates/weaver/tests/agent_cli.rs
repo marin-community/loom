@@ -157,7 +157,7 @@ async fn goal_artifact_write_syncs_the_branch_goal() {
     env.run_with_stdin(&["artifact", "write", "goal"], "ship the thing\n");
     let out = env.run(&["artifact", "show", "goal"]);
     assert_eq!(out.trim(), "ship the thing");
-    let out = env.run(&["status"]);
+    let out = env.run(&["status", "get"]);
     assert!(out.contains("goal:        ship the thing"), "status: {out}");
 }
 
@@ -369,7 +369,7 @@ async fn issue_ls_separates_branch_work_from_repo_backlog() {
     );
 
     // The badge counts only this branch's claimed work, not the backlog.
-    let out = env.run(&["status"]);
+    let out = env.run(&["status", "get"]);
     assert!(out.contains("open issues: 1"), "status: {out}");
 }
 
@@ -381,7 +381,14 @@ async fn issue_show_includes_the_working_branch_status() {
     let env = Env::start().await;
     env.run(&["issue", "add", "the", "sub-task"]);
     // The current branch claims it; give the branch a live status.
-    env.run(&["status", "blocked", "build", "is", "broken"]);
+    env.run(&[
+        "status",
+        "set",
+        "--tag",
+        "blocked",
+        "--message",
+        "build is broken",
+    ]);
     let out = env.run(&["issue", "show", "1"]);
     assert!(
         out.contains("working:"),
@@ -496,7 +503,7 @@ async fn summary_orients_an_agent_on_the_branch() {
     env.run_with_stdin(&["artifact", "write", "goal"], "ship the feature\n");
     env.run(&["issue", "add", "wire", "up", "routes"]);
     env.run(&["issue", "add", "add", "tests"]);
-    env.run(&["status", "ok", "routes", "wired"]);
+    env.run(&["status", "set", "--tag", "ok", "--message", "routes wired"]);
 
     let out = env.run(&["summary"]);
     assert!(out.contains("ship the feature"), "summary: {out}");
@@ -511,7 +518,7 @@ async fn summary_orients_an_agent_on_the_branch() {
     // Every section advertises the command that drills into it.
     for hint in [
         "(weaver artifact get goal)",
-        "(weaver status)",
+        "(weaver status get)",
         "(weaver issue ls)",
         "weaver artifact",
         "weaver log",
@@ -820,7 +827,7 @@ async fn session_start_hook_after_compaction_replays_the_concise_summary() {
     let env = Env::start().await;
     env.run_with_stdin(&["artifact", "write", "goal"], "ship the feature\n");
     env.run(&["issue", "add", "wire", "up", "routes"]);
-    env.run(&["status", "ok", "routes", "wired"]);
+    env.run(&["status", "set", "--tag", "ok", "--message", "routes wired"]);
 
     let payload = r#"{"hook_event_name":"SessionStart","source":"compact"}"#;
     let out = env.run_with_stdin(&["hook", "--event", "session-start"], payload);
@@ -867,11 +874,11 @@ async fn session_start_hook_after_compaction_replays_the_concise_summary() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn set_status_with_no_id_reports_current_branch() {
+async fn get_status_reports_current_branch() {
     let env = Env::start().await;
     env.run_with_stdin(&["artifact", "write", "goal"], "do the thing\n");
     env.run(&["issue", "add", "step", "one"]);
-    let out = env.run(&["status"]);
+    let out = env.run(&["status", "get"]);
     assert!(out.contains("branch:      feature-test"), "status: {out}");
     assert!(out.contains("goal:        do the thing"), "status: {out}");
     assert!(out.contains("open issues: 1"), "status: {out}");
@@ -884,21 +891,28 @@ async fn set_status_with_no_id_reports_current_branch() {
 async fn set_status_sets_level_and_message() {
     let env = Env::start().await;
     // Declare a level with a message, then read it back.
-    let out = env.run(&["status", "attention", "Waiting", "for", "PR", "feedback"]);
+    let out = env.run(&[
+        "status",
+        "set",
+        "--tag",
+        "attention",
+        "--message",
+        "Waiting for PR feedback",
+    ]);
     assert!(
         out.contains("attention — Waiting for PR feedback"),
         "set output: {out}"
     );
 
-    let out = env.run(&["status"]);
+    let out = env.run(&["status", "get"]);
     assert!(
         out.contains("status:      attention — Waiting for PR feedback"),
         "status read: {out}"
     );
 
     // A new message replaces the old one.
-    env.run(&["status", "ok", "back", "to", "work"]);
-    let out = env.run(&["status"]);
+    env.run(&["status", "set", "--tag", "ok", "--message", "back to work"]);
+    let out = env.run(&["status", "get"]);
     assert!(
         out.contains("status:      ok — back to work"),
         "status read: {out}"
@@ -906,8 +920,8 @@ async fn set_status_sets_level_and_message() {
 
     // A bare level change keeps the last message (the message is the persistent
     // current-state note; only the level is volatile).
-    env.run(&["status", "blocked"]);
-    let out = env.run(&["status"]);
+    env.run(&["status", "set", "--tag", "blocked"]);
+    let out = env.run(&["status", "get"]);
     assert!(
         out.contains("status:      blocked — back to work"),
         "message should persist across a bare level change: {out}"
@@ -930,7 +944,14 @@ async fn set_status_sets_level_and_message() {
 async fn triage_tag_marks_a_session_without_touching_attention() {
     let env = Env::start().await;
     // The agent declares its own attention about itself.
-    env.run(&["status", "blocked", "build", "broke"]);
+    env.run(&[
+        "status",
+        "set",
+        "--tag",
+        "blocked",
+        "--message",
+        "build broke",
+    ]);
 
     // No triage tag until a watch looks.
     let out = env.run(&["tag", "ls", "--session", "feature-test"]);
@@ -967,7 +988,7 @@ async fn triage_tag_marks_a_session_without_touching_attention() {
         out.contains("attention = blocked"),
         "agent attention must survive a triage write: {out}"
     );
-    let out = env.run(&["status"]);
+    let out = env.run(&["status", "get"]);
     assert!(
         out.contains("status:      blocked — build broke"),
         "the resolved status reads the agent's attention tag: {out}"
@@ -1047,14 +1068,21 @@ async fn tag_set_ls_rm_roundtrip() {
     assert!(out.contains("(no tags)"), "tag rm cleared it: {out}");
 }
 
-/// `status ok` clears the agent's `attention` tag (returns to calm) while
+/// `status set --tag ok` clears the agent's `attention` tag (returns to calm) while
 /// leaving the branch `description` in place.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn set_status_ok_clears_attention_tag_but_keeps_description() {
     let env = Env::start().await;
     // Raise attention with a message.
-    env.run(&["status", "attention", "ready", "for", "review"]);
+    env.run(&[
+        "status",
+        "set",
+        "--tag",
+        "attention",
+        "--message",
+        "ready for review",
+    ]);
     let out = env.run(&["tag", "ls"]);
     assert!(
         out.contains("attention = attention"),
@@ -1062,13 +1090,13 @@ async fn set_status_ok_clears_attention_tag_but_keeps_description() {
     );
 
     // Return to calm — the attention tag is cleared, the description survives.
-    env.run(&["status", "ok"]);
+    env.run(&["status", "set", "--tag", "ok"]);
     let out = env.run(&["tag", "ls"]);
     assert!(
         !out.contains("attention ="),
-        "status ok should clear the attention tag: {out}"
+        "calm status should clear the attention tag: {out}"
     );
-    let out = env.run(&["status"]);
+    let out = env.run(&["status", "get"]);
     assert!(
         out.contains("status:      ok — ready for review"),
         "ok must keep the last description beside the calm level: {out}"
@@ -1079,13 +1107,28 @@ async fn set_status_ok_clears_attention_tag_but_keeps_description() {
 #[serial]
 async fn set_status_rejects_unknown_level() {
     let env = Env::start().await;
-    let out = env.run_raw(&["status", "bogus"]);
+    let out = env.run_raw(&["status", "set", "--tag", "bogus"]);
     assert!(!out.status.success(), "unknown level should fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("unknown status 'bogus'"),
         "stderr: {stderr}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn status_requires_an_explicit_get_or_set_verb() {
+    let env = Env::start().await;
+    for args in [&["status"][..], &["status", "attention"][..]] {
+        let out = env.run_raw(args);
+        assert!(!out.status.success(), "legacy status syntax should fail");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("Usage: weaver status <COMMAND>"),
+            "stderr: {stderr}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -88,7 +88,7 @@ jump to the session.
 The "On it" reply doubles as the thread's live view of the session. At launch
 the trigger **wires** the branch to the thread — a quiet `github` tag whose
 value is `owner/name#number` — and records the reply's comment id. From then
-on, every `weaver status <level> "<message>"` the agent writes re-renders that
+on, every `weaver status set --tag <level> --message "<message>"` the agent writes re-renders that
 comment:
 
 > On it — {base}/s/{id}

@@ -24,8 +24,8 @@ weaver replays it for you automatically.
   outstanding tasks, and what to do next.
 - `weaver artifact get goal` — the task this branch was created for. Update it
   with `weaver artifact write goal <file|->` as your understanding evolves.
-- `weaver status <level> "<message>"` — your single status channel; see
-  "Signalling your status".
+- `weaver status get` / `weaver status set --tag <level> --message "<message>"`
+  — read or update your single status channel; see "Signalling your status".
 - `weaver channel read` — read this session's durable goal, messages, and
   status/result history. `weaver channel send "<message>" --channel <id>`
   talks to another visible session; `wait --channel <id>` blocks for its next
@@ -111,9 +111,10 @@ repository and worktree before handing work off.
 
 ## Signalling your status
 
-The user scans the dashboard for sessions that need them. Report with
-`weaver status <level> "<message>"` — the level is the "does this need me?"
-signal, the message the current state:
+The user scans the dashboard for sessions that need them. Report with `weaver
+status set --tag <level> --message "<message>"` — the tag is the "does this need
+me?" signal, and the message is the current state. Read it back with `weaver
+status get`:
 
 - `ok` — progressing normally, **or** waiting on something external that is
   not the user (CI, a PR review, a long workflow). No action needed.
@@ -121,12 +122,11 @@ signal, the message the current state:
 - `blocked` — stuck; you need help to proceed.
 
 Set it as your situation changes — raise it before finishing a turn expecting
-the user, drop back to `ok` once you are moving. A bare `weaver status ok`
-lowers the level and keeps the last message. The trail of these messages is
+the user, drop back to `ok` once you are moving. Omitting `--message` lowers or
+raises the tag while keeping the last message. The trail of these messages is
 your progress log: record decisions and hand-off points by setting status, not
 in separate notes — the dashboard's activity feed renders the trail, and on a
-session wired to GitHub it is mirrored publicly (see "Working a GitHub
-issue").
+session wired to GitHub it is mirrored publicly (see "Working a GitHub issue").
 
 Under the hood, status appends a typed message to your channel and retains a
 compatibility **tag** on your branch — a single `(key, value)` annotation with
@@ -148,8 +148,9 @@ moved on since it was set.
 - Ask the user in plain prose when a product choice genuinely matters. ACP
   runtime permission requests are answerable in Conversation; do not turn an
   ordinary product decision into a runtime permission card or an ad hoc
-  terminal TUI. State the question as text, set `weaver status attention
-  "<the question>"`, and continue on your best safe assumption when possible.
+  terminal TUI. State the question as text, run `weaver status set --tag
+  attention --message "<the question>"`, and continue on your best safe
+  assumption when possible.
 
 ## Your environment
 
@@ -192,7 +193,7 @@ thread; they don't read this terminal.
 - **Comment when you need a person.** A question, a design to review, the
   finished result — post it with `gh issue comment <n>` / `gh pr comment <n>`
   (comment edits notify no one; a real comment does), and raise
-  `weaver status attention "<question>"` so the dashboard agrees. Then
+  `weaver status set --tag attention --message "<question>"` so the dashboard agrees. Then
   continue on your best assumption rather than idling.
 - **Say which board a number belongs to.** Weaver issues and GitHub issues
   number separately; on a GitHub thread `#12` is theirs, so describe weaver

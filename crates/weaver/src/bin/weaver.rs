@@ -31,23 +31,34 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum StatusCmd {
+    /// Print the current attention level and message.
+    Get,
+    /// Update the attention level and optional current-state message.
+    Set {
+        /// Attention level: `ok`, `attention`, or `blocked`.
+        #[arg(long)]
+        tag: String,
+        /// Current-state message, e.g. "Wired up routes; tests pass".
+        #[arg(long, default_value = "")]
+        message: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
-    /// Report the agent's status, or read it back.
+    /// Read or update the agent's status.
     ///
     /// This is the agent's single channel for telling the dashboard how it is
-    /// doing. With no arguments it prints the title, goal, status, and
-    /// open-issue count. Given a level (`ok`, `attention`, or `blocked`) and an
-    /// optional message, it sets both at once: the level drives what the
-    /// dashboard surfaces and filters on, and the message is the current-state
-    /// note shown beside it. Use `attention` to ask the user to look ("ready
-    /// for review", a question) and `blocked` when stuck and needing help; `ok`
-    /// covers both progressing normally and being blocked on something external
-    /// (a CI run, a PR review) that is not the user.
+    /// doing. `get` prints the title, goal, status, and open-issue count. `set`
+    /// updates the attention level and optional current-state message together.
+    /// Use `attention` to ask the user to look ("ready for review", a question)
+    /// and `blocked` when stuck and needing help; `ok` covers both progressing
+    /// normally and waiting on something external (a CI run, a PR review) that
+    /// is not the user.
     Status {
-        /// Attention level: `ok`, `attention`, or `blocked`. Omit to read.
-        level: Option<String>,
-        /// Current-state message, e.g. "Wired up routes; tests pass".
-        message: Vec<String>,
+        #[command(subcommand)]
+        cmd: StatusCmd,
     },
     /// Read, set, or clear a tag on a session.
     ///
@@ -483,7 +494,10 @@ async fn main() {
 async fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Status { level, message } => cmd_status(level, message.join(" ")).await,
+        Cmd::Status { cmd } => match cmd {
+            StatusCmd::Get => cmd_status(None, String::new()).await,
+            StatusCmd::Set { tag, message } => cmd_status(Some(tag), message).await,
+        },
         Cmd::Tag { cmd } => cmd_tag(cmd).await,
         Cmd::Summary => cmd_summary().await,
         Cmd::Readme => cmd_readme().await,
@@ -691,7 +705,7 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
     } else {
         format!("{attention} — {}", b.description)
     };
-    let _ = writeln!(out, "Status:  {status}  (weaver status)");
+    let _ = writeln!(out, "Status:  {status}  (weaver status get)");
     if let Some(wiring) = github_wiring_of(b) {
         let _ = writeln!(
             out,
@@ -862,7 +876,7 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
     // The current status (where work was left off) is already on the `Status:`
     // line above, sourced from the status-description trail.
     out.push('\n');
-    let _ = writeln!(out, "Next steps:  (weaver log · weaver status)");
+    let _ = writeln!(out, "Next steps:  (weaver log · weaver status get)");
     let _ = writeln!(out, "  - {}", next_action_hint(&open, &delegated));
     Ok(out)
 }
@@ -1075,8 +1089,8 @@ fn github_wiring_of(b: &BranchView) -> Option<&str> {
 /// `blocked` set it. One call to loom (`POST /branches/{id}/status`), which
 /// writes the description, sets or clears the tag, and records a single `tag`
 /// event atomically server-side. An empty message leaves the previous message
-/// in place — `weaver status ok` just lowers the level without wiping what the
-/// agent last said.
+/// in place — `weaver status set --tag ok` just lowers the level without wiping
+/// what the agent last said.
 async fn cmd_status_write(client: &Client, key: &str, level: &str, message: &str) -> Result<()> {
     let level = level.trim().to_ascii_lowercase();
     // `ok` is a valid *input* (return to calm) but is never stored — it clears
@@ -2116,7 +2130,7 @@ fn read_hook_source() -> Option<String> {
 fn compact_replay(b: &BranchView, summary: &str) -> String {
     let summary = summary.trim_end();
     format!(
-        "Context was just compacted — you are still in a **weaver session** on branch `{branch}` (a detached agent workstream in a git worktree; the user reviews asynchronously via the loom dashboard, not this terminal). Re-orientation:\n\n{summary}\n\nReminders: keep your status honest with `weaver status <ok|attention|blocked> \"<message>\"`; never block on an interactive TUI prompt — state the question as plain text and raise `weaver status attention`; finish by opening a PR (`gh pr create`) rather than merging, and `weaver issue close <id>` your tracking issue when the work is done. Run `weaver readme` for the full weaver workflow guide.\n",
+        "Context was just compacted — you are still in a **weaver session** on branch `{branch}` (a detached agent workstream in a git worktree; the user reviews asynchronously via the loom dashboard, not this terminal). Re-orientation:\n\n{summary}\n\nReminders: keep your status honest with `weaver status set --tag <ok|attention|blocked> --message \"<message>\"`; never block on an interactive TUI prompt — state the question as plain text and raise `weaver status set --tag attention --message \"<question>\"`; finish by opening a PR (`gh pr create`) rather than merging, and `weaver issue close <id>` your tracking issue when the work is done. Run `weaver readme` for the full weaver workflow guide.\n",
         branch = b.branch,
     )
 }

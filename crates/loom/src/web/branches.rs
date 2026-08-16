@@ -149,7 +149,7 @@ const CALM_STATUS: &str = "ok";
 /// Set the agent's attention level and current-state message in one call:
 /// validate the level, write the description when a message is given,
 /// set-or-clear the `attention` tag, and record exactly one `tag` event —
-/// what `weaver status <level> [message]` has always done against the local
+/// what `weaver status set --tag <level> [--message <message>]` does against the local
 /// database in one process, reproduced server-side so a networked CLI gets
 /// the same one-event, effectively-atomic semantics.
 pub(super) async fn set_branch_status(
