@@ -412,7 +412,7 @@ test.describe("durable session workbench", () => {
     await expect(access).toBeVisible();
     await expect(access.locator("xpath=..")).toContainText("none");
     const response = await fetch(
-      `${weaver.baseUrl}/api/sessions/${session.id}/github-access`,
+      `${weaver.baseUrl}/api/sessions/${session.id}/github/access`,
     );
     expect(response.ok).toBe(true);
     expect(await response.json()).toMatchObject([

@@ -174,7 +174,7 @@ impl Client {
     pub async fn github_token(&self, session_id: &str) -> Result<GithubTokenView> {
         self.send_typed::<Value, GithubTokenView>(
             Method::POST,
-            &format!("/api/sessions/{}/github-token", Self::seg(session_id)),
+            &format!("/api/sessions/{}/github/token", Self::seg(session_id)),
             None,
         )
         .await
@@ -185,7 +185,7 @@ impl Client {
         session_id: &str,
     ) -> Result<Vec<SessionGithubAccessView>> {
         self.get_typed(&format!(
-            "/api/sessions/{}/github-access",
+            "/api/sessions/{}/github/access",
             Self::seg(session_id)
         ))
         .await
@@ -198,7 +198,7 @@ impl Client {
     ) -> Result<SessionGithubAccessView> {
         self.send_typed(
             Method::PUT,
-            &format!("/api/sessions/{}/github-access", Self::seg(session_id)),
+            &format!("/api/sessions/{}/github/access", Self::seg(session_id)),
             Some(request),
         )
         .await

@@ -115,13 +115,13 @@ export const getSession = (id: string) =>
   get(`/sessions/${encodeURIComponent(id)}`) as Promise<Session>;
 
 export const getSessionGithubAccess = (id: string) =>
-  get(`/sessions/${encodeURIComponent(id)}/github-access`) as Promise<SessionGithubAccess[]>;
+  get(`/sessions/${encodeURIComponent(id)}/github/access`) as Promise<SessionGithubAccess[]>;
 export const setSessionGithubAccess = (
   id: string,
   repository: string,
   mode: SessionGithubAccess['mode'],
 ) =>
-  put(`/sessions/${encodeURIComponent(id)}/github-access`, {
+  put(`/sessions/${encodeURIComponent(id)}/github/access`, {
     repository,
     mode,
   }) as Promise<SessionGithubAccess>;

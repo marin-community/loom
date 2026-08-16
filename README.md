@@ -250,21 +250,6 @@ kept branch's worktree and resume the agent.
 
 ## GitHub
 
-If a live task expands into another repository, grant that session access
-without changing its profile or restarting its agent:
-
-```sh
-loom github access marin-community/evalchemy --session <session> --mode write
-loom github ls --session <session>
-loom github access marin-community/evalchemy --session <session> --mode none
-```
-
-The grant is limited to that session and takes effect on its next `git` or `gh`
-call. Loom verifies that the repository belongs to the configured GitHub App
-installation before storing write access. This is a human-authorized operation;
-an agent should report the repository it needs, and an operator can approve it
-from this command or the session's **Details → GitHub access** controls.
-
 With the `gh` CLI installed and authenticated, loom tracks each active session's
 pull request. A background loop polls `gh pr view` for the branch every five
 minutes, with an immediate refresh available from Session **Details**, and

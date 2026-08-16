@@ -322,8 +322,7 @@ route truth, including internal proxy and compatibility paths.
 | `POST /api/deployment/reconcile` | admin-only idempotent reconciliation of deployment setting defaults, profiles, environment references, and federation mappings; runtime setting overrides and other operator-managed rows are never pruned |
 | `POST /api/auth/federate` | exchange an exact mapped, signature-verified GitHub or Google OIDC identity for a ten-minute Ed25519-signed, profile-scoped Loom automation token |
 | `GET POST /api/runs`; `GET /api/runs/{id}` | durable, subject-scoped automation runs with idempotency reservation; an optional channel routes distinct deliveries through one live ACP session, and verified GitHub callers may provide a validated deterministic key or use the workflow run/attempt |
-| `POST /api/sessions/{id}/restricted-github/{tool}` | session-token-scoped fixed GitHub operations for a restricted session; checks stamped tool policy, fixes the target repository and thread from the session, and resolves a GitHub App token or explicit App-less profile token server-side |
-| `GET PUT /api/sessions/{id}/github-access` | list or set (`write` / `none`) a human-authorized repository override on the session's refreshable GitHub App token; write grants are validated against the live App installation before storage |
+| `/api/sessions/{id}/github/*` | session GitHub operations: refreshable credentials, human-authorized repository access, and the session's pull-request association |
 | `GET PATCH DELETE /api/sessions/{id}` | session CRUD (status, title, goal, description); legacy placement fields are read-only derivatives of canonical placement; DELETE also accepts an unmatched automation run's reserved session id, tearing down and removing the failed launch attempt |
 | `POST /api/sessions/{id}/title/regenerate`; `PUT /api/sessions/{id}/title-generation` | explicit provenance-aware title regeneration / per-session opt-out; generation uses a one-prompt economy model on the session's ACP runtime with no environment authority, tools, or MCP, commits through a goal/title/provenance CAS, and emits a session `metadata` invalidation at terminal completion |
 | `GET POST /api/sessions/{id}/resumption-cue` | model-free current cue/cache read / explicit or inactivity-gated ensure; the ensure starts a detached flight and returns `generating` immediately, so no request is held open across a model call — clients follow the generation on the GET. One in-process flight per session, with bounded lazy prompt preparation and a content + immutable-artifact source fingerprint |
@@ -765,26 +764,11 @@ a Slack conversation.
 
 ## GitHub integration
 
-**Per-session repository access.** A profile's GitHub repository list remains
-an immutable launch-policy snapshot. When a task legitimately expands to
-another repository, an approved human can layer an audited, revocable override
-onto the live session:
-
-```sh
-loom github access marin-community/evalchemy --session <session> --mode write
-loom github access marin-community/evalchemy --session <session> --mode none
-loom github ls --session <session>
-```
-
-`write` first asks the configured GitHub App to mint the complete prospective
-token scope, so a repository that is not part of the same App installation is
-rejected before the grant is stored. The deploy image's `gh` wrapper and Git
-credential helper request tokens lazily, so the next command observes the new
-scope without restarting the agent. `none` can also mask access inherited from
-the launch profile. Session and automation principals cannot change these
-overrides; the first version intentionally keeps approval in the operator CLI
-and Session Details rather than introducing a second permission-request state
-machine.
+An agent can request access to an additional repository when a live task
+expands beyond its launch policy. A human grants or revokes that session-only
+access from `loom github access` or Session Details, without restarting it.
+Loom validates write access against the GitHub App installation before storing
+the audited override.
 
 When the `gh` CLI is installed and authenticated, loom keeps a per-branch
 pull-request snapshot alongside the session. A second background loop
