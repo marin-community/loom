@@ -447,9 +447,10 @@ onUnmounted(() => {
       {{ listError }}
     </p>
 
-    <div class="flex min-h-0 flex-1" :class="compact ? 'flex-col' : ''">
-      <!-- List — a sidebar at full width, a dropdown in the narrow rail. -->
-      <div v-if="!compact" class="flex w-72 shrink-0 flex-col border-r border-line">
+    <div class="flex min-h-0 flex-1 max-md:flex-col" :class="compact ? 'flex-col' : ''">
+      <!-- List — a sidebar at desktop width. Phones use the same compact
+           selector as a narrow rail so the document keeps the full viewport. -->
+      <div v-if="!compact" class="hidden w-72 shrink-0 flex-col border-r border-line md:flex">
         <div
           class="border-b border-line px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-faint"
         >
@@ -485,7 +486,26 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- Compact list: a dropdown header for the rail. -->
+      <!-- Phone list: one bounded selector above the full-width viewer. -->
+      <div
+        v-if="!compact"
+        class="flex shrink-0 items-center gap-2 border-b border-line px-2 py-1.5 text-xs md:hidden"
+      >
+        <span class="text-faint">Artifact</span>
+        <select
+          class="min-w-0 flex-1 rounded border border-line bg-surface px-1.5 py-1 text-xs text-fg"
+          data-testid="mobile-artifact-select"
+          :value="selected"
+          @change="selectFromDropdown"
+        >
+          <option v-if="!list.length" value="">No artifacts yet</option>
+          <option v-for="a in list" :key="a.id" :value="a.name">
+            {{ a.name }}{{ a.branch_id == null ? ' · shared' : '' }} · v{{ a.rev }}
+          </option>
+        </select>
+      </div>
+
+      <!-- Compact list: a dropdown header for the desktop split rail. -->
       <div v-else class="flex shrink-0 items-center gap-2 border-b border-line px-2 py-1.5 text-xs">
         <span class="text-faint">Artifact</span>
         <select
@@ -579,7 +599,7 @@ onUnmounted(() => {
             <!-- Open beside the work area on wide screens or below it on narrow
                  screens, then dock back into the tab. -->
             <button
-              class="rounded border border-line px-1.5 py-1 text-muted hover:bg-subtle hover:text-fg"
+              class="hidden rounded border border-line px-1.5 py-1 text-muted hover:bg-subtle hover:text-fg md:block"
               data-testid="artifact-pop"
               :title="popped ? 'Dock back into the tab' : 'Open in the split panel'"
               @click="togglePop"

@@ -25,6 +25,11 @@ import { cancelSessionBacktrack, completeSessionOpen } from '../lib/workbenchMet
 import { openSessionEvents, type SessionEventsHandle } from '../lib/sessionEvents';
 import { useCommandScope, type Command } from '../lib/commands';
 import { signalChips } from '../lib/sessionState';
+import {
+  clearMobileSessionNavigation,
+  publishMobileSessionNavigation,
+  type MobileSessionSurface,
+} from '../lib/mobileSessionNavigation';
 
 // Named + keyed-by-id in App.vue's <keep-alive> so the page (and its live
 // terminal) stays warm: every `/s/:id…` path (the work tabs and the Artifacts
@@ -83,6 +88,7 @@ const railOpen = computed(() => artifactsActive.value && poppedOut.value);
 const dockedArtifactsRef = ref<InstanceType<typeof ArtifactsPanel> | null>(null);
 const railArtifactsRef = ref<InstanceType<typeof ArtifactsPanel> | null>(null);
 const acpShellsRef = ref<InstanceType<typeof SessionTerminals> | null>(null);
+const headerRef = ref<InstanceType<typeof SessionPageHeader> | null>(null);
 let layoutNavigationAuthorized = false;
 
 function activeArtifactsPanel(): InstanceType<typeof ArtifactsPanel> | null {
@@ -159,6 +165,52 @@ async function selectTab(t: WorkTab) {
     await guardedArtifactLayout(async () => {
       await router.push(`/s/${props.id}`);
     });
+  }
+}
+
+// AppRail owns the phone's bottom edge, but SessionDetail owns the kept-alive
+// panes and guarded artifact navigation. Publish a tiny controller while this
+// cached page is active so the mobile bar can switch surfaces without
+// duplicating session state or tearing down the terminal.
+let pageActive = false;
+function activeMobileSurface(): MobileSessionSurface {
+  if (changesActive.value) return 'changes';
+  if (artifactsActive.value) return 'artifacts';
+  return effectiveLocalTab.value;
+}
+async function selectMobileSurface(surface: MobileSessionSurface) {
+  if (surface === 'artifacts' || surface === 'changes') {
+    await guardedArtifactLayout(async () => {
+      poppedOut.value = false;
+      const path = surface === 'artifacts' ? 'artifacts' : 'changes';
+      if (!route.path.startsWith(`/s/${props.id}/${path}`)) {
+        await router.push(`/s/${props.id}/${path}`);
+      }
+    });
+    return;
+  }
+  await selectTab(surface);
+}
+function publishMobileNavigation() {
+  if (!pageActive || !ws.value) return;
+  publishMobileSessionNavigation({
+    id: props.id,
+    protocol: ws.value.protocol,
+    active: activeMobileSurface(),
+    select: selectMobileSurface,
+    openDetails: () => headerRef.value?.openDetails(),
+  });
+}
+watch([ws, effectiveLocalTab, artifactsActive, changesActive], publishMobileNavigation);
+
+function defaultToMobileConversation() {
+  if (
+    localTab.value === null &&
+    !reviewActive.value &&
+    window.matchMedia('(max-width: 639px)').matches
+  ) {
+    mounted.conversation = true;
+    localTab.value = 'conversation';
   }
 }
 
@@ -412,6 +464,9 @@ function openStream() {
 }
 
 onMounted(() => {
+  defaultToMobileConversation();
+  pageActive = true;
+  publishMobileNavigation();
   requestAnimationFrame(() => completeSessionOpen(props.id));
   acknowledgeAndLoadAll();
   openStream();
@@ -430,6 +485,9 @@ onMounted(() => {
 // regardless. onMounted owns the first open; onActivated reopens + refetches on
 // a *return* (guarded by `source` so the initial mount never double-opens).
 onActivated(() => {
+  defaultToMobileConversation();
+  pageActive = true;
+  publishMobileNavigation();
   if (source) return; // initial mount already loaded + opened the stream
   requestAnimationFrame(() => completeSessionOpen(props.id));
   acknowledgeAndLoadAll();
@@ -475,8 +533,14 @@ onBeforeRouteLeave(async (to) => {
   const staysInSession = to.params.id === props.id && to.path.startsWith(`/s/${props.id}`);
   if (to.path !== '/' && !staysInSession) cancelSessionBacktrack();
 });
-onDeactivated(closeStream);
+onDeactivated(() => {
+  pageActive = false;
+  clearMobileSessionNavigation(props.id);
+  closeStream();
+});
 onUnmounted(() => {
+  pageActive = false;
+  clearMobileSessionNavigation(props.id);
   closeStream();
   stopDrag();
 });
@@ -491,6 +555,7 @@ onUnmounted(() => {
          AgentTerminal's ResizeObserver re-fits the terminal on the change. -->
     <div class="session-detail-main flex min-h-0 min-w-0 flex-1 flex-col px-3 py-2 sm:px-5 sm:py-3">
       <SessionPageHeader
+        ref="headerRef"
         :ws="ws"
         :events="events"
         :ide-enabled="ideEnabled"
@@ -498,6 +563,7 @@ onUnmounted(() => {
         @open-editor="ideOpen = true"
       />
       <SessionTabs
+        class="hidden sm:flex"
         :tab="workTab"
         :artifacts-popped="railOpen"
         :protocol="ws.protocol"
@@ -541,7 +607,10 @@ onUnmounted(() => {
           v-show="reviewDocked"
           class="flex h-full min-h-0 flex-col"
         >
-          <nav class="flex shrink-0 gap-1 border-b border-line px-2 text-xs" aria-label="Review">
+          <nav
+            class="hidden shrink-0 gap-1 border-b border-line px-2 text-xs sm:flex"
+            aria-label="Review"
+          >
             <router-link
               :to="`/s/${props.id}/artifacts`"
               class="border-b-2 px-2 py-1.5"

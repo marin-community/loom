@@ -291,7 +291,10 @@ test.describe('artifacts surface', () => {
       .toBeLessThanOrEqual(5);
   });
 
-  test('a narrow split stacks the artifact below the session', async ({ page, weaver }) => {
+  test('a narrow review keeps the artifact full-width behind session navigation', async ({
+    page,
+    weaver,
+  }) => {
     const session = await weaver.seedSession({
       goal: 'Review an artifact without squeezing the phone layout',
       name: 'mobile-artifact-split',
@@ -300,21 +303,18 @@ test.describe('artifacts surface', () => {
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/notes`);
-    await page.getByTestId('artifact-pop').click();
-    await expect(page.getByTestId('artifact-rail-close')).toBeVisible();
 
-    const main = page.locator('.session-detail-main');
-    const split = page.locator('.session-split-panel');
-    const [mainBox, splitBox] = await Promise.all([main.boundingBox(), split.boundingBox()]);
-    expect(mainBox).not.toBeNull();
-    expect(splitBox).not.toBeNull();
-    expect(splitBox!.x).toBe(mainBox!.x);
-    expect(splitBox!.width).toBe(mainBox!.width);
-    expect(splitBox!.y).toBeGreaterThanOrEqual(mainBox!.y + mainBox!.height - 1);
-    expect(splitBox!.height).toBeGreaterThan(120);
+    // Phones use one full-width work surface: the desktop Split action and
+    // permanent sidebar are replaced by one artifact selector.
+    await expect(page.getByTestId('artifact-pop')).toBeHidden();
+    await expect(page.locator('.session-split-panel')).toHaveCount(0);
+    await expect(page.getByTestId('mobile-artifact-select')).toHaveValue('notes');
 
     const scroll = page.getByTestId('artifact-scroll');
     await expect(scroll).toBeVisible();
+    const scrollBox = await scroll.boundingBox();
+    expect(scrollBox).not.toBeNull();
+    expect(scrollBox!.width).toBeGreaterThan(350);
     expect(
       await scroll.evaluate((element) => element.scrollHeight > element.clientHeight + 1_000),
     ).toBe(true);
@@ -330,7 +330,14 @@ test.describe('artifacts surface', () => {
     expect(primaryBox).not.toBeNull();
     expect(primaryBox!.width).toBe(390);
     expect(primaryBox!.y).toBeGreaterThan(780);
-
+    await expect(primary.getByRole('button', { name: 'Artifacts' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    await primary.getByRole('button', { name: 'More' }).click();
+    await page.getByTestId('mobile-session-changes').click();
+    await expect(page).toHaveURL(`${weaver.baseUrl}/s/${session.id}/changes`);
+    await expect(primary.getByRole('button', { name: 'More' })).toHaveClass(/text-fg/);
   });
 
   test('Review routes keep artifacts on the warm session page', async ({

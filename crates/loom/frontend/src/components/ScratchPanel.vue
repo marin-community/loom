@@ -7,7 +7,10 @@ import AttachmentDropzone from './AttachmentDropzone.vue';
 // Scratch attachments for a session. Browse and drag/drop share the bounded
 // AttachmentDropzone path, so a cached detail view can never consume a drop
 // intended for another route.
-const props = defineProps<{ id: string }>();
+const props = withDefaults(defineProps<{ id: string; testId?: string; embedded?: boolean }>(), {
+  testId: 'scratch-panel',
+  embedded: false,
+});
 
 const files = ref<ScratchFile[]>([]);
 const busy = ref(false);
@@ -114,7 +117,8 @@ onUnmounted(deactivate);
   <div
     ref="root"
     class="relative flex min-w-0 items-center gap-1 text-xs"
-    data-testid="scratch-panel"
+    :class="embedded && 'flex-wrap'"
+    :data-testid="testId"
   >
     <ul
       v-if="files.length && !hasManyFiles"
@@ -138,7 +142,10 @@ onUnmounted(deactivate);
     <div
       v-if="files.length"
       class="scratch-menu-wrap shrink-0"
-      :class="hasManyFiles && 'scratch-menu-wrap--visible'"
+      :class="[
+        hasManyFiles && 'scratch-menu-wrap--visible',
+        embedded && 'scratch-menu-wrap--embedded',
+      ]"
     >
       <button
         ref="menuButton"
@@ -169,7 +176,12 @@ onUnmounted(deactivate);
       <div
         v-if="menuOpen"
         :id="`scratch-menu-${props.id}`"
-        class="scratch-menu absolute right-0 top-[calc(100%+0.35rem)] z-30 w-[min(22rem,calc(100vw-1.5rem))] overflow-hidden rounded-md border border-line bg-surface shadow-lg"
+        class="scratch-menu z-30 overflow-hidden rounded-md border border-line bg-surface shadow-lg"
+        :class="
+          embedded
+            ? 'relative mt-2 w-full'
+            : 'absolute right-0 top-[calc(100%+0.35rem)] w-[min(22rem,calc(100vw-1.5rem))]'
+        "
         data-testid="scratch-menu"
         role="menu"
       >
@@ -233,6 +245,12 @@ onUnmounted(deactivate);
 
 .scratch-menu-wrap--visible {
   display: block;
+}
+
+.scratch-menu-wrap--embedded {
+  display: block;
+  width: 100%;
+  order: 3;
 }
 
 @media (max-width: 639px) {

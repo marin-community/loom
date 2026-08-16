@@ -16,11 +16,14 @@ a gap.
 
 ## App shell and workbench
 
-The rail has stable destinations for **Sessions**, **Channels**, **Issues**,
-**Watch**, **Shell**, and **Settings**. On narrow screens it becomes a bottom
-navigation bar so the work surface keeps the full viewport width. Session
-Artifacts and Changes are not global destinations; they live together under
-that session's Review surface.
+The desktop rail has stable destinations for **Sessions**, **Channels**,
+**Issues**, **Watch**, **Shell**, and **Settings**. Narrow fleet pages use four
+bottom destinations plus **More**, which holds Shell and preferences. An open
+session makes that bottom edge contextual instead: **Sessions**, **Chat**, and
+**Artifacts** are the three durable destinations, followed by **More**. Agent or
+Shells, Changes, Details, and Scratch live in the bounded More sheet. The
+positions stay stable while the session is open, and every switch preserves its
+warm pane.
 
 Sessions is organized as shared **Spaces → Groups → Sessions**. **Later** is a
 top-level space ahead of the provenance spaces, keeping deferred work out of
@@ -64,9 +67,12 @@ task, overrides, or attachments. A successful launch opens the new session.
 
 ## Session detail
 
-An ACP session leads with **Conversation**, followed by **Shells** and
-**Review**. A terminal-backed session leads with **Agent**, followed by
-**Conversation** and **Review**. There is no Overview tab.
+On desktop, an ACP session leads with **Conversation**, followed by **Shells**
+and **Review**. A terminal-backed session leads with **Agent**, followed by
+**Conversation** and **Review**. There is no Overview tab. Phones open a plain
+session on Chat and replace the top tab strip with the contextual bottom bar.
+Artifacts stays one tap away; Agent, Changes, and ACP Shells remain available
+from More without occupying primary navigation.
 
 Conversation is the durable operator/agent exchange. Mid-turn composer feedback
 steers adapters that support live input; otherwise it stops the current turn and
@@ -92,15 +98,21 @@ layout changes that would discard it are stopped with a focused save-or-cancel
 choice. Submitted review history is immutable apart from comment resolution and
 delivery retry.
 
-The session header keeps current state and frequent destinations visible. A
-linked GitHub issue or pull request opens directly from its labelled pill;
+The session header keeps current state and frequent destinations visible. On a
+phone it reduces to the task label, live state, and at most one current status
+line; the single Sessions button owns navigation back to the fleet, while
+Details and GitHub association controls move into More. On desktop,
+a linked GitHub issue or pull request opens directly from its labelled pill;
 reassociation is an adjacent secondary action, and an empty pill remains a
 discoverable setup action.
 
 **Details** is a popover, not a work tab. It owns task and launch metadata,
 status history, lifecycle actions, handoff, and auto-archive policy. The
-embedded editor is an optional **Advanced → Open editor** escape hatch. Split
-panels open beside the work area on wide screens and below it on narrow ones.
+embedded editor is an optional **Advanced → Open editor** escape hatch. The
+Details popover becomes a bounded bottom sheet on phones. Split panels open
+beside the work area on wide screens; phone review uses one full-width surface
+and keeps the session pane warm behind it instead of squeezing two permanent
+panes into the viewport.
 
 Archive stops the runtime and removes the worktree while preserving the branch,
 conversation, placement, artifacts, and Weaver history. Remove deletes the
@@ -117,9 +129,11 @@ selected issues changes.
 Scratch is inbound reference material, kept out of Git. Launch-time and live
 drop targets share the server's file-count, per-file, total-size, and filename
 validation. A session shows one attachment inline on a wide tab row; larger
-collections, and every collection on a narrow screen, live in a bounded menu.
-Each drop target is scoped to its active route so a cached session cannot
-consume files intended for another session.
+desktop collections use a bounded menu. Phones place the complete Scratch
+control in the session's More sheet, where long collections expand within the
+bounded sheet instead of competing with the task label or work-surface
+navigation. Each drop target is scoped to its active route so a cached session
+cannot consume files intended for another session.
 
 ## Confirmation and feedback
 
@@ -131,8 +145,8 @@ SPA does not delegate confirmation to native browser prompts.
 
 Status, selection, destructive intent, and failures are expressed with text as
 well as color. Controls have visible focus and accessible names. Narrow layouts
-retain the same routes and actions; panels may stack, but lifecycle, review, and
-confirmation semantics do not change.
+retain the same routes and actions; work surfaces may replace one another, but
+lifecycle, review, and confirmation semantics do not change.
 
 ## Keyboard command model
 
