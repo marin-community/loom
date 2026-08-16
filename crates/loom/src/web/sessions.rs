@@ -1770,14 +1770,14 @@ pub(super) async fn send_session(
     Json(req): Json<SendReq>,
 ) -> ApiResult<Json<Value>> {
     let (session, branch) = require_session(&st.db, &key).await?;
-    // A cross-session send must not sit behind an ACP turn indefinitely. Steer
-    // the live turn when supported, otherwise cancel it and immediately start
-    // this message as a fresh turn, while keeping the same `nudge` audit.
+    // A cross-session send must not sit behind an ACP turn indefinitely or be
+    // discarded with an adapter's in-memory steer. Cancel a live turn and
+    // immediately start this message as a fresh turn, keeping the same audit.
     if session.protocol == "acp" {
         let handle = require_acp_task(&st, &session)?;
         let by = author_or_manual(req.by.as_deref());
         let ack = handle
-            .send_now(req.text.clone(), Some(by.clone()), Vec::new())
+            .stop_and_send(req.text.clone(), Some(by.clone()), Vec::new())
             .await
             .map_err(|e| AppError::conflict(e.to_string()))?;
         events::record(
@@ -2025,8 +2025,8 @@ pub(super) struct PromptBody {
     pub text: String,
     #[serde(default)]
     pub by: Option<String>,
-    /// Deliver this user message immediately: steer a supported live turn, or
-    /// cancel and replace an unsteerable one.
+    /// Deliver this user message immediately: steer a receptive live turn, or
+    /// cancel and replace one blocked behind a tool or permission.
     #[serde(default)]
     pub send_now: bool,
     /// Promote the server's durable next-turn queue instead of sending `text`.
@@ -2146,9 +2146,9 @@ async fn prompt_resources(work_dir: &str, files: &[String]) -> ApiResult<Vec<Val
 
 /// Send a user message to an ACP session. A normal request is dispatched when
 /// idle or appended to the durable queue while a turn is live; `send_now`
-/// instead steers a supported live turn or cancels and replaces an unsteerable
-/// one. Returns 202 `{ queued, turn }`. Every send records a `nudge` event (the
-/// audit rule).
+/// instead steers a receptive live turn or cancels and replaces one blocked at
+/// a tool/permission boundary. Returns 202 `{ queued, turn }`. Every send records
+/// a `nudge` event (the audit rule).
 pub(super) async fn prompt_session(
     State(st): State<AppState>,
     Path(key): Path<String>,
@@ -2169,7 +2169,7 @@ pub(super) async fn prompt_session(
         let resources = prompt_resources(&session.work_dir, &req.files).await?;
         if req.send_now {
             handle
-                .send_now(req.text.clone(), Some(by.clone()), resources)
+                .steer_or_restart(req.text.clone(), Some(by.clone()), resources)
                 .await
         } else {
             handle

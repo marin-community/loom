@@ -108,11 +108,11 @@ explicitly selects an origin profile. Deployment configuration can manage and
 select those profiles together.
 
 `poll` reads lifecycle and attention, `wait` blocks until completion or human
-attention, `send` delivers immediate control input, and `interrupt` stops the
-current turn. For ACP, immediate control input steers a supported live turn and
-otherwise cancels and restarts; the conversation composer uses the same
-immediate delivery behavior. Session commands accept an id, branch id, branch
-name, or `repo:branch`.
+attention, `send` delivers immediate external control input, and `interrupt`
+stops the current turn. For ACP, external input always cancels and restarts;
+the conversation composer tries live steering and falls back to the same
+stop-and-send behavior when the model is behind a tool or permission. Session
+commands accept an id, branch id, branch name, or `repo:branch`.
 
 The session title is one canonical, unqualified task label; fleet views add its
 Group only when they need a qualified `Group / Task` name. Loom records whether
@@ -263,16 +263,15 @@ the workbench header.
 Every session detail has a **Conversation** tab that renders the agent's chat
 with the model — user turns, replies, thinking, and tool calls — live and
 (via the archive capture below) still there to review after the terminal is gone.
-For ACP sessions, the conversation composer sends immediately: it steers an
-adapter that supports live input, or stops an unsteerable turn and starts the
-message as the next turn. Feedback queued by another client stays visible and
-can be pulled back into the composer with its **Edit** action or ArrowUp from an
-empty composer, or sent immediately with **Stop & send**. The live status names
-visible thinking, writing, or tool activity and reports how long it has been
-since the agent produced an observable update; quiet time is not guessed to mean
-stuck. Cross-session `loom session send` uses the same immediate policy: it
-steers a supported live turn, or cancels that turn and starts the message as a
-new one.
+For ACP sessions, the conversation composer sends immediately: it steers a
+receptive adapter, or stops a turn blocked behind a tool or permission and
+starts the message as the next turn. Feedback queued by another client stays
+visible and can be pulled back into the composer with its **Edit** action or
+ArrowUp from an empty composer, or sent immediately with **Stop & send**. The
+live status names visible thinking, writing, or tool activity and reports how
+long it has been since the agent produced an observable update; quiet time is
+not guessed to mean stuck. Cross-session `loom session send` always cancels a
+live turn and starts the message as a new one.
 
 Whenever a session is archived — by the Archive button or automatically on merge
 — loom first captures that conversation to disk: it finds the agent's transcript

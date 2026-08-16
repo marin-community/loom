@@ -14,6 +14,7 @@
 //                        turn (what claude does after /compact); must NOT re-journal
 //   tool:edit[:title]    a tool_call (in_progress) then tool_call_update (completed);
 //                        an `edit` kind carries a diff, others a text content block
+//   toolwait:MS[:title]  an in-progress execute tool that waits until MS or cancellation
 //   image[:title]        a read tool whose result is an ACP image content block
 //   toolfail[:title]     a tool_call that ends with status `failed`
 //   plan                 a plan update with two entries
@@ -209,6 +210,20 @@ async function runToken(tok) {
     notify({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: tok.slice(6) } });
   } else if (tok.startsWith("echo:")) {
     notify({ sessionUpdate: "user_message_chunk", content: { type: "text", text: tok.slice(5) } });
+  } else if (tok.startsWith("toolwait:")) {
+    const [, delay, ...titleParts] = tok.split(":");
+    const toolCallId = "call-wait-" + Math.floor(Math.random() * 100000);
+    notify({
+      sessionUpdate: "tool_call",
+      toolCallId,
+      title: titleParts.join(":") || "Blocking tool",
+      kind: "execute",
+      status: "in_progress",
+    });
+    await sleepCancellable(Number(delay));
+    if (!cancelled) {
+      notify({ sessionUpdate: "tool_call_update", toolCallId, status: "completed" });
+    }
   } else if (tok.startsWith("toolfail")) {
     const title = tok.includes(":") ? tok.slice(tok.indexOf(":") + 1) : "Failing tool";
     const toolCallId = "call-fail-" + Math.floor(Math.random() * 100000);
