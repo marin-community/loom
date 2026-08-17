@@ -1,8 +1,9 @@
 # GitHub trigger (`@loom`)
 
-loom turns a request in an issue body or an issue/PR comment into a session.
-Include **`@loom`** when opening the issue or posting the comment, or add it later
-by editing either body. loom launches a session against that repo — attached to
+loom turns a request in an issue body, issue/PR comment, or submitted PR review
+into a session. Include **`@loom`** when opening the issue, posting the comment,
+or submitting the review, or add it later by editing an issue or comment body.
+loom launches a session against that repo — attached to
 the PR's own branch (so the agent's commits land on the PR) or, for an issue, a
 stable `weaver/issue-<n>` branch — seeded with the thread's context, and replies
 with a link to the live session (`On it — {base}/s/{id}`). That reply is the
@@ -18,20 +19,20 @@ anything is launched.
 
 ## How it works
 
-GitHub delivers `issues/opened`, `issues/edited`, `issue_comment/created`, and
-`issue_comment/edited` events to `POST /api/github/webhook`. The receiver, in
-order:
+GitHub delivers `issues/opened`, `issues/edited`, `issue_comment/created`,
+`issue_comment/edited`, and `pull_request_review/submitted` events to
+`POST /api/github/webhook`. The receiver, in order:
 
 1. **Verifies the signature.** It recomputes HMAC-SHA256 over the raw request
    body with the webhook secret and constant-time-compares it to
    `X-Hub-Signature-256`. A missing or wrong signature is rejected with **401**.
 2. **Dedupes** on `X-GitHub-Delivery`. A replayed or GitHub-retried delivery is a
    no-op, so a repeat never launches a second session.
-3. **Filters** to new or body-edited `issues` and `issue_comment` events. Title
-   edits, deletions, other events, and the bot's own requests (set
-   `github.bot_login`) are ignored.
-4. **Matches a newly introduced trigger.** The issue body or comment must tag the
-   trigger phrase (`github.trigger_phrase`, default `@loom`), matched
+3. **Filters** to new or body-edited `issues` and `issue_comment` events and
+   submitted `pull_request_review` events. Title edits, deletions, other events,
+   and the bot's own requests (set `github.bot_login`) are ignored.
+4. **Matches a newly introduced trigger.** The issue, comment, or review body
+   must tag the trigger phrase (`github.trigger_phrase`, default `@loom`), matched
    case-insensitively **anywhere** in its prose — `please @loom rebase this`
    fires just as `@loom rebase this` does. For an edit, the previous body must
    not already contain a matching trigger. This prevents an unrelated edit from
@@ -42,30 +43,30 @@ order:
    code, fenced or inline, so text asking whether `` `@loom` `` still works
    launches nothing. The mention must stand alone — `@loom-bot` and
    `me@loom.dev` are not `@loom`.
-5. **Authorizes the requester.** The issue opener, commenter, or editor who
-   introduced the mention must be an [approved loom user](#who-can-trigger) —
-   the *same* allowlist that gates signing in to the app. Repo write access is
+5. **Authorizes the requester.** The issue opener, commenter, reviewer, or editor
+   who introduced the mention must be an [approved loom user](#who-can-trigger)
+   — the *same* allowlist that gates signing in to the app. Repo write access is
    **not** by itself a grant. An unapproved requester gets a one-line "request
    access" reply — rather than a silent drop, so they know to ask instead of
    assuming loom is broken. A per-repo rate limit bounds both the launch and
    that reply against request spam.
 6. **Resolves the repo** through the [managed repo store](#which-repos) — an
    approved user's trigger on any repo the App is installed on registers it — and
-   picks the branch to work on: a **pull request** comment attaches the session's
-   worktree to the PR's head branch, so the agent's commits push straight to the
-   PR; an **issue** body or comment gets a stable `weaver/issue-<n>` branch. (A
-   PR from a fork, whose head loom can't push to, falls back to a fresh branch.)
+   picks the branch to work on: a **pull request** comment or review attaches the
+   session's worktree to the PR's head branch, so the agent's commits push
+   straight to the PR; an **issue** body or comment gets a stable
+   `weaver/issue-<n>` branch. (A PR from a fork, whose head loom can't push to,
+   falls back to a fresh branch.)
 7. **Reuses or creates.** If an active session already owns that branch, the new
    request is forwarded into it (a nudge in its terminal) rather than launching a
    duplicate. Otherwise loom creates the session with `github.profile` (default
-   `default`), seeded with the issue/PR title, body, and triggering comment when
-   applicable, plus the fixed thread reply and terminal-status contract.
+   `default`), seeded with the issue/PR title, body, and triggering request, plus
+   the fixed thread reply and terminal-status contract.
 8. **Replies** on the thread with the session URL. A forwarded comment is
-   acknowledged with a 👀 **reaction** on the triggering comment instead — seen,
-   passed along, no ack comment accumulating on an active thread. When the
-   reaction can't land (no comment id in the delivery, or a token that can't
-   react), or the request came from an issue body, loom uses the ack comment so
-   the feedback isn't lost.
+   acknowledged with a 👀 **reaction** on the triggering comment — seen, passed
+   along, no ack comment accumulating on an active thread. When the reaction
+   can't land (no comment id in the delivery, a token that can't react, an issue
+   body, or a review), loom uses the ack comment so the feedback isn't lost.
 
 Steps 6–8 (clone, create-or-forward, reply) run in a **detached task**: the
 handler returns `200` as soon as the gates pass. Cloning a large repo can outlast
@@ -137,9 +138,10 @@ not retry a delivery loom handled without launching.
 The people who can trigger `@loom` are exactly the people who can sign in to
 loom: the **approved users** (the `users` table). One allowlist governs both
 surfaces — being approved lets someone sign in *and* drive the trigger from an
-issue body or comment, including by editing in the mention; no one else can do
-either. Write access to the repo is **not** by itself a grant, so opening a repo
-to loom never hands the trigger to everyone who can push to it.
+issue body, comment, or submitted review, including by editing a body to add the
+mention; no one else can do either. Write access to the repo is **not** by itself
+a grant, so opening a repo to loom never hands the trigger to everyone who can
+push to it.
 
 The first approved user is seeded from `LOOM_OWNER_GITHUB` on a fresh database.
 Manage the rest in **Settings → People & security** or over the API (set
@@ -181,8 +183,8 @@ Add a webhook on the repo or org (**Settings → Webhooks → Add webhook**):
   URL (the same one `auth.base_url` names).
 - **Content type** — `application/json`.
 - **Secret** — the same value as `LOOM_GITHUB_WEBHOOK_SECRET`.
-- **Events** — "Let me select individual events" → **Issues** and **Issue
-  comments**.
+- **Events** — "Let me select individual events" → **Issues**, **Issue
+  comments**, and **Pull request reviews**.
 
 Until `LOOM_GITHUB_WEBHOOK_SECRET` is set the endpoint rejects every delivery
 (it cannot verify a signature without it).
@@ -194,8 +196,9 @@ two ways:
 
 - **An approved user triggers on it.** When an approved user opens an issue with
   `@loom` in its body, edits an issue to add `@loom`, or creates or edits a
-  comment to add `@loom`, on a repo where the [GitHub App](#the-github-app) is
-  installed, loom registers that repo automatically and launches. The *person*
+  comment to add `@loom`, or submits a PR review containing `@loom`, on a repo
+  where the [GitHub App](#the-github-app) is installed, loom registers that repo
+  automatically and launches. The *person*
   is the trust boundary — since only an approved user can trigger, a stranger
   installing the public App on their own repo changes nothing. The App
   installation scopes *which* repos loom can reach; the approved-user gate
@@ -214,10 +217,10 @@ launches nothing.
 ### Optional settings
 
 - `github.trigger_phrase` — the phrase that tags loom (default `@loom`). Matched
-  case-insensitively anywhere in an issue body or comment's prose, as a
+  case-insensitively anywhere in an issue, comment, or review body, as a
   standalone mention ([step 4](#how-it-works)) — both `@loom rebase onto main`
-  and `can you rebase this, @loom?` trigger when created or newly introduced by
-  an edit. Settable in **Settings → GitHub** or `loom config set
+  and `can you rebase this, @loom?` trigger in a new request or when introduced
+  by an edit. Settable in **Settings → GitHub** or `loom config set
   github.trigger_phrase "…"`.
 - `github.bot_login` (or `LOOM_GITHUB_BOT_LOGIN`) — a GitHub login whose own
   requests are ignored, so a bot account can post without re-triggering itself.
@@ -284,9 +287,13 @@ Apps → New GitHub App**:
   - **Metadata** — Read-only (mandatory; granted automatically).
   - **Pull requests** — Read & write (open and update pull requests).
   - **Workflows** — Read & write (push changes under `.github/workflows`).
-- **Subscribe to events** — **Issues** and **Issue comment**.
+- **Subscribe to events** — **Issues**, **Issue comment**, and **Pull request
+  review**.
 - After creating it, **generate a private key** (downloads a `.pem`) and note the
   **App ID**.
+
+Apps created before submitted-review triggers were supported must add **Pull
+request review** to their subscribed events once.
 
 Then **install** the App on each repo (or org) loom should act on — the
 installation is what authorizes a repo to trigger.
@@ -319,19 +326,19 @@ the gates above. Debugging is one question: *did the delivery arrive, and which
 gate did it hit?* Work through it in order:
 
 1. **Was the request the right shape?** It must be an issue body
-   (`issues/opened` or a body-changing `issues/edited`) or a PR/issue
+   (`issues/opened` or a body-changing `issues/edited`), a PR/issue
    **conversation** comment (`issue_comment/created` or
-   `issue_comment/edited`) that newly introduces the trigger phrase in its prose
-   — a mention that sits only inside a quote or a code span is ignored by design
-   ([step 4](#how-it-works)). An inline code-review comment and a review summary
-   are different events loom does not subscribe to, so `@loom` in those never
-   fires.
+   `issue_comment/edited`), or a submitted PR review
+   (`pull_request_review/submitted`) that newly introduces the trigger phrase in
+   its prose — a mention that sits only inside a quote or a code span is ignored
+   by design ([step 4](#how-it-works)). An inline code-review comment is a
+   different event loom does not subscribe to, so `@loom` in one never fires.
 
 2. **Did GitHub deliver it, and what did loom answer?** The GitHub App's
    **Settings → Advanced → Recent Deliveries** (or the repo/org webhook's) shows
    every delivery, its payload, and loom's HTTP response:
    - *no delivery* — the App is not installed on the repo, or it was not a
-     subscribed `issues` or `issue_comment` event;
+     subscribed `issues`, `issue_comment`, or `pull_request_review` event;
    - *401* — the webhook secret loom holds does not match the one GitHub signs
      with;
    - *200 but nothing launched* — it hit a gate (below), or the launch is still
