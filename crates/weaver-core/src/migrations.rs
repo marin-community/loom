@@ -113,6 +113,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "deployment_settings",
         include_str!("../migrations/0018_deployment_settings.sql"),
     ),
+    (
+        19,
+        "activate_pr_labeller",
+        include_str!("../migrations/0019_activate_pr_labeller.sql"),
+    ),
 ];
 
 /// Latest core schema version compiled into this binary.
@@ -637,6 +642,24 @@ mod tests {
                 .unwrap();
             assert!(!enabled, "{name} stock row becomes opt-in");
         }
+        sqlx::query(
+            "UPDATE watches SET params = '{\"label\":\"weaver\"}', capabilities = '[\"observe\"]'
+             WHERE name = 'pr-label'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let migration = MIGRATIONS.iter().find(|(v, _, _)| *v == 19).unwrap().2;
+        for stmt in split_statements(migration) {
+            sqlx::query(&stmt).execute(&pool).await.unwrap();
+        }
+        let (enabled, capabilities): (bool, String) =
+            sqlx::query_as("SELECT enabled, capabilities FROM watches WHERE name = 'pr-label'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(enabled);
+        assert!(capabilities.contains("mark"));
         let profiles: Vec<String> =
             sqlx::query_scalar("SELECT DISTINCT profile FROM watches ORDER BY profile")
                 .fetch_all(&pool)

@@ -1092,9 +1092,8 @@ async fn rest_lists_builtin_programs_and_validates_program_refs() {
 /// The embedded builtin scripts end to end: each runs as a real `python3`
 /// subprocess against the live test server's REST API. `archive-merged` flags
 /// the session whose stored PR snapshot is merged; `pr-label` flags the one
-/// with an open PR (the fixture repo has no GitHub remote, so the label read
-/// degrades to the ensure-label report). Both are read-only — the fleet is
-/// untouched afterward.
+/// with an open PR. This fixture grants the labeller only `observe`, so both
+/// rounds report their actions without mutating the fleet.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn builtin_scripts_report_merged_and_unlabelled_prs() {
@@ -1198,7 +1197,7 @@ async fn builtin_scripts_report_merged_and_unlabelled_prs() {
     assert_eq!(actions[0]["session"], open_id.as_str());
     assert_eq!(actions[0]["label"], "weaver");
 
-    // Read-only: neither session was archived or otherwise mutated.
+    // Observe-only: neither session was archived or otherwise mutated.
     for id in [&merged_id, &open_id] {
         let view = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
         assert_ne!(view["status"], "archived", "builtin scripts mutate nothing");
