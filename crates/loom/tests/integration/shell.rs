@@ -106,13 +106,16 @@ async fn shell_spawns_lazily_runs_and_restarts() {
 }
 
 /// A session's worktree debug shells: each spawns lazily in the session's
-/// worktree (carrying its `WEAVER_BRANCH`), `/shells` lists the live ones for
-/// reload-rediscovery, and archiving the session sweeps every one.
+/// worktree with the agent's launch environment, `/shells` lists the live ones
+/// for reload-rediscovery, and archiving the session sweeps every one.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_debug_shells_run_in_worktree_and_are_swept_on_archive() {
     let ts = TestServer::start().await;
     let client = &ts.client;
+    loom::profile::env_set(&ts.state.db, "default", "SHELL_ENV_SNAPSHOT", "before")
+        .await
+        .unwrap();
 
     let session = client
         .post(
@@ -123,6 +126,9 @@ async fn session_debug_shells_run_in_worktree_and_are_swept_on_archive() {
         .unwrap();
     let id = session["id"].as_str().unwrap().to_string();
     let work_dir = session["work_dir"].as_str().unwrap().to_string();
+    loom::profile::env_set(&ts.state.db, "default", "SHELL_ENV_SNAPSHOT", "after")
+        .await
+        .unwrap();
 
     // No debug shell exists until the first attach.
     assert!(
@@ -136,7 +142,11 @@ async fn session_debug_shells_run_in_worktree_and_are_swept_on_archive() {
     await_shell_ready(&mut sh0, "RDY0").await;
     // `WT$((0))` is `WT0` in the OUTPUT but `WT$((0))` in the echoed keystrokes,
     // so draining for `WT0=` matches the command's result, not the typed line.
-    send_input(&mut sh0, "echo WT$((0))=$PWD BR=${WEAVER_BRANCH:-none}\n").await;
+    send_input(
+        &mut sh0,
+        "echo WT$((0))=$PWD BR=${WEAVER_BRANCH:-none} ENV=${SHELL_ENV_SNAPSHOT:-none} SID=${LOOM_SESSION_ID:-none} TOKEN=${LOOM_TOKEN:+set}\n",
+    )
+    .await;
     let probe = drain_until(&mut sh0, "WT0=", Duration::from_secs(8)).await;
     assert!(
         probe.contains(&format!("WT0={work_dir}")),
@@ -145,6 +155,14 @@ async fn session_debug_shells_run_in_worktree_and_are_swept_on_archive() {
     assert!(
         !probe.contains("BR=none"),
         "shell should export the session's WEAVER_BRANCH; got:\n{probe}"
+    );
+    assert!(
+        probe.contains("ENV=before"),
+        "shell should inherit the agent's launch snapshot; got:\n{probe}"
+    );
+    assert!(
+        probe.contains(&format!("SID={id}")) && probe.contains("TOKEN=set"),
+        "shell should inherit the session credential broker identity; got:\n{probe}"
     );
 
     // The live shell is rediscoverable both via the helper and the HTTP route.

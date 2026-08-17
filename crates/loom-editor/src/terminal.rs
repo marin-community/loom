@@ -144,11 +144,11 @@ pub async fn session_shell_ws(
         );
         return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
     }
-    let (session, branch) = match session::resolve_key(&st.db, &key).await {
+    let (session, _) = match session::resolve_key(&st.db, &key).await {
         Ok(Some(pair)) => pair,
         _ => return (StatusCode::NOT_FOUND, "no such session").into_response(),
     };
-    let target = match crate::shell::ensure_debug(&st, &session, &branch, idx).await {
+    let target = match crate::shell::ensure_debug(&st, &session, idx).await {
         Ok(name) => name,
         Err(e) => {
             tracing::error!(session = %key, idx, error = %e, "failed to bring up session debug shell");

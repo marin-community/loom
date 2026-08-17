@@ -11,6 +11,7 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
 use crate::protocol::{self, op, req, Frame, PongInfo};
+use crate::DerivedLaunch;
 
 /// Buffered output frames an attach holds before the consumer must catch up.
 /// Bounded so a slow reader back-pressures the socket (and thus the supervisor)
@@ -52,6 +53,14 @@ impl Client {
         }
         let info: Option<PongInfo> = serde_json::from_slice(&frame.payload)?;
         info.context("supervisor returned no pong info")
+    }
+
+    /// Launch a sibling PTY supervisor that inherits this supervisor's exact
+    /// child environment.
+    pub async fn derive(&mut self, launch: &DerivedLaunch) -> Result<()> {
+        let payload = serde_json::to_vec(launch).context("encoding derived launch")?;
+        protocol::write_frame(&mut self.stream, &req::derive(payload)).await?;
+        self.expect_ok().await
     }
 
     /// Render the current screen to text; `history` extra scrollback rows.

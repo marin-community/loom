@@ -3,7 +3,7 @@
 //! Build the test image with `HOST_UID=$(id -u)` and `HOST_GID=$(id -g)`, then
 //! run `cargo build -p tapestry && cargo test -p loom --test docker_runner --
 //! --ignored`. The regular suite stays Docker-free. This smoke covers placement,
-//! launcher death, shared socket access, colocating a second supervisor, keeping
+//! launcher death, shared socket access, deriving a second supervisor, keeping
 //! the operator shell on the launcher host, and a callback over the configured
 //! sibling network.
 
@@ -94,11 +94,16 @@ fn docker_runner_child() {
     configure(&root, &session);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
+        let env = [
+            ("LOOM_SESSION_ID", "session-id"),
+            ("LOOM_TOKEN", "session-token"),
+            ("OWNER_ENV", "owner-value"),
+        ];
         let options = tapestry::LaunchOptions {
             name: &session,
             cwd: Path::new("/home/app/work"),
             script: "python3 -c 'import os, urllib.request; print(urllib.request.urlopen(os.environ[\"WEAVER_API\"], timeout=5).status)'; printf 'runner-ready owner-host=%s\\n' \"$(cat /etc/hostname)\"; sleep 60",
-            env: &[],
+            env: &env,
             env_clear: false,
             cols: 80,
             rows: 24,
@@ -202,49 +207,55 @@ fn docker_runner_supervisor_outlives_its_launcher() {
         let host_session = format!("{session}-host-shell");
         let host_screen = wait_for_screen(&host_session, &["host-shell-ready"]).await;
 
-        let colocated = format!("{session}-shell");
-        let options = tapestry::LaunchOptions {
-            name: &colocated,
-            cwd: Path::new("/home/app/work"),
-            script: "printf 'shell-ready colocated-host=%s\\n' \"$(cat /etc/hostname)\"; sleep 60",
-            env: &[],
-            env_clear: false,
-            cols: 80,
-            rows: 24,
-            mode: tapestry::Mode::Pty,
-            segment_max_bytes: None,
-            supervisor_bin: None,
-        };
-        loom::runner::spawn_colocated(&options, 1, &session)
+        let derived = format!("{session}-shell");
+        tapestry::Client::connect(&session)
+            .await
+            .unwrap()
+            .derive(&tapestry::DerivedLaunch {
+                name: derived.clone(),
+                cwd: Path::new("/home/app/work").to_path_buf(),
+                script: "printf 'shell-ready derived-host=%s env=%s session=%s token=%s\\n' \"$(cat /etc/hostname)\" \"$OWNER_ENV\" \"$LOOM_SESSION_ID\" \"$LOOM_TOKEN\"; sleep 60".to_string(),
+                cols: 80,
+                rows: 24,
+            })
             .await
             .unwrap();
 
-        let shell_screen = wait_for_screen(&colocated, &["shell-ready"]).await;
+        let shell_screen = wait_for_screen(
+            &derived,
+            &[
+                "shell-ready",
+                "env=owner-value",
+                "session=session-id",
+                "token=session-token",
+            ],
+        )
+        .await;
         let owner_host = owner_screen
             .split("owner-host=")
             .nth(1)
             .and_then(|tail| tail.split_whitespace().next())
             .expect("owner should print its container hostname");
-        let colocated_host = shell_screen
-            .split("colocated-host=")
+        let derived_host = shell_screen
+            .split("derived-host=")
             .nth(1)
             .and_then(|tail| tail.split_whitespace().next())
-            .expect("shell should print its container hostname");
+            .expect("derived shell should print its container hostname");
         let host_shell_host = host_screen
             .split("host-shell-ready host=")
             .nth(1)
             .and_then(|tail| tail.split_whitespace().next())
             .expect("host shell should print the launcher's hostname");
         assert_eq!(
-            colocated_host, owner_host,
-            "colocated supervisor should run in the owner's container"
+            derived_host, owner_host,
+            "derived supervisor should run in the owner's container"
         );
         assert_ne!(
             host_shell_host, owner_host,
             "host supervisor should bypass the session container"
         );
 
-        loom::backend::kill_session_and_wait(&colocated)
+        loom::backend::kill_session_and_wait(&derived)
             .await
             .unwrap();
         loom::backend::kill_session_and_wait(&host_session)

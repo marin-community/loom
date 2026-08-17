@@ -2,9 +2,10 @@
 //! `user_github_tokens` table.
 //!
 //! For an ordinary interactive session, loom injects the token as `GH_TOKEN`
-//! into the session env, overriding the selected profile credential.
-//! Restricted sessions use the GitHub App (or an explicit App-less profile
-//! credential) instead. Combined with the per-user commit author identity loom already sets
+//! into the session env ([`crate::provision::create`]), overriding the
+//! selected profile credential. Restricted sessions use the GitHub App (or an
+//! explicit App-less profile credential) instead. Combined with the per-user
+//! commit author identity loom already sets
 //! ([`crate::auth::commit_identity`]), ordinary pushes are attributed to them.
 //!
 //! The value is **write-only** over the API: callers learn only *that* a token is
@@ -18,30 +19,6 @@ use serde::Serialize;
 use sqlx::Row;
 
 use crate::db::{now_iso, Db};
-
-/// Overlay the launching user's personal token onto a session environment.
-/// A personal token wins over profile, repository, and shared credentials.
-pub async fn apply_user_github_token(
-    db: &Db,
-    env: &mut Vec<(String, String)>,
-    created_by: Option<&str>,
-) {
-    let Some(username) = created_by else { return };
-    match get(db, username).await {
-        Ok(Some(token)) if !token.trim().is_empty() => {
-            if let Some(slot) = env.iter_mut().find(|(name, _)| name == "GH_TOKEN") {
-                slot.1 = token;
-            } else {
-                env.push(("GH_TOKEN".to_string(), token));
-            }
-            tracing::info!(%username, "applied user github token as GH_TOKEN");
-        }
-        Ok(_) => {
-            tracing::debug!(%username, "no personal github token on file, retaining session GH_TOKEN")
-        }
-        Err(error) => tracing::warn!(%username, "failed to load user github token: {error}"),
-    }
-}
 
 /// Whether a user has a token set, and when it last changed — the write-only
 /// status the account pane renders and the API returns. Never the token.
@@ -178,17 +155,5 @@ mod tests {
         remove(&db, "alice").await.unwrap();
         assert!(get(&db, "alice").await.unwrap().is_none());
         assert_eq!(get(&db, "bob").await.unwrap().as_deref(), Some("bob-tok"));
-    }
-
-    #[tokio::test]
-    async fn applying_a_user_token_replaces_the_shared_token() {
-        let db = crate::db::connect_in_memory().await.unwrap();
-        seed_user(&db, "alice").await;
-        set(&db, "alice", "alice-tok").await.unwrap();
-        let mut env = vec![("GH_TOKEN".to_string(), "shared-tok".to_string())];
-
-        apply_user_github_token(&db, &mut env, Some("alice")).await;
-
-        assert_eq!(env, vec![("GH_TOKEN".to_string(), "alice-tok".to_string())]);
     }
 }

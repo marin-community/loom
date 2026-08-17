@@ -546,11 +546,14 @@ Details → Advanced, not as the primary file or work surface.
   `done`/`error` sessions remain owners, and the monitor handles the
   inverse mismatch by marking a session row with no supervisor `orphaned`.
   See [Session lifecycle](session-lifecycle.md).
-- **Shell placement follows purpose:** with the Docker runner, each agent owns a
-  sibling session container and its per-session debug shells are colocated
-  there. The global operator Shell is the deliberate exception: its supervisor
-  runs beside `loom server run`, giving operators the control-plane container's
-  process/filesystem view and its Docker-socket view of sibling sessions.
+- **Shell placement and environment follow the agent:** each per-session debug
+  shell is derived by the owning Tapestry supervisor. It therefore starts in
+  the same Docker container (when configured) with the agent's exact materialized
+  launch environment, including profile/repository values and its session-scoped
+  credential-broker identity. The global operator Shell is the deliberate
+  exception: its supervisor runs beside `loom server run`, giving operators the
+  control-plane container's process/filesystem view and its Docker-socket view
+  of sibling sessions.
 
 ## Status & tags
 

@@ -5,7 +5,6 @@ pub mod automation;
 pub mod custom_mcp;
 pub mod db;
 pub mod profile;
-pub mod user_token;
 
 pub use loom_agent::Ctx;
 pub use loom_agent::{

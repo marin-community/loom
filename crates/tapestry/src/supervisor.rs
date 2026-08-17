@@ -28,9 +28,10 @@
 //! Control commands are polled ahead of output each iteration, so liveness and
 //! teardown stay responsive.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -108,6 +109,21 @@ pub async fn run(cfg: SupervisorConfig) -> Result<()> {
     }
 }
 
+/// Snapshot the exact environment supplied to a child. Both the child and any
+/// later derived shell use this same owned map, so neither can observe ambient
+/// changes made after the supervisor starts.
+fn child_environment(cfg: &SupervisorConfig, terminal: bool) -> Vec<(String, String)> {
+    let mut environment = BTreeMap::new();
+    if !cfg.env_clear {
+        environment.extend(std::env::vars());
+    }
+    environment.extend(cfg.env.iter().cloned());
+    if terminal {
+        environment.insert("TERM".to_string(), "xterm-256color".to_string());
+    }
+    environment.into_iter().collect()
+}
+
 /// Control messages to the core task. The single owner of screen + client state.
 /// PTY output travels on its own bounded channel (so the reader can park under
 /// back-pressure), not through here.
@@ -144,6 +160,7 @@ enum Cmd {
 /// arrives. The socket file is removed on the way out.
 async fn run_pty(cfg: SupervisorConfig) -> Result<()> {
     let socket = prepare_socket(&cfg.name).await?;
+    let environment = Arc::new(child_environment(&cfg, true));
 
     // --- PTY + child -------------------------------------------------------
     let pty_system = native_pty_system();
@@ -159,13 +176,10 @@ async fn run_pty(cfg: SupervisorConfig) -> Result<()> {
     let mut builder = CommandBuilder::new("/bin/sh");
     builder.args(["-c", &cfg.script]);
     builder.cwd(&cfg.cwd);
-    if cfg.env_clear {
-        builder.env_clear();
-    }
-    for (k, v) in &cfg.env {
+    builder.env_clear();
+    for (k, v) in environment.iter() {
         builder.env(k, v);
     }
-    builder.env("TERM", "xterm-256color");
 
     let child = slave.spawn_command(builder).context("spawn child")?;
     // Drop the slave so the master reader sees EOF once the child closes its fds.
@@ -229,13 +243,15 @@ async fn run_pty(cfg: SupervisorConfig) -> Result<()> {
         .with_context(|| format!("binding control socket {}", socket.display()))?;
     {
         let cmd_tx = cmd_tx.clone();
+        let environment = environment.clone();
         weaver_core::spawn_boxed(Box::pin(async move {
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
                         let cmd_tx = cmd_tx.clone();
+                        let environment = environment.clone();
                         weaver_core::spawn_boxed(Box::pin(async move {
-                            if let Err(e) = handle_conn(stream, cmd_tx).await {
+                            if let Err(e) = handle_conn(stream, cmd_tx, environment).await {
                                 tracing::debug!(error = %e, "control connection ended");
                             }
                         }));
@@ -440,6 +456,7 @@ fn render(parser: &mut vt100::Parser, history: u32) -> String {
 async fn handle_conn(
     stream: tokio::net::UnixStream,
     cmd_tx: mpsc::UnboundedSender<Cmd>,
+    environment: Arc<Vec<(String, String)>>,
 ) -> Result<()> {
     let mut stream = stream;
     loop {
@@ -484,6 +501,9 @@ async fn handle_conn(
                 let payload = serde_json::to_vec(&info).unwrap_or_default();
                 protocol::write_frame(&mut stream, &Frame::new(op::PONG, payload)).await?;
             }
+            op::DERIVE => {
+                derive(&mut stream, &frame.payload, &environment).await?;
+            }
             op::KILL => {
                 let _ = cmd_tx.send(Cmd::Kill);
                 protocol::write_frame(&mut stream, &Frame::new(op::OK, Vec::new())).await?;
@@ -502,6 +522,25 @@ async fn handle_conn(
             }
         }
     }
+}
+
+/// Decode one derived launch and answer only after its sibling supervisor is
+/// accepting connections. Errors stay on the control socket rather than
+/// tearing down the owner.
+async fn derive(
+    stream: &mut tokio::net::UnixStream,
+    payload: &[u8],
+    environment: &[(String, String)],
+) -> Result<()> {
+    let result = match serde_json::from_slice::<crate::DerivedLaunch>(payload) {
+        Ok(launch) => crate::spawn_derived(environment, &launch).await,
+        Err(error) => Err(error.into()),
+    };
+    let frame = match result {
+        Ok(()) => Frame::new(op::OK, Vec::new()),
+        Err(error) => Frame::new(op::ERR, error.to_string().into_bytes()),
+    };
+    protocol::write_frame(stream, &frame).await
 }
 
 /// Drive a live terminal attach: stream PTY output to the client and forward its
@@ -663,6 +702,7 @@ mod relay {
     /// on-its-own child exit does *not* return — see the type docs).
     pub async fn run(cfg: SupervisorConfig) -> Result<()> {
         let socket = super::prepare_socket(&cfg.name).await?;
+        let environment = Arc::new(super::child_environment(&cfg, false));
         let segment_max = cfg
             .segment_max_bytes
             .unwrap_or(DEFAULT_SEGMENT_BYTES)
@@ -670,16 +710,14 @@ mod relay {
 
         // --- child over pipes ---------------------------------------------
         let mut cmd = std::process::Command::new("/bin/sh");
-        if cfg.env_clear {
-            cmd.env_clear();
-        }
+        cmd.env_clear();
         cmd.arg("-c")
             .arg(&cfg.script)
             .current_dir(&cfg.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        for (k, v) in &cfg.env {
+        for (k, v) in environment.iter() {
             cmd.env(k, v);
         }
         // Lead a new session so the child is its own process-group leader — then
@@ -775,13 +813,15 @@ mod relay {
             .with_context(|| format!("binding control socket {}", socket.display()))?;
         {
             let cmd_tx = cmd_tx.clone();
+            let environment = environment.clone();
             weaver_core::spawn_boxed(Box::pin(async move {
                 loop {
                     match listener.accept().await {
                         Ok((stream, _)) => {
                             let cmd_tx = cmd_tx.clone();
+                            let environment = environment.clone();
                             weaver_core::spawn_boxed(Box::pin(async move {
-                                if let Err(e) = handle_conn(stream, cmd_tx).await {
+                                if let Err(e) = handle_conn(stream, cmd_tx, environment).await {
                                     tracing::debug!(error = %e, "relay control connection ended");
                                 }
                             }));
@@ -1100,6 +1140,7 @@ mod relay {
     async fn handle_conn(
         stream: tokio::net::UnixStream,
         cmd_tx: mpsc::UnboundedSender<Cmd>,
+        environment: Arc<Vec<(String, String)>>,
     ) -> Result<()> {
         let mut stream = stream;
         loop {
@@ -1115,6 +1156,9 @@ mod relay {
                     let info = resp_rx.await.ok();
                     let payload = serde_json::to_vec(&info).unwrap_or_default();
                     protocol::write_frame(&mut stream, &Frame::new(op::PONG, payload)).await?;
+                }
+                op::DERIVE => {
+                    super::derive(&mut stream, &frame.payload, &environment).await?;
                 }
                 op::CAPTURE => {
                     let (resp_tx, resp_rx) = oneshot::channel();
